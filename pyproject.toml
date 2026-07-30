@@ -1,0 +1,55 @@
+[tool.poetry]
+name = "dotmac-vendor-control-plane"
+version = "0.1.0"
+description = "DotMac Vendor Control Plane — a vendor/product-lifecycle assembly composed from the pinned dotmac-kernel. It is NOT a product data plane; it owns vendor-side accounts, provisioning contracts, and (later) deployment lifecycle."
+authors = ["DotMac"]
+readme = "README.md"
+packages = [{ include = "vendor_cp", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.14"
+# The kernel is PINNED EXACTLY to the published alpha and resolved ONLY from the
+# private Forgejo index (ADR-0005). The `testing` extra ships the kernel's
+# supported test kit (harness + fakes + provisioning contract) this assembly's
+# tests consume. No copied kernel modules, no import-path shims.
+dotmac-kernel = { version = "0.1.0a1", extras = ["testing"], source = "forgejo" }
+uvicorn = "^0.30"
+# The one control-plane database's driver (Postgres). There is exactly ONE
+# database; no product DSNs, no cross-database access (deny-case D1/D2).
+psycopg = { version = "^3.2", extras = ["binary"] }
+
+# Public Dotmac packages resolve from Forgejo; everything else from PyPI. Marked
+# `explicit` so ONLY dotmac-kernel is pulled from here (no dependency-confusion
+# aggregation of public names).
+[[tool.poetry.source]]
+name = "forgejo"
+url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
+priority = "explicit"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+ruff = "^0.6"
+mypy = "^1.11"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S"]
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # asserts are the point in tests
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/vendor_cp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
