@@ -28,7 +28,7 @@ from vendor_cp.migrations import composed_version_locations, make_alembic_config
 KERNEL_HEAD = "0012_platform_outbox"  # current pin (0.1.0a6)
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v004_contracts"
+VENDOR_HEAD = "v005_allocations"
 
 
 def _superuser_url() -> str:
@@ -140,6 +140,8 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     assert _table_exists(scratch_db, "approval_records")
     assert _table_exists(scratch_db, "contracts")
     assert _table_exists(scratch_db, "contract_lines")
+    assert _table_exists(scratch_db, "allocations")
+    assert _table_exists(scratch_db, "allocation_entries")
     # Kernel platform tables the AccountService depends on are present too.
     assert _table_exists(scratch_db, "platform_audit_events")
     assert _table_exists(scratch_db, "platform_inbox_records")
@@ -254,6 +256,7 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     assert _table_exists(scratch_db, "offer_versions")
     assert _table_exists(scratch_db, "approval_policies")
     assert _table_exists(scratch_db, "contracts")
+    assert _table_exists(scratch_db, "allocations")
     assert _versions(scratch_db) == {KERNEL_HEAD, VENDOR_HEAD}
 
 

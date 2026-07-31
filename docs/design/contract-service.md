@@ -25,8 +25,13 @@ desired state, licence signing, or payment. It is a decision owner, and routes/
 jobs/webhooks are thin adapters around it (Dotmac source-of-truth standard).
 
 `AllocationService` is a **separate** owner that reacts to `contract.activated`
-(via the inbox) and **stages an immutable allocation** — it derives *what a tenant
-is entitled to* from the active contract's lines. It **does NOT write
+(via `process_once_platform`) and **stages an immutable allocation** — it derives
+*what a tenant is entitled to* from the active contract's lines. **Implemented
+(staging only):** `src/vendor_cp/allocations/` — the `ContractEventConsumer`
+(`PlatformDeliveryTransport`) dispatches `contract.activated` to `stage_allocation`,
+which writes an immutable `Allocation` (unique per `(contract_id, content_hash)`,
+idempotent on the source event id). Delivery of that allocation is out of scope
+here. It **does NOT write
 `tenant_entitlement_grants`** — the vendor control plane never writes a product
 data plane's WS2 grants (ruling C4 / `domain-foundation.md` § "Licence /
 entitlement-allocation lifecycle"). Delivery is a **signed, versioned document or
