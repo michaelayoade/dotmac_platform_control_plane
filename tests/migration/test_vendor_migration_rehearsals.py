@@ -25,7 +25,7 @@ from sqlalchemy.exc import DBAPIError
 
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0010_tenant_entitlements"  # current pin (0.1.0a4)
+KERNEL_HEAD = "0011_outbox_relay_leasing"  # current pin (0.1.0a5)
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v003_approval_policies"
