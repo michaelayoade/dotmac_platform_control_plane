@@ -1,11 +1,14 @@
 # ContractService — design (state machine + acceptance cases)
 
-> **Status:** Design only (2026-07-31). No implementation is authorized. Per the
-> standing constraint, the vendor CP may DESIGN the contract state machine and
-> acceptance cases now, but must NOT implement commercial/deployment records
-> until the kernel contracts they depend on publish (see § Dependencies). This
-> document fixes the owner, the states, the transitions, and the tests; the code
-> lands later, one guarded slice at a time.
+> **Status:** Implementation AUTHORIZED (2026-07-31). Every kernel dependency
+> ContractService needs has published: WS1 (a3), WS4 (a2), WS2 (a4), the vendor
+> OfferVersion + ApprovalPolicy owners (merged), and — the last blocker — the
+> **platform outbox** channel (kernel **0.1.0a6**, resolving
+> `starter-platform-outbox-channel-fork`). ContractService lands **state +
+> platform audit + platform outbox event atomically** (never audit-only).
+> AllocationService follows as **immutable staging only**; the signed/versioned
+> cross-plane delivery + ack (WS8/C4) stays design-only. This document fixes the
+> owner, states, transitions, and tests; the code lands one guarded slice at a time.
 
 ## Owner and scope
 
@@ -78,9 +81,11 @@ goes `active → superseded` with the successor id recorded.
 | `draft`\|`pending_approval → cancelled` | submitter/admin | no downstream allocation exists | emit `contract.cancelled` |
 
 **ContractService only changes contract state and enqueues events.** It does NOT
-synchronously mutate allocation, deployment, or entitlement state — `contract.*`
-events are consumed (through the inbox) by `AllocationService` /
-`FleetDesiredStateService`, which own those transitions.
+synchronously mutate allocation, deployment, or entitlement state — each transition
+commits its state change, its **platform audit event**, and its **platform outbox
+event** (`enqueue_platform_event`, kernel 0.1.0a6) in ONE transaction (never
+audit-only). `contract.*` events are consumed through `process_once_platform` by
+`AllocationService` / `FleetDesiredStateService`, which own those transitions.
 
 ### Invariants
 
@@ -105,7 +110,7 @@ events are consumed (through the inbox) by `AllocationService` /
 | WS1 capability catalogue | `CapabilityCatalogue.require` | reject a contract line naming an undeclared capability |
 | WS2 entitlements (data-plane) | `TenantEntitlementGrant` / `is_entitled` | the *product* data plane writes its own local grant + evaluates. The vendor CP NEVER writes these; it stages an allocation and delivers a signed/versioned envelope (cross-plane delivery/ack = WS8/C4, design-only) |
 | WS4 money/FX | `Money`, `ExchangeRate` | exact pricing + immutable FX snapshots |
-| WS3 messaging | `process_once` + outbox `enqueue_event` | idempotent transitions emitted atomically; the relay (slice 2, design fixed) delivers |
+| WS3 platform messaging | `process_once_platform` + `enqueue_platform_event` (kernel **0.1.0a6**) | idempotent transitions emitted atomically into the **platform outbox** (`platform_outbox_events`, no tenant/RLS); the platform relay delivers. Contract events are platform-level, NOT tenant-data-plane — so they use the platform channel, never the tenant outbox (resolved fork `starter-platform-outbox-channel-fork`) |
 | Deployment profiles (WS1) | `DeploymentProfileRegistry.is_valid_code` | a contract that pins a deployment profile validates the profile code |
 
 ## Acceptance cases (the tests the future implementation must pass)
