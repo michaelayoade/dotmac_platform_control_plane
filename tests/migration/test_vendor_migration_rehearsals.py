@@ -28,7 +28,7 @@ from vendor_cp.migrations import composed_version_locations, make_alembic_config
 KERNEL_HEAD = "0010_tenant_entitlements"  # current pin (0.1.0a4)
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v002_offer_versions"
+VENDOR_HEAD = "v003_approval_policies"
 
 
 def _superuser_url() -> str:
@@ -136,6 +136,8 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     _upgrade(scratch_db, "heads")
     assert _table_exists(scratch_db, "vendor_accounts")
     assert _table_exists(scratch_db, "offer_versions")
+    assert _table_exists(scratch_db, "approval_policies")
+    assert _table_exists(scratch_db, "approval_records")
     # Kernel platform tables the AccountService depends on are present too.
     assert _table_exists(scratch_db, "platform_audit_events")
     assert _table_exists(scratch_db, "platform_inbox_records")
@@ -170,11 +172,15 @@ def test_two_head_topology(scratch_db: str) -> None:
     vendor_head = script.get_revision("vendor@head")
     assert kernel_head.revision == KERNEL_HEAD
     assert vendor_head.revision == VENDOR_HEAD
-    # The vendor head v002 is a child of the vendor root v001; the ROOT is its
-    # own branch that DEPENDS ON (is not a child of) a kernel head, so the
-    # lineages advance independently.
-    assert vendor_head.down_revision == VENDOR_ROOT
-    root = script.get_revision(VENDOR_ROOT)
+    # The vendor head is the tip of a single-parent chain that walks back to the
+    # vendor ROOT; the ROOT is its own branch that DEPENDS ON (is not a child of)
+    # a kernel head, so the lineages advance independently.
+    node = vendor_head
+    while node.down_revision is not None:
+        assert isinstance(node.down_revision, str)  # linear vendor lineage
+        node = script.get_revision(node.down_revision)
+    assert node.revision == VENDOR_ROOT
+    root = node
     assert root.down_revision is None
     deps = root.dependencies
     deps = (deps,) if isinstance(deps, str) else tuple(deps or ())
@@ -244,6 +250,7 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     _upgrade(scratch_db, "heads")
     assert _table_exists(scratch_db, "vendor_accounts")
     assert _table_exists(scratch_db, "offer_versions")
+    assert _table_exists(scratch_db, "approval_policies")
     assert _versions(scratch_db) == {KERNEL_HEAD, VENDOR_HEAD}
 
 

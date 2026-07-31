@@ -12,6 +12,7 @@ from __future__ import annotations
 from dotmac_kernel import ProductAssemblySpec
 
 from vendor_cp.accounts.feature import feature as accounts_feature
+from vendor_cp.approvals.feature import feature as approvals_feature
 from vendor_cp.console.feature import feature as console_feature
 from vendor_cp.offers.feature import feature as offers_feature
 from vendor_cp.provisioning.feature import feature as provisioning_feature
@@ -32,6 +33,7 @@ def build_spec() -> ProductAssemblySpec:
             console_feature,
             accounts_feature,
             offers_feature,
+            approvals_feature,
             provisioning_feature,
         ),
         web_enabled=True,
