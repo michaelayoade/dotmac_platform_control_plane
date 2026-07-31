@@ -5,11 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # Manual trigger: this repo produces no pull_request run for DRAFT PRs (verified
-  # on both `opened` and `synchronize`, with no draft/types filter in this
-  # workflow) — a GitHub-side behaviour for this spending-restricted private repo,
-  # not a fixable filter here. `workflow_dispatch` lets any branch (e.g. a spike)
-  # be validated on demand without opening a ready PR.
+  # Manual fallback. GitHub does not run pull_request workflows for a
+  # merge-CONFLICTED PR; the option-C spike branched off main~1 with a competing
+  # accounts implementation at the same paths, so it conflicted with current main
+  # and never ran (draft status / Actions spend were NOT the cause).
+  # `workflow_dispatch` validates a branch HEAD on demand — note it is NOT the
+  # synthetic merge with main, so it does not substitute for required PR CI.
   workflow_dispatch:
 
 permissions:
@@ -27,12 +28,14 @@ jobs:
         with:
           virtualenvs-create: true
           virtualenvs-in-project: true
-      # The kernel resolves from the PRIVATE Forgejo registry. FORGEJO_READ_TOKEN
-      # is a read:package token whose canonical source is OpenBao
-      # (secret/dotmac/forgejo/*); it is scoped to read only.
+      # The kernel resolves from the PRIVATE Forgejo registry, authenticated as the
+      # dedicated `ci-reader` identity (a Forgejo user in the org's read-only
+      # `ci-readers` team — package-read ONLY, no publish rights).
+      # FORGEJO_READ_TOKEN is ci-reader's read:package token; its canonical source
+      # is OpenBao (secret/dotmac/forgejo/read-token).
       - name: Install (kernel from Forgejo)
         env:
-          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-publisher
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
           POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: poetry install
       - name: Lint
