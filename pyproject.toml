@@ -17,6 +17,9 @@ uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).
 psycopg = { version = "^3.2", extras = ["binary"] }
+# Migrations: the vendor lineage is composed with the kernel's shipped base
+# lineage (dotmac_kernel.migrations.versions_dir) at deploy time.
+alembic = "^1.13"
 
 # Public Dotmac packages resolve from Forgejo; everything else from PyPI. Marked
 # `explicit` so ONLY dotmac-kernel is pulled from here (no dependency-confusion
