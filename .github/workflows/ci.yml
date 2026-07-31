@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual trigger: this repo produces no pull_request run for DRAFT PRs (verified
+  # on both `opened` and `synchronize`, with no draft/types filter in this
+  # workflow) — a GitHub-side behaviour for this spending-restricted private repo,
+  # not a fixable filter here. `workflow_dispatch` lets any branch (e.g. a spike)
+  # be validated on demand without opening a ready PR.
+  workflow_dispatch:
 
 permissions:
   contents: read
