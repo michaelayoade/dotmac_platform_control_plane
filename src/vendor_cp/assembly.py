@@ -13,6 +13,7 @@ from dotmac_kernel import ProductAssemblySpec
 
 from vendor_cp.accounts.feature import feature as accounts_feature
 from vendor_cp.console.feature import feature as console_feature
+from vendor_cp.offers.feature import feature as offers_feature
 from vendor_cp.provisioning.feature import feature as provisioning_feature
 
 ASSEMBLY_NAME = "dotmac-vendor-control-plane"
@@ -27,6 +28,11 @@ def build_spec() -> ProductAssemblySpec:
     """
     return ProductAssemblySpec(
         name=ASSEMBLY_NAME,
-        modules=(console_feature, accounts_feature, provisioning_feature),
+        modules=(
+            console_feature,
+            accounts_feature,
+            offers_feature,
+            provisioning_feature,
+        ),
         web_enabled=True,
     )

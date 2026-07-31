@@ -27,6 +27,7 @@ from sqlalchemy import engine_from_config, pool
 
 # Register the vendor's own models (VendorAccount).
 import vendor_cp.accounts.models  # noqa: F401
+import vendor_cp.offers.models  # noqa: F401
 from vendor_cp.migrations import composed_version_locations
 
 config = context.config
