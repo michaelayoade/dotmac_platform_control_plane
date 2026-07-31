@@ -12,7 +12,7 @@ python = ">=3.12,<3.14"
 # private Forgejo index (ADR-0005). The `testing` extra ships the kernel's
 # supported test kit (harness + fakes + provisioning contract) this assembly's
 # tests consume. No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a2", extras = ["testing"], source = "forgejo" }
+dotmac-kernel = { version = "0.1.0a3", extras = ["testing"], source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).
