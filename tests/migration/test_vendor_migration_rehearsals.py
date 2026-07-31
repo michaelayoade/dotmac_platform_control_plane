@@ -25,8 +25,10 @@ from sqlalchemy.exc import DBAPIError
 
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0009_platform_audit_inbox"
-VENDOR_HEAD = "v001_vendor_accounts"
+KERNEL_HEAD = "0010_tenant_entitlements"  # current pin (0.1.0a4)
+VENDOR_ROOT = "v001_vendor_accounts"
+VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
+VENDOR_HEAD = "v002_offer_versions"
 
 
 def _superuser_url() -> str:
@@ -133,6 +135,7 @@ def _versions(url: str) -> set[str]:
 def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     _upgrade(scratch_db, "heads")
     assert _table_exists(scratch_db, "vendor_accounts")
+    assert _table_exists(scratch_db, "offer_versions")
     # Kernel platform tables the AccountService depends on are present too.
     assert _table_exists(scratch_db, "platform_audit_events")
     assert _table_exists(scratch_db, "platform_inbox_records")
@@ -151,12 +154,10 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         scratch_db,
         "SELECT relrowsecurity FROM pg_class WHERE oid='vendor_accounts'::regclass",
     )
-    # The runtime version table records ONLY the vendor head: because v001
-    # `depends_on` the current kernel head (0009), it subsumes it. A SECOND entry
-    # (the kernel head) appears only once the kernel advances PAST 0009 — proven
-    # in `test_kernel_advance_keeps_vendor_head_independent`. (The STATIC head set
-    # is two — see `test_two_head_topology`.)
-    assert _versions(scratch_db) == {VENDOR_HEAD}
+    # Two runtime heads: the vendor root pins kernel 0009, but the pin has since
+    # advanced to 0010, so the kernel head is no longer subsumed by the vendor
+    # lineage — both appear (the two-head topology this lineage is built for).
+    assert _versions(scratch_db) == {KERNEL_HEAD, VENDOR_HEAD}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -169,12 +170,15 @@ def test_two_head_topology(scratch_db: str) -> None:
     vendor_head = script.get_revision("vendor@head")
     assert kernel_head.revision == KERNEL_HEAD
     assert vendor_head.revision == VENDOR_HEAD
-    # The vendor root is its own branch that DEPENDS ON (is not a child of) the
-    # kernel head — so the lineages advance independently.
-    assert vendor_head.down_revision is None
-    deps = vendor_head.dependencies
+    # The vendor head v002 is a child of the vendor root v001; the ROOT is its
+    # own branch that DEPENDS ON (is not a child of) a kernel head, so the
+    # lineages advance independently.
+    assert vendor_head.down_revision == VENDOR_ROOT
+    root = script.get_revision(VENDOR_ROOT)
+    assert root.down_revision is None
+    deps = root.dependencies
     deps = (deps,) if isinstance(deps, str) else tuple(deps or ())
-    assert KERNEL_HEAD in deps
+    assert VENDOR_ROOT_DEP in deps
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,11 +240,11 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     assert not _table_exists(scratch_db, "vendor_accounts")
     assert _versions(scratch_db) == {KERNEL_HEAD}
 
-    # Deploy the vendor lineage on top — adopts vendor_accounts, data-safe. The
-    # version table records only v001 (it subsumes the 0009 head it depends on).
+    # Deploy the vendor lineage on top — adopts both vendor tables, data-safe.
     _upgrade(scratch_db, "heads")
     assert _table_exists(scratch_db, "vendor_accounts")
-    assert _versions(scratch_db) == {VENDOR_HEAD}
+    assert _table_exists(scratch_db, "offer_versions")
+    assert _versions(scratch_db) == {KERNEL_HEAD, VENDOR_HEAD}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
