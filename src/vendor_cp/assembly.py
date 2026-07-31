@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dotmac_kernel import ProductAssemblySpec
 
+from vendor_cp.accounts.feature import feature as accounts_feature
 from vendor_cp.console.feature import feature as console_feature
 
 ASSEMBLY_NAME = "dotmac-vendor-control-plane"
@@ -19,12 +20,12 @@ ASSEMBLY_NAME = "dotmac-vendor-control-plane"
 def build_spec() -> ProductAssemblySpec:
     """Compose the vendor control-plane assembly.
 
-    Slice 1/2: the platform-admin surface + the console shell. Accounts and the
-    provisioning laboratory are added as their own feature modules in later
-    slices.
+    Slice 2: the platform-admin surface + the console shell. Slice 3 adds the
+    vendor `accounts` feature (platform-level, option A). The provisioning
+    laboratory is a later slice's own feature module.
     """
     return ProductAssemblySpec(
         name=ASSEMBLY_NAME,
-        modules=(console_feature,),
+        modules=(console_feature, accounts_feature),
         web_enabled=True,
     )
