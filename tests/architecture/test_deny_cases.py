@@ -140,3 +140,27 @@ def test_d5_only_public_kernel_surface_is_imported() -> None:
             if name and name.startswith("_"):
                 bad.append(f"{p.name}: imports private name {name} from {mod}")
     assert not bad, f"vendor CP may import ONLY the kernel's public surface: {bad}"
+
+
+# ── D6 — no deployment-mode / plan-name branching in commercial logic ────────
+# ADR-0003 ban (design case 10): a contract/commercial decision reads explainable
+# local values (status, capability codes, quorum), never a profile/plan/mode
+# string. Scan the contracts domain for `if <mode/plan/tier/profile> == "..."`.
+_BANNED_BRANCH = re.compile(
+    r"\b(deployment_mode|plan_name|plan|tier|profile_code|mode)\b\s*(==|!=|in)\s*",
+)
+
+
+def test_d6_no_plan_or_mode_string_branching_in_contracts() -> None:
+    bad: list[str] = []
+    for p in (SRC / "contracts").rglob("*.py"):
+        if "__pycache__" in p.parts:
+            continue
+        for i, line in enumerate(p.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if _BANNED_BRANCH.search(code):
+                bad.append(f"{p.name}:{i}: {line.strip()}")
+    assert not bad, (
+        "commercial logic must not branch on a plan/mode/profile string "
+        f"(ADR-0003): {bad}"
+    )
