@@ -20,10 +20,14 @@ it owns and — just as importantly — what it must never become.
 - **Vendor accounts** (slice 3) — the vendor-owned `AccountService`: typed
   commands + outcomes, atomic transaction ownership, idempotency, audit,
   platform-admin-only adapters.
-- **Provisioning contracts** (slice 4) — consumes the kernel's
-  `ProvisioningProvider` contract; proves conformance via the kernel's
+- **Provisioning contracts** (slice 4, delivered) — the `provisioning` feature
+  (`src/vendor_cp/provisioning/`): a platform-admin-only API that drives the
+  kernel's `ProvisioningProvider` contract (plan → apply → observe → cancel)
+  against the FAKE provider, plus conformance via the kernel's
   `check_provisioning_provider_contract`. A **laboratory** — fakes only, no fleet
-  tables, no runner.
+  tables, no runner, no real infrastructure, no SSH; the only state is the fake's
+  in-memory operation ledger. The real runner + activation contracts are a later,
+  design-gated slice.
 - **Administration shell** — a platform-admin-only console surface
   (`src/vendor_cp/console/`).
 
