@@ -65,6 +65,11 @@ Option A avoids all four by using the platform-scoped primitives directly.
   surface has, without inventing a tenant.
 - The kernel's platform-scoped primitives (added in `0.1.0a2`, option b) get
   their first real consumer, validating that surface.
-- A vendor-lineage Alembic migration for `vendor_accounts` (with the platform
-  grants) is a follow-up; unit tests build the schema via the kernel testing
-  kit's `create_all`.
+- The vendor-lineage Alembic migration for `vendor_accounts` (branch label
+  `vendor`, `depends_on` the kernel head, platform grants, `app_user` revoked) is
+  in place (`alembic/versions/v001_vendor_accounts.py`), composed with the kernel
+  base lineage via `vendor_cp.migrations`. Its deployability is proven by Postgres
+  rehearsals (`tests/migration/`): fresh install, upgrade-from-kernel-only,
+  platform-role access + tenant-role denial, and the two-head topology (incl. a
+  kernel-advance simulation). Fast unit tests still build the schema via the
+  kernel testing kit's `create_all`.
