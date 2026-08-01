@@ -16,6 +16,7 @@ from vendor_cp.allocations.feature import feature as allocations_feature
 from vendor_cp.approvals.feature import feature as approvals_feature
 from vendor_cp.console.feature import feature as console_feature
 from vendor_cp.contracts.feature import feature as contracts_feature
+from vendor_cp.licensing.feature import feature as licensing_feature
 from vendor_cp.offers.feature import feature as offers_feature
 from vendor_cp.provisioning.feature import feature as provisioning_feature
 
@@ -38,6 +39,7 @@ def build_spec() -> ProductAssemblySpec:
             approvals_feature,
             contracts_feature,
             allocations_feature,
+            licensing_feature,
             provisioning_feature,
         ),
         web_enabled=True,

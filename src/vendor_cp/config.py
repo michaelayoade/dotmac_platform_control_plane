@@ -22,6 +22,11 @@ class VendorSettings:
     # mirror of the target product's manifest catalogue (reconciled via the product
     # contract, never by inventing codes). An offer version may only grant these.
     offered_capabilities: tuple[str, ...] = ()
+    # WS8 licence signing (see vendor_cp.licensing.signer). Only "ephemeral" is
+    # permitted in this phase — an in-memory keypair, never persisted. Real key
+    # custody (OpenBao-referenced) is a later, design-gated slice, so anything
+    # else fails loudly rather than silently signing with a throwaway key.
+    licence_signing_mode: str = "ephemeral"
 
 
 def load_vendor_settings() -> VendorSettings:
@@ -29,7 +34,12 @@ def load_vendor_settings() -> VendorSettings:
     mode = os.getenv("VENDOR_PROVIDER_MODE", "fake").strip().lower()
     raw = os.getenv("VENDOR_OFFERED_CAPABILITIES", "")
     offered = tuple(c.strip() for c in raw.split(",") if c.strip())
-    return VendorSettings(provider_mode=mode, offered_capabilities=offered)
+    signing = os.getenv("VENDOR_LICENCE_SIGNING_MODE", "ephemeral").strip().lower()
+    return VendorSettings(
+        provider_mode=mode,
+        offered_capabilities=offered,
+        licence_signing_mode=signing,
+    )
 
 
 vendor_settings = load_vendor_settings()
