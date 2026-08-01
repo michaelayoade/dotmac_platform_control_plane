@@ -10,9 +10,15 @@ packages = [{ include = "vendor_cp", from = "src" }]
 python = ">=3.12,<3.14"
 # The kernel is PINNED EXACTLY to the published alpha and resolved ONLY from the
 # private Forgejo index (ADR-0005). The `testing` extra ships the kernel's
-# supported test kit (harness + fakes + provisioning contract) this assembly's
-# tests consume. No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a6", extras = ["testing"], source = "forgejo" }
+# supported test kit (harness + fakes + provisioning contract + the WS8
+# FakeLicenceSigner) this assembly's tests consume; `licensing` adds the Ed25519
+# dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
+# requires to sign and to round-trip its envelopes through `verify_licence`.
+# No copied kernel modules, no import-path shims.
+dotmac-kernel = { version = "0.1.0a7", extras = [
+    "testing",
+    "licensing",
+], source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).
