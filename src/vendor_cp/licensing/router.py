@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vendor_cp.licensing import projection, service
+from vendor_cp.licensing import projection, revocation, service
 from vendor_cp.licensing.models import LicenceSigningKey
 from vendor_cp.licensing.schemas import (
     AcknowledgementRequest,
@@ -26,6 +26,9 @@ from vendor_cp.licensing.schemas import (
     DeliveryResponse,
     IssueLicenceRequest,
     LicenceIssuanceResponse,
+    RevocationEntryResponse,
+    RevocationListResponse,
+    RevokeLicenceRequest,
     SigningKeyResponse,
     StageDeliveryRequest,
 )
@@ -121,6 +124,55 @@ def ingest_acknowledgement(
         activated=outcome.activated,
         quarantined=outcome.quarantined,
         delivery_id=outcome.delivery_id,
+    )
+
+
+@router.post("/revocations", response_model=RevocationEntryResponse)
+def revoke(
+    payload: RevokeLicenceRequest, admin: Admin, db: Db
+) -> RevocationEntryResponse:
+    """Append a revocation entry. It reaches deployments only when the next
+    list snapshot is published and imported — revoking is not delivery."""
+    entry = revocation.revoke_licence(
+        db,
+        revocation.RevokeLicenceCommand(
+            licence_id=payload.licence_id,
+            reason=payload.reason,
+            actor_admin_id=admin.id,
+        ),
+    )
+    return RevocationEntryResponse(licence_id=entry.licence_id, reason=entry.reason)
+
+
+@router.post("/revocations/publish", response_model=RevocationListResponse)
+def publish_revocation_list(admin: Admin, db: Db) -> RevocationListResponse:
+    """Sign and record a FULL cumulative snapshot at the next list version."""
+    view = revocation.publish_revocation_list(db, actor_admin_id=admin.id)
+    return RevocationListResponse(
+        id=view.id,
+        list_version=view.list_version,
+        digest=view.digest,
+        key_id=view.key_id,
+        entry_count=view.entry_count,
+        envelope=view.envelope,
+        revoked_licence_ids=list(view.revoked_licence_ids),
+    )
+
+
+@router.get("/revocations/latest", response_model=RevocationListResponse | None)
+def latest_revocation_list(_admin: Admin, db: Db) -> RevocationListResponse | None:
+    """What a deployment should be importing right now."""
+    row = revocation.latest_list(db)
+    if row is None:
+        return None
+    return RevocationListResponse(
+        id=row.id,
+        list_version=row.list_version,
+        digest=row.digest,
+        key_id=row.key_id,
+        entry_count=row.entry_count,
+        envelope=dict(row.envelope),
+        revoked_licence_ids=list(revocation.revoked_licence_ids(db)),
     )
 
 
