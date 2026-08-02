@@ -12,22 +12,28 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from dotmac_kernel import PlatformAdmin
+from dotmac_kernel import BadRequestError, PlatformAdmin
 from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vendor_cp.licensing import ops, projection, revocation, service
+from vendor_cp.licensing import ops, projection, revocation, service, transport
+from vendor_cp.licensing.delivery_models import LicenceDeliveryTarget, TargetStatus
 from vendor_cp.licensing.models import LicenceSigningKey
 from vendor_cp.licensing.schemas import (
     AcknowledgementRequest,
     AckOutcomeResponse,
     DeliveryResponse,
+    DeliveryTargetResponse,
+    DispatchReportResponse,
+    DispatchRequest,
     IssueLicenceRequest,
     LicenceIssuanceResponse,
+    MapLegacyDeliveryRequest,
     PipelineHealthResponse,
+    RegisterTargetRequest,
     RevocationEntryResponse,
     RevocationListResponse,
     RevokeLicenceRequest,
@@ -204,6 +210,105 @@ def pipeline_health(_admin: Admin, db: Db) -> PipelineHealthResponse:
         revocation_application_lag_measurable=(
             health.revocation_application_lag_measurable
         ),
+    )
+
+
+@router.post("/targets", response_model=DeliveryTargetResponse)
+def register_target(
+    payload: RegisterTargetRequest, admin: Admin, db: Db
+) -> DeliveryTargetResponse:
+    """Register/synchronise a delivery target — the ONE writer for the target
+    projection. Without this endpoint a clean deployment could never stage a
+    delivery at all, because staging requires a registered destination."""
+    try:
+        status = TargetStatus(payload.status)
+    except ValueError as exc:
+        raise BadRequestError(
+            f"unknown target status {payload.status!r} — expected one of "
+            f"{[s.value for s in TargetStatus]}"
+        ) from exc
+    row = projection.register_delivery_target(
+        db,
+        projection.RegisterTargetCommand(
+            target_ref=payload.target_ref,
+            customer_ref=payload.customer_ref,
+            connection_ref=payload.connection_ref,
+            status=status,
+            actor_admin_id=admin.id,
+        ),
+    )
+    return DeliveryTargetResponse(
+        id=row.id,
+        target_ref=row.target_ref,
+        customer_ref=row.customer_ref,
+        connection_ref=row.connection_ref,
+        status=row.status,
+    )
+
+
+@router.get("/targets", response_model=list[DeliveryTargetResponse])
+def list_targets(_admin: Admin, db: Db) -> list[DeliveryTargetResponse]:
+    rows = db.execute(select(LicenceDeliveryTarget)).scalars().all()
+    return [
+        DeliveryTargetResponse(
+            id=r.id,
+            target_ref=r.target_ref,
+            customer_ref=r.customer_ref,
+            connection_ref=r.connection_ref,
+            status=r.status,
+        )
+        for r in rows
+    ]
+
+
+@router.post("/deliveries/{delivery_id}/map", response_model=DeliveryResponse)
+def map_legacy_delivery(
+    delivery_id: UUID, payload: MapLegacyDeliveryRequest, admin: Admin, db: Db
+) -> DeliveryResponse:
+    """Attach a destination to a delivery quarantined by migration `v010`.
+    Applies the same authorisation as staging, so this is not a back door."""
+    return _delivery_response(
+        projection.map_legacy_delivery(
+            db,
+            delivery_id=delivery_id,
+            target_ref=payload.target_ref,
+            actor_admin_id=admin.id,
+        )
+    )
+
+
+@router.post("/deliveries/{delivery_id}/resume", response_model=DeliveryResponse)
+def resume_delivery(delivery_id: UUID, admin: Admin, db: Db) -> DeliveryResponse:
+    """Un-park a delivery once its cause is fixed; the retry budget resets to a
+    new replay generation. Refuses an unmapped delivery, which would otherwise
+    leave replay silently."""
+    transport.resume_delivery(db, delivery_id, actor_admin_id=admin.id)
+    return _delivery_response(projection.delivery_status(db, delivery_id))
+
+
+@router.post("/replay", response_model=DispatchReportResponse)
+def run_replay(
+    payload: DispatchRequest, admin: Admin, db: Db
+) -> DispatchReportResponse:
+    """Execute one bounded replay pass.
+
+    Exposed as an endpoint so a scheduler (or an operator) can actually drive
+    delivery: until this existed, `dispatch_pending` had no runtime caller and
+    nothing was ever sent outside tests. Intentionally a pull, not a daemon —
+    a background loop inside the API process would replay from every replica.
+    """
+    report = transport.dispatch_pending(
+        db,
+        limit=payload.limit,
+        max_attempts=payload.max_attempts,
+        actor_admin_id=admin.id,
+    )
+    return DispatchReportResponse(
+        attempted=report.attempted,
+        sent=report.sent,
+        failed=report.failed,
+        parked_terminal=report.parked_terminal,
+        parked_exhausted=report.parked_exhausted,
     )
 
 

@@ -125,6 +125,46 @@ class RevocationListResponse(BaseModel):
     revoked_licence_ids: list[str]
 
 
+class RegisterTargetRequest(BaseModel):
+    """Register or synchronise a delivery target. `connection_ref` is an opaque
+    handle a transport interprets — never a destination URL from the caller."""
+
+    target_ref: str = Field(min_length=1, max_length=200)
+    customer_ref: str = Field(min_length=1, max_length=200)
+    connection_ref: str | None = Field(default=None, max_length=200)
+    status: str = Field(default="active")
+
+
+class DeliveryTargetResponse(BaseModel):
+    id: UUID
+    target_ref: str
+    customer_ref: str
+    connection_ref: str | None = None
+    status: str
+
+
+class MapLegacyDeliveryRequest(BaseModel):
+    """Attach a destination to a delivery staged before the registry existed."""
+
+    target_ref: str = Field(min_length=1, max_length=200)
+
+
+class DispatchRequest(BaseModel):
+    """Run one replay pass. Bounded by `limit` so an operator (or a job) cannot
+    accidentally sweep the whole backlog in a single transaction."""
+
+    limit: int = Field(default=100, ge=1, le=1000)
+    max_attempts: int = Field(default=10, ge=1, le=100)
+
+
+class DispatchReportResponse(BaseModel):
+    attempted: int
+    sent: int
+    failed: int
+    parked_terminal: int
+    parked_exhausted: int
+
+
 class PipelineHealthResponse(BaseModel):
     """The alertable signals, kept as SEPARATE observations. The two
     `*_measurable` flags are False until deployments report the keyring and
@@ -159,4 +199,9 @@ __all__ = [
     "RevocationEntryResponse",
     "RevocationListResponse",
     "PipelineHealthResponse",
+    "RegisterTargetRequest",
+    "DeliveryTargetResponse",
+    "MapLegacyDeliveryRequest",
+    "DispatchRequest",
+    "DispatchReportResponse",
 ]

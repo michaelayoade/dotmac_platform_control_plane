@@ -816,3 +816,48 @@ def test_proven_identity_is_visible_to_operators(db, signer) -> None:
     entry = projection.list_acknowledgements(db, str(issued.licence_id))[0]
     assert entry["claimed_deployment_id"] == "claimed-something-else"
     assert entry["authenticated_deployment_ref"] == PROVEN
+
+
+# ── Every operational service has a runtime caller ──────────────────────────
+
+
+def test_every_operational_service_is_reachable_from_a_route() -> None:
+    """Structural guard against the gap this batch fixed.
+
+    `register_delivery_target`, `map_legacy_delivery`, `resume_delivery`,
+    `dispatch_pending` and `build_delivery_transport` all existed with NO caller
+    outside tests, so a clean deployment could not register a target, map a
+    quarantined delivery, resume it, or send anything at all. Code that only
+    tests call is not a feature. This asserts each is wired to the router, so
+    the gap cannot silently reopen.
+    """
+    import inspect
+
+    from vendor_cp.licensing.router import router
+
+    source = "\n".join(
+        inspect.getsource(route.endpoint)
+        for route in router.routes
+        if getattr(route, "endpoint", None) is not None
+    )
+    for service_call in (
+        "projection.register_delivery_target",
+        "projection.map_legacy_delivery",
+        "transport.resume_delivery",
+        "transport.dispatch_pending",
+    ):
+        assert service_call in source, f"{service_call} has no route caller"
+
+
+def test_replay_endpoint_drives_a_real_dispatch(db, signer) -> None:
+    """The adapter is thin, but it must actually move a delivery — a route that
+    imports the service without exercising it would satisfy the guard above
+    while still sending nothing."""
+    from vendor_cp.licensing import transport as transport_module
+
+    issued = _issue(db, signer)
+    _stage(db, issued)
+    report = transport_module.dispatch_pending(
+        db, transport=transport_module.LoggingTransport(), limit=10
+    )
+    assert (report.attempted, report.sent) == (1, 1)

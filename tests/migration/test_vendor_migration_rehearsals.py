@@ -12,7 +12,6 @@ skips when `TEST_DATABASE_URL` is unset.
 
 from __future__ import annotations
 
-import os
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -31,13 +30,11 @@ VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v010_delivery_hardening"
 
 
-def _superuser_url() -> str:
-    url = os.getenv("TEST_DATABASE_URL")
-    if not url:
-        pytest.skip(
-            "TEST_DATABASE_URL not set — vendor migration rehearsals need Postgres"
-        )
-    return url
+def _superuser_url(postgres_url: str) -> str:
+    """The cluster superuser URL, taken from the `postgres_url` fixture
+    (conftest), which skips locally but FAILS under REQUIRE_POSTGRES_TESTS=1 —
+    so this suite cannot pass by being skipped in required CI."""
+    return postgres_url
 
 
 def _url_for(base_url: str, dbname: str, *, user: str | None = None) -> str:
@@ -50,14 +47,14 @@ def _url_for(base_url: str, dbname: str, *, user: str | None = None) -> str:
 
 
 @pytest.fixture
-def scratch_db() -> Iterator[str]:
+def scratch_db(postgres_url: str) -> Iterator[str]:
     """Create an isolated scratch DB and yield an APP_ADMIN url for it.
 
     Migrations run as `app_admin` (the production migrator, BYPASSRLS) so the
     table owner + grants match production. The cluster superuser only creates the
     DB and hands its public schema to app_admin (which exists globally once
     `make test-db-up` has run the kernel's initial migration)."""
-    superuser = _superuser_url()
+    superuser = _superuser_url(postgres_url)
     name = f"vcp_rehearsal_{uuid.uuid4().hex[:12]}"
     server = create_engine(superuser, isolation_level="AUTOCOMMIT")
     with server.connect() as conn:

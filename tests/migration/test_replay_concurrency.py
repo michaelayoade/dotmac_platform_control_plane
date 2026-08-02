@@ -15,7 +15,6 @@ a no-op on SQLite, so the unit suite structurally cannot prove this.
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from collections.abc import Iterator
 
@@ -27,16 +26,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from vendor_cp.licensing.transport import pending_deliveries
 
 
-def _database_url() -> str:
-    url = os.getenv("TEST_DATABASE_URL")
-    if not url:
-        pytest.skip("TEST_DATABASE_URL not set — this needs a real Postgres")
-    return url
-
-
 @pytest.fixture
-def engine() -> Iterator[Engine]:
-    eng = create_engine(_database_url(), future=True)
+def engine(postgres_url: str) -> Iterator[Engine]:
+    # `postgres_url` (conftest) skips locally and FAILS under
+    # REQUIRE_POSTGRES_TESTS=1, so this suite can never pass by skipping.
+    eng = create_engine(postgres_url, future=True)
     yield eng
     eng.dispose()
 
