@@ -343,29 +343,29 @@ wmi = ["wmi (>=1.5.1) ; platform_system == \"Windows\""]
 
 [[package]]
 name = "dotmac-kernel"
-version = "0.1.0a7"
+version = "0.1.0a8"
 description = "DotMac platform kernel — multi-tenant FastAPI foundation (config, RLS db, identity/tenancy models, security, platform auth, middleware, settings, features registry, audit)"
 optional = false
-python-versions = ">=3.12,<3.14"
+python-versions = ">=3.11,<3.14"
 groups = ["main"]
 files = [
-    {file = "dotmac_kernel-0.1.0a7-py3-none-any.whl", hash = "sha256:2d1c92c1811387fbf74933a1c5625084f49687753dd513f0b8a528fbca667ed7"},
-    {file = "dotmac_kernel-0.1.0a7.tar.gz", hash = "sha256:b02f2ee72e087af512f50a11e4acaedb526719048ea05693546224725bacca38"},
+    {file = "dotmac_kernel-0.1.0a8-py3-none-any.whl", hash = "sha256:34d6ea13ab47378af7e123e342e421127858f3f120290161eab9cb2a39a80d07"},
+    {file = "dotmac_kernel-0.1.0a8.tar.gz", hash = "sha256:6575895d7e0945e3ca9b16f81c6002dcb4e29b067bc66fe8a996119be4ce2c90"},
 ]
 
 [package.dependencies]
 argon2-cffi = ">=25.1.0,<26.0.0"
-cryptography = {version = ">=43", optional = true, markers = "extra == \"testing\" or extra == \"licensing\""}
-fastapi = ">=0.115,<0.116"
+cryptography = {version = ">=42", optional = true, markers = "extra == \"licensing\""}
+fastapi = ">=0.111,<0.116"
 httpx = {version = ">=0.27,<0.28", optional = true, markers = "extra == \"testing\""}
 jinja2 = ">=3.1,<4.0"
-pydantic = {version = ">=2.9,<3.0", extras = ["email"]}
-pydantic-settings = ">=2.5,<3.0"
+pydantic = {version = ">=2.7.4,<3.0", extras = ["email"]}
+pydantic-settings = ">=2.2,<3.0"
 sqlalchemy = ">=2.0,<3.0"
 
 [package.extras]
-licensing = ["cryptography (>=43)"]
-testing = ["cryptography (>=43)", "httpx (>=0.27,<0.28)"]
+licensing = ["cryptography (>=42)"]
+testing = ["httpx (>=0.27,<0.28)"]
 
 [package.source]
 type = "legacy"
@@ -1508,4 +1508,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "0e99d4f562c69df7aade4fe1e2c6236f213a0f04b18d7a35c0f75b41c4a64ada"
+content-hash = "ba7703ef85129d47254604e04b926694cd2a13122846b3173e743d5db056e3f0"
