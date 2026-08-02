@@ -96,6 +96,35 @@ class AckOutcomeResponse(BaseModel):
     delivery_id: UUID | None = None
 
 
+class RevokeLicenceRequest(BaseModel):
+    """Revoking is a decision: a named reason is mandatory."""
+
+    licence_id: UUID
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class RevocationEntryResponse(BaseModel):
+    """Confirmation that a lineage is revoked. It reaches deployments only when
+    the next snapshot is published AND imported — this is a decision, not
+    delivery."""
+
+    licence_id: UUID
+    reason: str
+
+
+class RevocationListResponse(BaseModel):
+    """A published snapshot. `revoked_licence_ids` is the FULL cumulative set —
+    deployments import the whole artifact, never a delta."""
+
+    id: UUID
+    list_version: int
+    digest: str
+    key_id: str
+    entry_count: int
+    envelope: dict[str, object]
+    revoked_licence_ids: list[str]
+
+
 __all__ = [
     "IssueLicenceRequest",
     "LicenceIssuanceResponse",
@@ -104,4 +133,7 @@ __all__ = [
     "DeliveryResponse",
     "AcknowledgementRequest",
     "AckOutcomeResponse",
+    "RevokeLicenceRequest",
+    "RevocationEntryResponse",
+    "RevocationListResponse",
 ]

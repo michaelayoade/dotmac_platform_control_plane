@@ -174,17 +174,46 @@ def build_keyring(db: Session) -> LicenceKeyRing:
 
 
 def _lineage(db: Session, *, customer_ref: str, product: str) -> Licence:
-    row = db.execute(
-        select(Licence).where(
-            Licence.customer_ref == customer_ref, Licence.product == product
-        )
+    """Resolve the lineage to issue into for a customer+product.
+
+    Reuses the current generation unless it has been REVOKED — revocation is by
+    `licence_id` and permanent, so continuing to issue into a revoked lineage
+    would produce documents every deployment must refuse. In that case a new
+    generation is minted: that is the contracted recovery path, and it is why
+    `generation` exists at all.
+    """
+    current = db.execute(
+        select(Licence)
+        .where(Licence.customer_ref == customer_ref, Licence.product == product)
+        .order_by(Licence.generation.desc())
+        .limit(1)
     ).scalar_one_or_none()
-    if row is not None:
-        return row
-    row = Licence(customer_ref=customer_ref, product=product)
+    if current is not None and not _is_revoked(db, current.id):
+        return current
+    row = Licence(
+        customer_ref=customer_ref,
+        product=product,
+        generation=(current.generation + 1) if current is not None else 1,
+    )
     db.add(row)
     db.flush()
     return row
+
+
+def _is_revoked(db: Session, licence_id: UUID) -> bool:
+    """Imported from the revocation MODELS, not the revocation service — the
+    dependency runs one way (revocation → issuance), and reading a fact must
+    not create a cycle."""
+    from vendor_cp.licensing.revocation_models import LicenceRevocationEntry
+
+    return (
+        db.execute(
+            select(LicenceRevocationEntry.id).where(
+                LicenceRevocationEntry.licence_id == licence_id
+            )
+        ).scalar_one_or_none()
+        is not None
+    )
 
 
 def _next_version(db: Session, licence_id: UUID) -> int:

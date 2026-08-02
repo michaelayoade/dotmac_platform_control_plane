@@ -68,19 +68,33 @@ class LicenceSigningKey(Base, TimestampMixin):
 
 
 class Licence(Base, TimestampMixin):
-    """A licence lineage — one per customer+product. `id` is the document's
-    `licence_id`; versions of this lineage supersede one another."""
+    """A licence lineage. `id` is the document's `licence_id`; versions within
+    a lineage supersede one another.
+
+    A lineage is identified by `(customer_ref, product, generation)` rather than
+    just customer+product. The `generation` exists for exactly one reason:
+    revocation is by `licence_id` and is PERMANENT, so once a lineage is
+    revoked, the contracted recovery path — re-issuing for that same customer
+    and product — needs a genuinely new lineage to issue into. Without a
+    discriminator the resolver would return the revoked lineage and every
+    "recovery" document would be dead on arrival. Generations start at 1 and
+    only advance when the current one has been revoked.
+    """
 
     __tablename__ = "licences"
     __table_args__ = (
         UniqueConstraint(
-            "customer_ref", "product", name="uq_licences_customer_product"
+            "customer_ref",
+            "product",
+            "generation",
+            name="uq_licences_customer_product_generation",
         ),
     )
 
     id: Mapped[UUID] = uuid_pk()
     customer_ref: Mapped[str] = mapped_column(String(200), nullable=False)
     product: Mapped[str] = mapped_column(String(120), nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     issuances: Mapped[list[LicenceIssuance]] = relationship(
         "LicenceIssuance",
