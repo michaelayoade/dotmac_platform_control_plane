@@ -11,9 +11,12 @@ follows from that:
 
 - Staging a delivery records an immutable fact and emits `licence.delivered`
   atomically with it; delivery is at-least-once, so re-staging is a no-op.
-- Only an `applied` acknowledgement matching the licence id, version, digest,
-  and — when the document is deployment-bound — the deployment id, advances
-  `delivered → active`.
+- Only an `applied` acknowledgement from a PROVEN deployment identity, matching
+  the licence id, version and digest (and, for a bound document, that exact
+  deployment), advances `delivered → active`. An acknowledgement with no proven
+  identity is recorded as evidence and activates nothing — bound or unbound —
+  because `active` claims the data plane committed, and an unauthenticated
+  caller cannot establish that for any licence.
 - Anything else is recorded and QUARANTINED, never acted on. An ack naming a
   digest we never issued is the mis-issue/tamper tripwire; deleting it would
   destroy the evidence.
@@ -30,7 +33,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
-from dotmac_kernel import NotFoundError, write_platform_audit_event
+from dotmac_kernel import (
+    BadRequestError,
+    NotFoundError,
+    write_platform_audit_event,
+)
 from dotmac_kernel.messaging import enqueue_platform_event
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -42,6 +49,8 @@ from vendor_cp.licensing.delivery_models import (
     LicenceAckRecord,
     LicenceDelivery,
     LicenceDeliveryState,
+    LicenceDeliveryTarget,
+    TargetStatus,
 )
 from vendor_cp.licensing.models import Licence, LicenceIssuance
 
@@ -51,7 +60,13 @@ _EVENT_ACTIVATED = "licence.activated"
 
 @dataclass(frozen=True, slots=True)
 class StageDeliveryCommand:
-    """Stage an issued version for delivery to one opaque target."""
+    """Stage an issued version for delivery to a REGISTERED target.
+
+    `target_ref` is resolved against the licence-delivery-target projection
+    and AUTHORISED (active status, matching customer, and the exact bound
+    deployment for a bound document) — registration alone is not permission,
+    and a caller can never name an arbitrary destination.
+    """
 
     issuance_id: UUID
     target_ref: str
@@ -97,6 +112,174 @@ class AckOutcome:
         return AckDisposition(self.disposition).is_quarantined
 
 
+# ── Delivery targets (the one writer) ───────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterTargetCommand:
+    """Register or synchronise a delivery target.
+
+    This is the ONLY supported way `licence_delivery_targets` is written.
+    Without it the table had no named writer, so every caller — including
+    tests — reached for raw inserts, which is precisely how a projection drifts
+    from the authority it projects. When `FleetDesiredStateService` lands, this
+    command becomes its subscriber rather than a parallel source of truth.
+    """
+
+    target_ref: str
+    customer_ref: str
+    connection_ref: str | None = None
+    status: TargetStatus = TargetStatus.ACTIVE
+    actor_admin_id: UUID | None = None
+
+
+def register_delivery_target(
+    db: Session, command: RegisterTargetCommand
+) -> LicenceDeliveryTarget:
+    """Create or update a delivery target, audited. Idempotent on
+    `target_ref`; changing the customer of an existing target is REFUSED —
+    that would silently re-point a destination at another customer's
+    licences, which the cross-customer staging check could then no longer
+    catch."""
+    if not command.target_ref.strip() or not command.customer_ref.strip():
+        raise BadRequestError("a delivery target needs a ref and a customer")
+
+    row = db.execute(
+        select(LicenceDeliveryTarget).where(
+            LicenceDeliveryTarget.target_ref == command.target_ref
+        )
+    ).scalar_one_or_none()
+    if row is not None:
+        if row.customer_ref != command.customer_ref:
+            raise BadRequestError(
+                f"delivery target {command.target_ref!r} belongs to "
+                f"{row.customer_ref!r}; re-pointing it at "
+                f"{command.customer_ref!r} would move a destination between "
+                "customers — register a new target instead"
+            )
+        row.connection_ref = command.connection_ref
+        row.status = command.status.value
+        db.flush()
+        action = "vendor.licence.delivery_target_updated"
+    else:
+        row = LicenceDeliveryTarget(
+            target_ref=command.target_ref,
+            customer_ref=command.customer_ref,
+            connection_ref=command.connection_ref,
+            status=command.status.value,
+        )
+        db.add(row)
+        db.flush()
+        action = "vendor.licence.delivery_target_registered"
+
+    write_platform_audit_event(
+        db,
+        actor_admin_id=command.actor_admin_id,
+        action=action,
+        entity_type="licence_delivery_target",
+        entity_id=str(row.id),
+        details={
+            "target_ref": row.target_ref,
+            "customer_ref": row.customer_ref,
+            "status": row.status,
+        },
+    )
+    return row
+
+
+def list_delivery_targets(db: Session) -> list[LicenceDeliveryTarget]:
+    """All registered delivery targets. Lives here rather than in the router so
+    the route stays a thin adapter — a direct query in a handler is how a
+    second, unowned read path starts."""
+    return list(
+        db.execute(
+            select(LicenceDeliveryTarget).order_by(LicenceDeliveryTarget.target_ref)
+        ).scalars()
+    )
+
+
+def map_legacy_delivery(
+    db: Session,
+    *,
+    delivery_id: UUID,
+    target_ref: str,
+    actor_admin_id: UUID | None = None,
+) -> DeliveryView:
+    """Attach a destination to a delivery that predates the registry.
+
+    Migration `v010` parks those rows; this is how an operator makes one
+    replayable again, and `resume_delivery` refuses until it has been done.
+    The same authorisation rules as staging apply — mapping must not become a
+    back door around the checks staging performs.
+    """
+    delivery = db.get(LicenceDelivery, delivery_id)
+    if delivery is None:
+        raise NotFoundError(f"licence delivery {delivery_id} not found")
+    if delivery.target_id is not None:
+        raise BadRequestError(
+            f"delivery {delivery_id} already has a destination — a delivery "
+            "fact is immutable and may not be re-pointed"
+        )
+    issuance = db.get(LicenceIssuance, delivery.issuance_id)
+    if issuance is None:  # unreachable: FK-enforced
+        raise RuntimeError(f"delivery {delivery_id} references a missing issuance")
+    target = _authorised_target(db, target_ref=target_ref, issuance=issuance)
+
+    delivery.target_ref = target.target_ref
+    delivery.target_id = target.id
+    db.flush()
+    write_platform_audit_event(
+        db,
+        actor_admin_id=actor_admin_id,
+        action="vendor.licence.delivery_mapped",
+        entity_type="licence_delivery",
+        entity_id=str(delivery.id),
+        details={"target_ref": target.target_ref},
+    )
+    return _view(db, delivery)
+
+
+def _authorised_target(
+    db: Session, *, target_ref: str, issuance: LicenceIssuance
+) -> LicenceDeliveryTarget:
+    """Resolve a target AND authorise it for this issuance. Registration is not
+    authorisation; each check below is a distinct failure mode, so each is made
+    and named separately rather than folded into one predicate."""
+    target = db.execute(
+        select(LicenceDeliveryTarget).where(
+            LicenceDeliveryTarget.target_ref == target_ref
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise NotFoundError(
+            f"delivery target {target_ref!r} is not registered — a licence may "
+            "only be delivered to a registered destination"
+        )
+    if target.status != TargetStatus.ACTIVE.value:
+        raise BadRequestError(
+            f"delivery target {target.target_ref!r} is {target.status!r}, not "
+            "active — a suspended or retired destination must not receive "
+            "licences"
+        )
+    licence = db.get(Licence, issuance.licence_id)
+    if licence is None:  # unreachable: FK-enforced
+        raise RuntimeError(f"issuance {issuance.id} references a missing licence")
+    if target.customer_ref != licence.customer_ref:
+        raise BadRequestError(
+            "refusing cross-customer delivery: the licence lineage belongs to "
+            f"{licence.customer_ref!r} but target {target.target_ref!r} belongs "
+            f"to {target.customer_ref!r}"
+        )
+    bound_to = _issued_deployment_id(issuance)
+    if bound_to is not None and bound_to != target.target_ref:
+        raise BadRequestError(
+            f"licence is bound to deployment {bound_to!r} and may not be staged "
+            f"to {target.target_ref!r} — a bound document is unusable there and "
+            "delivering it still discloses the entitlement set"
+        )
+    return target
+
+
 # ── Delivery staging ────────────────────────────────────────────────────────
 
 
@@ -133,6 +316,8 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
     if issuance is None:
         raise NotFoundError(f"licence issuance {command.issuance_id} not found")
 
+    target = _authorised_target(db, target_ref=command.target_ref, issuance=issuance)
+
     existing = db.execute(
         select(LicenceDelivery).where(
             LicenceDelivery.issuance_id == command.issuance_id,
@@ -142,7 +327,11 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
     if existing is not None:
         return _view(db, existing)
 
-    delivery = LicenceDelivery(issuance_id=issuance.id, target_ref=command.target_ref)
+    delivery = LicenceDelivery(
+        issuance_id=issuance.id,
+        target_ref=command.target_ref,
+        target_id=target.id,
+    )
     db.add(delivery)
     db.flush()
     db.add(
@@ -190,6 +379,7 @@ def _record(
     disposition: AckDisposition,
     *,
     delivery_id: UUID | None = None,
+    authenticated_deployment_ref: str | None = None,
 ) -> LicenceAckRecord:
     row = LicenceAckRecord(
         delivery_id=delivery_id,
@@ -198,7 +388,10 @@ def _record(
         digest=ack.digest,
         status=ack.status,
         reason=ack.reason,
+        # The CLAIM and the PROOF are stored separately, so an audit can never
+        # mistake one for the other.
         deployment_id=ack.deployment_id,
+        authenticated_deployment_ref=authenticated_deployment_ref,
         disposition=disposition.value,
     )
     db.add(row)
@@ -229,7 +422,11 @@ def _audit_ack(
             "digest": ack.digest,
             "status": ack.status,
             "reason": ack.reason,
-            "deployment_id": ack.deployment_id,
+            # Claim and proof are reported SEPARATELY — an audit trail that
+            # showed only the claim would look identical whether or not the
+            # caller proved anything.
+            "claimed_deployment_id": ack.deployment_id,
+            "authenticated_deployment_ref": record.authenticated_deployment_ref,
             "disposition": disposition.value,
         },
     )
@@ -279,14 +476,23 @@ def ingest_acknowledgement(
     db: Session,
     ack: AcknowledgementInput,
     *,
+    authenticated_deployment_ref: str | None = None,
     actor_admin_id: UUID | None = None,
 ) -> AckOutcome:
     """Record an acknowledgement and, only if it genuinely matches something we
     issued, advance that delivery to `active`.
 
+    `authenticated_deployment_ref` is the identity the CALLER PROVED, derived
+    from its authentication — never from the request body. `ack.deployment_id`
+    is only a claim, and a claim that disagrees with the proven identity is a
+    mismatch. For a deployment-BOUND licence, an unauthenticated caller cannot
+    activate anything: without a proven identity there is nothing to check the
+    binding against, and accepting the body's word would make binding
+    decorative. That is fail-closed by design until deployment authentication
+    lands; platform-admin callers can still ingest acks for unbound licences.
+
     Every inbound ack is written to the append-only log first — including the
-    ones we refuse — so the decision is always auditable. The verdict is the
-    returned `disposition`.
+    ones we refuse — so the decision is always auditable.
     """
     # 1. Does it name a lineage we own?
     try:
@@ -295,7 +501,12 @@ def ingest_acknowledgement(
         licence_uuid = None
     licence = db.get(Licence, licence_uuid) if licence_uuid is not None else None
     if licence is None:
-        record = _record(db, ack, AckDisposition.UNKNOWN_LICENCE)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.UNKNOWN_LICENCE,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.UNKNOWN_LICENCE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.UNKNOWN_LICENCE.value, False)
 
@@ -307,39 +518,89 @@ def ingest_acknowledgement(
         )
     ).scalar_one_or_none()
     if issuance is None:
-        record = _record(db, ack, AckDisposition.UNKNOWN_LICENCE)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.UNKNOWN_LICENCE,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.UNKNOWN_LICENCE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.UNKNOWN_LICENCE.value, False)
 
     # 3. …with the digest WE issued? A mismatch means the deployment applied a
     #    document we did not produce (or produced a claim about one).
     if ack.digest != issuance.digest:
-        record = _record(db, ack, AckDisposition.UNKNOWN_DIGEST)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.UNKNOWN_DIGEST,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.UNKNOWN_DIGEST, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.UNKNOWN_DIGEST.value, False)
 
     # 4. …from the deployment it was bound to (when it was bound at all)?
-    bound_to = _issued_deployment_id(issuance)
-    if bound_to is not None and ack.deployment_id != bound_to:
-        record = _record(db, ack, AckDisposition.DEPLOYMENT_MISMATCH)
+    # 4. No PROVEN identity ⇒ evidence only, never activation. `active` means
+    #    the data plane committed, and an unauthenticated caller cannot
+    #    establish that for ANY licence, bound or unbound. Checked BEFORE the
+    #    binding rules because an ABSENT identity is not a contradiction —
+    #    calling it a mismatch would misdescribe what happened.
+    if authenticated_deployment_ref is None:
+        record = _record(
+            db,
+            ack,
+            AckDisposition.UNVERIFIED_IDENTITY,
+            authenticated_deployment_ref=None,
+        )
+        _audit_ack(db, ack, record, AckDisposition.UNVERIFIED_IDENTITY, actor_admin_id)
+        return AckOutcome(record.id, AckDisposition.UNVERIFIED_IDENTITY.value, False)
+
+    # A claimed identity that contradicts the proven one is itself a mismatch.
+    if (
+        authenticated_deployment_ref is not None
+        and ack.deployment_id is not None
+        and ack.deployment_id != authenticated_deployment_ref
+    ):
+        record = _record(
+            db,
+            ack,
+            AckDisposition.DEPLOYMENT_MISMATCH,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.DEPLOYMENT_MISMATCH, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.DEPLOYMENT_MISMATCH.value, False)
 
-    delivery = (
-        db.execute(
-            select(LicenceDelivery).where(LicenceDelivery.issuance_id == issuance.id)
+    bound_to = _issued_deployment_id(issuance)
+    if bound_to is not None and authenticated_deployment_ref != bound_to:
+        record = _record(
+            db,
+            ack,
+            AckDisposition.DEPLOYMENT_MISMATCH,
+            authenticated_deployment_ref=authenticated_deployment_ref,
         )
-        .scalars()
-        .first()
-    )
+        _audit_ack(db, ack, record, AckDisposition.DEPLOYMENT_MISMATCH, actor_admin_id)
+        return AckOutcome(record.id, AckDisposition.DEPLOYMENT_MISMATCH.value, False)
 
-    # 5. The receiver itself reported failure — real information, no activation.
+    # The delivery to THIS deployment, not merely the first one for this
+    # issuance — the same version may be staged to several targets, and
+    # activating an arbitrary one would mark the wrong deployment licensed.
+    delivery_query = select(LicenceDelivery).where(
+        LicenceDelivery.issuance_id == issuance.id
+    )
+    if authenticated_deployment_ref is not None:
+        delivery_query = delivery_query.where(
+            LicenceDelivery.target_ref == authenticated_deployment_ref
+        )
+    delivery = db.execute(delivery_query).scalars().first()
+
+    # 6. The receiver itself reported failure — real information, no activation.
     if ack.status != AckStatus.APPLIED.value:
         record = _record(
             db,
             ack,
             AckDisposition.REJECTED_BY_RECEIVER,
             delivery_id=delivery.id if delivery else None,
+            authenticated_deployment_ref=authenticated_deployment_ref,
         )
         _audit_ack(db, ack, record, AckDisposition.REJECTED_BY_RECEIVER, actor_admin_id)
         return AckOutcome(
@@ -349,7 +610,7 @@ def ingest_acknowledgement(
             delivery.id if delivery else None,
         )
 
-    # 6. A late ack for an older version must NEVER regress a newer active one.
+    # 7. A late ack for an older version must NEVER regress a newer active one.
     highest_active = _highest_active_version(db, licence.id)
     if ack.licence_version < highest_active:
         record = _record(
@@ -357,6 +618,7 @@ def ingest_acknowledgement(
             ack,
             AckDisposition.STALE,
             delivery_id=delivery.id if delivery else None,
+            authenticated_deployment_ref=authenticated_deployment_ref,
         )
         _audit_ack(db, ack, record, AckDisposition.STALE, actor_admin_id)
         return AckOutcome(
@@ -369,17 +631,34 @@ def ingest_acknowledgement(
     if delivery is None:
         # Applied something we issued but never staged for delivery — worth
         # keeping and flagging rather than silently activating nothing.
-        record = _record(db, ack, AckDisposition.UNKNOWN_LICENCE)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.UNKNOWN_LICENCE,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.UNKNOWN_LICENCE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.UNKNOWN_LICENCE.value, False)
 
     state = _state_of(db, delivery.id)
     if state.state == DeliveryState.ACTIVE.value:
-        record = _record(db, ack, AckDisposition.DUPLICATE, delivery_id=delivery.id)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.DUPLICATE,
+            delivery_id=delivery.id,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.DUPLICATE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.DUPLICATE.value, False, delivery.id)
 
-    record = _record(db, ack, AckDisposition.ACCEPTED, delivery_id=delivery.id)
+    record = _record(
+        db,
+        ack,
+        AckDisposition.ACCEPTED,
+        delivery_id=delivery.id,
+        authenticated_deployment_ref=authenticated_deployment_ref,
+    )
     state.state = DeliveryState.ACTIVE.value
     state.activating_ack_id = record.id
     db.flush()
@@ -422,7 +701,8 @@ def list_acknowledgements(db: Session, licence_id: str) -> list[Mapping[str, obj
             "digest": r.digest,
             "status": r.status,
             "reason": r.reason,
-            "deployment_id": r.deployment_id,
+            "claimed_deployment_id": r.deployment_id,
+            "authenticated_deployment_ref": r.authenticated_deployment_ref,
             "disposition": r.disposition,
         }
         for r in rows
@@ -430,6 +710,10 @@ def list_acknowledgements(db: Session, licence_id: str) -> list[Mapping[str, obj
 
 
 __all__ = [
+    "RegisterTargetCommand",
+    "register_delivery_target",
+    "list_delivery_targets",
+    "map_legacy_delivery",
     "StageDeliveryCommand",
     "AcknowledgementInput",
     "DeliveryView",

@@ -58,8 +58,8 @@ class SigningKeyResponse(BaseModel):
 
 
 class StageDeliveryRequest(BaseModel):
-    """Stage an issued version for one opaque target. Transports are a later
-    slice — this records the fact and emits the event."""
+    """Stage an issued version for a REGISTERED delivery target. `target_ref`
+    is resolved against the registry — an arbitrary destination is refused."""
 
     issuance_id: UUID
     target_ref: str
@@ -125,20 +125,66 @@ class RevocationListResponse(BaseModel):
     revoked_licence_ids: list[str]
 
 
-class PipelineHealthResponse(BaseModel):
-    """The alertable signals. `revocation_import_lag_measurable` is False until
-    deployments acknowledge revocation imports — a dashboard should show "not
-    measurable" rather than a misleading zero."""
+class RegisterTargetRequest(BaseModel):
+    """Register or synchronise a delivery target. `connection_ref` is an opaque
+    handle a transport interprets — never a destination URL from the caller."""
 
-    unacknowledged_total: int
-    unacknowledged_never_sent: int
-    unacknowledged_sent: int
+    target_ref: str = Field(min_length=1, max_length=200)
+    customer_ref: str = Field(min_length=1, max_length=200)
+    connection_ref: str | None = Field(default=None, max_length=200)
+    status: str = Field(default="active")
+
+
+class DeliveryTargetResponse(BaseModel):
+    id: UUID
+    target_ref: str
+    customer_ref: str
+    connection_ref: str | None = None
+    status: str
+
+
+class MapLegacyDeliveryRequest(BaseModel):
+    """Attach a destination to a delivery staged before the registry existed."""
+
+    target_ref: str = Field(min_length=1, max_length=200)
+
+
+class DispatchRequest(BaseModel):
+    """Run one replay pass. Bounded by `limit` so an operator (or a job) cannot
+    accidentally sweep the whole backlog in a single transaction."""
+
+    limit: int = Field(default=100, ge=1, le=1000)
+    max_attempts: int = Field(default=10, ge=1, le=100)
+
+
+class DispatchReportResponse(BaseModel):
+    attempted: int
+    sent: int
+    failed: int
+    parked_terminal: int
+    parked_exhausted: int
+
+
+class PipelineHealthResponse(BaseModel):
+    """The alertable signals, kept as SEPARATE observations. The two
+    `*_measurable` flags are False until deployments report the keyring and
+    revocation-list versions they have APPLIED — a dashboard should show "not
+    measurable" rather than a zero that reads green during an outage."""
+
+    never_attempted: int
+    attempted_never_sent: int
+    sent_unacknowledged: int
     oldest_unacknowledged_age_seconds: int | None = None
+    parked_total: int
     rejected_by_reason: dict[str, int]
     unknown_digest_acks: int
-    quarantined_acks: int
+    unknown_licence_acks: int
+    deployment_mismatch_acks: int
+    unverified_identity_acks: int
+    critical_acks: int
     latest_revocation_list_version: int | None = None
-    revocation_import_lag_measurable: bool
+    keyring_uptake_lag_measurable: bool
+    revocation_application_lag_measurable: bool
 
 
 __all__ = [
@@ -153,4 +199,9 @@ __all__ = [
     "RevocationEntryResponse",
     "RevocationListResponse",
     "PipelineHealthResponse",
+    "RegisterTargetRequest",
+    "DeliveryTargetResponse",
+    "MapLegacyDeliveryRequest",
+    "DispatchRequest",
+    "DispatchReportResponse",
 ]

@@ -57,3 +57,16 @@ contract + outbox). Each unblocks only when its kernel primitive lands.
 ERP and ISP adopt through assemblies, adapters, contract/shadow tests,
 expand/contract migrations, reconciliation, and one-writer cutovers — never a
 big-bang rewrite, and never by this control plane reaching into their databases.
+
+
+## Licence delivery targets vs. the Deployment entity (2026-08-02)
+
+`licence_delivery_targets` is a **licensing-owned projection** of where a
+licence may be delivered, written only by
+`EntitlementProjectionService.register_delivery_target`. It is deliberately NOT
+the authoritative `Deployment` entity: `docs/design/domain-foundation.md`
+assigns that to `FleetDesiredStateService`, and deployment intent remains
+design-only. Naming the licensing table `deployments` would have made licensing
+the de-facto owner of an entity another service is specified to own — a
+source-of-truth violation dressed as a convenience. When the fleet slice lands,
+this projection is rebuilt from it rather than competing with it.

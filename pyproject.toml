@@ -51,6 +51,10 @@ select = ["E", "F", "I", "UP", "B", "S"]
 # asserts are the point in tests; S105/S106 flag dummy fixture "passwords"
 # (e.g. password_hash="x") that are not real secrets.
 "tests/**" = ["S101", "S105", "S106"]
+# The concurrency proof interpolates a per-test scratch TABLE NAME it generated
+# itself (uuid4 hex) — table identifiers cannot be bound as parameters, and no
+# external input reaches these statements.
+"tests/migration/test_replay_concurrency.py" = ["S101", "S105", "S106", "S608"]
 
 [tool.mypy]
 python_version = "3.12"

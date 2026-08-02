@@ -28,6 +28,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 from dotmac_kernel import (
+    BadRequestError,
     CapabilityCatalogue,
     FeatureManifest,
     Tenant,
@@ -54,6 +55,9 @@ from vendor_cp.licensing.delivery_models import (
     DeliveryState,
     LicenceAckRecord,
     LicenceDelivery,
+    LicenceDeliveryState,
+    LicenceDeliveryTarget,
+    TargetStatus,
 )
 from vendor_cp.licensing.signer import EphemeralLicenceSigner
 from vendor_cp.offers.models import OfferVersion
@@ -181,9 +185,42 @@ def _issue(db, signer, *, suffix="a", customer_ref="cust-a", **over):
     )
 
 
+PROVEN = TARGET  # the deployment identity a receiver would authenticate as
+
+
+def _register(db, ref=TARGET, customer_ref="cust-a"):
+    """Destinations must be registered — a delivery can never name an
+    arbitrary target."""
+    existing = db.execute(
+        select(LicenceDeliveryTarget).where(LicenceDeliveryTarget.target_ref == ref)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    row = LicenceDeliveryTarget(target_ref=ref, customer_ref=customer_ref)
+    db.add(row)
+    db.flush()
+    return row
+
+
 def _stage(db, issued, target=TARGET):
+    _register(db, target)
     return projection.stage_delivery(
-        db, projection.StageDeliveryCommand(issuance_id=issued.id, target_ref=target)
+        db,
+        projection.StageDeliveryCommand(issuance_id=issued.id, target_ref=target),
+    )
+
+
+def _ingest(db, ack_input, *, proven=PROVEN, authenticated_deployment_ref=None):
+    """Ack ingestion with a PROVEN deployment identity — the only path that can
+    activate anything."""
+    return projection.ingest_acknowledgement(
+        db,
+        ack_input,
+        authenticated_deployment_ref=(
+            authenticated_deployment_ref
+            if authenticated_deployment_ref is not None
+            else proven
+        ),
     )
 
 
@@ -277,9 +314,25 @@ def test_restaging_is_the_same_fact_not_a_second_one(db, signer) -> None:
     )
 
 
+def test_staging_to_an_unregistered_destination_is_rejected(db, signer) -> None:
+    """A caller may not invent a destination: delivery resolves through the
+    registry or not at all."""
+    from dotmac_kernel import NotFoundError
+
+    issued = _issue(db, signer)
+    with pytest.raises(NotFoundError, match="not registered"):
+        projection.stage_delivery(
+            db,
+            projection.StageDeliveryCommand(
+                issuance_id=issued.id, target_ref="https://attacker.example/steal"
+            ),
+        )
+
+
 def test_staging_an_unknown_issuance_is_rejected(db) -> None:
     from dotmac_kernel import NotFoundError
 
+    _register(db)
     with pytest.raises(NotFoundError):
         projection.stage_delivery(
             db,
@@ -314,7 +367,7 @@ def test_cross_plane_canary_activate_to_active(db, signer) -> None:
     assert is_entitled(db, tenant_id=tenant.id, capability_code="cap.a").allowed
 
     # --- back at the vendor ---
-    outcome = projection.ingest_acknowledgement(db, _ack_from(ack))
+    outcome = _ingest(db, _ack_from(ack))
     assert outcome.disposition == AckDisposition.ACCEPTED.value
     assert outcome.activated is True
     assert (
@@ -369,7 +422,7 @@ def test_receiver_commit_failure_produces_no_applied_ack(db, signer) -> None:
 def test_unknown_licence_is_quarantined(db, signer) -> None:
     issued = _issue(db, signer)
     _stage(db, issued)
-    outcome = projection.ingest_acknowledgement(
+    outcome = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(uuid.uuid4()),
@@ -385,7 +438,7 @@ def test_unknown_licence_is_quarantined(db, signer) -> None:
 def test_unknown_digest_is_quarantined_as_the_tamper_tripwire(db, signer) -> None:
     issued = _issue(db, signer)
     delivery = _stage(db, issued)
-    outcome = projection.ingest_acknowledgement(
+    outcome = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -408,7 +461,7 @@ def test_unknown_digest_is_quarantined_as_the_tamper_tripwire(db, signer) -> Non
 def test_unknown_version_is_quarantined(db, signer) -> None:
     issued = _issue(db, signer)
     _stage(db, issued)
-    outcome = projection.ingest_acknowledgement(
+    outcome = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -422,18 +475,20 @@ def test_unknown_version_is_quarantined(db, signer) -> None:
 
 
 def test_bound_licence_requires_the_acking_deployment_to_match(db, signer) -> None:
+    """A bound licence may only be staged to its bound deployment, and only
+    that deployment can acknowledge it."""
     issued = _issue(db, signer, deployment_id="dep-a")
-    delivery = _stage(db, issued)
+    delivery = _stage(db, issued, target="dep-a")
 
-    wrong = projection.ingest_acknowledgement(
+    wrong = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
             licence_version=issued.version,
             digest=issued.digest,
             status="applied",
-            deployment_id="dep-b",
         ),
+        authenticated_deployment_ref="dep-b",
     )
     assert wrong.disposition == AckDisposition.DEPLOYMENT_MISMATCH.value
     assert wrong.quarantined
@@ -442,23 +497,67 @@ def test_bound_licence_requires_the_acking_deployment_to_match(db, signer) -> No
         == DeliveryState.DELIVERED.value
     )
 
-    right = projection.ingest_acknowledgement(
+    right = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
             licence_version=issued.version,
             digest=issued.digest,
             status="applied",
-            deployment_id="dep-a",
         ),
+        authenticated_deployment_ref="dep-a",
     )
     assert right.activated is True
+
+
+def test_bound_licence_cannot_be_activated_without_proven_identity(db, signer):
+    """Fail-closed: with no authenticated identity there is nothing to check
+    the binding against, and taking the body's word would make binding
+    decorative."""
+    issued = _issue(db, signer, deployment_id="dep-a")
+    delivery = _stage(db, issued, target="dep-a")
+    outcome = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest=issued.digest,
+            status="applied",
+            deployment_id="dep-a",  # a CLAIM, not proof
+        ),
+        # No authenticated identity at all — the platform-admin path.
+    )
+    # No proven identity ⇒ evidence only, and it is NOT recorded as a mismatch
+    # (nothing contradicted anything) — it simply cannot activate.
+    assert outcome.disposition == AckDisposition.UNVERIFIED_IDENTITY.value
+    assert not outcome.activated
+    assert (
+        projection.delivery_status(db, delivery.id).state
+        == DeliveryState.DELIVERED.value
+    )
+
+
+def test_claimed_identity_contradicting_the_proven_one_is_a_mismatch(db, signer):
+    issued = _issue(db, signer)
+    _stage(db, issued)
+    outcome = _ingest(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest=issued.digest,
+            status="applied",
+            deployment_id="dep-impostor",
+        ),
+        authenticated_deployment_ref="dep-real",
+    )
+    assert outcome.disposition == AckDisposition.DEPLOYMENT_MISMATCH.value
 
 
 def test_rejected_ack_records_the_reason_without_activating(db, signer) -> None:
     issued = _issue(db, signer)
     delivery = _stage(db, issued)
-    outcome = projection.ingest_acknowledgement(
+    outcome = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -487,8 +586,8 @@ def test_duplicate_acknowledgement_is_idempotent(db, signer) -> None:
         digest=issued.digest,
         status="applied",
     )
-    first = projection.ingest_acknowledgement(db, ack)
-    second = projection.ingest_acknowledgement(db, ack)
+    first = _ingest(db, ack)
+    second = _ingest(db, ack)
 
     assert first.activated is True
     assert second.activated is False
@@ -505,13 +604,14 @@ def test_duplicate_acknowledgement_is_idempotent(db, signer) -> None:
 
 def test_late_v1_ack_cannot_regress_an_active_v2(db, signer) -> None:
     v1 = _issue(db, signer, suffix="a", customer_ref="cust-x")
-    d1 = _stage(db, v1)
+    _register(db, "target-x", customer_ref="cust-x")
+    d1 = _stage(db, v1, target="target-x")
     v2 = _issue(db, signer, suffix="a2", customer_ref="cust-x")
     assert (v1.licence_id, v2.version) == (v2.licence_id, 2)
-    d2 = _stage(db, v2)
+    d2 = _stage(db, v2, target="target-x")
 
     # v2 acknowledged and active first…
-    projection.ingest_acknowledgement(
+    _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(v2.licence_id),
@@ -519,11 +619,12 @@ def test_late_v1_ack_cannot_regress_an_active_v2(db, signer) -> None:
             digest=v2.digest,
             status="applied",
         ),
+        proven="target-x",
     )
     assert projection.delivery_status(db, d2.id).state == DeliveryState.ACTIVE.value
 
     # …then a delayed v1 ack arrives. It must not activate the older delivery.
-    late = projection.ingest_acknowledgement(
+    late = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(v1.licence_id),
@@ -531,6 +632,7 @@ def test_late_v1_ack_cannot_regress_an_active_v2(db, signer) -> None:
             digest=v1.digest,
             status="applied",
         ),
+        proven="target-x",
     )
     assert late.disposition == AckDisposition.STALE.value
     assert late.activated is False
@@ -547,8 +649,8 @@ def test_acknowledgement_log_lists_every_verdict(db, signer) -> None:
         digest=issued.digest,
         status="applied",
     )
-    projection.ingest_acknowledgement(db, good)
-    projection.ingest_acknowledgement(
+    _ingest(db, good)
+    _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -571,7 +673,7 @@ def test_projection_writes_no_product_entitlement_grants(db, signer) -> None:
 
     issued = _issue(db, signer)
     _stage(db, issued)
-    projection.ingest_acknowledgement(
+    _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -586,3 +688,188 @@ def test_projection_writes_no_product_entitlement_grants(db, signer) -> None:
         ).scalar_one()
         == 0
     )
+
+
+# ── The delivery-target projection has ONE writer ───────────────────────────
+
+
+def test_register_delivery_target_is_the_writer_and_is_idempotent(db) -> None:
+    first = projection.register_delivery_target(
+        db,
+        projection.RegisterTargetCommand(
+            target_ref="dep-1", customer_ref="cust-a", connection_ref="edge-1"
+        ),
+    )
+    second = projection.register_delivery_target(
+        db,
+        projection.RegisterTargetCommand(
+            target_ref="dep-1", customer_ref="cust-a", connection_ref="edge-2"
+        ),
+    )
+    assert first.id == second.id
+    assert second.connection_ref == "edge-2"
+
+
+def test_a_target_cannot_be_repointed_to_another_customer(db) -> None:
+    """Re-pointing would move a destination between customers, after which the
+    cross-customer staging check could no longer catch it — the guard would
+    still pass while delivering to the wrong party."""
+    projection.register_delivery_target(
+        db, projection.RegisterTargetCommand(target_ref="dep-1", customer_ref="cust-a")
+    )
+    with pytest.raises(BadRequestError, match="between customers"):
+        projection.register_delivery_target(
+            db,
+            projection.RegisterTargetCommand(target_ref="dep-1", customer_ref="cust-b"),
+        )
+
+
+def test_a_suspended_target_cannot_receive_a_licence(db, signer) -> None:
+    issued = _issue(db, signer)
+    projection.register_delivery_target(
+        db,
+        projection.RegisterTargetCommand(
+            target_ref="dep-suspended",
+            customer_ref="cust-a",
+            status=TargetStatus.SUSPENDED,
+        ),
+    )
+    with pytest.raises(BadRequestError, match="not\\s+active"):
+        projection.stage_delivery(
+            db,
+            projection.StageDeliveryCommand(
+                issuance_id=issued.id, target_ref="dep-suspended"
+            ),
+        )
+
+
+def test_mapping_a_legacy_delivery_applies_the_same_authorisation(db, signer) -> None:
+    """Mapping must not be a back door around the checks staging performs."""
+    issued = _issue(db, signer)
+    delivery = _stage(db, issued)
+    # Simulate the v009-era shape: a delivery with no resolved destination.
+    row = db.get(LicenceDelivery, delivery.id)
+    assert row is not None
+    row.target_id = None
+    db.flush()
+
+    projection.register_delivery_target(
+        db,
+        projection.RegisterTargetCommand(target_ref="dep-other", customer_ref="cust-z"),
+    )
+    with pytest.raises(BadRequestError, match="cross-customer"):
+        projection.map_legacy_delivery(
+            db, delivery_id=delivery.id, target_ref="dep-other"
+        )
+
+    mapped = projection.map_legacy_delivery(
+        db, delivery_id=delivery.id, target_ref=TARGET
+    )
+    assert mapped.target_ref == TARGET
+
+
+def test_resuming_an_unmapped_delivery_is_refused(db, signer) -> None:
+    """Resuming without a destination would move the row out of `parked` and
+    straight out of replay eligibility — it would vanish rather than retry."""
+    from vendor_cp.licensing import transport as transport_module
+
+    issued = _issue(db, signer)
+    delivery = _stage(db, issued)
+    row = db.get(LicenceDelivery, delivery.id)
+    assert row is not None
+    row.target_id = None
+    db.flush()
+    state = db.execute(
+        select(LicenceDeliveryState).where(
+            LicenceDeliveryState.delivery_id == delivery.id
+        )
+    ).scalar_one()
+    state.state = DeliveryState.PARKED.value
+    db.flush()
+
+    with pytest.raises(BadRequestError, match="no resolved destination"):
+        transport_module.resume_delivery(db, delivery.id)
+
+    projection.map_legacy_delivery(db, delivery_id=delivery.id, target_ref=TARGET)
+    transport_module.resume_delivery(db, delivery.id)
+    assert (
+        projection.delivery_status(db, delivery.id).state
+        == DeliveryState.DELIVERED.value
+    )
+
+
+def test_proven_identity_is_visible_to_operators(db, signer) -> None:
+    """The claim and the proof must be separately visible; a log showing only
+    the claim looks identical whether or not anything was proven."""
+    issued = _issue(db, signer)
+    _stage(db, issued)
+    _ingest(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest=issued.digest,
+            status="applied",
+            deployment_id="claimed-something-else",
+        ),
+    )
+    entry = projection.list_acknowledgements(db, str(issued.licence_id))[0]
+    assert entry["claimed_deployment_id"] == "claimed-something-else"
+    assert entry["authenticated_deployment_ref"] == PROVEN
+
+
+# ── Every operational service has a runtime caller ──────────────────────────
+
+
+def test_every_operational_service_is_reachable_from_a_route() -> None:
+    """Structural guard against the gap this batch fixed.
+
+    `register_delivery_target`, `map_legacy_delivery` and `resume_delivery`
+    existed with NO caller outside tests, so a clean deployment could not
+    register a target, map a quarantined delivery, or resume it. Code that only
+    tests call is not a feature.
+
+    `dispatch_pending` is deliberately ABSENT from this list: generic replay is
+    disabled while both reference transports are in-process, because an
+    endpoint that reported success while the bytes were discarded would
+    manufacture delivery evidence. `export_delivery_bundle` is the enabled
+    path, and it is a real handoff.
+    """
+    import inspect
+
+    from vendor_cp.licensing.router import router
+
+    source = "\n".join(
+        inspect.getsource(route.endpoint)
+        for route in router.routes
+        if getattr(route, "endpoint", None) is not None
+    )
+    for service_call in (
+        "projection.register_delivery_target",
+        "projection.list_delivery_targets",
+        "projection.map_legacy_delivery",
+        "transport.resume_delivery",
+        "transport.export_delivery_bundle",
+    ):
+        assert service_call in source, f"{service_call} has no route caller"
+    assert "transport.dispatch_pending" not in source, (
+        "generic replay must stay disabled until a transport performs a real "
+        "external handoff — otherwise it records deliveries that never left "
+        "the process"
+    )
+
+
+def test_dispatch_refuses_a_transport_that_hands_off_nothing(db, signer) -> None:
+    """The false-SENT boundary. An in-process transport accepts a packet and
+    drops it; recording that as delivery corrupts the unacknowledged signal and
+    can park a licence nothing ever carried anywhere."""
+    from vendor_cp.licensing import transport as transport_module
+
+    issued = _issue(db, signer)
+    _stage(db, issued)
+    with pytest.raises(
+        transport_module.TransportModeNotPermittedError, match="external handoff"
+    ):
+        transport_module.dispatch_pending(
+            db, transport=transport_module.LoggingTransport()
+        )

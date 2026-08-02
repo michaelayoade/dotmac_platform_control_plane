@@ -69,15 +69,28 @@ grants, and acks the applied `(licence_id, licence_version, digest)`.
 - **Private-key interface, not key material:** `LicenceSignerProvider` is a
   narrow protocol (`key_id`, `public_key_b64`, `sign(payload: bytes) ->
   signature bytes`). Two modes behind `VENDOR_LICENCE_SIGNING_MODE`:
-  - **`ephemeral`** (default; the only mode this phase, matching the D3
-    fake-provider posture): an in-memory key generated at startup — dev/test
-    only, never persisted.
-  - **`configured`** (later phase, design here only): key material loaded
-    from a file/env reference whose CANONICAL source is OpenBao
-    (`secret/dotmac/licensing/signing-key` — pointer only; the value never
-    appears in code, config files, logs, or the database). A non-`ephemeral`
-    mode without a resolvable key FAILS STARTUP (same fail-closed posture as
-    `VENDOR_PROVIDER_MODE`).
+  - **`ephemeral`** (default): an in-memory key generated at startup — dev/test
+    only, never persisted. Default so a missing configuration cannot silently
+    become a real issuer.
+  - **`configured`** (IMPLEMENTED): key material loaded from a file whose
+    CANONICAL source is OpenBao (`secret/dotmac/licensing/signing-key` —
+    pointer only; the value never appears in code, config files, logs, the
+    database, or an exception message). A mode without resolvable key material
+    FAILS STARTUP.
+
+### Deployment contract (ruled 2026-08-02)
+
+- Issuance runs on **one designated vendor-control-plane instance**, to keep
+  key exposure to a single host. The specific host is deliberately **not yet
+  named** and must be named explicitly before deployment.
+- Keys live at
+  `/run/secrets/dotmac/vendor-control-plane/licence-signing/<key-id>.key`.
+- **Deploy tooling** materialises them from OpenBao: 0700 directory, 0600
+  service-owned files, **atomic replacement**, **read-only** container mount.
+  Manual materialisation is **break-glass only**.
+- The key is read **once** at construction, so every primary/overlap change
+  requires a **controlled restart**. Editing the file under a running process
+  changes nothing — a trap worth stating plainly.
 - **Key registry (public material only):** `licence_signing_keys` — `key_id`,
   `public_key_b64`, `status` (`active`/`retired`/`revoked`), timestamps. This
   is the source the distributed keyring is built from; rotation is: insert
@@ -154,11 +167,12 @@ grants, and acks the applied `(licence_id, licence_version, digest)`.
    a re-import of the same version is idempotent (kernel guard proves it).
 9. **No product-plane writes anywhere** (D1/D2 deny cases unchanged); no
    private key material in code, DB rows, fixtures, or logs — the ONLY
-   private key in tests is ephemeral (`FakeLicenceSigner` or `ephemeral`
-   mode).
-10. **Fail-closed startup:** `VENDOR_LICENCE_SIGNING_MODE` other than
-    `ephemeral` without resolvable key material refuses to boot (this phase:
-    only `ephemeral` is accepted at all).
+   private key in tests is ephemeral (`FakeLicenceSigner`, `ephemeral` mode, or
+   a per-test temporary key file).
+10. **Fail-closed startup:** `configured` without resolvable key material
+    refuses to boot; an UNKNOWN mode refuses to boot; a half-configured
+    rotation overlap (file without id, or id without file) refuses to boot
+    rather than silently disabling double-signing mid-rotation.
 
 ## Dependencies and sequencing
 
@@ -171,8 +185,89 @@ grants, and acks the applied `(licence_id, licence_version, digest)`.
 | Reference product receiver (starter repo) proving verify → local WS2 grant → explainable decision → ack | parallel slice; closes the end-to-end proof |
 
 Implementation lands one guarded slice at a time: (1) repin; (2) key registry +
-`LicenceSignerProvider` (ephemeral) + `LicenceIssuanceService` with issuance
+`LicenceSignerProvider` + `LicenceIssuanceService` with issuance
 tables + round-trip tests; (3) `EntitlementProjectionService` delivery staging
 + ack recording + lifecycle projection; (4) revocation entries + signed list
 publication. Each slice: migration, typed idempotent commands, platform audit,
 thin routes, Postgres rehearsals.
+
+
+## Delivery-pipeline review gates (2026-08-02)
+
+Applied after the transport slice merged:
+
+- **Concurrency-safe replay claims.** Workers claim their work-list
+  `FOR UPDATE SKIP LOCKED` (Postgres), so two replay processes cannot read the
+  same delivery, compute the same next attempt number, and race — one having
+  already sent before losing the unique constraint.
+- **Safe error codes only.** Attempts persist a stable, closed-vocabulary
+  `error_code`; raw transport exceptions, response bodies, URLs, headers, and
+  tokens are never stored or audited. The old free-text column is dropped, not
+  migrated.
+- **Terminal failures park and alert.** `retryable` CONTROLS replay rather than
+  merely describing it: a terminal failure (or attempt exhaustion) moves the
+  delivery to `parked`, which stops replay immediately and surfaces as its own
+  alert bucket. Parked is not deleted — an operator resumes it.
+- **Registered AND authorised destinations only.** Deliveries resolve through
+  the `licence_delivery_targets` projection — narrowly named and owned by
+  `EntitlementProjectionService`, NOT the authoritative `Deployment` entity that
+  `domain-foundation.md` assigns to `FleetDesiredStateService`. Registration is
+  not authorisation: staging additionally requires an active target, a customer
+  matching the licence lineage, and (for a bound document) that exact
+  deployment. `register_delivery_target` is the ONE writer;
+  `map_legacy_delivery` attaches a destination to a pre-`v010` delivery under
+  the same rules, and resuming a parked delivery requires it.
+- **Ack identity is proven, not claimed.** `ingest_acknowledgement` takes the
+  identity the caller AUTHENTICATED as; the body's `deployment_id` is only a
+  claim, stored beside the proof and never merged with it. An acknowledgement
+  with NO proven identity is recorded as `unverified_identity` evidence and
+  activates nothing — bound or unbound. Until deployment authentication lands
+  this means admin-submitted acks cannot activate any licence, which is the
+  correct reading of "active means the data plane committed".
+- **Offline delivery is an ENVELOPE bundle**, not a self-contained one. It
+  carries the signed licence and (optionally) the signed revocation list, and
+  states its unmet prerequisites in the artifact: the keyring must be
+  provisioned out-of-band, the receiver applies the revocation list itself, and
+  there is no import receipt.
+- **Alerts are separate observations, none blended**: never attempted (ZERO
+  attempts); attempted but never sent; sent but unacknowledged; parked
+  (retry-exhausted/terminal); receiver rejections by stable reason; unknown
+  digest / unknown licence / deployment mismatch as CRITICAL sub-counts;
+  unverified-identity evidence; keyring uptake lag; revocation application lag.
+  Acknowledgement counts are WINDOWED (default 24h) so one historical event
+  cannot pin a dashboard red forever. The last two are reported as **not
+  measurable** — both need receiver-reported applied versions, and "transport
+  sent it" cannot prove import.
+- **Legacy quarantine.** `v010` parks every pre-`v010` delivery with no resolved
+  destination, INCLUDING `active` ones: those were activated when acks needed no
+  proven identity, so they record only a claim. Parking forces re-verification.
+- **Proven concurrency.** The replay claim is exercised by a two-session
+  Postgres test driving the REAL `pending_deliveries(claim=True)` query, and CI
+  now runs the Postgres suites — previously they skipped silently, so a green
+  pipeline proved neither migration safety nor the locking claim.
+
+
+## False-delivery boundary (2026-08-02)
+
+A transport that accepts a packet and discards it has delivered NOTHING, and
+recording that as `sent` is worse than recording nothing: it manufactures
+delivery evidence, corrupts the unacknowledged-delivery signal, and can
+eventually park a licence no one ever carried anywhere.
+
+- `LicenceDeliveryTransport` declares `performs_external_handoff`. Both
+  reference transports (`LoggingTransport`, `OfflineBundleTransport.send`) are
+  in-process and declare **False**.
+- `dispatch_pending` REFUSES a transport with no external handoff unless
+  `simulate=True` is passed explicitly, and a simulated pass records
+  `simulated` attempts — never `sent`.
+- Attempt outcomes distinguish `sent` (a transport that really handed off),
+  `exported` (bundle returned to an authenticated operator — a real handoff a
+  human carries on), and `simulated` (in-process, proves nothing). Health
+  counts only `sent`/`exported` as delivered; `simulated` lands in
+  `attempted_never_sent`.
+- **There is no generic replay endpoint.** `POST /deliveries/{id}/export` is
+  the only enabled delivery path this phase. Connected replay returns when a
+  transport performs a genuine external handoff.
+- Route-level tests drive the HTTP endpoints. The earlier "replay endpoint"
+  test called the service directly and never invoked a route, so it could not
+  have caught this.

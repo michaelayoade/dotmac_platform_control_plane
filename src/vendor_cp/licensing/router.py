@@ -12,22 +12,26 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from dotmac_kernel import PlatformAdmin
+from dotmac_kernel import BadRequestError, PlatformAdmin
 from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.platform_auth import require_platform_admin
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vendor_cp.licensing import ops, projection, revocation, service
+from vendor_cp.licensing import ops, projection, revocation, service, transport
+from vendor_cp.licensing.delivery_models import TargetStatus
 from vendor_cp.licensing.models import LicenceSigningKey
 from vendor_cp.licensing.schemas import (
     AcknowledgementRequest,
     AckOutcomeResponse,
     DeliveryResponse,
+    DeliveryTargetResponse,
     IssueLicenceRequest,
     LicenceIssuanceResponse,
+    MapLegacyDeliveryRequest,
     PipelineHealthResponse,
+    RegisterTargetRequest,
     RevocationEntryResponse,
     RevocationListResponse,
     RevokeLicenceRequest,
@@ -118,6 +122,10 @@ def ingest_acknowledgement(
             reason=payload.reason,
             deployment_id=payload.deployment_id,
         ),
+        # Identity must be PROVEN, not claimed. A platform admin is not a
+        # deployment, so bound licences fail closed here until
+        # deployment-authenticated ingestion lands.
+        authenticated_deployment_ref=None,
         actor_admin_id=admin.id,
     )
     return AckOutcomeResponse(
@@ -184,15 +192,124 @@ def pipeline_health(_admin: Admin, db: Db) -> PipelineHealthResponse:
     report is reproducible."""
     health = ops.pipeline_health(db, now=datetime.now(UTC))
     return PipelineHealthResponse(
-        unacknowledged_total=health.unacknowledged_total,
-        unacknowledged_never_sent=health.unacknowledged_never_sent,
-        unacknowledged_sent=health.unacknowledged_sent,
+        never_attempted=health.never_attempted,
+        attempted_never_sent=health.attempted_never_sent,
+        sent_unacknowledged=health.sent_unacknowledged,
         oldest_unacknowledged_age_seconds=health.oldest_unacknowledged_age_seconds,
+        parked_total=health.parked_total,
         rejected_by_reason=dict(health.rejected_by_reason),
         unknown_digest_acks=health.unknown_digest_acks,
-        quarantined_acks=health.quarantined_acks,
+        unknown_licence_acks=health.unknown_licence_acks,
+        deployment_mismatch_acks=health.deployment_mismatch_acks,
+        unverified_identity_acks=health.unverified_identity_acks,
+        critical_acks=health.critical_acks,
         latest_revocation_list_version=health.latest_revocation_list_version,
-        revocation_import_lag_measurable=health.revocation_import_lag_measurable,
+        keyring_uptake_lag_measurable=health.keyring_uptake_lag_measurable,
+        revocation_application_lag_measurable=(
+            health.revocation_application_lag_measurable
+        ),
+    )
+
+
+@router.post("/targets", response_model=DeliveryTargetResponse)
+def register_target(
+    payload: RegisterTargetRequest, admin: Admin, db: Db
+) -> DeliveryTargetResponse:
+    """Register/synchronise a delivery target — the ONE writer for the target
+    projection. Without this endpoint a clean deployment could never stage a
+    delivery at all, because staging requires a registered destination."""
+    try:
+        status = TargetStatus(payload.status)
+    except ValueError as exc:
+        raise BadRequestError(
+            f"unknown target status {payload.status!r} — expected one of "
+            f"{[s.value for s in TargetStatus]}"
+        ) from exc
+    row = projection.register_delivery_target(
+        db,
+        projection.RegisterTargetCommand(
+            target_ref=payload.target_ref,
+            customer_ref=payload.customer_ref,
+            connection_ref=payload.connection_ref,
+            status=status,
+            actor_admin_id=admin.id,
+        ),
+    )
+    return DeliveryTargetResponse(
+        id=row.id,
+        target_ref=row.target_ref,
+        customer_ref=row.customer_ref,
+        connection_ref=row.connection_ref,
+        status=row.status,
+    )
+
+
+@router.get("/targets", response_model=list[DeliveryTargetResponse])
+def list_targets(_admin: Admin, db: Db) -> list[DeliveryTargetResponse]:
+    rows = projection.list_delivery_targets(db)
+    return [
+        DeliveryTargetResponse(
+            id=r.id,
+            target_ref=r.target_ref,
+            customer_ref=r.customer_ref,
+            connection_ref=r.connection_ref,
+            status=r.status,
+        )
+        for r in rows
+    ]
+
+
+@router.post("/deliveries/{delivery_id}/map", response_model=DeliveryResponse)
+def map_legacy_delivery(
+    delivery_id: UUID, payload: MapLegacyDeliveryRequest, admin: Admin, db: Db
+) -> DeliveryResponse:
+    """Attach a destination to a delivery quarantined by migration `v010`.
+    Applies the same authorisation as staging, so this is not a back door."""
+    return _delivery_response(
+        projection.map_legacy_delivery(
+            db,
+            delivery_id=delivery_id,
+            target_ref=payload.target_ref,
+            actor_admin_id=admin.id,
+        )
+    )
+
+
+@router.post("/deliveries/{delivery_id}/resume", response_model=DeliveryResponse)
+def resume_delivery(delivery_id: UUID, admin: Admin, db: Db) -> DeliveryResponse:
+    """Un-park a delivery once its cause is fixed; the retry budget resets to a
+    new replay generation. Refuses an unmapped delivery, which would otherwise
+    leave replay silently."""
+    transport.resume_delivery(db, delivery_id, actor_admin_id=admin.id)
+    return _delivery_response(projection.delivery_status(db, delivery_id))
+
+
+@router.post("/deliveries/{delivery_id}/export")
+def export_delivery_bundle(delivery_id: UUID, admin: Admin, db: Db) -> Response:
+    """Export a delivery's envelope bundle for an air-gapped site.
+
+    This is the only delivery path enabled in this phase, and it is a REAL
+    handoff: the bytes are returned to an authenticated operator, so the
+    artifact actually leaves the process and an `exported` attempt is recorded.
+
+    There is deliberately NO generic replay endpoint yet. Both reference
+    transports are in-process — they accept a packet and discard it — so a
+    replay pass would have recorded deliveries as `sent` while nothing crossed
+    a boundary, manufacturing evidence and eventually parking licences that
+    were never carried anywhere. Connected replay returns when a transport
+    performs a genuine external handoff.
+    """
+    bundle = transport.export_delivery_bundle(
+        db, delivery_id=delivery_id, actor_admin_id=admin.id
+    )
+    return Response(
+        content=bundle,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="licence-bundle-{delivery_id}.json"'
+            )
+        },
     )
 
 

@@ -46,3 +46,59 @@ jobs:
         run: poetry run mypy
       - name: Tests (boot + provisioning contract + D1–D5 deny cases)
         run: poetry run pytest -q
+      # Postgres-backed suites. These were previously never run in CI: the
+      # migration rehearsals and the replay-concurrency proof both SKIP without
+      # TEST_DATABASE_URL, so a green pipeline said nothing about migration
+      # safety or about FOR UPDATE SKIP LOCKED actually holding. A skipped
+      # security test is not a passing one.
+
+  # Postgres-backed suites run on a GITHUB-HOSTED runner, deliberately NOT on
+  # the self-hosted `dotmac-s3` runner.
+  #
+  # That runner has no Docker access, and the fix is NOT to add it to the docker
+  # group: membership is root-equivalent on the host, so any workflow code —
+  # including a fork's, or a compromised dependency's — would gain full control
+  # of a co-located production box. A disposable ephemeral runner is the correct
+  # place for a throwaway database.
+  #
+  # `ubuntu-latest` reaches registry.dotmac.io (the kernel release workflow
+  # already publishes to and installs from it there), so the private kernel
+  # still resolves.
+  postgres:
+    runs-on: ubuntu-latest
+    env:
+      TEST_DB_PORT: "5439"
+      TEST_DB_HOST: localhost
+      TEST_DB_NAME: vendor_cp_test
+      TEST_DB_ADMIN_USER: postgres
+      TEST_DB_ADMIN_PASSWORD: postgres
+      # Turns a missing database into a FAILURE instead of a skip. `-rs` only
+      # prints skips; under required CI a suite that can pass by skipping is
+      # not a gate, which is exactly how this suite stayed silently unrun.
+      REQUIRE_POSTGRES_TESTS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+      - name: Install (kernel from Forgejo)
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: poetry install
+      - name: Start disposable Postgres + migrate
+        run: |
+          docker compose -f docker-compose.test.yml up -d --wait
+          MIGRATION_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test \
+            poetry run python scripts/migrate.py
+      - name: Migration rehearsals + replay concurrency
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test
+        run: poetry run pytest tests/migration -q -rs
+      - name: Stop Postgres
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v

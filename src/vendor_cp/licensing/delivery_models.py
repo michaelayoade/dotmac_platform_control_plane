@@ -33,10 +33,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 class DeliveryState(str, Enum):
     """`delivered` — staged and handed to a transport (at-least-once, so it may
     be re-sent). `active` — the data plane acknowledged a COMMITTED local
-    projection of this exact version+digest. There is no "probably applied"."""
+    projection of this exact version+digest. `parked` — replay STOPPED, either
+    because a transport reported a terminal failure or attempts were exhausted;
+    it alerts immediately and never retries until an operator resumes it. There
+    is no "probably applied"."""
 
     DELIVERED = "delivered"
     ACTIVE = "active"
+    PARKED = "parked"
 
 
 class AckStatus(str, Enum):
@@ -57,6 +61,11 @@ class AckDisposition(str, Enum):
     failure; the reason is its stable kernel error code.
     `stale` — a late ack for a version older than the one already active; it
     must never regress the projection.
+    `unverified_identity` — the caller proved no deployment identity, so the
+    acknowledgement is recorded as EVIDENCE ONLY and activates nothing. Until
+    deployment authentication exists this is what every admin-submitted ack
+    becomes: "active" must mean the data plane committed, and an unauthenticated
+    caller cannot establish that for any licence, bound or not.
     `unknown_licence` / `unknown_digest` / `deployment_mismatch` —
     QUARANTINED. An ack we cannot tie to something we actually issued (for this
     deployment) is the mis-issue/tamper tripwire: recorded, flagged, and never
@@ -65,6 +74,7 @@ class AckDisposition(str, Enum):
 
     ACCEPTED = "accepted"
     DUPLICATE = "duplicate"
+    UNVERIFIED_IDENTITY = "unverified_identity"
     REJECTED_BY_RECEIVER = "rejected_by_receiver"
     STALE = "stale"
     UNKNOWN_LICENCE = "unknown_licence"
@@ -94,9 +104,16 @@ class LicenceDelivery(Base, TimestampMixin):
     issuance_id: Mapped[UUID] = mapped_column(
         Uuid(), ForeignKey("licence_issuances.id"), nullable=False
     )
-    # Opaque destination handle (a deployment endpoint, an offline bundle
-    # recipient, …). The vendor never interprets it; transports do.
+    # The REGISTERED deployment's ref, resolved at staging — not a caller-
+    # supplied destination. Kept denormalised for display/uniqueness alongside
+    # the FK below.
     target_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    # The resolved destination. Nullable ONLY so pre-existing rows could be
+    # adopted; a CHECK constraint (NOT VALID) rejects new/updated rows without
+    # one, and legacy nulls are parked by the migration.
+    target_id: Mapped[UUID | None] = mapped_column(
+        Uuid(), ForeignKey("licence_delivery_targets.id"), nullable=True
+    )
 
 
 class LicenceDeliveryState(Base, TimestampMixin):
@@ -118,15 +135,77 @@ class LicenceDeliveryState(Base, TimestampMixin):
     )
     # The ack that activated this delivery (provenance for the transition).
     activating_ack_id: Mapped[UUID | None] = mapped_column(Uuid(), nullable=True)
+    # Bumped by `resume_delivery`. The retry budget is counted WITHIN a
+    # generation, so resuming resets the budget while the immutable attempt
+    # history is preserved.
+    replay_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
 
 class AttemptOutcome(str, Enum):
-    """What one transport attempt did. `sent` means the transport accepted the
-    packet — NOT that the deployment applied it; only an acknowledgement can
-    say that."""
+    """What one transport attempt did.
+
+    `sent` — the artifact CROSSED A PROCESS BOUNDARY via a transport that
+    performs a real external handoff. Not that the deployment applied it; only
+    an acknowledgement says that.
+    `exported` — the bundle was handed to an authenticated operator in a
+    response. A real handoff, named distinctly because a human carries it on.
+    `simulated` — an in-process transport accepted the packet and DISCARDED it.
+    Proves nothing and must never be counted as delivery: recording `sent` here
+    would manufacture evidence that an artifact left the building, corrupt the
+    unacknowledged-delivery signal, and eventually park a licence that was
+    never actually sent anywhere.
+    `terminal` will never succeed for this document and stops replay at once.
+    """
 
     SENT = "sent"
+    EXPORTED = "exported"
+    SIMULATED = "simulated"
     FAILED = "failed"
+    TERMINAL = "terminal"
+
+
+class TargetStatus(str, Enum):
+    """Only `active` targets may receive a delivery."""
+
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    RETIRED = "retired"
+
+
+class LicenceDeliveryTarget(Base, TimestampMixin):
+    """A licensing-owned projection of where a licence may be delivered.
+
+    Deliberately NOT named `deployments`: `docs/design/domain-foundation.md`
+    assigns the authoritative Deployment entity to `FleetDesiredStateService`,
+    and ARCHITECTURE.md still records deployment intent as design-only. Having
+    licensing quietly create that table would have made it the de-facto owner
+    of an entity another service is specified to own — a source-of-truth
+    violation dressed as a convenience. This is a narrow delivery-target
+    projection owned by `EntitlementProjectionService`; when the fleet slice
+    lands, this is rebuilt from it rather than competing with it.
+
+    Registration alone is NOT authorisation — staging additionally requires an
+    `active` status, a customer matching the licence lineage, and (for a bound
+    document) the exact bound deployment.
+
+    `connection_ref` is an opaque handle a transport interprets (a configured
+    endpoint name, a bundle drop, …) — never a URL supplied with a request.
+    """
+
+    __tablename__ = "licence_delivery_targets"
+    __table_args__ = (
+        UniqueConstraint("target_ref", name="uq_licence_delivery_targets_ref"),
+    )
+
+    id: Mapped[UUID] = uuid_pk()
+    target_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    customer_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    connection_ref: Mapped[str | None] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=TargetStatus.ACTIVE.value
+    )
 
 
 class LicenceDeliveryAttempt(Base, TimestampMixin):
@@ -141,7 +220,10 @@ class LicenceDeliveryAttempt(Base, TimestampMixin):
     __tablename__ = "licence_delivery_attempts"
     __table_args__ = (
         UniqueConstraint(
-            "delivery_id", "attempt_no", name="uq_licence_delivery_attempt_no"
+            "delivery_id",
+            "replay_generation",
+            "attempt_no",
+            name="uq_licence_delivery_attempt_no",
         ),
     )
 
@@ -151,10 +233,16 @@ class LicenceDeliveryAttempt(Base, TimestampMixin):
         ForeignKey("licence_deliveries.id", ondelete="CASCADE"),
         nullable=False,
     )
+    replay_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
     transport: Mapped[str] = mapped_column(String(40), nullable=False)
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
-    error: Mapped[str | None] = mapped_column(String(500))
+    # A STABLE, CLOSED-VOCABULARY code — never a raw exception, response body,
+    # URL, header, or token. Transport failures routinely carry credentials in
+    # their messages, and this table is read by dashboards and support staff.
+    error_code: Mapped[str | None] = mapped_column(String(60))
 
 
 class LicenceAckRecord(Base, TimestampMixin):
@@ -173,13 +261,19 @@ class LicenceAckRecord(Base, TimestampMixin):
     digest: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     reason: Mapped[str | None] = mapped_column(String(120))
+    # The body's CLAIM — untrusted, kept for evidence.
     deployment_id: Mapped[str | None] = mapped_column(String(200))
+    # The identity the caller actually PROVED, or NULL when it proved none.
+    # Stored separately so an audit can never mistake a claim for proof.
+    authenticated_deployment_ref: Mapped[str | None] = mapped_column(String(200))
     disposition: Mapped[str] = mapped_column(String(40), nullable=False)
 
 
 __all__ = [
     "DeliveryState",
     "AttemptOutcome",
+    "TargetStatus",
+    "LicenceDeliveryTarget",
     "LicenceDeliveryAttempt",
     "AckStatus",
     "AckDisposition",
