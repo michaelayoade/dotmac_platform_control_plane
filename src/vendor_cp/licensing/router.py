@@ -8,6 +8,7 @@ there is no route that can expose private key material, by construction.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -18,7 +19,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vendor_cp.licensing import projection, revocation, service
+from vendor_cp.licensing import ops, projection, revocation, service
 from vendor_cp.licensing.models import LicenceSigningKey
 from vendor_cp.licensing.schemas import (
     AcknowledgementRequest,
@@ -26,6 +27,7 @@ from vendor_cp.licensing.schemas import (
     DeliveryResponse,
     IssueLicenceRequest,
     LicenceIssuanceResponse,
+    PipelineHealthResponse,
     RevocationEntryResponse,
     RevocationListResponse,
     RevokeLicenceRequest,
@@ -173,6 +175,24 @@ def latest_revocation_list(_admin: Admin, db: Db) -> RevocationListResponse | No
         entry_count=row.entry_count,
         envelope=dict(row.envelope),
         revoked_licence_ids=list(revocation.revoked_licence_ids(db)),
+    )
+
+
+@router.get("/health", response_model=PipelineHealthResponse)
+def pipeline_health(_admin: Admin, db: Db) -> PipelineHealthResponse:
+    """Operational signals for alerting. Read-only; injects the clock so a
+    report is reproducible."""
+    health = ops.pipeline_health(db, now=datetime.now(UTC))
+    return PipelineHealthResponse(
+        unacknowledged_total=health.unacknowledged_total,
+        unacknowledged_never_sent=health.unacknowledged_never_sent,
+        unacknowledged_sent=health.unacknowledged_sent,
+        oldest_unacknowledged_age_seconds=health.oldest_unacknowledged_age_seconds,
+        rejected_by_reason=dict(health.rejected_by_reason),
+        unknown_digest_acks=health.unknown_digest_acks,
+        quarantined_acks=health.quarantined_acks,
+        latest_revocation_list_version=health.latest_revocation_list_version,
+        revocation_import_lag_measurable=health.revocation_import_lag_measurable,
     )
 
 

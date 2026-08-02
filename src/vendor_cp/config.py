@@ -40,6 +40,10 @@ class VendorSettings:
     # can verify. Retire the old key once the fleet has the new one, then unset.
     licence_overlap_key_file: str = ""
     licence_overlap_key_id: str = ""
+    # Delivery transport. "logging" (default) records what would be sent;
+    # "offline_bundle" renders a self-contained artifact for an air-gapped
+    # site. Networked transports are a separate, credentialed slice.
+    licence_delivery_mode: str = "logging"
 
 
 def load_vendor_settings() -> VendorSettings:
@@ -56,6 +60,9 @@ def load_vendor_settings() -> VendorSettings:
         licence_signing_key_id=os.getenv("VENDOR_LICENCE_SIGNING_KEY_ID", ""),
         licence_overlap_key_file=os.getenv("VENDOR_LICENCE_OVERLAP_KEY_FILE", ""),
         licence_overlap_key_id=os.getenv("VENDOR_LICENCE_OVERLAP_KEY_ID", ""),
+        licence_delivery_mode=os.getenv("VENDOR_LICENCE_DELIVERY_MODE", "logging")
+        .strip()
+        .lower(),
     )
 
 

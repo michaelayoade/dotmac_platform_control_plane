@@ -120,6 +120,43 @@ class LicenceDeliveryState(Base, TimestampMixin):
     activating_ack_id: Mapped[UUID | None] = mapped_column(Uuid(), nullable=True)
 
 
+class AttemptOutcome(str, Enum):
+    """What one transport attempt did. `sent` means the transport accepted the
+    packet — NOT that the deployment applied it; only an acknowledgement can
+    say that."""
+
+    SENT = "sent"
+    FAILED = "failed"
+
+
+class LicenceDeliveryAttempt(Base, TimestampMixin):
+    """Append-only record of each transport attempt.
+
+    Kept because "no acknowledgement" is ambiguous without it: never sent, and
+    sent ten times but never acknowledged, are different faults needing
+    different responses, and an alert that cannot tell them apart sends the
+    operator to the wrong place.
+    """
+
+    __tablename__ = "licence_delivery_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "delivery_id", "attempt_no", name="uq_licence_delivery_attempt_no"
+        ),
+    )
+
+    id: Mapped[UUID] = uuid_pk()
+    delivery_id: Mapped[UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("licence_deliveries.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    transport: Mapped[str] = mapped_column(String(40), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    error: Mapped[str | None] = mapped_column(String(500))
+
+
 class LicenceAckRecord(Base, TimestampMixin):
     """Append-only: every acknowledgement received, accepted or not."""
 
@@ -142,6 +179,8 @@ class LicenceAckRecord(Base, TimestampMixin):
 
 __all__ = [
     "DeliveryState",
+    "AttemptOutcome",
+    "LicenceDeliveryAttempt",
     "AckStatus",
     "AckDisposition",
     "LicenceDelivery",
