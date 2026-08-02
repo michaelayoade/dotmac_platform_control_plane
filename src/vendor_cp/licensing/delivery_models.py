@@ -144,12 +144,24 @@ class LicenceDeliveryState(Base, TimestampMixin):
 
 
 class AttemptOutcome(str, Enum):
-    """What one transport attempt did. `sent` means the transport accepted the
-    packet — NOT that the deployment applied it; only an acknowledgement can
-    say that. `terminal` will never succeed for this document and stops replay
-    at once."""
+    """What one transport attempt did.
+
+    `sent` — the artifact CROSSED A PROCESS BOUNDARY via a transport that
+    performs a real external handoff. Not that the deployment applied it; only
+    an acknowledgement says that.
+    `exported` — the bundle was handed to an authenticated operator in a
+    response. A real handoff, named distinctly because a human carries it on.
+    `simulated` — an in-process transport accepted the packet and DISCARDED it.
+    Proves nothing and must never be counted as delivery: recording `sent` here
+    would manufacture evidence that an artifact left the building, corrupt the
+    unacknowledged-delivery signal, and eventually park a licence that was
+    never actually sent anywhere.
+    `terminal` will never succeed for this document and stops replay at once.
+    """
 
     SENT = "sent"
+    EXPORTED = "exported"
+    SIMULATED = "simulated"
     FAILED = "failed"
     TERMINAL = "terminal"
 

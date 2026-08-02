@@ -58,11 +58,11 @@ class SigningKeyResponse(BaseModel):
 
 
 class StageDeliveryRequest(BaseModel):
-    """Stage an issued version for a REGISTERED deployment. `deployment_ref`
+    """Stage an issued version for a REGISTERED delivery target. `target_ref`
     is resolved against the registry — an arbitrary destination is refused."""
 
     issuance_id: UUID
-    deployment_ref: str
+    target_ref: str
 
 
 class DeliveryResponse(BaseModel):

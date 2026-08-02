@@ -143,19 +143,32 @@ class DeliveryPacket:
 
 @runtime_checkable
 class LicenceDeliveryTransport(Protocol):
-    """Move one packet to its target, or raise a `TransportError`."""
+    """Move one packet to its target, or raise a `TransportError`.
+
+    `performs_external_handoff` states whether `send` actually gets the artifact
+    OUT of this process. It exists because the two reference transports do
+    not: recording a delivery as `sent` when the bytes were appended to an
+    in-memory list and dropped at the end of the request would manufacture
+    evidence that something was delivered — corrupting the unacknowledged
+    signal and eventually parking a licence that never left the building.
+    """
 
     @property
     def name(self) -> str: ...
+
+    @property
+    def performs_external_handoff(self) -> bool: ...
 
     def send(self, packet: DeliveryPacket) -> None: ...
 
 
 class LoggingTransport:
-    """Records packets in memory instead of sending them. The reference
-    transport for this phase and the one tests drive."""
+    """Records packets in memory instead of sending them — a SIMULATION.
+    Nothing crosses a process boundary, so a dispatch through this transport is
+    never recorded as `sent`."""
 
     name = LOGGING_MODE
+    performs_external_handoff = False
 
     def __init__(self, *, fail_with: TransportError | None = None) -> None:
         self.sent: list[DeliveryPacket] = []
@@ -191,6 +204,10 @@ class OfflineBundleTransport:
     """
 
     name = OFFLINE_MODE
+    # `send()` only accumulates bundles in memory. The REAL handoff is
+    # `export_delivery_bundle`, which returns the bytes to an authenticated
+    # operator — that is when the artifact actually leaves the process.
+    performs_external_handoff = False
 
     def __init__(self, *, revocation_envelope: Mapping[str, object] | None = None):
         self.bundles: list[bytes] = []
@@ -406,16 +423,37 @@ def dispatch_pending(
     transport: LicenceDeliveryTransport | None = None,
     limit: int = 100,
     max_attempts: int = 10,
+    simulate: bool = False,
     actor_admin_id: UUID | None = None,
 ) -> DispatchReport:
     """Re-send every delivery that has not been acknowledged as applied.
 
+    REFUSES to run with a transport that performs no external handoff unless
+    `simulate=True` is passed explicitly, and a simulated pass records
+    `simulated` attempts — never `sent`. Claiming delivery for bytes that were
+    appended to an in-memory list and discarded is false evidence: it corrupts
+    the unacknowledged signal and eventually parks a licence nothing ever
+    carried anywhere.
+
     At-least-once: a delivery already received is simply re-sent, which the
-    receiver and the ack path both treat as idempotent. A delivery is abandoned
-    after `max_attempts` — it stays visible and re-dispatchable once an operator
+    receiver and the ack path both treat as idempotent. A delivery is parked
+    after `max_attempts` — it stays visible and resumable once an operator
     fixes the cause; nothing is deleted.
     """
     transport = transport or build_delivery_transport()
+    if not transport.performs_external_handoff and not simulate:
+        raise TransportModeNotPermittedError(
+            f"transport {transport.name!r} performs no external handoff, so a "
+            "dispatch through it would record deliveries that never left the "
+            "process. Pass simulate=True to record `simulated` attempts, or "
+            "configure a transport that actually hands off. For air-gapped "
+            "delivery use `export_delivery_bundle`."
+        )
+    sent_outcome = (
+        AttemptOutcome.SIMULATED.value
+        if not transport.performs_external_handoff
+        else AttemptOutcome.SENT.value
+    )
     attempted = sent = failed = parked_terminal = parked_exhausted = 0
 
     for delivery in pending_deliveries(db, limit=limit, claim=True):
@@ -484,7 +522,7 @@ def dispatch_pending(
                 replay_generation=generation,
                 attempt_no=attempt_no,
                 transport=transport.name,
-                outcome=AttemptOutcome.SENT.value,
+                outcome=sent_outcome,
             )
         )
         db.flush()
@@ -496,6 +534,66 @@ def dispatch_pending(
         parked_terminal=parked_terminal,
         parked_exhausted=parked_exhausted,
     )
+
+
+def export_delivery_bundle(
+    db: Session,
+    *,
+    delivery_id: UUID,
+    revocation_envelope: Mapping[str, object] | None = None,
+    actor_admin_id: UUID | None = None,
+) -> bytes:
+    """Render a delivery's envelope bundle and hand it to the caller.
+
+    This is the air-gapped path and a REAL handoff: the bytes are returned in an
+    authenticated response, so the artifact genuinely leaves the process — which
+    is why it records an `exported` attempt while `dispatch_pending` through an
+    in-memory transport records only `simulated`.
+
+    It does NOT mean the deployment applied anything; only an acknowledgement
+    says that, and there is no import receipt in this flow.
+    """
+    delivery = db.get(LicenceDelivery, delivery_id)
+    if delivery is None:
+        raise NotFoundError(f"licence delivery {delivery_id} not found")
+    if delivery.target_id is None:
+        raise BadRequestError(
+            f"delivery {delivery_id} has no resolved destination — map it "
+            "before exporting, or the bundle names a target the vendor never "
+            "authorised"
+        )
+    packet = _packet(db, delivery)
+    bundle = OfflineBundleTransport.render(
+        packet, revocation_envelope=revocation_envelope
+    )
+
+    generation = _current_generation(db, delivery.id)
+    attempt_no = _attempt_count(db, delivery.id, generation=generation) + 1
+    db.add(
+        LicenceDeliveryAttempt(
+            delivery_id=delivery.id,
+            replay_generation=generation,
+            attempt_no=attempt_no,
+            transport=OFFLINE_MODE,
+            outcome=AttemptOutcome.EXPORTED.value,
+        )
+    )
+    db.flush()
+    write_platform_audit_event(
+        db,
+        actor_admin_id=actor_admin_id,
+        action="vendor.licence.bundle_exported",
+        entity_type="licence_delivery",
+        entity_id=str(delivery.id),
+        details={
+            "licence_id": str(packet.licence_id),
+            "licence_version": packet.licence_version,
+            "digest": packet.digest,
+            "target_ref": packet.target_ref,
+            "attempt_no": attempt_no,
+        },
+    )
+    return bundle
 
 
 __all__ = [
@@ -513,5 +611,6 @@ __all__ = [
     "DispatchReport",
     "pending_deliveries",
     "dispatch_pending",
+    "export_delivery_bundle",
     "resume_delivery",
 ]

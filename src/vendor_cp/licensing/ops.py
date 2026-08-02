@@ -12,8 +12,10 @@ system and collapsing them sends operators to the wrong place:
    (Attempts that were made and FAILED are a different fault and live in
    `attempted_never_sent`; folding them in here would blame the scheduler for
    a transport outage.)
-2. **Attempted but never sent** — attempts exist, none succeeded. Our transport
-   or configuration.
+2. **Attempted but never sent** — attempts exist, none of them a REAL handoff.
+   Our transport or configuration. A `simulated` attempt lands here, never in
+   "sent": an in-process transport that discarded the bytes has delivered
+   nothing, whatever the endpoint reported.
 3. **Sent, unacknowledged** — we delivered; the receiver is not applying or not
    reporting. Connectivity or receiver fault.
 4. **Retry exhausted / terminal** — parked, replay STOPPED. Needs a human now;
@@ -178,7 +180,16 @@ def pipeline_health(
                 .select_from(LicenceDeliveryAttempt)
                 .where(
                     LicenceDeliveryAttempt.delivery_id == delivery_id,
-                    LicenceDeliveryAttempt.outcome == AttemptOutcome.SENT.value,
+                    # ONLY real handoffs count. A `simulated` attempt means an
+                    # in-process transport accepted and discarded the bytes;
+                    # counting it as sent would report delivery that never
+                    # happened and point the operator away from the fault.
+                    LicenceDeliveryAttempt.outcome.in_(
+                        [
+                            AttemptOutcome.SENT.value,
+                            AttemptOutcome.EXPORTED.value,
+                        ]
+                    ),
                 )
             ).scalar_one()
         )

@@ -62,14 +62,14 @@ _EVENT_ACTIVATED = "licence.activated"
 class StageDeliveryCommand:
     """Stage an issued version for delivery to a REGISTERED target.
 
-    `deployment_ref` is resolved against the licence-delivery-target projection
+    `target_ref` is resolved against the licence-delivery-target projection
     and AUTHORISED (active status, matching customer, and the exact bound
     deployment for a bound document) — registration alone is not permission,
     and a caller can never name an arbitrary destination.
     """
 
     issuance_id: UUID
-    deployment_ref: str
+    target_ref: str
     actor_admin_id: UUID | None = None
 
 
@@ -185,6 +185,17 @@ def register_delivery_target(
         },
     )
     return row
+
+
+def list_delivery_targets(db: Session) -> list[LicenceDeliveryTarget]:
+    """All registered delivery targets. Lives here rather than in the router so
+    the route stays a thin adapter — a direct query in a handler is how a
+    second, unowned read path starts."""
+    return list(
+        db.execute(
+            select(LicenceDeliveryTarget).order_by(LicenceDeliveryTarget.target_ref)
+        ).scalars()
+    )
 
 
 def map_legacy_delivery(
@@ -305,14 +316,12 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
     if issuance is None:
         raise NotFoundError(f"licence issuance {command.issuance_id} not found")
 
-    target = _authorised_target(
-        db, target_ref=command.deployment_ref, issuance=issuance
-    )
+    target = _authorised_target(db, target_ref=command.target_ref, issuance=issuance)
 
     existing = db.execute(
         select(LicenceDelivery).where(
             LicenceDelivery.issuance_id == command.issuance_id,
-            LicenceDelivery.target_ref == command.deployment_ref,
+            LicenceDelivery.target_ref == command.target_ref,
         )
     ).scalar_one_or_none()
     if existing is not None:
@@ -320,7 +329,7 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
 
     delivery = LicenceDelivery(
         issuance_id=issuance.id,
-        target_ref=command.deployment_ref,
+        target_ref=command.target_ref,
         target_id=target.id,
     )
     db.add(delivery)
@@ -343,7 +352,7 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
             "licence_id": str(issuance.licence_id),
             "licence_version": issuance.version,
             "digest": issuance.digest,
-            "target_ref": command.deployment_ref,
+            "target_ref": command.target_ref,
         },
     )
     enqueue_platform_event(
@@ -355,7 +364,7 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
             "licence_id": str(issuance.licence_id),
             "licence_version": issuance.version,
             "digest": issuance.digest,
-            "target_ref": command.deployment_ref,
+            "target_ref": command.target_ref,
         },
     )
     return _view(db, delivery)
@@ -701,6 +710,10 @@ def list_acknowledgements(db: Session, licence_id: str) -> list[Mapping[str, obj
 
 
 __all__ = [
+    "RegisterTargetCommand",
+    "register_delivery_target",
+    "list_delivery_targets",
+    "map_legacy_delivery",
     "StageDeliveryCommand",
     "AcknowledgementInput",
     "DeliveryView",

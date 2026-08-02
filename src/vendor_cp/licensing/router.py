@@ -15,20 +15,18 @@ from uuid import UUID
 from dotmac_kernel import BadRequestError, PlatformAdmin
 from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.platform_auth import require_platform_admin
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vendor_cp.licensing import ops, projection, revocation, service, transport
-from vendor_cp.licensing.delivery_models import LicenceDeliveryTarget, TargetStatus
+from vendor_cp.licensing.delivery_models import TargetStatus
 from vendor_cp.licensing.models import LicenceSigningKey
 from vendor_cp.licensing.schemas import (
     AcknowledgementRequest,
     AckOutcomeResponse,
     DeliveryResponse,
     DeliveryTargetResponse,
-    DispatchReportResponse,
-    DispatchRequest,
     IssueLicenceRequest,
     LicenceIssuanceResponse,
     MapLegacyDeliveryRequest,
@@ -96,7 +94,7 @@ def stage_delivery(
         db,
         projection.StageDeliveryCommand(
             issuance_id=payload.issuance_id,
-            deployment_ref=payload.deployment_ref,
+            target_ref=payload.target_ref,
             actor_admin_id=admin.id,
         ),
     )
@@ -248,7 +246,7 @@ def register_target(
 
 @router.get("/targets", response_model=list[DeliveryTargetResponse])
 def list_targets(_admin: Admin, db: Db) -> list[DeliveryTargetResponse]:
-    rows = db.execute(select(LicenceDeliveryTarget)).scalars().all()
+    rows = projection.list_delivery_targets(db)
     return [
         DeliveryTargetResponse(
             id=r.id,
@@ -286,29 +284,32 @@ def resume_delivery(delivery_id: UUID, admin: Admin, db: Db) -> DeliveryResponse
     return _delivery_response(projection.delivery_status(db, delivery_id))
 
 
-@router.post("/replay", response_model=DispatchReportResponse)
-def run_replay(
-    payload: DispatchRequest, admin: Admin, db: Db
-) -> DispatchReportResponse:
-    """Execute one bounded replay pass.
+@router.post("/deliveries/{delivery_id}/export")
+def export_delivery_bundle(delivery_id: UUID, admin: Admin, db: Db) -> Response:
+    """Export a delivery's envelope bundle for an air-gapped site.
 
-    Exposed as an endpoint so a scheduler (or an operator) can actually drive
-    delivery: until this existed, `dispatch_pending` had no runtime caller and
-    nothing was ever sent outside tests. Intentionally a pull, not a daemon —
-    a background loop inside the API process would replay from every replica.
+    This is the only delivery path enabled in this phase, and it is a REAL
+    handoff: the bytes are returned to an authenticated operator, so the
+    artifact actually leaves the process and an `exported` attempt is recorded.
+
+    There is deliberately NO generic replay endpoint yet. Both reference
+    transports are in-process — they accept a packet and discard it — so a
+    replay pass would have recorded deliveries as `sent` while nothing crossed
+    a boundary, manufacturing evidence and eventually parking licences that
+    were never carried anywhere. Connected replay returns when a transport
+    performs a genuine external handoff.
     """
-    report = transport.dispatch_pending(
-        db,
-        limit=payload.limit,
-        max_attempts=payload.max_attempts,
-        actor_admin_id=admin.id,
+    bundle = transport.export_delivery_bundle(
+        db, delivery_id=delivery_id, actor_admin_id=admin.id
     )
-    return DispatchReportResponse(
-        attempted=report.attempted,
-        sent=report.sent,
-        failed=report.failed,
-        parked_terminal=report.parked_terminal,
-        parked_exhausted=report.parked_exhausted,
+    return Response(
+        content=bundle,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="licence-bundle-{delivery_id}.json"'
+            )
+        },
     )
 
 

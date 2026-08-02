@@ -184,9 +184,7 @@ def _issue_and_stage(db, signer, *, suffix="a", customer_ref="cust-a"):
         db.flush()
     delivery = projection.stage_delivery(
         db,
-        projection.StageDeliveryCommand(
-            issuance_id=issued.id, deployment_ref=target_ref
-        ),
+        projection.StageDeliveryCommand(issuance_id=issued.id, target_ref=target_ref),
     )
     return issued, delivery
 
@@ -214,7 +212,7 @@ def _ack(
 def test_logging_transport_receives_the_frozen_envelope(db, signer) -> None:
     issued, delivery = _issue_and_stage(db, signer)
     transport = LoggingTransport()
-    dispatch_pending(db, transport=transport)
+    dispatch_pending(db, simulate=True, transport=transport)
 
     assert len(transport.sent) == 1
     packet = transport.sent[0]
@@ -308,8 +306,8 @@ def test_unacknowledged_deliveries_are_resent(db, signer) -> None:
     _issue_and_stage(db, signer)
     transport = LoggingTransport()
 
-    first = dispatch_pending(db, transport=transport)
-    second = dispatch_pending(db, transport=transport)
+    first = dispatch_pending(db, simulate=True, transport=transport)
+    second = dispatch_pending(db, simulate=True, transport=transport)
 
     assert (first.sent, second.sent) == (1, 1)
     assert len(transport.sent) == 2
@@ -323,14 +321,14 @@ def test_unacknowledged_deliveries_are_resent(db, signer) -> None:
 
 def test_an_acknowledged_delivery_is_not_resent(db, signer) -> None:
     issued, delivery = _issue_and_stage(db, signer)
-    dispatch_pending(db, transport=LoggingTransport())
+    dispatch_pending(db, simulate=True, transport=LoggingTransport())
     _ack(db, issued)
     assert (
         projection.delivery_status(db, delivery.id).state == DeliveryState.ACTIVE.value
     )
 
     transport = LoggingTransport()
-    report = dispatch_pending(db, transport=transport)
+    report = dispatch_pending(db, simulate=True, transport=transport)
     assert report.attempted == 0
     assert transport.sent == []
 
@@ -345,7 +343,7 @@ def test_failed_attempts_persist_a_safe_code_not_the_exception(db, signer) -> No
         fail_with=TransportError(secret, code="endpoint_unreachable")
     )
 
-    report = dispatch_pending(db, transport=transport)
+    report = dispatch_pending(db, simulate=True, transport=transport)
 
     assert (report.attempted, report.sent, report.failed) == (1, 0, 1)
     attempt = db.execute(select(LicenceDeliveryAttempt)).scalar_one()
@@ -374,7 +372,7 @@ def test_codes_outside_the_closed_vocabulary_are_discarded(
 ) -> None:
     _issue_and_stage(db, signer)
     transport = LoggingTransport(fail_with=TransportError("boom", code=smuggled))
-    dispatch_pending(db, transport=transport)
+    dispatch_pending(db, simulate=True, transport=transport)
 
     attempt = db.execute(select(LicenceDeliveryAttempt)).scalar_one()
     assert attempt.error_code == "unspecified"
@@ -390,7 +388,7 @@ def test_a_code_carrying_unsafe_content_is_collapsed(db, signer) -> None:
     transport = LoggingTransport(
         fail_with=TransportError("boom", code="https://tenant.example/?token=abc")
     )
-    dispatch_pending(db, transport=transport)
+    dispatch_pending(db, simulate=True, transport=transport)
     assert (
         db.execute(select(LicenceDeliveryAttempt)).scalar_one().error_code
         == "unspecified"
@@ -403,21 +401,25 @@ def test_exhausted_retries_park_the_delivery_and_stop_replay(db, signer) -> None
     _, delivery = _issue_and_stage(db, signer)
     failing = LoggingTransport(fail_with=TransportError("down", code="down"))
     for _ in range(3):
-        dispatch_pending(db, transport=failing, max_attempts=3)
+        dispatch_pending(db, simulate=True, transport=failing, max_attempts=3)
 
-    report = dispatch_pending(db, transport=failing, max_attempts=3)
+    report = dispatch_pending(db, simulate=True, transport=failing, max_attempts=3)
     assert report.parked_exhausted == 1
     assert (
         projection.delivery_status(db, delivery.id).state == DeliveryState.PARKED.value
     )
     # Parked work is OFF the replay list…
     assert delivery.id not in {d.id for d in pending_deliveries(db)}
-    quiet = dispatch_pending(db, transport=LoggingTransport(), max_attempts=9)
+    quiet = dispatch_pending(
+        db, simulate=True, transport=LoggingTransport(), max_attempts=9
+    )
     assert quiet.attempted == 0
 
     # …until an operator resumes it, and nothing was lost.
     transport_module.resume_delivery(db, delivery.id)
-    resumed = dispatch_pending(db, transport=LoggingTransport(), max_attempts=9)
+    resumed = dispatch_pending(
+        db, simulate=True, transport=LoggingTransport(), max_attempts=9
+    )
     assert resumed.sent == 1
 
 
@@ -429,7 +431,7 @@ def test_terminal_failure_parks_immediately_without_burning_retries(db, signer) 
         fail_with=TerminalTransportError("rejected", code="rejected_by_target")
     )
 
-    report = dispatch_pending(db, transport=transport, max_attempts=10)
+    report = dispatch_pending(db, simulate=True, transport=transport, max_attempts=10)
 
     assert (report.failed, report.parked_terminal) == (1, 1)
     assert (
@@ -439,28 +441,38 @@ def test_terminal_failure_parks_immediately_without_burning_retries(db, signer) 
     assert attempt.outcome == AttemptOutcome.TERMINAL.value
     assert attempt.error_code == "rejected_by_target"
     # One attempt only — no further retries were spent.
-    assert dispatch_pending(db, transport=transport).attempted == 0
+    assert dispatch_pending(db, simulate=True, transport=transport).attempted == 0
 
 
 # ── Alerting surface ────────────────────────────────────────────────────────
 
 
-def test_ageing_unacknowledged_split_by_whether_we_ever_sent(db, signer) -> None:
-    """The distinction that decides where an operator looks: our transport, or
-    the deployment."""
+def test_ageing_buckets_separate_never_attempted_simulated_and_real(db, signer) -> None:
+    """Three distinct observations, and the middle one is the point of this
+    batch: an in-process transport that DISCARDED the bytes must never be
+    counted as sent. Reporting it as delivered manufactures evidence and sends
+    the operator looking at the receiver instead of at our transport."""
+    from vendor_cp.licensing import transport as transport_module
+
+    # 1. never attempted — nothing has tried.
     _issue_and_stage(db, signer, suffix="a", customer_ref="cust-a")
-    _issue_and_stage(db, signer, suffix="b", customer_ref="cust-b")
-    # Send only one of them.
-    sent_once = LoggingTransport()
-    dispatch_pending(db, transport=sent_once, limit=1)
+    # 2. attempted, but only ever SIMULATED (in-process, discarded).
+    _, simulated = _issue_and_stage(db, signer, suffix="b", customer_ref="cust-b")
+    dispatch_pending(db, transport=LoggingTransport(), simulate=True, limit=100)
+    # 3. a REAL handoff: the bundle left the process in a response.
+    _, exported = _issue_and_stage(db, signer, suffix="c", customer_ref="cust-c")
+    transport_module.export_delivery_bundle(db, delivery_id=exported.id)
 
     later = NOW + timedelta(days=2)
     health = ops.pipeline_health(db, now=later, ack_sla=timedelta(hours=24))
 
-    assert health.unacknowledged_total == 2
+    assert health.unacknowledged_total == 3
+    # The simulated one attempted twice (its own pass plus the sweep) and still
+    # counts as never SENT.
     assert health.sent_unacknowledged == 1
-    assert health.never_attempted == 1
-    assert health.oldest_unacknowledged_age_seconds is not None
+    assert health.attempted_never_sent == 2
+    assert health.never_attempted == 0
+    assert simulated.id is not None
 
 
 def test_recent_deliveries_are_not_flagged(db, signer) -> None:
@@ -530,6 +542,7 @@ def test_parked_deliveries_are_their_own_alert_bucket(db, signer) -> None:
     _issue_and_stage(db, signer)
     dispatch_pending(
         db,
+        simulate=True,
         transport=LoggingTransport(
             fail_with=TerminalTransportError("x", code="rejected_by_target")
         ),

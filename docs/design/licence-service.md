@@ -245,3 +245,29 @@ Applied after the transport slice merged:
   Postgres test driving the REAL `pending_deliveries(claim=True)` query, and CI
   now runs the Postgres suites — previously they skipped silently, so a green
   pipeline proved neither migration safety nor the locking claim.
+
+
+## False-delivery boundary (2026-08-02)
+
+A transport that accepts a packet and discards it has delivered NOTHING, and
+recording that as `sent` is worse than recording nothing: it manufactures
+delivery evidence, corrupts the unacknowledged-delivery signal, and can
+eventually park a licence no one ever carried anywhere.
+
+- `LicenceDeliveryTransport` declares `performs_external_handoff`. Both
+  reference transports (`LoggingTransport`, `OfflineBundleTransport.send`) are
+  in-process and declare **False**.
+- `dispatch_pending` REFUSES a transport with no external handoff unless
+  `simulate=True` is passed explicitly, and a simulated pass records
+  `simulated` attempts — never `sent`.
+- Attempt outcomes distinguish `sent` (a transport that really handed off),
+  `exported` (bundle returned to an authenticated operator — a real handoff a
+  human carries on), and `simulated` (in-process, proves nothing). Health
+  counts only `sent`/`exported` as delivered; `simulated` lands in
+  `attempted_never_sent`.
+- **There is no generic replay endpoint.** `POST /deliveries/{id}/export` is
+  the only enabled delivery path this phase. Connected replay returns when a
+  transport performs a genuine external handoff.
+- Route-level tests drive the HTTP endpoints. The earlier "replay endpoint"
+  test called the service directly and never invoked a route, so it could not
+  have caught this.

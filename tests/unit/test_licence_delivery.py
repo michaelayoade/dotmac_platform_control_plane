@@ -206,7 +206,7 @@ def _stage(db, issued, target=TARGET):
     _register(db, target)
     return projection.stage_delivery(
         db,
-        projection.StageDeliveryCommand(issuance_id=issued.id, deployment_ref=target),
+        projection.StageDeliveryCommand(issuance_id=issued.id, target_ref=target),
     )
 
 
@@ -324,7 +324,7 @@ def test_staging_to_an_unregistered_destination_is_rejected(db, signer) -> None:
         projection.stage_delivery(
             db,
             projection.StageDeliveryCommand(
-                issuance_id=issued.id, deployment_ref="https://attacker.example/steal"
+                issuance_id=issued.id, target_ref="https://attacker.example/steal"
             ),
         )
 
@@ -337,7 +337,7 @@ def test_staging_an_unknown_issuance_is_rejected(db) -> None:
         projection.stage_delivery(
             db,
             projection.StageDeliveryCommand(
-                issuance_id=uuid.uuid4(), deployment_ref=TARGET
+                issuance_id=uuid.uuid4(), target_ref=TARGET
             ),
         )
 
@@ -738,7 +738,7 @@ def test_a_suspended_target_cannot_receive_a_licence(db, signer) -> None:
         projection.stage_delivery(
             db,
             projection.StageDeliveryCommand(
-                issuance_id=issued.id, deployment_ref="dep-suspended"
+                issuance_id=issued.id, target_ref="dep-suspended"
             ),
         )
 
@@ -824,12 +824,16 @@ def test_proven_identity_is_visible_to_operators(db, signer) -> None:
 def test_every_operational_service_is_reachable_from_a_route() -> None:
     """Structural guard against the gap this batch fixed.
 
-    `register_delivery_target`, `map_legacy_delivery`, `resume_delivery`,
-    `dispatch_pending` and `build_delivery_transport` all existed with NO caller
-    outside tests, so a clean deployment could not register a target, map a
-    quarantined delivery, resume it, or send anything at all. Code that only
-    tests call is not a feature. This asserts each is wired to the router, so
-    the gap cannot silently reopen.
+    `register_delivery_target`, `map_legacy_delivery` and `resume_delivery`
+    existed with NO caller outside tests, so a clean deployment could not
+    register a target, map a quarantined delivery, or resume it. Code that only
+    tests call is not a feature.
+
+    `dispatch_pending` is deliberately ABSENT from this list: generic replay is
+    disabled while both reference transports are in-process, because an
+    endpoint that reported success while the bytes were discarded would
+    manufacture delivery evidence. `export_delivery_bundle` is the enabled
+    path, and it is a real handoff.
     """
     import inspect
 
@@ -842,22 +846,30 @@ def test_every_operational_service_is_reachable_from_a_route() -> None:
     )
     for service_call in (
         "projection.register_delivery_target",
+        "projection.list_delivery_targets",
         "projection.map_legacy_delivery",
         "transport.resume_delivery",
-        "transport.dispatch_pending",
+        "transport.export_delivery_bundle",
     ):
         assert service_call in source, f"{service_call} has no route caller"
+    assert "transport.dispatch_pending" not in source, (
+        "generic replay must stay disabled until a transport performs a real "
+        "external handoff — otherwise it records deliveries that never left "
+        "the process"
+    )
 
 
-def test_replay_endpoint_drives_a_real_dispatch(db, signer) -> None:
-    """The adapter is thin, but it must actually move a delivery — a route that
-    imports the service without exercising it would satisfy the guard above
-    while still sending nothing."""
+def test_dispatch_refuses_a_transport_that_hands_off_nothing(db, signer) -> None:
+    """The false-SENT boundary. An in-process transport accepts a packet and
+    drops it; recording that as delivery corrupts the unacknowledged signal and
+    can park a licence nothing ever carried anywhere."""
     from vendor_cp.licensing import transport as transport_module
 
     issued = _issue(db, signer)
     _stage(db, issued)
-    report = transport_module.dispatch_pending(
-        db, transport=transport_module.LoggingTransport(), limit=10
-    )
-    assert (report.attempted, report.sent) == (1, 1)
+    with pytest.raises(
+        transport_module.TransportModeNotPermittedError, match="external handoff"
+    ):
+        transport_module.dispatch_pending(
+            db, transport=transport_module.LoggingTransport()
+        )
