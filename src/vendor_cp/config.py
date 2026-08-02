@@ -27,6 +27,19 @@ class VendorSettings:
     # custody (OpenBao-referenced) is a later, design-gated slice, so anything
     # else fails loudly rather than silently signing with a throwaway key.
     licence_signing_mode: str = "ephemeral"
+    # `configured` mode only. Path to a file holding the base64url raw Ed25519
+    # private key, whose CANONICAL source is OpenBao
+    # (secret/dotmac/licensing/signing-key) — deploy tooling materialises it at
+    # 0600 and it is never committed, logged, or stored in the database. The
+    # key id is advertised in every envelope so deployments can select the
+    # right verification key.
+    licence_signing_key_file: str = ""
+    licence_signing_key_id: str = ""
+    # OPTIONAL rotation overlap: while set, every document is ALSO signed with
+    # this second key, so deployments holding either the old or the new keyring
+    # can verify. Retire the old key once the fleet has the new one, then unset.
+    licence_overlap_key_file: str = ""
+    licence_overlap_key_id: str = ""
 
 
 def load_vendor_settings() -> VendorSettings:
@@ -39,6 +52,10 @@ def load_vendor_settings() -> VendorSettings:
         provider_mode=mode,
         offered_capabilities=offered,
         licence_signing_mode=signing,
+        licence_signing_key_file=os.getenv("VENDOR_LICENCE_SIGNING_KEY_FILE", ""),
+        licence_signing_key_id=os.getenv("VENDOR_LICENCE_SIGNING_KEY_ID", ""),
+        licence_overlap_key_file=os.getenv("VENDOR_LICENCE_OVERLAP_KEY_FILE", ""),
+        licence_overlap_key_id=os.getenv("VENDOR_LICENCE_OVERLAP_KEY_ID", ""),
     )
 
 

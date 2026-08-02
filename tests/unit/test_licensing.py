@@ -49,6 +49,7 @@ from vendor_cp.licensing.models import (
 )
 from vendor_cp.licensing.signer import (
     EphemeralLicenceSigner,
+    SigningKeyUnavailableError,
     SigningModeNotPermittedError,
     build_licence_signer,
 )
@@ -428,7 +429,24 @@ def test_a_key_outside_the_registry_is_unknown_to_deployments(
 # ── 6. Signing-mode fail-closed ─────────────────────────────────────────────
 
 
-def test_non_ephemeral_signing_mode_refuses_to_build(monkeypatch) -> None:
+def test_unknown_signing_mode_refuses_to_build(monkeypatch) -> None:
+    from vendor_cp import config as vendor_config
+    from vendor_cp.licensing import signer as signer_module
+
+    monkeypatch.setattr(
+        signer_module,
+        "vendor_settings",
+        vendor_config.VendorSettings(
+            provider_mode="fake", licence_signing_mode="hsm-someday"
+        ),
+    )
+    with pytest.raises(SigningModeNotPermittedError, match="hsm-someday"):
+        build_licence_signer()
+
+
+def test_configured_mode_without_a_key_fails_startup(monkeypatch) -> None:
+    """`configured` is a real mode now, but selecting it without key material
+    must fail loudly rather than fall back to a throwaway key."""
     from vendor_cp import config as vendor_config
     from vendor_cp.licensing import signer as signer_module
 
@@ -439,7 +457,7 @@ def test_non_ephemeral_signing_mode_refuses_to_build(monkeypatch) -> None:
             provider_mode="fake", licence_signing_mode="configured"
         ),
     )
-    with pytest.raises(SigningModeNotPermittedError, match="configured"):
+    with pytest.raises(SigningKeyUnavailableError):
         build_licence_signer()
 
 

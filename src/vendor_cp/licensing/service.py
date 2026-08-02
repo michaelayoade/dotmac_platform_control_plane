@@ -28,7 +28,7 @@ change + platform audit + platform outbox event commit in ONE transaction
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
@@ -56,7 +56,18 @@ from vendor_cp.licensing.models import (
     LicenceSigningKey,
     SigningKeyStatus,
 )
-from vendor_cp.licensing.signer import LicenceSignerProvider, build_licence_signer
+
+# Imported at module level (not lazily inside `_is_revoked`) so the table is
+# always registered on `Base.metadata` wherever this service is imported.
+# Deferring it made a test file pass in a full run — where some other module
+# happened to import it first — and fail when run alone. Models are safe to
+# import here: only `revocation.py` (the service) would create a cycle.
+from vendor_cp.licensing.revocation_models import LicenceRevocationEntry
+from vendor_cp.licensing.signer import (
+    LicenceSignerProvider,
+    build_licence_signer,
+    build_overlap_signer,
+)
 
 DEFAULT_ISSUER = "dotmac-vendor"
 
@@ -201,11 +212,8 @@ def _lineage(db: Session, *, customer_ref: str, product: str) -> Licence:
 
 
 def _is_revoked(db: Session, licence_id: UUID) -> bool:
-    """Imported from the revocation MODELS, not the revocation service — the
-    dependency runs one way (revocation → issuance), and reading a fact must
-    not create a cycle."""
-    from vendor_cp.licensing.revocation_models import LicenceRevocationEntry
-
+    """Reads the revocation FACT from its model, never the revocation service —
+    the dependency runs one way (revocation → issuance)."""
     return (
         db.execute(
             select(LicenceRevocationEntry.id).where(
@@ -261,16 +269,22 @@ def _build_payload(
     return json.dumps(document).encode()
 
 
-def _envelope(payload: bytes, signer: LicenceSignerProvider) -> dict[str, object]:
+def _envelope(
+    payload: bytes, signers: Sequence[LicenceSignerProvider]
+) -> dict[str, object]:
+    """One envelope, one signature per signer. More than one signer is a
+    ROTATION OVERLAP: deployments holding either keyring can verify the same
+    document, which is what makes rotation non-breaking."""
     return {
         "schema": ENVELOPE_SCHEMA,
         "payload_b64": _b64url(payload),
         "signatures": [
             {
-                "key_id": signer.key_id,
+                "key_id": s.key_id,
                 "algorithm": "ed25519",
-                "signature_b64": _b64url(signer.sign(payload)),
+                "signature_b64": _b64url(s.sign(payload)),
             }
+            for s in signers
         ],
     }
 
@@ -286,6 +300,7 @@ def issue_licence(
     command: IssueLicenceCommand,
     *,
     signer: LicenceSignerProvider | None = None,
+    overlap_signers: Sequence[LicenceSignerProvider] | None = None,
     now: datetime | None = None,
 ) -> LicenceIssuanceView:
     """Issue (sign + freeze) the next licence version for a staged allocation.
@@ -295,6 +310,10 @@ def issue_licence(
     pinned kernel verifier would not accept the envelope we just produced.
     """
     signer = signer or build_licence_signer()
+    if overlap_signers is None:
+        overlap = build_overlap_signer()
+        overlap_signers = (overlap,) if overlap is not None else ()
+    signers = (signer, *overlap_signers)
     issued_at = now or datetime.now(UTC)
 
     existing = db.execute(
@@ -319,9 +338,11 @@ def issue_licence(
             "licence would grant nothing"
         )
 
-    # The signing key's PUBLIC half must be in the registry before we sign with
-    # it, so the keyring we distribute can verify what we issue.
-    register_signing_key(db, key_id=signer.key_id, public_key_b64=signer.public_key_b64)
+    # Every signing key's PUBLIC half must be in the registry before we sign
+    # with it, so the keyring we distribute can verify what we issue — during a
+    # rotation overlap that means BOTH keys.
+    for s in signers:
+        register_signing_key(db, key_id=s.key_id, public_key_b64=s.public_key_b64)
 
     licence = _lineage(
         db, customer_ref=allocation.customer_ref, product=command.product
@@ -334,7 +355,7 @@ def issue_licence(
         allocation=allocation,
         issued_at=issued_at,
     )
-    envelope = _envelope(payload, signer)
+    envelope = _envelope(payload, signers)
     digest = payload_digest(payload)
 
     # Round-trip through the PINNED kernel verifier before recording anything.
