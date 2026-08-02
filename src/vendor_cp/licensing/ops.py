@@ -86,6 +86,11 @@ class LicencePipelineHealth:
     unknown_digest_acks: int = 0
     unknown_licence_acks: int = 0
     deployment_mismatch_acks: int = 0
+    # Acks recorded as evidence because the caller proved no deployment
+    # identity. Not a fault in itself — but a rising count means deployments
+    # are reporting through a path that can never activate anything, which
+    # looks like silence from the licence pipeline's side.
+    unverified_identity_acks: int = 0
     # context
     latest_revocation_list_version: int | None = None
     # 6–7: not measurable without receiver-reported versions
@@ -239,6 +244,7 @@ def pipeline_health(
         unknown_digest_acks=unknown_digest,
         unknown_licence_acks=_count(AckDisposition.UNKNOWN_LICENCE),
         deployment_mismatch_acks=_count(AckDisposition.DEPLOYMENT_MISMATCH),
+        unverified_identity_acks=_count(AckDisposition.UNVERIFIED_IDENTITY),
         latest_revocation_list_version=(
             int(latest_list) if latest_list is not None else None
         ),

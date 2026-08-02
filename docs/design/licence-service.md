@@ -208,21 +208,40 @@ Applied after the transport slice merged:
   merely describing it: a terminal failure (or attempt exhaustion) moves the
   delivery to `parked`, which stops replay immediately and surfaces as its own
   alert bucket. Parked is not deleted — an operator resumes it.
-- **Registered destinations only.** Deliveries resolve through the
-  `deployments` registry; a caller can never name an arbitrary destination URL.
+- **Registered AND authorised destinations only.** Deliveries resolve through
+  the `licence_delivery_targets` projection — narrowly named and owned by
+  `EntitlementProjectionService`, NOT the authoritative `Deployment` entity that
+  `domain-foundation.md` assigns to `FleetDesiredStateService`. Registration is
+  not authorisation: staging additionally requires an active target, a customer
+  matching the licence lineage, and (for a bound document) that exact
+  deployment. `register_delivery_target` is the ONE writer;
+  `map_legacy_delivery` attaches a destination to a pre-`v010` delivery under
+  the same rules, and resuming a parked delivery requires it.
 - **Ack identity is proven, not claimed.** `ingest_acknowledgement` takes the
   identity the caller AUTHENTICATED as; the body's `deployment_id` is only a
-  claim and a disagreement is a mismatch. A deployment-bound licence cannot be
-  activated by an unauthenticated caller — fail-closed until deployment
-  authentication lands, because accepting the body's word would make binding
-  decorative.
+  claim, stored beside the proof and never merged with it. An acknowledgement
+  with NO proven identity is recorded as `unverified_identity` evidence and
+  activates nothing — bound or unbound. Until deployment authentication lands
+  this means admin-submitted acks cannot activate any licence, which is the
+  correct reading of "active means the data plane committed".
 - **Offline delivery is an ENVELOPE bundle**, not a self-contained one. It
   carries the signed licence and (optionally) the signed revocation list, and
   states its unmet prerequisites in the artifact: the keyring must be
   provisioned out-of-band, the receiver applies the revocation list itself, and
   there is no import receipt.
-- **Alerts are seven separate observations** (never attempted; sent but
-  unacknowledged; retry-exhausted/terminal; receiver rejections by reason;
-  unknown digest/licence/mismatch as CRITICAL; keyring uptake lag; revocation
-  application lag). The last two are reported as **not measurable** — both need
-  receiver-reported versions, and "transport sent it" cannot prove import.
+- **Alerts are separate observations, none blended**: never attempted (ZERO
+  attempts); attempted but never sent; sent but unacknowledged; parked
+  (retry-exhausted/terminal); receiver rejections by stable reason; unknown
+  digest / unknown licence / deployment mismatch as CRITICAL sub-counts;
+  unverified-identity evidence; keyring uptake lag; revocation application lag.
+  Acknowledgement counts are WINDOWED (default 24h) so one historical event
+  cannot pin a dashboard red forever. The last two are reported as **not
+  measurable** — both need receiver-reported applied versions, and "transport
+  sent it" cannot prove import.
+- **Legacy quarantine.** `v010` parks every pre-`v010` delivery with no resolved
+  destination, INCLUDING `active` ones: those were activated when acks needed no
+  proven identity, so they record only a claim. Parking forces re-verification.
+- **Proven concurrency.** The replay claim is exercised by a two-session
+  Postgres test driving the REAL `pending_deliveries(claim=True)` query, and CI
+  now runs the Postgres suites — previously they skipped silently, so a green
+  pipeline proved neither migration safety nor the locking claim.

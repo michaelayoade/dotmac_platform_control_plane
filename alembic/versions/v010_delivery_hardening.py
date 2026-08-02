@@ -88,16 +88,22 @@ def upgrade() -> None:
         ["id"],
     )
 
-    # PARK every pre-existing delivery. They were staged before destinations
-    # were resolved through a registry, so replaying them would deliver to an
-    # unvalidated target. Parked is visible and resumable — an operator maps
-    # the destination, then resumes.
+    # PARK every pre-existing delivery with no resolved destination —
+    # INCLUDING the ones marked `active`.
+    #
+    # An `active` v009 delivery is not trustworthy authority: it was activated
+    # under the previous semantics, where an acknowledgement needed no proven
+    # deployment identity, so "active" recorded only that SOMEONE claimed the
+    # licence was applied. Leaving those rows active would preserve exactly the
+    # unproven authority this migration exists to remove, and they would never
+    # be re-examined because active rows are excluded from replay. Parking them
+    # forces re-verification: the deployment must acknowledge again, with a
+    # proven identity, to become active.
     op.execute(
         """
         UPDATE licence_delivery_states
            SET state = 'parked'
-         WHERE state <> 'active'
-           AND delivery_id IN (
+         WHERE delivery_id IN (
                SELECT id FROM licence_deliveries WHERE target_id IS NULL
            );
         """

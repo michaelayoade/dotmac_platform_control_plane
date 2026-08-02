@@ -18,14 +18,16 @@ network, keeping the D3 posture — a real HTTP/webhook transport is a separate,
 credentialed slice):
 
 - `LoggingTransport` — records what would be sent; the default.
-- `OfflineBundleTransport` — renders the signed envelope as a self-contained
-  bundle an operator carries to an air-gapped site. Returns bytes; it does NOT
-  write files, so nothing here needs filesystem permissions or cleanup.
+- `OfflineBundleTransport` — renders an ENVELOPE bundle (deliberately not
+  "self-contained": see the class docstring for the receiver prerequisites it
+  does NOT satisfy) for an air-gapped site. Returns bytes; it does NOT write
+  files, so nothing here needs filesystem permissions or cleanup.
 
 Every attempt is recorded append-only (`LicenceDeliveryAttempt`) — that record
-is what the ageing-delivery alert reads, and what tells an operator whether
-silence means "never sent" or "sent repeatedly, never acknowledged". Those are
-completely different faults and must not look alike.
+is what the ageing-delivery alert reads, and what separates "never attempted"
+from "attempted, never sent" from "sent repeatedly, never acknowledged". Those
+are three different faults pointing at three different systems, and an alert
+that blurs them sends the operator to the wrong one.
 """
 
 from __future__ import annotations
@@ -37,7 +39,11 @@ from enum import Enum
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
-from dotmac_kernel import NotFoundError, write_platform_audit_event
+from dotmac_kernel import (
+    BadRequestError,
+    NotFoundError,
+    write_platform_audit_event,
+)
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -357,6 +363,19 @@ def resume_delivery(
     db: Session, delivery_id: UUID, *, actor_admin_id: UUID | None = None
 ) -> None:
     """Un-park a delivery after the cause is fixed; replay picks it up again."""
+    delivery = db.get(LicenceDelivery, delivery_id)
+    if delivery is None:
+        raise NotFoundError(f"licence delivery {delivery_id} not found")
+    # Mapping is a PRECONDITION, not an afterthought: resuming an unmapped
+    # delivery would move it out of `parked` and straight out of replay
+    # eligibility (the claim query excludes null targets), so it would silently
+    # disappear instead of being fixed.
+    if delivery.target_id is None:
+        raise BadRequestError(
+            f"delivery {delivery_id} has no resolved destination — map it with "
+            "`map_legacy_delivery` before resuming, or it will vanish from "
+            "replay instead of being retried"
+        )
     state = db.execute(
         select(LicenceDeliveryState).where(
             LicenceDeliveryState.delivery_id == delivery_id

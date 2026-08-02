@@ -28,6 +28,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 from dotmac_kernel import (
+    BadRequestError,
     CapabilityCatalogue,
     FeatureManifest,
     Tenant,
@@ -54,7 +55,9 @@ from vendor_cp.licensing.delivery_models import (
     DeliveryState,
     LicenceAckRecord,
     LicenceDelivery,
+    LicenceDeliveryState,
     LicenceDeliveryTarget,
+    TargetStatus,
 )
 from vendor_cp.licensing.signer import EphemeralLicenceSigner
 from vendor_cp.offers.models import OfferVersion
@@ -685,3 +688,131 @@ def test_projection_writes_no_product_entitlement_grants(db, signer) -> None:
         ).scalar_one()
         == 0
     )
+
+
+# ── The delivery-target projection has ONE writer ───────────────────────────
+
+
+def test_register_delivery_target_is_the_writer_and_is_idempotent(db) -> None:
+    first = projection.register_delivery_target(
+        db,
+        projection.RegisterTargetCommand(
+            target_ref="dep-1", customer_ref="cust-a", connection_ref="edge-1"
+        ),
+    )
+    second = projection.register_delivery_target(
+        db,
+        projection.RegisterTargetCommand(
+            target_ref="dep-1", customer_ref="cust-a", connection_ref="edge-2"
+        ),
+    )
+    assert first.id == second.id
+    assert second.connection_ref == "edge-2"
+
+
+def test_a_target_cannot_be_repointed_to_another_customer(db) -> None:
+    """Re-pointing would move a destination between customers, after which the
+    cross-customer staging check could no longer catch it — the guard would
+    still pass while delivering to the wrong party."""
+    projection.register_delivery_target(
+        db, projection.RegisterTargetCommand(target_ref="dep-1", customer_ref="cust-a")
+    )
+    with pytest.raises(BadRequestError, match="between customers"):
+        projection.register_delivery_target(
+            db,
+            projection.RegisterTargetCommand(target_ref="dep-1", customer_ref="cust-b"),
+        )
+
+
+def test_a_suspended_target_cannot_receive_a_licence(db, signer) -> None:
+    issued = _issue(db, signer)
+    projection.register_delivery_target(
+        db,
+        projection.RegisterTargetCommand(
+            target_ref="dep-suspended",
+            customer_ref="cust-a",
+            status=TargetStatus.SUSPENDED,
+        ),
+    )
+    with pytest.raises(BadRequestError, match="not\\s+active"):
+        projection.stage_delivery(
+            db,
+            projection.StageDeliveryCommand(
+                issuance_id=issued.id, deployment_ref="dep-suspended"
+            ),
+        )
+
+
+def test_mapping_a_legacy_delivery_applies_the_same_authorisation(db, signer) -> None:
+    """Mapping must not be a back door around the checks staging performs."""
+    issued = _issue(db, signer)
+    delivery = _stage(db, issued)
+    # Simulate the v009-era shape: a delivery with no resolved destination.
+    row = db.get(LicenceDelivery, delivery.id)
+    assert row is not None
+    row.target_id = None
+    db.flush()
+
+    projection.register_delivery_target(
+        db,
+        projection.RegisterTargetCommand(target_ref="dep-other", customer_ref="cust-z"),
+    )
+    with pytest.raises(BadRequestError, match="cross-customer"):
+        projection.map_legacy_delivery(
+            db, delivery_id=delivery.id, target_ref="dep-other"
+        )
+
+    mapped = projection.map_legacy_delivery(
+        db, delivery_id=delivery.id, target_ref=TARGET
+    )
+    assert mapped.target_ref == TARGET
+
+
+def test_resuming_an_unmapped_delivery_is_refused(db, signer) -> None:
+    """Resuming without a destination would move the row out of `parked` and
+    straight out of replay eligibility — it would vanish rather than retry."""
+    from vendor_cp.licensing import transport as transport_module
+
+    issued = _issue(db, signer)
+    delivery = _stage(db, issued)
+    row = db.get(LicenceDelivery, delivery.id)
+    assert row is not None
+    row.target_id = None
+    db.flush()
+    state = db.execute(
+        select(LicenceDeliveryState).where(
+            LicenceDeliveryState.delivery_id == delivery.id
+        )
+    ).scalar_one()
+    state.state = DeliveryState.PARKED.value
+    db.flush()
+
+    with pytest.raises(BadRequestError, match="no resolved destination"):
+        transport_module.resume_delivery(db, delivery.id)
+
+    projection.map_legacy_delivery(db, delivery_id=delivery.id, target_ref=TARGET)
+    transport_module.resume_delivery(db, delivery.id)
+    assert (
+        projection.delivery_status(db, delivery.id).state
+        == DeliveryState.DELIVERED.value
+    )
+
+
+def test_proven_identity_is_visible_to_operators(db, signer) -> None:
+    """The claim and the proof must be separately visible; a log showing only
+    the claim looks identical whether or not anything was proven."""
+    issued = _issue(db, signer)
+    _stage(db, issued)
+    _ingest(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest=issued.digest,
+            status="applied",
+            deployment_id="claimed-something-else",
+        ),
+    )
+    entry = projection.list_acknowledgements(db, str(issued.licence_id))[0]
+    assert entry["claimed_deployment_id"] == "claimed-something-else"
+    assert entry["authenticated_deployment_ref"] == PROVEN

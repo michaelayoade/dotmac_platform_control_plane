@@ -132,6 +132,7 @@ class PipelineHealthResponse(BaseModel):
     measurable" rather than a zero that reads green during an outage."""
 
     never_attempted: int
+    attempted_never_sent: int
     sent_unacknowledged: int
     oldest_unacknowledged_age_seconds: int | None = None
     parked_total: int
@@ -139,6 +140,7 @@ class PipelineHealthResponse(BaseModel):
     unknown_digest_acks: int
     unknown_licence_acks: int
     deployment_mismatch_acks: int
+    unverified_identity_acks: int
     critical_acks: int
     latest_revocation_list_version: int | None = None
     keyring_uptake_lag_measurable: bool

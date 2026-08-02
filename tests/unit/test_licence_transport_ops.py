@@ -354,6 +354,37 @@ def test_failed_attempts_persist_a_safe_code_not_the_exception(db, signer) -> No
     assert "SUPERSECRET" not in str(attempt.__dict__)
 
 
+@pytest.mark.parametrize(
+    "smuggled",
+    [
+        # THE canary for the original defect: this is SAFE-LOOKING. A
+        # shape-only filter normalises it to `bearer_supersecrettoken` and
+        # stores the token verbatim. Only a closed vocabulary rejects it, so
+        # this test fails the moment anyone reverts to shape filtering.
+        "bearer SUPERSECRETTOKEN",
+        "Bearer-AbC123",
+        "api_key_9f8e7d6c",
+        # URL/obviously-unsafe shapes a naive filter would already catch.
+        "https://tenant.example/?token=abc",
+        "endpoint unreachable: 401 {'authorization': 'Bearer xyz'}",
+    ],
+)
+def test_codes_outside_the_closed_vocabulary_are_discarded(
+    db, signer, smuggled: str
+) -> None:
+    _issue_and_stage(db, signer)
+    transport = LoggingTransport(fail_with=TransportError("boom", code=smuggled))
+    dispatch_pending(db, transport=transport)
+
+    attempt = db.execute(select(LicenceDeliveryAttempt)).scalar_one()
+    assert attempt.error_code == "unspecified"
+    # The secret never reaches storage in ANY column.
+    persisted = " ".join(str(v) for v in attempt.__dict__.values())
+    assert "SUPERSECRETTOKEN" not in persisted
+    assert "9f8e7d6c" not in persisted
+    assert "Bearer" not in persisted
+
+
 def test_a_code_carrying_unsafe_content_is_collapsed(db, signer) -> None:
     _issue_and_stage(db, signer)
     transport = LoggingTransport(

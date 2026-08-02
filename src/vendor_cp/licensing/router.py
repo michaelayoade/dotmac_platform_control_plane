@@ -189,6 +189,7 @@ def pipeline_health(_admin: Admin, db: Db) -> PipelineHealthResponse:
     health = ops.pipeline_health(db, now=datetime.now(UTC))
     return PipelineHealthResponse(
         never_attempted=health.never_attempted,
+        attempted_never_sent=health.attempted_never_sent,
         sent_unacknowledged=health.sent_unacknowledged,
         oldest_unacknowledged_age_seconds=health.oldest_unacknowledged_age_seconds,
         parked_total=health.parked_total,
@@ -196,6 +197,7 @@ def pipeline_health(_admin: Admin, db: Db) -> PipelineHealthResponse:
         unknown_digest_acks=health.unknown_digest_acks,
         unknown_licence_acks=health.unknown_licence_acks,
         deployment_mismatch_acks=health.deployment_mismatch_acks,
+        unverified_identity_acks=health.unverified_identity_acks,
         critical_acks=health.critical_acks,
         latest_revocation_list_version=health.latest_revocation_list_version,
         keyring_uptake_lag_measurable=health.keyring_uptake_lag_measurable,

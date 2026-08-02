@@ -51,10 +51,30 @@ jobs:
       # TEST_DATABASE_URL, so a green pipeline said nothing about migration
       # safety or about FOR UPDATE SKIP LOCKED actually holding. A skipped
       # security test is not a passing one.
+      # Commands are inlined rather than routed through `make`: the
+      # self-hosted runner has no make, so the previous `make test-db-up`
+      # failed with "command not found" — the Postgres suites SKIPPED and the
+      # pipeline still reported green, which is exactly the failure mode this
+      # step exists to prevent.
       - name: Start test Postgres
-        run: make test-db-up
+        env:
+          TEST_DB_PORT: "5439"
+          TEST_DB_NAME: vendor_cp_test
+          TEST_DB_ADMIN_USER: postgres
+          TEST_DB_ADMIN_PASSWORD: postgres
+        run: |
+          docker compose -f docker-compose.test.yml up -d --wait
+          MIGRATION_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test \
+            poetry run python scripts/migrate.py
       - name: Migration rehearsals + replay concurrency
-        run: make test-migration
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test
+        # -p no:randomly is not needed; --strict-markers keeps a typo'd skip
+        # from silently disabling a suite. `-rs` PRINTS skip reasons so a
+        # skipped Postgres test is visible in the log rather than invisible.
+        run: poetry run pytest tests/migration -q -rs
       - name: Stop test Postgres
         if: always()
-        run: make test-db-down
+        env:
+          TEST_DB_PORT: "5439"
+        run: docker compose -f docker-compose.test.yml down -v

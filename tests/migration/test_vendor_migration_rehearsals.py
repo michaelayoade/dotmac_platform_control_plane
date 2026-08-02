@@ -307,3 +307,115 @@ def test_kernel_advance_keeps_vendor_head_independent(
     command.upgrade(cfg, "heads")
     assert _table_exists(scratch_db, "vendor_accounts")
     assert _versions(scratch_db) == {synth_rev, VENDOR_HEAD}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v010 — legacy deliveries created before the destination boundary
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_v010_quarantines_legacy_deliveries_including_active_ones(
+    scratch_db: str,
+) -> None:
+    """A v009-era delivery has no resolved destination. Both the in-flight and
+    the ACTIVE ones must be parked.
+
+    `active` is the case that matters: it was established under the previous
+    semantics, where an acknowledgement needed no proven deployment identity,
+    so it records only that someone claimed the licence was applied. Leaving it
+    active would preserve exactly the unproven authority v010 exists to remove
+    — and it would never be re-examined, because active rows are excluded from
+    replay.
+    """
+    _upgrade(scratch_db, "v009_delivery_attempts")
+
+    eng = create_engine(scratch_db)
+    ids = {k: str(uuid.uuid4()) for k in ("target", "lic", "iss", "d1", "d2", "c", "a")}
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO licences (id, customer_ref, product, generation) "
+                    "VALUES (:id, 'cust-legacy', 'dotmac-sub', 1)"
+                ),
+                {"id": ids["lic"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO contracts (id, customer_ref, legal_entity, "
+                    "currency_code, term_start, term_end, status, content_hash) "
+                    "VALUES (:id, 'cust-legacy', 'Dotmac Ltd', 'USD', "
+                    "'2026-01-01', '2026-12-31', 'active', 'h')"
+                ),
+                {"id": ids["c"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO allocations (id, contract_id, customer_ref, "
+                    "content_hash, status, source_event_id) VALUES "
+                    "(:id, :c, 'cust-legacy', 'h', 'staged', 'evt')"
+                ),
+                {"id": ids["a"], "c": ids["c"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO licence_issuances (id, licence_id, allocation_id, "
+                    "version, digest, key_id, envelope, status) VALUES "
+                    "(:id, :lic, :a, 1, 'sha256:x', 'k', '{}'::jsonb, 'issued')"
+                ),
+                {"id": ids["iss"], "lic": ids["lic"], "a": ids["a"]},
+            )
+            for key, state in (("d1", "delivered"), ("d2", "active")):
+                conn.execute(
+                    text(
+                        "INSERT INTO licence_deliveries (id, issuance_id, target_ref) "
+                        "VALUES (:id, :iss, :ref)"
+                    ),
+                    {"id": ids[key], "iss": ids["iss"], "ref": f"legacy-{key}"},
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO licence_delivery_states "
+                        "(id, delivery_id, state) VALUES (:id, :d, :state)"
+                    ),
+                    {"id": str(uuid.uuid4()), "d": ids[key], "state": state},
+                )
+
+        _upgrade(scratch_db, "heads")
+
+        with eng.connect() as conn:
+            states = dict(
+                conn.execute(
+                    text(
+                        "SELECT delivery_id, state FROM licence_delivery_states "
+                        "WHERE delivery_id = ANY(:ids)"
+                    ),
+                    {"ids": [ids["d1"], ids["d2"]]},
+                ).all()
+            )
+        assert states[uuid.UUID(ids["d1"])] == "parked"
+        # The important one: an ACTIVE legacy row is quarantined too.
+        assert states[uuid.UUID(ids["d2"])] == "parked"
+    finally:
+        eng.dispose()
+
+
+def test_v010_check_constraint_rejects_a_new_delivery_without_a_target(
+    scratch_db: str,
+) -> None:
+    """Existing rows are tolerated (NOT VALID) but every NEW row must carry a
+    destination — otherwise the boundary would only apply to code paths that
+    remembered to enforce it."""
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            with pytest.raises(DBAPIError, match="ck_licence_delivery_has_target"):
+                conn.execute(
+                    text(
+                        "INSERT INTO licence_deliveries (id, issuance_id, target_ref) "
+                        "VALUES (gen_random_uuid(), gen_random_uuid(), 'x')"
+                    )
+                )
+    finally:
+        eng.dispose()
