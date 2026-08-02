@@ -125,6 +125,22 @@ class RevocationListResponse(BaseModel):
     revoked_licence_ids: list[str]
 
 
+class PipelineHealthResponse(BaseModel):
+    """The alertable signals. `revocation_import_lag_measurable` is False until
+    deployments acknowledge revocation imports — a dashboard should show "not
+    measurable" rather than a misleading zero."""
+
+    unacknowledged_total: int
+    unacknowledged_never_sent: int
+    unacknowledged_sent: int
+    oldest_unacknowledged_age_seconds: int | None = None
+    rejected_by_reason: dict[str, int]
+    unknown_digest_acks: int
+    quarantined_acks: int
+    latest_revocation_list_version: int | None = None
+    revocation_import_lag_measurable: bool
+
+
 __all__ = [
     "IssueLicenceRequest",
     "LicenceIssuanceResponse",
@@ -136,4 +152,5 @@ __all__ = [
     "RevokeLicenceRequest",
     "RevocationEntryResponse",
     "RevocationListResponse",
+    "PipelineHealthResponse",
 ]
