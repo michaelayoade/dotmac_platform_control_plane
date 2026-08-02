@@ -249,7 +249,7 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
             "licence_revocation_entries",
             "licence_revocation_lists",
             "licence_delivery_attempts",
-            "deployments",
+            "licence_delivery_targets",
         ):
             with appu.connect() as conn:
                 with pytest.raises(DBAPIError, match="permission denied"):

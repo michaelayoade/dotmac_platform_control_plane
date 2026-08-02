@@ -32,8 +32,8 @@ from vendor_cp.licensing import transport as transport_module
 from vendor_cp.licensing.delivery_models import (
     AttemptOutcome,
     DeliveryState,
-    Deployment,
     LicenceDeliveryAttempt,
+    LicenceDeliveryTarget,
 )
 from vendor_cp.licensing.signer import EphemeralLicenceSigner
 from vendor_cp.licensing.transport import (
@@ -155,6 +155,10 @@ def _staged(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
     ).id
 
 
+def _target_for(customer_ref: str) -> str:
+    return f"{TARGET}-{customer_ref}"
+
+
 def _issue_and_stage(db, signer, *, suffix="a", customer_ref="cust-a"):
     issued = licensing.issue_licence(
         db,
@@ -165,25 +169,36 @@ def _issue_and_stage(db, signer, *, suffix="a", customer_ref="cust-a"):
         signer=signer,
         now=NOW,
     )
+    # Each customer gets its OWN registered target — sharing one across
+    # customers is exactly what the cross-customer guard forbids.
+    target_ref = _target_for(customer_ref)
     if (
         db.execute(
-            select(Deployment).where(Deployment.deployment_ref == TARGET)
+            select(LicenceDeliveryTarget).where(
+                LicenceDeliveryTarget.target_ref == target_ref
+            )
         ).scalar_one_or_none()
         is None
     ):
-        db.add(Deployment(deployment_ref=TARGET, customer_ref=customer_ref))
+        db.add(LicenceDeliveryTarget(target_ref=target_ref, customer_ref=customer_ref))
         db.flush()
     delivery = projection.stage_delivery(
         db,
-        projection.StageDeliveryCommand(issuance_id=issued.id, deployment_ref=TARGET),
+        projection.StageDeliveryCommand(
+            issuance_id=issued.id, deployment_ref=target_ref
+        ),
     )
     return issued, delivery
 
 
-def _ack(db, issued, *, status="applied", reason=None, digest=None):
+def _ack(
+    db, issued, *, status="applied", reason=None, digest=None, customer_ref="cust-a"
+):
     return projection.ingest_acknowledgement(
         db,
-        projection.AcknowledgementInput(
+        # A PROVEN deployment identity — the only path that can activate.
+        authenticated_deployment_ref=_target_for(customer_ref),
+        ack=projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
             licence_version=issued.version,
             digest=digest or issued.digest,
@@ -215,7 +230,7 @@ def test_offline_bundle_is_self_contained_and_deterministic(db, signer) -> None:
         licence_id=issued.licence_id,
         licence_version=issued.version,
         digest=issued.digest,
-        target_ref=TARGET,
+        target_ref=_target_for("cust-a"),
         envelope=issued.envelope,
     )
     bundle = OfflineBundleTransport.render(packet)
@@ -252,7 +267,7 @@ def test_offline_bundle_carries_the_signed_revocation_list_when_supplied(
         licence_id=issued.licence_id,
         licence_version=issued.version,
         digest=issued.digest,
-        target_ref=TARGET,
+        target_ref=_target_for("cust-a"),
         envelope=issued.envelope,
     )
     decoded = json.loads(
@@ -428,9 +443,27 @@ def test_recent_deliveries_are_not_flagged(db, signer) -> None:
 def test_rejected_acks_are_grouped_by_reason(db, signer) -> None:
     issued_a, _ = _issue_and_stage(db, signer, suffix="a", customer_ref="cust-a")
     issued_b, _ = _issue_and_stage(db, signer, suffix="b", customer_ref="cust-b")
-    _ack(db, issued_a, status="rejected", reason="UndeclaredCapabilityError")
-    _ack(db, issued_b, status="rejected", reason="UndeclaredCapabilityError")
-    _ack(db, issued_b, status="rejected", reason="LicenceExpiredError")
+    _ack(
+        db,
+        issued_a,
+        status="rejected",
+        reason="UndeclaredCapabilityError",
+        customer_ref="cust-a",
+    )
+    _ack(
+        db,
+        issued_b,
+        status="rejected",
+        reason="UndeclaredCapabilityError",
+        customer_ref="cust-b",
+    )
+    _ack(
+        db,
+        issued_b,
+        status="rejected",
+        reason="LicenceExpiredError",
+        customer_ref="cust-b",
+    )
 
     health = ops.pipeline_health(db, now=NOW)
     assert health.rejected_by_reason == {

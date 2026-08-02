@@ -7,19 +7,29 @@ stops acknowledging, or when acks start arriving for digests we never issued.
 Seven observations are kept SEPARATE, because each points at a different
 system and collapsing them sends operators to the wrong place:
 
-1. **Never attempted** — staged but no successful send. Our transport or
-   configuration, not the deployment.
-2. **Sent repeatedly, unacknowledged** — we delivered; the receiver is not
-   applying or not reporting. Connectivity or receiver fault.
-3. **Retry exhausted / terminal** — parked, replay STOPPED. Needs a human now;
+1. **Never attempted** — ZERO attempts exist. Nothing has tried to send it:
+   the replay worker is not running, or the delivery is not eligible.
+   (Attempts that were made and FAILED are a different fault and live in
+   `attempted_never_sent`; folding them in here would blame the scheduler for
+   a transport outage.)
+2. **Attempted but never sent** — attempts exist, none succeeded. Our transport
+   or configuration.
+3. **Sent, unacknowledged** — we delivered; the receiver is not applying or not
+   reporting. Connectivity or receiver fault.
+4. **Retry exhausted / terminal** — parked, replay STOPPED. Needs a human now;
    it will not fix itself.
-4. **Receiver rejections, grouped by stable reason** — the deployment told us
+5. **Receiver rejections, grouped by stable reason** — the deployment told us
    why. A spike in one reason is systematic, not bad luck.
-5. **Unknown digest / unknown licence / deployment mismatch — CRITICAL.** The
+6. **Unknown digest / unknown licence / deployment mismatch — CRITICAL.** The
    mis-issue and tamper tripwire; alert at ANY non-zero count, never on a
    threshold, and keep the three sub-counts visible.
-6. **Keyring uptake lag during overlap** — NOT MEASURABLE (below).
-7. **Revocation-list application lag** — NOT MEASURABLE (below).
+7. **Keyring uptake lag during overlap** — NOT MEASURABLE (below).
+8. **Revocation-list application lag** — NOT MEASURABLE (below).
+
+Acknowledgement counts are computed over a **window** (default 24h), not
+lifetime: a single historical quarantine event must not leave the dashboard
+permanently red, because an alert that can never clear is one people learn to
+ignore. Lifetime totals remain queryable from the append-only log.
 
 **Why 6 and 7 are absent rather than approximated.** Both need the receiver to
 report the keyring and revocation-list versions it has actually applied. The
@@ -53,6 +63,9 @@ from vendor_cp.licensing.delivery_models import (
 from vendor_cp.licensing.revocation_models import LicenceRevocationList
 
 DEFAULT_ACK_SLA = timedelta(hours=24)
+# Acknowledgement counts are windowed so one historical event cannot pin the
+# dashboard red forever — an alert that never clears is one people ignore.
+DEFAULT_ACK_WINDOW = timedelta(hours=24)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +73,9 @@ class LicencePipelineHealth:
     """A snapshot an alerting rule can evaluate directly. Each field is one
     observation; none is a blend of two."""
 
-    # 1–2: ageing, by what actually happened
+    # 1–3: ageing, by what actually happened
     never_attempted: int = 0
+    attempted_never_sent: int = 0
     sent_unacknowledged: int = 0
     oldest_unacknowledged_age_seconds: int | None = None
     # 3: replay stopped
@@ -89,7 +103,9 @@ class LicencePipelineHealth:
 
     @property
     def unacknowledged_total(self) -> int:
-        return self.never_attempted + self.sent_unacknowledged
+        return (
+            self.never_attempted + self.attempted_never_sent + self.sent_unacknowledged
+        )
 
 
 def revocation_application_lag_supported() -> bool:
@@ -106,11 +122,20 @@ def keyring_uptake_lag_supported() -> bool:
 
 
 def pipeline_health(
-    db: Session, *, now: datetime, ack_sla: timedelta = DEFAULT_ACK_SLA
+    db: Session,
+    *,
+    now: datetime,
+    ack_sla: timedelta = DEFAULT_ACK_SLA,
+    ack_window: timedelta = DEFAULT_ACK_WINDOW,
 ) -> LicencePipelineHealth:
     """Compute the alertable signals as of `now` (injected, never read from the
-    wall clock, so a report is reproducible)."""
+    wall clock, so a report is reproducible).
+
+    `ack_window` bounds the acknowledgement counts so a single old event cannot
+    pin the dashboard red forever.
+    """
     cutoff = now - ack_sla
+    ack_cutoff = now - ack_window
 
     parked_total = int(
         db.execute(
@@ -132,9 +157,16 @@ def pipeline_health(
             LicenceDelivery.created_at <= cutoff,
         )
     ).all()
-    never_sent = 0
+    never_attempted = attempted_never_sent = sent_unacknowledged = 0
     oldest_age: int | None = None
     for delivery_id, created_at in stale:
+        total_attempts = int(
+            db.execute(
+                select(func.count())
+                .select_from(LicenceDeliveryAttempt)
+                .where(LicenceDeliveryAttempt.delivery_id == delivery_id)
+            ).scalar_one()
+        )
         sent_attempts = int(
             db.execute(
                 select(func.count())
@@ -145,8 +177,12 @@ def pipeline_health(
                 )
             ).scalar_one()
         )
-        if sent_attempts == 0:
-            never_sent += 1
+        if total_attempts == 0:
+            never_attempted += 1
+        elif sent_attempts == 0:
+            attempted_never_sent += 1
+        else:
+            sent_unacknowledged += 1
         if created_at is not None:
             reference = created_at
             if reference.tzinfo is None:
@@ -157,7 +193,8 @@ def pipeline_health(
     rejected_rows = db.execute(
         select(LicenceAckRecord.reason, func.count())
         .where(
-            LicenceAckRecord.disposition == AckDisposition.REJECTED_BY_RECEIVER.value
+            LicenceAckRecord.disposition == AckDisposition.REJECTED_BY_RECEIVER.value,
+            LicenceAckRecord.created_at >= ack_cutoff,
         )
         .group_by(LicenceAckRecord.reason)
     ).all()
@@ -169,7 +206,10 @@ def pipeline_health(
         db.execute(
             select(func.count())
             .select_from(LicenceAckRecord)
-            .where(LicenceAckRecord.disposition == AckDisposition.UNKNOWN_DIGEST.value)
+            .where(
+                LicenceAckRecord.disposition == AckDisposition.UNKNOWN_DIGEST.value,
+                LicenceAckRecord.created_at >= ack_cutoff,
+            )
         ).scalar_one()
     )
 
@@ -178,7 +218,10 @@ def pipeline_health(
             db.execute(
                 select(func.count())
                 .select_from(LicenceAckRecord)
-                .where(LicenceAckRecord.disposition == disposition.value)
+                .where(
+                    LicenceAckRecord.disposition == disposition.value,
+                    LicenceAckRecord.created_at >= ack_cutoff,
+                )
             ).scalar_one()
         )
 
@@ -187,8 +230,9 @@ def pipeline_health(
     ).scalar()
 
     return LicencePipelineHealth(
-        never_attempted=never_sent,
-        sent_unacknowledged=len(stale) - never_sent,
+        never_attempted=never_attempted,
+        attempted_never_sent=attempted_never_sent,
+        sent_unacknowledged=sent_unacknowledged,
         oldest_unacknowledged_age_seconds=oldest_age,
         parked_total=parked_total,
         rejected_by_reason=rejected_by_reason,
@@ -205,6 +249,7 @@ def pipeline_health(
 
 __all__ = [
     "DEFAULT_ACK_SLA",
+    "DEFAULT_ACK_WINDOW",
     "LicencePipelineHealth",
     "revocation_application_lag_supported",
     "keyring_uptake_lag_supported",

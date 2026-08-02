@@ -52,9 +52,9 @@ from vendor_cp.licensing import service as licensing
 from vendor_cp.licensing.delivery_models import (
     AckDisposition,
     DeliveryState,
-    Deployment,
     LicenceAckRecord,
     LicenceDelivery,
+    LicenceDeliveryTarget,
 )
 from vendor_cp.licensing.signer import EphemeralLicenceSigner
 from vendor_cp.offers.models import OfferVersion
@@ -182,15 +182,18 @@ def _issue(db, signer, *, suffix="a", customer_ref="cust-a", **over):
     )
 
 
+PROVEN = TARGET  # the deployment identity a receiver would authenticate as
+
+
 def _register(db, ref=TARGET, customer_ref="cust-a"):
     """Destinations must be registered — a delivery can never name an
     arbitrary target."""
     existing = db.execute(
-        select(Deployment).where(Deployment.deployment_ref == ref)
+        select(LicenceDeliveryTarget).where(LicenceDeliveryTarget.target_ref == ref)
     ).scalar_one_or_none()
     if existing is not None:
         return existing
-    row = Deployment(deployment_ref=ref, customer_ref=customer_ref)
+    row = LicenceDeliveryTarget(target_ref=ref, customer_ref=customer_ref)
     db.add(row)
     db.flush()
     return row
@@ -201,6 +204,20 @@ def _stage(db, issued, target=TARGET):
     return projection.stage_delivery(
         db,
         projection.StageDeliveryCommand(issuance_id=issued.id, deployment_ref=target),
+    )
+
+
+def _ingest(db, ack_input, *, proven=PROVEN, authenticated_deployment_ref=None):
+    """Ack ingestion with a PROVEN deployment identity — the only path that can
+    activate anything."""
+    return projection.ingest_acknowledgement(
+        db,
+        ack_input,
+        authenticated_deployment_ref=(
+            authenticated_deployment_ref
+            if authenticated_deployment_ref is not None
+            else proven
+        ),
     )
 
 
@@ -347,7 +364,7 @@ def test_cross_plane_canary_activate_to_active(db, signer) -> None:
     assert is_entitled(db, tenant_id=tenant.id, capability_code="cap.a").allowed
 
     # --- back at the vendor ---
-    outcome = projection.ingest_acknowledgement(db, _ack_from(ack))
+    outcome = _ingest(db, _ack_from(ack))
     assert outcome.disposition == AckDisposition.ACCEPTED.value
     assert outcome.activated is True
     assert (
@@ -402,7 +419,7 @@ def test_receiver_commit_failure_produces_no_applied_ack(db, signer) -> None:
 def test_unknown_licence_is_quarantined(db, signer) -> None:
     issued = _issue(db, signer)
     _stage(db, issued)
-    outcome = projection.ingest_acknowledgement(
+    outcome = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(uuid.uuid4()),
@@ -418,7 +435,7 @@ def test_unknown_licence_is_quarantined(db, signer) -> None:
 def test_unknown_digest_is_quarantined_as_the_tamper_tripwire(db, signer) -> None:
     issued = _issue(db, signer)
     delivery = _stage(db, issued)
-    outcome = projection.ingest_acknowledgement(
+    outcome = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -441,7 +458,7 @@ def test_unknown_digest_is_quarantined_as_the_tamper_tripwire(db, signer) -> Non
 def test_unknown_version_is_quarantined(db, signer) -> None:
     issued = _issue(db, signer)
     _stage(db, issued)
-    outcome = projection.ingest_acknowledgement(
+    outcome = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -455,10 +472,12 @@ def test_unknown_version_is_quarantined(db, signer) -> None:
 
 
 def test_bound_licence_requires_the_acking_deployment_to_match(db, signer) -> None:
+    """A bound licence may only be staged to its bound deployment, and only
+    that deployment can acknowledge it."""
     issued = _issue(db, signer, deployment_id="dep-a")
-    delivery = _stage(db, issued)
+    delivery = _stage(db, issued, target="dep-a")
 
-    wrong = projection.ingest_acknowledgement(
+    wrong = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -475,7 +494,7 @@ def test_bound_licence_requires_the_acking_deployment_to_match(db, signer) -> No
         == DeliveryState.DELIVERED.value
     )
 
-    right = projection.ingest_acknowledgement(
+    right = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -493,7 +512,7 @@ def test_bound_licence_cannot_be_activated_without_proven_identity(db, signer):
     the binding against, and taking the body's word would make binding
     decorative."""
     issued = _issue(db, signer, deployment_id="dep-a")
-    delivery = _stage(db, issued)
+    delivery = _stage(db, issued, target="dep-a")
     outcome = projection.ingest_acknowledgement(
         db,
         projection.AcknowledgementInput(
@@ -503,8 +522,11 @@ def test_bound_licence_cannot_be_activated_without_proven_identity(db, signer):
             status="applied",
             deployment_id="dep-a",  # a CLAIM, not proof
         ),
+        # No authenticated identity at all — the platform-admin path.
     )
-    assert outcome.disposition == AckDisposition.DEPLOYMENT_MISMATCH.value
+    # No proven identity ⇒ evidence only, and it is NOT recorded as a mismatch
+    # (nothing contradicted anything) — it simply cannot activate.
+    assert outcome.disposition == AckDisposition.UNVERIFIED_IDENTITY.value
     assert not outcome.activated
     assert (
         projection.delivery_status(db, delivery.id).state
@@ -515,7 +537,7 @@ def test_bound_licence_cannot_be_activated_without_proven_identity(db, signer):
 def test_claimed_identity_contradicting_the_proven_one_is_a_mismatch(db, signer):
     issued = _issue(db, signer)
     _stage(db, issued)
-    outcome = projection.ingest_acknowledgement(
+    outcome = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -532,7 +554,7 @@ def test_claimed_identity_contradicting_the_proven_one_is_a_mismatch(db, signer)
 def test_rejected_ack_records_the_reason_without_activating(db, signer) -> None:
     issued = _issue(db, signer)
     delivery = _stage(db, issued)
-    outcome = projection.ingest_acknowledgement(
+    outcome = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -561,8 +583,8 @@ def test_duplicate_acknowledgement_is_idempotent(db, signer) -> None:
         digest=issued.digest,
         status="applied",
     )
-    first = projection.ingest_acknowledgement(db, ack)
-    second = projection.ingest_acknowledgement(db, ack)
+    first = _ingest(db, ack)
+    second = _ingest(db, ack)
 
     assert first.activated is True
     assert second.activated is False
@@ -579,13 +601,14 @@ def test_duplicate_acknowledgement_is_idempotent(db, signer) -> None:
 
 def test_late_v1_ack_cannot_regress_an_active_v2(db, signer) -> None:
     v1 = _issue(db, signer, suffix="a", customer_ref="cust-x")
-    d1 = _stage(db, v1)
+    _register(db, "target-x", customer_ref="cust-x")
+    d1 = _stage(db, v1, target="target-x")
     v2 = _issue(db, signer, suffix="a2", customer_ref="cust-x")
     assert (v1.licence_id, v2.version) == (v2.licence_id, 2)
-    d2 = _stage(db, v2)
+    d2 = _stage(db, v2, target="target-x")
 
     # v2 acknowledged and active first…
-    projection.ingest_acknowledgement(
+    _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(v2.licence_id),
@@ -593,11 +616,12 @@ def test_late_v1_ack_cannot_regress_an_active_v2(db, signer) -> None:
             digest=v2.digest,
             status="applied",
         ),
+        proven="target-x",
     )
     assert projection.delivery_status(db, d2.id).state == DeliveryState.ACTIVE.value
 
     # …then a delayed v1 ack arrives. It must not activate the older delivery.
-    late = projection.ingest_acknowledgement(
+    late = _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(v1.licence_id),
@@ -605,6 +629,7 @@ def test_late_v1_ack_cannot_regress_an_active_v2(db, signer) -> None:
             digest=v1.digest,
             status="applied",
         ),
+        proven="target-x",
     )
     assert late.disposition == AckDisposition.STALE.value
     assert late.activated is False
@@ -621,8 +646,8 @@ def test_acknowledgement_log_lists_every_verdict(db, signer) -> None:
         digest=issued.digest,
         status="applied",
     )
-    projection.ingest_acknowledgement(db, good)
-    projection.ingest_acknowledgement(
+    _ingest(db, good)
+    _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),
@@ -645,7 +670,7 @@ def test_projection_writes_no_product_entitlement_grants(db, signer) -> None:
 
     issued = _issue(db, signer)
     _stage(db, issued)
-    projection.ingest_acknowledgement(
+    _ingest(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),

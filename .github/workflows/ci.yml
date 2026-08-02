@@ -46,3 +46,15 @@ jobs:
         run: poetry run mypy
       - name: Tests (boot + provisioning contract + D1–D5 deny cases)
         run: poetry run pytest -q
+      # Postgres-backed suites. These were previously never run in CI: the
+      # migration rehearsals and the replay-concurrency proof both SKIP without
+      # TEST_DATABASE_URL, so a green pipeline said nothing about migration
+      # safety or about FOR UPDATE SKIP LOCKED actually holding. A skipped
+      # security test is not a passing one.
+      - name: Start test Postgres
+        run: make test-db-up
+      - name: Migration rehearsals + replay concurrency
+        run: make test-migration
+      - name: Stop test Postgres
+        if: always()
+        run: make test-db-down

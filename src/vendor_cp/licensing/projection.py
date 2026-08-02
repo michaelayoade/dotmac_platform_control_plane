@@ -30,7 +30,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
-from dotmac_kernel import NotFoundError, write_platform_audit_event
+from dotmac_kernel import (
+    BadRequestError,
+    NotFoundError,
+    write_platform_audit_event,
+)
 from dotmac_kernel.messaging import enqueue_platform_event
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -39,10 +43,11 @@ from vendor_cp.licensing.delivery_models import (
     AckDisposition,
     AckStatus,
     DeliveryState,
-    Deployment,
     LicenceAckRecord,
     LicenceDelivery,
     LicenceDeliveryState,
+    LicenceDeliveryTarget,
+    TargetStatus,
 )
 from vendor_cp.licensing.models import Licence, LicenceIssuance
 
@@ -139,13 +144,40 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
     if issuance is None:
         raise NotFoundError(f"licence issuance {command.issuance_id} not found")
 
-    deployment = db.execute(
-        select(Deployment).where(Deployment.deployment_ref == command.deployment_ref)
+    target = db.execute(
+        select(LicenceDeliveryTarget).where(
+            LicenceDeliveryTarget.target_ref == command.deployment_ref
+        )
     ).scalar_one_or_none()
-    if deployment is None:
+    if target is None:
         raise NotFoundError(
-            f"deployment {command.deployment_ref!r} is not registered — a "
+            f"delivery target {command.deployment_ref!r} is not registered — a "
             "licence may only be delivered to a registered destination"
+        )
+    # Registration is NOT authorisation. Each check below has its own failure
+    # mode, so each is made and named separately rather than folded into one
+    # "is this allowed" predicate.
+    if target.status != TargetStatus.ACTIVE.value:
+        raise BadRequestError(
+            f"delivery target {target.target_ref!r} is {target.status!r}, not "
+            "active — a suspended or retired destination must not receive "
+            "licences"
+        )
+    licence = db.get(Licence, issuance.licence_id)
+    if licence is None:  # unreachable: FK-enforced
+        raise RuntimeError(f"issuance {issuance.id} references a missing licence")
+    if target.customer_ref != licence.customer_ref:
+        raise BadRequestError(
+            "refusing cross-customer delivery: the licence lineage belongs to "
+            f"{licence.customer_ref!r} but target {target.target_ref!r} belongs "
+            f"to {target.customer_ref!r}"
+        )
+    bound_to = _issued_deployment_id(issuance)
+    if bound_to is not None and bound_to != target.target_ref:
+        raise BadRequestError(
+            f"licence is bound to deployment {bound_to!r} and may not be staged "
+            f"to {target.target_ref!r} — a bound document is unusable there and "
+            "delivering it still discloses the entitlement set"
         )
 
     existing = db.execute(
@@ -160,7 +192,7 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
     delivery = LicenceDelivery(
         issuance_id=issuance.id,
         target_ref=command.deployment_ref,
-        deployment_id=deployment.id,
+        target_id=target.id,
     )
     db.add(delivery)
     db.flush()
@@ -209,6 +241,7 @@ def _record(
     disposition: AckDisposition,
     *,
     delivery_id: UUID | None = None,
+    authenticated_deployment_ref: str | None = None,
 ) -> LicenceAckRecord:
     row = LicenceAckRecord(
         delivery_id=delivery_id,
@@ -217,7 +250,10 @@ def _record(
         digest=ack.digest,
         status=ack.status,
         reason=ack.reason,
+        # The CLAIM and the PROOF are stored separately, so an audit can never
+        # mistake one for the other.
         deployment_id=ack.deployment_id,
+        authenticated_deployment_ref=authenticated_deployment_ref,
         disposition=disposition.value,
     )
     db.add(row)
@@ -323,7 +359,12 @@ def ingest_acknowledgement(
         licence_uuid = None
     licence = db.get(Licence, licence_uuid) if licence_uuid is not None else None
     if licence is None:
-        record = _record(db, ack, AckDisposition.UNKNOWN_LICENCE)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.UNKNOWN_LICENCE,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.UNKNOWN_LICENCE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.UNKNOWN_LICENCE.value, False)
 
@@ -335,49 +376,89 @@ def ingest_acknowledgement(
         )
     ).scalar_one_or_none()
     if issuance is None:
-        record = _record(db, ack, AckDisposition.UNKNOWN_LICENCE)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.UNKNOWN_LICENCE,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.UNKNOWN_LICENCE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.UNKNOWN_LICENCE.value, False)
 
     # 3. …with the digest WE issued? A mismatch means the deployment applied a
     #    document we did not produce (or produced a claim about one).
     if ack.digest != issuance.digest:
-        record = _record(db, ack, AckDisposition.UNKNOWN_DIGEST)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.UNKNOWN_DIGEST,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.UNKNOWN_DIGEST, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.UNKNOWN_DIGEST.value, False)
 
     # 4. …from the deployment it was bound to (when it was bound at all)?
+    # 4. No PROVEN identity ⇒ evidence only, never activation. `active` means
+    #    the data plane committed, and an unauthenticated caller cannot
+    #    establish that for ANY licence, bound or unbound. Checked BEFORE the
+    #    binding rules because an ABSENT identity is not a contradiction —
+    #    calling it a mismatch would misdescribe what happened.
+    if authenticated_deployment_ref is None:
+        record = _record(
+            db,
+            ack,
+            AckDisposition.UNVERIFIED_IDENTITY,
+            authenticated_deployment_ref=None,
+        )
+        _audit_ack(db, ack, record, AckDisposition.UNVERIFIED_IDENTITY, actor_admin_id)
+        return AckOutcome(record.id, AckDisposition.UNVERIFIED_IDENTITY.value, False)
+
     # A claimed identity that contradicts the proven one is itself a mismatch.
     if (
         authenticated_deployment_ref is not None
         and ack.deployment_id is not None
         and ack.deployment_id != authenticated_deployment_ref
     ):
-        record = _record(db, ack, AckDisposition.DEPLOYMENT_MISMATCH)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.DEPLOYMENT_MISMATCH,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.DEPLOYMENT_MISMATCH, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.DEPLOYMENT_MISMATCH.value, False)
 
     bound_to = _issued_deployment_id(issuance)
     if bound_to is not None and authenticated_deployment_ref != bound_to:
-        record = _record(db, ack, AckDisposition.DEPLOYMENT_MISMATCH)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.DEPLOYMENT_MISMATCH,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.DEPLOYMENT_MISMATCH, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.DEPLOYMENT_MISMATCH.value, False)
 
-    delivery = (
-        db.execute(
-            select(LicenceDelivery).where(LicenceDelivery.issuance_id == issuance.id)
-        )
-        .scalars()
-        .first()
+    # The delivery to THIS deployment, not merely the first one for this
+    # issuance — the same version may be staged to several targets, and
+    # activating an arbitrary one would mark the wrong deployment licensed.
+    delivery_query = select(LicenceDelivery).where(
+        LicenceDelivery.issuance_id == issuance.id
     )
+    if authenticated_deployment_ref is not None:
+        delivery_query = delivery_query.where(
+            LicenceDelivery.target_ref == authenticated_deployment_ref
+        )
+    delivery = db.execute(delivery_query).scalars().first()
 
-    # 5. The receiver itself reported failure — real information, no activation.
+    # 6. The receiver itself reported failure — real information, no activation.
     if ack.status != AckStatus.APPLIED.value:
         record = _record(
             db,
             ack,
             AckDisposition.REJECTED_BY_RECEIVER,
             delivery_id=delivery.id if delivery else None,
+            authenticated_deployment_ref=authenticated_deployment_ref,
         )
         _audit_ack(db, ack, record, AckDisposition.REJECTED_BY_RECEIVER, actor_admin_id)
         return AckOutcome(
@@ -387,7 +468,7 @@ def ingest_acknowledgement(
             delivery.id if delivery else None,
         )
 
-    # 6. A late ack for an older version must NEVER regress a newer active one.
+    # 7. A late ack for an older version must NEVER regress a newer active one.
     highest_active = _highest_active_version(db, licence.id)
     if ack.licence_version < highest_active:
         record = _record(
@@ -395,6 +476,7 @@ def ingest_acknowledgement(
             ack,
             AckDisposition.STALE,
             delivery_id=delivery.id if delivery else None,
+            authenticated_deployment_ref=authenticated_deployment_ref,
         )
         _audit_ack(db, ack, record, AckDisposition.STALE, actor_admin_id)
         return AckOutcome(
@@ -407,17 +489,34 @@ def ingest_acknowledgement(
     if delivery is None:
         # Applied something we issued but never staged for delivery — worth
         # keeping and flagging rather than silently activating nothing.
-        record = _record(db, ack, AckDisposition.UNKNOWN_LICENCE)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.UNKNOWN_LICENCE,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.UNKNOWN_LICENCE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.UNKNOWN_LICENCE.value, False)
 
     state = _state_of(db, delivery.id)
     if state.state == DeliveryState.ACTIVE.value:
-        record = _record(db, ack, AckDisposition.DUPLICATE, delivery_id=delivery.id)
+        record = _record(
+            db,
+            ack,
+            AckDisposition.DUPLICATE,
+            delivery_id=delivery.id,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+        )
         _audit_ack(db, ack, record, AckDisposition.DUPLICATE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.DUPLICATE.value, False, delivery.id)
 
-    record = _record(db, ack, AckDisposition.ACCEPTED, delivery_id=delivery.id)
+    record = _record(
+        db,
+        ack,
+        AckDisposition.ACCEPTED,
+        delivery_id=delivery.id,
+        authenticated_deployment_ref=authenticated_deployment_ref,
+    )
     state.state = DeliveryState.ACTIVE.value
     state.activating_ack_id = record.id
     db.flush()

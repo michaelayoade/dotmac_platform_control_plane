@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
@@ -59,22 +60,58 @@ class TransportModeNotPermittedError(RuntimeError):
     silently not delivering."""
 
 
+class TransportErrorCode(str, Enum):
+    """The CLOSED vocabulary of persistable failure codes.
+
+    A shape check is not enough, and that was the bug: `bearer
+    SUPERSECRETTOKEN` normalises to a perfectly well-formed
+    `bearer_supersecrettoken` and would have been stored verbatim. Only members
+    of this enum are ever written, so a secret cannot become a code merely by
+    looking like one. Extending the vocabulary is a deliberate code change,
+    reviewed like any other.
+    """
+
+    UNSPECIFIED = "unspecified"
+    TRANSPORT_FAILED = "transport_failed"
+    TRANSPORT_TERMINAL = "transport_terminal"
+    ENDPOINT_UNREACHABLE = "endpoint_unreachable"
+    ENDPOINT_TIMEOUT = "endpoint_timeout"
+    AUTHENTICATION_FAILED = "authentication_failed"
+    REJECTED_BY_TARGET = "rejected_by_target"
+    TARGET_NOT_CONFIGURED = "target_not_configured"
+    PAYLOAD_TOO_LARGE = "payload_too_large"
+    RETRY_EXHAUSTED = "retry_exhausted"
+
+
+def _closed_code(code: TransportErrorCode | str) -> str:
+    """Map to the closed vocabulary, or `unspecified`. Anything not already an
+    approved member is DISCARDED — never normalised into storage."""
+    if isinstance(code, TransportErrorCode):
+        return code.value
+    try:
+        return TransportErrorCode(code).value
+    except ValueError:
+        return TransportErrorCode.UNSPECIFIED.value
+
+
 class TransportError(RuntimeError):
     """A delivery attempt failed.
 
-    `code` is a STABLE, closed-vocabulary identifier and is the ONLY thing
-    persisted or audited. Transport exception text routinely carries URLs,
-    response bodies, headers, and bearer tokens; this table is read by
-    dashboards and support staff, so the message never reaches storage.
-    `retryable` CONTROLS replay — it is not an observation.
+    `code` is a `TransportErrorCode` member and is the ONLY thing persisted or
+    audited. Transport exception text routinely carries URLs, response bodies,
+    headers, and bearer tokens; this table is read by dashboards and support
+    staff, so the message never reaches storage. `retryable` CONTROLS replay —
+    it is not an observation.
     """
 
     retryable = True
-    default_code = "transport_failed"
+    default_code = TransportErrorCode.TRANSPORT_FAILED
 
-    def __init__(self, message: str = "", *, code: str | None = None) -> None:
+    def __init__(
+        self, message: str = "", *, code: TransportErrorCode | str | None = None
+    ) -> None:
         super().__init__(message)
-        self.code = _safe_code(code or self.default_code)
+        self.code = _closed_code(code if code is not None else self.default_code)
 
 
 class TerminalTransportError(TransportError):
@@ -82,23 +119,7 @@ class TerminalTransportError(TransportError):
     no further attempts, alert now."""
 
     retryable = False
-    default_code = "transport_terminal"
-
-
-_SAFE_CODE_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789_")
-_MAX_CODE_LEN = 60
-
-
-def _safe_code(code: str) -> str:
-    """Normalise to a short, lower-snake identifier. Anything else — including
-    a caller that tries to smuggle a URL or token through `code` — collapses to
-    `unspecified` rather than being stored."""
-    candidate = (code or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if not candidate or len(candidate) > _MAX_CODE_LEN:
-        return "unspecified"
-    if not set(candidate) <= _SAFE_CODE_CHARS:
-        return "unspecified"
-    return candidate
+    default_code = TransportErrorCode.TRANSPORT_TERMINAL
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,12 +265,30 @@ def _packet(db: Session, delivery: LicenceDelivery) -> DeliveryPacket:
     )
 
 
-def _attempt_count(db: Session, delivery_id: UUID) -> int:
+def _current_generation(db: Session, delivery_id: UUID) -> int:
+    state = db.execute(
+        select(LicenceDeliveryState).where(
+            LicenceDeliveryState.delivery_id == delivery_id
+        )
+    ).scalar_one()
+    return state.replay_generation
+
+
+def _attempt_count(db: Session, delivery_id: UUID, *, generation: int) -> int:
+    """Attempts in the CURRENT replay generation only.
+
+    Attempts are immutable and kept forever, so the historical record survives
+    a resume — but the retry BUDGET must reset, otherwise resuming an exhausted
+    delivery re-parks it on the next pass without a single new attempt.
+    """
     return int(
         db.execute(
             select(func.count())
             .select_from(LicenceDeliveryAttempt)
-            .where(LicenceDeliveryAttempt.delivery_id == delivery_id)
+            .where(
+                LicenceDeliveryAttempt.delivery_id == delivery_id,
+                LicenceDeliveryAttempt.replay_generation == generation,
+            )
         ).scalar_one()
     )
 
@@ -275,7 +314,10 @@ def pending_deliveries(
         .where(
             LicenceDeliveryState.state.notin_(
                 [DeliveryState.ACTIVE.value, DeliveryState.PARKED.value]
-            )
+            ),
+            # Defence in depth: a delivery with no resolved destination is
+            # never replayable, whatever its state says.
+            LicenceDelivery.target_id.isnot(None),
         )
         .order_by(LicenceDelivery.created_at)
         .limit(limit)
@@ -325,6 +367,9 @@ def resume_delivery(
     if state.state != DeliveryState.PARKED.value:
         return
     state.state = DeliveryState.DELIVERED.value
+    # A new generation resets the retry budget WITHOUT touching the immutable
+    # attempt history — resuming with the old budget would re-park immediately.
+    state.replay_generation += 1
     db.flush()
     write_platform_audit_event(
         db,
@@ -332,7 +377,7 @@ def resume_delivery(
         action="vendor.licence.delivery_resumed",
         entity_type="licence_delivery",
         entity_id=str(delivery_id),
-        details={},
+        details={"replay_generation": state.replay_generation},
     )
 
 
@@ -355,13 +400,14 @@ def dispatch_pending(
     attempted = sent = failed = parked_terminal = parked_exhausted = 0
 
     for delivery in pending_deliveries(db, limit=limit, claim=True):
-        prior = _attempt_count(db, delivery.id)
+        generation = _current_generation(db, delivery.id)
+        prior = _attempt_count(db, delivery.id, generation=generation)
         if prior >= max_attempts:
             parked_exhausted += 1
             _park(
                 db,
                 delivery,
-                reason_code="retry_exhausted",
+                reason_code=TransportErrorCode.RETRY_EXHAUSTED.value,
                 actor_admin_id=actor_admin_id,
             )
             continue
@@ -376,6 +422,7 @@ def dispatch_pending(
             db.add(
                 LicenceDeliveryAttempt(
                     delivery_id=delivery.id,
+                    replay_generation=generation,
                     attempt_no=attempt_no,
                     transport=transport.name,
                     outcome=(
@@ -415,6 +462,7 @@ def dispatch_pending(
         db.add(
             LicenceDeliveryAttempt(
                 delivery_id=delivery.id,
+                replay_generation=generation,
                 attempt_no=attempt_no,
                 transport=transport.name,
                 outcome=AttemptOutcome.SENT.value,
@@ -435,6 +483,7 @@ __all__ = [
     "LOGGING_MODE",
     "OFFLINE_MODE",
     "TransportModeNotPermittedError",
+    "TransportErrorCode",
     "TransportError",
     "TerminalTransportError",
     "DeliveryPacket",

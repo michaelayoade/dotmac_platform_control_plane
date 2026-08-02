@@ -61,6 +61,11 @@ class AckDisposition(str, Enum):
     failure; the reason is its stable kernel error code.
     `stale` — a late ack for a version older than the one already active; it
     must never regress the projection.
+    `unverified_identity` — the caller proved no deployment identity, so the
+    acknowledgement is recorded as EVIDENCE ONLY and activates nothing. Until
+    deployment authentication exists this is what every admin-submitted ack
+    becomes: "active" must mean the data plane committed, and an unauthenticated
+    caller cannot establish that for any licence, bound or not.
     `unknown_licence` / `unknown_digest` / `deployment_mismatch` —
     QUARANTINED. An ack we cannot tie to something we actually issued (for this
     deployment) is the mis-issue/tamper tripwire: recorded, flagged, and never
@@ -69,6 +74,7 @@ class AckDisposition(str, Enum):
 
     ACCEPTED = "accepted"
     DUPLICATE = "duplicate"
+    UNVERIFIED_IDENTITY = "unverified_identity"
     REJECTED_BY_RECEIVER = "rejected_by_receiver"
     STALE = "stale"
     UNKNOWN_LICENCE = "unknown_licence"
@@ -102,8 +108,11 @@ class LicenceDelivery(Base, TimestampMixin):
     # supplied destination. Kept denormalised for display/uniqueness alongside
     # the FK below.
     target_ref: Mapped[str] = mapped_column(String(200), nullable=False)
-    deployment_id: Mapped[UUID | None] = mapped_column(
-        Uuid(), ForeignKey("deployments.id"), nullable=True
+    # The resolved destination. Nullable ONLY so pre-existing rows could be
+    # adopted; a CHECK constraint (NOT VALID) rejects new/updated rows without
+    # one, and legacy nulls are parked by the migration.
+    target_id: Mapped[UUID | None] = mapped_column(
+        Uuid(), ForeignKey("licence_delivery_targets.id"), nullable=True
     )
 
 
@@ -126,6 +135,12 @@ class LicenceDeliveryState(Base, TimestampMixin):
     )
     # The ack that activated this delivery (provenance for the transition).
     activating_ack_id: Mapped[UUID | None] = mapped_column(Uuid(), nullable=True)
+    # Bumped by `resume_delivery`. The retry budget is counted WITHIN a
+    # generation, so resuming resets the budget while the immutable attempt
+    # history is preserved.
+    replay_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
 
 class AttemptOutcome(str, Enum):
@@ -139,24 +154,46 @@ class AttemptOutcome(str, Enum):
     TERMINAL = "terminal"
 
 
-class Deployment(Base, TimestampMixin):
-    """A registered delivery destination.
+class TargetStatus(str, Enum):
+    """Only `active` targets may receive a delivery."""
 
-    Deliveries resolve through this registry, so a caller can never name an
-    arbitrary destination: an issued licence may only be sent somewhere the
-    vendor has deliberately registered. `connection_ref` is an opaque handle a
-    transport interprets (a configured endpoint name, a bundle drop, …) — never
-    a URL supplied with the request.
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    RETIRED = "retired"
+
+
+class LicenceDeliveryTarget(Base, TimestampMixin):
+    """A licensing-owned projection of where a licence may be delivered.
+
+    Deliberately NOT named `deployments`: `docs/design/domain-foundation.md`
+    assigns the authoritative Deployment entity to `FleetDesiredStateService`,
+    and ARCHITECTURE.md still records deployment intent as design-only. Having
+    licensing quietly create that table would have made it the de-facto owner
+    of an entity another service is specified to own — a source-of-truth
+    violation dressed as a convenience. This is a narrow delivery-target
+    projection owned by `EntitlementProjectionService`; when the fleet slice
+    lands, this is rebuilt from it rather than competing with it.
+
+    Registration alone is NOT authorisation — staging additionally requires an
+    `active` status, a customer matching the licence lineage, and (for a bound
+    document) the exact bound deployment.
+
+    `connection_ref` is an opaque handle a transport interprets (a configured
+    endpoint name, a bundle drop, …) — never a URL supplied with a request.
     """
 
-    __tablename__ = "deployments"
-    __table_args__ = (UniqueConstraint("deployment_ref", name="uq_deployments_ref"),)
+    __tablename__ = "licence_delivery_targets"
+    __table_args__ = (
+        UniqueConstraint("target_ref", name="uq_licence_delivery_targets_ref"),
+    )
 
     id: Mapped[UUID] = uuid_pk()
-    deployment_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    target_ref: Mapped[str] = mapped_column(String(200), nullable=False)
     customer_ref: Mapped[str] = mapped_column(String(200), nullable=False)
     connection_ref: Mapped[str | None] = mapped_column(String(200))
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=TargetStatus.ACTIVE.value
+    )
 
 
 class LicenceDeliveryAttempt(Base, TimestampMixin):
@@ -171,7 +208,10 @@ class LicenceDeliveryAttempt(Base, TimestampMixin):
     __tablename__ = "licence_delivery_attempts"
     __table_args__ = (
         UniqueConstraint(
-            "delivery_id", "attempt_no", name="uq_licence_delivery_attempt_no"
+            "delivery_id",
+            "replay_generation",
+            "attempt_no",
+            name="uq_licence_delivery_attempt_no",
         ),
     )
 
@@ -180,6 +220,9 @@ class LicenceDeliveryAttempt(Base, TimestampMixin):
         Uuid(),
         ForeignKey("licence_deliveries.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    replay_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
     )
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
     transport: Mapped[str] = mapped_column(String(40), nullable=False)
@@ -206,14 +249,19 @@ class LicenceAckRecord(Base, TimestampMixin):
     digest: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     reason: Mapped[str | None] = mapped_column(String(120))
+    # The body's CLAIM — untrusted, kept for evidence.
     deployment_id: Mapped[str | None] = mapped_column(String(200))
+    # The identity the caller actually PROVED, or NULL when it proved none.
+    # Stored separately so an audit can never mistake a claim for proof.
+    authenticated_deployment_ref: Mapped[str | None] = mapped_column(String(200))
     disposition: Mapped[str] = mapped_column(String(40), nullable=False)
 
 
 __all__ = [
     "DeliveryState",
     "AttemptOutcome",
-    "Deployment",
+    "TargetStatus",
+    "LicenceDeliveryTarget",
     "LicenceDeliveryAttempt",
     "AckStatus",
     "AckDisposition",
