@@ -28,7 +28,7 @@ from vendor_cp.migrations import composed_version_locations, make_alembic_config
 KERNEL_HEAD = "0012_platform_outbox"  # current pin (0.1.0a7; head unchanged since a6)
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v006_licences"
+VENDOR_HEAD = "v007_licence_delivery"
 
 
 def _superuser_url() -> str:
@@ -239,7 +239,14 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
         # The WS8 licence tables carry the same REVOKE. The signing-key registry
         # holds public material only, but a tenant application role has no
         # business reading which keys exist or what a customer was issued.
-        for table in ("licence_signing_keys", "licences", "licence_issuances"):
+        for table in (
+            "licence_signing_keys",
+            "licences",
+            "licence_issuances",
+            "licence_deliveries",
+            "licence_delivery_states",
+            "licence_ack_records",
+        ):
             with appu.connect() as conn:
                 with pytest.raises(DBAPIError, match="permission denied"):
                     conn.execute(text(f"SELECT count(*) FROM {table}")).scalar()  # noqa: S608

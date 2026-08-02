@@ -57,8 +57,51 @@ class SigningKeyResponse(BaseModel):
     status: str
 
 
+class StageDeliveryRequest(BaseModel):
+    """Stage an issued version for one opaque target. Transports are a later
+    slice — this records the fact and emits the event."""
+
+    issuance_id: UUID
+    target_ref: str
+
+
+class DeliveryResponse(BaseModel):
+    id: UUID
+    issuance_id: UUID
+    target_ref: str
+    state: str
+    activating_ack_id: UUID | None = None
+
+
+class AcknowledgementRequest(BaseModel):
+    """An inbound acknowledgement in the kernel's cross-plane vocabulary. Every
+    field is a CLAIM until matched against what the vendor actually issued."""
+
+    licence_id: str
+    licence_version: int
+    digest: str
+    status: str
+    reason: str | None = None
+    deployment_id: str | None = None
+
+
+class AckOutcomeResponse(BaseModel):
+    """The vendor's verdict — deliberately distinct from the receiver's claim.
+    `quarantined` marks an ack that could not be tied to something we issued."""
+
+    ack_id: UUID
+    disposition: str
+    activated: bool
+    quarantined: bool
+    delivery_id: UUID | None = None
+
+
 __all__ = [
     "IssueLicenceRequest",
     "LicenceIssuanceResponse",
     "SigningKeyResponse",
+    "StageDeliveryRequest",
+    "DeliveryResponse",
+    "AcknowledgementRequest",
+    "AckOutcomeResponse",
 ]
