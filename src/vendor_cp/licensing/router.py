@@ -90,7 +90,7 @@ def stage_delivery(
         db,
         projection.StageDeliveryCommand(
             issuance_id=payload.issuance_id,
-            target_ref=payload.target_ref,
+            deployment_ref=payload.deployment_ref,
             actor_admin_id=admin.id,
         ),
     )
@@ -118,6 +118,10 @@ def ingest_acknowledgement(
             reason=payload.reason,
             deployment_id=payload.deployment_id,
         ),
+        # Identity must be PROVEN, not claimed. A platform admin is not a
+        # deployment, so bound licences fail closed here until
+        # deployment-authenticated ingestion lands.
+        authenticated_deployment_ref=None,
         actor_admin_id=admin.id,
     )
     return AckOutcomeResponse(
@@ -184,15 +188,20 @@ def pipeline_health(_admin: Admin, db: Db) -> PipelineHealthResponse:
     report is reproducible."""
     health = ops.pipeline_health(db, now=datetime.now(UTC))
     return PipelineHealthResponse(
-        unacknowledged_total=health.unacknowledged_total,
-        unacknowledged_never_sent=health.unacknowledged_never_sent,
-        unacknowledged_sent=health.unacknowledged_sent,
+        never_attempted=health.never_attempted,
+        sent_unacknowledged=health.sent_unacknowledged,
         oldest_unacknowledged_age_seconds=health.oldest_unacknowledged_age_seconds,
+        parked_total=health.parked_total,
         rejected_by_reason=dict(health.rejected_by_reason),
         unknown_digest_acks=health.unknown_digest_acks,
-        quarantined_acks=health.quarantined_acks,
+        unknown_licence_acks=health.unknown_licence_acks,
+        deployment_mismatch_acks=health.deployment_mismatch_acks,
+        critical_acks=health.critical_acks,
         latest_revocation_list_version=health.latest_revocation_list_version,
-        revocation_import_lag_measurable=health.revocation_import_lag_measurable,
+        keyring_uptake_lag_measurable=health.keyring_uptake_lag_measurable,
+        revocation_application_lag_measurable=(
+            health.revocation_application_lag_measurable
+        ),
     )
 
 

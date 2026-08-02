@@ -39,6 +39,7 @@ from vendor_cp.licensing.delivery_models import (
     AckDisposition,
     AckStatus,
     DeliveryState,
+    Deployment,
     LicenceAckRecord,
     LicenceDelivery,
     LicenceDeliveryState,
@@ -51,10 +52,15 @@ _EVENT_ACTIVATED = "licence.activated"
 
 @dataclass(frozen=True, slots=True)
 class StageDeliveryCommand:
-    """Stage an issued version for delivery to one opaque target."""
+    """Stage an issued version for delivery to a REGISTERED deployment.
+
+    `deployment_ref` is resolved against the deployment registry — a caller can
+    never name an arbitrary destination, so an issued licence only ever goes
+    somewhere the vendor deliberately registered.
+    """
 
     issuance_id: UUID
-    target_ref: str
+    deployment_ref: str
     actor_admin_id: UUID | None = None
 
 
@@ -133,16 +139,29 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
     if issuance is None:
         raise NotFoundError(f"licence issuance {command.issuance_id} not found")
 
+    deployment = db.execute(
+        select(Deployment).where(Deployment.deployment_ref == command.deployment_ref)
+    ).scalar_one_or_none()
+    if deployment is None:
+        raise NotFoundError(
+            f"deployment {command.deployment_ref!r} is not registered — a "
+            "licence may only be delivered to a registered destination"
+        )
+
     existing = db.execute(
         select(LicenceDelivery).where(
             LicenceDelivery.issuance_id == command.issuance_id,
-            LicenceDelivery.target_ref == command.target_ref,
+            LicenceDelivery.target_ref == command.deployment_ref,
         )
     ).scalar_one_or_none()
     if existing is not None:
         return _view(db, existing)
 
-    delivery = LicenceDelivery(issuance_id=issuance.id, target_ref=command.target_ref)
+    delivery = LicenceDelivery(
+        issuance_id=issuance.id,
+        target_ref=command.deployment_ref,
+        deployment_id=deployment.id,
+    )
     db.add(delivery)
     db.flush()
     db.add(
@@ -163,7 +182,7 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
             "licence_id": str(issuance.licence_id),
             "licence_version": issuance.version,
             "digest": issuance.digest,
-            "target_ref": command.target_ref,
+            "target_ref": command.deployment_ref,
         },
     )
     enqueue_platform_event(
@@ -175,7 +194,7 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
             "licence_id": str(issuance.licence_id),
             "licence_version": issuance.version,
             "digest": issuance.digest,
-            "target_ref": command.target_ref,
+            "target_ref": command.deployment_ref,
         },
     )
     return _view(db, delivery)
@@ -279,14 +298,23 @@ def ingest_acknowledgement(
     db: Session,
     ack: AcknowledgementInput,
     *,
+    authenticated_deployment_ref: str | None = None,
     actor_admin_id: UUID | None = None,
 ) -> AckOutcome:
     """Record an acknowledgement and, only if it genuinely matches something we
     issued, advance that delivery to `active`.
 
+    `authenticated_deployment_ref` is the identity the CALLER PROVED, derived
+    from its authentication — never from the request body. `ack.deployment_id`
+    is only a claim, and a claim that disagrees with the proven identity is a
+    mismatch. For a deployment-BOUND licence, an unauthenticated caller cannot
+    activate anything: without a proven identity there is nothing to check the
+    binding against, and accepting the body's word would make binding
+    decorative. That is fail-closed by design until deployment authentication
+    lands; platform-admin callers can still ingest acks for unbound licences.
+
     Every inbound ack is written to the append-only log first — including the
-    ones we refuse — so the decision is always auditable. The verdict is the
-    returned `disposition`.
+    ones we refuse — so the decision is always auditable.
     """
     # 1. Does it name a lineage we own?
     try:
@@ -319,8 +347,18 @@ def ingest_acknowledgement(
         return AckOutcome(record.id, AckDisposition.UNKNOWN_DIGEST.value, False)
 
     # 4. …from the deployment it was bound to (when it was bound at all)?
+    # A claimed identity that contradicts the proven one is itself a mismatch.
+    if (
+        authenticated_deployment_ref is not None
+        and ack.deployment_id is not None
+        and ack.deployment_id != authenticated_deployment_ref
+    ):
+        record = _record(db, ack, AckDisposition.DEPLOYMENT_MISMATCH)
+        _audit_ack(db, ack, record, AckDisposition.DEPLOYMENT_MISMATCH, actor_admin_id)
+        return AckOutcome(record.id, AckDisposition.DEPLOYMENT_MISMATCH.value, False)
+
     bound_to = _issued_deployment_id(issuance)
-    if bound_to is not None and ack.deployment_id != bound_to:
+    if bound_to is not None and authenticated_deployment_ref != bound_to:
         record = _record(db, ack, AckDisposition.DEPLOYMENT_MISMATCH)
         _audit_ack(db, ack, record, AckDisposition.DEPLOYMENT_MISMATCH, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.DEPLOYMENT_MISMATCH.value, False)

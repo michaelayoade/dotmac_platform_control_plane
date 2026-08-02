@@ -33,10 +33,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 class DeliveryState(str, Enum):
     """`delivered` — staged and handed to a transport (at-least-once, so it may
     be re-sent). `active` — the data plane acknowledged a COMMITTED local
-    projection of this exact version+digest. There is no "probably applied"."""
+    projection of this exact version+digest. `parked` — replay STOPPED, either
+    because a transport reported a terminal failure or attempts were exhausted;
+    it alerts immediately and never retries until an operator resumes it. There
+    is no "probably applied"."""
 
     DELIVERED = "delivered"
     ACTIVE = "active"
+    PARKED = "parked"
 
 
 class AckStatus(str, Enum):
@@ -94,9 +98,13 @@ class LicenceDelivery(Base, TimestampMixin):
     issuance_id: Mapped[UUID] = mapped_column(
         Uuid(), ForeignKey("licence_issuances.id"), nullable=False
     )
-    # Opaque destination handle (a deployment endpoint, an offline bundle
-    # recipient, …). The vendor never interprets it; transports do.
+    # The REGISTERED deployment's ref, resolved at staging — not a caller-
+    # supplied destination. Kept denormalised for display/uniqueness alongside
+    # the FK below.
     target_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    deployment_id: Mapped[UUID | None] = mapped_column(
+        Uuid(), ForeignKey("deployments.id"), nullable=True
+    )
 
 
 class LicenceDeliveryState(Base, TimestampMixin):
@@ -123,10 +131,32 @@ class LicenceDeliveryState(Base, TimestampMixin):
 class AttemptOutcome(str, Enum):
     """What one transport attempt did. `sent` means the transport accepted the
     packet — NOT that the deployment applied it; only an acknowledgement can
-    say that."""
+    say that. `terminal` will never succeed for this document and stops replay
+    at once."""
 
     SENT = "sent"
     FAILED = "failed"
+    TERMINAL = "terminal"
+
+
+class Deployment(Base, TimestampMixin):
+    """A registered delivery destination.
+
+    Deliveries resolve through this registry, so a caller can never name an
+    arbitrary destination: an issued licence may only be sent somewhere the
+    vendor has deliberately registered. `connection_ref` is an opaque handle a
+    transport interprets (a configured endpoint name, a bundle drop, …) — never
+    a URL supplied with the request.
+    """
+
+    __tablename__ = "deployments"
+    __table_args__ = (UniqueConstraint("deployment_ref", name="uq_deployments_ref"),)
+
+    id: Mapped[UUID] = uuid_pk()
+    deployment_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    customer_ref: Mapped[str] = mapped_column(String(200), nullable=False)
+    connection_ref: Mapped[str | None] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
 
 
 class LicenceDeliveryAttempt(Base, TimestampMixin):
@@ -154,7 +184,10 @@ class LicenceDeliveryAttempt(Base, TimestampMixin):
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
     transport: Mapped[str] = mapped_column(String(40), nullable=False)
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
-    error: Mapped[str | None] = mapped_column(String(500))
+    # A STABLE, CLOSED-VOCABULARY code — never a raw exception, response body,
+    # URL, header, or token. Transport failures routinely carry credentials in
+    # their messages, and this table is read by dashboards and support staff.
+    error_code: Mapped[str | None] = mapped_column(String(60))
 
 
 class LicenceAckRecord(Base, TimestampMixin):
@@ -180,6 +213,7 @@ class LicenceAckRecord(Base, TimestampMixin):
 __all__ = [
     "DeliveryState",
     "AttemptOutcome",
+    "Deployment",
     "LicenceDeliveryAttempt",
     "AckStatus",
     "AckDisposition",

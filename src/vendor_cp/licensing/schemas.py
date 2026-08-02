@@ -58,11 +58,11 @@ class SigningKeyResponse(BaseModel):
 
 
 class StageDeliveryRequest(BaseModel):
-    """Stage an issued version for one opaque target. Transports are a later
-    slice — this records the fact and emits the event."""
+    """Stage an issued version for a REGISTERED deployment. `deployment_ref`
+    is resolved against the registry — an arbitrary destination is refused."""
 
     issuance_id: UUID
-    target_ref: str
+    deployment_ref: str
 
 
 class DeliveryResponse(BaseModel):
@@ -126,19 +126,23 @@ class RevocationListResponse(BaseModel):
 
 
 class PipelineHealthResponse(BaseModel):
-    """The alertable signals. `revocation_import_lag_measurable` is False until
-    deployments acknowledge revocation imports — a dashboard should show "not
-    measurable" rather than a misleading zero."""
+    """The alertable signals, kept as SEPARATE observations. The two
+    `*_measurable` flags are False until deployments report the keyring and
+    revocation-list versions they have APPLIED — a dashboard should show "not
+    measurable" rather than a zero that reads green during an outage."""
 
-    unacknowledged_total: int
-    unacknowledged_never_sent: int
-    unacknowledged_sent: int
+    never_attempted: int
+    sent_unacknowledged: int
     oldest_unacknowledged_age_seconds: int | None = None
+    parked_total: int
     rejected_by_reason: dict[str, int]
     unknown_digest_acks: int
-    quarantined_acks: int
+    unknown_licence_acks: int
+    deployment_mismatch_acks: int
+    critical_acks: int
     latest_revocation_list_version: int | None = None
-    revocation_import_lag_measurable: bool
+    keyring_uptake_lag_measurable: bool
+    revocation_application_lag_measurable: bool
 
 
 __all__ = [

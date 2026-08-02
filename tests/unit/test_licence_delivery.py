@@ -52,6 +52,7 @@ from vendor_cp.licensing import service as licensing
 from vendor_cp.licensing.delivery_models import (
     AckDisposition,
     DeliveryState,
+    Deployment,
     LicenceAckRecord,
     LicenceDelivery,
 )
@@ -181,9 +182,25 @@ def _issue(db, signer, *, suffix="a", customer_ref="cust-a", **over):
     )
 
 
+def _register(db, ref=TARGET, customer_ref="cust-a"):
+    """Destinations must be registered — a delivery can never name an
+    arbitrary target."""
+    existing = db.execute(
+        select(Deployment).where(Deployment.deployment_ref == ref)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    row = Deployment(deployment_ref=ref, customer_ref=customer_ref)
+    db.add(row)
+    db.flush()
+    return row
+
+
 def _stage(db, issued, target=TARGET):
+    _register(db, target)
     return projection.stage_delivery(
-        db, projection.StageDeliveryCommand(issuance_id=issued.id, target_ref=target)
+        db,
+        projection.StageDeliveryCommand(issuance_id=issued.id, deployment_ref=target),
     )
 
 
@@ -277,14 +294,30 @@ def test_restaging_is_the_same_fact_not_a_second_one(db, signer) -> None:
     )
 
 
+def test_staging_to_an_unregistered_destination_is_rejected(db, signer) -> None:
+    """A caller may not invent a destination: delivery resolves through the
+    registry or not at all."""
+    from dotmac_kernel import NotFoundError
+
+    issued = _issue(db, signer)
+    with pytest.raises(NotFoundError, match="not registered"):
+        projection.stage_delivery(
+            db,
+            projection.StageDeliveryCommand(
+                issuance_id=issued.id, deployment_ref="https://attacker.example/steal"
+            ),
+        )
+
+
 def test_staging_an_unknown_issuance_is_rejected(db) -> None:
     from dotmac_kernel import NotFoundError
 
+    _register(db)
     with pytest.raises(NotFoundError):
         projection.stage_delivery(
             db,
             projection.StageDeliveryCommand(
-                issuance_id=uuid.uuid4(), target_ref=TARGET
+                issuance_id=uuid.uuid4(), deployment_ref=TARGET
             ),
         )
 
@@ -432,8 +465,8 @@ def test_bound_licence_requires_the_acking_deployment_to_match(db, signer) -> No
             licence_version=issued.version,
             digest=issued.digest,
             status="applied",
-            deployment_id="dep-b",
         ),
+        authenticated_deployment_ref="dep-b",
     )
     assert wrong.disposition == AckDisposition.DEPLOYMENT_MISMATCH.value
     assert wrong.quarantined
@@ -449,10 +482,51 @@ def test_bound_licence_requires_the_acking_deployment_to_match(db, signer) -> No
             licence_version=issued.version,
             digest=issued.digest,
             status="applied",
-            deployment_id="dep-a",
         ),
+        authenticated_deployment_ref="dep-a",
     )
     assert right.activated is True
+
+
+def test_bound_licence_cannot_be_activated_without_proven_identity(db, signer):
+    """Fail-closed: with no authenticated identity there is nothing to check
+    the binding against, and taking the body's word would make binding
+    decorative."""
+    issued = _issue(db, signer, deployment_id="dep-a")
+    delivery = _stage(db, issued)
+    outcome = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest=issued.digest,
+            status="applied",
+            deployment_id="dep-a",  # a CLAIM, not proof
+        ),
+    )
+    assert outcome.disposition == AckDisposition.DEPLOYMENT_MISMATCH.value
+    assert not outcome.activated
+    assert (
+        projection.delivery_status(db, delivery.id).state
+        == DeliveryState.DELIVERED.value
+    )
+
+
+def test_claimed_identity_contradicting_the_proven_one_is_a_mismatch(db, signer):
+    issued = _issue(db, signer)
+    _stage(db, issued)
+    outcome = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest=issued.digest,
+            status="applied",
+            deployment_id="dep-impostor",
+        ),
+        authenticated_deployment_ref="dep-real",
+    )
+    assert outcome.disposition == AckDisposition.DEPLOYMENT_MISMATCH.value
 
 
 def test_rejected_ack_records_the_reason_without_activating(db, signer) -> None:

@@ -32,6 +32,7 @@ from vendor_cp.licensing import transport as transport_module
 from vendor_cp.licensing.delivery_models import (
     AttemptOutcome,
     DeliveryState,
+    Deployment,
     LicenceDeliveryAttempt,
 )
 from vendor_cp.licensing.signer import EphemeralLicenceSigner
@@ -164,9 +165,17 @@ def _issue_and_stage(db, signer, *, suffix="a", customer_ref="cust-a"):
         signer=signer,
         now=NOW,
     )
+    if (
+        db.execute(
+            select(Deployment).where(Deployment.deployment_ref == TARGET)
+        ).scalar_one_or_none()
+        is None
+    ):
+        db.add(Deployment(deployment_ref=TARGET, customer_ref=customer_ref))
+        db.flush()
     delivery = projection.stage_delivery(
         db,
-        projection.StageDeliveryCommand(issuance_id=issued.id, target_ref=TARGET),
+        projection.StageDeliveryCommand(issuance_id=issued.id, deployment_ref=TARGET),
     )
     return issued, delivery
 
@@ -214,10 +223,42 @@ def test_offline_bundle_is_self_contained_and_deterministic(db, signer) -> None:
 
     # Everything the air-gapped receiver needs, and the signature is what makes
     # it acceptable — so a bundle needs no trusted channel.
-    assert decoded["bundle"] == "dotmac-licence-bundle/1"
+    assert decoded["bundle"] == "dotmac-licence-envelope-bundle/1"
     assert decoded["digest"] == issued.digest
     assert decoded["envelope"] == issued.envelope
+    # The artifact STATES what it does not include, so an operator opening it
+    # cannot assume it is everything the receiver needs.
+    assert decoded["requires"] == [
+        "verification-keyring-provisioned-out-of-band",
+        "receiver-applies-revocation-list",
+        "no-import-receipt",
+    ]
+    assert "revocation_list" not in decoded  # none supplied
     assert OfflineBundleTransport.render(packet) == bundle  # deterministic
+
+
+def test_offline_bundle_carries_the_signed_revocation_list_when_supplied(
+    db, signer
+) -> None:
+    """The revocation list IS authenticated, so it can travel with the bundle —
+    unlike the keyring, which would be worthless beside the document it
+    authenticates."""
+    from vendor_cp.licensing import revocation
+
+    issued, delivery = _issue_and_stage(db, signer)
+    published = revocation.publish_revocation_list(db, signer=signer, now=NOW)
+    packet = DeliveryPacket(
+        delivery_id=delivery.id,
+        licence_id=issued.licence_id,
+        licence_version=issued.version,
+        digest=issued.digest,
+        target_ref=TARGET,
+        envelope=issued.envelope,
+    )
+    decoded = json.loads(
+        OfflineBundleTransport.render(packet, revocation_envelope=published.envelope)
+    )
+    assert decoded["revocation_list"] == published.envelope
 
 
 def test_unknown_delivery_mode_fails_closed(monkeypatch) -> None:
@@ -279,41 +320,80 @@ def test_an_acknowledged_delivery_is_not_resent(db, signer) -> None:
     assert transport.sent == []
 
 
-def test_failed_attempts_are_recorded_with_their_error(db, signer) -> None:
+def test_failed_attempts_persist_a_safe_code_not_the_exception(db, signer) -> None:
+    """Transport messages routinely carry URLs, bodies, and bearer tokens; this
+    table is read by dashboards and support staff, so only the stable code is
+    stored."""
+    secret = "https://tenant.example/api?token=SUPERSECRET"
     _issue_and_stage(db, signer)
-    transport = LoggingTransport(fail_with=TransportError("endpoint unreachable"))
+    transport = LoggingTransport(
+        fail_with=TransportError(secret, code="endpoint_unreachable")
+    )
 
     report = dispatch_pending(db, transport=transport)
 
     assert (report.attempted, report.sent, report.failed) == (1, 0, 1)
     attempt = db.execute(select(LicenceDeliveryAttempt)).scalar_one()
     assert attempt.outcome == AttemptOutcome.FAILED.value
-    assert "endpoint unreachable" in (attempt.error or "")
+    assert attempt.error_code == "endpoint_unreachable"
+    assert "SUPERSECRET" not in str(attempt.__dict__)
 
 
-def test_delivery_is_abandoned_after_max_attempts_but_retained(db, signer) -> None:
-    """Abandoned is not deleted: the delivery stays visible and re-dispatchable
-    once an operator fixes the cause."""
+def test_a_code_carrying_unsafe_content_is_collapsed(db, signer) -> None:
+    _issue_and_stage(db, signer)
+    transport = LoggingTransport(
+        fail_with=TransportError("boom", code="https://tenant.example/?token=abc")
+    )
+    dispatch_pending(db, transport=transport)
+    assert (
+        db.execute(select(LicenceDeliveryAttempt)).scalar_one().error_code
+        == "unspecified"
+    )
+
+
+def test_exhausted_retries_park_the_delivery_and_stop_replay(db, signer) -> None:
+    """Parked is not deleted, and it is not silently retried either: replay
+    STOPS until an operator resumes it."""
     _, delivery = _issue_and_stage(db, signer)
-    failing = LoggingTransport(fail_with=TransportError("down"))
+    failing = LoggingTransport(fail_with=TransportError("down", code="down"))
     for _ in range(3):
         dispatch_pending(db, transport=failing, max_attempts=3)
 
     report = dispatch_pending(db, transport=failing, max_attempts=3)
-    assert (report.attempted, report.abandoned) == (0, 1)
-    assert delivery.id in {d.id for d in pending_deliveries(db)}
+    assert report.parked_exhausted == 1
+    assert (
+        projection.delivery_status(db, delivery.id).state == DeliveryState.PARKED.value
+    )
+    # Parked work is OFF the replay list…
+    assert delivery.id not in {d.id for d in pending_deliveries(db)}
+    quiet = dispatch_pending(db, transport=LoggingTransport(), max_attempts=9)
+    assert quiet.attempted == 0
 
-    # Raising the ceiling resumes delivery — nothing was lost.
-    resumed = dispatch_pending(db, transport=LoggingTransport(), max_attempts=5)
+    # …until an operator resumes it, and nothing was lost.
+    transport_module.resume_delivery(db, delivery.id)
+    resumed = dispatch_pending(db, transport=LoggingTransport(), max_attempts=9)
     assert resumed.sent == 1
 
 
-def test_terminal_errors_are_still_recorded_as_attempts(db, signer) -> None:
-    _issue_and_stage(db, signer)
-    transport = LoggingTransport(fail_with=TerminalTransportError("rejected"))
-    report = dispatch_pending(db, transport=transport)
-    assert report.failed == 1
-    assert db.execute(select(LicenceDeliveryAttempt)).scalar_one().error is not None
+def test_terminal_failure_parks_immediately_without_burning_retries(db, signer) -> None:
+    """`retryable` CONTROLS replay rather than describing it: a terminal fault
+    will never succeed, so retrying is only delay before someone looks."""
+    _, delivery = _issue_and_stage(db, signer)
+    transport = LoggingTransport(
+        fail_with=TerminalTransportError("rejected", code="rejected_by_target")
+    )
+
+    report = dispatch_pending(db, transport=transport, max_attempts=10)
+
+    assert (report.failed, report.parked_terminal) == (1, 1)
+    assert (
+        projection.delivery_status(db, delivery.id).state == DeliveryState.PARKED.value
+    )
+    attempt = db.execute(select(LicenceDeliveryAttempt)).scalar_one()
+    assert attempt.outcome == AttemptOutcome.TERMINAL.value
+    assert attempt.error_code == "rejected_by_target"
+    # One attempt only — no further retries were spent.
+    assert dispatch_pending(db, transport=transport).attempted == 0
 
 
 # ── Alerting surface ────────────────────────────────────────────────────────
@@ -332,8 +412,8 @@ def test_ageing_unacknowledged_split_by_whether_we_ever_sent(db, signer) -> None
     health = ops.pipeline_health(db, now=later, ack_sla=timedelta(hours=24))
 
     assert health.unacknowledged_total == 2
-    assert health.unacknowledged_sent == 1
-    assert health.unacknowledged_never_sent == 1
+    assert health.sent_unacknowledged == 1
+    assert health.never_attempted == 1
     assert health.oldest_unacknowledged_age_seconds is not None
 
 
@@ -365,17 +445,36 @@ def test_unknown_digest_acks_are_surfaced_as_the_tripwire(db, signer) -> None:
 
     health = ops.pipeline_health(db, now=NOW)
     assert health.unknown_digest_acks == 1
-    assert health.quarantined_acks == 1
+    assert health.critical_acks == 1
 
 
-def test_revocation_import_lag_is_reported_as_unmeasurable(db, signer) -> None:
-    """Honest by design: the vendor cannot know which list a deployment
-    imported, so this must read "not measurable" rather than a misleading
-    zero. Closing it needs an import-acknowledgement channel."""
-    assert ops.revocation_import_lag_supported() is False
+def test_uptake_signals_are_reported_as_unmeasurable(db, signer) -> None:
+    """Honest by design: the vendor cannot know which keyring or revocation
+    list a deployment has APPLIED, so both must read "not measurable" rather
+    than a misleading zero that would look green during the very outage they
+    exist to catch. Both need receiver-reported versions."""
+    assert ops.revocation_application_lag_supported() is False
+    assert ops.keyring_uptake_lag_supported() is False
     health = ops.pipeline_health(db, now=NOW)
-    assert health.revocation_import_lag_measurable is False
+    assert health.revocation_application_lag_measurable is False
+    assert health.keyring_uptake_lag_measurable is False
     assert health.latest_revocation_list_version is None
+
+
+def test_parked_deliveries_are_their_own_alert_bucket(db, signer) -> None:
+    """Retry-exhausted/terminal is a different response from "still trying"."""
+    _issue_and_stage(db, signer)
+    dispatch_pending(
+        db,
+        transport=LoggingTransport(
+            fail_with=TerminalTransportError("x", code="rejected_by_target")
+        ),
+    )
+    health = ops.pipeline_health(db, now=NOW + timedelta(days=2))
+    assert health.parked_total == 1
+    # Parked work is NOT also counted as ageing-unacknowledged: that would
+    # double-report one fault in two buckets.
+    assert health.unacknowledged_total == 0
 
 
 def test_latest_published_revocation_list_is_reported(db, signer) -> None:

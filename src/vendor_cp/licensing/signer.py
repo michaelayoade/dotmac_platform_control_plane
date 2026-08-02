@@ -1,4 +1,4 @@
-"""The licence signing seam — EPHEMERAL ONLY in this phase.
+"""The licence signing seam — ephemeral for dev/test, configured for real use.
 
 Signing is the vendor control plane's job: the kernel deliberately ships no
 signer (it verifies only), so the Ed25519 signing lives here. What does NOT
@@ -6,17 +6,30 @@ live here is key custody — `LicenceSignerProvider` is a narrow protocol
 (`key_id`, `public_key_b64`, `sign`), so the material's source is swappable
 without touching issuance logic.
 
-Two modes behind `VENDOR_LICENCE_SIGNING_MODE`, mirroring the D3
-fake-provider posture:
+Two modes behind `VENDOR_LICENCE_SIGNING_MODE`:
 
 - **`ephemeral`** (default) — a keypair generated in memory at construction.
-  Never persisted, never a real issuer key: dev/test only.
+  Never persisted, never a real issuer key: dev/test only. It is the default
+  because a missing configuration must not silently become a real issuer.
 - **`configured`** — the private key is read from a file whose CANONICAL source
-  is OpenBao (`secret/dotmac/licensing/signing-key`), materialised at 0600 by
-  deploy tooling. The value never appears in code, config, logs, the database,
-  or an exception message: every failure below reports the PATH and the shape
-  problem, never the bytes. Anything missing, unreadable, or malformed FAILS
-  STARTUP rather than falling back to a throwaway key.
+  is OpenBao (`secret/dotmac/licensing/signing-key`).
+
+  **Deployment contract (ruled 2026-08-02).** Issuance runs on ONE designated
+  vendor-control-plane instance, to keep key exposure to a single host; that
+  host is not yet named. Keys live at
+  `/run/secrets/dotmac/vendor-control-plane/licence-signing/`
+  `<key-id>.key`,
+  materialised by deploy tooling from OpenBao: 0700 directory, 0600
+  service-owned files, ATOMIC replacement, mounted read-only into the
+  container. Manual materialisation is break-glass only. Because the key is
+  read ONCE at construction, every primary/overlap change requires a
+  CONTROLLED RESTART — editing the file under a running process changes
+  nothing, which is a trap worth stating plainly.
+
+  The value never appears in code, config, logs, the database, or an exception
+  message: every failure below reports the PATH and the shape problem, never
+  the bytes. Anything missing, unreadable, or malformed FAILS STARTUP rather
+  than falling back to a throwaway key.
 
 **Rotation overlap.** Set `VENDOR_LICENCE_OVERLAP_KEY_FILE`/`_KEY_ID` to
 double-sign every document with a second key. That is what makes rotation

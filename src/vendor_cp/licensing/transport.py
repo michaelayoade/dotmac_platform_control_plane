@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
-from dotmac_kernel import write_platform_audit_event
+from dotmac_kernel import NotFoundError, write_platform_audit_event
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -60,15 +60,45 @@ class TransportModeNotPermittedError(RuntimeError):
 
 
 class TransportError(RuntimeError):
-    """A delivery attempt failed. `retryable` distinguishes a transient fault
-    from one that will never succeed for this document — the replay driver
-    keeps retrying the former and stops wasting attempts on the latter."""
+    """A delivery attempt failed.
+
+    `code` is a STABLE, closed-vocabulary identifier and is the ONLY thing
+    persisted or audited. Transport exception text routinely carries URLs,
+    response bodies, headers, and bearer tokens; this table is read by
+    dashboards and support staff, so the message never reaches storage.
+    `retryable` CONTROLS replay — it is not an observation.
+    """
 
     retryable = True
+    default_code = "transport_failed"
+
+    def __init__(self, message: str = "", *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = _safe_code(code or self.default_code)
 
 
 class TerminalTransportError(TransportError):
+    """Will never succeed for this document. Parks the delivery immediately —
+    no further attempts, alert now."""
+
     retryable = False
+    default_code = "transport_terminal"
+
+
+_SAFE_CODE_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789_")
+_MAX_CODE_LEN = 60
+
+
+def _safe_code(code: str) -> str:
+    """Normalise to a short, lower-snake identifier. Anything else — including
+    a caller that tries to smuggle a URL or token through `code` — collapses to
+    `unspecified` rather than being stored."""
+    candidate = (code or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not candidate or len(candidate) > _MAX_CODE_LEN:
+        return "unspecified"
+    if not set(candidate) <= _SAFE_CODE_CHARS:
+        return "unspecified"
+    return candidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,37 +141,63 @@ class LoggingTransport:
 
 
 class OfflineBundleTransport:
-    """Renders a self-contained bundle for an air-gapped site.
+    """Renders an ENVELOPE BUNDLE for an air-gapped site.
 
-    The bundle is the signed envelope plus its identifiers — everything the
-    receiver needs, and nothing it must trust us about, since the signature is
-    what makes it acceptable. Returned as bytes for the caller to route
-    (removable media, ticket attachment); writing files is an operator concern,
-    not this module's.
+    Deliberately NOT called self-contained. It carries the signed licence
+    envelope and, when supplied, the current signed revocation list — both
+    authenticated artifacts a receiver can verify on its own. It does NOT carry
+    the verification keyring, because an unsigned keyring travelling beside the
+    document it authenticates is worthless: an attacker who can alter the
+    bundle would simply swap both.
+
+    **Receiver prerequisites, which this bundle does not satisfy:**
+    1. the verification keyring must already be provisioned out-of-band (that
+       is what makes any of this trustworthy);
+    2. the receiver applies the revocation list itself — carrying it here does
+       not prove import;
+    3. there is no import receipt, so nothing in this flow tells the vendor the
+       bundle was applied. That needs the import-acknowledgement channel noted
+       in `ops.py`.
+
+    Returned as bytes for the caller to route (removable media, ticket
+    attachment); writing files is an operator concern, not this module's.
     """
 
     name = OFFLINE_MODE
 
-    def __init__(self) -> None:
+    def __init__(self, *, revocation_envelope: Mapping[str, object] | None = None):
         self.bundles: list[bytes] = []
+        self._revocation_envelope = revocation_envelope
 
     def send(self, packet: DeliveryPacket) -> None:
-        self.bundles.append(self.render(packet))
+        self.bundles.append(
+            self.render(packet, revocation_envelope=self._revocation_envelope)
+        )
 
     @staticmethod
-    def render(packet: DeliveryPacket) -> bytes:
-        return json.dumps(
-            {
-                "bundle": "dotmac-licence-bundle/1",
-                "licence_id": str(packet.licence_id),
-                "licence_version": packet.licence_version,
-                "digest": packet.digest,
-                "target_ref": packet.target_ref,
-                "envelope": dict(packet.envelope),
-            },
-            indent=2,
-            sort_keys=True,
-        ).encode()
+    def render(
+        packet: DeliveryPacket,
+        *,
+        revocation_envelope: Mapping[str, object] | None = None,
+    ) -> bytes:
+        bundle: dict[str, object] = {
+            "bundle": "dotmac-licence-envelope-bundle/1",
+            "licence_id": str(packet.licence_id),
+            "licence_version": packet.licence_version,
+            "digest": packet.digest,
+            "target_ref": packet.target_ref,
+            "envelope": dict(packet.envelope),
+            # Stated in the artifact so an operator opening it sees what it
+            # does NOT include, rather than assuming it is everything.
+            "requires": [
+                "verification-keyring-provisioned-out-of-band",
+                "receiver-applies-revocation-list",
+                "no-import-receipt",
+            ],
+        }
+        if revocation_envelope is not None:
+            bundle["revocation_list"] = dict(revocation_envelope)
+        return json.dumps(bundle, indent=2, sort_keys=True).encode()
 
 
 def build_delivery_transport() -> LicenceDeliveryTransport:
@@ -163,13 +219,15 @@ def build_delivery_transport() -> LicenceDeliveryTransport:
 
 @dataclass(frozen=True, slots=True)
 class DispatchReport:
-    """What one replay pass did. `failed` and `abandoned` are separated because
-    they demand different operator responses."""
+    """What one replay pass did. Retryable failures, terminal failures, and
+    exhaustion are separated because they demand different operator
+    responses — and the latter two PARK the delivery."""
 
     attempted: int
     sent: int
     failed: int
-    abandoned: int
+    parked_terminal: int
+    parked_exhausted: int
 
 
 def _packet(db: Session, delivery: LicenceDelivery) -> DeliveryPacket:
@@ -196,19 +254,86 @@ def _attempt_count(db: Session, delivery_id: UUID) -> int:
     )
 
 
-def pending_deliveries(db: Session, *, limit: int = 100) -> Sequence[LicenceDelivery]:
-    """Deliveries not yet acknowledged as applied — the replay work-list."""
-    rows = db.execute(
+def pending_deliveries(
+    db: Session, *, limit: int = 100, claim: bool = False
+) -> Sequence[LicenceDelivery]:
+    """Deliveries eligible for replay: staged, not acknowledged, not parked.
+
+    With `claim=True` the rows are locked FOR UPDATE SKIP LOCKED, so concurrent
+    replay workers take DISJOINT work-lists. Without it, two workers would read
+    the same delivery, compute the same `max(attempt_no) + 1`, and race — one
+    losing on the unique constraint after already sending. Skip-locked is used
+    only on backends that support it (SQLite in unit tests does not; tenancy
+    and concurrency are proven on Postgres).
+    """
+    statement = (
         select(LicenceDelivery)
         .join(
             LicenceDeliveryState,
             LicenceDeliveryState.delivery_id == LicenceDelivery.id,
         )
-        .where(LicenceDeliveryState.state != DeliveryState.ACTIVE.value)
+        .where(
+            LicenceDeliveryState.state.notin_(
+                [DeliveryState.ACTIVE.value, DeliveryState.PARKED.value]
+            )
+        )
         .order_by(LicenceDelivery.created_at)
         .limit(limit)
-    ).scalars()
-    return list(rows)
+    )
+    if claim and db.bind is not None and db.bind.dialect.name == "postgresql":
+        statement = statement.with_for_update(skip_locked=True, of=LicenceDelivery)
+    return list(db.execute(statement).scalars())
+
+
+def _park(
+    db: Session,
+    delivery: LicenceDelivery,
+    *,
+    reason_code: str,
+    actor_admin_id: UUID | None,
+) -> None:
+    """Stop replaying this delivery and make it loud. Parked is not deleted —
+    an operator resumes it after fixing the cause."""
+    state = db.execute(
+        select(LicenceDeliveryState).where(
+            LicenceDeliveryState.delivery_id == delivery.id
+        )
+    ).scalar_one()
+    state.state = DeliveryState.PARKED.value
+    db.flush()
+    write_platform_audit_event(
+        db,
+        actor_admin_id=actor_admin_id,
+        action="vendor.licence.delivery_parked",
+        entity_type="licence_delivery",
+        entity_id=str(delivery.id),
+        details={"reason_code": reason_code, "target_ref": delivery.target_ref},
+    )
+
+
+def resume_delivery(
+    db: Session, delivery_id: UUID, *, actor_admin_id: UUID | None = None
+) -> None:
+    """Un-park a delivery after the cause is fixed; replay picks it up again."""
+    state = db.execute(
+        select(LicenceDeliveryState).where(
+            LicenceDeliveryState.delivery_id == delivery_id
+        )
+    ).scalar_one_or_none()
+    if state is None:
+        raise NotFoundError(f"licence delivery {delivery_id} not found")
+    if state.state != DeliveryState.PARKED.value:
+        return
+    state.state = DeliveryState.DELIVERED.value
+    db.flush()
+    write_platform_audit_event(
+        db,
+        actor_admin_id=actor_admin_id,
+        action="vendor.licence.delivery_resumed",
+        entity_type="licence_delivery",
+        entity_id=str(delivery_id),
+        details={},
+    )
 
 
 def dispatch_pending(
@@ -227,12 +352,18 @@ def dispatch_pending(
     fixes the cause; nothing is deleted.
     """
     transport = transport or build_delivery_transport()
-    attempted = sent = failed = abandoned = 0
+    attempted = sent = failed = parked_terminal = parked_exhausted = 0
 
-    for delivery in pending_deliveries(db, limit=limit):
+    for delivery in pending_deliveries(db, limit=limit, claim=True):
         prior = _attempt_count(db, delivery.id)
         if prior >= max_attempts:
-            abandoned += 1
+            parked_exhausted += 1
+            _park(
+                db,
+                delivery,
+                reason_code="retry_exhausted",
+                actor_admin_id=actor_admin_id,
+            )
             continue
 
         attempted += 1
@@ -241,13 +372,19 @@ def dispatch_pending(
             transport.send(_packet(db, delivery))
         except TransportError as exc:
             failed += 1
+            terminal = not exc.retryable
             db.add(
                 LicenceDeliveryAttempt(
                     delivery_id=delivery.id,
                     attempt_no=attempt_no,
                     transport=transport.name,
-                    outcome=AttemptOutcome.FAILED.value,
-                    error=f"{type(exc).__name__}: {exc}"[:500],
+                    outcome=(
+                        AttemptOutcome.TERMINAL.value
+                        if terminal
+                        else AttemptOutcome.FAILED.value
+                    ),
+                    # ONLY the stable code — never the exception text.
+                    error_code=exc.code,
                 )
             )
             db.flush()
@@ -261,9 +398,17 @@ def dispatch_pending(
                     "attempt_no": attempt_no,
                     "transport": transport.name,
                     "retryable": exc.retryable,
-                    "error": str(exc)[:200],
+                    "error_code": exc.code,
                 },
             )
+            if terminal:
+                parked_terminal += 1
+                _park(
+                    db,
+                    delivery,
+                    reason_code=exc.code,
+                    actor_admin_id=actor_admin_id,
+                )
             continue
 
         sent += 1
@@ -278,7 +423,11 @@ def dispatch_pending(
         db.flush()
 
     return DispatchReport(
-        attempted=attempted, sent=sent, failed=failed, abandoned=abandoned
+        attempted=attempted,
+        sent=sent,
+        failed=failed,
+        parked_terminal=parked_terminal,
+        parked_exhausted=parked_exhausted,
     )
 
 
@@ -296,4 +445,5 @@ __all__ = [
     "DispatchReport",
     "pending_deliveries",
     "dispatch_pending",
+    "resume_delivery",
 ]

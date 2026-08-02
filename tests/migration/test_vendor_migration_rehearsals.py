@@ -28,7 +28,7 @@ from vendor_cp.migrations import composed_version_locations, make_alembic_config
 KERNEL_HEAD = "0012_platform_outbox"  # current pin (0.1.0a7; head unchanged since a6)
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v009_delivery_attempts"
+VENDOR_HEAD = "v010_delivery_hardening"
 
 
 def _superuser_url() -> str:
@@ -249,6 +249,7 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
             "licence_revocation_entries",
             "licence_revocation_lists",
             "licence_delivery_attempts",
+            "deployments",
         ):
             with appu.connect() as conn:
                 with pytest.raises(DBAPIError, match="permission denied"):

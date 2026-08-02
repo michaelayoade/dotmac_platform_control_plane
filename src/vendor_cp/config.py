@@ -22,17 +22,23 @@ class VendorSettings:
     # mirror of the target product's manifest catalogue (reconciled via the product
     # contract, never by inventing codes). An offer version may only grant these.
     offered_capabilities: tuple[str, ...] = ()
-    # WS8 licence signing (see vendor_cp.licensing.signer). Only "ephemeral" is
-    # permitted in this phase — an in-memory keypair, never persisted. Real key
-    # custody (OpenBao-referenced) is a later, design-gated slice, so anything
-    # else fails loudly rather than silently signing with a throwaway key.
+    # WS8 licence signing (see vendor_cp.licensing.signer). "ephemeral" (an
+    # in-memory keypair, dev/test only) or "configured" (a real key read from
+    # licence_signing_key_file). Ephemeral is the DEFAULT so a missing
+    # configuration cannot silently become a real issuer; an unknown mode fails
+    # loudly rather than falling back.
     licence_signing_mode: str = "ephemeral"
     # `configured` mode only. Path to a file holding the base64url raw Ed25519
     # private key, whose CANONICAL source is OpenBao
-    # (secret/dotmac/licensing/signing-key) — deploy tooling materialises it at
-    # 0600 and it is never committed, logged, or stored in the database. The
-    # key id is advertised in every envelope so deployments can select the
-    # right verification key.
+    # (secret/dotmac/licensing/signing-key). Deployment contract (2026-08-02):
+    # issuance runs on ONE designated instance; keys at
+    # /run/secrets/dotmac/vendor-control-plane/licence-signing/<key-id>.key,
+    # materialised by deploy tooling with a 0700 dir, 0600 service-owned files,
+    # atomic replacement, read-only container mount; manual materialisation is
+    # break-glass only. Never committed, logged, or stored in the database.
+    # The key is read ONCE at startup, so any key change needs a CONTROLLED
+    # RESTART. The key id is advertised in every envelope so deployments can
+    # select the right verification key.
     licence_signing_key_file: str = ""
     licence_signing_key_id: str = ""
     # OPTIONAL rotation overlap: while set, every document is ALSO signed with

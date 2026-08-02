@@ -69,15 +69,28 @@ grants, and acks the applied `(licence_id, licence_version, digest)`.
 - **Private-key interface, not key material:** `LicenceSignerProvider` is a
   narrow protocol (`key_id`, `public_key_b64`, `sign(payload: bytes) ->
   signature bytes`). Two modes behind `VENDOR_LICENCE_SIGNING_MODE`:
-  - **`ephemeral`** (default; the only mode this phase, matching the D3
-    fake-provider posture): an in-memory key generated at startup — dev/test
-    only, never persisted.
-  - **`configured`** (later phase, design here only): key material loaded
-    from a file/env reference whose CANONICAL source is OpenBao
-    (`secret/dotmac/licensing/signing-key` — pointer only; the value never
-    appears in code, config files, logs, or the database). A non-`ephemeral`
-    mode without a resolvable key FAILS STARTUP (same fail-closed posture as
-    `VENDOR_PROVIDER_MODE`).
+  - **`ephemeral`** (default): an in-memory key generated at startup — dev/test
+    only, never persisted. Default so a missing configuration cannot silently
+    become a real issuer.
+  - **`configured`** (IMPLEMENTED): key material loaded from a file whose
+    CANONICAL source is OpenBao (`secret/dotmac/licensing/signing-key` —
+    pointer only; the value never appears in code, config files, logs, the
+    database, or an exception message). A mode without resolvable key material
+    FAILS STARTUP.
+
+### Deployment contract (ruled 2026-08-02)
+
+- Issuance runs on **one designated vendor-control-plane instance**, to keep
+  key exposure to a single host. The specific host is deliberately **not yet
+  named** and must be named explicitly before deployment.
+- Keys live at
+  `/run/secrets/dotmac/vendor-control-plane/licence-signing/<key-id>.key`.
+- **Deploy tooling** materialises them from OpenBao: 0700 directory, 0600
+  service-owned files, **atomic replacement**, **read-only** container mount.
+  Manual materialisation is **break-glass only**.
+- The key is read **once** at construction, so every primary/overlap change
+  requires a **controlled restart**. Editing the file under a running process
+  changes nothing — a trap worth stating plainly.
 - **Key registry (public material only):** `licence_signing_keys` — `key_id`,
   `public_key_b64`, `status` (`active`/`retired`/`revoked`), timestamps. This
   is the source the distributed keyring is built from; rotation is: insert
@@ -154,11 +167,12 @@ grants, and acks the applied `(licence_id, licence_version, digest)`.
    a re-import of the same version is idempotent (kernel guard proves it).
 9. **No product-plane writes anywhere** (D1/D2 deny cases unchanged); no
    private key material in code, DB rows, fixtures, or logs — the ONLY
-   private key in tests is ephemeral (`FakeLicenceSigner` or `ephemeral`
-   mode).
-10. **Fail-closed startup:** `VENDOR_LICENCE_SIGNING_MODE` other than
-    `ephemeral` without resolvable key material refuses to boot (this phase:
-    only `ephemeral` is accepted at all).
+   private key in tests is ephemeral (`FakeLicenceSigner`, `ephemeral` mode, or
+   a per-test temporary key file).
+10. **Fail-closed startup:** `configured` without resolvable key material
+    refuses to boot; an UNKNOWN mode refuses to boot; a half-configured
+    rotation overlap (file without id, or id without file) refuses to boot
+    rather than silently disabling double-signing mid-rotation.
 
 ## Dependencies and sequencing
 
@@ -171,8 +185,44 @@ grants, and acks the applied `(licence_id, licence_version, digest)`.
 | Reference product receiver (starter repo) proving verify → local WS2 grant → explainable decision → ack | parallel slice; closes the end-to-end proof |
 
 Implementation lands one guarded slice at a time: (1) repin; (2) key registry +
-`LicenceSignerProvider` (ephemeral) + `LicenceIssuanceService` with issuance
+`LicenceSignerProvider` + `LicenceIssuanceService` with issuance
 tables + round-trip tests; (3) `EntitlementProjectionService` delivery staging
 + ack recording + lifecycle projection; (4) revocation entries + signed list
 publication. Each slice: migration, typed idempotent commands, platform audit,
 thin routes, Postgres rehearsals.
+
+
+## Delivery-pipeline review gates (2026-08-02)
+
+Applied after the transport slice merged:
+
+- **Concurrency-safe replay claims.** Workers claim their work-list
+  `FOR UPDATE SKIP LOCKED` (Postgres), so two replay processes cannot read the
+  same delivery, compute the same next attempt number, and race — one having
+  already sent before losing the unique constraint.
+- **Safe error codes only.** Attempts persist a stable, closed-vocabulary
+  `error_code`; raw transport exceptions, response bodies, URLs, headers, and
+  tokens are never stored or audited. The old free-text column is dropped, not
+  migrated.
+- **Terminal failures park and alert.** `retryable` CONTROLS replay rather than
+  merely describing it: a terminal failure (or attempt exhaustion) moves the
+  delivery to `parked`, which stops replay immediately and surfaces as its own
+  alert bucket. Parked is not deleted — an operator resumes it.
+- **Registered destinations only.** Deliveries resolve through the
+  `deployments` registry; a caller can never name an arbitrary destination URL.
+- **Ack identity is proven, not claimed.** `ingest_acknowledgement` takes the
+  identity the caller AUTHENTICATED as; the body's `deployment_id` is only a
+  claim and a disagreement is a mismatch. A deployment-bound licence cannot be
+  activated by an unauthenticated caller — fail-closed until deployment
+  authentication lands, because accepting the body's word would make binding
+  decorative.
+- **Offline delivery is an ENVELOPE bundle**, not a self-contained one. It
+  carries the signed licence and (optionally) the signed revocation list, and
+  states its unmet prerequisites in the artifact: the keyring must be
+  provisioned out-of-band, the receiver applies the revocation list itself, and
+  there is no import receipt.
+- **Alerts are seven separate observations** (never attempted; sent but
+  unacknowledged; retry-exhausted/terminal; receiver rejections by reason;
+  unknown digest/licence/mismatch as CRITICAL; keyring uptake lag; revocation
+  application lag). The last two are reported as **not measurable** — both need
+  receiver-reported versions, and "transport sent it" cannot prove import.
