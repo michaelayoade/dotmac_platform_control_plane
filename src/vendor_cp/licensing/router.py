@@ -18,12 +18,16 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vendor_cp.licensing import service
+from vendor_cp.licensing import projection, service
 from vendor_cp.licensing.models import LicenceSigningKey
 from vendor_cp.licensing.schemas import (
+    AcknowledgementRequest,
+    AckOutcomeResponse,
+    DeliveryResponse,
     IssueLicenceRequest,
     LicenceIssuanceResponse,
     SigningKeyResponse,
+    StageDeliveryRequest,
 )
 
 router = APIRouter(prefix="/platform/vendor/licences", tags=["licensing"])
@@ -71,6 +75,63 @@ def keyring(_admin: Admin, db: Db) -> list[SigningKeyResponse]:
         )
         for r in rows
     ]
+
+
+@router.post("/deliveries", response_model=DeliveryResponse)
+def stage_delivery(
+    payload: StageDeliveryRequest, admin: Admin, db: Db
+) -> DeliveryResponse:
+    view = projection.stage_delivery(
+        db,
+        projection.StageDeliveryCommand(
+            issuance_id=payload.issuance_id,
+            target_ref=payload.target_ref,
+            actor_admin_id=admin.id,
+        ),
+    )
+    return _delivery_response(view)
+
+
+@router.get("/deliveries/{delivery_id}", response_model=DeliveryResponse)
+def delivery_status(delivery_id: UUID, _admin: Admin, db: Db) -> DeliveryResponse:
+    return _delivery_response(projection.delivery_status(db, delivery_id))
+
+
+@router.post("/acknowledgements", response_model=AckOutcomeResponse)
+def ingest_acknowledgement(
+    payload: AcknowledgementRequest, admin: Admin, db: Db
+) -> AckOutcomeResponse:
+    """Ingest a data-plane acknowledgement. Always 200 with a verdict: a
+    quarantined ack is a recorded FACT the vendor needs, not a client error."""
+    outcome = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=payload.licence_id,
+            licence_version=payload.licence_version,
+            digest=payload.digest,
+            status=payload.status,
+            reason=payload.reason,
+            deployment_id=payload.deployment_id,
+        ),
+        actor_admin_id=admin.id,
+    )
+    return AckOutcomeResponse(
+        ack_id=outcome.ack_id,
+        disposition=outcome.disposition,
+        activated=outcome.activated,
+        quarantined=outcome.quarantined,
+        delivery_id=outcome.delivery_id,
+    )
+
+
+def _delivery_response(view: projection.DeliveryView) -> DeliveryResponse:
+    return DeliveryResponse(
+        id=view.id,
+        issuance_id=view.issuance_id,
+        target_ref=view.target_ref,
+        state=view.state,
+        activating_ack_id=view.activating_ack_id,
+    )
 
 
 __all__ = ["router"]

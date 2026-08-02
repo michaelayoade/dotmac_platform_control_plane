@@ -1,0 +1,588 @@
+"""Unit tests for `EntitlementProjectionService` (delivery + acknowledgement).
+
+The contract under test: **`active` means the data plane COMMITTED a local
+projection of this exact version and digest** — not that a call returned
+successfully. Everything else follows: only a matching `applied` ack activates;
+unknown/conflicting acks are recorded but quarantined; duplicates are
+idempotent; a late v1 ack can never regress a v2 delivery.
+
+The centrepiece is a cross-plane canary running the full chain —
+activate → allocate → issue → stage → receiver apply → ingest ack → active —
+plus its negative twin, where the receiver's transaction is rolled back and NO
+applied acknowledgement is allowed to reach the vendor.
+
+The "receiver" here is a stand-in built ONLY on the kernel's public licensing +
+entitlement API (`verify_licence`, `grant_entitlement`, `AppliedLicence`), the
+same contract the real reference receiver consumes: the vendor control plane
+may not import a product data plane (deny-case D2). The REAL receiver
+(`app/features/licensing`) is proven in `dotmac_starter_mt`; what this proves
+is that documents this repo issues drive that contract correctly, and that the
+vendor's ack handling is right.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Iterator
+from datetime import UTC, date, datetime
+
+import pytest
+from dotmac_kernel import (
+    CapabilityCatalogue,
+    FeatureManifest,
+    Tenant,
+    grant_entitlement,
+    is_entitled,
+)
+from dotmac_kernel.licensing import (
+    AppliedLicence,
+    LicenceAcknowledgement,
+    verify_licence,
+)
+from dotmac_kernel.messaging import PlatformOutboxEvent
+from dotmac_kernel.testing import create_test_engine, isolated_session
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from vendor_cp.allocations import service as allocations
+from vendor_cp.approvals import service as approvals
+from vendor_cp.contracts import service as contracts
+from vendor_cp.licensing import projection
+from vendor_cp.licensing import service as licensing
+from vendor_cp.licensing.delivery_models import (
+    AckDisposition,
+    DeliveryState,
+    LicenceAckRecord,
+    LicenceDelivery,
+)
+from vendor_cp.licensing.signer import EphemeralLicenceSigner
+from vendor_cp.offers.models import OfferVersion
+
+NOW = datetime(2026, 8, 2, 12, 0, 0, tzinfo=UTC)
+PRODUCT = "dotmac-sub"
+TARGET = "deployment-endpoint-1"
+
+
+@pytest.fixture
+def db() -> Iterator[Session]:
+    engine = create_test_engine()
+    try:
+        with isolated_session(engine) as s:
+            yield s
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def signer() -> EphemeralLicenceSigner:
+    return EphemeralLicenceSigner(key_id="vendor-key-1")
+
+
+def _catalogue(*codes: str) -> CapabilityCatalogue:
+    return CapabilityCatalogue.from_manifests(
+        [FeatureManifest(name="t", capabilities=tuple(codes))]
+    )
+
+
+def _staged_allocation(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
+    """contract → submit → approve → activate → stage."""
+    offer_code = f"off-{suffix}"
+    db.add(
+        OfferVersion(
+            offer_code=offer_code,
+            version=1,
+            amount="10.00",
+            currency_code="USD",
+            capability_codes=["cap.a", "cap.b"],
+        )
+    )
+    db.flush()
+    draft = contracts.create_draft(
+        db,
+        contracts.CreateDraftCommand(
+            command_id=f"d-{uuid.uuid4()}",
+            customer_ref=customer_ref,
+            legal_entity="Dotmac Ltd",
+            currency_code="USD",
+            term_start=date(2026, 1, 1),
+            term_end=date(2026, 12, 31),
+            lines=(
+                contracts.LineInput(offer_code, 1, "cap.a", quantity=2),
+                contracts.LineInput(offer_code, 1, "cap.b", quantity=1),
+            ),
+        ),
+    )
+    submitted = contracts.submit(
+        db,
+        contracts.SubmitCommand(
+            command_id=f"s-{uuid.uuid4()}",
+            contract_id=draft.id,
+            approval_policy_code=f"p-{suffix}",
+            approval_policy_version=1,
+            submitter_id=uuid.uuid4(),
+        ),
+        catalogue=_catalogue("cap.a", "cap.b"),
+    )
+    approvals.publish_policy_version(
+        db,
+        approvals.PublishPolicyCommand(
+            command_id=f"pol-{uuid.uuid4()}",
+            policy_code=f"p-{suffix}",
+            version=1,
+            quorum=1,
+        ),
+    )
+    approvals.record_approval(
+        db,
+        approvals.RecordApprovalCommand(
+            command_id=f"a-{uuid.uuid4()}",
+            policy_code=f"p-{suffix}",
+            policy_version=1,
+            subject_type="contract",
+            subject_id=str(draft.id),
+            content_hash=submitted.content_hash or "",
+            approver_id=uuid.uuid4(),
+        ),
+    )
+    contracts.approve(
+        db,
+        contracts.TransitionCommand(
+            command_id=f"ap-{uuid.uuid4()}", contract_id=draft.id
+        ),
+    )
+    contracts.activate(
+        db,
+        contracts.TransitionCommand(
+            command_id=f"act-{uuid.uuid4()}",
+            contract_id=draft.id,
+            activation_evidence="countersigned",
+        ),
+    )
+    return allocations.stage_allocation(
+        db,
+        allocations.StageAllocationCommand(
+            source_event_id=f"evt-{uuid.uuid4()}",
+            contract_id=draft.id,
+            content_hash=submitted.content_hash or "",
+            customer_ref=customer_ref,
+        ),
+    ).id
+
+
+def _issue(db, signer, *, suffix="a", customer_ref="cust-a", **over):
+    alloc = _staged_allocation(db, suffix=suffix, customer_ref=customer_ref)
+    return licensing.issue_licence(
+        db,
+        licensing.IssueLicenceCommand(
+            allocation_id=alloc, product=over.pop("product", PRODUCT), **over
+        ),
+        signer=signer,
+        now=NOW,
+    )
+
+
+def _stage(db, issued, target=TARGET):
+    return projection.stage_delivery(
+        db, projection.StageDeliveryCommand(issuance_id=issued.id, target_ref=target)
+    )
+
+
+def _ack_from(ack: LicenceAcknowledgement) -> projection.AcknowledgementInput:
+    """Adapt the kernel's cross-plane ack value object to the ingestion input —
+    the vendor speaks exactly the vocabulary the receiver emits."""
+    return projection.AcknowledgementInput(
+        licence_id=ack.licence_id,
+        licence_version=ack.licence_version,
+        digest=ack.digest,
+        status=ack.status,
+        reason=ack.reason,
+        deployment_id=ack.deployment_id,
+    )
+
+
+# ── The receiver stand-in (kernel public API only) ──────────────────────────
+
+
+def _receive(
+    db: Session,
+    envelope,
+    *,
+    keyring,
+    tenant_id: uuid.UUID,
+    catalogue: CapabilityCatalogue,
+    applied: AppliedLicence | None = None,
+    deployment_id: str | None = None,
+    fail_after_grants: bool = False,
+) -> LicenceAcknowledgement:
+    """Verify → project into local WS2 grants → emit the ack, exactly as the
+    reference receiver does. `fail_after_grants` simulates a receiver whose
+    transaction dies after writing grants but before commit."""
+    verified = verify_licence(
+        envelope,
+        keyring=keyring,
+        now=NOW,
+        expected_deployment_id=deployment_id,
+        applied=applied,
+    )
+    for grant in verified.document.capabilities:
+        grant_entitlement(
+            db,
+            tenant_id=tenant_id,
+            capability_code=grant.code,
+            catalogue=catalogue,
+            limits=dict(grant.limits),
+            source=f"licence:{verified.document.licence_id}",
+        )
+    if fail_after_grants:
+        raise RuntimeError("receiver crashed before commit")
+    return LicenceAcknowledgement(
+        licence_id=verified.document.licence_id,
+        licence_version=verified.document.licence_version,
+        digest=verified.digest,
+        status="applied",
+        deployment_id=deployment_id,
+    )
+
+
+# ── Delivery staging ────────────────────────────────────────────────────────
+
+
+def test_staging_records_the_fact_state_and_event_atomically(db, signer) -> None:
+    issued = _issue(db, signer)
+    view = _stage(db, issued)
+
+    assert view.state == DeliveryState.DELIVERED.value
+    assert view.activating_ack_id is None
+    events = (
+        db.execute(
+            select(PlatformOutboxEvent).where(
+                PlatformOutboxEvent.event_type == "licence.delivered"
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(events) == 1
+    assert events[0].payload["digest"] == issued.digest
+    assert events[0].payload["target_ref"] == TARGET
+
+
+def test_restaging_is_the_same_fact_not_a_second_one(db, signer) -> None:
+    issued = _issue(db, signer)
+    first = _stage(db, issued)
+    second = _stage(db, issued)
+    assert first.id == second.id
+    assert (
+        db.execute(select(func.count()).select_from(LicenceDelivery)).scalar_one() == 1
+    )
+
+
+def test_staging_an_unknown_issuance_is_rejected(db) -> None:
+    from dotmac_kernel import NotFoundError
+
+    with pytest.raises(NotFoundError):
+        projection.stage_delivery(
+            db,
+            projection.StageDeliveryCommand(
+                issuance_id=uuid.uuid4(), target_ref=TARGET
+            ),
+        )
+
+
+# ── The cross-plane canary ──────────────────────────────────────────────────
+
+
+def test_cross_plane_canary_activate_to_active(db, signer) -> None:
+    """activate → allocate → issue → stage → receiver apply → ingest ack → active."""
+    issued = _issue(db, signer)
+    delivery = _stage(db, issued)
+    assert delivery.state == DeliveryState.DELIVERED.value
+
+    # --- data plane (kernel contract only) ---
+    tenant = Tenant(slug="acme", name="Acme")
+    db.add(tenant)
+    db.flush()
+    receiver_catalogue = _catalogue("cap.a", "cap.b")
+    ack = _receive(
+        db,
+        issued.envelope,
+        keyring=licensing.build_keyring(db),
+        tenant_id=tenant.id,
+        catalogue=receiver_catalogue,
+    )
+    # The product's local decision is live and explainable.
+    assert is_entitled(db, tenant_id=tenant.id, capability_code="cap.a").allowed
+
+    # --- back at the vendor ---
+    outcome = projection.ingest_acknowledgement(db, _ack_from(ack))
+    assert outcome.disposition == AckDisposition.ACCEPTED.value
+    assert outcome.activated is True
+    assert (
+        projection.delivery_status(db, delivery.id).state == DeliveryState.ACTIVE.value
+    )
+    activated = (
+        db.execute(
+            select(PlatformOutboxEvent).where(
+                PlatformOutboxEvent.event_type == "licence.activated"
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(activated) == 1
+    assert activated[0].payload["digest"] == issued.digest
+
+
+def test_receiver_commit_failure_produces_no_applied_ack(db, signer) -> None:
+    """`applied` means COMMITTED. A receiver that dies before commit emits no
+    acknowledgement, so the vendor's delivery must stay `delivered` — never
+    activated on the strength of a call that did not stick."""
+    issued = _issue(db, signer)
+    delivery = _stage(db, issued)
+    tenant = Tenant(slug="acme", name="Acme")
+    db.add(tenant)
+    db.flush()
+
+    with pytest.raises(RuntimeError, match="crashed before commit"):
+        _receive(
+            db,
+            issued.envelope,
+            keyring=licensing.build_keyring(db),
+            tenant_id=tenant.id,
+            catalogue=_catalogue("cap.a", "cap.b"),
+            fail_after_grants=True,
+        )
+
+    # No ack was produced, so none can be ingested: nothing reaches the vendor.
+    assert (
+        db.execute(select(func.count()).select_from(LicenceAckRecord)).scalar_one() == 0
+    )
+    assert (
+        projection.delivery_status(db, delivery.id).state
+        == DeliveryState.DELIVERED.value
+    )
+
+
+# ── Matching rules ──────────────────────────────────────────────────────────
+
+
+def test_unknown_licence_is_quarantined(db, signer) -> None:
+    issued = _issue(db, signer)
+    _stage(db, issued)
+    outcome = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(uuid.uuid4()),
+            licence_version=1,
+            digest=issued.digest,
+            status="applied",
+        ),
+    )
+    assert outcome.disposition == AckDisposition.UNKNOWN_LICENCE.value
+    assert outcome.quarantined and not outcome.activated
+
+
+def test_unknown_digest_is_quarantined_as_the_tamper_tripwire(db, signer) -> None:
+    issued = _issue(db, signer)
+    delivery = _stage(db, issued)
+    outcome = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest="sha256:not-a-digest-we-issued",
+            status="applied",
+        ),
+    )
+    assert outcome.disposition == AckDisposition.UNKNOWN_DIGEST.value
+    assert outcome.quarantined and not outcome.activated
+    assert (
+        projection.delivery_status(db, delivery.id).state
+        == DeliveryState.DELIVERED.value
+    )
+    # …and the evidence is retained.
+    record = db.execute(select(LicenceAckRecord)).scalar_one()
+    assert record.digest == "sha256:not-a-digest-we-issued"
+
+
+def test_unknown_version_is_quarantined(db, signer) -> None:
+    issued = _issue(db, signer)
+    _stage(db, issued)
+    outcome = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=99,
+            digest=issued.digest,
+            status="applied",
+        ),
+    )
+    assert outcome.disposition == AckDisposition.UNKNOWN_LICENCE.value
+    assert not outcome.activated
+
+
+def test_bound_licence_requires_the_acking_deployment_to_match(db, signer) -> None:
+    issued = _issue(db, signer, deployment_id="dep-a")
+    delivery = _stage(db, issued)
+
+    wrong = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest=issued.digest,
+            status="applied",
+            deployment_id="dep-b",
+        ),
+    )
+    assert wrong.disposition == AckDisposition.DEPLOYMENT_MISMATCH.value
+    assert wrong.quarantined
+    assert (
+        projection.delivery_status(db, delivery.id).state
+        == DeliveryState.DELIVERED.value
+    )
+
+    right = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest=issued.digest,
+            status="applied",
+            deployment_id="dep-a",
+        ),
+    )
+    assert right.activated is True
+
+
+def test_rejected_ack_records_the_reason_without_activating(db, signer) -> None:
+    issued = _issue(db, signer)
+    delivery = _stage(db, issued)
+    outcome = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest=issued.digest,
+            status="rejected",
+            reason="UndeclaredCapabilityError",
+        ),
+    )
+    assert outcome.disposition == AckDisposition.REJECTED_BY_RECEIVER.value
+    assert not outcome.activated and not outcome.quarantined
+    assert (
+        projection.delivery_status(db, delivery.id).state
+        == DeliveryState.DELIVERED.value
+    )
+    record = db.execute(select(LicenceAckRecord)).scalar_one()
+    assert record.reason == "UndeclaredCapabilityError"
+
+
+def test_duplicate_acknowledgement_is_idempotent(db, signer) -> None:
+    issued = _issue(db, signer)
+    delivery = _stage(db, issued)
+    ack = projection.AcknowledgementInput(
+        licence_id=str(issued.licence_id),
+        licence_version=issued.version,
+        digest=issued.digest,
+        status="applied",
+    )
+    first = projection.ingest_acknowledgement(db, ack)
+    second = projection.ingest_acknowledgement(db, ack)
+
+    assert first.activated is True
+    assert second.activated is False
+    assert second.disposition == AckDisposition.DUPLICATE.value
+    state = projection.delivery_status(db, delivery.id)
+    assert state.state == DeliveryState.ACTIVE.value
+    # The activating ack is unchanged — the duplicate did not take it over.
+    assert state.activating_ack_id == first.ack_id
+    # Both are retained: the log is append-only.
+    assert (
+        db.execute(select(func.count()).select_from(LicenceAckRecord)).scalar_one() == 2
+    )
+
+
+def test_late_v1_ack_cannot_regress_an_active_v2(db, signer) -> None:
+    v1 = _issue(db, signer, suffix="a", customer_ref="cust-x")
+    d1 = _stage(db, v1)
+    v2 = _issue(db, signer, suffix="a2", customer_ref="cust-x")
+    assert (v1.licence_id, v2.version) == (v2.licence_id, 2)
+    d2 = _stage(db, v2)
+
+    # v2 acknowledged and active first…
+    projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(v2.licence_id),
+            licence_version=2,
+            digest=v2.digest,
+            status="applied",
+        ),
+    )
+    assert projection.delivery_status(db, d2.id).state == DeliveryState.ACTIVE.value
+
+    # …then a delayed v1 ack arrives. It must not activate the older delivery.
+    late = projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(v1.licence_id),
+            licence_version=1,
+            digest=v1.digest,
+            status="applied",
+        ),
+    )
+    assert late.disposition == AckDisposition.STALE.value
+    assert late.activated is False
+    assert projection.delivery_status(db, d1.id).state == DeliveryState.DELIVERED.value
+    assert projection.delivery_status(db, d2.id).state == DeliveryState.ACTIVE.value
+
+
+def test_acknowledgement_log_lists_every_verdict(db, signer) -> None:
+    issued = _issue(db, signer)
+    _stage(db, issued)
+    good = projection.AcknowledgementInput(
+        licence_id=str(issued.licence_id),
+        licence_version=issued.version,
+        digest=issued.digest,
+        status="applied",
+    )
+    projection.ingest_acknowledgement(db, good)
+    projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest="sha256:bogus",
+            status="applied",
+        ),
+    )
+    log = projection.list_acknowledgements(db, str(issued.licence_id))
+    assert [entry["disposition"] for entry in log] == [
+        AckDisposition.ACCEPTED.value,
+        AckDisposition.UNKNOWN_DIGEST.value,
+    ]
+
+
+def test_projection_writes_no_product_entitlement_grants(db, signer) -> None:
+    """The C4 boundary holds on this side too: tracking an acknowledgement
+    never writes a data plane's grants."""
+    from dotmac_kernel.entitlements import TenantEntitlementGrant
+
+    issued = _issue(db, signer)
+    _stage(db, issued)
+    projection.ingest_acknowledgement(
+        db,
+        projection.AcknowledgementInput(
+            licence_id=str(issued.licence_id),
+            licence_version=issued.version,
+            digest=issued.digest,
+            status="applied",
+        ),
+    )
+    assert (
+        db.execute(
+            select(func.count()).select_from(TenantEntitlementGrant)
+        ).scalar_one()
+        == 0
+    )
