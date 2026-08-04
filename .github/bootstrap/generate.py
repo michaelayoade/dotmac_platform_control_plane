@@ -1,10 +1,11 @@
 """Emit a --require-hashes requirements file pinning Poetry and every
 transitive dependency, resolved for THIS interpreter/platform.
 
-Run inside a linux/amd64 cp312 container so the resolution matches the CI
-runners; markers are evaluated against the running interpreter, so resolving
-on macOS silently produces a different dependency set (xattr in, SecretStorage
-and jeepney out).
+Run inside a linux/amd64 container for the TARGET interpreter, so the
+resolution matches the CI runner that will use it. Markers are evaluated
+against the RUNNING interpreter, so resolving on macOS silently produces a
+different dependency set (xattr in; SecretStorage, jeepney and cryptography
+out), and resolving on one Python minor produces a different set from another.
 
 For each resolved (name, version) it records the sha256 of EVERY distribution
 PyPI publishes for that version, not just the one wheel this resolution picked.
@@ -59,7 +60,7 @@ pins = sorted(
 
 print("# Hash-locked Poetry bootstrap — GENERATED, do not hand-edit.")
 print("# Regenerate with .github/bootstrap/regenerate.sh (see that script for why")
-print("# it must run in a linux/amd64 cp312 container).")
+print("# it must run in a linux/amd64 container for THIS interpreter).")
 print(f"# Pinned installer: {POETRY}")
 print("#")
 print("# Install with:")

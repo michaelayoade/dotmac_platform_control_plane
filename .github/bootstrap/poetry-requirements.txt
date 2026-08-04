@@ -1,6 +1,6 @@
 # Hash-locked Poetry bootstrap — GENERATED, do not hand-edit.
 # Regenerate with .github/bootstrap/regenerate.sh (see that script for why
-# it must run in a linux/amd64 cp312 container).
+# it must run in a linux/amd64 container for THIS interpreter).
 # Pinned installer: poetry==2.4.1
 #
 # Install with:

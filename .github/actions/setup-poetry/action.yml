@@ -40,25 +40,46 @@ runs:
         path: ~/.cache/pip
         key: poetry-bootstrap-${{ runner.os }}-${{ hashFiles('.github/bootstrap/poetry-requirements.txt') }}
 
-    - name: Install pinned Poetry (hash-locked)
+    - name: Install pinned Poetry into a fresh job-local venv
       shell: bash
       run: |
         set -euo pipefail
         req=".github/bootstrap/poetry-requirements.txt"
-        # Bounded retries: a cold cache still needs the network, and one reset
-        # should not fail a run. Bounded, because retrying forever converts a
-        # real outage into a timeout with no diagnosis.
+        venv="${RUNNER_TEMP}/poetry-bootstrap"
+
+        # A FRESH VENV IS THE WHOLE POINT, not tidiness.
         #
-        # A HASH MISMATCH is not transient and must never be retried into
-        # submission. pip exits non-zero for both causes, so the attempt count
-        # is low, the backoff short, and the final message points explicitly at
-        # regeneration so a genuine pin failure is not misread as flakiness.
+        # pip leaves an already-satisfied requirement untouched, and hashes
+        # protect archives being INSTALLED — not packages already on disk.
+        # Installing into the interpreter's own site-packages therefore
+        # verifies nothing whenever the packages happen to be present, which on
+        # this repo's persistent self-hosted runner is every run after the
+        # first. Observed 2026-08-04: the `check` job reported every package
+        # "Requirement already satisfied" from the shared tool cache and
+        # downloaded nothing, so the bootstrap ran and established no trust at
+        # all — on precisely the runner where a poisoned site-packages matters
+        # most, because it persists across jobs.
+        #
+        # Removing and recreating the venv makes skipping structurally
+        # impossible: there is nothing there to satisfy anything, so every
+        # package is fetched and hash-checked on every run.
+        rm -rf "$venv"
+        python -m venv "$venv"
+
+        # Bounded retries for transient network faults. Every attempt applies
+        # the SAME hash checking, so a mismatch fails all three identically —
+        # retrying cannot launder a bad hash into an install. Bounded, because
+        # retrying forever turns a real outage into a timeout with no
+        # diagnosis; the final message names both causes so a genuine pin
+        # failure is not misread as flakiness.
         for attempt in 1 2 3; do
-          if python -m pip install --disable-pip-version-check \
+          if "$venv/bin/python" -m pip install --disable-pip-version-check \
                --require-hashes --only-binary=:all: -r "$req"; then
-            poetry --version
-            poetry config virtualenvs.create true
-            poetry config virtualenvs.in-project true
+            resolved="$("$venv/bin/poetry" --version)"
+            echo "${venv}/bin" >> "$GITHUB_PATH"
+            echo "installed ${resolved} at ${venv}/bin/poetry"
+            "$venv/bin/poetry" config virtualenvs.create true
+            "$venv/bin/poetry" config virtualenvs.in-project true
             exit 0
           fi
           echo "::warning::poetry bootstrap attempt ${attempt} failed"
@@ -66,3 +87,15 @@ runs:
         done
         echo "::error::poetry bootstrap failed after 3 attempts — if pip reported HASH MISMATCH this is NOT a network fault; regenerate ${req} with .github/bootstrap/regenerate.sh"
         exit 1
+
+    - name: Assert Poetry resolves to the verified venv
+      shell: bash
+      run: |
+        set -euo pipefail
+        want="${RUNNER_TEMP}/poetry-bootstrap/bin/poetry"
+        got="$(command -v poetry)"
+        if [ "$got" != "$want" ]; then
+          echo "::error::poetry on PATH is ${got}, not the hash-verified ${want} — a pre-existing install is shadowing the bootstrap"
+          exit 1
+        fi
+        echo "poetry resolves to the verified venv: ${got}"

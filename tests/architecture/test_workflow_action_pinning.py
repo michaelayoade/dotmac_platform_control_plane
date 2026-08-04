@@ -33,12 +33,28 @@ _SHA = re.compile(r"^[0-9a-f]{40}$")
 _USES = re.compile(r"^\s*-?\s*uses:\s*(?P<ref>[^\s#]+)")
 
 
+def _workflow_files() -> list[Path]:
+    """Every file GitHub would treat as a workflow or a local action manifest.
+
+    BOTH extensions, RECURSIVELY. GitHub accepts `.yml` and `.yaml` for
+    workflows, and `action.yml` or `action.yaml` for action metadata — so a
+    checker scanning only `*.yml` one directory deep can be bypassed by a
+    perfectly valid `.yaml` file, which would then escape every assertion in
+    this module. That is a silent hole in a supply-chain guard, not mere
+    laxity.
+    """
+    files: list[Path] = []
+    for ext in ("yml", "yaml"):
+        files += WORKFLOWS.rglob(f"*.{ext}")
+        files += ACTIONS.rglob(f"action.{ext}")
+    return sorted(set(files))
+
+
 def _iter_uses() -> list[tuple[str, str]]:
     """(source file, `uses:` value) for every step in every workflow and every
     local composite action."""
     found: list[tuple[str, str]] = []
-    files = sorted(WORKFLOWS.glob("*.yml")) + sorted(ACTIONS.glob("*/action.yml"))
-    for path in files:
+    for path in _workflow_files():
         rel = str(path.relative_to(REPO))
         for line in path.read_text().splitlines():
             match = _USES.match(line)
@@ -112,3 +128,61 @@ def test_the_bootstrap_requirements_are_fully_hash_pinned() -> None:
         name = line.split()[0]
         assert "==" in name, f"{name!r} is not pinned to an exact version"
         assert "--hash=sha256:" in line, f"{name!r} carries no sha256 hash"
+
+
+def test_the_bootstrap_installs_into_a_fresh_venv_not_the_interpreter() -> None:
+    """pip leaves an already-satisfied requirement untouched, and hashes cover
+    archives being INSTALLED — not packages already on disk. Installing into
+    the interpreter's own site-packages therefore verifies nothing on a
+    persistent runner, which is exactly what happened on the self-hosted
+    `dotmac-s3` runner on 2026-08-04: every package "Requirement already
+    satisfied" from the shared tool cache, nothing downloaded, no hash checked.
+    Only a freshly created venv makes skipping impossible."""
+    action = (ACTIONS / "setup-poetry" / "action.yml").read_text()
+    assert 'rm -rf "$venv"' in action, "the venv is not recreated, so pip may skip"
+    assert "python -m venv" in action, "no venv is created"
+    assert (
+        '"$venv/bin/python" -m pip install' in action
+    ), "pip must install into the venv's interpreter, not the job's"
+    assert "--require-hashes" in action
+    assert (
+        'echo "${venv}/bin" >> "$GITHUB_PATH"' in action
+    ), "the verified venv is never published on PATH"
+    assert (
+        "command -v poetry" in action
+    ), "nothing asserts that the poetry on PATH is the verified one"
+
+
+def test_a_dot_yaml_workflow_cannot_bypass_the_checks() -> None:
+    """Sensitivity proof for the extension coverage. GitHub runs `.yaml`
+    workflows exactly as it runs `.yml`, so prove discovery picks one up rather
+    than trusting the glob by inspection."""
+    probe = WORKFLOWS / "_pinning_probe_.yaml"
+    probe.write_text(
+        "name: probe\njobs:\n  p:\n    steps:\n"
+        "      - uses: snok/install-poetry@v1\n"
+    )
+    try:
+        assert probe in _workflow_files(), ".yaml workflows are not discovered"
+        refs = [uses for rel, uses in _iter_uses() if "_pinning_probe_" in rel]
+        assert refs == [
+            "snok/install-poetry@v1"
+        ], "a .yaml workflow's `uses:` was not read"
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+def test_a_dot_yaml_action_manifest_is_also_scanned() -> None:
+    """Same hole one level down: action metadata may be `action.yaml`."""
+    probe_dir = ACTIONS / "_pinning_probe_"
+    probe = probe_dir / "action.yaml"
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    probe.write_text(
+        "name: probe\nruns:\n  using: composite\n  steps:\n"
+        "      - uses: some/action@main\n"
+    )
+    try:
+        assert probe in _workflow_files(), "action.yaml manifests are not scanned"
+    finally:
+        probe.unlink(missing_ok=True)
+        probe_dir.rmdir()
