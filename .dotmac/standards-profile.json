@@ -1,0 +1,41 @@
+{
+  "schema_version": 2,
+  "profile_id": "dotmac-vendor-control-plane-engineering-standards",
+  "repository": {
+    "canonical_url": "https://github.com/michaelayoade/dotmac_vendor_control_plane",
+    "default_branch": "main"
+  },
+  "governance_model": {
+    "kind": "pinned",
+    "canonical_url": "https://github.com/michaelayoade/dotmac_governance",
+    "revision": "1f5f1372238ef37eff71154694d5620008de0959",
+    "source": "docs/adr/0006-cross-repository-engineering-conformance.md",
+    "status": "accepted"
+  },
+  "enforcement_mode": "required",
+  "authorities": [
+    {
+      "authority_id": "licence-issuance",
+      "subject": "Vendor-side signing and immutable lineage/version assignment for staged licence allocations.",
+      "protected_resources": [
+        "signed-licence-document",
+        "licence-lineage-version"
+      ],
+      "owner_component": "licence-issuance-service",
+      "owner_implementation": "src/vendor_cp/licensing/service.py",
+      "decision_interface": "vendor_cp.licensing.service.issue_licence",
+      "canonical_writer_paths": ["src/vendor_cp/licensing/service.py"],
+      "adapter_paths": ["src/vendor_cp/licensing/router.py"],
+      "drift_test_paths": ["tests/unit/test_licensing.py"]
+    }
+  ],
+  "typed_contract_surfaces": [
+    {
+      "surface_id": "licence-issuance-service-contract",
+      "paths": ["src/vendor_cp/licensing/service.py"],
+      "require_public_annotations": true,
+      "forbid_any": true,
+      "require_immutable_records": true
+    }
+  ]
+}

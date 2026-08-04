@@ -30,7 +30,13 @@ disagree, fix the drift.
    kernel's transaction authority (`get_db`/`conflict_savepoint`) and audit
    write-side.
 8. **Branch before committing; merge only on green.** Protected `main`. Pin the
-   kernel exactly (`==0.1.0a1`); bump deliberately when a new alpha ships.
+   kernel exactly (`==0.1.0a8`); bump deliberately when a new alpha ships.
+9. **Cross-repository engineering governance is pinned and required.**
+   `.dotmac/standards-profile.json` names the enrolled authority and fully typed
+   contract surface, and pins the accepted Governance source by exact commit.
+   The `Dotmac engineering standards` CI job must execute that same immutable
+   revision. Mutable tags/branches, copied rules, candidate mode, or a missing
+   required check are not substitutes.
 
 ## Validation before any commit
 
