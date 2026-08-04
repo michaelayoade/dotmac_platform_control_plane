@@ -16,7 +16,9 @@ follows from that:
   deployment), advances `delivered → active`. An acknowledgement with no proven
   identity is recorded as evidence and activates nothing — bound or unbound —
   because `active` claims the data plane committed, and an unauthenticated
-  caller cannot establish that for any licence.
+  caller cannot establish that for any licence. A platform admin is not a
+  deployment: admin-submitted acks are evidence, permanently, by design and
+  not pending some later feature.
 - Anything else is recorded and QUARANTINED, never acted on. An ack naming a
   digest we never issued is the mis-issue/tamper tripwire; deleting it would
   destroy the evidence.
@@ -485,11 +487,20 @@ def ingest_acknowledgement(
     `authenticated_deployment_ref` is the identity the CALLER PROVED, derived
     from its authentication — never from the request body. `ack.deployment_id`
     is only a claim, and a claim that disagrees with the proven identity is a
-    mismatch. For a deployment-BOUND licence, an unauthenticated caller cannot
-    activate anything: without a proven identity there is nothing to check the
-    binding against, and accepting the body's word would make binding
-    decorative. That is fail-closed by design until deployment authentication
-    lands; platform-admin callers can still ingest acks for unbound licences.
+    mismatch.
+
+    **Without a proven identity nothing activates — bound or unbound.** A
+    platform admin may SUBMIT an acknowledgement, and it is recorded as
+    `unverified_identity` evidence, but it advances no delivery to `active`.
+    `active` asserts that the data plane committed this exact version, and no
+    third party can attest to that on the data plane's behalf; for a bound
+    licence there is additionally nothing to check the binding against, so
+    accepting the body's word would make binding decorative.
+
+    This is not a limitation awaiting deployment authentication. Authenticated
+    ingestion (`docs/design/deployment-credentials.md`) adds a second adapter
+    that CAN supply a proven identity; it never grants admin submissions the
+    power to activate.
 
     Every inbound ack is written to the append-only log first — including the
     ones we refuse — so the decision is always auditable.
