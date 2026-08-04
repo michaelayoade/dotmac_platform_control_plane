@@ -28,7 +28,7 @@ from vendor_cp.migrations import composed_version_locations, make_alembic_config
 KERNEL_HEAD = "0012_platform_outbox"  # current pin (0.1.0a7; head unchanged since a6)
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v011_deployment_credentials"
+VENDOR_HEAD = "v012_applied_state_receipts"
 
 
 def _superuser_url(postgres_url: str) -> str:
@@ -635,3 +635,116 @@ def test_v011_the_service_path_works_against_the_MIGRATED_schema(
             assert credential.created_at is not None
     finally:
         eng.dispose()
+# ─────────────────────────────────────────────────────────────────────────────
+# v012 — applied-state receipts: claim/proof separation, enforced by the schema
+# ─────────────────────────────────────────────────────────────────────────────
+def _insert_attempt(conn, **over: object) -> None:
+    row = {
+        "signature_status": "unresolved",
+        "eligibility_at_receipt": "n/a",
+        "authenticated_deployment_ref": None,
+        "disposition": "malformed",
+    }
+    row.update(over)
+    conn.execute(
+        text(
+            "INSERT INTO applied_state_receipt_attempts "
+            "(id, received_at, signature_status, eligibility_at_receipt,"
+            " authenticated_deployment_ref, disposition, raw_body_truncated,"
+            " created_at, updated_at) "
+            "VALUES (gen_random_uuid(), now(), :signature_status,"
+            " :eligibility_at_receipt, :authenticated_deployment_ref,"
+            " :disposition, false, now(), now())"
+        ),
+        row,
+    )
+
+
+def test_v012_an_unverified_attempt_cannot_carry_a_proven_identity(
+    scratch_db: str,
+) -> None:
+    """Claim/proof separation made STRUCTURAL. Without this a row could carry
+    an `authenticated_deployment_ref` that nothing actually authenticated —
+    which is the single confusion this whole slice exists to prevent."""
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            with pytest.raises(
+                DBAPIError, match="ck_receipt_attempt_identity_needs_valid_signature"
+            ):
+                _insert_attempt(
+                    conn,
+                    signature_status="invalid",
+                    authenticated_deployment_ref="dep-1",
+                )
+        # A VALID signature may carry one, so the constraint is not simply
+        # rejecting every identity.
+        with eng.begin() as conn:
+            _insert_attempt(
+                conn,
+                signature_status="valid",
+                eligibility_at_receipt="eligible",
+                authenticated_deployment_ref="dep-1",
+                disposition="accepted",
+            )
+    finally:
+        eng.dispose()
+
+
+def test_v012_eligibility_is_not_a_question_until_the_signature_verifies(
+    scratch_db: str,
+) -> None:
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            with pytest.raises(
+                DBAPIError, match="ck_receipt_attempt_eligibility_needs_valid_signature"
+            ):
+                _insert_attempt(
+                    conn,
+                    signature_status="unresolved",
+                    eligibility_at_receipt="eligible",
+                )
+    finally:
+        eng.dispose()
+
+
+def test_v012_report_ids_are_unique_only_within_a_proven_identity(
+    scratch_db: str,
+) -> None:
+    """Scoped to the PROVEN identity, so one deployment's report_id can never
+    collide with another's — and the constraint is what arbitrates concurrent
+    first arrivals."""
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    insert = (
+        "INSERT INTO applied_state_reports "
+        "(id, authenticated_deployment_ref, report_id, payload, payload_digest,"
+        " key_id, first_received_at, original_verdict, created_at, updated_at) "
+        "VALUES (gen_random_uuid(), :dep, :rep, '\\x00'::bytea, 'sha256:x',"
+        " 'k', now(), 'accepted', now(), now())"
+    )
+    try:
+        with eng.begin() as conn:
+            conn.execute(text(insert), {"dep": "dep-a", "rep": "r-1"})
+            # SAME report_id, DIFFERENT proven identity — allowed.
+            conn.execute(text(insert), {"dep": "dep-b", "rep": "r-1"})
+        with eng.begin() as conn:
+            with pytest.raises(
+                DBAPIError, match="uq_applied_state_reports_identity_report"
+            ):
+                conn.execute(text(insert), {"dep": "dep-a", "rep": "r-1"})
+    finally:
+        eng.dispose()
+
+
+def test_v012_receipt_tables_are_platform_catalog(scratch_db: str) -> None:
+    _upgrade(scratch_db, "heads")
+    for table in ("applied_state_reports", "applied_state_receipt_attempts"):
+        assert "tenant_id" not in _column_names(scratch_db, table)
+        grantees = _grantees(scratch_db, table)
+        assert grantees, f"{table} has no grants at all — the migration ran?"
+        assert "app_user" not in grantees, f"{table} is readable by app_user"
+        assert {"platform_api", "app_admin"} <= grantees, f"{table} grants missing"

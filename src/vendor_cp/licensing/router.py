@@ -112,7 +112,11 @@ def ingest_acknowledgement(
 ) -> AckOutcomeResponse:
     """Ingest a data-plane acknowledgement. Always 200 with a verdict: a
     quarantined ack is a recorded FACT the vendor needs, not a client error."""
-    outcome = projection.ingest_acknowledgement(
+    # The ADMIN adapter. It cannot supply a proven identity — the parameter does
+    # not exist on this path — so an admin submission is recorded as evidence
+    # and activates nothing. Authenticated ingestion is a separate adapter with
+    # a separate route; see `AppliedStateAdmissionService`.
+    outcome = projection.ingest_admin_acknowledgement(
         db,
         projection.AcknowledgementInput(
             licence_id=payload.licence_id,
@@ -122,10 +126,6 @@ def ingest_acknowledgement(
             reason=payload.reason,
             deployment_id=payload.deployment_id,
         ),
-        # Identity must be PROVEN, not claimed. A platform admin is not a
-        # deployment, so bound licences fail closed here until
-        # deployment-authenticated ingestion lands.
-        authenticated_deployment_ref=None,
         actor_admin_id=admin.id,
     )
     return AckOutcomeResponse(

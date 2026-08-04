@@ -212,8 +212,15 @@ def _stage(db, issued, target=TARGET):
 
 def _ingest(db, ack_input, *, proven=PROVEN, authenticated_deployment_ref=None):
     """Ack ingestion with a PROVEN deployment identity — the only path that can
-    activate anything."""
-    return projection.ingest_acknowledgement(
+    activate anything.
+
+    Calls the SHARED CORE directly rather than either adapter. These tests are
+    about the decision rules, which both adapters converge on; the admin
+    adapter structurally cannot supply an identity, and the authenticated one
+    requires a kernel `VerifiedAppliedState` that a projection-rules test has no
+    business fabricating.
+    """
+    return projection._apply_acknowledgement(
         db,
         ack_input,
         authenticated_deployment_ref=(
@@ -516,7 +523,7 @@ def test_bound_licence_cannot_be_activated_without_proven_identity(db, signer):
     decorative."""
     issued = _issue(db, signer, deployment_id="dep-a")
     delivery = _stage(db, issued, target="dep-a")
-    outcome = projection.ingest_acknowledgement(
+    outcome = projection.ingest_admin_acknowledgement(
         db,
         projection.AcknowledgementInput(
             licence_id=str(issued.licence_id),

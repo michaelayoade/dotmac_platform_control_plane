@@ -40,6 +40,7 @@ from dotmac_kernel import (
     NotFoundError,
     write_platform_audit_event,
 )
+from dotmac_kernel.licensing import VerifiedAppliedState
 from dotmac_kernel.messaging import enqueue_platform_event
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -474,14 +475,60 @@ def _issued_deployment_id(issuance: LicenceIssuance) -> str | None:
     return bound if isinstance(bound, str) else None
 
 
-def ingest_acknowledgement(
+def ingest_admin_acknowledgement(
     db: Session,
     ack: AcknowledgementInput,
     *,
-    authenticated_deployment_ref: str | None = None,
     actor_admin_id: UUID | None = None,
 ) -> AckOutcome:
-    """Record an acknowledgement and, only if it genuinely matches something we
+    """ADMIN adapter. Records evidence; activates nothing, ever.
+
+    Note what is ABSENT from this signature: there is no proven-identity
+    parameter. Not one defaulting to `None` — absent. A platform admin is not a
+    deployment and cannot become one, so the type system should make the
+    mistake unexpressible rather than the code merely avoid it; a defaulted
+    parameter is one careless keyword away from an admin route activating a
+    licence.
+    """
+    return _apply_acknowledgement(
+        db, ack, authenticated_deployment_ref=None, actor_admin_id=actor_admin_id
+    )
+
+
+def ingest_authenticated_applied_state(
+    db: Session,
+    verified: VerifiedAppliedState,
+    ack: AcknowledgementInput,
+) -> AckOutcome:
+    """AUTHENTICATED adapter. Requires a kernel `VerifiedAppliedState`.
+
+    A `deployment_ref: str` parameter would let any caller that can reach this
+    function supply an identity. Requiring the kernel's verified RESULT means
+    the only way to obtain one is to have verified a signature — the proof is
+    in the type, not in a convention.
+
+    The proven identity is read from the verified result, never from `ack`,
+    whose `deployment_id` remains a claim on this path exactly as on the other.
+    """
+    return _apply_acknowledgement(
+        db,
+        ack,
+        authenticated_deployment_ref=verified.deployment_ref,
+        actor_admin_id=None,
+    )
+
+
+def _apply_acknowledgement(
+    db: Session,
+    ack: AcknowledgementInput,
+    *,
+    authenticated_deployment_ref: str | None,
+    actor_admin_id: UUID | None = None,
+) -> AckOutcome:
+    """The ONE decision path. Both adapters converge here; the rules below are
+    unchanged by the V6 slice and are not duplicated anywhere.
+
+    Record an acknowledgement and, only if it genuinely matches something we
     issued, advance that delivery to `active`.
 
     `authenticated_deployment_ref` is the identity the CALLER PROVED, derived
@@ -730,7 +777,8 @@ __all__ = [
     "DeliveryView",
     "AckOutcome",
     "stage_delivery",
-    "ingest_acknowledgement",
+    "ingest_admin_acknowledgement",
+    "ingest_authenticated_applied_state",
     "delivery_status",
     "list_acknowledgements",
 ]

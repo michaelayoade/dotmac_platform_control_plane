@@ -200,7 +200,9 @@ def _issue_and_stage(db, signer, *, suffix="a", customer_ref="cust-a"):
 def _ack(
     db, issued, *, status="applied", reason=None, digest=None, customer_ref="cust-a"
 ):
-    return projection.ingest_acknowledgement(
+    # The shared core: these tests exercise the decision rules, not the
+    # adapters. The admin adapter cannot supply an identity by construction.
+    return projection._apply_acknowledgement(
         db,
         # A PROVEN deployment identity — the only path that can activate.
         authenticated_deployment_ref=_target_for(customer_ref),
