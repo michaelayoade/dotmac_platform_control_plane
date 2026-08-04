@@ -20,6 +20,7 @@ green.
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -115,22 +116,52 @@ def _wire(dep: str, signer: FakeDeploymentSigner, **over) -> bytes:
     return json.dumps(seal_applied_state(state, signer=signer).to_wire()).encode()
 
 
-def _run_interleaved(
+def _run_concurrently(
     sessions: sessionmaker[Session], first: bytes, second: bytes
 ) -> tuple[str, str]:
-    """Both sessions admit BEFORE either commits — the genuine race. Without
-    that overlap each would simply see the other's committed row and this would
-    degenerate into a sequential replay test."""
-    s1, s2 = sessions(), sessions()
-    try:
-        out1 = admit(s1, first, received_at=NOW)
-        out2 = admit(s2, second, received_at=NOW)
-        s1.commit()
-        s2.commit()
-        return out1.disposition, out2.disposition
-    finally:
-        s1.close()
-        s2.close()
+    """Admit both bodies from two REAL threads, overlapping in time.
+
+    Threads, not sequential calls in one process. Postgres BLOCKS a conflicting
+    inserter while the other transaction is still open and raises the unique
+    violation only once that transaction commits — so the loser can then see the
+    committed winner. Two `admit()` calls interleaved in a single thread cannot
+    produce that ordering: the second would simply block on the first, which
+    never commits because the same thread is stuck inside it. An earlier version
+    of this test did exactly that and manufactured a state real concurrency
+    never reaches.
+
+    The barrier makes both threads reach their INSERT together, so the race is
+    genuinely contended rather than accidentally serialised by thread startup.
+    """
+    barrier = threading.Barrier(2)
+    results: dict[int, str] = {}
+    errors: dict[int, BaseException] = {}
+
+    def worker(index: int, body: bytes) -> None:
+        session = sessions()
+        try:
+            barrier.wait(timeout=30)
+            results[index] = admit(session, body, received_at=NOW).disposition
+            session.commit()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the main thread
+            errors[index] = exc
+            session.rollback()
+        finally:
+            session.close()
+
+    threads = [
+        threading.Thread(target=worker, args=(0, first)),
+        threading.Thread(target=worker, args=(1, second)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+        assert not t.is_alive(), "a thread deadlocked — the race never resolved"
+
+    if errors:
+        raise next(iter(errors.values()))
+    return results[0], results[1]
 
 
 def test_simultaneous_identical_first_arrivals_yield_one_report(
@@ -141,7 +172,7 @@ def test_simultaneous_identical_first_arrivals_yield_one_report(
     two racing identical reports activate a delivery exactly once."""
     _, dep, signer = credential
     wire = _wire(dep, signer)
-    d1, d2 = _run_interleaved(sessions, wire, wire)
+    d1, d2 = _run_concurrently(sessions, wire, wire)
 
     assert {d1, d2} == {
         AdmissionDisposition.ACCEPTED,
@@ -181,7 +212,7 @@ def test_simultaneous_divergent_first_arrivals_yield_one_report_and_a_conflict(
     second = _wire(dep, signer, licence_version=4)
     assert first != second
 
-    d1, d2 = _run_interleaved(sessions, first, second)
+    d1, d2 = _run_concurrently(sessions, first, second)
     assert {d1, d2} == {
         AdmissionDisposition.ACCEPTED,
         AdmissionDisposition.CONFLICT,

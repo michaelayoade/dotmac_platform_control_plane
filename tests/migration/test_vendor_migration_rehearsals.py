@@ -635,6 +635,8 @@ def test_v011_the_service_path_works_against_the_MIGRATED_schema(
             assert credential.created_at is not None
     finally:
         eng.dispose()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # v012 — applied-state receipts: claim/proof separation, enforced by the schema
 # ─────────────────────────────────────────────────────────────────────────────

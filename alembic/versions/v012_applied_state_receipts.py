@@ -53,8 +53,18 @@ def upgrade() -> None:
         sa.Column("key_id", sa.String(200), nullable=False),
         sa.Column("first_received_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("original_verdict", sa.String(40), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
         # Scoped to the PROVEN identity, so one deployment's report_id can never
         # collide with another's. Also the concurrency arbiter.
         sa.UniqueConstraint(
@@ -91,8 +101,18 @@ def upgrade() -> None:
             sa.ForeignKey(f"{_REPORTS}.id"),
             nullable=True,
         ),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
         # A proven identity is recorded ONLY alongside a valid signature. This
         # is the claim/proof separation made structural: without it, a row could
         # carry an "authenticated" ref that nothing actually authenticated.

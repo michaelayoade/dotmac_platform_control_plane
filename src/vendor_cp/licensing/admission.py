@@ -58,6 +58,15 @@ EVIDENCE_STORAGE_CAP = 64 * 1024
 ABSOLUTE_INGRESS_CAP = 1024 * 1024
 
 
+class AdmissionInvariantError(RuntimeError):
+    """An assumption this module documents did not hold.
+
+    Deliberately NOT a `BadRequestError`: nothing the caller sent caused it, so
+    reporting it as a client fault would send an operator looking in the wrong
+    place.
+    """
+
+
 class BodyTooLargeError(BadRequestError):
     """The body exceeded the absolute ingress cap and was not fully read."""
 
@@ -362,6 +371,19 @@ def _claim_report(
     # Lost the race, or this is an ordinary later resend. Load and LOCK the
     # committed winner before comparing, so two losers cannot both read a row
     # mid-update.
+    #
+    # The winner is necessarily COMMITTED by the time we get here, and that is
+    # not an assumption — it is what a unique violation means. Postgres BLOCKS a
+    # conflicting inserter while the other transaction is still open; the
+    # violation is only raised once that transaction commits, at which point
+    # READ COMMITTED can see the row. (If it rolls back instead, our insert
+    # succeeds and we never reach this branch.)
+    #
+    # `scalar_one_or_none` rather than `scalar_one` so that if the invariant is
+    # ever violated — a different unique constraint firing, an isolation level
+    # this reasoning does not hold under — it surfaces as a statement about
+    # WHAT went wrong rather than an opaque NoResultFound from deep inside the
+    # result API.
     winner = db.execute(
         select(AppliedStateReport)
         .where(
@@ -369,7 +391,15 @@ def _claim_report(
             AppliedStateReport.report_id == state.report_id,
         )
         .with_for_update()
-    ).scalar_one()
+    ).scalar_one_or_none()
+    if winner is None:
+        raise AdmissionInvariantError(
+            "a unique violation on "
+            f"({proven_ref!r}, {state.report_id!r}) implies a committed winner, "
+            "but none is visible. Either a DIFFERENT unique constraint fired, or "
+            "this transaction is running at an isolation level where the "
+            "block-then-violate ordering does not hold."
+        )
 
     identical = winner.payload_digest == digest
     disposition = (
@@ -452,6 +482,7 @@ def payload_json(envelope: AppliedStateEnvelope) -> dict[str, object]:
 
 __all__ = [
     "ABSOLUTE_INGRESS_CAP",
+    "AdmissionInvariantError",
     "EVIDENCE_STORAGE_CAP",
     "AdmissionOutcome",
     "BodyTooLargeError",
