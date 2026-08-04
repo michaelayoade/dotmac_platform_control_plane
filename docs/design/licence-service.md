@@ -1,15 +1,25 @@
 # LicenceIssuanceService + EntitlementProjectionService — WS8 vendor slice design
 
-> **Status:** Implementation brief (2026-08-01). The kernel WS8 contract has
-> **published** (dotmac-kernel **0.1.0a7**: `dotmac_kernel.licensing` — DSSE
-> envelope, Ed25519 keyring, offline fail-closed `verify_licence`,
-> `verify_revocation_list`, `LicenceAcknowledgement`; design brief
+> **Status:** Implementation brief (2026-08-01), implemented. The kernel WS8
+> contract it was written against **published** as dotmac-kernel **0.1.0a7**
+> (`dotmac_kernel.licensing` — DSSE envelope, Ed25519 keyring, offline
+> fail-closed `verify_licence`, `verify_revocation_list`,
+> `LicenceAcknowledgement`; design brief
 > `dotmac_starter_mt/docs/superpowers/reviews/2026-08-01-ws8-signed-licence-design.md`).
+> **The pin has since advanced to `==0.1.0a9`** — `a8` added
+> `ReceiverAppliedState`, `a9` the ADR-0007 deployment-authentication contract.
+> Version references below are the state at authorship; `pyproject.toml` is the
+> authority for what is pinned now.
 > This document fixes the VENDOR side: issuance, key custody, versioned
 > delivery, revocation-list publication, and acknowledgement tracking. The
 > authoritative lifecycle is `docs/design/domain-foundation.md` § "Licence /
 > entitlement-allocation lifecycle"; this is the focused service view and
 > defers to it on any conflict.
+>
+> **Deployment authentication is NOT in this document.** The identity that
+> makes `active` reachable is specified in
+> `docs/design/deployment-credentials.md` (WS8 V6); this brief's
+> acknowledgement rules are consumed by it unchanged.
 
 ## Owners and scope
 
@@ -178,8 +188,8 @@ grants, and acks the applied `(licence_id, licence_version, digest)`.
 
 | Dependency | Status |
 |---|---|
-| Kernel WS8 (`dotmac_kernel.licensing`, testing signer, `licensing` extra) | **published — 0.1.0a7**, tagged `dotmac-kernel-v0.1.0a7` |
-| Vendor repin `==0.1.0a7` (with the `licensing` extra alongside `testing`) | **first PR of this slice** |
+| Kernel WS8 (`dotmac_kernel.licensing`, testing signer, `licensing` extra) | published — 0.1.0a7, tagged `dotmac-kernel-v0.1.0a7`; **now pinned at 0.1.0a9** |
+| Vendor repin `==0.1.0a7` (with the `licensing` extra alongside `testing`) | merged — first PR of this slice; **superseded by the a8 (#28) and a9 (#30) repins** |
 | Staged `Allocation` (immutable, v005) | merged (#19) |
 | Platform outbox channel | published (0.1.0a6), in use by ContractService |
 | Reference product receiver (starter repo) proving verify → local WS2 grant → explainable decision → ack | parallel slice; closes the end-to-end proof |
