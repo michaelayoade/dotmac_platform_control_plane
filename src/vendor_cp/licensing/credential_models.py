@@ -40,7 +40,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-
 #: `status` must equal what the timestamps say. Ordered most-terminal first,
 #: because revocation outranks retirement: a credential that was retired and
 #: then revoked is revoked. Kept byte-identical to the v011 predicate — see the
