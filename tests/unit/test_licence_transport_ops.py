@@ -32,6 +32,7 @@ from vendor_cp.licensing import transport as transport_module
 from vendor_cp.licensing.delivery_models import (
     AttemptOutcome,
     DeliveryState,
+    LicenceDelivery,
     LicenceDeliveryAttempt,
     LicenceDeliveryTarget,
 )
@@ -186,6 +187,13 @@ def _issue_and_stage(db, signer, *, suffix="a", customer_ref="cust-a"):
         db,
         projection.StageDeliveryCommand(issuance_id=issued.id, target_ref=target_ref),
     )
+    delivery_row = db.get(LicenceDelivery, delivery.id)
+    assert delivery_row is not None
+    # Keep every SLA assertion on the injected test clock. TimestampMixin uses
+    # the wall clock by default, which made this fixed-date suite expire as
+    # soon as real time crossed the test's cutoff.
+    delivery_row.created_at = NOW
+    db.flush()
     return issued, delivery
 
 
