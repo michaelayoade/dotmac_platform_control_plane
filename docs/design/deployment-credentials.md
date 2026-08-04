@@ -30,14 +30,32 @@ document must not be read as amending them.
 
 ## Owners and scope
 
-- **`DeploymentCredentialService`** (new) owns the credential: registration,
+Three owners, deliberately not two. An earlier draft folded admission into
+`DeploymentCredentialService`, which left the receipt row, the receipt clock
+and the replay verdict without a named writer — the exact shape of gap this
+architecture exists to prevent.
+
+- **`DeploymentCredentialService`** (new) owns the **credential**: registration,
   possession challenges, activation, rotation, retirement, revocation, and the
-  resolution of a signed applied-state report to a **proven**
-  `deployment_ref`. It decides nothing about entitlements.
-- **`EntitlementProjectionService`** (existing) continues to own delivery and
-  acknowledgement state, and consumes the proven identity exactly where it
-  already accepts `authenticated_deployment_ref`. Its digest/version/binding
-  rules are untouched.
+  **eligibility lookup** — given a `key_id` and a receipt time, which
+  credential (if any) may admit that report, and what `deployment_ref` it
+  resolves to. It writes no receipts and decides nothing about entitlements.
+- **`AppliedStateAdmissionService`** (new) is the canonical writer for
+  **admission**: stamping the server receipt time, persisting the raw inbound
+  evidence, parsing, calling kernel verification, asking
+  `DeploymentCredentialService` for eligibility, and deciding
+  accepted / idempotent-replay / conflict / quarantined. It owns both receipt
+  tables and nothing else. It does not activate anything.
+- **`EntitlementProjectionService`** (existing) remains the **sole consequence
+  owner**: delivery and acknowledgement state, and the digest/version/binding
+  rules that decide activation. It consumes a proven identity exactly where it
+  already accepts `authenticated_deployment_ref`. Its rules are untouched by
+  this slice.
+
+The split matters because the three answer different questions — *may this key
+speak?*, *what exactly arrived and have we seen it before?*, and *what follows
+from it?* — and a single service answering all three would make the receipt
+clock a private detail of credential logic, where nothing could depend on it.
 - **Kernel** owns the envelope contract, its serialization and the conformance
   vectors, and holds **no production key custody**.
 - **Fleet / deployment owner** owns the authoritative Deployment entity and
@@ -87,11 +105,18 @@ path, two typed doors.
   private half. A key that authenticated from the moment it was pasted in
   would let a typo, or an operator with control-plane write access, bind an
   identity the real deployment never had.
-- **`active`** — possession proven. Verifies reports and may be used for new
-  ones.
-- **`retired`** — rotated out. Stops authenticating new reports but stays
-  attributable for what it already signed.
-- **`revoked`** — terminal. See "Revocation" below.
+- **`active`** — possession proven, `activated_at` stamped. Admits reports
+  received from that instant.
+- **`retired`** — rotated out, `retired_at` stamped. Admits nothing received
+  at or after that instant, and stays attributable for what it already
+  signed.
+- **`revoked`** — terminal, `revoked_at` stamped. Same admission cut, never
+  reinstated.
+
+The status column is a summary; **the three timestamps are the authority**,
+because admission is decided for a report received at some past instant, not
+for "now". A status check alone cannot answer whether a credential was
+eligible when a given report arrived — see "The eligibility predicate".
 
 ### Uniqueness
 
@@ -118,7 +143,7 @@ identical key register twice and silently defeat the constraint above. Store
 `sha256(raw_32_bytes)` in the `sha256:<hex>` form used elsewhere in WS8, and
 compute it after decoding and length-validating the key.
 
-## Enrollment authority
+## Enrollment authority (temporary: platform-admin policy)
 
 Registration requires an **authorized enrollment subject**. Anyone who can
 register an arbitrary `deployment_ref` can create an identity the fleet never
@@ -126,20 +151,56 @@ authorised, and the possession challenge would then faithfully prove control
 of a key bound to a deployment that does not exist.
 
 The authoritative Deployment entity belongs to `FleetDesiredStateService`,
-which is not built. Until it is, registration requires an **`active`
-`LicenceDeliveryTarget`** whose `target_ref` matches the `deployment_ref`
-being registered.
+which is not built. Until it is, **the enrollment authority is platform-admin
+policy**: a platform admin asserts that this `deployment_ref` should exist, and
+that assertion is what authorises the registration.
 
-This is a stopgap and is documented as one. `LicenceDeliveryTarget` is
-explicitly a *licensing-owned delivery projection*, not the Deployment
-authority — its own docstring says so, and `docs/design/domain-foundation.md`
-assigns that entity elsewhere. Using it as the enrollment gate is a deliberate,
-bounded borrow: it is the only checked-in record of "a place this customer's
-licences may legitimately go", and gating on it is strictly better than
-gating on nothing. When the fleet slice lands, this check moves to the real
-authority and the projection stops being consulted for authorisation. Do not
-let the borrow calcify into ownership: no code may treat a delivery target as
-proof that a deployment exists for any purpose beyond this gate.
+**An `active` `LicenceDeliveryTarget` is an eligibility INPUT to that policy,
+not the authority.** Be precise about what it does and does not buy:
+
+- It **is** a useful typo and scope guard. It catches a mistyped
+  `deployment_ref` and constrains registration to refs this customer's
+  licences may legitimately reach.
+- It **is not** proof that a Deployment exists. The same platform-admin
+  authority can create the target and then the credential, so requiring one
+  before the other adds a step, not an independent authority. Calling it proof
+  would be laundering a single actor's assertion through two tables and
+  presenting the result as corroboration.
+
+Constraints on the borrow, all of which the implementation must carry:
+
+1. **One narrow reader.** Exactly one function in
+   `DeploymentCredentialService` reads `LicenceDeliveryTarget`, and only during
+   registration. Nothing else in the credential path may touch it.
+2. **Authorisation provenance in the audit event.** The registration audit
+   records *which* admin asserted the enrollment and *that* the authority was
+   the interim admin policy — not merely that a target existed. When the fleet
+   slice lands, historic registrations must remain readable as "authorised
+   under the stopgap", or the cutover silently rewrites the past.
+3. **No credential lifecycle coupling to target status.** A target later going
+   inactive, or being deleted, must NOT retire, revoke or otherwise disturb an
+   existing credential. The target gated one moment — registration — and has no
+   standing over a credential whose possession has since been proven.
+   Coupling them would let a delivery-routing edit revoke a proven identity.
+4. **An architecture canary** asserting the reader appears only on the
+   registration path, so the borrow cannot spread by ordinary refactoring. This
+   is the mechanism that keeps the stopgap from calcifying into ownership;
+   a comment asking politely would not survive contact.
+
+### Retirement gates
+
+The stopgap is retired against `FleetDesiredStateService` in explicit phases,
+not swapped in one commit:
+
+- **Shadow.** Fleet is consulted alongside the target check; disagreements are
+  recorded and reviewed, and neither blocks the other. This is what surfaces
+  refs that were enrolled under the admin policy but do not correspond to a
+  real Deployment.
+- **Cutover.** Fleet becomes the authority; the target check is demoted to a
+  warning, then removed from the decision.
+- **Stopgap retirement.** The narrow reader and its canary are deleted, and
+  this section is replaced by the Fleet contract. Retirement is not complete
+  while any code path still reads a delivery target for authorisation.
 
 ## Possession proof
 
@@ -175,9 +236,27 @@ could be followed by a second, independent activation path using a challenge
 whose response may have been captured elsewhere. One possession proof
 activates one credential, once.
 
-A challenge is single-use whether it succeeds or fails to the point of
-consumption; expiry is checked before the signature, because "expired" and
-"bad signature" send an operator to completely different places.
+### A failed proof does NOT consume the challenge
+
+Consumption happens **only on successful verification**, in step 3. A failed
+attempt leaves the challenge outstanding until it expires on its own.
+
+Consuming on failure would be a denial-of-service on enrollment, available to
+anyone who learns the routing identifiers: `challenge_id` and `key_id` are not
+secrets — they travel in the response and identify a record, they do not
+authenticate it — so an attacker who observes them could burn every challenge
+as it is issued by posting garbage signatures, and the real deployment could
+never enroll. The nonce and the signature are the secrets; the identifiers are
+an address.
+
+Invalid attempts are **counted and rate-limited separately**, per challenge and
+per credential, so repeated failures are visible and throttled without
+destroying the legitimate holder's ability to answer. A burst of failures is a
+signal to surface to an operator, not a reason to invalidate the enrollment.
+
+Expiry remains the challenge's bound on how long a captured response stays
+useful, and is checked before the signature, because "expired" and "bad
+signature" send an operator to completely different places.
 
 ## Applied-state receipts
 
@@ -187,20 +266,60 @@ record of a signed report: it has no `report_id`, no signed bytes, no
 also blur two different things — an operator-submitted claim and a
 cryptographically signed attestation.
 
-A new **append-only `applied_state_receipts`** table records every
-authenticated report:
+**Two records, not one.** An earlier draft used a single append-only table
+keyed uniquely on `(authenticated_deployment_ref, report_id)`. That cannot
+work, and the failure is instructive: the second arrival under a given key is
+exactly the row worth keeping — the replay, or the conflicting bytes — and the
+unique constraint forbids inserting it. Updating the first row instead would
+break append-only semantics AND discard the conflicting bytes, destroying the
+evidence the table exists to preserve. The same schema also had nowhere to put
+an attempt that never resolved to an identity at all: unknown `key_id`,
+malformed envelope, bad signature. Those are the tripwires.
+
+So: an append-only log of **attempts**, and one canonical **report** record
+per idempotency key.
+
+### `applied_state_receipt_attempts` — append-only, one row per arrival
+
+Every inbound authenticated-ingestion attempt, whatever happens to it,
+including the ones that never verified:
 
 | Column | Purpose |
 |---|---|
-| `report_id` | the receiver's idempotency key, from the signed payload |
-| `authenticated_deployment_ref` | the PROVEN identity, resolved from `key_id` |
+| `received_at` | server clock, stamped on arrival, before any parsing |
+| `raw_body` (bytes, **bounded**) | the EXACT inbound bytes, truncated at a configured cap with a flag recording that truncation occurred |
+| `raw_body_digest` | `sha256:` over the full body as received, computed BEFORE truncation, so a truncated row is still comparable |
+| `verification` | `untrusted` or `verified` — see below |
+| `key_id` | as presented; meaningless until verified, kept for triage |
+| `authenticated_deployment_ref` | the PROVEN identity, NULL unless `verification = verified` |
+| `report_id`, `claimed_deployment_ref` | parsed from the payload; evidence only |
+| `signature` (bytes) | so a verified attempt stays independently checkable |
+| `disposition` | accepted / idempotent-replay / conflict / unknown-key / malformed / bad-signature / deployment-mismatch |
+| `report_ref` | FK to the canonical report row when one was established, else NULL |
+
+`verification` is a two-value fact and must not be inferred from other
+columns: `untrusted` means nothing in this row may be believed — the bytes are
+whatever arrived — and `verified` means the signature checked out under an
+eligible credential. A row is written on EVERY path, including the ones that
+fail before an identity exists, because an unknown `key_id` or a bad signature
+against a known one is precisely the evidence an operator needs and the thing a
+fail-closed system would otherwise discard silently.
+
+`raw_body` is bounded because it is attacker-controlled and unauthenticated at
+the moment it is stored. An unbounded column here is a free write amplifier for
+anyone who can reach the endpoint. The pre-truncation digest is what keeps a
+truncated row useful: two truncated attempts are still distinguishable.
+
+### `applied_state_reports` — one canonical row per idempotency key
+
+| Column | Purpose |
+|---|---|
+| `authenticated_deployment_ref` + `report_id` | **UNIQUE together** — the idempotency key, scoped to the proven identity so one deployment's `report_id` can never collide with another's |
+| `payload` (bytes) | the exact signed bytes of the FIRST accepted arrival |
+| `payload_digest` | `sha256:` of those bytes — the replay discriminator |
 | `key_id` | which credential verified it — attributable after rotation |
-| `payload` (bytes) | the EXACT signed bytes, never a re-serialisation |
-| `signature` (bytes) | so the evidence stays independently checkable |
-| `payload_digest` | `sha256:` of the signed bytes — the replay discriminator |
-| `received_at` | server clock, set on receipt (see below) |
-| `claimed_deployment_ref` | the body's claim, evidence only |
-| `disposition` | accepted / idempotent-replay / conflict / quarantined |
+| `first_received_at` | the receipt time that decided eligibility |
+| `original_verdict` | the verdict returned to every subsequent identical replay |
 
 Storing the exact bytes and signature — not a parsed projection of them — is
 what keeps the report portable evidence a third party can verify, which is the
@@ -208,17 +327,21 @@ property ADR-0007 §1 justifies Ed25519 with in the first place.
 
 ### Idempotency
 
-**`(authenticated_deployment_ref, report_id)` is unique**, scoped to the proven
-identity so one deployment's `report_id` can never collide with another's.
-Three cases, distinguished by comparing `payload_digest`:
+On a verified arrival, the admission service compares the incoming digest to
+the canonical row's `payload_digest`:
 
 | Case | Verdict |
 |---|---|
-| Same key, same digest | **Idempotent replay** — return the ORIGINAL verdict, change nothing |
-| Same key, different digest | **Conflict → quarantine** — one of the two is forged or a receiver bug; never pick one |
+| No canonical row yet | Create it; proceed to consequences |
+| Same key, same digest | **Idempotent replay** — return `original_verdict`, change nothing but the attempt log |
+| Same key, different digest | **Conflict → quarantine** — one of the two is forged or a receiver bug; never pick one. Both arrivals survive as attempt rows |
 | Older valid report | **Retained as evidence**, may never regress active state |
 
-Returning the original verdict (rather than recomputing) matters: recomputation
+Every one of these writes an attempt row. Only the first writes a canonical
+row. The conflicting bytes are preserved in the attempt log, which is the whole
+reason for the split.
+
+Returning `original_verdict` (rather than recomputing) matters: recomputation
 against changed licence state could yield a different answer for bytes the
 deployment sent once, which would make an at-least-once transport look like a
 state change.
@@ -233,17 +356,50 @@ Eligibility is decided against the **persisted server `received_at`**, never
 against the payload's `observed_at` and never against "now" at the moment a
 background job happens to re-evaluate.
 
-A credential is eligible for a report when its status is `active` or
-`retired` at that instant, and:
+### Two different questions
+
+Conflating these produced a contradiction in an earlier draft, where `retired`
+credentials could admit new reports forever while acceptance case 14 said a
+revoked key never verifies:
+
+- **Cryptographic attribution** — *did this key sign these bytes?* Independent
+  of lifecycle. Old key material stays verifiable evidence permanently; that is
+  what makes a signed report checkable by a third party years later, and
+  retiring a key must not retroactively make its past attestations
+  unverifiable.
+- **Admission eligibility** — *may a report received at time T activate
+  anything?* Decided entirely by the persisted timeline.
+
+They are separate, and only the second gates consequences.
+
+### The eligibility predicate
+
+Decided against the **persisted server `received_at`** of that report:
 
 ```
-revoked_at IS NULL OR revoked_at > received_at
+activated_at  <= received_at
+AND (retired_at IS NULL OR received_at <  retired_at)
+AND (revoked_at IS NULL OR received_at <  revoked_at)
 ```
 
-Equivalently: **`revoked_at <= received_at` fails.** The boundary is closed
-against the credential — a report received at the exact revocation instant is
-refused, because the alternative resolves a tie in favour of a key the
-operator has just declared compromised.
+Read as a window: a credential admits exactly the reports received **from** its
+activation, **up to but not including** its retirement or revocation.
+
+Each clause earns its place:
+
+- `activated_at <= received_at` — a `pending` credential admits nothing, and a
+  report that arrived *before* possession was proven cannot be retro-admitted
+  by later activation. Without this clause, activating a key would silently
+  bless everything it had already sent.
+- `received_at < retired_at` — retirement ENDS admission. Rotation overlap is
+  provided by the two windows overlapping in time, not by a retired key
+  accepting new work indefinitely.
+- `received_at < revoked_at` — revocation ends admission at its instant.
+
+Both boundaries are **closed against the credential**: a report received at the
+exact retirement or revocation instant is refused, because the alternative
+resolves a tie in favour of a key the operator has just stood down or declared
+compromised.
 
 The whole point is that the test uses a timestamp the **vendor** wrote. The
 report's own `observed_at` is a claim inside data the holder of a compromised
@@ -252,17 +408,28 @@ an earlier timestamp. Persisting `received_at` at ingestion also makes the
 decision reproducible: re-running eligibility later yields the same answer it
 did at receipt, which a `now()`-based test would not.
 
-Retirement and revocation stay different: a `retired` key stops being offered
-for NEW reports but still verifies what it already signed, which is what makes
-rotation overlap safe.
+Retirement and revocation remain different in kind even though both close the
+window. Retirement is planned and reversible in principle; revocation is
+terminal, and a revoked `key_id` is never reinstated (which is why its
+uniqueness constraint spans all states). What they share is that neither
+un-signs anything: reports already admitted stay admitted, and past signatures
+stay verifiable.
 
 ## Rotation
 
 Registering a new key while the old one is `active` is normal and expected;
 overlapping active keys are the mechanism, not an anomaly. The deployment cuts
-over on its own schedule, and the old key is retired afterwards. Each key
-independently carries its own state and timestamps, so a report is always
-attributable to the specific credential that verified it.
+over on its own schedule, and the old key is retired afterwards.
+
+Overlap is expressed as **overlapping eligibility windows**, not as a retired
+key continuing to admit work: the new credential's `activated_at` precedes the
+old one's `retired_at`, so both windows cover the changeover period and either
+key's reports are admitted during it. Retiring the old key then closes its
+window at a definite instant rather than leaving it open-ended.
+
+Each key carries its own timeline independently, so a report is always
+attributable to the specific credential that signed it — and remains so after
+both are retired.
 
 ## The body's claim stays evidence
 
@@ -292,7 +459,7 @@ to either vocabulary is a visible edit here:
 | resolved from `key_id` | `authenticated_deployment_ref` | the PROVEN identity |
 | `report_id`, `keyring_generation`, `revocation_list_version`, `observed_at` | — | no legacy home; live on the receipt row |
 
-The last row is the reason the receipt table exists rather than columns bolted
+The last row is the reason the receipt tables exist rather than columns bolted
 onto `LicenceAckRecord`: the signed report carries facts the acknowledgement
 vocabulary has no place for, and those facts (keyring generation, applied
 revocation-list version) are precisely what make keyring-uptake and
@@ -300,33 +467,72 @@ revocation-application lag measurable.
 
 ## Acceptance cases
 
+**Enrollment and credentials**
+
 1. Registration without an active `LicenceDeliveryTarget` for that
    `deployment_ref` is refused.
-2. A newly registered credential is `pending` and authenticates nothing.
-3. A correct possession response activates the credential, consumes the
-   challenge, and invalidates sibling challenges — all in one transaction.
-4. Replaying a consumed challenge response activates nothing.
-5. An expired challenge is refused as expired, not as a bad signature.
-6. A response naming a different challenge or key is a mismatch, not a
-   signature failure.
-7. The same public key cannot be registered under a second `key_id`
+2. The registration audit records the asserting admin and that the authority
+   was the interim admin policy.
+3. A target going inactive or being deleted does NOT retire, revoke or
+   otherwise disturb an existing credential.
+4. An architecture canary fails if `LicenceDeliveryTarget` is read anywhere in
+   the credential path except registration.
+5. A newly registered credential is `pending` and authenticates nothing.
+6. The same public key cannot be registered under a second `key_id`
    (fingerprint uniqueness), and the fingerprint is computed on decoded bytes —
    a re-encoded base64 variant of the same key is still refused.
-8. A revoked `key_id` cannot be re-registered, in any state.
-9. A valid signed report resolves to the proven `deployment_ref` and, when
-   version and digest match, activates the delivery.
-10. A byte-identical signed replay returns the ORIGINAL verdict and changes
-    nothing.
-11. The same `report_id` with different bytes quarantines as a conflict.
-12. A report whose signed body claims another deployment is quarantined as
+7. A revoked `key_id` cannot be re-registered, in any state.
+
+**Possession**
+
+8. A correct possession response activates the credential, consumes the
+   challenge, and invalidates sibling challenges — all in one transaction.
+9. Replaying a consumed challenge response activates nothing.
+10. A FAILED possession attempt leaves the challenge outstanding: the correct
+    response still activates afterwards. Burning a challenge with a bad
+    signature must not deny enrollment.
+11. Invalid attempts are counted per challenge and per credential.
+12. An expired challenge is refused as expired, not as a bad signature.
+13. A response naming a different challenge or key is a mismatch, not a
+    signature failure.
+
+**Admission and eligibility**
+
+14. A valid signed report resolves to the proven `deployment_ref` and, when
+    version and digest match, activates the delivery.
+15. A report received BEFORE `activated_at` is refused, and later activation
+    does not retro-admit it.
+16. A report received at or after `retired_at` is refused admission, even
+    though its signature still verifies — attribution and eligibility are
+    separate.
+17. A report received at or after `revoked_at` is refused, including when its
+    payload `observed_at` is backdated to before it. Both boundaries are
+    closed against the credential (`received_at == retired_at` and
+    `received_at == revoked_at` both fail).
+18. During rotation overlap, a report received while two credentials' windows
+    both cover it is admitted and attributed to the key that signed it.
+19. A signature made by a retired or revoked key remains independently
+    verifiable as evidence — lifecycle never un-signs anything.
+
+**Receipts and replay**
+
+20. Every arrival writes an attempt row, including unknown `key_id`, malformed
+    envelope and bad signature; those rows carry `verification = untrusted` and
+    a NULL `authenticated_deployment_ref`.
+21. An oversized body is truncated with the flag set, and its digest — computed
+    before truncation — still distinguishes it from a different oversized body.
+22. A byte-identical signed replay returns the ORIGINAL verdict, changes
+    nothing, and appends an attempt row.
+23. The same `report_id` with different bytes quarantines as a conflict, and
+    BOTH byte sequences survive in the attempt log.
+24. A report whose signed body claims another deployment is quarantined as
     `deployment_mismatch` and activates nothing.
-13. A report received after revocation is refused even when its payload
-    `observed_at` is backdated to before it.
-14. A report signed by a `retired` key still verifies; one signed by a
-    `revoked` key never does.
-15. An older valid report is retained as evidence and cannot regress a newer
+25. An older valid report is retained as evidence and cannot regress a newer
     active state.
-16. Admin ingestion cannot supply a proven identity — asserted structurally,
+
+**Adapters**
+
+26. Admin ingestion cannot supply a proven identity — asserted structurally,
     not merely behaviourally — and always records `unverified_identity`.
 
 ## Dependencies and sequencing
@@ -343,12 +549,17 @@ Implementation lands one guarded slice at a time, each with its migration,
 typed idempotent commands, platform audit, thin routes and Postgres
 rehearsals:
 
-1. Credential registry + challenge issuance/activation (migration, service,
-   admin routes).
-2. Authenticated applied-state ingestion + receipt table + the two-adapter
-   split of the projection entry points.
-3. Rotation, retirement and revocation commands with the receipt-time
-   eligibility rule.
+1. `DeploymentCredentialService`: registry + challenge issuance/activation
+   (migration, service, admin routes, enrollment audit provenance, the narrow
+   delivery-target reader and its architecture canary).
+2. `AppliedStateAdmissionService`: both receipt tables, authenticated
+   ingestion, and the two-adapter split of the projection entry points.
+3. Rotation, retirement and revocation commands, and the full receipt-time
+   eligibility window (`activated_at`/`retired_at`/`revoked_at`).
+
+The eligibility predicate spans slices 1 and 3: slice 1 sets `activated_at`
+and must already write the timeline columns, so slice 3 adds transitions
+rather than retrofitting the schema the admission rule depends on.
 
 The nine-case cross-plane proof against the starter receiver follows the third
 slice; connected delivery is last, because transport automation is separate

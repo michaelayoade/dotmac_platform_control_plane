@@ -30,7 +30,11 @@ disagree, fix the drift.
    kernel's transaction authority (`get_db`/`conflict_savepoint`) and audit
    write-side.
 8. **Branch before committing; merge only on green.** Protected `main`. Pin the
-   kernel exactly (`==0.1.0a9`); bump deliberately when a new alpha ships.
+   kernel to an EXACT version (`==`, never a range or caret); bump deliberately
+   when a new alpha ships. **`pyproject.toml` is the authority for which
+   version that is** — this file deliberately does not repeat the number. A
+   second copy of a version literal is a second thing to forget, which is
+   exactly how this line came to say `a8` while the pin said `a9`.
 9. **Cross-repository engineering governance is pinned and required.**
    `.dotmac/standards-profile.json` names the enrolled authority and fully typed
    contract surface, and pins the accepted Governance source by exact commit.
