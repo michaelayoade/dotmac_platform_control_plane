@@ -30,6 +30,17 @@ with tempfile.TemporaryDirectory() as tmp:
         "pip",
         "install",
         "--dry-run",
+        # --ignore-installed is LOAD-BEARING, not tidiness. Without it the
+        # report describes what pip would install INTO THIS IMAGE, so anything
+        # already present is silently omitted from the closure. python:3.11-slim
+        # ships `packaging`; python:3.12-slim does not — which produced a lock
+        # missing `packaging` that installed fine in the container and then
+        # failed on the CI runner, where nothing is pre-installed:
+        #   ERROR: In --require-hashes mode, all requirements must have their
+        #   versions pinned with ==. These do not: packaging>=24.0
+        # The lock must be the COMPLETE closure, independent of whatever
+        # happens to be in the environment that generated it.
+        "--ignore-installed",
         "--quiet",
         "--report",
         str(report),

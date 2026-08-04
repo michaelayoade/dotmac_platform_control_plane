@@ -45,6 +45,14 @@ docker run --rm -i --platform linux/amd64 python:3.12-slim python - "${POETRY_PI
 mv "${OUT}.tmp" "${OUT}"
 echo "wrote ${OUT} ($(grep -c '^[a-zA-Z]' "${OUT}") pinned packages)"
 echo
-echo "Verify before committing:"
+echo "Verify before committing, INTO A FRESH VENV:"
+echo
+echo "  The venv is not a nicety. Installing into the image's site-packages"
+echo "  lets anything already present satisfy a requirement, so a lock with a"
+echo "  MISSING package still appears to install — which is exactly how a lock"
+echo "  omitting 'packaging' passed local verification and then failed on a CI"
+echo "  runner, where nothing is pre-installed."
+echo
 echo "  docker run --rm -i --platform linux/amd64 -v ${OUT}:/r.txt:ro python:3.12-slim \\"
-echo "    sh -c 'pip install -q --require-hashes --only-binary=:all: -r /r.txt && poetry --version'"
+echo "    sh -c 'python -m venv /v && /v/bin/pip install -q --require-hashes \\"
+echo "           --only-binary=:all: -r /r.txt && /v/bin/poetry --version'"
