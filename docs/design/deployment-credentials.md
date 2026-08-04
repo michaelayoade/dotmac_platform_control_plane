@@ -113,10 +113,27 @@ path, two typed doors.
 - **`revoked`** — terminal, `revoked_at` stamped. Same admission cut, never
   reinstated.
 
-The status column is a summary; **the three timestamps are the authority**,
-because admission is decided for a report received at some past instant, not
-for "now". A status check alone cannot answer whether a credential was
-eligible when a given report arrived — see "The eligibility predicate".
+**The three timestamps are the authority**, because admission is decided for a
+report received at some past instant, not for "now". A status check alone
+cannot answer whether a credential was eligible when a given report arrived —
+see "The eligibility predicate".
+
+If a `status` column is stored at all, it is a **single-writer, rebuildable
+projection of those timestamps**, never independently writable authority:
+
+- one writer — the lifecycle transition in `DeploymentCredentialService`, which
+  sets the timestamp and derives the status in the same statement;
+- **database constraints tying it to the timestamps**, so the two cannot
+  disagree even under a direct SQL edit. A `CHECK` is sufficient here:
+  `revoked` iff `revoked_at IS NOT NULL`; `retired` iff `retired_at IS NOT
+  NULL AND revoked_at IS NULL`; `active` iff `activated_at IS NOT NULL` and
+  neither of the others; `pending` iff all three are NULL;
+- fully reconstructible from the timestamps, so it can be dropped and rebuilt
+  without loss.
+
+The alternative — a status anyone may set — reintroduces exactly the drift this
+section exists to prevent: a row reading `active` whose `revoked_at` is set,
+where which one wins depends on which query the reader happened to write.
 
 ### Uniqueness
 
@@ -286,40 +303,112 @@ including the ones that never verified:
 
 | Column | Purpose |
 |---|---|
-| `received_at` | server clock, stamped on arrival, before any parsing |
-| `raw_body` (bytes, **bounded**) | the EXACT inbound bytes, truncated at a configured cap with a flag recording that truncation occurred |
-| `raw_body_digest` | `sha256:` over the full body as received, computed BEFORE truncation, so a truncated row is still comparable |
-| `verification` | `untrusted` or `verified` — see below |
-| `key_id` | as presented; meaningless until verified, kept for triage |
-| `authenticated_deployment_ref` | the PROVEN identity, NULL unless `verification = verified` |
+| `received_at` | the trusted receipt instant — see "Capturing receipt time" |
+| `raw_body` (bytes, **bounded**) | the EXACT inbound bytes, truncated at the evidence-storage cap with a flag recording that truncation occurred |
+| `raw_body_digest` | `sha256:` over the full body as received, computed BEFORE truncation; meaningful only for bodies within the absolute ingress cap |
+| `signature_status` | `unresolved` / `invalid` / `valid` — did this key sign these bytes? |
+| `eligibility_at_receipt` | `n/a` / `eligible` / `not_eligible` — was that credential admitted at `received_at`? |
+| `key_id` | as presented; meaningless until resolved, kept for triage |
+| `authenticated_deployment_ref` | the PROVEN identity, NULL unless `signature_status = valid` |
 | `report_id`, `claimed_deployment_ref` | parsed from the payload; evidence only |
 | `signature` (bytes) | so a verified attempt stays independently checkable |
-| `disposition` | accepted / idempotent-replay / conflict / unknown-key / malformed / bad-signature / deployment-mismatch |
+| `disposition` | accepted / idempotent-replay / conflict / unknown-key / malformed / bad-signature / not-eligible / deployment-mismatch / body-too-large |
 | `report_ref` | FK to the canonical report row when one was established, else NULL |
 
-`verification` is a two-value fact and must not be inferred from other
-columns: `untrusted` means nothing in this row may be believed — the bytes are
-whatever arrived — and `verified` means the signature checked out under an
-eligible credential. A row is written on EVERY path, including the ones that
-fail before an identity exists, because an unknown `key_id` or a bad signature
-against a known one is precisely the evidence an operator needs and the thing a
-fail-closed system would otherwise discard silently.
+A row is written on EVERY path, including the ones that fail before an identity
+exists, because an unknown `key_id` or a bad signature against a known one is
+precisely the evidence an operator needs and the thing a fail-closed system
+would otherwise discard silently.
 
-`raw_body` is bounded because it is attacker-controlled and unauthenticated at
-the moment it is stored. An unbounded column here is a free write amplifier for
-anyone who can reach the endpoint. The pre-truncation digest is what keeps a
-truncated row useful: two truncated attempts are still distinguishable.
+### Signature validity and eligibility are separate persisted facts
+
+An earlier draft stored one `verification` flag meaning "valid under an
+**eligible** credential". That collapses the two questions the eligibility
+section is careful to distinguish, and it destroys information: garbage
+naming a revoked key and a genuinely signed but late report from that same key
+would both land as "not verified", which are completely different operational
+events — the first is an attacker or a bug, the second is a deployment that was
+offline during a rotation.
+
+So resolve them independently:
+
+- **`signature_status`** answers *did this key sign these bytes?* Verification
+  material is resolved for any KNOWN `key_id` **regardless of lifecycle state**
+  — including retired and revoked. A revoked key's signature is still a fact,
+  and refusing to evaluate it would throw away the evidence that the compromised
+  key is still being used. `unresolved` means no such `key_id` is registered,
+  so there was nothing to check against.
+- **`eligibility_at_receipt`** answers *was that credential admitted at
+  `received_at`?* — the timeline predicate below. `n/a` when
+  `signature_status` is not `valid`, because eligibility of an unproven claim
+  is not a meaningful question.
+
+**Only `eligibility_at_receipt = eligible` gates consequences.** A `valid` +
+`not_eligible` attempt is recorded, attributable, and activates nothing.
+
+### Two caps, not one
+
+`raw_body` is attacker-controlled and unauthenticated at the moment it is
+stored, so it needs bounding — but a single cap conflates two different
+protections:
+
+- **Evidence-storage cap.** Above this, `raw_body` is truncated and the flag is
+  set. The row still exists and is still useful; only the stored copy of the
+  bytes is shortened.
+- **Absolute ingress/read cap.** Above this, the request is **not read at all**
+  past the limit. This is the one that matters for safety: without it, "read
+  the whole body, hash it, then truncate for storage" still reads and hashes
+  unbounded attacker-supplied input, so the write amplifier is merely moved
+  from disk to memory and CPU.
+
+The pre-truncation digest is therefore sound **only for bodies within the
+absolute cap** — it is a digest of everything that was legitimately read. Past
+that cap there is no complete body to hash, and claiming a digest would be a
+lie about evidence we never held.
+
+A body beyond the absolute cap is recorded as `body-too-large`: an attempt row
+with whatever prefix the evidence cap allows, `raw_body_digest` NULL, and
+`signature_status = unresolved`. Refusing to store anything would discard the
+signal that someone is posting oversized payloads.
+
+### Capturing receipt time
+
+`received_at` is the trusted instant the entire eligibility rule rests on, so
+where it comes from is part of the contract, not an implementation detail:
+
+- **From the same database clock** as `activated_at`, `retired_at` and
+  `revoked_at`. Comparing an application-server timestamp against
+  database-written lifecycle timestamps compares two clocks that drift
+  independently, and a few hundred milliseconds of skew at a revocation
+  boundary decides whether a compromised key's report is admitted.
+- **After the complete bounded body has arrived**, and **before parsing
+  begins.** Both halves matter. Stamping at request *start* lets a slow or
+  chunked upload begin before a revocation and finish after it while keeping
+  the earlier timestamp — a trivially exploitable way to be admitted by a key
+  that was revoked mid-transfer. Stamping after parsing makes the receipt time
+  depend on how long parsing took, which is attacker-influenced through payload
+  shape.
+
+So: read up to the absolute cap, stop, take the database clock, then parse.
 
 ### `applied_state_reports` — one canonical row per idempotency key
 
 | Column | Purpose |
 |---|---|
 | `authenticated_deployment_ref` + `report_id` | **UNIQUE together** — the idempotency key, scoped to the proven identity so one deployment's `report_id` can never collide with another's |
-| `payload` (bytes) | the exact signed bytes of the FIRST accepted arrival |
+| `payload` (bytes) | the exact signed bytes of the **first eligible verified arrival** |
 | `payload_digest` | `sha256:` of those bytes — the replay discriminator |
 | `key_id` | which credential verified it — attributable after rotation |
 | `first_received_at` | the receipt time that decided eligibility |
 | `original_verdict` | the verdict returned to every subsequent identical replay |
+
+"First **eligible verified** arrival", not "first accepted": a report can be
+validly signed, eligible, and still be **quarantined by the projection** —
+unknown digest, deployment mismatch, a version we never issued. Those establish
+the canonical row too, and their verdict must be just as stable as an
+activation's. Keying only on accepted reports would let a quarantined report_id
+be re-sent with different bytes and re-decided, which is exactly the
+re-litigation the idempotency key exists to prevent.
 
 Storing the exact bytes and signature — not a parsed projection of them — is
 what keeps the report portable evidence a third party can verify, which is the
@@ -327,8 +416,8 @@ property ADR-0007 §1 justifies Ed25519 with in the first place.
 
 ### Idempotency
 
-On a verified arrival, the admission service compares the incoming digest to
-the canonical row's `payload_digest`:
+On an eligible verified arrival, the admission service compares the incoming
+digest to the canonical row's `payload_digest`:
 
 | Case | Verdict |
 |---|---|
@@ -345,6 +434,38 @@ Returning `original_verdict` (rather than recomputing) matters: recomputation
 against changed licence state could yield a different answer for bytes the
 deployment sent once, which would make an at-least-once transport look like a
 state change.
+
+### Concurrent first arrivals
+
+"No canonical row yet" cannot be decided by looking. Two simultaneous first
+arrivals both observe no row, and both proceed — at-least-once delivery plus a
+retrying transport makes this ordinary, not exotic. The read-then-insert race
+must be resolved by the database, so the algorithm is part of the contract:
+
+1. **Insert the attempt row in the OUTER transaction.** Evidence is never
+   contingent on winning a race; it is written before any contended work.
+2. **Attempt the canonical insert inside `conflict_savepoint`** (the kernel's
+   conflict-handling seam — feature services never call `db.rollback()`; the
+   mutation goes INSIDE the `with` block). Let the unique constraint on
+   `(authenticated_deployment_ref, report_id)` be the arbiter.
+3. **On a uniqueness collision, load and lock the committed winner**
+   (`SELECT ... FOR UPDATE`) and compare digests. Identical bytes are an
+   idempotent replay returning the winner's `original_verdict`; different bytes
+   are a conflict.
+4. **Preserve the losing attempt either way**, with `report_ref` pointing at
+   the winner. The loser is not noise — under identical bytes it is the proof
+   that delivery retried, and under different bytes it is half the evidence of
+   a conflict.
+
+The loser must NOT re-run consequences. It resolves to the winner's verdict, so
+two racing identical reports activate a delivery exactly once.
+
+This needs **Postgres canaries**, not SQLite unit tests — the behaviour under
+test is a real unique-constraint collision between concurrent transactions,
+which the in-memory lane cannot reproduce. Two cases: simultaneous **identical**
+first arrivals (both succeed, one verdict, one activation) and simultaneous
+**divergent** first arrivals (one canonical row, the other a conflict, both
+byte sequences retained).
 
 A freshness window is deliberately NOT used. Applied state is legitimately
 delayed — a deployment that was offline reports late — so a timestamp window
@@ -408,12 +529,20 @@ an earlier timestamp. Persisting `received_at` at ingestion also makes the
 decision reproducible: re-running eligibility later yields the same answer it
 did at receipt, which a `now()`-based test would not.
 
-Retirement and revocation remain different in kind even though both close the
-window. Retirement is planned and reversible in principle; revocation is
-terminal, and a revoked `key_id` is never reinstated (which is why its
-uniqueness constraint spans all states). What they share is that neither
-un-signs anything: reports already admitted stay admitted, and past signatures
-stay verifiable.
+Retirement and revocation remain different in intent — one is planned
+rotation, the other is a compromise response — but **neither is reversible in
+this model, and retirement is not "softer" in effect**. A credential has ONE
+eligibility interval. Reactivating a retired key would require modelling
+multiple intervals per credential, and until that exists, un-setting
+`retired_at` would silently re-admit every report received during the gap. If
+a retired key must be used again, register a new credential and prove
+possession again.
+
+Revocation is additionally terminal at the identity level: a revoked `key_id`
+is never reinstated, which is why its uniqueness constraint spans all states.
+
+What both share is that neither un-signs anything: reports already admitted
+stay admitted, and past signatures stay independently verifiable.
 
 ## Rotation
 
@@ -513,26 +642,47 @@ revocation-application lag measurable.
     both cover it is admitted and attributed to the key that signed it.
 19. A signature made by a retired or revoked key remains independently
     verifiable as evidence — lifecycle never un-signs anything.
+20. A late but genuinely signed report from a revoked key records
+    `signature_status = valid` with `eligibility_at_receipt = not_eligible`,
+    and is distinguishable in the log from garbage naming that same `key_id`
+    (`signature_status = invalid`).
+21. `status`, if stored, cannot disagree with the timestamps — a direct SQL
+    write setting `active` alongside a non-NULL `revoked_at` is refused by the
+    check constraint.
 
 **Receipts and replay**
 
-20. Every arrival writes an attempt row, including unknown `key_id`, malformed
-    envelope and bad signature; those rows carry `verification = untrusted` and
-    a NULL `authenticated_deployment_ref`.
-21. An oversized body is truncated with the flag set, and its digest — computed
-    before truncation — still distinguishes it from a different oversized body.
-22. A byte-identical signed replay returns the ORIGINAL verdict, changes
+22. Every arrival writes an attempt row, including unknown `key_id`, malformed
+    envelope and bad signature; those carry a NULL
+    `authenticated_deployment_ref`.
+23. A body within the absolute ingress cap but over the evidence cap is
+    truncated with the flag set, and its digest — computed before truncation —
+    still distinguishes it from a different oversized body.
+24. A body beyond the ABSOLUTE ingress cap is refused as `body-too-large`
+    without being read past the limit, records a NULL `raw_body_digest`, and
+    still writes an attempt row.
+25. `received_at` comes from the database clock and is stamped after the body
+    is fully read and before parsing: a request that begins before a revocation
+    and completes after it is NOT admitted.
+26. Two simultaneous IDENTICAL first arrivals produce one canonical row, one
+    verdict and exactly one activation; both attempt rows survive.
+27. Two simultaneous DIVERGENT first arrivals produce one canonical row and one
+    conflict; both byte sequences are retained.
+28. A byte-identical signed replay returns the ORIGINAL verdict, changes
     nothing, and appends an attempt row.
-23. The same `report_id` with different bytes quarantines as a conflict, and
+29. The same `report_id` with different bytes quarantines as a conflict, and
     BOTH byte sequences survive in the attempt log.
-24. A report whose signed body claims another deployment is quarantined as
+30. A report whose signed body claims another deployment is quarantined as
     `deployment_mismatch` and activates nothing.
-25. An older valid report is retained as evidence and cannot regress a newer
+31. A report QUARANTINED by the projection still establishes the canonical row,
+    and re-sending that `report_id` with different bytes is a conflict rather
+    than a fresh decision.
+32. An older valid report is retained as evidence and cannot regress a newer
     active state.
 
 **Adapters**
 
-26. Admin ingestion cannot supply a proven identity — asserted structurally,
+33. Admin ingestion cannot supply a proven identity — asserted structurally,
     not merely behaviourally — and always records `unverified_identity`.
 
 ## Dependencies and sequencing
@@ -557,9 +707,16 @@ rehearsals:
 3. Rotation, retirement and revocation commands, and the full receipt-time
    eligibility window (`activated_at`/`retired_at`/`revoked_at`).
 
-The eligibility predicate spans slices 1 and 3: slice 1 sets `activated_at`
-and must already write the timeline columns, so slice 3 adds transitions
-rather than retrofitting the schema the admission rule depends on.
+**Ruled:** slice 1 creates ALL timeline columns and sets `activated_at`; slice
+2 consumes the complete predicate; slice 3 adds the retirement/revocation
+transitions **without changing schema**. The eligibility rule therefore never
+runs against a schema that cannot express it, and slice 3 is a behaviour change
+rather than a migration against live credential rows.
+
+Postgres rehearsals are mandatory for the concurrency canaries in slice 2
+(simultaneous identical and divergent first arrivals) — the in-memory SQLite
+lane cannot reproduce a unique-constraint collision between concurrent
+transactions, so passing there would prove nothing.
 
 The nine-case cross-plane proof against the starter receiver follows the third
 slice; connected delivery is last, because transport automation is separate
