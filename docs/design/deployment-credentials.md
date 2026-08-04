@@ -263,8 +263,16 @@ anyone who learns the routing identifiers: `challenge_id` and `key_id` are not
 secrets — they travel in the response and identify a record, they do not
 authenticate it — so an attacker who observes them could burn every challenge
 as it is issued by posting garbage signatures, and the real deployment could
-never enroll. The nonce and the signature are the secrets; the identifiers are
-an address.
+never enroll.
+
+Be precise about what is what, because "secret" is the wrong word for two of
+these three. The **private key** is the only secret. The **nonce** is not
+secret — it is *unpredictable and single-use*, which is what stops a response
+being precomputed before the challenge is issued. The **signature** is not
+secret either; it is *public evidence*, which is the whole point of preferring
+Ed25519 (§1: portable, checkable by any third party). The identifiers are
+merely an address. What makes the response unforgeable is possession of the
+private key, not the confidentiality of anything transmitted.
 
 Invalid attempts are **counted and rate-limited separately**, per challenge and
 per credential, so repeated failures are visible and throttled without
