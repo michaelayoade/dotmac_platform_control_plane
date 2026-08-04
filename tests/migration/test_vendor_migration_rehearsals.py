@@ -27,7 +27,7 @@ from vendor_cp.migrations import composed_version_locations, make_alembic_config
 KERNEL_HEAD = "0012_platform_outbox"  # current pin (0.1.0a7; head unchanged since a6)
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v010_delivery_hardening"
+VENDOR_HEAD = "v011_deployment_credentials"
 
 
 def _superuser_url(postgres_url: str) -> str:
@@ -416,3 +416,140 @@ def test_v010_check_constraint_rejects_a_new_delivery_without_a_target(
                 )
     finally:
         eng.dispose()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v011 — deployment credentials: the constraints that carry the security argument
+# ─────────────────────────────────────────────────────────────────────────────
+def _insert_credential(conn, **over: object) -> None:
+    row = {
+        "key_id": "k-1",
+        "deployment_ref": "dep-1",
+        "public_key_b64": "x" * 43,
+        "public_key_fingerprint": "sha256:" + "ab" * 32,
+        "status": "pending",
+        "activated_at": None,
+        "retired_at": None,
+        "revoked_at": None,
+        "enrollment_authority": "platform_admin_policy",
+    }
+    row.update(over)
+    conn.execute(
+        text(
+            "INSERT INTO deployment_credentials "
+            "(id, key_id, deployment_ref, public_key_b64, public_key_fingerprint,"
+            " status, activated_at, retired_at, revoked_at, enrollment_authority,"
+            " created_at, updated_at) "
+            "VALUES (gen_random_uuid(), :key_id, :deployment_ref, :public_key_b64,"
+            " :public_key_fingerprint, :status, :activated_at, :retired_at,"
+            " :revoked_at, :enrollment_authority, now(), now())"
+        ),
+        row,
+    )
+
+
+def test_v011_status_cannot_disagree_with_the_timestamps(scratch_db: str) -> None:
+    """`status` is a PROJECTION, not an independent authority. A direct SQL
+    write claiming `active` alongside a non-NULL `revoked_at` must be refused —
+    otherwise which one wins depends on which query the reader happened to
+    write, which is the drift the constraint exists to prevent."""
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            with pytest.raises(
+                DBAPIError, match="ck_deployment_credentials_status_timeline"
+            ):
+                _insert_credential(
+                    conn,
+                    status="active",
+                    activated_at="2026-08-04T12:00:00+00:00",
+                    revoked_at="2026-08-04T13:00:00+00:00",
+                )
+        # …and a row that AGREES is accepted, so the constraint is not simply
+        # rejecting everything.
+        with eng.begin() as conn:
+            _insert_credential(
+                conn, status="active", activated_at="2026-08-04T12:00:00+00:00"
+            )
+    finally:
+        eng.dispose()
+
+
+def test_v011_a_pending_credential_cannot_claim_an_activation_time(
+    scratch_db: str,
+) -> None:
+    """The other direction: a timestamp without the matching status is equally
+    a contradiction, and `pending` means nothing has happened yet."""
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            with pytest.raises(
+                DBAPIError, match="ck_deployment_credentials_status_timeline"
+            ):
+                _insert_credential(
+                    conn, status="pending", activated_at="2026-08-04T12:00:00+00:00"
+                )
+    finally:
+        eng.dispose()
+
+
+def test_v011_a_revoked_key_id_cannot_be_reinstated(scratch_db: str) -> None:
+    """`key_id` is unique across ALL states. Revocation is terminal, so a
+    partial index excluding revoked rows would permit exactly the reinstatement
+    ADR-0007 §6 forbids — and reinstating retroactively re-trusts everything
+    that key can sign."""
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            _insert_credential(
+                conn,
+                key_id="burned",
+                status="revoked",
+                revoked_at="2026-08-04T12:00:00+00:00",
+            )
+        with eng.begin() as conn:
+            with pytest.raises(DBAPIError, match="uq_deployment_credentials_key_id"):
+                _insert_credential(
+                    conn, key_id="burned", public_key_fingerprint="sha256:" + "cd" * 32
+                )
+    finally:
+        eng.dispose()
+
+
+def test_v011_the_same_public_key_cannot_be_registered_twice(scratch_db: str) -> None:
+    """Fingerprint uniqueness makes the §4 substitution attack's precondition
+    unreachable, independently of the service-layer check."""
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            _insert_credential(conn, key_id="k-a")
+        with eng.begin() as conn:
+            with pytest.raises(
+                DBAPIError, match="uq_deployment_credentials_fingerprint"
+            ):
+                _insert_credential(conn, key_id="k-b")
+    finally:
+        eng.dispose()
+
+
+def test_v011_credential_tables_are_platform_catalog_not_tenant_data(
+    scratch_db: str,
+) -> None:
+    """A product data plane's role has no business reading credential state,
+    let alone writing it."""
+    _upgrade(scratch_db, "heads")
+    for table in ("deployment_credentials", "deployment_challenges"):
+        assert "tenant_id" not in _column_names(scratch_db, table)
+        granted = _q(
+            scratch_db,
+            "SELECT grantee FROM information_schema.role_table_grants "
+            "WHERE table_name = :t",
+            t=table,
+        )
+        grantees = {row[0] for row in granted}
+        assert "app_user" not in grantees, f"{table} is readable by app_user"
+        assert {"platform_api", "app_admin"} <= grantees, f"{table} grants missing"

@@ -29,6 +29,7 @@ from uuid import UUID
 
 from dotmac_kernel import Base, TimestampMixin, uuid_pk
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -38,6 +39,20 @@ from sqlalchemy import (
     Uuid,
 )
 from sqlalchemy.orm import Mapped, mapped_column
+
+
+#: `status` must equal what the timestamps say. Ordered most-terminal first,
+#: because revocation outranks retirement: a credential that was retired and
+#: then revoked is revoked. Kept byte-identical to the v011 predicate — see the
+#: comment on the CheckConstraint below for why it is stated twice.
+STATUS_MATCHES_TIMESTAMPS = """
+    (status = 'revoked' AND revoked_at IS NOT NULL)
+ OR (status = 'retired' AND retired_at IS NOT NULL AND revoked_at IS NULL)
+ OR (status = 'active'  AND activated_at IS NOT NULL
+        AND retired_at IS NULL AND revoked_at IS NULL)
+ OR (status = 'pending' AND activated_at IS NULL
+        AND retired_at IS NULL AND revoked_at IS NULL)
+"""
 
 
 class CredentialStatus:
@@ -67,6 +82,17 @@ class DeploymentCredential(Base, TimestampMixin):
         # ids — unreachable. Both, because either alone is one mistake away.
         UniqueConstraint(
             "public_key_fingerprint", name="uq_deployment_credentials_fingerprint"
+        ),
+        # `status` is a PROJECTION of the timestamps and may not disagree with
+        # them. Declared HERE as well as in v011 on purpose: the unit lane
+        # builds its schema with `create_all` from this metadata, so a
+        # constraint living only in the migration would mean the fast tests run
+        # against a schema production does not have — and the guard would be
+        # exercised solely on Postgres. Migrations stay self-contained (they are
+        # frozen snapshots and must not import app code), so the predicate is
+        # deliberately duplicated; the v011 rehearsal proves the two agree.
+        CheckConstraint(
+            STATUS_MATCHES_TIMESTAMPS, name="ck_deployment_credentials_status_timeline"
         ),
     )
 
@@ -143,4 +169,9 @@ class DeploymentChallenge(Base, TimestampMixin):
     failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
-__all__ = ["CredentialStatus", "DeploymentChallenge", "DeploymentCredential"]
+__all__ = [
+    "STATUS_MATCHES_TIMESTAMPS",
+    "CredentialStatus",
+    "DeploymentChallenge",
+    "DeploymentCredential",
+]
