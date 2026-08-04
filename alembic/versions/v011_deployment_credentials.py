@@ -78,8 +78,18 @@ def upgrade() -> None:
         sa.Column("revocation_reason", sa.String(200), nullable=True),
         sa.Column("registered_by_admin_id", sa.Uuid(), nullable=True),
         sa.Column("enrollment_authority", sa.String(60), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
         sa.UniqueConstraint("key_id", name="uq_deployment_credentials_key_id"),
         sa.UniqueConstraint(
             "public_key_fingerprint", name="uq_deployment_credentials_fingerprint"
@@ -110,8 +120,18 @@ def upgrade() -> None:
         sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("consumed_reason", sa.String(40), nullable=True),
         sa.Column("failed_attempts", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
         sa.UniqueConstraint(
             "challenge_id", name="uq_deployment_challenges_challenge_id"
         ),

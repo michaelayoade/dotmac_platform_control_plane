@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -570,3 +571,67 @@ def test_v011_credential_tables_are_platform_catalog_not_tenant_data(
         assert grantees, f"{table} has no grants at all — the migration ran?"
         assert "app_user" not in grantees, f"{table} is readable by app_user"
         assert {"platform_api", "app_admin"} <= grantees, f"{table} grants missing"
+
+
+def test_v011_the_service_path_works_against_the_MIGRATED_schema(
+    scratch_db: str,
+) -> None:
+    """Register → challenge → activate through the real service, against the
+    schema the MIGRATION built.
+
+    The other v011 rehearsals insert with raw SQL supplying `created_at`
+    explicitly, and the unit lane builds its schema with `create_all` from the
+    model — where `TimestampMixin` provides `server_default=now()`. Between
+    them, both masked a migration that declared those columns NOT NULL with NO
+    server default, so every service insert failed on Postgres with a
+    NotNullViolation while every test passed.
+
+    This is the shape of the gap: exercise the SERVICE against the MIGRATED
+    schema, not the model's.
+    """
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    try:
+        from dotmac_kernel.licensing import answer_possession_challenge
+        from dotmac_kernel.testing import FakeDeploymentSigner
+        from sqlalchemy.orm import Session
+
+        from vendor_cp.licensing.credential_models import CredentialStatus
+        from vendor_cp.licensing.credentials import (
+            activate_credential,
+            issue_challenge,
+            register_credential,
+        )
+        from vendor_cp.licensing.delivery_models import (
+            LicenceDeliveryTarget,
+            TargetStatus,
+        )
+
+        now = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
+        signer = FakeDeploymentSigner(key_id="svc-key", deployment_ref="svc-dep")
+        with Session(eng) as session:
+            session.add(
+                LicenceDeliveryTarget(
+                    target_ref="svc-dep",
+                    customer_ref="cust-1",
+                    status=TargetStatus.ACTIVE.value,
+                )
+            )
+            session.flush()
+            credential = register_credential(
+                session,
+                key_id="svc-key",
+                deployment_ref="svc-dep",
+                public_key_b64=signer.public_key_b64,
+            )
+            issued = issue_challenge(session, credential_id=credential.id, now=now)
+            activate_credential(
+                session,
+                answer_possession_challenge(issued.challenge, signer=signer),
+                now=now,
+            )
+            session.commit()
+            assert credential.status == CredentialStatus.ACTIVE
+            assert credential.created_at is not None
+    finally:
+        eng.dispose()
