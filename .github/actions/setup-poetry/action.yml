@@ -1,0 +1,101 @@
+name: Install pinned Poetry
+description: >-
+  Install a pinned, hash-locked Poetry without a third-party action. Drop-in
+  replacement for snok/install-poetry@v1, which resolved from a MUTABLE tag and
+  downloaded an installer from the public network on every job.
+
+# Scope is deliberately identical to what it replaces: install Poetry and set
+# the two virtualenv options. It does NOT run actions/setup-python — callers
+# already do that explicitly, and some (the kernel-floors matrix in the starter
+# repo) must choose the version per job. Absorbing it here would hide that
+# choice and duplicate a step that is already pinned by SHA.
+#
+# Why this exists, in two parts:
+#
+# 1. Supply chain. `@v1` is a mutable tag: whoever controls it controls code
+#    executing on a self-hosted runner in the Dotmac fleet — the same runner
+#    class deliberately kept out of the docker group so workflow code cannot
+#    reach root-equivalent host control. A local composite action has no
+#    external reference that can move under it, and what it installs is pinned
+#    by hash.
+#
+# 2. Reliability. The old action fetched install.python-poetry.org on every
+#    run, putting runner egress in the critical path of every job. It reset
+#    twice within one hour on 2026-08-04, both times before any repository code
+#    ran. Hash pinning secures CONTENTS but does not remove cold-cache network
+#    dependence, so this adds a wheel cache and bounded retries.
+#
+# The pinned version lives in .github/bootstrap/poetry-requirements.txt;
+# regenerate it with .github/bootstrap/regenerate.sh.
+
+runs:
+  using: composite
+  steps:
+    # Cache pip's wheel cache, keyed on the lock file: a regenerated bootstrap
+    # must MISS the cache, or a stale entry could quietly serve wheels the new
+    # pin no longer names. (pip re-verifies hashes on install regardless, so
+    # this is a latency optimisation, not a trust boundary.)
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/pip
+        key: poetry-bootstrap-${{ runner.os }}-${{ hashFiles('.github/bootstrap/poetry-requirements.txt') }}
+
+    - name: Install pinned Poetry into a fresh job-local venv
+      shell: bash
+      run: |
+        set -euo pipefail
+        req=".github/bootstrap/poetry-requirements.txt"
+        venv="${RUNNER_TEMP}/poetry-bootstrap"
+
+        # A FRESH VENV IS THE WHOLE POINT, not tidiness.
+        #
+        # pip leaves an already-satisfied requirement untouched, and hashes
+        # protect archives being INSTALLED — not packages already on disk.
+        # Installing into the interpreter's own site-packages therefore
+        # verifies nothing whenever the packages happen to be present, which on
+        # this repo's persistent self-hosted runner is every run after the
+        # first. Observed 2026-08-04: the `check` job reported every package
+        # "Requirement already satisfied" from the shared tool cache and
+        # downloaded nothing, so the bootstrap ran and established no trust at
+        # all — on precisely the runner where a poisoned site-packages matters
+        # most, because it persists across jobs.
+        #
+        # Removing and recreating the venv makes skipping structurally
+        # impossible: there is nothing there to satisfy anything, so every
+        # package is fetched and hash-checked on every run.
+        rm -rf "$venv"
+        python -m venv "$venv"
+
+        # Bounded retries for transient network faults. Every attempt applies
+        # the SAME hash checking, so a mismatch fails all three identically —
+        # retrying cannot launder a bad hash into an install. Bounded, because
+        # retrying forever turns a real outage into a timeout with no
+        # diagnosis; the final message names both causes so a genuine pin
+        # failure is not misread as flakiness.
+        for attempt in 1 2 3; do
+          if "$venv/bin/python" -m pip install --disable-pip-version-check \
+               --require-hashes --only-binary=:all: -r "$req"; then
+            resolved="$("$venv/bin/poetry" --version)"
+            echo "${venv}/bin" >> "$GITHUB_PATH"
+            echo "installed ${resolved} at ${venv}/bin/poetry"
+            "$venv/bin/poetry" config virtualenvs.create true
+            "$venv/bin/poetry" config virtualenvs.in-project true
+            exit 0
+          fi
+          echo "::warning::poetry bootstrap attempt ${attempt} failed"
+          sleep $((attempt * 5))
+        done
+        echo "::error::poetry bootstrap failed after 3 attempts — if pip reported HASH MISMATCH this is NOT a network fault; regenerate ${req} with .github/bootstrap/regenerate.sh"
+        exit 1
+
+    - name: Assert Poetry resolves to the verified venv
+      shell: bash
+      run: |
+        set -euo pipefail
+        want="${RUNNER_TEMP}/poetry-bootstrap/bin/poetry"
+        got="$(command -v poetry)"
+        if [ "$got" != "$want" ]; then
+          echo "::error::poetry on PATH is ${got}, not the hash-verified ${want} — a pre-existing install is shadowing the bootstrap"
+          exit 1
+        fi
+        echo "poetry resolves to the verified venv: ${got}"
