@@ -111,6 +111,28 @@ def _column_names(url: str, table: str) -> set[str]:
         eng.dispose()
 
 
+def _grantees(url: str, table: str) -> set[str]:
+    """Every role holding any privilege on `table`.
+
+    Deliberately NOT built on `_q`, which returns `.scalar()` — a single value.
+    Iterating that yields CHARACTERS, which silently turns a grant assertion
+    into a comparison against letters of the alphabet.
+    """
+    eng = create_engine(url)
+    try:
+        with eng.connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT DISTINCT grantee FROM information_schema.role_table_grants "
+                    "WHERE table_schema='public' AND table_name=:t"
+                ),
+                {"t": table},
+            ).scalars()
+            return set(rows)
+    finally:
+        eng.dispose()
+
+
 def _versions(url: str) -> set[str]:
     eng = create_engine(url)
     try:
@@ -544,12 +566,7 @@ def test_v011_credential_tables_are_platform_catalog_not_tenant_data(
     _upgrade(scratch_db, "heads")
     for table in ("deployment_credentials", "deployment_challenges"):
         assert "tenant_id" not in _column_names(scratch_db, table)
-        granted = _q(
-            scratch_db,
-            "SELECT grantee FROM information_schema.role_table_grants "
-            "WHERE table_name = :t",
-            t=table,
-        )
-        grantees = {row[0] for row in granted}
+        grantees = _grantees(scratch_db, table)
+        assert grantees, f"{table} has no grants at all — the migration ran?"
         assert "app_user" not in grantees, f"{table} is readable by app_user"
         assert {"platform_api", "app_admin"} <= grantees, f"{table} grants missing"
