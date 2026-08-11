@@ -17,9 +17,11 @@ disagree, fix the drift.
 3. **No product data-plane imports.** Never import `dotmac_sub`/`crm`/`erp`/`app`
    (**D2**). Cross-system collaboration is via APIs/webhooks only, per the
    Dotmac app-independence standard.
-4. **Fake providers only, this phase.** A non-`fake` `VENDOR_PROVIDER_MODE` FAILS
-   STARTUP; no real-provider SDKs are imported (**D3**). No fleet tables, no
-   `DeploymentRunner` yet.
+4. **Vendor-owned simulation provider only, this phase.** A non-`fake`
+   `VENDOR_PROVIDER_MODE` FAILS STARTUP; no real-provider SDKs are imported
+   (**D3**). Runtime code implements the side-effect-free laboratory provider
+   locally and never imports `dotmac_kernel.testing`; the kernel test kit is
+   test-only. No fleet tables, no `DeploymentRunner` yet.
 5. **Platform-admin auth through the kernel.** Vendor admin surfaces depend on
    `dotmac_kernel.platform_auth.require_platform_admin`; auth is never
    re-implemented (**D4**).

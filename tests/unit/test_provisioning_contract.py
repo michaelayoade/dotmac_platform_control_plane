@@ -22,10 +22,21 @@ from vendor_cp.providers import (
     RealProviderNotPermittedError,
     build_provisioning_provider,
 )
+from vendor_cp.provisioning.laboratory import LaboratoryProvisioningProvider
 
 
 def test_vendor_provider_factory_satisfies_kernel_contract() -> None:
     check_provisioning_provider_contract(build_provisioning_provider)
+
+
+def test_runtime_laboratory_provider_is_vendor_owned() -> None:
+    """The shipped lab must not execute a helper from the kernel test kit."""
+    provider = build_provisioning_provider()
+    assert type(provider) is LaboratoryProvisioningProvider
+    assert LaboratoryProvisioningProvider.__mro__ == (
+        LaboratoryProvisioningProvider,
+        object,
+    )
 
 
 def test_failure_injection_resume_and_operation_id_idempotency() -> None:

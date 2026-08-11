@@ -7,9 +7,10 @@ lifecycle — never a product's tenants, subscribers, or customer data.
 
 - **Hard rules:** `AGENTS.md` (canonical). **As-built + boundaries:**
   `docs/ARCHITECTURE.md`. **Decisions:** `docs/adr/`.
-- **Kernel:** consumed as `dotmac-kernel==0.1.0a1` (extras `testing`) resolved
+- **Kernel:** consumed at the exact version pinned in `pyproject.toml`, resolved
   **only** from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`).
-  No copied kernel code, no private imports (deny-case D5).
+  The testing extra supports tests only; runtime code never imports it. No
+  copied kernel code or private imports (deny-case D5).
 
 ## Layout
 
@@ -17,8 +18,10 @@ lifecycle — never a product's tenants, subscribers, or customer data.
 - `src/vendor_cp/main.py` — `app = create_app(build_spec())` (`uvicorn
   vendor_cp.main:app`).
 - `src/vendor_cp/console/` — the platform-admin-only administration shell.
-- `src/vendor_cp/providers.py` — provisioning provider wiring (**fake only** this
-  phase; a real provider fails startup).
+- `src/vendor_cp/providers.py` — provisioning provider wiring (**Vendor-owned
+  simulation only** this phase; a real provider fails startup).
+- `src/vendor_cp/provisioning/laboratory.py` — the side-effect-free runtime
+  simulation of the kernel's public provisioning contract.
 - `tests/architecture/test_deny_cases.py` — the D1–D5 boundary guards.
 
 ## Boundaries (D1–D5)
@@ -27,7 +30,7 @@ lifecycle — never a product's tenants, subscribers, or customer data.
 |---|---|
 | D1 | One control-plane database; the kernel owns the engine (no `create_engine`, no product DSNs). |
 | D2 | No product data-plane imports (`dotmac_sub`/`crm`/`erp`/`app`). |
-| D3 | Fake providers only; a real-provider config **fails startup**; no real-provider SDKs. |
+| D3 | Vendor-owned simulation provider only; real config **fails startup**; no real-provider SDKs or runtime testing-kit imports. |
 | D4 | Platform-admin auth **through the kernel** (`require_platform_admin`), never re-implemented. |
 | D5 | Only the kernel's **public** surface (`SUPPORTED_MODULES` + top-level `__all__`); no private/internal/copied code. |
 

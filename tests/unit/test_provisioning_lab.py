@@ -1,10 +1,10 @@
 """Unit tests for the provisioning contract LABORATORY (slice 4).
 
 The lab drives the kernel `ProvisioningProvider` contract (plan → apply → observe
-→ cancel) against the FAKE provider — no persistence beyond the fake's in-memory
-ledger. These cover the lab's own thin service + that the platform-admin routes
-are mounted. (Contract CONFORMANCE of the provider factory itself is covered by
-`test_provisioning_contract.py`.)
+→ cancel) against the Vendor-owned simulation — no persistence beyond its
+in-memory ledger. These cover the lab's own thin service + that the
+platform-admin routes are mounted. (Contract CONFORMANCE of the provider factory
+itself is covered by `test_provisioning_contract.py`.)
 """
 
 from __future__ import annotations

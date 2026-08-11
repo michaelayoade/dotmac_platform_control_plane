@@ -45,3 +45,14 @@ land. See `docs/ARCHITECTURE.md`.
 The vendor CP evolves independently of product data planes and of the kernel's
 release cadence (it pins an exact kernel and bumps deliberately). Its boundaries
 are enforced by tests, not convention, so drift fails the build.
+
+## Implementation clarification — 2026-08-11
+
+"Fake providers only" describes the admitted runtime effect: the laboratory may
+simulate the public provisioning contract and may not reach real
+infrastructure. It does not make the kernel's test fake a runtime provider.
+`LaboratoryProvisioningProvider` is the Vendor-owned, side-effect-free runtime
+implementation; `dotmac_kernel.testing` is consumed only by tests that run the
+kernel's conformance suite. This preserves D3 while keeping test-only session
+factories, fake signing helpers, and provider fakes out of shipped execution
+paths.

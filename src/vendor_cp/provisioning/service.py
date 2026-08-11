@@ -1,11 +1,11 @@
 """The laboratory's thin driver over the kernel `ProvisioningProvider` contract.
 
-Holds ONE shared FAKE provider for the process so an operation's state (keyed by
-`operation_id`) survives across the plan → apply → observe → cancel HTTP calls
-that exercise it — the fake keeps that state in memory, which is the whole extent
-of the lab's "persistence" (no fleet tables, no runner). The provider comes from
-`vendor_cp.providers.build_provisioning_provider`, which FAILS for any non-fake
-mode (deny-case D3).
+Holds ONE shared Vendor-owned simulation provider for the process so an
+operation's state (keyed by `operation_id`) survives across the plan → apply →
+observe → cancel HTTP calls that exercise it. The provider keeps that state in
+memory, which is the whole extent of the lab's "persistence" (no fleet tables,
+no runner). It comes from `vendor_cp.providers.build_provisioning_provider`,
+which FAILS for any non-fake mode (deny-case D3).
 
 These are deliberately thin: each function is one contract invocation. There is
 no orchestration loop here — driving apply→observe to convergence is the caller's
@@ -30,7 +30,7 @@ _provider: ProvisioningProvider | None = None
 
 
 def get_lab_provider() -> ProvisioningProvider:
-    """The process-wide fake provider backing the lab (created on first use)."""
+    """The process-wide simulation backing the lab (created on first use)."""
     global _provider
     if _provider is None:
         _provider = build_provisioning_provider()

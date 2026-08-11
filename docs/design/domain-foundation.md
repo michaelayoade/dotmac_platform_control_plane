@@ -562,6 +562,14 @@ define a competing public contract.
 > [`../reviews/2026-07-30-vendor-dependency-reconciliation.md`](../reviews/2026-07-30-vendor-dependency-reconciliation.md).
 > Read the 0–7 table below as the fuller domain enumeration, not the alpha-era build order.
 
+> **Implementation clarification 2026-08-11 (testing-kit locality).** The
+> kernel's `FakeProvisioningProvider` is the test reference and its contract
+> suite remains the conformance driver. The shipped provisioning laboratory
+> uses Vendor-owned `LaboratoryProvisioningProvider`, a side-effect-free runtime
+> implementation of the same public protocol. D4's "fake provider" means no
+> infrastructure effects; it does not permit runtime imports from
+> `dotmac_kernel.testing`.
+
 Prerequisites (none of this slice starts before all three hold):
 
 1. Control-plane security plan merged (platform identity, exact-host routing, RLS-active dev).
@@ -653,7 +661,8 @@ record, those documents remain authoritative for their scope.
 3. Build and publish the kernel alpha containing `ProductAssemblySpec` AND `ProvisioningProvider`
    (protocol + typed results + stable errors + fake + contract suite).
 4. Create the `dotmac_vendor_control_plane` repository.
-5. Implement executable slice steps 0–6 against that pinned kernel alpha and its fake provider.
+5. Implement executable slice steps 0–6 against that pinned kernel alpha and a
+   Vendor-owned, contract-conformant simulation provider.
 
 Until step 3 ships, Lane B is **design-only** — domain modelling, contract examples, and
 acceptance scenarios. No executable slice step (including step 0) runs before the kernel alpha
