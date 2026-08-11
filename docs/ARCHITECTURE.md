@@ -23,11 +23,12 @@ it owns and — just as importantly — what it must never become.
 - **Provisioning contracts** (slice 4, delivered) — the `provisioning` feature
   (`src/vendor_cp/provisioning/`): a platform-admin-only API that drives the
   kernel's `ProvisioningProvider` contract (plan → apply → observe → cancel)
-  against the FAKE provider, plus conformance via the kernel's
-  `check_provisioning_provider_contract`. A **laboratory** — fakes only, no fleet
-  tables, no runner, no real infrastructure, no SSH; the only state is the fake's
-  in-memory operation ledger. The real runner + activation contracts are a later,
-  design-gated slice.
+  against the Vendor-owned `LaboratoryProvisioningProvider`, plus test-only
+  conformance via the kernel's `check_provisioning_provider_contract`. A
+  **laboratory** — simulation only, no fleet tables, no runner, no real
+  infrastructure, no SSH; the only state is the provider's in-memory operation
+  ledger. Runtime code never imports `dotmac_kernel.testing`. The real runner +
+  activation contracts are a later, design-gated slice.
 - **Administration shell** — a platform-admin-only console surface
   (`src/vendor_cp/console/`).
 
@@ -40,7 +41,7 @@ a build-failing architecture test (`tests/architecture/test_deny_cases.py`):
 |---|---|---|
 | **D1** | One control-plane database; the kernel owns the engine. No `create_engine`/`sessionmaker`, no product DSNs. | A cache or a product DB must never become a parallel authority; the vendor CP has exactly one datastore. |
 | **D2** | No product data-plane imports (`dotmac_sub`/`crm`/`erp`/`app`). | ERP/ISP/CRM remain separate data planes; collaboration is API/webhook only. An ISP operator is a *tenant*, its subscribers are the product's parties — never the vendor CP's. |
-| **D3** | Fake providers only; real config fails startup; no real-provider SDKs. | A request-time access check never calls a payment/cloud provider; the runner + activation contracts are a later, design-gated slice. |
+| **D3** | Vendor-owned simulation provider only; real config fails startup; no real-provider SDKs or runtime testing-kit imports. | A request-time access check never calls a payment/cloud provider; the runner + activation contracts are a later, design-gated slice. |
 | **D4** | Platform-admin auth through the kernel (`require_platform_admin`). | One authority for platform-actor identity; no re-implemented auth to drift. |
 | **D5** | Only the kernel's public surface; no private/internal/copied code. | Products compose a pinned kernel and improve it via declared extension points — never fork or copy it. |
 

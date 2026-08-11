@@ -1,11 +1,11 @@
 """Provisioning-lab JSON API — a thin, platform-admin-only adapter.
 
 Exposes the four kernel `ProvisioningProvider` contract operations so a platform
-admin can drive plan → apply → observe → cancel against the FAKE provider. Every
-route depends on `require_platform_admin` (deny-case D4). NO database (there is no
-persistence — the only state is the fake's in-memory ledger, deny-case D1/D3).
-The route builds no infrastructure; it invokes one contract method and maps the
-typed result.
+admin can drive plan → apply → observe → cancel against the Vendor-owned
+laboratory simulation. Every route depends on `require_platform_admin`
+(deny-case D4). NO database (there is no persistence — the only state is the
+simulation's in-memory ledger, deny-case D1/D3). The route builds no
+infrastructure; it invokes one contract method and maps the typed result.
 """
 
 from __future__ import annotations
