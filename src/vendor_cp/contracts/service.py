@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from uuid import UUID
 
+from dotmac_entitlement_allocation import CapabilityCatalogueReader
 from dotmac_kernel import (
     ConflictError,
     NotFoundError,
@@ -41,7 +42,6 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import service as approvals
 from vendor_cp.contracts.models import Contract, ContractLine, ContractStatus
-from vendor_cp.offers.catalog import ProductCapabilityCatalogueReader
 from vendor_cp.offers.models import OfferVersion
 
 _CMD_CREATE = "vendor.contract.create_draft"
@@ -301,7 +301,7 @@ def submit(
     db: Session,
     command: SubmitCommand,
     *,
-    catalogues: ProductCapabilityCatalogueReader,
+    catalogues: CapabilityCatalogueReader,
 ) -> ContractView:
     """`draft → pending_approval`. Freezes the priced snapshot (copies each pinned
     offer version's price onto its line), validates every line's capability code is

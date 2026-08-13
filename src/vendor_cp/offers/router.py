@@ -2,14 +2,15 @@
 
 Builds the typed `Money` price + resolves the capability catalogue, then delegates
 to `OfferVersionService`. `ConflictError` (immutable version / duplicate) → 409;
-`UndeclaredCapabilityError` (undeclared code) → the kernel maps it; a bad
-amount/currency → 400.
+the module's catalogue errors are translated to kernel HTTP-domain errors at this
+boundary; a bad amount/currency → 400.
 """
 
 from __future__ import annotations
 
 from typing import Annotated
 
+from dotmac_entitlement_allocation import AllocationError
 from dotmac_kernel import (
     BadRequestError,
     Money,
@@ -24,7 +25,10 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from vendor_cp.offers import service
-from vendor_cp.offers.catalog import configured_product_capability_catalogues
+from vendor_cp.offers.catalog import (
+    catalogue_domain_error,
+    configured_product_capability_catalogues,
+)
 from vendor_cp.offers.schemas import OfferVersionResponse, PublishOfferVersionRequest
 
 router = APIRouter(prefix="/platform/vendor/offer-versions", tags=["offer-versions"])
@@ -46,19 +50,22 @@ def _price(amount: str, code: str) -> Money:
 def publish(
     body: PublishOfferVersionRequest, admin: Admin, db: Db
 ) -> OfferVersionResponse:
-    result = service.publish_offer_version(
-        db,
-        service.PublishOfferVersionCommand(
-            command_id=body.command_id,
-            product_code=body.product_code,
-            offer_code=body.offer_code,
-            version=body.version,
-            price=_price(body.amount, body.currency),
-            capability_codes=tuple(body.capability_codes),
-            actor_admin_id=admin.id,
-        ),
-        catalogues=configured_product_capability_catalogues(),
-    )
+    try:
+        result = service.publish_offer_version(
+            db,
+            service.PublishOfferVersionCommand(
+                command_id=body.command_id,
+                product_code=body.product_code,
+                offer_code=body.offer_code,
+                version=body.version,
+                price=_price(body.amount, body.currency),
+                capability_codes=tuple(body.capability_codes),
+                actor_admin_id=admin.id,
+            ),
+            catalogues=configured_product_capability_catalogues(),
+        )
+    except AllocationError as exc:
+        raise catalogue_domain_error(exc) from exc
     return OfferVersionResponse.of(result.offer_version)
 
 

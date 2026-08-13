@@ -37,11 +37,16 @@ it owns and — just as importantly — what it must never become.
 - **Commercial lifecycle (as-built)** — immutable product-qualified offers,
   versioned approvals, product-qualified contracts, the legacy allocation
   projection, and signed licence issuance and delivery. Offer and contract
-  services consume a product-scoped catalogue port; the current assembly adapter
-  is populated from manifest-derived snapshots in
-  `VENDOR_PRODUCT_MANIFEST_CAPABILITIES_JSON`. These remain vendor-local owners
-  until each approved independent module cutover explicitly retires its
-  corresponding local writer.
+  services consume `dotmac-entitlement-allocation`'s product-scoped
+  `CapabilityCatalogueReader` port. The current assembly adapter is populated
+  from `VENDOR_PRODUCT_MANIFEST_CAPABILITIES_JSON`; this is temporary shadow
+  input, not a verified publication contract and not authority for product
+  identity. After `dotmac-kernel`'s release-bound product-manifest snapshot and
+  `dotmac-release-catalog`'s `product_manifest` attestation kind are published,
+  that adapter must verify the canonical snapshot digest associated with the
+  exact product artifact and reject the raw JSON configuration. These
+  commercial features remain vendor-local owners until each approved
+  independent-module cutover explicitly retires its corresponding local writer.
 - **Allocation cutover gate** — Entitlement Allocation can become authoritative
   only after one coherent change proves all of the following:
 
@@ -49,22 +54,33 @@ it owns and — just as importantly — what it must never become.
      hashes, and emits an explicit product identity; historical offers and
      contracts must still be mapped from evidence before the v011 checks can be
      validated;
-  2. **typed boundary delivered:** a product-scoped catalogue port replaces the
-     flat `offered_capabilities` mirror; promotion still needs the configured
-     manifest snapshots reconciled with each target application's published
-     descriptor;
+  2. **typed boundary delivered:** commercial services and the cutover preflight
+     consume the allocation module's product-scoped catalogue port rather than
+     owning a duplicate protocol. Promotion still needs the temporary configured
+     capabilities replaced by release-bound, digest-verified product-manifest
+     snapshots;
   3. every live legacy allocation entry validates against its product's
      manifest and duplicate capability codes are normalized before switching;
   4. the activation adapter constructs the module's `ContractSnapshot`, the
      consumer switches once, licence issuance reads `allocation_product()`, and
      the legacy models, service, FK and writer path are retired after parity.
 
-  Until all four pass, the module tables are empty and non-authoritative. A
-  partial switch would either invent product identity or create two writers.
+  `preflight_allocation_cutover` is the read-only proof for steps 1–3. It scans
+  offers, contracts, allocations, and entries; reports every known divergence;
+  and accepts only immutable, evidence-referenced mapping proposals. It never
+  changes a legacy row. Separate canonical digests bind the exact operator
+  classification set and every relevant persisted fact the report observed;
+  neither digest makes a proposal authoritative. Shadow runs may observe normal
+  traffic, but the final cutover proof must run after the legacy writer is
+  quiesced, so a passing observation cannot move before the writer switch.
+  Until all four gates pass, the module tables are empty and non-authoritative.
+  A partial switch would either invent product identity or create two writers.
 - **Release artifacts and attestations** — owned by the independently published
   `dotmac-release-catalog`, not by a vendor-local feature or table. This change
   composes the owner; it does not yet add a publish HTTP adapter or claim a
-  production cutover.
+  production cutover. Product identity and capability declarations originate in
+  each product assembly; the release catalogue binds their snapshot attestation
+  to exact artifact bytes, while Vendor only consumes that evidence.
 - **Provisioning contracts** (slice 4, delivered) — the `provisioning` feature
   (`src/vendor_cp/provisioning/`): a platform-admin-only API that drives the
   kernel's `ProvisioningProvider` contract (plan → apply → observe → cancel)

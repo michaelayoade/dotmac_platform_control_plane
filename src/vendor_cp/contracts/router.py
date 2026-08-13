@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
+from dotmac_entitlement_allocation import AllocationError
 from dotmac_kernel import PlatformAdmin
 from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.platform_auth import require_platform_admin
@@ -23,7 +24,10 @@ from vendor_cp.contracts.schemas import (
     SubmitRequest,
     TransitionRequest,
 )
-from vendor_cp.offers.catalog import configured_product_capability_catalogues
+from vendor_cp.offers.catalog import (
+    catalogue_domain_error,
+    configured_product_capability_catalogues,
+)
 
 router = APIRouter(prefix="/platform/vendor/contracts", tags=["contracts"])
 
@@ -63,18 +67,21 @@ def create_draft(body: CreateDraftRequest, admin: Admin, db: Db) -> ContractResp
 def submit(
     contract_id: UUID, body: SubmitRequest, admin: Admin, db: Db
 ) -> ContractResponse:
-    view = service.submit(
-        db,
-        service.SubmitCommand(
-            command_id=body.command_id,
-            contract_id=contract_id,
-            approval_policy_code=body.approval_policy_code,
-            approval_policy_version=body.approval_policy_version,
-            submitter_id=body.submitter_id,
-            actor_admin_id=admin.id,
-        ),
-        catalogues=configured_product_capability_catalogues(),
-    )
+    try:
+        view = service.submit(
+            db,
+            service.SubmitCommand(
+                command_id=body.command_id,
+                contract_id=contract_id,
+                approval_policy_code=body.approval_policy_code,
+                approval_policy_version=body.approval_policy_version,
+                submitter_id=body.submitter_id,
+                actor_admin_id=admin.id,
+            ),
+            catalogues=configured_product_capability_catalogues(),
+        )
+    except AllocationError as exc:
+        raise catalogue_domain_error(exc) from exc
     return ContractResponse.of(view)
 
 

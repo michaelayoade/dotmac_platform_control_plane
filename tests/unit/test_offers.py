@@ -10,13 +10,19 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from dotmac_kernel import ConflictError, Money, currency
-from dotmac_kernel.capabilities import UndeclaredCapabilityError
+from dotmac_entitlement_allocation import (
+    UndeclaredCapabilityError,
+    UnknownProductError,
+)
+from dotmac_kernel import BadRequestError, ConflictError, Money, NotFoundError, currency
 from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy.orm import Session
 
 from vendor_cp.offers import service
-from vendor_cp.offers.catalog import ProductCapabilityCatalogues, UnknownProductError
+from vendor_cp.offers.catalog import (
+    ProductCapabilityCatalogues,
+    catalogue_domain_error,
+)
 
 
 @pytest.fixture
@@ -89,6 +95,15 @@ def test_unknown_product_fails_closed(db: Session) -> None:
             _cmd(product_code="dotmac-unknown"),
             catalogues=_CATALOGUES,
         )
+
+
+def test_catalogue_errors_keep_the_http_contract() -> None:
+    unknown = catalogue_domain_error(UnknownProductError("dotmac-unknown"))
+    undeclared = catalogue_domain_error(
+        UndeclaredCapabilityError("dotmac-sub", ("cap.unknown",))
+    )
+    assert isinstance(unknown, NotFoundError)
+    assert isinstance(undeclared, BadRequestError)
 
 
 def test_versions_are_immutable(db: Session) -> None:

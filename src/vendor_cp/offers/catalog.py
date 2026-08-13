@@ -5,10 +5,11 @@ manifest-derived snapshot for each named product and exposes only a fail-closed
 ``require_declared`` port to commercial services. A code declared by one product
 is not evidence that another product declares it.
 
-The environment adapter is an assembly concern, not the authority: deployments
-materialise ``VENDOR_PRODUCT_MANIFEST_CAPABILITIES_JSON`` from the target product
-manifests. The typed port lets that adapter be replaced by a published
-product-catalogue client without changing offer or contract policy.
+The environment adapter is an assembly concern, not the authority. Its
+``VENDOR_PRODUCT_MANIFEST_CAPABILITIES_JSON`` input is deliberately recorded as
+temporary shadow configuration: it is neither signed nor bound to exact release
+bytes. The typed port lets the release-bound, digest-verified product-manifest
+adapter replace it without changing offer or contract policy.
 """
 
 from __future__ import annotations
@@ -16,21 +17,23 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Protocol, Self
+from typing import Self
 
-from dotmac_kernel import CapabilityCatalogue, FeatureManifest, NotFoundError
+from dotmac_entitlement_allocation import (
+    AllocationError,
+    UndeclaredCapabilityError,
+    UnknownProductError,
+)
+from dotmac_kernel import (
+    BadRequestError,
+    CapabilityCatalogue,
+    DomainError,
+    FeatureManifest,
+    NotFoundError,
+)
+from dotmac_kernel import UndeclaredCapabilityError as KernelUndeclaredCapabilityError
 
 from vendor_cp.config import vendor_settings
-
-
-class UnknownProductError(NotFoundError):
-    """No manifest-derived catalogue was supplied for this product."""
-
-
-class ProductCapabilityCatalogueReader(Protocol):
-    """The narrow product-qualified catalogue seam commercial policy consumes."""
-
-    def require_declared(self, *, product_code: str, capability_code: str) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +65,21 @@ class ProductCapabilityCatalogues:
             raise UnknownProductError(
                 f"product {product_code!r} has no supplied manifest catalogue"
             )
-        catalogue.require(capability_code)
+        try:
+            catalogue.require(capability_code)
+        except KernelUndeclaredCapabilityError as exc:
+            # The published module owns this port and its stable error
+            # vocabulary. The kernel catalogue is the backing mechanism; its
+            # KeyError-shaped exception must not leak across the module seam.
+            raise UndeclaredCapabilityError(product_code, (capability_code,)) from exc
+
+
+def catalogue_domain_error(error: AllocationError) -> DomainError:
+    """Translate the module-owned validation vocabulary at the HTTP boundary."""
+
+    if isinstance(error, UnknownProductError):
+        return NotFoundError(str(error))
+    return BadRequestError(str(error))
 
 
 def configured_product_capability_catalogues() -> ProductCapabilityCatalogues:
@@ -74,8 +91,7 @@ def configured_product_capability_catalogues() -> ProductCapabilityCatalogues:
 
 
 __all__ = [
-    "UnknownProductError",
-    "ProductCapabilityCatalogueReader",
     "ProductCapabilityCatalogues",
+    "catalogue_domain_error",
     "configured_product_capability_catalogues",
 ]

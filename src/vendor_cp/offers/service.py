@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
+from dotmac_entitlement_allocation import CapabilityCatalogueReader
 from dotmac_kernel import (
     ConflictError,
     Money,
@@ -33,7 +34,6 @@ from dotmac_kernel.messaging import process_once_platform
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vendor_cp.offers.catalog import ProductCapabilityCatalogueReader
 from vendor_cp.offers.models import OfferVersion
 
 _COMMAND_TYPE_PUBLISH = "vendor.offer_version.publish"
@@ -87,7 +87,7 @@ def publish_offer_version(
     db: Session,
     command: PublishOfferVersionCommand,
     *,
-    catalogues: ProductCapabilityCatalogueReader,
+    catalogues: CapabilityCatalogueReader,
 ) -> PublishResult:
     """Publish an offer version idempotently, with an audit record. Raises
     `ConflictError` if `(product_code, offer_code, version)` already exists
