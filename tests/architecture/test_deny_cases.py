@@ -14,11 +14,18 @@ from pathlib import Path
 
 import dotmac_kernel
 
-SRC = Path(__file__).resolve().parents[2] / "src" / "vendor_cp"
+ROOT = Path(__file__).resolve().parents[2]
+SRC = ROOT / "src" / "vendor_cp"
+ENTRYPOINTS = ROOT / "scripts"
 
 
 def _py_files() -> list[Path]:
-    return [p for p in SRC.rglob("*.py") if "__pycache__" not in p.parts]
+    return [
+        p
+        for root in (SRC, ENTRYPOINTS)
+        for p in root.rglob("*.py")
+        if "__pycache__" not in p.parts
+    ]
 
 
 def _imports(path: Path) -> list[tuple[str, str | None]]:
@@ -43,6 +50,21 @@ def test_d1_no_engine_or_session_construction() -> None:
     assert (
         not bad
     ), f"vendor code must use the kernel's single engine, not build one: {bad}"
+
+
+def test_d1_session_authority_guard_covers_every_entrypoint_family() -> None:
+    """SENSITIVITY: a forbidden constructor in scripts must trip the guard."""
+    probe = ENTRYPOINTS / "_session_authority_sensitivity.py"
+    probe.write_text("sessionmaker()\n", encoding="utf-8")
+    try:
+        bad = [
+            p
+            for p in _py_files()
+            if re.search(r"\bsessionmaker\s*\(", p.read_text(encoding="utf-8"))
+        ]
+        assert probe in bad
+    finally:
+        probe.unlink()
 
 
 def test_d1_no_product_database_dsns() -> None:

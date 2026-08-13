@@ -21,6 +21,7 @@ from vendor_cp.contracts.feature import feature as contracts_feature
 from vendor_cp.licensing.feature import feature as licensing_feature
 from vendor_cp.offers.feature import feature as offers_feature
 from vendor_cp.provisioning.feature import feature as provisioning_feature
+from vendor_cp.release_evidence.feature import feature as release_evidence_feature
 
 ASSEMBLY_NAME = "dotmac-vendor-control-plane"
 
@@ -37,6 +38,7 @@ def build_spec() -> ProductAssemblySpec:
         modules=(
             release_catalog_module,
             entitlement_allocation_module,
+            release_evidence_feature,
             console_feature,
             accounts_feature,
             offers_feature,
