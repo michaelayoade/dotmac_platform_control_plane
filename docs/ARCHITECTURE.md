@@ -75,11 +75,15 @@ it owns and — just as importantly — what it must never become.
   Until all four gates pass, the module tables are empty and non-authoritative.
   A partial switch would either invent product identity or create two writers.
 - **Release artifacts and attestations** — owned by the independently published
-  `dotmac-release-catalog`, not by a vendor-local feature or table. This change
-  composes the owner; it does not yet add a publish HTTP adapter or claim a
-  production cutover. Product identity and capability declarations originate in
-  each product assembly; the release catalogue binds their snapshot attestation
-  to exact artifact bytes, while Vendor only consumes that evidence.
+  `dotmac-release-catalog`, not by a vendor-local feature or table. Vendor's
+  `release_evidence` service is the thin ingestion adapter: it holds exact
+  product-emitted manifest bytes by digest, calls the module's public write
+  seam, spends every delivery key through kernel idempotency, and emits one
+  platform audit event per new association. It owns no table or capability
+  vocabulary. `scripts/catalogue_product_release.py` is the operator boundary;
+  no publish HTTP surface exists. Product identity and capability declarations
+  originate in each product assembly; the catalogue binds their snapshot
+  attestation to exact artifact bytes, while Vendor only consumes that evidence.
 - **Provisioning contracts** (slice 4, delivered) — the `provisioning` feature
   (`src/vendor_cp/provisioning/`): a platform-admin-only API that drives the
   kernel's `ProvisioningProvider` contract (plan → apply → observe → cancel)
