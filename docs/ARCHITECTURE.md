@@ -11,15 +11,29 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a1` (extras `testing`), resolved **only**
+- The kernel is `dotmac-kernel==0.1.0a45` (extras `testing` and `licensing`),
+  resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source.
+- `dotmac-release-catalog==0.1.0a2` is the permanent owner of immutable release
+  artifacts and attestations. The assembly composes its `ModuleManifest` and
+  its public `versions_dir()` alongside the kernel and vendor migration
+  lineages. Its `mod_rel` tables are platform catalogues: `platform_api` may
+  use the published grants and `app_user` is denied.
 
 ## Ownership (what this control plane owns)
 
 - **Vendor accounts** (slice 3) — the vendor-owned `AccountService`: typed
   commands + outcomes, atomic transaction ownership, idempotency, audit,
   platform-admin-only adapters.
+- **Commercial lifecycle (as-built)** — immutable offers, versioned approvals,
+  contracts, the legacy allocation projection, and signed licence issuance and
+  delivery. These remain vendor-local owners until each approved independent
+  module cutover explicitly retires its corresponding local writer.
+- **Release artifacts and attestations** — owned by the independently published
+  `dotmac-release-catalog`, not by a vendor-local feature or table. This change
+  composes the owner; it does not yet add a publish HTTP adapter or claim a
+  production cutover.
 - **Provisioning contracts** (slice 4, delivered) — the `provisioning` feature
   (`src/vendor_cp/provisioning/`): a platform-admin-only API that drives the
   kernel's `ProvisioningProvider` contract (plan → apply → observe → cancel)
@@ -47,11 +61,11 @@ a build-failing architecture test (`tests/architecture/test_deny_cases.py`):
 
 ## Still design-only (do NOT implement yet)
 
-Commercial contracts (blocked on money/FX + outbox/inbox), deployment intent
-(outbox + deployment profiles), allocation (capability catalogue + outbox),
-plan/approval (profiles + allocation + outbox), the full provisioning runner
-(preceding workflows + activation contracts), observed health (health/heartbeat
-contract + outbox). Each unblocks only when its kernel primitive lands.
+Fleet desired state, update authority, support access, the full provisioning
+runner, and observed fleet health. Independent-module extraction of the
+existing approvals, contracts, allocation and licensing implementations follows
+their adjudication/cutover dossiers; their existing vendor-local code is not
+evidence that those extractions already happened.
 
 ## Migrating existing products
 
