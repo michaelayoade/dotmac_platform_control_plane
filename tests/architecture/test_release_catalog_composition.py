@@ -38,4 +38,4 @@ def test_release_catalog_manifest_is_composed() -> None:
 def test_release_catalog_public_migration_lineage_is_composed() -> None:
     locations = composed_version_locations().split()
     assert str(release_catalog_versions_dir()) in locations
-    assert len(locations) == 3
+    assert len(locations) == 4

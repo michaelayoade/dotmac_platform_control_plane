@@ -27,6 +27,7 @@ from vendor_cp.migrations import composed_version_locations, make_alembic_config
 KERNEL_HEAD = "0023_audit_actor_and_forensics"  # current pin (0.1.0a45)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
+ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v010_delivery_hardening"
@@ -163,6 +164,8 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     assert _table_exists(scratch_db, "platform_idempotency_records")
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_rel.artifact_attestations")
+    assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    assert _qualified_table_exists(scratch_db, "mod_ealloc.allocation_entries")
     cols = _column_names(scratch_db, "vendor_accounts")
     assert {
         "id",
@@ -178,31 +181,35 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         scratch_db,
         "SELECT relrowsecurity FROM pg_class WHERE oid='vendor_accounts'::regclass",
     )
-    # Three independent runtime heads: kernel, vendor assembly and the installed
-    # Release Catalog module each retain their own migration authority.
+    # Four independent runtime heads: kernel, vendor assembly and both installed
+    # modules each retain their own migration authority.
     assert _versions(scratch_db) == {
         KERNEL_HEAD,
+        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rehearsal 2 — three-head topology
+# Rehearsal 2 — four-head topology
 # ─────────────────────────────────────────────────────────────────────────────
-def test_three_head_topology(scratch_db: str) -> None:
+def test_four_head_topology(scratch_db: str) -> None:
     script = ScriptDirectory.from_config(make_alembic_config(scratch_db))
     assert set(script.get_heads()) == {
         KERNEL_HEAD,
+        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
     kernel_head = script.get_revision("kernel@head")
     vendor_head = script.get_revision("vendor@head")
     release_catalog_head = script.get_revision("release_catalog@head")
+    allocation_head = script.get_revision("entitlement_allocation@head")
     assert kernel_head.revision == KERNEL_HEAD
     assert vendor_head.revision == VENDOR_HEAD
     assert release_catalog_head.revision == RELEASE_CATALOG_HEAD
+    assert allocation_head.revision == ENTITLEMENT_ALLOCATION_HEAD
     # The vendor head is the tip of a single-parent chain that walks back to the
     # vendor ROOT; the ROOT is its own branch that DEPENDS ON (is not a child of)
     # a kernel head, so the lineages advance independently.
@@ -240,6 +247,20 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
         with plat.connect() as conn:
             assert (
                 conn.execute(text("SELECT count(*) FROM vendor_accounts")).scalar() == 1
+            )
+    finally:
+        plat.dispose()
+
+    plat = create_engine(
+        _url_for(scratch_db, scratch_db.rsplit("/", 1)[1], user="platform_api")
+    )
+    try:
+        with plat.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT count(*) FROM mod_ealloc.allocations")
+                ).scalar()
+                == 0
             )
     finally:
         plat.dispose()
@@ -302,6 +323,11 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
                 conn.execute(
                     text("SELECT count(*) FROM mod_rel.release_artifacts")
                 ).scalar()
+        with appu.connect() as conn:
+            with pytest.raises(DBAPIError, match="permission denied"):
+                conn.execute(
+                    text("SELECT count(*) FROM mod_ealloc.allocations")
+                ).scalar()
     finally:
         appu.dispose()
 
@@ -324,8 +350,10 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     assert _table_exists(scratch_db, "contracts")
     assert _table_exists(scratch_db, "allocations")
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
+    assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _versions(scratch_db) == {
         KERNEL_HEAD,
+        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -334,11 +362,12 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
 def test_upgrade_from_previous_vendor_deployment_preserves_data(
     scratch_db: str,
 ) -> None:
-    """Rehearse the actual adoption edge: a9 + vendor v010 to a45 + module."""
+    """Rehearse a9 + vendor v010 to a45 + both installed module lineages."""
     _upgrade(scratch_db, "vendor@head")
     _upgrade(scratch_db, PREVIOUS_KERNEL_HEAD)
     assert _versions(scratch_db) == {PREVIOUS_KERNEL_HEAD, VENDOR_HEAD}
     assert not _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
+    assert not _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
 
     account_id = str(uuid.uuid4())
     eng = create_engine(scratch_db)
@@ -358,6 +387,7 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     _upgrade(scratch_db, "heads")
 
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
+    assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert (
         _q(
             scratch_db,
@@ -368,6 +398,7 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     )
     assert _versions(scratch_db) == {
         KERNEL_HEAD,
+        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -381,7 +412,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
 ) -> None:
     """Simulate a FUTURE kernel migration (a child of the kernel head). The
     vendor and module heads must remain separate heads — and a composed upgrade
-    must still apply all three lineages."""
+    must still apply all four lineages."""
     synth_rev = "9999_synthetic_kernel_advance"
     (tmp_path / f"{synth_rev}.py").write_text(
         "revision = '9999_synthetic_kernel_advance'\n"
@@ -399,6 +430,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
     # Kernel advances independently; the vendor and module heads are untouched.
     assert set(script.get_heads()) == {
         synth_rev,
+        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -407,6 +439,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
     assert _table_exists(scratch_db, "vendor_accounts")
     assert _versions(scratch_db) == {
         synth_rev,
+        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
