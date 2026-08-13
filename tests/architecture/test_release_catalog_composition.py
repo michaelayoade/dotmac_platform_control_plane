@@ -23,10 +23,10 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
     dependencies = config["tool"]["poetry"]["dependencies"]
 
-    assert dependencies["dotmac-kernel"]["version"] == "0.1.0a45"
+    assert dependencies["dotmac-kernel"]["version"] == "0.1.0a50"
     assert dependencies["dotmac-kernel"]["source"] == "forgejo"
     assert dependencies["dotmac-release-catalog"] == {
-        "version": "0.1.0a2",
+        "version": "0.1.0a3",
         "source": "forgejo",
     }
 

@@ -24,7 +24,7 @@ from sqlalchemy.exc import DBAPIError
 
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0023_audit_actor_and_forensics"  # current pin (0.1.0a45)
+KERNEL_HEAD = "0023_audit_actor_and_forensics"  # current pin (0.1.0a50)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"

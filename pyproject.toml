@@ -15,14 +15,14 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a45", extras = [
+dotmac-kernel = { version = "0.1.0a50", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
 # Vendor-owned immutable artifact identity and attestations. Exact-pinned from
 # the same private index; its manifest and migration locator are composed by the
 # assembly through the package's public top-level surface.
-dotmac-release-catalog = { version = "0.1.0a2", source = "forgejo" }
+dotmac-release-catalog = { version = "0.1.0a3", source = "forgejo" }
 # Installed in shadow mode: the independent owner and its migration lineage are
 # composed now, while the vendor-local allocation writer remains authoritative
 # until historical commercial rows have evidence-backed product mappings and

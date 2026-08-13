@@ -11,11 +11,11 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a45` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a50` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source.
-- `dotmac-release-catalog==0.1.0a2` is the permanent owner of immutable release
+- `dotmac-release-catalog==0.1.0a3` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration
   lineages. Its `mod_rel` tables are platform catalogues: `platform_api` may
@@ -38,15 +38,15 @@ it owns and — just as importantly — what it must never become.
   versioned approvals, product-qualified contracts, the legacy allocation
   projection, and signed licence issuance and delivery. Offer and contract
   services consume `dotmac-entitlement-allocation`'s product-scoped
-  `CapabilityCatalogueReader` port. The current assembly adapter is populated
-  from `VENDOR_PRODUCT_MANIFEST_CAPABILITIES_JSON`; this is temporary shadow
-  input, not a verified publication contract and not authority for product
-  identity. After `dotmac-kernel`'s release-bound product-manifest snapshot and
-  `dotmac-release-catalog`'s `product_manifest` attestation kind are published,
-  that adapter must verify the canonical snapshot digest associated with the
-  exact product artifact and reject the raw JSON configuration. These
-  commercial features remain vendor-local owners until each approved
-  independent-module cutover explicitly retires its corresponding local writer.
+  `CapabilityCatalogueReader` port. The assembly config names only exact
+  artifact and product-manifest digests per product. The adapter requires the
+  digest-addressed container row and its matching `product_manifest`
+  attestation, reads the held canonical bytes through a local document-reader
+  port, and delegates digest/canonical/product/version verification to kernel
+  a50 before deriving capabilities. The old raw capability-list configuration
+  is rejected. These commercial features remain vendor-local owners until each
+  approved independent-module cutover explicitly retires its corresponding
+  local writer.
 - **Allocation cutover gate** — Entitlement Allocation can become authoritative
   only after one coherent change proves all of the following:
 
@@ -56,9 +56,8 @@ it owns and — just as importantly — what it must never become.
      validated;
   2. **typed boundary delivered:** commercial services and the cutover preflight
      consume the allocation module's product-scoped catalogue port rather than
-     owning a duplicate protocol. Promotion still needs the temporary configured
-     capabilities replaced by release-bound, digest-verified product-manifest
-     snapshots;
+     owning a duplicate protocol. Release-bound, digest-verified product-manifest
+     snapshots now supply that port;
   3. every live legacy allocation entry validates against its product's
      manifest and duplicate capability codes are normalized before switching;
   4. the activation adapter constructs the module's `ContractSnapshot`, the
