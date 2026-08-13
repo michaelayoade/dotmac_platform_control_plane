@@ -25,9 +25,11 @@ dotmac-kernel = { version = "0.1.0a45", extras = [
 dotmac-release-catalog = { version = "0.1.0a2", source = "forgejo" }
 # Installed in shadow mode: the independent owner and its migration lineage are
 # composed now, while the vendor-local allocation writer remains authoritative
-# until contracts carry a truthful product identity and the data preflight in
-# docs/ARCHITECTURE.md passes. Exact-pinned from the private index; never a path
-# dependency and never a silent dual-write.
+# until historical commercial rows have evidence-backed product mappings and
+# the data preflight in docs/ARCHITECTURE.md passes. New writes are
+# product-qualified; that does not by itself authorize a writer cutover.
+# Exact-pinned from the private index; never a path dependency and never a
+# silent dual-write.
 dotmac-entitlement-allocation = { version = "0.1.0a3", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE

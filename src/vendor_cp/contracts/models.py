@@ -4,7 +4,8 @@ A contract is a platform-level record the vendor owns across all its customers, 
 these follow the platform-catalog pattern (no `tenant_id`, no RLS; GRANTed to
 `platform_api`/`app_admin`, REVOKEd from `app_user`; vendor migration v004).
 
-- `Contract` — the contract header + its lifecycle `status`. `content_hash` is the
+- `Contract` — the product-qualified contract header + its lifecycle `status`.
+  `content_hash` is the
   frozen priced snapshot's digest, set at submit and used to bind approvals to the
   exact version (a later change invalidates prior approvals). `customer_ref` is an
   opaque customer/deployment identifier used as the event correlation key — it is
@@ -48,6 +49,9 @@ class Contract(Base, TimestampMixin):
     __tablename__ = "contracts"
 
     id: Mapped[UUID] = uuid_pk()
+    # Nullable only for rows written before v011. Services fail closed until an
+    # operator supplies an evidence-backed product mapping.
+    product_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     customer_ref: Mapped[str] = mapped_column(String(200), nullable=False)
     legal_entity: Mapped[str] = mapped_column(String(200), nullable=False)
     currency_code: Mapped[str] = mapped_column(String(3), nullable=False)

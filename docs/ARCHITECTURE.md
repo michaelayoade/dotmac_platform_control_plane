@@ -23,26 +23,36 @@ it owns and — just as importantly — what it must never become.
 - `dotmac-entitlement-allocation==0.1.0a3` is installed and its manifest and
   public migration lineage are composed. This is deliberately a **shadow
   installation**, not adoption: `vendor_cp.allocations` remains the sole
-  authoritative writer and there is no dual-write. The independent module
-  cannot accept a truthful `ContractSnapshot` yet because the vendor contract,
-  offer, activation event and legacy allocation carry no `product_code`.
+  authoritative writer and there is no dual-write. Vendor migration v011 makes
+  new immutable offers and contracts product-qualified, binds that identity into
+  the contract content hash, and emits it on contract events. Historical rows
+  remain explicitly unclassified until an operator supplies evidence; the
+  independent module therefore still receives no `ContractSnapshot`.
 
 ## Ownership (what this control plane owns)
 
 - **Vendor accounts** (slice 3) — the vendor-owned `AccountService`: typed
   commands + outcomes, atomic transaction ownership, idempotency, audit,
   platform-admin-only adapters.
-- **Commercial lifecycle (as-built)** — immutable offers, versioned approvals,
-  contracts, the legacy allocation projection, and signed licence issuance and
-  delivery. These remain vendor-local owners until each approved independent
-  module cutover explicitly retires its corresponding local writer.
+- **Commercial lifecycle (as-built)** — immutable product-qualified offers,
+  versioned approvals, product-qualified contracts, the legacy allocation
+  projection, and signed licence issuance and delivery. Offer and contract
+  services consume a product-scoped catalogue port; the current assembly adapter
+  is populated from manifest-derived snapshots in
+  `VENDOR_PRODUCT_MANIFEST_CAPABILITIES_JSON`. These remain vendor-local owners
+  until each approved independent module cutover explicitly retires its
+  corresponding local writer.
 - **Allocation cutover gate** — Entitlement Allocation can become authoritative
   only after one coherent change proves all of the following:
 
-  1. the commercial-contract owner persists and emits an explicit product
-     identity; no caller-supplied or default product may fill the gap;
-  2. a product-scoped manifest catalogue replaces the current flat configured
-     `offered_capabilities` mirror;
+  1. **expand delivered for new writes:** the commercial-contract owner persists,
+     hashes, and emits an explicit product identity; historical offers and
+     contracts must still be mapped from evidence before the v011 checks can be
+     validated;
+  2. **typed boundary delivered:** a product-scoped catalogue port replaces the
+     flat `offered_capabilities` mirror; promotion still needs the configured
+     manifest snapshots reconciled with each target application's published
+     descriptor;
   3. every live legacy allocation entry validates against its product's
      manifest and duplicate capability codes are normalized before switching;
   4. the activation adapter constructs the module's `ContractSnapshot`, the

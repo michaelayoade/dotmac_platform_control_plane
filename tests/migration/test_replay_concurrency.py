@@ -76,9 +76,9 @@ def two_deliveries(engine: Engine) -> Iterator[tuple[str, str]]:
         conn.execute(
             text(
                 "INSERT INTO contracts (id, customer_ref, legal_entity, "
-                "currency_code, term_start, term_end, status, content_hash) "
-                "VALUES (:id, :cust, 'Dotmac Ltd', 'USD', '2026-01-01', "
-                "'2026-12-31', 'active', :hash)"
+                "currency_code, term_start, term_end, status, content_hash, "
+                "product_code) VALUES (:id, :cust, 'Dotmac Ltd', 'USD', "
+                "'2026-01-01', '2026-12-31', 'active', :hash, 'dotmac-sub')"
             ),
             {"id": contract_id, "cust": f"cust-{suffix}", "hash": f"h-{suffix}"},
         )

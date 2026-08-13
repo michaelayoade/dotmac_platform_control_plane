@@ -11,6 +11,7 @@ from vendor_cp.offers.service import OfferVersionView
 
 class PublishOfferVersionRequest(BaseModel):
     command_id: str = Field(min_length=1, max_length=200)
+    product_code: str = Field(min_length=1, max_length=120)
     offer_code: str = Field(min_length=1, max_length=120)
     version: int = Field(ge=1)
     # Exact price as a decimal STRING (never a float) + ISO-4217 code.
@@ -21,6 +22,7 @@ class PublishOfferVersionRequest(BaseModel):
 
 class OfferVersionResponse(BaseModel):
     id: UUID
+    product_code: str
     offer_code: str
     version: int
     amount: str
@@ -31,6 +33,7 @@ class OfferVersionResponse(BaseModel):
     def of(cls, view: OfferVersionView) -> OfferVersionResponse:
         return cls(
             id=view.id,
+            product_code=view.product_code,
             offer_code=view.offer_code,
             version=view.version,
             amount=str(view.price.amount),

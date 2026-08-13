@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from datetime import date
 
 import pytest
-from dotmac_kernel import CapabilityCatalogue, ConflictError, FeatureManifest
+from dotmac_kernel import ConflictError, NotFoundError
 from dotmac_kernel.capabilities import UndeclaredCapabilityError
 from dotmac_kernel.entitlements import TenantEntitlementGrant
 from dotmac_kernel.messaging import PlatformOutboxEvent
@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import service as approvals
 from vendor_cp.contracts import service
-from vendor_cp.contracts.models import ContractStatus
+from vendor_cp.contracts.models import Contract, ContractStatus
+from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
 
@@ -38,15 +39,22 @@ def db() -> Iterator[Session]:
         engine.dispose()
 
 
-def _catalogue(*codes: str) -> CapabilityCatalogue:
-    return CapabilityCatalogue.from_manifests(
-        [FeatureManifest(name="t", capabilities=tuple(codes))]
-    )
+def _catalogue(*codes: str) -> ProductCapabilityCatalogues:
+    return ProductCapabilityCatalogues.from_capabilities({"dotmac-sub": tuple(codes)})
 
 
-def _offer(db: Session, *, code: str, ver: int, caps: list[str], amount: str) -> None:
+def _offer(
+    db: Session,
+    *,
+    code: str,
+    ver: int,
+    caps: list[str],
+    amount: str,
+    product_code: str = "dotmac-sub",
+) -> None:
     db.add(
         OfferVersion(
+            product_code=product_code,
             offer_code=code,
             version=ver,
             amount=amount,
@@ -57,11 +65,19 @@ def _offer(db: Session, *, code: str, ver: int, caps: list[str], amount: str) ->
     db.flush()
 
 
-def _draft(db: Session, *, cap: str = "cap.a", offer_code: str = "off", ver: int = 1):
+def _draft(
+    db: Session,
+    *,
+    cap: str = "cap.a",
+    offer_code: str = "off",
+    ver: int = 1,
+    product_code: str = "dotmac-sub",
+):
     return service.create_draft(
         db,
         service.CreateDraftCommand(
             command_id=f"d-{uuid.uuid4()}",
+            product_code=product_code,
             customer_ref="cust-1",
             legal_entity="Dotmac Ltd",
             currency_code="USD",
@@ -86,7 +102,7 @@ def _submit(db: Session, cid, catalogue, *, submitter=None):
             approval_policy_version=1,
             submitter_id=submitter or uuid.uuid4(),
         ),
-        catalogue=catalogue,
+        catalogues=catalogue,
     )
 
 
@@ -141,11 +157,83 @@ def test_submit_freezes_exact_priced_snapshot(db: Session) -> None:
     assert draft.lines[0].unit_amount is None  # not priced until submit
     submitted = _submit(db, draft.id, _catalogue("cap.a"))
     assert submitted.status == ContractStatus.PENDING_APPROVAL.value
+    assert submitted.product_code == "dotmac-sub"
     # Exact Money, frozen onto the line as a string (never float).
     assert submitted.lines[0].unit_amount == "19.99"
     assert submitted.lines[0].unit_currency_code == "USD"
     assert submitted.content_hash is not None
     assert _events(db, "contract.submitted") == 1
+
+
+def test_contract_refuses_an_offer_owned_by_another_product(db: Session) -> None:
+    _offer(
+        db,
+        code="off",
+        ver=1,
+        caps=["cap.a"],
+        amount="19.99",
+        product_code="dotmac-erp",
+    )
+    with pytest.raises(NotFoundError, match="offer version.*not found"):
+        _draft(db, cap="cap.a")
+
+
+def test_contract_content_hash_binds_the_product_identity(db: Session) -> None:
+    for product in ("dotmac-sub", "dotmac-erp"):
+        _offer(
+            db,
+            code="off",
+            ver=1,
+            caps=["cap.a"],
+            amount="19.99",
+            product_code=product,
+        )
+    catalogues = ProductCapabilityCatalogues.from_capabilities(
+        {"dotmac-sub": ("cap.a",), "dotmac-erp": ("cap.a",)}
+    )
+    sub = _draft(db, product_code="dotmac-sub")
+    erp = _draft(db, product_code="dotmac-erp")
+    submitted_sub = _submit(db, sub.id, catalogues)
+    submitted_erp = _submit(db, erp.id, catalogues)
+    assert submitted_sub.content_hash != submitted_erp.content_hash
+
+
+def test_activation_event_carries_the_hashed_product_identity(db: Session) -> None:
+    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
+    draft = _draft(db, cap="cap.a")
+    submitter = uuid.uuid4()
+    submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
+    _approve_quorum(db, submitted, submitted.content_hash, submitter)
+    service.approve(
+        db, service.TransitionCommand(command_id="ap-product", contract_id=draft.id)
+    )
+    service.activate(
+        db,
+        service.TransitionCommand(
+            command_id="act-product",
+            contract_id=draft.id,
+            activation_evidence="countersigned",
+        ),
+    )
+    event = db.scalar(
+        select(PlatformOutboxEvent).where(
+            PlatformOutboxEvent.event_type == "contract.activated"
+        )
+    )
+    assert event is not None
+    assert event.payload["product_code"] == "dotmac-sub"
+
+
+def test_historical_contract_without_product_fails_closed(db: Session) -> None:
+    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
+    draft = _draft(db, cap="cap.a")
+    row = db.get(Contract, draft.id)
+    assert row is not None
+    row.product_code = None
+    db.flush()
+    with pytest.raises(ConflictError, match="has no product identity"):
+        _submit(db, draft.id, _catalogue("cap.a"))
+    assert _events(db, "contract.submitted") == 0
 
 
 def test_approval_is_separate_from_activation(db: Session) -> None:

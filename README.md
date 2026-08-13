@@ -17,8 +17,9 @@ lifecycle — never a product's tenants, subscribers, or customer data.
 - **Entitlement Allocation:** `dotmac-entitlement-allocation==0.1.0a3`, also
   exact-pinned and composed through its public manifest and Alembic locator.
   This is a shadow installation, not a writer cutover: the vendor-local
-  allocation projection remains authoritative until contracts carry an
-  explicit product identity and the checked-in data preflight passes.
+  allocation projection remains authoritative. New commercial writes carry an
+  explicit product identity, but historical rows still need evidence-backed
+  classification and the checked-in allocation preflight has not passed.
 
 ## Layout
 

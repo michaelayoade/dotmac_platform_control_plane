@@ -60,6 +60,7 @@ from vendor_cp.licensing.delivery_models import (
     TargetStatus,
 )
 from vendor_cp.licensing.signer import EphemeralLicenceSigner
+from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
 NOW = datetime(2026, 8, 2, 12, 0, 0, tzinfo=UTC)
@@ -88,11 +89,16 @@ def _catalogue(*codes: str) -> CapabilityCatalogue:
     )
 
 
+def _product_catalogues(*codes: str) -> ProductCapabilityCatalogues:
+    return ProductCapabilityCatalogues.from_capabilities({PRODUCT: tuple(codes)})
+
+
 def _staged_allocation(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
     """contract → submit → approve → activate → stage."""
     offer_code = f"off-{suffix}"
     db.add(
         OfferVersion(
+            product_code=PRODUCT,
             offer_code=offer_code,
             version=1,
             amount="10.00",
@@ -105,6 +111,7 @@ def _staged_allocation(db: Session, *, suffix: str, customer_ref: str) -> uuid.U
         db,
         contracts.CreateDraftCommand(
             command_id=f"d-{uuid.uuid4()}",
+            product_code=PRODUCT,
             customer_ref=customer_ref,
             legal_entity="Dotmac Ltd",
             currency_code="USD",
@@ -125,7 +132,7 @@ def _staged_allocation(db: Session, *, suffix: str, customer_ref: str) -> uuid.U
             approval_policy_version=1,
             submitter_id=uuid.uuid4(),
         ),
-        catalogue=_catalogue("cap.a", "cap.b"),
+        catalogues=_product_catalogues("cap.a", "cap.b"),
     )
     approvals.publish_policy_version(
         db,

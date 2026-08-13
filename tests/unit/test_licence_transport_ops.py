@@ -17,7 +17,6 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
-from dotmac_kernel import CapabilityCatalogue, FeatureManifest
 from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -48,6 +47,7 @@ from vendor_cp.licensing.transport import (
     dispatch_pending,
     pending_deliveries,
 )
+from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
 NOW = datetime(2026, 8, 2, 12, 0, 0, tzinfo=UTC)
@@ -69,16 +69,15 @@ def signer() -> EphemeralLicenceSigner:
     return EphemeralLicenceSigner(key_id="vendor-key-1")
 
 
-def _catalogue(*codes: str) -> CapabilityCatalogue:
-    return CapabilityCatalogue.from_manifests(
-        [FeatureManifest(name="t", capabilities=tuple(codes))]
-    )
+def _catalogue(*codes: str) -> ProductCapabilityCatalogues:
+    return ProductCapabilityCatalogues.from_capabilities({"dotmac-sub": tuple(codes)})
 
 
 def _staged(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
     offer_code = f"off-{suffix}"
     db.add(
         OfferVersion(
+            product_code="dotmac-sub",
             offer_code=offer_code,
             version=1,
             amount="10.00",
@@ -91,6 +90,7 @@ def _staged(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
         db,
         contracts.CreateDraftCommand(
             command_id=f"d-{uuid.uuid4()}",
+            product_code="dotmac-sub",
             customer_ref=customer_ref,
             legal_entity="Dotmac Ltd",
             currency_code="USD",
@@ -108,7 +108,7 @@ def _staged(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
             approval_policy_version=1,
             submitter_id=uuid.uuid4(),
         ),
-        catalogue=_catalogue("cap.a"),
+        catalogues=_catalogue("cap.a"),
     )
     approvals.publish_policy_version(
         db,

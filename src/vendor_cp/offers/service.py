@@ -4,8 +4,9 @@ Platform-level, so it builds on the kernel's platform-scoped primitives
 (idempotent `process_once_platform`, audited `write_platform_audit_event`) like
 `AccountService`. Enforces the offer contract:
 
-- **Immutable**: publishing a `(offer_code, version)` that already exists is a
-  `ConflictError` — a version is never edited; a change is a new version.
+- **Immutable**: publishing a `(product_code, offer_code, version)` that already
+  exists is a `ConflictError` — a version is never edited; a change is a new
+  version.
 - **Exact Money**: the price is `Money` (never float), stored as a quantized
   decimal string + ISO-4217 code and reconstructed losslessly.
 - **Declared capabilities**: every granted capability code must be declared by an
@@ -23,7 +24,6 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from dotmac_kernel import (
-    CapabilityCatalogue,
     ConflictError,
     Money,
     currency,
@@ -33,6 +33,7 @@ from dotmac_kernel.messaging import process_once_platform
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from vendor_cp.offers.catalog import ProductCapabilityCatalogueReader
 from vendor_cp.offers.models import OfferVersion
 
 _COMMAND_TYPE_PUBLISH = "vendor.offer_version.publish"
@@ -44,6 +45,7 @@ class PublishOfferVersionCommand:
     `price` is exact `Money`; `capability_codes` must all be declared (WS1)."""
 
     command_id: str
+    product_code: str
     offer_code: str
     version: int
     price: Money
@@ -56,6 +58,7 @@ class OfferVersionView:
     """Typed read model of a published offer version."""
 
     id: UUID
+    product_code: str
     offer_code: str
     version: int
     price: Money
@@ -69,8 +72,10 @@ class PublishResult:
 
 
 def _view(row: OfferVersion) -> OfferVersionView:
+    product_code = _require_product_code(row.product_code, subject=f"offer {row.id}")
     return OfferVersionView(
         id=row.id,
+        product_code=product_code,
         offer_code=row.offer_code,
         version=row.version,
         price=Money.of(row.amount, currency(row.currency_code)),
@@ -82,27 +87,31 @@ def publish_offer_version(
     db: Session,
     command: PublishOfferVersionCommand,
     *,
-    catalogue: CapabilityCatalogue,
+    catalogues: ProductCapabilityCatalogueReader,
 ) -> PublishResult:
     """Publish an offer version idempotently, with an audit record. Raises
-    `ConflictError` if `(offer_code, version)` already exists (immutable) OR — via
-    the catalogue — `UndeclaredCapabilityError` for an undeclared code."""
+    `ConflictError` if `(product_code, offer_code, version)` already exists
+    (immutable) OR — via the product catalogue — `UndeclaredCapabilityError` for
+    an undeclared code."""
+    product_code = _require_product_code(command.product_code, subject="command")
     for code in command.capability_codes:
-        catalogue.require(code)
+        catalogues.require_declared(product_code=product_code, capability_code=code)
 
     def handler(session: Session) -> Mapping[str, object]:
         existing = session.execute(
             select(OfferVersion).where(
+                OfferVersion.product_code == product_code,
                 OfferVersion.offer_code == command.offer_code,
                 OfferVersion.version == command.version,
             )
         ).scalar_one_or_none()
         if existing is not None:
             raise ConflictError(
-                f"offer version {command.offer_code!r} v{command.version} already "
-                "exists — versions are immutable"
+                f"offer version {product_code!r}/{command.offer_code!r} "
+                f"v{command.version} already exists — versions are immutable"
             )
         row = OfferVersion(
+            product_code=product_code,
             offer_code=command.offer_code,
             version=command.version,
             amount=str(command.price.amount),
@@ -119,6 +128,7 @@ def publish_offer_version(
             entity_id=str(row.id),
             details={
                 "offer_code": row.offer_code,
+                "product_code": product_code,
                 "version": row.version,
                 "amount": row.amount,
                 "currency": row.currency_code,
@@ -134,6 +144,7 @@ def publish_offer_version(
     )
     row = db.execute(
         select(OfferVersion).where(
+            OfferVersion.product_code == product_code,
             OfferVersion.offer_code == command.offer_code,
             OfferVersion.version == command.version,
         )
@@ -142,10 +153,11 @@ def publish_offer_version(
 
 
 def get_offer_version(
-    db: Session, *, offer_code: str, version: int
+    db: Session, *, product_code: str, offer_code: str, version: int
 ) -> OfferVersionView | None:
     row = db.execute(
         select(OfferVersion).where(
+            OfferVersion.product_code == product_code,
             OfferVersion.offer_code == offer_code,
             OfferVersion.version == version,
         )
@@ -153,13 +165,24 @@ def get_offer_version(
     return _view(row) if row is not None else None
 
 
-def list_offer_versions(db: Session, *, offer_code: str) -> list[OfferVersionView]:
+def list_offer_versions(
+    db: Session, *, product_code: str, offer_code: str
+) -> list[OfferVersionView]:
     rows = db.execute(
         select(OfferVersion)
-        .where(OfferVersion.offer_code == offer_code)
+        .where(
+            OfferVersion.product_code == product_code,
+            OfferVersion.offer_code == offer_code,
+        )
         .order_by(OfferVersion.version)
     ).scalars()
     return [_view(r) for r in rows]
+
+
+def _require_product_code(product_code: str | None, *, subject: str) -> str:
+    if not product_code or product_code != product_code.strip():
+        raise ConflictError(f"{subject} has no valid product identity")
+    return product_code
 
 
 __all__ = [

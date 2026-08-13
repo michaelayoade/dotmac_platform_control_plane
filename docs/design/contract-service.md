@@ -15,8 +15,8 @@
 `ContractService` is the **one owner** of commercial-contract shape and lifecycle
 in the vendor control plane. It owns:
 
-- **Contract shape** — the contract, its lines, currency, term, and the immutable
-  offer/price versions each line references.
+- **Contract shape** — the target `product_code`, contract lines, currency, term,
+  and the immutable product-qualified offer/price versions each line references.
 - **Lifecycle transitions** — the state machine below, each transition named,
   guarded, audited, and idempotent.
 
@@ -75,7 +75,7 @@ goes `active → superseded` with the successor id recorded.
 
 | Transition | Guard | Effects |
 |---|---|---|
-| `draft → pending_approval` (submit) | ≥1 line; every line's `capability_code` **declared** (WS1 `CapabilityCatalogue.require`); legal entity, currency, term set; each line pins an immutable offer version | snapshot the priced contract; emit `contract.submitted` |
+| `draft → pending_approval` (submit) | explicit product identity; ≥1 line; every line's `capability_code` declared by that product's catalogue; legal entity, currency, term set; each line pins an immutable offer version owned by the same product | snapshot the priced contract including `product_code`; emit `contract.submitted` |
 | `pending_approval → approved` (approve) | `ApprovalPolicyService` satisfied **at the recorded policy version**; approver ≠ submitter when two-person applies; approval bound to *this* content hash; pinned offer versions still exist | emit `contract.approved` |
 | `pending_approval → draft` (reject) | approver | reason recorded | emit `contract.rejected` |
 | `approved → active` (activate) | the contracted **activation rule** is satisfied (rule-driven, not "form submitted") | set `activated_at`; emit `contract.activated` |
@@ -106,13 +106,19 @@ audit-only). `contract.*` events are consumed through `process_once_platform` by
 - **No deployment-mode / plan-name branching.** Contract logic reads explainable
   local values, never a profile/plan string (kernel ADR-0003 ban).
 - **Capability codes are declared, never invented.** Every line code is validated
-  against the WS1 catalogue at submit; allocation projects only declared codes.
+  against the named product's manifest-derived catalogue at offer publication and
+  contract submit; a code declared by one product proves nothing about another.
+- **Product identity is immutable commercial provenance.** It originates on the
+  immutable offer version, is required by a new contract, is included in the
+  approval-bound content hash, and is emitted on every contract event. Migration
+  v011 does not backfill historical rows with a default: those rows fail closed
+  in services until an operator supplies an evidence-backed mapping.
 
 ## Relationship to the kernel contracts
 
 | Uses | Kernel contract | For |
 |---|---|---|
-| WS1 capability catalogue | `CapabilityCatalogue.require` | reject a contract line naming an undeclared capability |
+| WS1 capability catalogue | `ProductCapabilityCatalogueReader.require_declared` backed by a product's `CapabilityCatalogue` | reject an offer or contract line naming a code undeclared by its target product |
 | WS2 entitlements (data-plane) | `TenantEntitlementGrant` / `is_entitled` | the *product* data plane writes its own local grant + evaluates. The vendor CP NEVER writes these; it stages an allocation and delivers a signed/versioned envelope (cross-plane delivery/ack = WS8/C4, design-only) |
 | WS4 money/FX | `Money`, `ExchangeRate` | exact pricing + immutable FX snapshots |
 | WS3 platform messaging | `process_once_platform` + `enqueue_platform_event` (kernel **0.1.0a6**) | idempotent transitions emitted atomically into the **platform outbox** (`platform_outbox_events`, no tenant/RLS); the platform relay delivers. Contract events are platform-level, NOT tenant-data-plane — so they use the platform channel, never the tenant outbox (resolved fork `starter-platform-outbox-channel-fork`) |
@@ -120,31 +126,35 @@ audit-only). `contract.*` events are consumed through `process_once_platform` by
 
 ## Acceptance cases (the tests the future implementation must pass)
 
-1. **Submit rejects an undeclared capability code** on any line (WS1 `require`).
-2. **Submit freezes an immutable priced snapshot**; a later offer-version change
+1. **Offer publication and submit reject an undeclared capability code** against
+   the named product's catalogue; another product declaring it does not count.
+2. **Product identity cannot drift.** A contract may pin only offer versions for
+   its product; the approval-bound content hash and activation event both carry
+   that product.
+3. **Submit freezes an immutable priced snapshot**; a later offer-version change
    does not mutate the submitted contract.
-3. **Approval is separate from activation.** `pending_approval → approved`
+4. **Approval is separate from activation.** `pending_approval → approved`
    requires the approval policy satisfied at its recorded version (two distinct
    approvers of *this* content hash when applicable) and emits `contract.approved`
    — it does NOT make the contract `active`.
-4. **Activation is a separate rule-driven command.** `approved → active` requires
+5. **Activation is a separate rule-driven command.** `approved → active` requires
    the contracted activation rule (not "a form was submitted"); it emits
    `contract.activated` and mutates NO allocation/entitlement/deployment state.
-5. **ContractService writes no cross-plane state.** Activation emits an event;
+6. **ContractService writes no cross-plane state.** Activation emits an event;
    `AllocationService` reacts (inbox) and STAGES an immutable allocation. The
    vendor CP writes **no** `tenant_entitlement_grants`; the product-local WS2 grant
    is written by the data plane only after it verifies a signed/versioned delivery
    envelope and acks the version/digest (WS8/C4 — design-only).
-6. **Amendment creates a new version**; the prior version stays `active` until the
+7. **Amendment creates a new version**; the prior version stays `active` until the
    amendment's effective date, then goes `superseded` (no gap, no in-place edit).
-7. **Suspend/terminate project to allocation restriction, never data deletion**;
+8. **Suspend/terminate project to allocation restriction, never data deletion**;
    `is_entitled` on the data plane reflects the projected change only after the
    data plane applies it.
-8. **Transitions are idempotent and atomic with their outbox event** (a retried
+9. **Transitions are idempotent and atomic with their outbox event** (a retried
    approve/activate does not double-emit or double-transition).
-9. **Money is exact; FX uses an immutable timestamped snapshot** (no float, no
+10. **Money is exact; FX uses an immutable timestamped snapshot** (no float, no
    live-rate lookup at read time).
-10. **No transition branches on a profile/plan string** (architecture test).
+11. **No transition branches on a profile/plan string** (architecture test).
 
 ## Dependencies — what must publish before implementation
 
