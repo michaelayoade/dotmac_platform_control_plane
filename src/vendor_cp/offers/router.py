@@ -62,7 +62,7 @@ def publish(
                 capability_codes=tuple(body.capability_codes),
                 actor_admin_id=admin.id,
             ),
-            catalogues=configured_product_capability_catalogues(),
+            catalogues=configured_product_capability_catalogues(db),
         )
     except AllocationError as exc:
         raise catalogue_domain_error(exc) from exc

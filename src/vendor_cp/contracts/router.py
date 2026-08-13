@@ -78,7 +78,7 @@ def submit(
                 submitter_id=body.submitter_id,
                 actor_admin_id=admin.id,
             ),
-            catalogues=configured_product_capability_catalogues(),
+            catalogues=configured_product_capability_catalogues(db),
         )
     except AllocationError as exc:
         raise catalogue_domain_error(exc) from exc

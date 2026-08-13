@@ -11,7 +11,7 @@ lifecycle — never a product's tenants, subscribers, or customer data.
   **only** from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`).
   The testing extra supports tests only; runtime code never imports it. No
   copied kernel code or private imports (deny-case D5).
-- **Release Catalog:** `dotmac-release-catalog==0.1.0a2`, exact-pinned from the
+- **Release Catalog:** `dotmac-release-catalog==0.1.0a3`, exact-pinned from the
   same registry. The assembly composes its manifest and public Alembic lineage;
   its `mod_rel` platform-catalog tables remain inaccessible to `app_user`.
 - **Entitlement Allocation:** `dotmac-entitlement-allocation==0.1.0a3`, also
@@ -20,6 +20,9 @@ lifecycle — never a product's tenants, subscribers, or customer data.
   allocation projection remains authoritative. New commercial writes carry an
   explicit product identity, but historical rows still need evidence-backed
   classification and the checked-in allocation preflight has not passed.
+- **Product capability evidence:** Vendor config pins exact product OCI and
+  manifest digests; the adapter verifies their Release Catalog association and
+  derives capabilities only from held kernel-canonical document bytes.
 
 ## Layout
 
