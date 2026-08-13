@@ -13,6 +13,11 @@ from __future__ import annotations
 import os
 from logging.config import fileConfig
 
+# Register the vendor's own models (VendorAccount).
+# The composed MODULE models, so autogenerate sees `mod_rel` and `mod_ealloc`
+# alongside the kernel's and the vendor's own.
+import dotmac_entitlement_allocation.models  # noqa: F401
+import dotmac_release_catalog.models  # noqa: F401
 from alembic import context
 
 # Register the kernel models so the shared Base.metadata is fully populated.
@@ -25,7 +30,6 @@ from dotmac_kernel.messaging import models as messaging_models  # noqa: F401
 from dotmac_kernel.models import Base
 from sqlalchemy import engine_from_config, pool
 
-# Register the vendor's own models (VendorAccount).
 import vendor_cp.accounts.models  # noqa: F401
 import vendor_cp.allocations.models  # noqa: F401
 import vendor_cp.approvals.models  # noqa: F401

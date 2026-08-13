@@ -13,7 +13,7 @@ from collections.abc import Iterator
 
 import pytest
 from dotmac_kernel import ConflictError, PlatformAdmin, PlatformAuditEvent
-from dotmac_kernel.messaging.models import PlatformInboxRecord
+from dotmac_kernel.idempotency_models import PlatformIdempotencyRecord
 from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -85,7 +85,10 @@ def test_create_account_is_idempotent_on_command_id(session: Session) -> None:
 
     # Exactly one account, one inbox record, one audit event — no double effect.
     assert session.scalar(select(func.count()).select_from(VendorAccount)) == 1
-    assert session.scalar(select(func.count()).select_from(PlatformInboxRecord)) == 1
+    recorded = session.scalar(
+        select(func.count()).select_from(PlatformIdempotencyRecord)
+    )
+    assert recorded == 1
     assert session.scalar(select(func.count()).select_from(PlatformAuditEvent)) == 1
 
 

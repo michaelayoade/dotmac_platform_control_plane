@@ -15,10 +15,20 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a9", extras = [
+dotmac-kernel = { version = "0.1.0a46", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
+# The two vendor-side modules, on EXACT pins from the same private index. Both
+# are platform-catalog modules — their tables carry no `tenant_id` and take
+# grants rather than RLS — which is why this assembly, and not a product data
+# plane, is their first consumer.
+#
+# Their kernel floors (a44 and a45) are what forced the kernel pin above off
+# a9: a module cannot register against a kernel that never allocated its
+# namespace.
+dotmac-release-catalog = { version = "0.1.0a1", source = "forgejo" }
+dotmac-entitlement-allocation = { version = "0.1.0a1", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).
@@ -27,9 +37,9 @@ psycopg = { version = "^3.2", extras = ["binary"] }
 # lineage (dotmac_kernel.migrations.versions_dir) at deploy time.
 alembic = "^1.13"
 
-# Public Dotmac packages resolve from Forgejo; everything else from PyPI. Marked
-# `explicit` so ONLY dotmac-kernel is pulled from here (no dependency-confusion
-# aggregation of public names).
+# Dotmac packages resolve from Forgejo; everything else from PyPI. Marked
+# `explicit` so ONLY the three names that declare `source = "forgejo"` are
+# pulled from here — no dependency-confusion aggregation of public names.
 [[tool.poetry.source]]
 name = "forgejo"
 url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"

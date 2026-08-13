@@ -9,6 +9,8 @@ kernel code, no private kernel imports (deny-case D5).
 
 from __future__ import annotations
 
+import dotmac_entitlement_allocation
+import dotmac_release_catalog
 from dotmac_kernel import ProductAssemblySpec
 
 from vendor_cp.accounts.feature import feature as accounts_feature
@@ -41,6 +43,13 @@ def build_spec() -> ProductAssemblySpec:
             allocations_feature,
             licensing_feature,
             provisioning_feature,
+            # The two vendor-side MODULES (ModuleManifest, not FeatureManifest):
+            # released packages this assembly composes rather than owns. Their
+            # tables live in `mod_rel` and `mod_ealloc`, are platform-catalog
+            # (no `tenant_id`, grants rather than RLS), and their lineages are
+            # composed in `vendor_cp.migrations`.
+            dotmac_release_catalog.module,
+            dotmac_entitlement_allocation.module,
         ),
         web_enabled=True,
     )
