@@ -14,8 +14,8 @@ from collections.abc import Iterator
 from datetime import date
 
 import pytest
+from dotmac_entitlement_allocation import UndeclaredCapabilityError
 from dotmac_kernel import ConflictError, NotFoundError
-from dotmac_kernel.capabilities import UndeclaredCapabilityError
 from dotmac_kernel.entitlements import TenantEntitlementGrant
 from dotmac_kernel.messaging import PlatformOutboxEvent
 from dotmac_kernel.testing import create_test_engine, isolated_session

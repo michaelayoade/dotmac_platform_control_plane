@@ -19,8 +19,9 @@ class VendorSettings:
     """Vendor-only configuration (the kernel owns DB / auth / security config)."""
 
     provider_mode: str  # only "fake" is permitted in this phase
-    # Manifest-derived capability snapshots, qualified by target product. The
-    # vendor consumes these facts; it does not own or invent their members.
+    # Temporary shadow input, qualified by target product. It is not a signed or
+    # digest-verified product publication; the release-bound snapshot adapter
+    # must replace it before allocation authority moves out of Vendor.
     product_manifest_capabilities: tuple[tuple[str, tuple[str, ...]], ...] = ()
     # WS8 licence signing (see vendor_cp.licensing.signer). "ephemeral" (an
     # in-memory keypair, dev/test only) or "configured" (a real key read from
