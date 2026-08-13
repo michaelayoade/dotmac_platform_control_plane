@@ -11,6 +11,9 @@ lifecycle — never a product's tenants, subscribers, or customer data.
   **only** from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`).
   The testing extra supports tests only; runtime code never imports it. No
   copied kernel code or private imports (deny-case D5).
+- **Release Catalog:** `dotmac-release-catalog==0.1.0a2`, exact-pinned from the
+  same registry. The assembly composes its manifest and public Alembic lineage;
+  its `mod_rel` platform-catalog tables remain inaccessible to `app_user`.
 
 ## Layout
 
@@ -48,9 +51,9 @@ make test       # pytest
 
 ## Scope this phase
 
-Slices **1 (foundation)** and **2 (assembly that boots via `create_app`)** are in
-place. **Accounts** (slice 3) and the **provisioning laboratory** (slice 4) build
-on this. Commercial contracts, deployment intent, allocation, plan/approval, the
-full provisioning runner, and observed health remain **design-only** until their
-blocking primitives (outbox, money/FX, capability catalogue, deployment profiles)
-land in the kernel.
+The assembly owns vendor accounts, immutable offers, approvals, commercial
+contracts, its legacy allocation projection, licence issuance/delivery, and the
+provisioning laboratory. It now composes the independently published Release
+Catalog for immutable artifact identity and attestations. Fleet desired state,
+the full provisioning runner, update authority, support access, and observed
+health remain future independent slices.

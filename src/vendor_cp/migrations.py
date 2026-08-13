@@ -1,11 +1,12 @@
 """Compose the vendor migration lineage with the kernel's shipped base lineage.
 
 The vendor control-plane database runs the KERNEL base migrations (shipped as
-`dotmac_kernel` package data, located via the public `versions_dir()`) PLUS this
-repo's own `alembic/versions` — one revision graph, two separately-owned
-lineages, exactly the pattern the reference assembly uses. Because the kernel is
-an installed dependency (not a fixed repo path), `version_locations` is composed
-programmatically here rather than hard-coded in `alembic.ini`.
+`dotmac_kernel` package data, located via the public `versions_dir()`), the
+installed Release Catalog module lineage, PLUS this repo's own
+`alembic/versions` — one revision graph, three separately-owned lineages.
+Because both shared packages are installed dependencies (not fixed repo paths),
+`version_locations` is composed programmatically rather than hard-coded in
+`alembic.ini`.
 
 Import-safe: builds an Alembic `Config` only — it constructs no engine (deny-case
 D1) and imports only the kernel's PUBLIC `migrations` surface (deny-case D5).
@@ -18,6 +19,7 @@ from pathlib import Path
 
 from alembic.config import Config
 from dotmac_kernel.migrations import versions_dir as kernel_versions_dir
+from dotmac_release_catalog import versions_dir as release_catalog_versions_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_DIR = REPO_ROOT / "alembic"
@@ -25,8 +27,12 @@ VENDOR_VERSIONS = ALEMBIC_DIR / "versions"
 
 
 def composed_version_locations() -> str:
-    """`<kernel base versions> <vendor versions>` — the two composed lineages."""
-    return f"{kernel_versions_dir()} {VENDOR_VERSIONS}"
+    """Kernel, Release Catalog and vendor assembly migration lineages."""
+    return (
+        f"{kernel_versions_dir()} "
+        f"{release_catalog_versions_dir()} "
+        f"{VENDOR_VERSIONS}"
+    )
 
 
 def make_alembic_config(url: str) -> Config:

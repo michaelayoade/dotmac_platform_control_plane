@@ -24,7 +24,9 @@ from sqlalchemy.exc import DBAPIError
 
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0012_platform_outbox"  # current pin (0.1.0a7; head unchanged since a6)
+KERNEL_HEAD = "0023_audit_actor_and_forensics"  # current pin (0.1.0a45)
+PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
+RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v010_delivery_hardening"
@@ -62,6 +64,19 @@ def scratch_db(postgres_url: str) -> Iterator[str]:
     setup = create_engine(_url_for(superuser, name), isolation_level="AUTOCOMMIT")
     with setup.connect() as conn:
         conn.execute(text("ALTER SCHEMA public OWNER TO app_admin"))
+        # A stateful MODULE owns and creates its own schema. PostgreSQL checks
+        # CREATE on the database for CREATE SCHEMA; owning `public` only covered
+        # the pre-module kernel + assembly rehearsal.
+        conn.execute(text(f'GRANT CREATE ON DATABASE "{name}" TO app_admin'))
+        # The access canary must connect as the real online roles. Granting a
+        # database connection does not grant schema/table access; the module
+        # migration remains the authority for those privileges and denials.
+        conn.execute(
+            text(
+                f'GRANT CONNECT ON DATABASE "{name}" TO platform_api, app_user, '
+                "app_admin"
+            )
+        )
     setup.dispose()
     try:
         yield _url_for(superuser, name, user="app_admin")
@@ -93,6 +108,10 @@ def _q(url: str, sql: str, **params):
 
 def _table_exists(url: str, table: str) -> bool:
     return bool(_q(url, "SELECT to_regclass('public.' || :t) IS NOT NULL", t=table))
+
+
+def _qualified_table_exists(url: str, table: str) -> bool:
+    return bool(_q(url, "SELECT to_regclass(:t) IS NOT NULL", t=table))
 
 
 def _column_names(url: str, table: str) -> set[str]:
@@ -141,7 +160,9 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     assert _table_exists(scratch_db, "allocation_entries")
     # Kernel platform tables the AccountService depends on are present too.
     assert _table_exists(scratch_db, "platform_audit_events")
-    assert _table_exists(scratch_db, "platform_inbox_records")
+    assert _table_exists(scratch_db, "platform_idempotency_records")
+    assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
+    assert _qualified_table_exists(scratch_db, "mod_rel.artifact_attestations")
     cols = _column_names(scratch_db, "vendor_accounts")
     assert {
         "id",
@@ -157,22 +178,31 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         scratch_db,
         "SELECT relrowsecurity FROM pg_class WHERE oid='vendor_accounts'::regclass",
     )
-    # Two runtime heads: the vendor root pins kernel 0009, but the pin has since
-    # advanced to 0010, so the kernel head is no longer subsumed by the vendor
-    # lineage — both appear (the two-head topology this lineage is built for).
-    assert _versions(scratch_db) == {KERNEL_HEAD, VENDOR_HEAD}
+    # Three independent runtime heads: kernel, vendor assembly and the installed
+    # Release Catalog module each retain their own migration authority.
+    assert _versions(scratch_db) == {
+        KERNEL_HEAD,
+        RELEASE_CATALOG_HEAD,
+        VENDOR_HEAD,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rehearsal 2 — two-head topology
+# Rehearsal 2 — three-head topology
 # ─────────────────────────────────────────────────────────────────────────────
-def test_two_head_topology(scratch_db: str) -> None:
+def test_three_head_topology(scratch_db: str) -> None:
     script = ScriptDirectory.from_config(make_alembic_config(scratch_db))
-    assert set(script.get_heads()) == {KERNEL_HEAD, VENDOR_HEAD}
+    assert set(script.get_heads()) == {
+        KERNEL_HEAD,
+        RELEASE_CATALOG_HEAD,
+        VENDOR_HEAD,
+    }
     kernel_head = script.get_revision("kernel@head")
     vendor_head = script.get_revision("vendor@head")
+    release_catalog_head = script.get_revision("release_catalog@head")
     assert kernel_head.revision == KERNEL_HEAD
     assert vendor_head.revision == VENDOR_HEAD
+    assert release_catalog_head.revision == RELEASE_CATALOG_HEAD
     # The vendor head is the tip of a single-parent chain that walks back to the
     # vendor ROOT; the ROOT is its own branch that DEPENDS ON (is not a child of)
     # a kernel head, so the lineages advance independently.
@@ -214,6 +244,22 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
     finally:
         plat.dispose()
 
+    # The module is a platform catalogue. The online platform role can read it,
+    # while the product data-plane role is denied below.
+    plat = create_engine(
+        _url_for(scratch_db, scratch_db.rsplit("/", 1)[1], user="platform_api")
+    )
+    try:
+        with plat.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT count(*) FROM mod_rel.release_artifacts")
+                ).scalar()
+                == 0
+            )
+    finally:
+        plat.dispose()
+
     # app_user (tenant application role) may NOT even SELECT — REVOKEd. Each check
     # uses a FRESH connection: a permission error aborts the transaction, so a
     # second statement on the same connection would fail as "transaction aborted"
@@ -251,6 +297,11 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
             with appu.connect() as conn:
                 with pytest.raises(DBAPIError, match="permission denied"):
                     conn.execute(text(f"SELECT count(*) FROM {table}")).scalar()  # noqa: S608
+        with appu.connect() as conn:
+            with pytest.raises(DBAPIError, match="permission denied"):
+                conn.execute(
+                    text("SELECT count(*) FROM mod_rel.release_artifacts")
+                ).scalar()
     finally:
         appu.dispose()
 
@@ -265,14 +316,61 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     assert not _table_exists(scratch_db, "vendor_accounts")
     assert _versions(scratch_db) == {KERNEL_HEAD}
 
-    # Deploy the vendor lineage on top — adopts both vendor tables, data-safe.
+    # Deploy the vendor and module lineages on top — data-safe.
     _upgrade(scratch_db, "heads")
     assert _table_exists(scratch_db, "vendor_accounts")
     assert _table_exists(scratch_db, "offer_versions")
     assert _table_exists(scratch_db, "approval_policies")
     assert _table_exists(scratch_db, "contracts")
     assert _table_exists(scratch_db, "allocations")
-    assert _versions(scratch_db) == {KERNEL_HEAD, VENDOR_HEAD}
+    assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
+    assert _versions(scratch_db) == {
+        KERNEL_HEAD,
+        RELEASE_CATALOG_HEAD,
+        VENDOR_HEAD,
+    }
+
+
+def test_upgrade_from_previous_vendor_deployment_preserves_data(
+    scratch_db: str,
+) -> None:
+    """Rehearse the actual adoption edge: a9 + vendor v010 to a45 + module."""
+    _upgrade(scratch_db, "vendor@head")
+    _upgrade(scratch_db, PREVIOUS_KERNEL_HEAD)
+    assert _versions(scratch_db) == {PREVIOUS_KERNEL_HEAD, VENDOR_HEAD}
+    assert not _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
+
+    account_id = str(uuid.uuid4())
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO vendor_accounts "
+                    "(id, external_ref, display_name, status) "
+                    "VALUES (:id, 'pre-module', 'Existing Vendor', 'active')"
+                ),
+                {"id": account_id},
+            )
+    finally:
+        eng.dispose()
+
+    _upgrade(scratch_db, "heads")
+
+    assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
+    assert (
+        _q(
+            scratch_db,
+            "SELECT count(*) FROM vendor_accounts WHERE id = CAST(:id AS uuid)",
+            id=account_id,
+        )
+        == 1
+    )
+    assert _versions(scratch_db) == {
+        KERNEL_HEAD,
+        RELEASE_CATALOG_HEAD,
+        VENDOR_HEAD,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,8 +380,8 @@ def test_kernel_advance_keeps_vendor_head_independent(
     scratch_db: str, tmp_path: Path
 ) -> None:
     """Simulate a FUTURE kernel migration (a child of the kernel head). The
-    vendor head must remain a separate head — the two-head topology the vendor
-    lineage is designed for — and a composed upgrade must still apply both."""
+    vendor and module heads must remain separate heads — and a composed upgrade
+    must still apply all three lineages."""
     synth_rev = "9999_synthetic_kernel_advance"
     (tmp_path / f"{synth_rev}.py").write_text(
         "revision = '9999_synthetic_kernel_advance'\n"
@@ -298,12 +396,20 @@ def test_kernel_advance_keeps_vendor_head_independent(
         "version_locations", f"{composed_version_locations()} {tmp_path}"
     )
     script = ScriptDirectory.from_config(cfg)
-    # Kernel head has advanced to the synthetic revision; vendor head is untouched.
-    assert set(script.get_heads()) == {synth_rev, VENDOR_HEAD}
+    # Kernel advances independently; the vendor and module heads are untouched.
+    assert set(script.get_heads()) == {
+        synth_rev,
+        RELEASE_CATALOG_HEAD,
+        VENDOR_HEAD,
+    }
 
     command.upgrade(cfg, "heads")
     assert _table_exists(scratch_db, "vendor_accounts")
-    assert _versions(scratch_db) == {synth_rev, VENDOR_HEAD}
+    assert _versions(scratch_db) == {
+        synth_rev,
+        RELEASE_CATALOG_HEAD,
+        VENDOR_HEAD,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
