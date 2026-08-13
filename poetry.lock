@@ -342,6 +342,27 @@ trio = ["trio (>=0.30)"]
 wmi = ["wmi (>=1.5.1) ; platform_system == \"Windows\""]
 
 [[package]]
+name = "dotmac-entitlement-allocation"
+version = "0.1.0a3"
+description = "DotMac Entitlement Allocation — an immutable projection of what an activated contract entitles, validated against the product's manifest-declared capability catalogue (ADR-0006 M4)"
+optional = false
+python-versions = ">=3.11,<3.14"
+groups = ["main"]
+files = [
+    {file = "dotmac_entitlement_allocation-0.1.0a3-py3-none-any.whl", hash = "sha256:6a3e873bc8cd0857c0f35355f3efc237493cf0180830a1b6770359a3aea81425"},
+    {file = "dotmac_entitlement_allocation-0.1.0a3.tar.gz", hash = "sha256:f7c1c260d4e53e75ff4ec35e253183f26a0993634e5858682df74471607e0bb0"},
+]
+
+[package.dependencies]
+dotmac-kernel = ">=0.1.0a45"
+sqlalchemy = ">=2.0,<3.0"
+
+[package.source]
+type = "legacy"
+url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
+reference = "forgejo"
+
+[[package]]
 name = "dotmac-kernel"
 version = "0.1.0a45"
 description = "DotMac platform kernel — multi-tenant FastAPI foundation (config, RLS db, identity/tenancy models, security, platform auth, middleware, settings, features registry, audit)"
@@ -1530,4 +1551,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "d54de932f86a266e8a839d09245b8886d59507ced4fceb8022a286f478637b22"
+content-hash = "8d054fd5ac9095884bea5640e8d873e92169ec641f17c08fd2cd8efa952cc4ce"

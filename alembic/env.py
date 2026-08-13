@@ -2,10 +2,11 @@
 
 Connects as `app_admin` (the RLS-bypass migration role) — set
 `MIGRATION_DATABASE_URL` or `DATABASE_URL`. `target_metadata` is the kernel
-`Base` (all kernel models) PLUS the vendor's own models, so autogenerate sees the
-whole composed schema. The two lineages' directories are composed programmatically
-(`vendor_cp.migrations`), not in `alembic.ini`, because the kernel is an installed
-package with an environment-specific path.
+`Base` (all kernel models), the installed modules and the vendor's own models,
+so autogenerate sees the whole composed schema. The four lineages' directories
+are composed programmatically (`vendor_cp.migrations`), not in `alembic.ini`,
+because the shared owners are installed packages with environment-specific
+paths.
 """
 
 from __future__ import annotations
@@ -25,7 +26,9 @@ from dotmac_kernel.messaging import models as messaging_models  # noqa: F401
 from dotmac_kernel.models import Base
 from sqlalchemy import engine_from_config, pool
 
-# Register the vendor's own models (VendorAccount).
+# Register the vendor's own models. Importing `vendor_cp.migrations` below also
+# loads both installed modules through their public top-level migration locators,
+# registering their models on the same shared Base metadata.
 import vendor_cp.accounts.models  # noqa: F401
 import vendor_cp.allocations.models  # noqa: F401
 import vendor_cp.approvals.models  # noqa: F401
@@ -35,7 +38,7 @@ from vendor_cp.migrations import composed_version_locations
 
 config = context.config
 
-# Ensure both lineages are composed even if alembic is invoked without the
+# Ensure every lineage is composed even if alembic is invoked without the
 # programmatic Config (belt-and-suspenders for the online run).
 if not config.get_main_option("version_locations"):
     config.set_main_option("version_locations", composed_version_locations())

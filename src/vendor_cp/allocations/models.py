@@ -55,10 +55,10 @@ class Allocation(Base, TimestampMixin):
     source_event_id: Mapped[str] = mapped_column(String(200), nullable=False)
 
     entries: Mapped[list[AllocationEntry]] = relationship(
-        "AllocationEntry",
+        lambda: AllocationEntry,
         back_populates="allocation",
         cascade="all, delete-orphan",
-        order_by="AllocationEntry.capability_code",
+        order_by=lambda: AllocationEntry.capability_code,
     )
 
 
@@ -75,7 +75,7 @@ class AllocationEntry(Base, TimestampMixin):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     allocation: Mapped[Allocation] = relationship(
-        "Allocation", back_populates="entries"
+        lambda: Allocation, back_populates="entries"
     )
 
 

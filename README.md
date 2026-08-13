@@ -14,6 +14,11 @@ lifecycle — never a product's tenants, subscribers, or customer data.
 - **Release Catalog:** `dotmac-release-catalog==0.1.0a2`, exact-pinned from the
   same registry. The assembly composes its manifest and public Alembic lineage;
   its `mod_rel` platform-catalog tables remain inaccessible to `app_user`.
+- **Entitlement Allocation:** `dotmac-entitlement-allocation==0.1.0a3`, also
+  exact-pinned and composed through its public manifest and Alembic locator.
+  This is a shadow installation, not a writer cutover: the vendor-local
+  allocation projection remains authoritative until contracts carry an
+  explicit product identity and the checked-in data preflight passes.
 
 ## Layout
 
@@ -54,6 +59,7 @@ make test       # pytest
 The assembly owns vendor accounts, immutable offers, approvals, commercial
 contracts, its legacy allocation projection, licence issuance/delivery, and the
 provisioning laboratory. It now composes the independently published Release
-Catalog for immutable artifact identity and attestations. Fleet desired state,
-the full provisioning runner, update authority, support access, and observed
-health remain future independent slices.
+Catalog for immutable artifact identity and attestations, plus Entitlement
+Allocation in shadow mode. Fleet desired state, the full provisioning runner,
+update authority, support access, and observed health remain future independent
+slices.

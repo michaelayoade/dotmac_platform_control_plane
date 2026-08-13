@@ -20,6 +20,12 @@ it owns and — just as importantly — what it must never become.
   its public `versions_dir()` alongside the kernel and vendor migration
   lineages. Its `mod_rel` tables are platform catalogues: `platform_api` may
   use the published grants and `app_user` is denied.
+- `dotmac-entitlement-allocation==0.1.0a3` is installed and its manifest and
+  public migration lineage are composed. This is deliberately a **shadow
+  installation**, not adoption: `vendor_cp.allocations` remains the sole
+  authoritative writer and there is no dual-write. The independent module
+  cannot accept a truthful `ContractSnapshot` yet because the vendor contract,
+  offer, activation event and legacy allocation carry no `product_code`.
 
 ## Ownership (what this control plane owns)
 
@@ -30,6 +36,21 @@ it owns and — just as importantly — what it must never become.
   contracts, the legacy allocation projection, and signed licence issuance and
   delivery. These remain vendor-local owners until each approved independent
   module cutover explicitly retires its corresponding local writer.
+- **Allocation cutover gate** — Entitlement Allocation can become authoritative
+  only after one coherent change proves all of the following:
+
+  1. the commercial-contract owner persists and emits an explicit product
+     identity; no caller-supplied or default product may fill the gap;
+  2. a product-scoped manifest catalogue replaces the current flat configured
+     `offered_capabilities` mirror;
+  3. every live legacy allocation entry validates against its product's
+     manifest and duplicate capability codes are normalized before switching;
+  4. the activation adapter constructs the module's `ContractSnapshot`, the
+     consumer switches once, licence issuance reads `allocation_product()`, and
+     the legacy models, service, FK and writer path are retired after parity.
+
+  Until all four pass, the module tables are empty and non-authoritative. A
+  partial switch would either invent product identity or create two writers.
 - **Release artifacts and attestations** — owned by the independently published
   `dotmac-release-catalog`, not by a vendor-local feature or table. This change
   composes the owner; it does not yet add a publish HTTP adapter or claim a

@@ -9,6 +9,7 @@ kernel code, no private kernel imports (deny-case D5).
 
 from __future__ import annotations
 
+from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import ProductAssemblySpec
 from dotmac_release_catalog import module as release_catalog_module
 
@@ -35,6 +36,7 @@ def build_spec() -> ProductAssemblySpec:
         name=ASSEMBLY_NAME,
         modules=(
             release_catalog_module,
+            entitlement_allocation_module,
             console_feature,
             accounts_feature,
             offers_feature,

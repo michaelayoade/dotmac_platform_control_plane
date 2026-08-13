@@ -2,9 +2,10 @@
 
 The vendor control-plane database runs the KERNEL base migrations (shipped as
 `dotmac_kernel` package data, located via the public `versions_dir()`), the
-installed Release Catalog module lineage, PLUS this repo's own
-`alembic/versions` — one revision graph, three separately-owned lineages.
-Because both shared packages are installed dependencies (not fixed repo paths),
+installed Release Catalog module lineage, the installed Entitlement Allocation
+module lineage, PLUS this repo's own `alembic/versions` — one revision graph,
+four separately-owned lineages. Because all shared packages are installed
+dependencies (not fixed repo paths),
 `version_locations` is composed programmatically rather than hard-coded in
 `alembic.ini`.
 
@@ -18,6 +19,9 @@ import os
 from pathlib import Path
 
 from alembic.config import Config
+from dotmac_entitlement_allocation import (
+    versions_dir as entitlement_allocation_versions_dir,
+)
 from dotmac_kernel.migrations import versions_dir as kernel_versions_dir
 from dotmac_release_catalog import versions_dir as release_catalog_versions_dir
 
@@ -27,16 +31,17 @@ VENDOR_VERSIONS = ALEMBIC_DIR / "versions"
 
 
 def composed_version_locations() -> str:
-    """Kernel, Release Catalog and vendor assembly migration lineages."""
+    """Kernel, two independent modules and vendor migration lineages."""
     return (
         f"{kernel_versions_dir()} "
         f"{release_catalog_versions_dir()} "
+        f"{entitlement_allocation_versions_dir()} "
         f"{VENDOR_VERSIONS}"
     )
 
 
 def make_alembic_config(url: str) -> Config:
-    """An Alembic `Config` wired to both lineages and the given database URL.
+    """An Alembic `Config` wired to all lineages and the given database URL.
 
     Used by both the deploy entrypoint (`scripts/migrate.py`) and the migration
     rehearsals, so CLI-vs-test composition can never diverge.
