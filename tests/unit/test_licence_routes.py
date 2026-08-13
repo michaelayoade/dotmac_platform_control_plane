@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime
 
 import pytest
-from dotmac_kernel import CapabilityCatalogue, FeatureManifest, PlatformAdmin
+from dotmac_kernel import PlatformAdmin
 from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.errors import register_error_handlers
 from dotmac_kernel.platform_auth import require_platform_admin
@@ -39,6 +39,7 @@ from vendor_cp.licensing.delivery_models import (
 )
 from vendor_cp.licensing.router import router
 from vendor_cp.licensing.signer import EphemeralLicenceSigner
+from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
 NOW = datetime(2026, 8, 2, 12, 0, 0, tzinfo=UTC)
@@ -71,16 +72,15 @@ def client(db: Session) -> Iterator[TestClient]:
         yield c
 
 
-def _catalogue(*codes: str) -> CapabilityCatalogue:
-    return CapabilityCatalogue.from_manifests(
-        [FeatureManifest(name="t", capabilities=tuple(codes))]
-    )
+def _catalogue(*codes: str) -> ProductCapabilityCatalogues:
+    return ProductCapabilityCatalogues.from_capabilities({"dotmac-sub": tuple(codes)})
 
 
 def _issue(db: Session) -> object:
     """contract → activate → stage allocation → issue."""
     db.add(
         OfferVersion(
+            product_code="dotmac-sub",
             offer_code="off",
             version=1,
             amount="10.00",
@@ -93,6 +93,7 @@ def _issue(db: Session) -> object:
         db,
         contracts.CreateDraftCommand(
             command_id=f"d-{uuid.uuid4()}",
+            product_code="dotmac-sub",
             customer_ref=CUSTOMER,
             legal_entity="Dotmac Ltd",
             currency_code="USD",
@@ -110,7 +111,7 @@ def _issue(db: Session) -> object:
             approval_policy_version=1,
             submitter_id=uuid.uuid4(),
         ),
-        catalogue=_catalogue("cap.a"),
+        catalogues=_catalogue("cap.a"),
     )
     approvals.publish_policy_version(
         db,

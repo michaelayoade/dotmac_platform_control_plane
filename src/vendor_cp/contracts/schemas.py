@@ -19,6 +19,7 @@ class LineRequest(BaseModel):
 
 class CreateDraftRequest(BaseModel):
     command_id: str = Field(min_length=1, max_length=200)
+    product_code: str = Field(min_length=1, max_length=120)
     customer_ref: str = Field(min_length=1, max_length=200)
     legal_entity: str = Field(min_length=1, max_length=200)
     currency: str = Field(min_length=3, max_length=3)
@@ -54,6 +55,7 @@ class LineResponse(BaseModel):
 
 class ContractResponse(BaseModel):
     id: UUID
+    product_code: str
     customer_ref: str
     status: str
     content_hash: str | None
@@ -64,6 +66,7 @@ class ContractResponse(BaseModel):
     def of(cls, v: ContractView) -> ContractResponse:
         return cls(
             id=v.id,
+            product_code=v.product_code,
             customer_ref=v.customer_ref,
             status=v.status,
             content_hash=v.content_hash,

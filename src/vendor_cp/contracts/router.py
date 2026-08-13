@@ -23,7 +23,7 @@ from vendor_cp.contracts.schemas import (
     SubmitRequest,
     TransitionRequest,
 )
-from vendor_cp.offers.catalog import offered_capability_catalogue
+from vendor_cp.offers.catalog import configured_product_capability_catalogues
 
 router = APIRouter(prefix="/platform/vendor/contracts", tags=["contracts"])
 
@@ -37,6 +37,7 @@ def create_draft(body: CreateDraftRequest, admin: Admin, db: Db) -> ContractResp
         db,
         service.CreateDraftCommand(
             command_id=body.command_id,
+            product_code=body.product_code,
             customer_ref=body.customer_ref,
             legal_entity=body.legal_entity,
             currency_code=body.currency,
@@ -72,7 +73,7 @@ def submit(
             submitter_id=body.submitter_id,
             actor_admin_id=admin.id,
         ),
-        catalogue=offered_capability_catalogue(),
+        catalogues=configured_product_capability_catalogues(),
     )
     return ContractResponse.of(view)
 

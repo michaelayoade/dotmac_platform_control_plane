@@ -31,7 +31,6 @@ from datetime import UTC, date, datetime
 from uuid import UUID
 
 from dotmac_kernel import (
-    CapabilityCatalogue,
     ConflictError,
     NotFoundError,
     write_platform_audit_event,
@@ -42,6 +41,7 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import service as approvals
 from vendor_cp.contracts.models import Contract, ContractLine, ContractStatus
+from vendor_cp.offers.catalog import ProductCapabilityCatalogueReader
 from vendor_cp.offers.models import OfferVersion
 
 _CMD_CREATE = "vendor.contract.create_draft"
@@ -73,6 +73,7 @@ class LineInput:
 @dataclass(frozen=True, slots=True)
 class CreateDraftCommand:
     command_id: str
+    product_code: str
     customer_ref: str
     legal_entity: str
     currency_code: str
@@ -112,6 +113,7 @@ class TransitionCommand:
 @dataclass(frozen=True, slots=True)
 class ContractView:
     id: UUID
+    product_code: str
     customer_ref: str
     status: str
     content_hash: str | None
@@ -134,12 +136,15 @@ def _load(session: Session, contract_id: UUID) -> Contract:
     row = session.get(Contract, contract_id)
     if row is None:
         raise NotFoundError(f"contract {contract_id} not found")
+    _require_product(row)
     return row
 
 
 def _view(row: Contract) -> ContractView:
+    product_code = _require_product(row)
     return ContractView(
         id=row.id,
+        product_code=product_code,
         customer_ref=row.customer_ref,
         status=row.status,
         content_hash=row.content_hash,
@@ -162,6 +167,7 @@ def _content_hash(row: Contract) -> str:
     """Canonical digest of the frozen priced snapshot — approvals bind to it, so
     any change to terms/lines/prices invalidates prior approvals."""
     snapshot = {
+        "product_code": _require_product(row),
         "customer_ref": row.customer_ref,
         "legal_entity": row.legal_entity,
         "currency_code": row.currency_code,
@@ -198,6 +204,7 @@ def _emit(
     """The atomic consequence of a transition: a platform audit record AND a
     platform outbox event, both in the caller's transaction."""
     details: dict[str, object] = {
+        "product_code": _require_product(row),
         "customer_ref": row.customer_ref,
         "status": row.status,
         "content_hash": row.content_hash,
@@ -228,15 +235,28 @@ def _require_status(row: Contract, allowed: set[str]) -> None:
         )
 
 
+def _require_product(row: Contract) -> str:
+    product_code = row.product_code
+    if not product_code or product_code != product_code.strip():
+        raise ConflictError(
+            f"contract {row.id} has no product identity; backfill it from "
+            "evidence before moving its lifecycle"
+        )
+    return product_code
+
+
 # ── commands ─────────────────────────────────────────────────────────────────
 def create_draft(db: Session, command: CreateDraftCommand) -> ContractView:
     """Create a `draft` contract with its (unpriced) lines. Pricing is frozen at
     submit. Each line must pin an existing offer version."""
     if not command.lines:
         raise ConflictError("a contract needs at least one line")
+    if not command.product_code or command.product_code != command.product_code.strip():
+        raise ConflictError("a contract needs a valid product identity")
 
     def handler(session: Session) -> Mapping[str, object]:
         row = Contract(
+            product_code=command.product_code,
             customer_ref=command.customer_ref,
             legal_entity=command.legal_entity,
             currency_code=command.currency_code,
@@ -248,7 +268,9 @@ def create_draft(db: Session, command: CreateDraftCommand) -> ContractView:
         session.add(row)
         session.flush()
         for li in command.lines:
-            ov = _resolve_offer(session, li.offer_code, li.offer_version)
+            ov = _resolve_offer(
+                session, command.product_code, li.offer_code, li.offer_version
+            )
             session.add(
                 ContractLine(
                     contract_id=row.id,
@@ -276,7 +298,10 @@ def create_draft(db: Session, command: CreateDraftCommand) -> ContractView:
 
 
 def submit(
-    db: Session, command: SubmitCommand, *, catalogue: CapabilityCatalogue
+    db: Session,
+    command: SubmitCommand,
+    *,
+    catalogues: ProductCapabilityCatalogueReader,
 ) -> ContractView:
     """`draft → pending_approval`. Freezes the priced snapshot (copies each pinned
     offer version's price onto its line), validates every line's capability code is
@@ -288,13 +313,21 @@ def submit(
         _require_status(row, {ContractStatus.DRAFT.value})
         if not row.lines:
             raise ConflictError("a contract needs at least one line")
+        product_code = _require_product(row)
         for ln in row.lines:
-            catalogue.require(ln.capability_code)
+            catalogues.require_declared(
+                product_code=product_code, capability_code=ln.capability_code
+            )
             ov = session.get(OfferVersion, ln.offer_version_id)
             if ov is None:
                 raise ConflictError(
                     f"line pins offer version {ln.offer_version_id} which no "
                     "longer exists"
+                )
+            if ov.product_code != product_code:
+                raise ConflictError(
+                    f"line pins offer {ov.id} for product {ov.product_code!r}; "
+                    f"contract {row.id} belongs to {product_code!r}"
                 )
             if ln.capability_code not in ov.capability_codes:
                 raise ConflictError(
@@ -534,15 +567,20 @@ def get(db: Session, contract_id: UUID) -> ContractView | None:
 
 
 # ── internals ────────────────────────────────────────────────────────────────
-def _resolve_offer(session: Session, offer_code: str, version: int) -> OfferVersion:
+def _resolve_offer(
+    session: Session, product_code: str, offer_code: str, version: int
+) -> OfferVersion:
     ov = session.execute(
         select(OfferVersion).where(
+            OfferVersion.product_code == product_code,
             OfferVersion.offer_code == offer_code,
             OfferVersion.version == version,
         )
     ).scalar_one_or_none()
     if ov is None:
-        raise NotFoundError(f"offer version {offer_code!r} v{version} not found")
+        raise NotFoundError(
+            f"offer version {product_code!r}/{offer_code!r} v{version} not found"
+        )
     return ov
 
 

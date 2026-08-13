@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from vendor_cp.offers import service
-from vendor_cp.offers.catalog import offered_capability_catalogue
+from vendor_cp.offers.catalog import configured_product_capability_catalogues
 from vendor_cp.offers.schemas import OfferVersionResponse, PublishOfferVersionRequest
 
 router = APIRouter(prefix="/platform/vendor/offer-versions", tags=["offer-versions"])
@@ -50,32 +50,43 @@ def publish(
         db,
         service.PublishOfferVersionCommand(
             command_id=body.command_id,
+            product_code=body.product_code,
             offer_code=body.offer_code,
             version=body.version,
             price=_price(body.amount, body.currency),
             capability_codes=tuple(body.capability_codes),
             actor_admin_id=admin.id,
         ),
-        catalogue=offered_capability_catalogue(),
+        catalogues=configured_product_capability_catalogues(),
     )
     return OfferVersionResponse.of(result.offer_version)
 
 
-@router.get("/{offer_code}", response_model=list[OfferVersionResponse])
-def list_versions(offer_code: str, _admin: Admin, db: Db) -> list[OfferVersionResponse]:
+@router.get("/{product_code}/{offer_code}", response_model=list[OfferVersionResponse])
+def list_versions(
+    product_code: str, offer_code: str, _admin: Admin, db: Db
+) -> list[OfferVersionResponse]:
     return [
         OfferVersionResponse.of(v)
-        for v in service.list_offer_versions(db, offer_code=offer_code)
+        for v in service.list_offer_versions(
+            db, product_code=product_code, offer_code=offer_code
+        )
     ]
 
 
-@router.get("/{offer_code}/{version}", response_model=OfferVersionResponse)
+@router.get(
+    "/{product_code}/{offer_code}/{version}", response_model=OfferVersionResponse
+)
 def get_version(
-    offer_code: str, version: int, _admin: Admin, db: Db
+    product_code: str, offer_code: str, version: int, _admin: Admin, db: Db
 ) -> OfferVersionResponse:
-    view = service.get_offer_version(db, offer_code=offer_code, version=version)
+    view = service.get_offer_version(
+        db, product_code=product_code, offer_code=offer_code, version=version
+    )
     if view is None:
-        raise NotFoundError(f"offer version {offer_code!r} v{version} not found")
+        raise NotFoundError(
+            f"offer version {product_code!r}/{offer_code!r} v{version} not found"
+        )
     return OfferVersionResponse.of(view)
 
 

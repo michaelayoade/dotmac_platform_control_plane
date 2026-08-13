@@ -30,7 +30,7 @@ RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v010_delivery_hardening"
+VENDOR_HEAD = "v011_product_identity"
 
 
 def _superuser_url(postgres_url: str) -> str:
@@ -159,6 +159,8 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     assert _table_exists(scratch_db, "contract_lines")
     assert _table_exists(scratch_db, "allocations")
     assert _table_exists(scratch_db, "allocation_entries")
+    assert "product_code" in _column_names(scratch_db, "offer_versions")
+    assert "product_code" in _column_names(scratch_db, "contracts")
     # Kernel platform tables the AccountService depends on are present too.
     assert _table_exists(scratch_db, "platform_audit_events")
     assert _table_exists(scratch_db, "platform_idempotency_records")
@@ -551,6 +553,121 @@ def test_v010_check_constraint_rejects_a_new_delivery_without_a_target(
                     text(
                         "INSERT INTO licence_deliveries (id, issuance_id, target_ref) "
                         "VALUES (gen_random_uuid(), gen_random_uuid(), 'x')"
+                    )
+                )
+    finally:
+        eng.dispose()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v011 — product identity expand stage
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_v011_preserves_historical_rows_as_explicitly_unclassified(
+    scratch_db: str,
+) -> None:
+    """The migration may not invent a default product for existing commerce."""
+    _upgrade(scratch_db, "v010_delivery_hardening")
+    offer_id = str(uuid.uuid4())
+    contract_id = str(uuid.uuid4())
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO offer_versions "
+                    "(id, offer_code, version, amount, currency_code, "
+                    "capability_codes) VALUES "
+                    "(:id, 'legacy', 1, '10.00', 'USD', '[\"cap.a\"]'::jsonb)"
+                ),
+                {"id": offer_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO contracts (id, customer_ref, legal_entity, "
+                    "currency_code, term_start, term_end, status) VALUES "
+                    "(:id, 'cust', 'Dotmac Ltd', 'USD', '2026-01-01', "
+                    "'2026-12-31', 'draft')"
+                ),
+                {"id": contract_id},
+            )
+
+        _upgrade(scratch_db, "heads")
+
+        with eng.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT product_code FROM offer_versions WHERE id=:id"),
+                    {"id": offer_id},
+                ).scalar_one()
+                is None
+            )
+            assert (
+                conn.execute(
+                    text("SELECT product_code FROM contracts WHERE id=:id"),
+                    {"id": contract_id},
+                ).scalar_one()
+                is None
+            )
+    finally:
+        eng.dispose()
+
+
+def test_v011_offer_identity_is_product_qualified_in_postgres(scratch_db: str) -> None:
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            for product in ("dotmac-sub", "dotmac-erp"):
+                conn.execute(
+                    text(
+                        "INSERT INTO offer_versions "
+                        "(id, product_code, offer_code, version, amount, "
+                        "currency_code, capability_codes) VALUES "
+                        "(gen_random_uuid(), :product, 'pro', 1, '10.00', "
+                        "'USD', '[]'::jsonb)"
+                    ),
+                    {"product": product},
+                )
+            with pytest.raises(DBAPIError, match="uq_offer_versions_product_code_ver"):
+                conn.execute(
+                    text(
+                        "INSERT INTO offer_versions "
+                        "(id, product_code, offer_code, version, amount, "
+                        "currency_code, capability_codes) VALUES "
+                        "(gen_random_uuid(), 'dotmac-sub', 'pro', 1, '10.00', "
+                        "'USD', '[]'::jsonb)"
+                    )
+                )
+    finally:
+        eng.dispose()
+
+
+def test_v011_rejects_new_unclassified_commercial_rows(scratch_db: str) -> None:
+    """NOT VALID preserves history; it still governs every new write."""
+    _upgrade(scratch_db, "heads")
+    eng = create_engine(scratch_db)
+    try:
+        with pytest.raises(DBAPIError, match="ck_offer_versions_product_identity"):
+            with eng.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO offer_versions "
+                        "(id, offer_code, version, amount, currency_code, "
+                        "capability_codes) VALUES "
+                        "(gen_random_uuid(), 'unclassified', 1, '10.00', "
+                        "'USD', '[]'::jsonb)"
+                    )
+                )
+        with pytest.raises(DBAPIError, match="ck_contracts_product_identity"):
+            with eng.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO contracts (id, customer_ref, legal_entity, "
+                        "currency_code, term_start, term_end, status) VALUES "
+                        "(gen_random_uuid(), 'cust', 'Dotmac Ltd', 'USD', "
+                        "'2026-01-01', '2026-12-31', 'draft')"
                     )
                 )
     finally:

@@ -13,7 +13,6 @@ from collections.abc import Iterator
 from datetime import date
 
 import pytest
-from dotmac_kernel import CapabilityCatalogue, FeatureManifest
 from dotmac_kernel.entitlements import TenantEntitlementGrant
 from dotmac_kernel.messaging import ClaimedPlatformEvent, PlatformOutboxEvent
 from dotmac_kernel.testing import create_test_engine, isolated_session
@@ -25,6 +24,7 @@ from vendor_cp.allocations.consumer import ContractEventConsumer
 from vendor_cp.allocations.models import Allocation, AllocationStatus
 from vendor_cp.approvals import service as approvals
 from vendor_cp.contracts import service as contracts
+from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
 
@@ -38,10 +38,8 @@ def db() -> Iterator[Session]:
         engine.dispose()
 
 
-def _catalogue(*codes: str) -> CapabilityCatalogue:
-    return CapabilityCatalogue.from_manifests(
-        [FeatureManifest(name="t", capabilities=tuple(codes))]
-    )
+def _catalogue(*codes: str) -> ProductCapabilityCatalogues:
+    return ProductCapabilityCatalogues.from_capabilities({"dotmac-sub": tuple(codes)})
 
 
 def _activated_contract(db: Session):
@@ -49,6 +47,7 @@ def _activated_contract(db: Session):
     genuine `contract.activated` event lands in the platform outbox."""
     db.add(
         OfferVersion(
+            product_code="dotmac-sub",
             offer_code="off",
             version=1,
             amount="10.00",
@@ -61,6 +60,7 @@ def _activated_contract(db: Session):
         db,
         contracts.CreateDraftCommand(
             command_id=f"d-{uuid.uuid4()}",
+            product_code="dotmac-sub",
             customer_ref="cust-42",
             legal_entity="Dotmac Ltd",
             currency_code="USD",
@@ -82,7 +82,7 @@ def _activated_contract(db: Session):
             approval_policy_version=1,
             submitter_id=submitter,
         ),
-        catalogue=_catalogue("cap.a", "cap.b"),
+        catalogues=_catalogue("cap.a", "cap.b"),
     )
     approvals.publish_policy_version(
         db,
