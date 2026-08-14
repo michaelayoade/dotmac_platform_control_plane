@@ -11,10 +11,14 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a50` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a60` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source.
+- Alembic installs Vendor's checked-in logical prerequisite bindings before it
+  builds the composed revision map. Kernel `0001_initial_tenant_schema` supplies
+  `module_database_roles.v1`; `tenant_scope_catalog.v1` is deliberately unbound,
+  so a dual-plane module creates only its platform tables in this assembly.
 - `dotmac-release-catalog==0.1.0a3` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration

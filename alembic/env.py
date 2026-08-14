@@ -24,6 +24,7 @@ from dotmac_kernel import (  # noqa: F401
 )
 from dotmac_kernel.messaging import models as messaging_models  # noqa: F401
 from dotmac_kernel.models import Base
+from dotmac_kernel.prerequisites import install_prerequisite_bindings
 from sqlalchemy import engine_from_config, pool
 
 # Register the vendor's own models. Importing `vendor_cp.migrations` below also
@@ -34,7 +35,14 @@ import vendor_cp.allocations.models  # noqa: F401
 import vendor_cp.approvals.models  # noqa: F401
 import vendor_cp.contracts.models  # noqa: F401
 import vendor_cp.offers.models  # noqa: F401
+from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations
+
+# Install before Alembic builds the revision map. Requiring module migrations
+# resolve their logical prerequisites into this assembly's physical ordering
+# edges at script-load time. The binding set intentionally omits the tenant
+# catalogue, so a dual-plane module builds only its platform plane here.
+install_prerequisite_bindings(ASSEMBLY_PREREQUISITE_BINDINGS)
 
 config = context.config
 

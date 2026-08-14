@@ -19,12 +19,14 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
+from dotmac_kernel.prerequisites import installed_bindings
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
+from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0023_audit_actor_and_forensics"  # current pin (0.1.0a50)
+KERNEL_HEAD = "0023_audit_actor_and_forensics"  # current pin (0.1.0a60)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
@@ -191,6 +193,14 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
+
+
+def test_alembic_env_installs_the_vendor_prerequisite_bindings(
+    scratch_db: str,
+) -> None:
+    _upgrade(scratch_db, "heads")
+
+    assert installed_bindings() == ASSEMBLY_PREREQUISITE_BINDINGS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
