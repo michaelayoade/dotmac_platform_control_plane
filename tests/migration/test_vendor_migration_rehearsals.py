@@ -13,7 +13,7 @@ skips when `TEST_DATABASE_URL` is unset.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -35,65 +35,11 @@ VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v011_product_identity"
 
 
-def _superuser_url(postgres_url: str) -> str:
-    """The cluster superuser URL, taken from the `postgres_url` fixture
-    (conftest), which skips locally but FAILS under REQUIRE_POSTGRES_TESTS=1 —
-    so this suite cannot pass by being skipped in required CI."""
-    return postgres_url
-
-
-def _url_for(base_url: str, dbname: str, *, user: str | None = None) -> str:
-    scheme_userhost, _, _ = base_url.rpartition("/")
-    if user is not None:
-        scheme, _, userhost = scheme_userhost.partition("://")
-        host = userhost.rpartition("@")[2]
-        scheme_userhost = f"{scheme}://{user}@{host}"
-    return f"{scheme_userhost}/{dbname}"
-
-
-@pytest.fixture
-def scratch_db(postgres_url: str) -> Iterator[str]:
-    """Create an isolated scratch DB and yield an APP_ADMIN url for it.
-
-    Migrations run as `app_admin` (the production migrator, BYPASSRLS) so the
-    table owner + grants match production. The cluster superuser only creates the
-    DB and hands its public schema to app_admin (which exists globally once
-    `make test-db-up` has run the kernel's initial migration)."""
-    superuser = _superuser_url(postgres_url)
-    name = f"vcp_rehearsal_{uuid.uuid4().hex[:12]}"
-    server = create_engine(superuser, isolation_level="AUTOCOMMIT")
-    with server.connect() as conn:
-        conn.execute(text(f'CREATE DATABASE "{name}"'))
-    setup = create_engine(_url_for(superuser, name), isolation_level="AUTOCOMMIT")
-    with setup.connect() as conn:
-        conn.execute(text("ALTER SCHEMA public OWNER TO app_admin"))
-        # A stateful MODULE owns and creates its own schema. PostgreSQL checks
-        # CREATE on the database for CREATE SCHEMA; owning `public` only covered
-        # the pre-module kernel + assembly rehearsal.
-        conn.execute(text(f'GRANT CREATE ON DATABASE "{name}" TO app_admin'))
-        # The access canary must connect as the real online roles. Granting a
-        # database connection does not grant schema/table access; the module
-        # migration remains the authority for those privileges and denials.
-        conn.execute(
-            text(
-                f'GRANT CONNECT ON DATABASE "{name}" TO platform_api, app_user, '
-                "app_admin"
-            )
-        )
-    setup.dispose()
-    try:
-        yield _url_for(superuser, name, user="app_admin")
-    finally:
-        with server.connect() as conn:
-            conn.execute(
-                text(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    "WHERE datname = :n AND pid <> pg_backend_pid()"
-                ),
-                {"n": name},
-            )
-            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
-        server.dispose()
+# `scratch_db` and the DSN rewriter MOVED to `tests/migration/conftest.py`.
+# They were defined here, which meant the composed live-catalogue audit could
+# not reuse them without importing across modules of a test PACKAGE — the
+# import-path fragility that file's docstring already warns about. Both arrive
+# as FIXTURES (`scratch_db`, `url_for`), which is that file's stated convention.
 
 
 def _upgrade(url: str, target: str = "heads") -> None:
@@ -240,12 +186,14 @@ def test_four_head_topology(scratch_db: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Rehearsal 3 — platform-role access, tenant-role denial
 # ─────────────────────────────────────────────────────────────────────────────
-def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
+def test_platform_role_access_and_tenant_role_denial(
+    scratch_db: str, url_for: Callable[..., str]
+) -> None:
     _upgrade(scratch_db, "heads")
 
     # platform_api may INSERT + SELECT vendor_accounts.
     plat = create_engine(
-        _url_for(scratch_db, scratch_db.rsplit("/", 1)[1], user="platform_api")
+        url_for(scratch_db, scratch_db.rsplit("/", 1)[1], user="platform_api")
     )
     try:
         with plat.begin() as conn:
@@ -264,7 +212,7 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
         plat.dispose()
 
     plat = create_engine(
-        _url_for(scratch_db, scratch_db.rsplit("/", 1)[1], user="platform_api")
+        url_for(scratch_db, scratch_db.rsplit("/", 1)[1], user="platform_api")
     )
     try:
         with plat.connect() as conn:
@@ -280,7 +228,7 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
     # The module is a platform catalogue. The online platform role can read it,
     # while the product data-plane role is denied below.
     plat = create_engine(
-        _url_for(scratch_db, scratch_db.rsplit("/", 1)[1], user="platform_api")
+        url_for(scratch_db, scratch_db.rsplit("/", 1)[1], user="platform_api")
     )
     try:
         with plat.connect() as conn:
@@ -298,7 +246,7 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
     # second statement on the same connection would fail as "transaction aborted"
     # rather than "permission denied".
     appu = create_engine(
-        _url_for(scratch_db, scratch_db.rsplit("/", 1)[1], user="app_user")
+        url_for(scratch_db, scratch_db.rsplit("/", 1)[1], user="app_user")
     )
     try:
         with appu.connect() as conn:
@@ -312,24 +260,20 @@ def test_platform_role_access_and_tenant_role_denial(scratch_db: str) -> None:
                         "VALUES (gen_random_uuid(), 'x', 'y')"
                     )
                 )
-        # The WS8 licence tables carry the same REVOKE. The signing-key registry
-        # holds public material only, but a tenant application role has no
-        # business reading which keys exist or what a customer was issued.
-        for table in (
-            "licence_signing_keys",
-            "licences",
-            "licence_issuances",
-            "licence_deliveries",
-            "licence_delivery_states",
-            "licence_ack_records",
-            "licence_revocation_entries",
-            "licence_revocation_lists",
-            "licence_delivery_attempts",
-            "licence_delivery_targets",
-        ):
-            with appu.connect() as conn:
-                with pytest.raises(DBAPIError, match="permission denied"):
-                    conn.execute(text(f"SELECT count(*) FROM {table}")).scalar()  # noqa: S608
+        # The WS8 licence tables carried the same REVOKE, proven here by a
+        # ten-name literal list. That list is GONE: it covered the tables
+        # someone remembered, so every later migration silently widened the gap
+        # between what shipped and what was checked.
+        #
+        # `test_composed_live_catalog.py` now sweeps EVERY vendor-owned table,
+        # derived by diffing `public` across the two lineages, for all seven
+        # PostgreSQL table privileges including the column-level ones. One
+        # licence table stays here as the live-connection counterpart: the
+        # sweep reads `has_table_privilege`, and this proves a real connection
+        # is refused, so a catalogue that lied would not pass both.
+        with appu.connect() as conn:
+            with pytest.raises(DBAPIError, match="permission denied"):
+                conn.execute(text("SELECT count(*) FROM licences")).scalar()
         with appu.connect() as conn:
             with pytest.raises(DBAPIError, match="permission denied"):
                 conn.execute(
