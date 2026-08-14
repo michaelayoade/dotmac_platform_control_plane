@@ -80,16 +80,26 @@ jobs:
           set -euo pipefail
           remote="${TARGET_USER}@${TARGET_HOST}"
           ssh -i "$HOME/.ssh/vendor-production" "$remote" \
-            "mkdir -p '$TARGET_DIR/scripts' '$TARGET_DIR/deploy/postgres'"
+            "mkdir -p '$TARGET_DIR/scripts' '$TARGET_DIR/deploy/postgres' \
+              '$TARGET_DIR/src/vendor_cp'"
           rsync -azR -e "ssh -i $HOME/.ssh/vendor-production" \
+            .env.production.example \
             docker-compose.production.yml \
             scripts/deploy_production.sh \
+            scripts/deploy_production_with_registry_token.sh \
+            scripts/materialize_production_secrets.py \
             deploy/postgres/init-roles.sh \
+            src/vendor_cp/production_secrets.py \
             "$remote:$TARGET_DIR/"
 
       - name: Deploy the approved digest
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           remote="${TARGET_USER}@${TARGET_HOST}"
-          ssh -i "$HOME/.ssh/vendor-production" "$remote" \
-            "cd '$TARGET_DIR' && bash scripts/deploy_production.sh '$IMAGE_DIGEST'"
+          printf '%s' "$GHCR_TOKEN" \
+            | ssh -i "$HOME/.ssh/vendor-production" "$remote" \
+              "cd '$TARGET_DIR' && \
+                bash scripts/deploy_production_with_registry_token.sh \
+                  '$IMAGE_DIGEST' '$GITHUB_ACTOR'"

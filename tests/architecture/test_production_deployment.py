@@ -169,6 +169,37 @@ def test_deploy_workflow_requires_the_named_target_and_an_immutable_digest() -> 
     assert "VENDOR_PRODUCTION_SSH_KEY" in workflow
 
 
+def test_deploy_uses_an_ephemeral_registry_credential_over_stdin() -> None:
+    workflow = _text(".github/workflows/production-deploy.yml")
+    wrapper = _text("scripts/deploy_production_with_registry_token.sh")
+    operations = _text("docs/operations/production-deployment.md")
+
+    assert "GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}" in workflow
+    assert "printf '%s' \"$GHCR_TOKEN\"" in workflow
+    assert "deploy_production_with_registry_token.sh" in workflow
+    assert 'DOCKER_CONFIG="$(mktemp -d /run/vendor-cp-docker.' in wrapper
+    assert "--password-stdin" in wrapper
+    assert "trap cleanup EXIT HUP INT TERM" in wrapper
+    assert 'rm -rf -- "$DOCKER_CONFIG"' in wrapper
+    assert ".docker/config" not in wrapper
+    assert "production/ghcr-read" not in operations
+
+
+def test_deployment_adapter_includes_the_owned_secret_materializer() -> None:
+    workflow = _text(".github/workflows/production-deploy.yml")
+    service = _text("src/vendor_cp/production_secrets.py")
+    operations = _text("docs/operations/production-deployment.md")
+
+    assert "scripts/materialize_production_secrets.py" in workflow
+    assert "src/vendor_cp/production_secrets.py" in workflow
+    assert '"options": {"cas": 0}' in service
+    assert service.count("secret/dotmac/vendor-control-plane/production/") == 3
+    assert "secret/dotmac/licensing/signing-key" in service
+    assert "production/ghcr-read" not in service
+    assert "required reviewer" in operations.lower()
+    assert "remains blocked" in operations
+
+
 def test_nginx_contract_routes_only_to_the_loopback_vendor_app() -> None:
     nginx = _text("deploy/nginx/vendor.dotmac.io.conf")
 

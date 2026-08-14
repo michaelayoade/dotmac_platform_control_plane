@@ -33,21 +33,61 @@ entry point.
 
 The canonical production OpenBao locations are:
 
-- licence signing key: `secret/dotmac/licensing/signing-key`;
-- production database roles: `secret/dotmac/vendor-control-plane/production/database`;
-- kernel runtime secrets: `secret/dotmac/vendor-control-plane/production/runtime`;
-- deploy SSH identity: `secret/dotmac/vendor-control-plane/production/deploy-ssh`;
-- GHCR pull identity: `secret/dotmac/vendor-control-plane/production/ghcr-read`.
+- licence signing key: `secret/dotmac/licensing/signing-key`, containing exactly
+  `key_id` and `private_key_b64url`;
+- production database roles:
+  `secret/dotmac/vendor-control-plane/production/database`, containing exactly
+  `admin_password`, `app_user_password`, and `platform_api_password`;
+- kernel runtime secrets:
+  `secret/dotmac/vendor-control-plane/production/runtime`, containing exactly
+  `jwt_secret` and `session_hash_secret`;
+- deploy SSH identity:
+  `secret/dotmac/vendor-control-plane/production/deploy-ssh`, containing exactly
+  `private_key_openssh`, `public_key_openssh`, and `username`.
 
 Never paste their values into a command, ticket, log, or tracked file. Use the
-approved OpenBao materialisation path to create the host-local `.env` and
-`/run/secrets/dotmac/vendor-control-plane/licence-signing/primary.key`. Database
-passwords must be URL-safe because the composed runtime URLs hold them without
+checked-in `vendor_cp.production_secrets` operator service. Its OpenBao writes
+use KV v2 `cas=0`, so it creates an absent record but never overwrites an
+existing issuer key or password set. It validates all four complete schemas
+before materialization and atomically replaces each host-local file. Database
+passwords are URL-safe because the composed runtime URLs hold them without
 logging or transformation.
 
-Authenticate Docker on the host with the held GHCR read-only identity before
-the first deployment. The credential belongs to the production host and has
-package-read permission only; it is not the GitHub Actions publish token.
+There is deliberately no persistent GHCR pull credential in OpenBao or on the
+host. Each approved deployment pipes the same-repository, package-read
+`GITHUB_TOKEN` over SSH stdin. The host logs in through a temporary Docker
+configuration under `/run`, deploys the exact digest, logs out, and removes the
+configuration on exit.
+
+From an operator context that can authenticate to OpenBao, reach the named
+host, and manage this repository's `production` environment, run the versioned
+adapter from the exact `main` revision:
+
+```bash
+KNOWN_HOSTS=<approved-known-hosts-file>
+PYTHONPATH=src python3 scripts/materialize_production_secrets.py seed
+ssh -o "UserKnownHostsFile=$KNOWN_HOSTS" root@149.102.158.144 \
+  "install -d /opt/dotmac/vendor-control-plane/{scripts,src/vendor_cp}"
+rsync -azR -e "ssh -o UserKnownHostsFile=$KNOWN_HOSTS" \
+  .env.production.example \
+  scripts/materialize_production_secrets.py \
+  src/vendor_cp/production_secrets.py \
+  root@149.102.158.144:/opt/dotmac/vendor-control-plane/
+PYTHONPATH=src python3 scripts/materialize_production_secrets.py push \
+  --target root@149.102.158.144 \
+  --target-dir /opt/dotmac/vendor-control-plane \
+  --known-hosts "$KNOWN_HOSTS"
+PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
+  sync-github-deploy-key \
+  --repository michaelayoade/dotmac_vendor_control_plane \
+  --environment production
+```
+
+`seed` prints record paths only. `push` transfers a validated bundle only on SSH
+stdin and excludes the deployment private key. `sync-github-deploy-key` passes
+that held private key to `gh secret set` only on stdin. Install this exact
+adapter and its `src/vendor_cp/production_secrets.py` service on the target
+before `push`; never re-create the contract with shell substitutions.
 
 Prepare the GitHub `production` environment with:
 
@@ -58,6 +98,11 @@ Prepare the GitHub `production` environment with:
 - secret `VENDOR_PRODUCTION_KNOWN_HOSTS`;
 - required reviewers enabled.
 
+Verify the required reviewer in GitHub's live environment settings before any
+dispatch. On 2026-08-14, GitHub rejected that protection for the repository's
+current plan, so production deployment remains blocked until GitHub reports an
+effective human reviewer gate. A protected-branch policy alone is insufficient.
+
 After the signing key has been held at its canonical host path, transfer only
 the versioned bootstrap script, nginx files, and environment example to a
 temporary directory on the named server, then run:
@@ -67,8 +112,9 @@ CERTBOT_EMAIL=<operator-email> bash scripts/bootstrap_production_host.sh
 ```
 
 The first run creates `.env` from `.env.production.example` and intentionally
-stops. Materialise every blank field, then inspect the file without printing its
-values. Keep `VENDOR_PRODUCT_RELEASE_PINS_JSON={}` for the first healthy boot.
+stops. The checked-in materializer owns filling every secret field; inspect the
+result without printing its values. Keep `VENDOR_PRODUCT_RELEASE_PINS_JSON={}`
+for the first healthy boot.
 
 ## First release
 
