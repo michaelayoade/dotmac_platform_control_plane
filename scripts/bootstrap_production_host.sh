@@ -5,8 +5,8 @@ umask 077
 readonly EXPECTED_HOST_ID="vendor-cp-prod"
 readonly DEPLOY_DIR="${DEPLOY_DIR:-/opt/dotmac/vendor-control-plane}"
 readonly BACKUP_DIR="${BACKUP_DIR:-/opt/backups/dotmac-vendor-control-plane}"
-readonly KEY_DIR="/run/secrets/dotmac/vendor-control-plane/licence-signing"
-readonly KEY_FILE="${KEY_DIR}/primary.key"
+readonly KEY_FILE="/run/secrets/dotmac/vendor-control-plane/licence-signing/primary.key"
+readonly KEY_DIR="${KEY_FILE%/*}"
 readonly NGINX_AVAILABLE="/etc/nginx/sites-available/vendor.dotmac.io"
 readonly NGINX_ENABLED="/etc/nginx/sites-enabled/vendor.dotmac.io"
 
