@@ -1,0 +1,95 @@
+name: Deploy immutable image to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: Exact digest emitted by Build immutable production image
+        required: true
+        type: string
+      target_server_name:
+        description: Explicit production target identity
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: vendor-control-plane-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    env:
+      IMAGE_DIGEST: ${{ inputs.image_digest }}
+      TARGET_SERVER_NAME: ${{ inputs.target_server_name }}
+      TARGET_HOST: ${{ vars.VENDOR_PRODUCTION_HOST }}
+      TARGET_USER: ${{ vars.VENDOR_PRODUCTION_USER }}
+      TARGET_DIR: ${{ vars.VENDOR_PRODUCTION_DEPLOY_DIR }}
+    steps:
+      - name: Require the named target and an immutable digest
+        env:
+          DISPATCHED_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$DISPATCHED_REF" = "main" || {
+            echo "Production deploys may only use the adapter on main." >&2
+            exit 1
+          }
+          [[ "$TARGET_SERVER_NAME" != "vendor-cp-prod" ]] && {
+            echo "target_server_name must be vendor-cp-prod" >&2
+            exit 1
+          }
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test -n "$TARGET_HOST"
+          test -n "$TARGET_USER"
+          test -n "$TARGET_DIR"
+
+      - name: Check out the deployment adapter
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the production SSH identity
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.VENDOR_PRODUCTION_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VENDOR_PRODUCTION_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/vendor-production"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+
+      - name: Verify that the image exists
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          docker manifest inspect \
+            "ghcr.io/michaelayoade/dotmac_vendor_control_plane@${IMAGE_DIGEST}" \
+            >/dev/null
+
+      - name: Install the versioned deployment adapter
+        run: |
+          set -euo pipefail
+          remote="${TARGET_USER}@${TARGET_HOST}"
+          ssh -i "$HOME/.ssh/vendor-production" "$remote" \
+            "mkdir -p '$TARGET_DIR/scripts' '$TARGET_DIR/deploy/postgres'"
+          rsync -azR -e "ssh -i $HOME/.ssh/vendor-production" \
+            docker-compose.production.yml \
+            scripts/deploy_production.sh \
+            deploy/postgres/init-roles.sh \
+            "$remote:$TARGET_DIR/"
+
+      - name: Deploy the approved digest
+        run: |
+          set -euo pipefail
+          remote="${TARGET_USER}@${TARGET_HOST}"
+          ssh -i "$HOME/.ssh/vendor-production" "$remote" \
+            "cd '$TARGET_DIR' && bash scripts/deploy_production.sh '$IMAGE_DIGEST'"

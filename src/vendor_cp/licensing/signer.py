@@ -15,8 +15,8 @@ Two modes behind `VENDOR_LICENCE_SIGNING_MODE`:
   is OpenBao (`secret/dotmac/licensing/signing-key`).
 
   **Deployment contract (ruled 2026-08-02).** Issuance runs on ONE designated
-  vendor-control-plane instance, to keep key exposure to a single host; that
-  host is not yet named. Keys live at
+  vendor-control-plane instance, to keep key exposure to a single host;
+  `vendor-cp-prod` is that instance. Keys live at
   `/run/secrets/dotmac/vendor-control-plane/licence-signing/`
   `<key-id>.key`,
   materialised by deploy tooling from OpenBao: 0700 directory, 0600
@@ -49,13 +49,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import os
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from vendor_cp.config import vendor_settings
+from vendor_cp.config import (
+    VendorSettings,
+    validate_runtime_configuration,
+    vendor_settings,
+)
 
 EPHEMERAL_MODE = "ephemeral"
 CONFIGURED_MODE = "configured"
@@ -83,6 +88,9 @@ class LicenceSignerProvider(Protocol):
     def public_key_b64(self) -> str: ...
 
     def sign(self, payload: bytes) -> bytes: ...
+
+
+_runtime_signers: tuple[LicenceSignerProvider, ...] | None = None
 
 
 def _b64url(data: bytes) -> str:
@@ -177,16 +185,19 @@ def _load_private_key(key_file: str) -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(material)
 
 
-def build_licence_signer(key_id: str | None = None) -> LicenceSignerProvider:
+def build_licence_signer(
+    key_id: str | None = None, *, settings: VendorSettings | None = None
+) -> LicenceSignerProvider:
     """The PRIMARY signer for this deployment, per
     `VENDOR_LICENCE_SIGNING_MODE`. Fails startup rather than falling back."""
-    mode = vendor_settings.licence_signing_mode
+    selected = settings or vendor_settings
+    mode = selected.licence_signing_mode
     if mode == EPHEMERAL_MODE:
         return EphemeralLicenceSigner(key_id or "vendor-ephemeral-1")
     if mode == CONFIGURED_MODE:
         return ConfiguredLicenceSigner(
-            key_id=key_id or vendor_settings.licence_signing_key_id,
-            key_file=vendor_settings.licence_signing_key_file,
+            key_id=key_id or selected.licence_signing_key_id,
+            key_file=selected.licence_signing_key_file,
         )
     raise SigningModeNotPermittedError(
         f"VENDOR_LICENCE_SIGNING_MODE={mode!r} is not a signing mode — "
@@ -194,17 +205,20 @@ def build_licence_signer(key_id: str | None = None) -> LicenceSignerProvider:
     )
 
 
-def build_overlap_signer() -> LicenceSignerProvider | None:
+def build_overlap_signer(
+    *, settings: VendorSettings | None = None
+) -> LicenceSignerProvider | None:
     """The optional SECOND signer used during a rotation overlap, or None.
 
     Only meaningful in `configured` mode: an ephemeral overlap key would be
     regenerated on every restart, so documents signed with it could not be
     verified by anything, which is worse than not overlapping at all.
     """
-    if vendor_settings.licence_signing_mode != CONFIGURED_MODE:
+    selected = settings or vendor_settings
+    if selected.licence_signing_mode != CONFIGURED_MODE:
         return None
-    key_file = vendor_settings.licence_overlap_key_file
-    key_id = vendor_settings.licence_overlap_key_id
+    key_file = selected.licence_overlap_key_file
+    key_id = selected.licence_overlap_key_id
     if not key_file and not key_id:
         return None
     if bool(key_file) != bool(key_id):
@@ -214,6 +228,36 @@ def build_overlap_signer() -> LicenceSignerProvider | None:
             "would silently disable double-signing mid-rotation."
         )
     return ConfiguredLicenceSigner(key_id=key_id, key_file=key_file)
+
+
+def install_runtime_licence_signers(
+    settings: VendorSettings | None = None,
+) -> tuple[LicenceSignerProvider, ...]:
+    """Load and hold the process signers once during assembly boot.
+
+    Construct the complete tuple before replacing the working set, so a bad
+    overlap rotation never discards the already-loaded primary in a process
+    that is being inspected or tested.
+    """
+    global _runtime_signers
+
+    selected = settings or vendor_settings
+    validate_runtime_configuration(
+        selected,
+        environment=os.getenv("ENVIRONMENT", "development"),
+    )
+    primary = build_licence_signer(settings=selected)
+    overlap = build_overlap_signer(settings=selected)
+    installed = (primary, overlap) if overlap is not None else (primary,)
+    _runtime_signers = installed
+    return installed
+
+
+def runtime_licence_signers() -> tuple[LicenceSignerProvider, ...]:
+    """Return the signers held for this process, loading once if necessary."""
+    if _runtime_signers is None:
+        return install_runtime_licence_signers()
+    return _runtime_signers
 
 
 __all__ = [
@@ -226,4 +270,6 @@ __all__ = [
     "ConfiguredLicenceSigner",
     "build_licence_signer",
     "build_overlap_signer",
+    "install_runtime_licence_signers",
+    "runtime_licence_signers",
 ]
