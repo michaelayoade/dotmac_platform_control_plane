@@ -48,7 +48,13 @@ Compose project and from every product data plane:
 - the licence primary key is held from OpenBao path
   `secret/dotmac/licensing/signing-key`, mounted read-only, loaded at assembly
   boot, and retained in process memory. Production refuses an ephemeral issuer
-  before mounting routes.
+  before mounting routes;
+- the host retains no GHCR credential. Each approved deploy pipes the
+  same-repository Actions token over SSH stdin into a temporary Docker config
+  under `/run`, then logs out and removes that config;
+- `vendor_cp.production_secrets` owns the exact four-record OpenBao schema,
+  create-only seeding, validation, and per-file atomic host materialization.
+  `scripts/materialize_production_secrets.py` is its thin operator adapter.
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration
@@ -58,6 +64,12 @@ application. The complete operator contract and rollback boundary are in
 
 ## Ownership (what this control plane owns)
 
+- **Production secret materialization** — `vendor_cp.production_secrets` is the
+  sole schema, generation, validation, and host-projection owner for Vendor's
+  four canonical OpenBao records. The service creates only absent records with
+  KV v2 CAS, and the script is a thin operator adapter. Runtime settings never
+  read OpenBao, and GHCR authentication remains a per-deploy Actions token
+  rather than a fifth persistent record.
 - **Vendor accounts** (slice 3) — the vendor-owned `AccountService`: typed
   commands + outcomes, atomic transaction ownership, idempotency, audit,
   platform-admin-only adapters.
