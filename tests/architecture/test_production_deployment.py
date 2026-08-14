@@ -137,6 +137,17 @@ def test_image_workflow_builds_on_github_hosted_runner_and_publishes_a_digest() 
     assert ":latest" not in workflow
 
 
+def test_image_smokes_use_the_production_database_dialect() -> None:
+    for path in (
+        ".github/workflows/ci.yml",
+        ".github/workflows/production-image.yml",
+    ):
+        workflow = _text(path)
+        assert "sqlite+pysqlite" not in workflow
+        assert "DATABASE_URL=postgresql+psycopg://app_user@" in workflow
+        assert "PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@" in workflow
+
+
 def test_every_test_job_runs_on_a_github_hosted_runner() -> None:
     workflow = _text(".github/workflows/ci.yml")
 

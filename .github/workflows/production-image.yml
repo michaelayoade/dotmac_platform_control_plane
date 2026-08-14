@@ -65,8 +65,8 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --entrypoint python \
-            --env DATABASE_URL=sqlite+pysqlite:///:memory: \
-            --env PLATFORM_DATABASE_URL=sqlite+pysqlite:///:memory: \
+            --env DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+            --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
             "${{ steps.publish.outputs.reference }}" \
             -c "from vendor_cp.main import app; assert app is not None"
 

@@ -122,7 +122,8 @@ application. The complete operator contract and rollback boundary are in
   activation contracts are a later, design-gated slice.
 - **Administration shell** — a platform-admin-only console surface
   (`src/vendor_cp/console/`). The initial identity is created or rotated by the
-  prompt-only `scripts/create_platform_admin.py` adapter through the kernel's
+  assembly's `vendor_cp.platform_admin` service. The prompt-only
+  `scripts/create_platform_admin.py` adapter supplies the kernel's
   `platform_session`; there is no HTTP self-registration path and no second
   engine/session owner.
 
