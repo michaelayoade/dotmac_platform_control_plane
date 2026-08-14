@@ -62,6 +62,15 @@ make check      # ruff + mypy + import-linter
 make test       # pytest
 ```
 
+## Production
+
+Production is built once on a GitHub-hosted runner and deployed only by an
+immutable GHCR digest. The host does not build the repository, expose
+PostgreSQL, or run migrations from the container command. See
+[`docs/operations/production-deployment.md`](docs/operations/production-deployment.md)
+for the host contract, secret pointers, ordered first deploy, current Sub
+release-evidence ingestion, and rollback boundary.
+
 ## Scope this phase
 
 The assembly owns vendor accounts, immutable offers, approvals, commercial

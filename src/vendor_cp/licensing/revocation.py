@@ -45,7 +45,7 @@ from vendor_cp.licensing.revocation_models import (
     LicenceRevocationList,
 )
 from vendor_cp.licensing.service import build_keyring, register_signing_key
-from vendor_cp.licensing.signer import LicenceSignerProvider, build_licence_signer
+from vendor_cp.licensing.signer import LicenceSignerProvider, runtime_licence_signers
 
 _EVENT_REVOKED = "licence.revoked"
 _EVENT_LIST_PUBLISHED = "licence.revocation_list_published"
@@ -166,7 +166,7 @@ def publish_revocation_list(
     Fails closed if the candidate set is not a superset of the last published
     one, or if the pinned kernel verifier would not accept the artifact.
     """
-    signer = signer or build_licence_signer()
+    signer = signer or runtime_licence_signers()[0]
     issued_at = now or datetime.now(UTC)
     current = revoked_licence_ids(db)
 

@@ -18,6 +18,10 @@ from pathlib import Path
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
+class ProductionConfigurationError(RuntimeError):
+    """The process would start with a production-unsafe identity or mode."""
+
+
 @dataclass(frozen=True, slots=True)
 class ProductReleasePin:
     """Exact artifact and product-manifest identities selected by an operator."""
@@ -149,12 +153,45 @@ def load_vendor_settings() -> VendorSettings:
     )
 
 
+def validate_runtime_configuration(
+    settings: VendorSettings, *, environment: str
+) -> None:
+    """Validate modes whose failure must happen at boot, not first use.
+
+    The provider laboratory is the only implementation in every environment.
+    Production additionally requires a stable configured issuer: an ephemeral
+    key makes every restart a silent fleet-wide identity rotation.
+    """
+    if settings.provider_mode != "fake":
+        raise ProductionConfigurationError(
+            f"provider_mode={settings.provider_mode!r} is not permitted; "
+            "only the fake laboratory provider exists in this phase"
+        )
+    if settings.licence_signing_mode not in {"ephemeral", "configured"}:
+        raise ProductionConfigurationError(
+            f"licence_signing_mode={settings.licence_signing_mode!r} is unknown"
+        )
+    if settings.licence_delivery_mode not in {"logging", "offline_bundle"}:
+        raise ProductionConfigurationError(
+            f"licence_delivery_mode={settings.licence_delivery_mode!r} is unknown"
+        )
+    if environment.strip().lower() == "production" and (
+        settings.licence_signing_mode != "configured"
+    ):
+        raise ProductionConfigurationError(
+            "production requires VENDOR_LICENCE_SIGNING_MODE='configured'; "
+            "an ephemeral issuer changes identity on every process restart"
+        )
+
+
 vendor_settings = load_vendor_settings()
 
 
 __all__ = [
+    "ProductionConfigurationError",
     "ProductReleasePin",
     "VendorSettings",
     "load_vendor_settings",
+    "validate_runtime_configuration",
     "vendor_settings",
 ]

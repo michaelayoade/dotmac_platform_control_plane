@@ -1,0 +1,80 @@
+name: Build immutable production image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: vendor-control-plane-production-image
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/michaelayoade/dotmac_vendor_control_plane
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+      reference: ${{ steps.publish.outputs.reference }}
+    steps:
+      - name: Require main
+        env:
+          DISPATCHED_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$DISPATCHED_REF" = "main" || {
+            echo "Production images may only be built from main." >&2
+            exit 1
+          }
+
+      - name: Check out exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Authenticate to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Build, publish, and resolve the registry digest
+        id: publish
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${IMAGE_REPOSITORY}:${GITHUB_SHA}"
+          DOCKER_BUILDKIT=1 docker build \
+            --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
+            --build-arg "SOURCE_REVISION=${GITHUB_SHA}" \
+            --tag "$tag" .
+          docker push "$tag"
+          docker pull "$tag"
+          reference="$(docker image inspect --format '{{index .RepoDigests 0}}' "$tag")"
+          digest="${reference#*@}"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "reference=$reference" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke the published bytes
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python \
+            --env DATABASE_URL=sqlite+pysqlite:///:memory: \
+            --env PLATFORM_DATABASE_URL=sqlite+pysqlite:///:memory: \
+            "${{ steps.publish.outputs.reference }}" \
+            -c "from vendor_cp.main import app; assert app is not None"
+
+      - name: Record deployment input
+        run: |
+          {
+            echo '### Immutable Vendor CP image'
+            echo '```text'
+            echo '${{ steps.publish.outputs.reference }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

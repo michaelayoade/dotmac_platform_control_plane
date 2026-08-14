@@ -29,6 +29,33 @@ it owns and — just as importantly — what it must never become.
   remain explicitly unclassified until an operator supplies evidence; the
   independent module therefore still receives no `ContractSnapshot`.
 
+## Production topology
+
+The first production assembly is `vendor.dotmac.io` on the explicitly named
+`vendor-cp-prod` host (`149.102.158.144`). It is isolated from Marketing's
+Compose project and from every product data plane:
+
+- a GitHub-hosted workflow builds the application once, publishes it to GHCR,
+  and emits the immutable registry digest; the production host only pulls;
+- nginx terminates TLS and proxies to the loopback-only application port;
+- PostgreSQL has no published port and its volume belongs only to the Vendor
+  Compose project;
+- the application runs as UID/GID 10001 on a read-only filesystem, with all
+  Linux capabilities dropped;
+- `app_user`, `platform_api`, and `app_admin` remain distinct. The official
+  Postgres image bootstraps a new cluster as `app_admin`; the deploy owner
+  permanently demotes it after the first composed migration;
+- the licence primary key is held from OpenBao path
+  `secret/dotmac/licensing/signing-key`, mounted read-only, loaded at assembly
+  boot, and retained in process memory. Production refuses an ephemeral issuer
+  before mounting routes.
+
+`scripts/deploy_production.sh` is the only production migration/deploy owner.
+It verifies the host markers, pulls an exact digest, takes a pre-migration
+backup, runs the four-lineage `scripts/migrate.py`, and only then replaces the
+application. The complete operator contract and rollback boundary are in
+`docs/operations/production-deployment.md`.
+
 ## Ownership (what this control plane owns)
 
 - **Vendor accounts** (slice 3) — the vendor-owned `AccountService`: typed
@@ -94,7 +121,10 @@ it owns and — just as importantly — what it must never become.
   ledger. Runtime code never imports `dotmac_kernel.testing`. The real runner +
   activation contracts are a later, design-gated slice.
 - **Administration shell** — a platform-admin-only console surface
-  (`src/vendor_cp/console/`).
+  (`src/vendor_cp/console/`). The initial identity is created or rotated by the
+  prompt-only `scripts/create_platform_admin.py` adapter through the kernel's
+  `platform_session`; there is no HTTP self-registration path and no second
+  engine/session owner.
 
 ## Boundaries (deny-cases D1–D5)
 

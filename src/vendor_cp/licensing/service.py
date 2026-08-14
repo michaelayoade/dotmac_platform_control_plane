@@ -65,8 +65,7 @@ from vendor_cp.licensing.models import (
 from vendor_cp.licensing.revocation_models import LicenceRevocationEntry
 from vendor_cp.licensing.signer import (
     LicenceSignerProvider,
-    build_licence_signer,
-    build_overlap_signer,
+    runtime_licence_signers,
 )
 
 DEFAULT_ISSUER = "dotmac-vendor"
@@ -309,10 +308,10 @@ def issue_licence(
     immutable issuance rather than minting a second version. Fails closed if the
     pinned kernel verifier would not accept the envelope we just produced.
     """
-    signer = signer or build_licence_signer()
+    installed = runtime_licence_signers()
+    signer = signer or installed[0]
     if overlap_signers is None:
-        overlap = build_overlap_signer()
-        overlap_signers = (overlap,) if overlap is not None else ()
+        overlap_signers = installed[1:]
     signers = (signer, *overlap_signers)
     issued_at = now or datetime.now(UTC)
 
