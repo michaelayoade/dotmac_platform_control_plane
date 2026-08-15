@@ -23,27 +23,38 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from import_scanner import reaches_module, scan_imports, source_files
 
 from vendor_cp.approvals_cutover import (
+    ACTOR_MAPPING,
+    ADAPTER_OBLIGATIONS,
+    COARSE_ELIGIBILITY_RULE,
+    DIGEST_REJECTION_REASONS,
+    EVIDENCE_DIGEST_FIELDS,
     LEGACY_COMPOSITION_SITES,
     LEGACY_DECISION_CALL_SITES,
     LEGACY_DECISION_MODULE,
     LEGACY_PACKAGE,
+    MODULE_DIGEST_PREFIX,
     NEW_AUTHORITY,
     OLD_AUTHORITY,
+    PLATFORM_ADMIN_ROLE_ID,
     RECOVERABLE_FACTS,
     RESTART_CONDITIONS,
+    SEAL_TABLE,
+    SEALED_LEGACY_TABLES,
     SHARED_SAFETY_PROPERTIES,
     SHARED_SAFETY_PROPERTY_COUNT,
     UNCOMPARED_MODULE_CAPABILITIES,
     UNRECOVERABLE_FACTS,
-    WATERMARK_BOUNDARY_COLUMN,
-    WATERMARK_TABLE,
+    VENDOR_DIGEST_LENGTH,
     Disposition,
     LegacyFact,
+    digest_rejection_reason,
+    translate_digest,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -210,16 +221,36 @@ def test_the_adr_states_the_absence_of_a_request_mapping() -> None:
 # ── Scope of the shadow comparison ──────────────────────────────────────────
 
 
-def test_exactly_the_six_shared_safety_properties_are_declared() -> None:
-    assert len(SHARED_SAFETY_PROPERTIES) == SHARED_SAFETY_PROPERTY_COUNT == 6
+def test_exactly_the_five_shared_safety_properties_are_declared() -> None:
+    assert len(SHARED_SAFETY_PROPERTIES) == SHARED_SAFETY_PROPERTY_COUNT == 5
     assert {prop.code for prop in SHARED_SAFETY_PROPERTIES} == {
         "immutable_policy_versions",
         "content_digest_binding",
         "fail_closed_missing_policy",
-        "command_idempotency",
         "distinct_actor_quorum",
         "self_approval_excluded",
     }
+
+
+def test_idempotency_is_an_adapter_obligation_not_a_compared_property() -> None:
+    """Refusal is not replay.
+
+    Vendor's `process_once_platform` REPLAYS a duplicate command and returns the
+    original answer; the module RAISES `DuplicateDecision`. Both stop
+    double-counting, which is why they look alike — but a retried HTTP request
+    gets 200 from one and an error from the other. Comparing them as one
+    property would report an agreement that does not exist, so the difference is
+    carried as an obligation on the new adapter instead.
+    """
+    assert "command_idempotency" not in {prop.code for prop in SHARED_SAFETY_PROPERTIES}
+    assert ADAPTER_OBLIGATIONS
+    assert any("at_most_once" in obligation for obligation in ADAPTER_OBLIGATIONS)
+    assert any("replay" in obligation for obligation in ADAPTER_OBLIGATIONS)
+
+    text = adr_text()
+    assert "Vendor REPLAYS" in text
+    assert "The module REFUSES" in text
+    assert "NEW-ADAPTER OBLIGATION" in text
 
 
 def test_every_property_names_both_mechanisms() -> None:
@@ -255,14 +286,132 @@ def test_the_adr_documents_every_declared_property() -> None:
 # ── Watermark and disposition ───────────────────────────────────────────────
 
 
-def test_the_watermark_boundary_is_an_id_not_a_clock() -> None:
-    """A retried transaction can commit a legacy row whose timestamp precedes a
-    watermark written moments earlier. An id high-water mark is unambiguous
-    under exactly that race, so the boundary column is not negotiable."""
-    assert WATERMARK_BOUNDARY_COLUMN == "last_legacy_record_id"
+def test_the_boundary_is_a_sealed_set_not_a_cursor() -> None:
+    """`ApprovalRecord.id` is `uuid_pk()` -> `default=uuid4`, i.e. RANDOM, so a
+    high-water mark over it orders nothing. The seal removes the boundary
+    question instead of answering it: online DML is revoked first, so every
+    legacy row is pre-cutover by construction."""
+    assert SEAL_TABLE == "approval_cutover_seal"
+    assert set(SEALED_LEGACY_TABLES) == {"approval_policies", "approval_records"}
+
     text = adr_text()
-    assert WATERMARK_TABLE in text
-    assert "not wall-clock time" in text
+    assert "default=uuid4" in text
+    assert "pre-cutover by construction" in text or "**pre-cutover**" in text
+    assert "legacy_record_count" in text
+    assert "evidence_digest" in text
+
+
+def test_no_id_cursor_survives_anywhere_in_the_contract() -> None:
+    """MUTATION PROOF. The invalid design was confidently argued, so the
+    reasoning is what has to be blocked — not just the constant."""
+    declaration = (SRC / "vendor_cp" / "approvals_cutover.py").read_text()
+    assert "last_legacy_record_id" not in declaration, (
+        "the id cursor is back; `ApprovalRecord.id` is random (uuid4) and "
+        "orders nothing"
+    )
+    # The replacement rule must stay stated, or the next author reaches for the
+    # same wrong tool with the same confident reasoning.
+    assert "SCALAR_CURSOR_REQUIREMENT" in declaration
+    assert "enforced_monotonic_bigint_column" in declaration
+
+
+def test_the_evidence_digest_excludes_the_random_primary_key() -> None:
+    """Including `id` would make the digest depend on a value nothing else in
+    this contract trusts."""
+    assert "id" not in EVIDENCE_DIGEST_FIELDS
+    assert EVIDENCE_DIGEST_FIELDS == (
+        "policy_code",
+        "policy_version",
+        "subject_type",
+        "subject_id",
+        "content_hash",
+        "approver_id",
+    )
+
+
+# ── Coarse eligibility mapping ──────────────────────────────────────────────
+
+
+def test_coarse_eligibility_is_mapped_not_declared_absent() -> None:
+    """Vendor DOES express eligibility — `require_platform_admin` — so declaring
+    it uncompared overstated the gap. And the module's `approver_kind` /
+    `approver_id` are required fields with no defaults, so the mapping cannot be
+    left implicit even if one wanted to."""
+    assert COARSE_ELIGIBILITY_RULE == "any_authenticated_platform_admin"
+    assert PLATFORM_ADMIN_ROLE_ID
+    assert ACTOR_MAPPING
+
+    assert "fine_grained_approver_eligibility" in UNCOMPARED_MODULE_CAPABILITIES
+    assert "per_level_approver_eligibility" not in UNCOMPARED_MODULE_CAPABILITIES
+
+    text = adr_text()
+    assert "any authenticated platform admin may approve" in text
+    assert "ApproverKind.ROLE" in text
+
+
+def test_the_declared_role_id_is_a_stable_uuid() -> None:
+    """A value that differed between shadow runs would silently change what the
+    comparison compared."""
+    parsed = UUID(PLATFORM_ADMIN_ROLE_ID)
+    assert str(parsed) == PLATFORM_ADMIN_ROLE_ID
+
+
+def test_the_router_really_enforces_the_coarse_rule() -> None:
+    """INDEPENDENT EXPECTED TRUTH. The mapping claims Vendor's eligibility rule
+    is `require_platform_admin`; this reads the router rather than trusting the
+    declaration that describes it."""
+    router = (SRC / "vendor_cp" / "approvals" / "router.py").read_text()
+    assert "require_platform_admin" in router
+    assert "approver_id=admin.id" in router
+
+
+# ── Digest translation and its fail-closed preflight ────────────────────────
+
+
+def test_a_valid_vendor_digest_translates() -> None:
+    """NON-VACUITY: the rejection cases below must not pass because everything
+    is rejected."""
+    vendor = "a" * VENDOR_DIGEST_LENGTH
+    assert digest_rejection_reason(vendor) is None
+    assert translate_digest(vendor) == f"{MODULE_DIGEST_PREFIX}{vendor}"
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        pytest.param("", "empty", id="empty"),
+        pytest.param(f"sha256:{'a' * 64}", "already_prefixed", id="already-prefixed"),
+        pytest.param("a" * 63, "wrong_length", id="too-short"),
+        pytest.param("a" * 65, "wrong_length", id="too-long"),
+        pytest.param("A" * 64, "uppercase", id="uppercase"),
+        pytest.param("g" * 64, "non_hex", id="non-hex"),
+    ],
+)
+def test_every_untranslatable_digest_is_refused(value: str, reason: str) -> None:
+    """SENSITIVITY, one case per declared rejection reason.
+
+    Fail closed: an approval whose bound content cannot be expressed in the new
+    system is exactly the case where proceeding would silently drop the binding
+    that makes the approval mean anything. Nothing is normalised into validity.
+    """
+    assert digest_rejection_reason(value) == reason
+    with pytest.raises(ValueError, match="not translatable"):
+        translate_digest(value)
+
+
+def test_every_declared_rejection_reason_is_reachable() -> None:
+    """A reason nobody can produce is documentation pretending to be a branch."""
+    produced = {
+        digest_rejection_reason(value)
+        for value in ("", f"sha256:{'a' * 64}", "a" * 63, "A" * 64, "g" * 64)
+    }
+    assert produced == set(DIGEST_REJECTION_REASONS)
+
+
+def test_the_preflight_is_fail_closed_in_the_contract() -> None:
+    text = adr_text()
+    assert "any untranslatable digest stops the cutover" in text.lower()
+    assert "not translated on a best-effort basis" in text
 
 
 def test_incomplete_groups_have_exactly_two_dispositions() -> None:

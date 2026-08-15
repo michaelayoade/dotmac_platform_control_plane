@@ -112,12 +112,6 @@ SHARED_SAFETY_PROPERTIES: Final[tuple[SharedSafetyProperty, ...]] = (
         module_mechanism="PolicyNotFound",
     ),
     SharedSafetyProperty(
-        code="command_idempotency",
-        summary="Replaying one command records one decision.",
-        legacy_mechanism="process_once_platform + uq_approval_records_unique",
-        module_mechanism="policy.check_not_duplicate + the module unique constraint",
-    ),
-    SharedSafetyProperty(
         code="distinct_actor_quorum",
         summary="Quorum counts PEOPLE, so one actor cannot satisfy it alone.",
         legacy_mechanism="count(distinct approver_id)",
@@ -133,21 +127,132 @@ SHARED_SAFETY_PROPERTIES: Final[tuple[SharedSafetyProperty, ...]] = (
 
 #: Spelled out rather than derived from `len()`. A number someone must edit is a
 #: number someone must think about.
-SHARED_SAFETY_PROPERTY_COUNT: Final[int] = 6
+SHARED_SAFETY_PROPERTY_COUNT: Final[int] = 5
+
+#: NOT a shared property, and the reason is behavioural rather than pedantic.
+#: Vendor REPLAYS a duplicate command — `process_once_platform` returns the
+#: existing row's id and the caller gets the original answer. The module REFUSES
+#: it — `check_not_duplicate` raises `DuplicateDecision`. Both stop
+#: double-counting, which is why they look alike, but "succeeds identically" and
+#: "raises" are different observable behaviours: a retried HTTP request gets 200
+#: from one and an error from the other. Comparing them as one property would
+#: report an agreement that does not exist.
+#:
+#: At-most-once execution is kernel-owned (ADR-0014), so bridging the difference
+#: is an obligation on the NEW ADAPTER, not a property of either engine.
+ADAPTER_OBLIGATIONS: Final[tuple[str, ...]] = (
+    "wrap_the_module_decision_in_the_kernel_platform_at_most_once_primitive",
+    "preserve_replay_semantics_so_a_retried_command_returns_the_original_outcome",
+)
 
 #: Module capabilities Vendor never expressed, and which are therefore compared
 #: against NOTHING. Named so the omission is a decision on the record: inventing
 #: a legacy expectation to compare against is the same fabrication Ruling 2
 #: refuses, one layer up.
+#: NARROWED. An earlier draft declared approver eligibility wholly uncompared,
+#: which overstated the gap: Vendor expresses a coarse rule and it is mapped
+#: above. Only the genuinely richer capabilities remain uncompared.
 UNCOMPARED_MODULE_CAPABILITIES: Final[frozenset[str]] = frozenset(
     {
-        "per_level_approver_eligibility",
+        "fine_grained_approver_eligibility",
         "separation_of_duties",
         "mfa_requirement",
         "multi_level_sequencing",
         "delegation",
     }
 )
+
+
+# ── The coarse eligibility mapping (assembly-owned) ─────────────────────────
+
+#: Vendor's eligibility rule, in Vendor's own terms: `approvals/router.py` guards
+#: every approval with `require_platform_admin` and records `admin.id` as the
+#: approver. So the rule is real — "any authenticated platform admin may
+#: approve" — it is simply enforced by an authentication guard rather than by
+#: data, and it is COARSE rather than absent.
+COARSE_ELIGIBILITY_RULE: Final[str] = "any_authenticated_platform_admin"
+
+#: The module's `ApprovalLevel.approver_kind` / `approver_id` are REQUIRED — no
+#: defaults, and a blank `approver_id` is refused in `__post_init__` — so the
+#: mapping cannot be left implicit. This assembly therefore NAMES the role.
+#:
+#: Stable and arbitrary, in that order. It is not recovered from anywhere and
+#: does not pretend to be: it is the name this assembly assigns to a rule Vendor
+#: enforced through a guard. It must never change, because a value that differed
+#: between shadow runs would silently change what was compared.
+PLATFORM_ADMIN_ROLE_ID: Final[str] = "6f1d2a7c-9b34-4f5e-8c21-0d7a5e3b41f9"
+
+#: How a legacy approver becomes a module `Actor`. Every legacy approver held the
+#: role by construction: appearing in `approval_records` at all means they passed
+#: `require_platform_admin` at the time.
+ACTOR_MAPPING: Final[tuple[str, ...]] = (
+    "actor_id := approval_records.approver_id",
+    f"role_ids := {{{PLATFORM_ADMIN_ROLE_ID}}}",
+    "mfa_verified := False (never recorded; no level requires it)",
+)
+
+
+# ── Digest translation ──────────────────────────────────────────────────────
+
+#: Vendor stores `hashlib.sha256(...).hexdigest()` — bare lowercase hex.
+VENDOR_DIGEST_LENGTH: Final[int] = 64
+
+#: The module requires `sha256:` + 64 lowercase hex, enforced by
+#: `validate_digest`, which raises `ContentChanged` on anything else.
+MODULE_DIGEST_PREFIX: Final[str] = "sha256:"
+
+
+#: Deterministic and total in one direction. Nothing is normalised on the way
+#: through: an uppercase or short value is NOT lowercased or padded into
+#: validity, because a digest that needed repairing is a digest whose provenance
+#: is unknown.
+def translate_digest(vendor_content_hash: str) -> str:
+    """`<64 lowercase hex>` -> `sha256:<64 lowercase hex>`, or raise.
+
+    Pure and dependency-free — it names no module type — so the preflight can
+    run before anything is composed.
+    """
+    reason = digest_rejection_reason(vendor_content_hash)
+    if reason is not None:
+        raise ValueError(
+            f"legacy content_hash is not translatable ({reason}); an approval "
+            "whose bound content cannot be expressed in the new system must "
+            "stop the cutover, not be skipped"
+        )
+    return f"{MODULE_DIGEST_PREFIX}{vendor_content_hash}"
+
+
+#: Every way a legacy digest can fail to translate. Reported per row by the
+#: preflight so an operator resolves the ROW, rather than someone widening the
+#: accepted format.
+DIGEST_REJECTION_REASONS: Final[tuple[str, ...]] = (
+    "empty",
+    "already_prefixed",
+    "wrong_length",
+    "uppercase",
+    "non_hex",
+)
+
+_HEX_LOWER: Final[frozenset[str]] = frozenset("0123456789abcdef")
+
+
+def digest_rejection_reason(vendor_content_hash: str) -> str | None:
+    """Why this digest cannot translate, or `None` when it can.
+
+    FAIL CLOSED: every branch that is not a clean 64-character lowercase hex
+    string returns a reason. There is no tolerant path.
+    """
+    if not vendor_content_hash:
+        return "empty"
+    if vendor_content_hash.startswith(MODULE_DIGEST_PREFIX):
+        return "already_prefixed"
+    if len(vendor_content_hash) != VENDOR_DIGEST_LENGTH:
+        return "wrong_length"
+    if any(character.isupper() for character in vendor_content_hash):
+        return "uppercase"
+    if any(character not in _HEX_LOWER for character in vendor_content_hash):
+        return "non_hex"
+    return None
 
 
 # ── Disposition of incomplete legacy groups ─────────────────────────────────
@@ -178,18 +283,55 @@ RESTART_CONDITIONS: Final[tuple[str, ...]] = (
 
 # ── The watermark ───────────────────────────────────────────────────────────
 
-#: One row, insert-only, written inside the cutover transaction. Created by the
+#: One row, insert-only, written inside the sealing transaction. Created by the
 #: cutover change, not by this one.
-WATERMARK_TABLE: Final[str] = "approval_cutover_watermark"
+SEAL_TABLE: Final[str] = "approval_cutover_seal"
 
-#: The boundary is an id high-water mark, NOT wall-clock time: a retried
-#: transaction can commit a legacy row whose timestamp precedes a watermark
-#: written moments earlier, and an id is unambiguous under exactly that race.
-WATERMARK_BOUNDARY_COLUMN: Final[str] = "last_legacy_record_id"
+#: An earlier draft used `max(approval_records.id)` as a boundary cursor. That is
+#: INVALID: `ApprovalRecord.id` comes from the kernel's `uuid_pk()`, which is
+#: `default=uuid4` — random. A high-water mark over random values orders
+#: nothing. The argument against clocks was right; the substitute was not.
+#:
+#: The seal removes the boundary question instead of answering it: online DML is
+#: revoked first, so every legacy row is pre-cutover BY CONSTRUCTION, and the
+#: count and digest are evidence that the set compared is the set sealed.
+SEAL_COLUMNS: Final[tuple[str, ...]] = (
+    "sealed_at",
+    "alembic_revision",
+    "legacy_policy_count",
+    "legacy_record_count",
+    "evidence_digest",
+    "digest_algorithm",
+    "operator_ref",
+)
 
-#: Revoked from every online role once written, so the boundary cannot be moved
-#: afterwards to make a parity report look better.
-WATERMARK_IMMUTABLE_AFTER_WRITE: Final[bool] = True
+#: Revoked from the ONLINE roles before the seal is taken, which is what makes
+#: "no later legacy row can exist" a property of the database rather than a
+#: promise.
+SEALED_LEGACY_TABLES: Final[tuple[str, ...]] = (
+    "approval_policies",
+    "approval_records",
+)
+
+#: Fields hashed into `evidence_digest`, in order. `id` is deliberately absent:
+#: it is random, carries no meaning, and including it would make the digest
+#: depend on a value nothing else in this contract trusts.
+EVIDENCE_DIGEST_FIELDS: Final[tuple[str, ...]] = (
+    "policy_code",
+    "policy_version",
+    "subject_type",
+    "subject_id",
+    "content_hash",
+    "approver_id",
+)
+
+#: Revoked from every online role once written, so the sealed set cannot be
+#: restated afterwards to make a parity report agree.
+SEAL_IMMUTABLE_AFTER_WRITE: Final[bool] = True
+
+#: If a scalar cursor is ever genuinely needed, add an enforced monotonic BIGINT
+#: to the legacy table first. Never a cursor over UUID primary keys.
+SCALAR_CURSOR_REQUIREMENT: Final[str] = "enforced_monotonic_bigint_column"
 
 
 # ── The ratchet ─────────────────────────────────────────────────────────────
@@ -225,9 +367,21 @@ __all__ = [
     "SHARED_SAFETY_PROPERTY_COUNT",
     "UNCOMPARED_MODULE_CAPABILITIES",
     "UNRECOVERABLE_FACTS",
-    "WATERMARK_BOUNDARY_COLUMN",
-    "WATERMARK_IMMUTABLE_AFTER_WRITE",
-    "WATERMARK_TABLE",
+    "ACTOR_MAPPING",
+    "ADAPTER_OBLIGATIONS",
+    "COARSE_ELIGIBILITY_RULE",
+    "DIGEST_REJECTION_REASONS",
+    "EVIDENCE_DIGEST_FIELDS",
+    "MODULE_DIGEST_PREFIX",
+    "PLATFORM_ADMIN_ROLE_ID",
+    "SCALAR_CURSOR_REQUIREMENT",
+    "SEALED_LEGACY_TABLES",
+    "SEAL_COLUMNS",
+    "SEAL_IMMUTABLE_AFTER_WRITE",
+    "SEAL_TABLE",
+    "VENDOR_DIGEST_LENGTH",
+    "digest_rejection_reason",
+    "translate_digest",
     "Disposition",
     "LegacyFact",
     "SharedSafetyProperty",
