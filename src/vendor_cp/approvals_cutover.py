@@ -18,9 +18,14 @@ change, and building them now would be composing by instalments.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final
+from uuid import UUID
 
 # ── The two authorities ─────────────────────────────────────────────────────
 
@@ -319,19 +324,63 @@ SEAL_TRANSACTION_STEPS: Final[tuple[str, ...]] = (
     "grant_the_module_platform_tables_to_the_online_role",
 )
 
-#: Revoked from the ONLINE roles inside the transaction. TRUNCATE is included
-#: because it empties a table without being INSERT/UPDATE/DELETE.
+#: PostgreSQL's complete table privilege set, named once so no check can quietly
+#: cover a subset.
+ALL_TABLE_PRIVILEGES: Final[tuple[str, ...]] = (
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+)
+
+#: Revoked from the online platform role inside the transaction: every write and
+#: DDL privilege, and NOT `SELECT`.
+#:
+#: TRUNCATE is here because it empties a table without being INSERT/UPDATE/DELETE.
+#: REFERENCES and TRIGGER are here even though `v003` never granted them, so the
+#: statement is exhaustive by construction rather than by knowing today's grants.
 REVOKED_LEGACY_PRIVILEGES: Final[tuple[str, ...]] = (
     "INSERT",
     "UPDATE",
     "DELETE",
     "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
 )
 
-#: Roles that must effectively hold NOTHING on the legacy tables after the
-#: revoke. Verified, not assumed — a grant reaching a role through PUBLIC or
-#: through a role it inherits survives a direct REVOKE.
-SEALED_AGAINST_ROLES: Final[tuple[str, ...]] = ("platform_api", "app_user")
+#: The EXACT effective-privilege matrix required after the revoke, per role.
+#:
+#: An earlier draft required all seven false for `platform_api`, which
+#: contradicted the statement above it: the revoke never touched `SELECT`, and
+#: `v003` grants it. One of the two had to give, and it is the assertion — the
+#: shadow comparison READS these tables, so removing the read path would break
+#: the very check the seal exists to enable.
+#:
+#: `SELECT: True` is asserted POSITIVELY, not merely left unmentioned. Without
+#: the positive half, a future over-broad `REVOKE ALL` would silently delete the
+#: read path while every remaining assertion still passed — and a check that
+#: never ran would look identical to a check that passed.
+LEGACY_PRIVILEGE_MATRIX: Final[dict[str, dict[str, bool]]] = {
+    # Online platform role: reads the sealed evidence, writes nothing.
+    "platform_api": {
+        privilege: (privilege == "SELECT") for privilege in ALL_TABLE_PRIVILEGES
+    },
+    # Tenant application role: no business with a control-plane table at all.
+    "app_user": {privilege: False for privilege in ALL_TABLE_PRIVILEGES},
+}
+
+#: `app_admin` is deliberately absent from the matrix. It is the OFFLINE repair
+#: and migration role, unchanged by the seal: an estate with no way to correct a
+#: mistake is not safer, it is just stuck. It never serves a request.
+UNCONSTRAINED_OFFLINE_ROLE: Final[str] = "app_admin"
+
+#: Roles whose effective privileges are verified after the revoke. Verified, not
+#: assumed — a grant reaching a role through PUBLIC or through a role it inherits
+#: survives a direct REVOKE.
+SEALED_AGAINST_ROLES: Final[tuple[str, ...]] = tuple(LEGACY_PRIVILEGE_MATRIX)
 
 #: Complete contents, both tables. Counts and unique constraints detect inserts
 #: and deletes; NEITHER detects an UPDATE — and `platform_api` currently holds
@@ -371,9 +420,93 @@ RECORD_DIGEST_FIELDS: Final[tuple[str, ...]] = (
     "updated_at",
 )
 
-#: Rows rendered as \x1f-separated column values in the declared order, sorted
-#: bytewise by that rendering, newline-joined, SHA-256 over the UTF-8 encoding.
-DIGEST_FIELD_SEPARATOR: Final[str] = "\x1f"
+# ── The canonical encoding ──────────────────────────────────────────────────
+#
+# An earlier draft rendered each row as `\x1f`-separated column values joined by
+# newlines. That framing is NOT injective, and the failure is reachable rather
+# than theoretical: `policy_code`, `subject_type`, `subject_id` and
+# `content_hash` are plain strings that may legally contain `\x1f` or a newline,
+# so two different sets can render to byte-identical input and hash the same.
+# Timestamp text was ambiguous too — its rendering varied with session timezone
+# and formatting, so the same data hashed differently depending on who connected.
+#
+# The replacement is a typed, self-delimiting encoding: canonical JSON, which
+# escapes every delimiter inside a string, plus explicit normalisation for the
+# types where equal values have several spellings.
+
+#: Domain tag and version, carried in every encoded row so a policy row and a
+#: record row can never collide even with identical field values — and so a
+#: future encoding change is a visible version bump rather than a silent
+#: reinterpretation of old digests.
+SEAL_ENCODING_DOMAIN: Final[str] = "dotmac.vendor.approvals.seal"
+SEAL_ENCODING_VERSION: Final[int] = 1
+
+#: Fixed, timezone-independent timestamp rendering: converted to UTC first, then
+#: always six fractional digits and a literal `Z`.
+SEAL_TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+
+def _render_value(value: object) -> object:
+    """One column value, normalised so equal values have ONE spelling.
+
+    Fails closed on anything unrecognised: a type nobody thought about must not
+    reach the digest through `str()`, because that is exactly how an ambiguous
+    rendering gets in.
+    """
+    if value is None:
+        return None
+    # bool BEFORE int — `bool` is an `int` subclass, and `True` must not encode
+    # as `1`, which is a different value that would hash the same.
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, UUID):
+        return str(value).lower()
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise ValueError(
+                "a naive datetime has no single instant, so it cannot be "
+                "canonically encoded — read timestamps as timezone-aware"
+            )
+        return value.astimezone(UTC).strftime(SEAL_TIMESTAMP_FORMAT)
+    if isinstance(value, str):
+        return value
+    raise TypeError(f"no canonical encoding for {type(value).__name__}")
+
+
+def canonical_row(
+    table: str, fields: Sequence[str], values: Mapping[str, object]
+) -> str:
+    """One row as canonical JSON — injective, and self-delimiting.
+
+    `ensure_ascii=True` escapes `\x1f` as `\u001f` and a newline as `\n`, so a
+    delimiter inside a string value can never be mistaken for the frame. Field
+    ORDER comes from the declared tuple, not from the mapping.
+    """
+    payload = [
+        SEAL_ENCODING_DOMAIN,
+        SEAL_ENCODING_VERSION,
+        table,
+        [_render_value(values[field]) for field in fields],
+    ]
+    return json.dumps(
+        payload, ensure_ascii=True, separators=(",", ":"), allow_nan=False
+    )
+
+
+def seal_digest(
+    table: str, fields: Sequence[str], rows: Iterable[Mapping[str, object]]
+) -> str:
+    """SHA-256 over the sorted canonical rows of one sealed table.
+
+    Sorting is over the encoded text, so it is deterministic without depending on
+    any database ordering — there is no trustworthy row order here, which is the
+    same reason a random primary key cannot serve as a cursor.
+    """
+    encoded = sorted(canonical_row(table, fields, row) for row in rows)
+    return hashlib.sha256("\n".join(encoded).encode("utf-8")).hexdigest()
+
 
 #: Revoked from every online role once written, so the sealed set cannot be
 #: restated afterwards to make a report agree.
@@ -421,7 +554,14 @@ __all__ = [
     "ADAPTER_OBLIGATIONS",
     "COARSE_ELIGIBILITY_RULE",
     "DIGEST_REJECTION_REASONS",
-    "DIGEST_FIELD_SEPARATOR",
+    "ALL_TABLE_PRIVILEGES",
+    "LEGACY_PRIVILEGE_MATRIX",
+    "SEAL_ENCODING_DOMAIN",
+    "SEAL_ENCODING_VERSION",
+    "SEAL_TIMESTAMP_FORMAT",
+    "UNCONSTRAINED_OFFLINE_ROLE",
+    "canonical_row",
+    "seal_digest",
     "POLICY_DIGEST_FIELDS",
     "RECORD_DIGEST_FIELDS",
     "REVOKED_LEGACY_PRIVILEGES",

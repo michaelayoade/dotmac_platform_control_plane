@@ -22,6 +22,7 @@ here.
 from __future__ import annotations
 
 import tomllib
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
 
@@ -31,12 +32,14 @@ from import_scanner import reaches_module, scan_imports, source_files
 from vendor_cp.approvals_cutover import (
     ACTOR_MAPPING,
     ADAPTER_OBLIGATIONS,
+    ALL_TABLE_PRIVILEGES,
     COARSE_ELIGIBILITY_RULE,
     DIGEST_REJECTION_REASONS,
     LEGACY_COMPOSITION_SITES,
     LEGACY_DECISION_CALL_SITES,
     LEGACY_DECISION_MODULE,
     LEGACY_PACKAGE,
+    LEGACY_PRIVILEGE_MATRIX,
     MODULE_DIGEST_PREFIX,
     NEW_AUTHORITY,
     OLD_AUTHORITY,
@@ -46,19 +49,23 @@ from vendor_cp.approvals_cutover import (
     RECOVERABLE_FACTS,
     RESTART_CONDITIONS,
     REVOKED_LEGACY_PRIVILEGES,
+    SEAL_ENCODING_DOMAIN,
+    SEAL_ENCODING_VERSION,
     SEAL_LOCK_MODE,
     SEAL_TABLE,
     SEAL_TRANSACTION_STEPS,
-    SEALED_AGAINST_ROLES,
     SEALED_LEGACY_TABLES,
     SHARED_SAFETY_PROPERTIES,
     SHARED_SAFETY_PROPERTY_COUNT,
     UNCOMPARED_MODULE_CAPABILITIES,
+    UNCONSTRAINED_OFFLINE_ROLE,
     UNRECOVERABLE_FACTS,
     VENDOR_DIGEST_LENGTH,
     Disposition,
     LegacyFact,
+    canonical_row,
     digest_rejection_reason,
+    seal_digest,
     translate_digest,
 )
 
@@ -360,14 +367,71 @@ def test_the_privileges_are_verified_after_being_revoked() -> None:
         "insert_the_seal_row"
     ), "the seal must not be written before the revoke is proven effective"
 
-    assert set(SEALED_AGAINST_ROLES) == {"platform_api", "app_user"}
-    assert (
-        "TRUNCATE" in REVOKED_LEGACY_PRIVILEGES
-    ), "TRUNCATE empties a table without being INSERT/UPDATE/DELETE"
-
     text = adr_text()
     assert "has_any_column_privilege" in text
     assert "sql-revoke" in text
+
+
+def test_the_required_privilege_matrix_is_exact() -> None:
+    """The POSITIVE half is the point.
+
+    An earlier draft required all seven privileges false for `platform_api`,
+    contradicting the revoke statement above it — `v003` grants SELECT and the
+    revoke never touched it. The assertion was the half that had to give,
+    because the shadow comparison READS these tables.
+
+    `SELECT: True` is now asserted positively. Without that, a later over-broad
+    `REVOKE ALL` would silently delete the read path the parity comparison
+    depends on while every remaining assertion still passed.
+    """
+    platform = LEGACY_PRIVILEGE_MATRIX["platform_api"]
+    assert platform["SELECT"] is True, "the sealed evidence must stay readable"
+    assert not any(
+        held for privilege, held in platform.items() if privilege != "SELECT"
+    ), "the online role must keep no write or DDL privilege"
+
+    assert LEGACY_PRIVILEGE_MATRIX["app_user"] == dict.fromkeys(
+        ALL_TABLE_PRIVILEGES, False
+    )
+
+    # Every privilege is decided for every constrained role — no silent gaps.
+    for role, matrix in LEGACY_PRIVILEGE_MATRIX.items():
+        assert set(matrix) == set(ALL_TABLE_PRIVILEGES), role
+
+
+def test_the_revoke_statement_and_the_matrix_agree() -> None:
+    """The contradiction that started this: a statement and an assertion that
+    describe different end states. They are now derived from each other."""
+    platform = LEGACY_PRIVILEGE_MATRIX["platform_api"]
+    revoked = set(REVOKED_LEGACY_PRIVILEGES)
+
+    assert "SELECT" not in revoked
+    assert revoked == {
+        privilege for privilege, held in platform.items() if not held
+    }, "what the statement revokes must be exactly what the matrix forbids"
+
+    text = adr_text()
+    assert "REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER" in text
+    assert "SELECT is deliberately NOT revoked" in text
+
+
+def test_the_offline_repair_role_is_left_alone() -> None:
+    """An estate with no way to correct a mistake is not safer, just stuck.
+    `app_admin` never serves a request, so it is out of the matrix by decision
+    rather than by omission."""
+    assert UNCONSTRAINED_OFFLINE_ROLE == "app_admin"
+    assert UNCONSTRAINED_OFFLINE_ROLE not in LEGACY_PRIVILEGE_MATRIX
+    assert "unchanged" in adr_text()
+
+
+def test_the_select_grant_this_preserves_is_real() -> None:
+    """SENSITIVITY for the positive half: `v003` really does grant SELECT to the
+    online role, so retaining it is preserving something that exists."""
+    migration = (
+        ROOT / "alembic" / "versions" / "v003_approval_policies.py"
+    ).read_text()
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE" in migration
+    assert "TO platform_api" in migration
 
 
 def test_the_digests_cover_every_column_of_both_tables() -> None:
@@ -574,3 +638,149 @@ def test_the_prose_assertions_survive_reflow() -> None:
         "the phrase is no longer wrapped, so this proof has stopped proving "
         "anything — pick another wrapped phrase or delete it deliberately"
     )
+
+
+# ── The canonical encoding is injective ─────────────────────────────────────
+
+
+def _policy_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": UUID("00000000-0000-4000-8000-000000000001"),
+        "policy_code": "contract.activate",
+        "version": 1,
+        "quorum": 2,
+        "allow_self_approval": False,
+        "created_at": datetime(2026, 8, 15, 12, 0, 0, tzinfo=UTC),
+        "updated_at": datetime(2026, 8, 15, 12, 0, 0, tzinfo=UTC),
+    }
+    row.update(overrides)
+    return row
+
+
+def test_delimiter_bearing_values_are_escaped_not_framed() -> None:
+    """SENSITIVITY for injectivity, on the case that killed the old framing.
+
+    The previous encoding joined fields with `\x1f` and rows with newlines, so a
+    string value CONTAINING those bytes could move the frame. `policy_code` and
+    `content_hash` are plain strings, so this is reachable rather than
+    theoretical.
+    """
+    unit_separator = canonical_row(
+        "approval_policies", POLICY_DIGEST_FIELDS, _policy_row(policy_code="a\x1fb")
+    )
+    newline = canonical_row(
+        "approval_policies", POLICY_DIGEST_FIELDS, _policy_row(policy_code="a\nb")
+    )
+
+    # Escaped by the encoding itself — the raw bytes never reach the frame.
+    assert "\\u001f" in unit_separator
+    assert "\x1f" not in unit_separator
+    assert "\\n" in newline
+    assert "\n" not in newline
+
+    plain = canonical_row(
+        "approval_policies", POLICY_DIGEST_FIELDS, _policy_row(policy_code="ab")
+    )
+    assert len({unit_separator, newline, plain}) == 3
+
+
+def test_two_sets_differing_only_by_delimiter_placement_hash_differently() -> None:
+    """The precise failure: two SETS whose concatenation would be identical
+    under a delimiter-joined framing."""
+    set_a = [_policy_row(policy_code="x\x1fy")]
+    set_b = [_policy_row(policy_code="x"), _policy_row(policy_code="y")]
+    assert seal_digest("approval_policies", POLICY_DIGEST_FIELDS, set_a) != (
+        seal_digest("approval_policies", POLICY_DIGEST_FIELDS, set_b)
+    )
+
+
+def test_equivalent_timestamps_in_different_timezones_hash_identically() -> None:
+    """The same instant is the same fact, whoever connects.
+
+    Timestamp text previously varied with session timezone, so an identical
+    dataset hashed differently depending on the reader — which makes a digest
+    useless as evidence of what was sealed.
+    """
+    utc = datetime(2026, 8, 15, 12, 0, 0, tzinfo=UTC)
+    same_instants = (
+        utc,
+        utc.astimezone(timezone(timedelta(hours=2))),
+        utc.astimezone(timezone(timedelta(hours=-5))),
+    )
+    # Genuinely different renderings of one instant, or this proves nothing.
+    assert len({moment.utcoffset() for moment in same_instants}) == 3
+
+    digests = {
+        seal_digest(
+            "approval_policies",
+            POLICY_DIGEST_FIELDS,
+            [_policy_row(created_at=moment, updated_at=moment)],
+        )
+        for moment in same_instants
+    }
+    assert len(digests) == 1, "the same instant hashed differently by timezone"
+
+    # NON-VACUITY: a genuinely different instant must still differ.
+    later = utc.replace(second=1)
+    assert (
+        seal_digest(
+            "approval_policies",
+            POLICY_DIGEST_FIELDS,
+            [_policy_row(created_at=later, updated_at=later)],
+        )
+        not in digests
+    )
+
+
+def test_a_naive_timestamp_is_refused() -> None:
+    """A naive datetime has no single instant, so it cannot be canonically
+    encoded. Fail closed rather than guess a zone."""
+    naive = datetime(2026, 8, 15, 12, 0, 0)  # noqa: DTZ001
+    with pytest.raises(ValueError, match="naive datetime"):
+        canonical_row(
+            "approval_policies",
+            POLICY_DIGEST_FIELDS,
+            _policy_row(created_at=naive),
+        )
+
+
+def test_true_does_not_encode_as_one() -> None:
+    """`bool` is an `int` subclass, so an int-first branch would encode `True`
+    as `1` — a different value hashing the same."""
+    as_bool = _policy_row(allow_self_approval=True)
+    as_int = _policy_row(allow_self_approval=1)
+    assert canonical_row("approval_policies", POLICY_DIGEST_FIELDS, as_bool) != (
+        canonical_row("approval_policies", POLICY_DIGEST_FIELDS, as_int)
+    )
+
+
+def test_the_two_tables_cannot_collide() -> None:
+    """Domain/version separation: identical field values under different table
+    tags must encode differently."""
+    row = _policy_row()
+    assert canonical_row("approval_policies", POLICY_DIGEST_FIELDS, row) != (
+        canonical_row("approval_records", POLICY_DIGEST_FIELDS, row)
+    )
+    encoded = canonical_row("approval_policies", POLICY_DIGEST_FIELDS, row)
+    assert SEAL_ENCODING_DOMAIN in encoded
+    assert f",{SEAL_ENCODING_VERSION}," in encoded
+
+
+def test_row_order_does_not_change_the_digest() -> None:
+    """NON-VACUITY for the sorting rule: a set is a set. If this failed, every
+    inequality above could be passing on ordering rather than content."""
+    a = _policy_row(policy_code="a")
+    b = _policy_row(policy_code="b")
+    assert seal_digest("approval_policies", POLICY_DIGEST_FIELDS, [a, b]) == (
+        seal_digest("approval_policies", POLICY_DIGEST_FIELDS, [b, a])
+    )
+
+
+def test_an_unencodable_type_raises_rather_than_stringifying() -> None:
+    """A `str()` fallback is exactly how an ambiguous rendering gets in."""
+    with pytest.raises(TypeError, match="no canonical encoding"):
+        canonical_row(
+            "approval_policies",
+            POLICY_DIGEST_FIELDS,
+            _policy_row(policy_code=object()),
+        )

@@ -144,8 +144,10 @@ LOCK TABLE public.approval_policies, public.approval_records IN SHARE MODE;
 --                disposition coverage                          (§ 4, § 6)
 --     Any failure -> ROLLBACK. Nothing has changed; the locks release.
 
--- (4) revoke the online role's DML on both legacy tables
-REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON
+-- (4) revoke every WRITE and DDL privilege from the online role.
+--     SELECT is deliberately NOT revoked: the parity comparison reads these
+--     tables, and the sealed evidence stays readable afterwards.
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON
   public.approval_policies, public.approval_records FROM platform_api;
 
 -- (5) verify EFFECTIVE privileges are gone                     (§ 3.4)
@@ -208,9 +210,38 @@ theoretical one. Two digests therefore cover **every column of both tables**:
   `subject_type`, `subject_id`, `content_hash`, `approver_id`, `created_at`,
   `updated_at`.
 
-Each row is rendered as its `\x1f`-separated column values in the declared order,
-rows are sorted bytewise by that rendering, and SHA-256 is taken over the UTF-8
-encoding of the newline-joined result.
+**The framing is a typed, injective encoding**, not a delimiter-separated one.
+An earlier draft joined column values with `\x1f` and rows with newlines, which
+is ambiguous and reachably so: `policy_code`, `subject_type`, `subject_id` and
+`content_hash` are plain strings that may legally contain those bytes, so two
+different sets could render to byte-identical input and hash the same. Timestamp
+text was ambiguous in a second way — its rendering varied with session timezone
+and formatting, so the same data hashed differently depending on who connected.
+
+Each row is encoded as canonical JSON:
+
+```json
+["dotmac.vendor.approvals.seal", 1, "<table>", [ <values in declared order> ]]
+```
+
+with `ensure_ascii=True` and no whitespace, so every delimiter inside a string is
+escaped by the encoding itself. Values are normalised so equal values have ONE
+spelling: timestamps converted to UTC and rendered `%Y-%m-%dT%H:%M:%S.%fZ`
+(a naive datetime is refused, having no single instant); UUIDs lowercase
+canonical; booleans and integers as JSON types, with `bool` handled before `int`
+so `True` cannot encode as `1`. Any other type raises rather than falling back to
+`str()`, because that fallback is precisely how an ambiguous rendering gets in.
+
+The domain tag and version are carried in every row, so a policy row and a record
+row can never collide even with identical field values, and a future encoding
+change is a visible version bump rather than a silent reinterpretation of digests
+already recorded.
+
+Rows are then sorted by their encoded text and joined with newlines — safe now,
+because JSON escapes newlines inside strings — and SHA-256 is taken over the
+UTF-8 encoding. Sorting by encoded text rather than by any database order is
+deliberate: there is no trustworthy row order here, for the same reason a random
+primary key cannot serve as a cursor.
 
 **`id` is now included, and the earlier reasoning for excluding it was a
 category error.** A random value cannot ORDER a set — that is why it fails as a
@@ -234,12 +265,29 @@ through `PUBLIC`, or through a role it inherits, survives a direct revoke
 ([sql-revoke](https://www.postgresql.org/docs/current/sql-revoke.html)).
 
 After step (4) and **before** the seal is written, the transaction asserts the
-outcome: for each legacy table and each of PostgreSQL's seven table privileges,
-`has_table_privilege` OR `has_any_column_privilege` must be false for
-`platform_api` and for `app_user`. Both functions answer "effectively holds",
-which is what makes inherited and `PUBLIC` grants visible; the column-level
-function is what catches a `GRANT UPDATE (quorum)` that a table-level inquiry
-reports as revoked.
+outcome — as an EXACT matrix, per role, over all seven privileges:
+
+| Role | Required effective privileges |
+|---|---|
+| `platform_api` | **`SELECT` = true**; `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER` = false |
+| `app_user` | all seven false |
+| `app_admin` | unchanged — the offline repair and migration role, which never serves a request |
+
+An earlier draft required all seven false for `platform_api`. That contradicted
+the statement above it, since the revoke never touched `SELECT` and `v003` grants
+it — and the assertion is the half that had to give, because **the shadow
+comparison reads these tables**. Removing the read path would break the very
+check the seal exists to enable.
+
+`SELECT = true` is asserted **positively**, not left unmentioned. Without the
+positive half, a later over-broad `REVOKE ALL` would silently delete the read
+path while every remaining assertion still passed — and a check that never ran
+would look identical to a check that passed.
+
+The reader is `has_table_privilege` OR `has_any_column_privilege`. Both answer
+"effectively holds", which is what makes inherited and `PUBLIC` grants visible;
+the column-level function is what catches a `GRANT UPDATE (quorum)` that a
+table-level inquiry reports as revoked.
 
 This is the assembly's canonical privilege query — the same
 `ROLE_TABLE_PRIVILEGES_SQL` the composed live-catalogue audit uses — so the
@@ -507,6 +555,37 @@ Enforced with the shared import scanner
 `from x import y`, `from x.sub import y`, `from . import y` and relative parent
 walks are all seen. A single-form guard here would be worthless: the legacy
 surface is a plain module, reachable by every one of those spellings.
+
+### 9a. Obligation on the shadow-composition migration
+
+**Composing the module grants the online platform role a second write surface,
+unless the composing migration takes it away in the same transaction.**
+
+`ap_0001_approvals` grants `platform_api` `SELECT, INSERT, UPDATE, DELETE` on the
+module's platform tables the moment it runs. That is correct for an assembly
+where the module IS the authority. Here it is not: while the legacy writer is
+still authoritative, a platform role able to write `mod_approvals` is a second
+writer that nothing in this contract permits — created not by anyone's decision
+but as a side effect of installing a lineage.
+
+So the shadow-composition change **must**, in the same migration transaction that
+runs `ap_0001_approvals`:
+
+1. revoke `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES` and `TRIGGER` on
+   every `mod_approvals` table from `platform_api`;
+2. retain `SELECT`, so the shadow comparison and the eventual reconciliation can
+   read the module's side;
+3. verify the resulting EFFECTIVE privileges the same way § 3.4 does, and fail
+   the migration if any write privilege survives;
+4. leave `app_user` with nothing, as the module's own migration already does.
+
+The grant is restored — by the cutover change, not by the composing one — as step
+(8) of the sealing transaction in § 3.1, which is the single moment the authority
+moves.
+
+**This is named here and implemented in the shadow PR.** Recording it now is the
+point: it is an obligation that falls between two phases, and the phase that
+creates the exposure is not the phase that reads this contract most closely.
 
 ### 10. Future work — `RecoveredApprovalEvidence` (named, not built)
 
