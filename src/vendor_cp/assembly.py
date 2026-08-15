@@ -22,13 +22,13 @@ from vendor_cp.approvals.feature import feature as approvals_feature
 from vendor_cp.config import validate_runtime_configuration, vendor_settings
 from vendor_cp.console.feature import feature as console_feature
 from vendor_cp.contracts.feature import feature as contracts_feature
-from vendor_cp.migration_bindings import ASSEMBLY_MODULE_PLANES
 from vendor_cp.deployment_profile import (
     VendorDeploymentProfile,
     load_deployment_profile,
 )
 from vendor_cp.licensing.feature import feature as licensing_feature
 from vendor_cp.licensing.signer import install_runtime_licence_signers
+from vendor_cp.migration_bindings import ASSEMBLY_MODULE_PLANES
 from vendor_cp.offers.feature import feature as offers_feature
 from vendor_cp.provisioning.feature import feature as provisioning_feature
 from vendor_cp.release_evidence.feature import feature as release_evidence_feature
