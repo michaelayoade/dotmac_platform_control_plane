@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 import dotmac_kernel
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "vendor_cp"
@@ -40,27 +41,95 @@ def _imports(path: Path) -> list[tuple[str, str | None]]:
 
 
 # ── D1 — one control-plane database; the kernel owns the engine ──────────────
+
+# Connection constructors, not just SQLAlchemy's. `psycopg.connect` opens a
+# database exactly as effectively as `create_engine`, so a guard naming only the
+# latter can be satisfied by changing library — which is evading the rule rather
+# than following it.
+_CONNECTION_CONSTRUCTORS = ("create_engine", "sessionmaker", "psycopg.connect")
+
+#: The ONE entrypoint permitted to construct a connection, with the enforceable
+#: premises that make it not a violation of D1's purpose.
+#:
+#: D1 protects "one control-plane database, and the kernel owns its engine". The
+#: read-only inventory is the opposite case by design: an operator names a
+#: target for a single run, precisely so nothing infers one from configuration.
+#: It is allowed here because — and only while — all three hold, each checked in
+#: `tests/architecture/test_inventory_boundaries.py`:
+#:
+#:   1. the DSN is supplied explicitly and never read from the app's own
+#:      environment variables or any deployment config;
+#:   2. the transaction is opened READ ONLY, so the database refuses writes;
+#:   3. it writes to neither system, and records nothing anywhere.
+#:
+#: An entry added here without those properties is a second database creeping in
+#: under an exemption written for something else.
+_D1_CONNECTION_ALLOWLIST = {"approvals_inventory.py"}
+
+
 def test_d1_no_engine_or_session_construction() -> None:
     bad = [
         f"{p.name}: {fn}("
         for p in _py_files()
-        for fn in ("create_engine", "sessionmaker")
-        if re.search(rf"\b{fn}\s*\(", p.read_text())
+        if p.name not in _D1_CONNECTION_ALLOWLIST
+        for fn in _CONNECTION_CONSTRUCTORS
+        if re.search(rf"\b{re.escape(fn)}\s*\(", p.read_text())
     ]
     assert (
         not bad
     ), f"vendor code must use the kernel's single engine, not build one: {bad}"
 
 
-def test_d1_session_authority_guard_covers_every_entrypoint_family() -> None:
-    """SENSITIVITY: a forbidden constructor in scripts must trip the guard."""
+def test_d1_allowlist_names_only_files_that_exist() -> None:
+    """An allowlist entry for a deleted file is an exemption nobody is using and
+    everybody inherits."""
+    present = {p.name for p in _py_files()}
+    stale = sorted(_D1_CONNECTION_ALLOWLIST - present)
+    assert not stale, f"allowlisted file no longer exists: {stale}"
+
+
+def test_d1_allowlist_is_the_only_connecting_entrypoint() -> None:
+    """NON-VACUITY: the allowlisted file really does construct a connection, so
+    the exemption is load-bearing rather than decorative."""
+    connecting = {
+        p.name
+        for p in _py_files()
+        for fn in _CONNECTION_CONSTRUCTORS
+        if re.search(rf"\b{re.escape(fn)}\s*\(", p.read_text())
+    }
+    assert connecting == _D1_CONNECTION_ALLOWLIST, (
+        "the set of files constructing a database connection changed: "
+        f"{sorted(connecting ^ _D1_CONNECTION_ALLOWLIST)}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "constructor"),
+    [
+        pytest.param("sessionmaker()\n", "sessionmaker", id="sessionmaker"),
+        pytest.param("create_engine('x')\n", "create_engine", id="create-engine"),
+        pytest.param(
+            "import psycopg\npsycopg.connect('x')\n",
+            "psycopg.connect",
+            id="psycopg-connect",
+        ),
+    ],
+)
+def test_d1_session_authority_guard_covers_every_entrypoint_family(
+    source: str, constructor: str
+) -> None:
+    """SENSITIVITY: each forbidden constructor, in a scripts/ file, must trip
+    the guard — including the one a determined author would reach for after
+    finding `create_engine` blocked."""
     probe = ENTRYPOINTS / "_session_authority_sensitivity.py"
-    probe.write_text("sessionmaker()\n", encoding="utf-8")
+    probe.write_text(source, encoding="utf-8")
     try:
         bad = [
             p
             for p in _py_files()
-            if re.search(r"\bsessionmaker\s*\(", p.read_text(encoding="utf-8"))
+            if re.search(
+                rf"\b{re.escape(constructor)}\s*\(", p.read_text(encoding="utf-8")
+            )
         ]
         assert probe in bad
     finally:
