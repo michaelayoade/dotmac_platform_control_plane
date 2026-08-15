@@ -58,7 +58,16 @@ disagree, fix the drift.
     `build_spec()`. It may not withhold a persistence owner and may not change
     behaviour; feature code never branches on a profile name (ADR-0003, deny
     case D6; `tests/architecture/test_deployment_profile.py`).
-12. **Cross-repository engineering governance is pinned and required.**
+12. **A shadow overlap is declared, one-writer, ratcheted and dated.** The
+    legacy `public.allocations` / `public.allocation_entries` tables shadow the
+    composed `mod_ealloc` schema. `src/vendor_cp/shadow_overlaps.py` is the
+    ASSEMBLY-LOCAL declaration of exactly those two pairs: the legacy service
+    stays the only writer, no new legacy call sites may appear, the live set is
+    ratcheted in BOTH directions, and it names the cutover gate that deletes it.
+    Never relax the kernel gate to solve this, and never rename a legacy table to
+    hide the overlap (`tests/architecture/test_shadow_overlaps.py`,
+    `tests/migration/test_composed_live_catalog.py`).
+13. **Cross-repository engineering governance is pinned and required.**
     `.dotmac/standards-profile.json` names the enrolled authority and fully typed
     contract surface, and pins the accepted Governance source by exact commit.
     The `Dotmac engineering standards` CI job must execute that same immutable

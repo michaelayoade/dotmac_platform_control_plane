@@ -109,6 +109,50 @@ lineage — rather than the tables someone remembered to name.
   list that could only ever prove what someone remembered; a future `v012` table
   is swept the moment its migration runs.
 
+## The allocation shadow overlap (temporary, declared, dated)
+
+`public.allocations` and `public.allocation_entries` — created by vendor
+migration `v005` — carry the same names the composed
+`dotmac-entitlement-allocation` module owns in `mod_ealloc`. The kernel's
+live-catalogue gate reports that as a host squatter, and normally it is exactly
+right: a module table in the compatibility namespace usually means a module that
+never moved.
+
+Here it is the visible footprint of an authority migration that is deliberately
+unfinished, so `src/vendor_cp/shadow_overlaps.py` declares it — **assembly-local,
+exactly two pairs, and written to expire**.
+
+- **One writer at every instant.** `vendor_cp.allocations.service` is
+  authoritative and `mod_ealloc` stays empty. Enforced by a test that fails if
+  anything under `src/` imports the module's write surface (`stage_allocation`),
+  and by an allowlist of the module names vendor code may import while the
+  legacy writer owns the data.
+- **No new legacy call sites.** The set of modules importing the legacy
+  allocation models is exact — `allocations/service.py` (the writer),
+  `allocations/preflight.py` (read-only auditor), `licensing/service.py`
+  (reader). A new importer fails the build; new work belongs on the module's
+  boundary, not on tables scheduled for retirement.
+- **Two-directional ratchet.** The live audit asserts the database reports these
+  two overlaps and no others. Rising fails, because a third is a new fact needing
+  its own decision. **Falling also fails**, because a table that stops
+  overlapping means part of the cutover completed and the declaration must be
+  lowered in that same change — a backlog allowed to shrink quietly is how a
+  temporary exception outlives everyone who agreed to it.
+- **It names what removes it.** The "Allocation cutover gate" below, step 4: the
+  legacy models, service, FK and writer path are retired after parity. Then
+  `shadow_overlaps.py` is deleted rather than edited. A review date fails loudly
+  if that has not happened, so the exception gets re-justified by a person
+  instead of lapsing.
+
+Two things this is not. It is **not a kernel relaxation** — the gate is
+untouched and every other assembly still fails on a host squatter; only this
+assembly, for these two declared pairs, subtracts what it has justified. And it
+is **not a rename**: renaming the legacy tables would silence the gate by hiding
+a real migration state, so the overlap stays visible until the cutover retires
+it. It is also not a precedent for composing Approvals early — that stays blocked
+on its own cutover contract.
+
+
 ## Deployment profiles
 
 `src/vendor_cp/deployment_profile.py` declares which vendor SURFACES a

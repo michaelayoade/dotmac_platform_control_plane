@@ -63,6 +63,12 @@ from sqlalchemy import Connection, create_engine, text
 
 from vendor_cp.assembly import build_spec
 from vendor_cp.migrations import make_alembic_config
+from vendor_cp.shadow_overlaps import (
+    DECLARED_OVERLAP_COUNT,
+    SHADOW_OVERLAPS,
+    overlap_for,
+    overlapped_legacy_tables,
+)
 
 # The tenant application role. Kernel 0001 gives it USAGE on `public`, so a
 # table there is reachable unless nothing was granted on it — which is why this
@@ -206,6 +212,31 @@ def _public_schema(url: str) -> PublicSchema:
 # ── 1. Module schemas: the kernel's own canonical gate ──────────────────────
 
 
+def _partition_shadow_overlaps(
+    violations: tuple[str, ...],
+) -> tuple[dict[str, list[str]], tuple[str, ...]]:
+    """Split the gate's report into declared shadow overlaps and everything else.
+
+    Matched on the qualified legacy name that opens the message, plus the module
+    table appearing in it. Deliberately not an equality check against a rebuilt
+    sentence: copying the kernel's prose here would make a wording change look
+    like a contract change, and a bare `in` test on the table name would swallow
+    an unrelated violation about the same table.
+    """
+    declared: dict[str, list[str]] = {
+        overlap.legacy_table: [] for overlap in SHADOW_OVERLAPS
+    }
+    remaining: list[str] = []
+    for violation in violations:
+        legacy_table = violation.split(":", 1)[0]
+        overlap = overlap_for(legacy_table)
+        if overlap is not None and overlap.module_table in violation:
+            declared[legacy_table].append(violation)
+        else:
+            remaining.append(violation)
+    return declared, tuple(remaining)
+
+
 def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
     scratch_db: str,
 ) -> None:
@@ -215,6 +246,12 @@ def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
     modules declared their tables in `ModuleManifest.tables` — the TENANT
     contract — while their migrations built platform-shaped tables, and nothing
     in this repo looked at the live catalogue to notice the disagreement.
+
+    The ONLY violations tolerated are the two declared shadow overlaps in
+    `vendor_cp.shadow_overlaps`, and they are subtracted here — in this
+    assembly's own test — rather than by softening anything the kernel does. The
+    next test proves each declared overlap was really reported, so the
+    subtraction cannot quietly cover a clean database.
     """
     registry = NamespaceRegistry.from_manifests(build_spec().modules)
     assert frozenset(audited_schemas(registry)) == EXPECTED_MODULE_SCHEMAS
@@ -222,7 +259,49 @@ def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
     _upgrade(scratch_db)
     with _connection(scratch_db) as conn:
         violations = audit_live_schemas(conn, registry)
-    assert violations == ()
+
+    _, remaining = _partition_shadow_overlaps(violations)
+    assert remaining == (), (
+        "the composed module schemas must satisfy the kernel gate except for "
+        f"the declared shadow overlaps: {remaining}"
+    )
+
+
+def test_the_shadow_overlap_declaration_matches_the_database_exactly(
+    scratch_db: str,
+) -> None:
+    """The two-directional ratchet.
+
+    RISING fails: a third table shadowing the module schema is a new fact that
+    needs its own decision, not another entry appended to a list.
+
+    FALLING fails too, and that is the direction that matters more. If a legacy
+    table stops overlapping, someone has completed part of the allocation
+    cutover, and the declaration must be lowered in that same change. A backlog
+    allowed to shrink silently is exactly how a "temporary" exception outlives
+    everyone who agreed to it.
+    """
+    registry = NamespaceRegistry.from_manifests(build_spec().modules)
+    _upgrade(scratch_db)
+    with _connection(scratch_db) as conn:
+        violations = audit_live_schemas(conn, registry)
+
+    declared, _ = _partition_shadow_overlaps(violations)
+
+    unreported = sorted(table for table, found in declared.items() if not found)
+    assert not unreported, (
+        "these overlaps are declared but the database no longer has them — "
+        "lower the declaration in the change that removed them, and delete "
+        f"`vendor_cp.shadow_overlaps` once it is empty: {unreported}"
+    )
+    duplicated = sorted(table for table, found in declared.items() if len(found) > 1)
+    assert not duplicated, f"one overlap reported more than once: {duplicated}"
+
+    assert len(SHADOW_OVERLAPS) == DECLARED_OVERLAP_COUNT
+    assert overlapped_legacy_tables() == {
+        "public.allocations",
+        "public.allocation_entries",
+    }
 
 
 @pytest.mark.parametrize("schema_name", sorted(EXPECTED_MODULE_SCHEMAS))
