@@ -486,6 +486,47 @@ def test_every_platform_plane_public_table_is_revoked_from_the_tenant_role(
     assert not bad, f"platform-plane tables must be REVOKEd from {APP_ROLE}: {bad}"
 
 
+def catalogue_violations(privileges: dict[str, set[str]]) -> list[str]:
+    """The catalogue's privilege DECISION, pure and therefore provable.
+
+    Exactly `{"SELECT"}` per table. Split out from the live test so both failure
+    directions can be demonstrated against synthetic input: a live test can only
+    show that the READER observed a change, which is a weaker claim than the
+    guard rejecting it.
+    """
+    return [
+        f"{name}: {sorted(held)}"
+        for name, held in sorted(privileges.items())
+        if held != {"SELECT"}
+    ]
+
+
+def test_a_fully_revoked_catalogue_fails_the_decision() -> None:
+    """ACCEPTANCE: missing SELECT must fail.
+
+    This is the case the previous "nothing beyond SELECT" form passed. A
+    catalogue nobody can read is not the contract — kernel 0001 grants SELECT
+    because a tenant-scoped request resolves its own row through these tables.
+    """
+    assert catalogue_violations({"tenants": set()}) == ["tenants: []"]
+
+
+def test_an_over_granted_catalogue_fails_the_decision() -> None:
+    """ACCEPTANCE: excess privilege must fail."""
+    assert catalogue_violations({"tenants": {"SELECT", "INSERT"}}) == [
+        "tenants: ['INSERT', 'SELECT']"
+    ]
+
+
+def test_the_exact_grant_passes_the_decision() -> None:
+    """NON-VACUITY: the decision must accept the real, correct state, or the two
+    cases above would pass for a guard that rejects everything."""
+    assert (
+        catalogue_violations({"tenants": {"SELECT"}, "tenant_domains": {"SELECT"}})
+        == []
+    )
+
+
 def test_the_tenant_catalogue_is_open_but_read_only(scratch_db: str) -> None:
     """The catalogue's own contract, so excluding it from both planes is a
     checked premise rather than a hole.
@@ -511,11 +552,9 @@ def test_the_tenant_catalogue_is_open_but_read_only(scratch_db: str) -> None:
     # deliberately grants SELECT, and a tenant-scoped request resolves its own
     # row through these tables. A guard that accepts an unreadable catalogue is
     # asserting half of a two-sided rule and reporting the whole of it.
-    actual = {
-        name: set(schema.app_role_privileges.get(name, ()))
-        for name in sorted(catalogue)
-    }
-    wrong = {name: sorted(held) for name, held in actual.items() if held != {"SELECT"}}
+    wrong = catalogue_violations(
+        {name: set(schema.app_role_privileges.get(name, ())) for name in catalogue}
+    )
     assert not wrong, (
         f"the tenant catalogue must be exactly readable by {APP_ROLE} — SELECT "
         f"present, nothing else: {wrong}"

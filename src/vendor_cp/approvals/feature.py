@@ -1,19 +1,28 @@
 """The vendor-local approval feature — versioned approval policy + records.
 
-Named `vendor_approvals`, not `approvals`. The installed `dotmac-approvals`
-module now composes into this assembly under the code `approvals`, and a module
-registry has exactly one owner per code, so both cannot carry that name.
+This is the ONLY approval owner in this assembly. It writes
+`public.approval_policies` and `public.approval_records`, and every approval
+decision the control plane makes goes through it.
 
-The rename says which one this is rather than which one arrived first. This
-package is the vendor-local writer that still owns every approval decision in
-production; the installed module is composed in SHADOW — manifest, lineage and
-PLATFORM plane only — exactly as `dotmac-entitlement-allocation` was. When a
-cutover is designed the authority moves and this package retires; the name is
-not the thing that has to change then.
+## Why it is named `vendor_approvals`
+
+`dotmac-approvals` exists as a published module and RESERVES the module code
+`approvals`. It is **not composed here** — not its manifest, not its lineage,
+not a plane selection. Shadow composition is a bounded authority-migration phase
+with exactly one authoritative writer, so it may land only behind a cutover
+contract naming the old and new authority, the identity mapping, open-request
+handling, parity measurement, the watermark, the rollback boundary and the
+retirement gate.
+
+The rename is therefore proactive, not consequential. A module registry holds one
+owner per code and `FeatureManifest.name` becomes that code, so a manifest still
+called `approvals` would collide with the module on the cutover's first line of
+composition. Renaming now takes that off the cutover's path instead of leaving it
+as the cutover's first surprise.
 
 The HTTP surface is unchanged: routes still live under
-`/platform/vendor/approvals`. A manifest name is a composition identifier, not
-a URL.
+`/platform/vendor/approvals`. A manifest name is a composition identifier, not a
+URL.
 """
 
 from __future__ import annotations

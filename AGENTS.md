@@ -48,12 +48,20 @@ disagree, fix the drift.
    table, a sentinel tenant, or a nullable tenant column to satisfy a module
    (ADR-0028; `tests/architecture/test_migration_prerequisite_bindings.py`,
    `tests/migration/test_selected_planes.py`).
-10. **Every composed table is audited, none by name.** The module schemas go
-    through the kernel's `audit_live_schemas`; `public` is classified from the
-    live catalogue, and the vendor-owned subset is derived by diffing the
-    lineages. A privilege proof that names tables in a literal list is a
-    regression — it only ever covers what someone remembered
-    (`tests/migration/test_composed_live_catalog.py`).
+10. **Coverage is catalogue-derived; exceptions are named and ratcheted.** Two
+    halves, and the distinction between them is the rule. WHICH tables get
+    audited is never a literal list: module schemas go through the kernel's
+    `audit_live_schemas`, `public` is classified from the live catalogue, and
+    the vendor-owned subset is derived by diffing the lineages — so a table
+    added tomorrow is covered the moment its migration runs. WHAT an exceptional
+    category contains IS named exactly — `TENANT_CATALOGUE`,
+    `UNMONITORED_SPLIT_SCOPE`, `SHADOW_OVERLAPS` — and every such set is
+    ratcheted in both directions, so it cannot grow quietly or shrink without
+    the declaration being lowered in the same change. A privilege proof over a
+    hand-listed set of TABLES is the regression; a hand-listed set of
+    EXCEPTIONS, each justified and dated, is the contract
+    (`tests/migration/test_composed_live_catalog.py`,
+    `tests/architecture/test_shadow_overlaps.py`).
 11. **A deployment profile selects surfaces and nothing else.** Read it once, in
     `build_spec()`. It may not withhold a persistence owner and may not change
     behaviour; feature code never branches on a profile name (ADR-0003, deny
