@@ -33,7 +33,6 @@ from vendor_cp.approvals_cutover import (
     ADAPTER_OBLIGATIONS,
     COARSE_ELIGIBILITY_RULE,
     DIGEST_REJECTION_REASONS,
-    EVIDENCE_DIGEST_FIELDS,
     LEGACY_COMPOSITION_SITES,
     LEGACY_DECISION_CALL_SITES,
     LEGACY_DECISION_MODULE,
@@ -42,9 +41,15 @@ from vendor_cp.approvals_cutover import (
     NEW_AUTHORITY,
     OLD_AUTHORITY,
     PLATFORM_ADMIN_ROLE_ID,
+    POLICY_DIGEST_FIELDS,
+    RECORD_DIGEST_FIELDS,
     RECOVERABLE_FACTS,
     RESTART_CONDITIONS,
+    REVOKED_LEGACY_PRIVILEGES,
+    SEAL_LOCK_MODE,
     SEAL_TABLE,
+    SEAL_TRANSACTION_STEPS,
+    SEALED_AGAINST_ROLES,
     SEALED_LEGACY_TABLES,
     SHARED_SAFETY_PROPERTIES,
     SHARED_SAFETY_PROPERTY_COUNT,
@@ -289,16 +294,129 @@ def test_the_adr_documents_every_declared_property() -> None:
 def test_the_boundary_is_a_sealed_set_not_a_cursor() -> None:
     """`ApprovalRecord.id` is `uuid_pk()` -> `default=uuid4`, i.e. RANDOM, so a
     high-water mark over it orders nothing. The seal removes the boundary
-    question instead of answering it: online DML is revoked first, so every
-    legacy row is pre-cutover by construction."""
+    question instead of answering it."""
     assert SEAL_TABLE == "approval_cutover_seal"
     assert set(SEALED_LEGACY_TABLES) == {"approval_policies", "approval_records"}
 
     text = adr_text()
     assert "default=uuid4" in text
-    assert "pre-cutover by construction" in text or "**pre-cutover**" in text
-    assert "legacy_record_count" in text
-    assert "evidence_digest" in text
+    assert "pre-cutover by construction" in text or "no later legacy row" in text
+
+
+def test_the_lock_is_taken_before_anything_is_read() -> None:
+    """Operational quiescence is a plan, not a guarantee.
+
+    Without a lock an in-flight writer commits AFTER the count and digest are
+    read, and the seal attests to a set that already changed — which is the
+    boundary question again, wearing a different hat. SHARE conflicts with the
+    ROW EXCLUSIVE that INSERT/UPDATE/DELETE take, so PostgreSQL waits for
+    in-flight writers and blocks new ones for the transaction.
+    """
+    assert SEAL_LOCK_MODE == "SHARE"
+
+    steps = list(SEAL_TRANSACTION_STEPS)
+    lock = steps.index("lock_both_legacy_tables_in_share_mode")
+    assert lock == 0, "the lock is not the first thing the transaction does"
+    for reader in (
+        "preflight_digest_translatability_over_the_locked_set",
+        "parity_comparison_over_the_locked_set",
+        "compute_complete_content_digests",
+    ):
+        assert steps.index(reader) > lock, reader
+
+    text = adr_text()
+    assert "IN SHARE MODE" in text
+    assert "sql-lock" in text
+
+
+def test_parity_runs_before_the_transaction_can_commit() -> None:
+    """An earlier draft sealed first and compared afterwards, while forbidding
+    rollback after sealing — a parity failure with no legal exit. Every check
+    that could justify aborting must precede every irreversible step."""
+    steps = list(SEAL_TRANSACTION_STEPS)
+    parity = steps.index("parity_comparison_over_the_locked_set")
+    preflight = steps.index("preflight_digest_translatability_over_the_locked_set")
+    for irreversible in (
+        "revoke_online_dml_on_both_legacy_tables",
+        "insert_the_seal_row",
+        "grant_the_module_platform_tables_to_the_online_role",
+    ):
+        assert steps.index(irreversible) > parity, irreversible
+        assert steps.index(irreversible) > preflight, irreversible
+
+    text = adr_text()
+    assert "rollback is free and total" in text.lower()
+
+
+def test_the_privileges_are_verified_after_being_revoked() -> None:
+    """Issuing a REVOKE is not proof the privilege is gone: a grant reaching the
+    role through PUBLIC or through a role it inherits survives it. Assert the
+    outcome, never the action."""
+    steps = list(SEAL_TRANSACTION_STEPS)
+    assert steps.index("verify_effective_privileges_are_gone") > steps.index(
+        "revoke_online_dml_on_both_legacy_tables"
+    )
+    assert steps.index("verify_effective_privileges_are_gone") < steps.index(
+        "insert_the_seal_row"
+    ), "the seal must not be written before the revoke is proven effective"
+
+    assert set(SEALED_AGAINST_ROLES) == {"platform_api", "app_user"}
+    assert (
+        "TRUNCATE" in REVOKED_LEGACY_PRIVILEGES
+    ), "TRUNCATE empties a table without being INSERT/UPDATE/DELETE"
+
+    text = adr_text()
+    assert "has_any_column_privilege" in text
+    assert "sql-revoke" in text
+
+
+def test_the_digests_cover_every_column_of_both_tables() -> None:
+    """INDEPENDENT EXPECTED TRUTH, read from the ORM rather than from the
+    declaration that claims to describe it.
+
+    Counts and unique constraints detect inserts and deletes; neither detects an
+    UPDATE — and `platform_api` holds UPDATE and DELETE on both tables today, so
+    a silent change to `quorum` or a `content_hash` is a live capability. A
+    column added without being added to its digest fails here.
+    """
+    from vendor_cp.approvals.models import ApprovalPolicy, ApprovalRecord
+
+    assert set(POLICY_DIGEST_FIELDS) == {
+        column.name for column in ApprovalPolicy.__table__.columns
+    }
+    assert set(RECORD_DIGEST_FIELDS) == {
+        column.name for column in ApprovalRecord.__table__.columns
+    }
+
+
+def test_the_digests_include_the_id_and_the_mutable_columns() -> None:
+    """Reversing the earlier exclusion, which was a category error.
+
+    A random value cannot ORDER a set — that is why it fails as a cursor — but it
+    identifies a row perfectly well within one. Excluding it made a
+    source-identity replacement invisible: delete a row, insert a replacement
+    with different content under a new id, and count plus content-without-id
+    could be made to agree.
+    """
+    assert "id" in POLICY_DIGEST_FIELDS
+    assert "id" in RECORD_DIGEST_FIELDS
+    assert "updated_at" in POLICY_DIGEST_FIELDS
+    assert "updated_at" in RECORD_DIGEST_FIELDS
+    # The policy contents an UPDATE could change silently.
+    assert {"quorum", "allow_self_approval"} <= set(POLICY_DIGEST_FIELDS)
+    assert "content_hash" in RECORD_DIGEST_FIELDS
+
+
+def test_the_update_capability_this_defends_against_is_real() -> None:
+    """SENSITIVITY for the reasoning above: the migration really does grant
+    UPDATE to the online role, so this is a live capability rather than a
+    theoretical one. If v003 ever stops granting it, this test says so and the
+    justification can be revisited deliberately."""
+    migration = (
+        ROOT / "alembic" / "versions" / "v003_approval_policies.py"
+    ).read_text()
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE" in migration
+    assert "platform_api" in migration
 
 
 def test_no_id_cursor_survives_anywhere_in_the_contract() -> None:
@@ -309,24 +427,8 @@ def test_no_id_cursor_survives_anywhere_in_the_contract() -> None:
         "the id cursor is back; `ApprovalRecord.id` is random (uuid4) and "
         "orders nothing"
     )
-    # The replacement rule must stay stated, or the next author reaches for the
-    # same wrong tool with the same confident reasoning.
     assert "SCALAR_CURSOR_REQUIREMENT" in declaration
     assert "enforced_monotonic_bigint_column" in declaration
-
-
-def test_the_evidence_digest_excludes_the_random_primary_key() -> None:
-    """Including `id` would make the digest depend on a value nothing else in
-    this contract trusts."""
-    assert "id" not in EVIDENCE_DIGEST_FIELDS
-    assert EVIDENCE_DIGEST_FIELDS == (
-        "policy_code",
-        "policy_version",
-        "subject_type",
-        "subject_id",
-        "content_hash",
-        "approver_id",
-    )
 
 
 # ── Coarse eligibility mapping ──────────────────────────────────────────────

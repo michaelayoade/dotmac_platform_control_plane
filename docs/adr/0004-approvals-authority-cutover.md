@@ -116,69 +116,151 @@ watermark acquires either.
 
 ### 3. Sealing the legacy evidence set
 
-An earlier draft of this contract proposed a watermark whose boundary was
+An earlier draft proposed a watermark whose boundary was
 `max(approval_records.id)`, on the reasoning that an id is unambiguous where a
-clock is not. **That was wrong, and it was wrong at the premise.**
-`ApprovalRecord.id` comes from the kernel's `uuid_pk()`, which is
-`default=uuid4` — random. A high-water mark over random values orders nothing;
-"greatest id" has no chronological meaning at all. The argument against clocks
-was sound and the substitute was not.
+clock is not. **That was wrong at the premise.** `ApprovalRecord.id` comes from
+the kernel's `uuid_pk()`, which is `default=uuid4` — random. A high-water mark
+over random values orders nothing.
 
-The replacement does not answer the boundary question. It **removes** it.
+The replacement does not answer the boundary question. It **removes** it: the old
+set is sealed so that no later legacy row can exist, and the seal is proved
+rather than asserted.
 
-**Seal, then count and digest:**
+#### 3.1 One transaction, and everything inside it
 
-1. **Quiesce.** Stop the legacy write path and let in-flight work finish.
-2. **Revoke.** `INSERT`, `UPDATE` and `DELETE` on `approval_policies` and
-   `approval_records` are revoked from every ONLINE role (`platform_api`); only
-   the offline migrator retains DML. After this statement commits, no request
-   path in the running system can add a legacy row.
-3. **Record the seal.** A one-row, insert-only table
-   (`approval_cutover_seal`) records what was sealed:
+Sealing, proving and switching are **one transaction**. A sequence that sealed
+first and compared afterwards would forbid rollback at exactly the moment a
+parity failure could still be discovered — leaving a failure with no legal exit.
+Here every check runs while rollback is still free.
+
+```sql
+BEGIN;
+
+-- (1) LOCK FIRST. Operational quiescence is a plan, not a guarantee.
+LOCK TABLE public.approval_policies, public.approval_records IN SHARE MODE;
+
+-- (2) preflight: digest translatability over the LOCKED set   (§ 4a)
+-- (3) parity:    the five-property comparison, reconciliation,
+--                disposition coverage                          (§ 4, § 6)
+--     Any failure -> ROLLBACK. Nothing has changed; the locks release.
+
+-- (4) revoke the online role's DML on both legacy tables
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON
+  public.approval_policies, public.approval_records FROM platform_api;
+
+-- (5) verify EFFECTIVE privileges are gone                     (§ 3.4)
+-- (6) compute the complete content digests over the locked set (§ 3.3)
+-- (7) INSERT the single seal row
+-- (8) grant the module's platform tables to the online role — the database
+--     half of the authority switch
+
+COMMIT;
+```
+
+**Why `IN SHARE MODE`.** `SHARE` conflicts with `ROW EXCLUSIVE`, which is what
+`INSERT`, `UPDATE` and `DELETE` take. PostgreSQL therefore makes `LOCK TABLE`
+wait for every in-flight writer to finish and blocks new writers for the rest of
+the transaction
+([sql-lock](https://www.postgresql.org/docs/current/sql-lock.html)). It does not
+block `SELECT`, so the preflight, the parity comparison and the digests all read
+a set that provably cannot move under them.
+
+**The lock is taken before anything is read.** Without it, the sequence had a
+gap: an in-flight writer could commit *after* the count and digest were read, and
+the seal would attest to a set that had already changed — reintroducing the exact
+boundary question the sealed set exists to remove.
+
+**What the lock covers:** both legacy tables, for the whole transaction, against
+every writer regardless of role. It does not cover a `TRUNCATE` or DDL from a
+superuser session, which take `ACCESS EXCLUSIVE` and would themselves wait; and
+it says nothing about tables outside this list, which is why the two tables are
+named explicitly rather than discovered.
+
+#### 3.2 The seal row
+
+One row, insert-only, in `approval_cutover_seal`:
 
 | column | meaning |
 |---|---|
 | `sealed_at` | UTC instant of the sealing transaction |
 | `alembic_revision` | composed head at sealing |
-| `legacy_policy_count` | `count(*)` of `approval_policies` |
-| `legacy_record_count` | `count(*)` of `approval_records` |
-| `evidence_digest` | canonical digest of the sealed record set (below) |
-| `digest_algorithm` | `sha256` — named, so a future change is a visible one |
+| `legacy_policy_count` | `count(*)` of `approval_policies`, under the lock |
+| `legacy_record_count` | `count(*)` of `approval_records`, under the lock |
+| `policy_digest` | complete-content digest of `approval_policies` |
+| `record_digest` | complete-content digest of `approval_records` |
+| `digest_algorithm` | `sha256` — named, so a change is a visible one |
 | `operator_ref` | the platform admin who executed the sealing |
 
-**Why this is strictly stronger than a boundary.** A watermark asserts *when* the
-old world ended and then requires every row to be compared against that instant.
-A seal makes every legacy row **pre-cutover by construction**: the online roles
-cannot write the tables at all, so there is no later row to classify and no race
-to reason about. The count and digest are not the boundary — they are evidence
-that the set which was compared is the set that was sealed.
+`UPDATE` and `DELETE` on the seal table are revoked from every online role, so
+the sealed set cannot be restated afterwards to make a report agree.
 
-**The canonical digest.** Over `approval_records` only (policies are covered by
-their own count and are immutable by constraint): each row rendered as the
-newline-joined, `\x1f`-separated tuple
+#### 3.3 The digests cover COMPLETE contents
 
-`policy_code, policy_version, subject_type, subject_id, content_hash, approver_id`
+Counts and unique constraints detect insertions and deletions. **Neither detects
+an update at all** — and `platform_api` currently holds `UPDATE` and `DELETE` on
+both tables (migration `v003`), so a silent change to `quorum`,
+`allow_self_approval` or a record's `content_hash` is a live capability, not a
+theoretical one. Two digests therefore cover **every column of both tables**:
 
-with `approver_id` lowercased canonical UUID text, rows sorted bytewise by that
-rendering, then SHA-256 over the UTF-8 encoding. The row's own `id` is
-deliberately excluded: it is random, carries no meaning, and including it would
-make the digest depend on a value nothing else in this contract trusts.
+- `policy_digest` over `approval_policies`: `id`, `policy_code`, `version`,
+  `quorum`, `allow_self_approval`, `created_at`, `updated_at`;
+- `record_digest` over `approval_records`: `id`, `policy_code`, `policy_version`,
+  `subject_type`, `subject_id`, `content_hash`, `approver_id`, `created_at`,
+  `updated_at`.
 
-**"The watermark" now means the sealing transaction.** It is still the moment
+Each row is rendered as its `\x1f`-separated column values in the declared order,
+rows are sorted bytewise by that rendering, and SHA-256 is taken over the UTF-8
+encoding of the newline-joined result.
+
+**`id` is now included, and the earlier reasoning for excluding it was a
+category error.** A random value cannot ORDER a set — that is why it fails as a
+cursor — but it identifies a row perfectly well WITHIN one. Excluding it made a
+source-identity replacement invisible: delete a row and insert a replacement
+carrying different content under a new id, and count plus content-without-id
+could be made to agree. Excluding policy contents was the same hole one table
+over.
+
+`updated_at` is included so that an update which happens to preserve every other
+value still moves the digest.
+
+The declared field lists are checked against the ORM models, so a column added to
+either table without being added to its digest fails the build rather than
+silently escaping the seal.
+
+#### 3.4 Verify EFFECTIVE privileges, not the statement
+
+Issuing `REVOKE` is not proof the privilege is gone. A grant reaching the role
+through `PUBLIC`, or through a role it inherits, survives a direct revoke
+([sql-revoke](https://www.postgresql.org/docs/current/sql-revoke.html)).
+
+After step (4) and **before** the seal is written, the transaction asserts the
+outcome: for each legacy table and each of PostgreSQL's seven table privileges,
+`has_table_privilege` OR `has_any_column_privilege` must be false for
+`platform_api` and for `app_user`. Both functions answer "effectively holds",
+which is what makes inherited and `PUBLIC` grants visible; the column-level
+function is what catches a `GRANT UPDATE (quorum)` that a table-level inquiry
+reports as revoked.
+
+This is the assembly's canonical privilege query — the same
+`ROLE_TABLE_PRIVILEGES_SQL` the composed live-catalogue audit uses — so the
+sealing path and the standing audit cannot drift apart in what they consider
+"revoked".
+
+Any surviving privilege **aborts the transaction**. Assert the outcome, never the
+action.
+
+#### 3.5 If a scalar cursor is ever genuinely required
+
+Add an enforced monotonic `BIGINT` to the legacy table first, backfill it, and
+make it `NOT NULL` with a sequence default. Do **not** reintroduce a cursor over
+UUID primary keys. This paragraph exists because the mistake was made once with
+confident reasoning, and it is the reasoning that has to be blocked.
+
+**"The watermark" now means this sealing transaction.** It is still the moment
 that divides legacy evidence from module requests — it is simply recorded by
 sealing the old set rather than by naming a cursor into it. Everywhere below,
-"pre-watermark" means "in the sealed set", which after step 2 is every legacy
-row that will ever exist.
-
-The seal row is **never updated and never deleted** — `UPDATE`/`DELETE` revoked
-from every online role — so the sealed set cannot be restated afterwards to make
-a parity report agree.
-
-**If a scalar cursor is ever genuinely required**, an enforced monotonic `BIGINT`
-must be added to the legacy table first, backfilled, and made `NOT NULL` with a
-sequence default. Do **not** reintroduce a cursor over UUID primary keys. This
-paragraph exists because the mistake above was made once with confident
-reasoning, and the reasoning is what has to be blocked, not just the code.
+"pre-watermark" means "in the sealed set", which after commit is every legacy row
+that will ever exist.
 
 ### 4. Shadow comparison — five shared safety properties
 
@@ -338,9 +420,11 @@ groups:
 6. **Digest translatability** — every legacy `content_hash` translates under
    § 4a. Target: 100%. An untranslatable digest blocks the cutover; there is no
    skip path.
-7. **Seal integrity** — the recorded `legacy_record_count` and `evidence_digest`
-   recomputed at cutover match the sealed values, proving the compared set is
-   the sealed set.
+7. **Seal integrity** — the counts and both complete-content digests
+   (`policy_digest`, `record_digest`) are computed under the lock in the same
+   transaction that records them, so the set compared IS the set sealed. There is
+   no separate later recomputation to disagree, which is the point of doing all
+   of it inside one transaction.
 
 **Accepted differences** (present, understood, and not blockers):
 
@@ -358,18 +442,31 @@ groups:
 
 ### 7. Rollback boundary
 
-Rollback is available **until the seal row is committed**. Up to that point
-the module has accepted no request, holds no row, and the legacy writer is still
-authoritative: rollback is simply resuming legacy writes, and shadow comparison
-leaves nothing to undo because it writes nothing.
+The boundary is the sealing transaction's `COMMIT`, and every check that could
+justify aborting runs before it.
 
-**After the watermark, rollback is forward-only.** Genuine module requests exist
-by then, with real requesters and real idempotency keys, and reverting the
-authority would either strand them or require the legacy system to absorb facts
-it cannot represent. A defect found after the watermark is fixed in the module
-era — by cancelling and re-raising affected requests — not by moving the
-boundary backwards. The seal table's revoked `UPDATE`/`DELETE` makes that
-structural rather than a matter of discipline.
+**Before commit, rollback is free and total.** The preflight (§ 4a) and the parity
+comparison (§ 6) both run inside the transaction, under the lock, after nothing
+has been written. A failure at either point is a `ROLLBACK`: the locks release,
+no privilege has changed, no seal exists, and the legacy authority is still
+serving. This is the repair of an earlier draft that sealed first and compared
+afterwards while forbidding rollback after sealing — which left a parity failure
+with no legal exit.
+
+**After commit, rollback is forward-only.** The online role can no longer write
+the legacy tables, so there is no "resume the old writer" to return to; genuine
+module requests begin, with real requesters and real idempotency keys. A defect
+found afterwards is fixed in the module era — by cancelling and re-raising
+affected requests — not by moving the boundary backwards. The seal table's
+revoked `UPDATE`/`DELETE` makes that structural rather than a matter of
+discipline.
+
+**Between commit and the adapter deploy there is a deliberate write freeze.**
+The legacy path is physically incapable of writing and the new adapter is not yet
+serving, so approvals are briefly unavailable. That is a planned, announced
+outage and it is the honest cost of never having two writers: the alternative is
+an overlap window in which both could write, which is the thing this whole
+contract exists to prevent.
 
 ### 8. Retirement gate
 
@@ -426,8 +523,9 @@ and does not authorise it.
   read-only rather than migrated.
 - Some approval history will be visibly discontinuous at the watermark. That is
   the honest rendering of a system that did not record requests.
-- The cutover is one coherent change (quiesce → revoke → seal → compare → dispose →
-  switch), not a gradual dual-write.
+- The cutover is ONE transaction — lock → preflight → parity → revoke → verify →
+  digest → seal → grant — followed by the adapter deploy. Never a gradual
+  dual-write: there is no window in which both writers are able to act.
 
 ## What this ADR does NOT authorise
 

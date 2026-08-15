@@ -287,46 +287,96 @@ RESTART_CONDITIONS: Final[tuple[str, ...]] = (
 #: cutover change, not by this one.
 SEAL_TABLE: Final[str] = "approval_cutover_seal"
 
-#: An earlier draft used `max(approval_records.id)` as a boundary cursor. That is
-#: INVALID: `ApprovalRecord.id` comes from the kernel's `uuid_pk()`, which is
-#: `default=uuid4` — random. A high-water mark over random values orders
-#: nothing. The argument against clocks was right; the substitute was not.
-#:
-#: The seal removes the boundary question instead of answering it: online DML is
-#: revoked first, so every legacy row is pre-cutover BY CONSTRUCTION, and the
-#: count and digest are evidence that the set compared is the set sealed.
-SEAL_COLUMNS: Final[tuple[str, ...]] = (
-    "sealed_at",
-    "alembic_revision",
-    "legacy_policy_count",
-    "legacy_record_count",
-    "evidence_digest",
-    "digest_algorithm",
-    "operator_ref",
-)
-
-#: Revoked from the ONLINE roles before the seal is taken, which is what makes
-#: "no later legacy row can exist" a property of the database rather than a
-#: promise.
+#: The tables sealed, named explicitly rather than discovered: a lock covers what
+#: it names, and a set computed at runtime could quietly shrink.
 SEALED_LEGACY_TABLES: Final[tuple[str, ...]] = (
     "approval_policies",
     "approval_records",
 )
 
-#: Fields hashed into `evidence_digest`, in order. `id` is deliberately absent:
-#: it is random, carries no meaning, and including it would make the digest
-#: depend on a value nothing else in this contract trusts.
-EVIDENCE_DIGEST_FIELDS: Final[tuple[str, ...]] = (
+#: Taken BEFORE anything is read. Operational quiescence is a plan, not a
+#: guarantee: without the lock an in-flight writer can commit after the count and
+#: digest are read, and the seal would then attest to a set that had already
+#: changed — reintroducing the boundary question the seal exists to remove.
+#:
+#: SHARE conflicts with ROW EXCLUSIVE, which INSERT/UPDATE/DELETE take, so
+#: PostgreSQL waits for in-flight writers and blocks new ones for the rest of the
+#: transaction. It does not block SELECT, so every check below reads a set that
+#: provably cannot move under it.
+SEAL_LOCK_MODE: Final[str] = "SHARE"
+
+#: The whole sequence, in order, inside ONE transaction. Sealing before comparing
+#: would forbid rollback at exactly the moment a parity failure could still be
+#: found; here every check runs while rollback is still free.
+SEAL_TRANSACTION_STEPS: Final[tuple[str, ...]] = (
+    "lock_both_legacy_tables_in_share_mode",
+    "preflight_digest_translatability_over_the_locked_set",
+    "parity_comparison_over_the_locked_set",
+    "revoke_online_dml_on_both_legacy_tables",
+    "verify_effective_privileges_are_gone",
+    "compute_complete_content_digests",
+    "insert_the_seal_row",
+    "grant_the_module_platform_tables_to_the_online_role",
+)
+
+#: Revoked from the ONLINE roles inside the transaction. TRUNCATE is included
+#: because it empties a table without being INSERT/UPDATE/DELETE.
+REVOKED_LEGACY_PRIVILEGES: Final[tuple[str, ...]] = (
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+)
+
+#: Roles that must effectively hold NOTHING on the legacy tables after the
+#: revoke. Verified, not assumed — a grant reaching a role through PUBLIC or
+#: through a role it inherits survives a direct REVOKE.
+SEALED_AGAINST_ROLES: Final[tuple[str, ...]] = ("platform_api", "app_user")
+
+#: Complete contents, both tables. Counts and unique constraints detect inserts
+#: and deletes; NEITHER detects an UPDATE — and `platform_api` currently holds
+#: UPDATE and DELETE on both tables (migration v003), so a silent change to
+#: `quorum`, `allow_self_approval` or a `content_hash` is a live capability.
+#:
+#: `id` is INCLUDED, reversing an earlier exclusion that was a category error: a
+#: random value cannot ORDER a set, which is why it fails as a cursor, but it
+#: identifies a row perfectly well within one. Excluding it made a source-identity
+#: replacement invisible — delete a row, insert a replacement with different
+#: content under a new id, and count plus content-without-id could be made to
+#: agree. `updated_at` is included so an update preserving every other value
+#: still moves the digest.
+#:
+#: Checked against the ORM models by `tests/architecture/test_approvals_cutover.py`,
+#: so a column added to either table without being added here fails the build
+#: rather than silently escaping the seal.
+POLICY_DIGEST_FIELDS: Final[tuple[str, ...]] = (
+    "id",
+    "policy_code",
+    "version",
+    "quorum",
+    "allow_self_approval",
+    "created_at",
+    "updated_at",
+)
+
+RECORD_DIGEST_FIELDS: Final[tuple[str, ...]] = (
+    "id",
     "policy_code",
     "policy_version",
     "subject_type",
     "subject_id",
     "content_hash",
     "approver_id",
+    "created_at",
+    "updated_at",
 )
 
+#: Rows rendered as \x1f-separated column values in the declared order, sorted
+#: bytewise by that rendering, newline-joined, SHA-256 over the UTF-8 encoding.
+DIGEST_FIELD_SEPARATOR: Final[str] = "\x1f"
+
 #: Revoked from every online role once written, so the sealed set cannot be
-#: restated afterwards to make a parity report agree.
+#: restated afterwards to make a report agree.
 SEAL_IMMUTABLE_AFTER_WRITE: Final[bool] = True
 
 #: If a scalar cursor is ever genuinely needed, add an enforced monotonic BIGINT
@@ -371,12 +421,17 @@ __all__ = [
     "ADAPTER_OBLIGATIONS",
     "COARSE_ELIGIBILITY_RULE",
     "DIGEST_REJECTION_REASONS",
-    "EVIDENCE_DIGEST_FIELDS",
+    "DIGEST_FIELD_SEPARATOR",
+    "POLICY_DIGEST_FIELDS",
+    "RECORD_DIGEST_FIELDS",
+    "REVOKED_LEGACY_PRIVILEGES",
+    "SEALED_AGAINST_ROLES",
+    "SEAL_LOCK_MODE",
+    "SEAL_TRANSACTION_STEPS",
     "MODULE_DIGEST_PREFIX",
     "PLATFORM_ADMIN_ROLE_ID",
     "SCALAR_CURSOR_REQUIREMENT",
     "SEALED_LEGACY_TABLES",
-    "SEAL_COLUMNS",
     "SEAL_IMMUTABLE_AFTER_WRITE",
     "SEAL_TABLE",
     "VENDOR_DIGEST_LENGTH",
