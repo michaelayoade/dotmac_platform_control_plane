@@ -31,7 +31,12 @@ from dotmac_kernel.migrations.catalog import (
     ROLE_TABLE_PRIVILEGES_SQL,
     TABLE_PRIVILEGES,
 )
-from import_scanner import reaches_module, scan_imports, source_files
+from import_scanner import (
+    reaches_module,
+    scan_imports,
+    source_files,
+    submodule_reach_ins,
+)
 
 from vendor_cp.approvals_cutover import (
     ACTOR_MAPPING,
@@ -602,25 +607,56 @@ def test_the_restart_rule_is_data_not_judgement() -> None:
 # ── This contract authorises no composition ─────────────────────────────────
 
 
-def test_the_module_is_not_pinned_while_this_contract_stands() -> None:
-    """MUTATION PROOF for the ADR's closing section. Composition is the next
-    phase and needs the published locator release; a pin appearing here would
-    mean the phases had merged without anyone deciding to merge them."""
+def test_the_module_is_pinned_exactly_for_the_shadow_phase() -> None:
+    """This flipped deliberately.
+
+    Until the shadow phase the contract authorised no pin at all, and a guard
+    said so. That guard has now been changed in the change that earned it — which
+    is the whole point of a two-directional ratchet: it does not quietly permit
+    the next step, it makes someone take it.
+    """
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    assert "dotmac-approvals" not in config["tool"]["poetry"]["dependencies"]
+    assert config["tool"]["poetry"]["dependencies"]["dotmac-approvals"] == {
+        "version": "0.1.0a4",
+        "source": "forgejo",
+    }
 
 
-def test_no_source_file_imports_the_new_authority() -> None:
-    """Including this contract module itself, which references the module only
-    as a string for exactly this reason."""
-    importers = sorted(
+def test_only_composition_sites_touch_the_new_authority() -> None:
+    """Composed, but boundedly: nothing may CALL it.
+
+    The module is imported in exactly two places, for exactly two purposes — the
+    manifest for the assembly spec, and the migration locator for the composed
+    revision graph. A third importer, or either of these reaching past those
+    names, is the shadow phase quietly becoming an adoption.
+    """
+    importers = {
         path.relative_to(SRC).as_posix()
         for path in source_files(PACKAGE)
         if reaches_module(_refs(path), NEW_AUTHORITY)
+    }
+    assert importers == {"vendor_cp/assembly.py", "vendor_cp/migrations.py"}, (
+        "only composition may import the module during shadow; a caller is an "
+        f"authority change: {sorted(importers)}"
     )
-    assert not importers, (
-        f"{NEW_AUTHORITY} is not a dependency of this assembly yet; the cutover "
-        f"contract precedes the composition: {importers}"
+
+
+def test_no_source_file_reaches_the_modules_service_surface() -> None:
+    """The one-writer premise, enforced at the import boundary.
+
+    `dotmac_approvals.service` is where a write would come from. Nothing under
+    `src/` may reach it — under any spelling, which is why this goes through the
+    shared scanner rather than a substring search.
+    """
+    reach_ins = sorted(
+        f"{path.relative_to(SRC).as_posix()}: {sorted(found)}"
+        for path in source_files(PACKAGE)
+        if (found := submodule_reach_ins(_refs(path), NEW_AUTHORITY))
+        and found != {f"{NEW_AUTHORITY}.migrations"}
+    )
+    assert not reach_ins, (
+        "vendor code may take only the manifest and the migration locator from "
+        f"the module during shadow: {reach_ins}"
     )
 
 

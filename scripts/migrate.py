@@ -45,41 +45,25 @@ if _URL:
 
 from alembic import command  # noqa: E402
 
-from vendor_cp.migrations import make_alembic_config  # noqa: E402
-
-#: The ONLY target this entrypoint accepts. See the module docstring.
-COMPOSED_TARGET = "heads"
+from vendor_cp.migrations import (  # noqa: E402
+    COMPOSED_TARGET,
+    deploy_config,
+    deploy_target_refusal,
+)
 
 
 def main(target: str = COMPOSED_TARGET) -> int:
+    """Validate, then delegate. The decisions live in `vendor_cp.migrations`."""
     if not _URL:
         print("set MIGRATION_DATABASE_URL (or DATABASE_URL)", file=sys.stderr)
         return 2
 
-    if target != COMPOSED_TARGET:
-        print(
-            f"refusing to upgrade to {target!r}: the deploy path applies composed "
-            f"{COMPOSED_TARGET!r} only.\n"
-            "A partial upgrade can stop after `ap_0001_approvals` and COMMIT the "
-            "module DML grant that vendor `v012` exists to remove — the shadow "
-            "composition is read-only only because both run in one transaction.\n"
-            "Drive an intermediate target through vendor_cp.migrations "
-            "make_alembic_config (rehearsals do) if that is genuinely what you "
-            "want.",
-            file=sys.stderr,
-        )
+    refusal = deploy_target_refusal(target)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         return 3
 
-    config = make_alembic_config(_URL)
-    # Assert the OUTCOME, not the action, and assert it INSIDE the migration
-    # transaction: `upgrade("heads")` returning does not by itself say the
-    # database reached every composed head — a lineage missing from
-    # `version_locations` is simply never applied, and the command reports
-    # success for the lineages it did know about. `env.py` performs the check on
-    # the live connection, so a shortfall rolls the whole composition back
-    # rather than leaving a half-composed database committed.
-    config.attributes["require_composed_heads"] = True
-    command.upgrade(config, COMPOSED_TARGET)
+    command.upgrade(deploy_config(_URL), COMPOSED_TARGET)
     return 0
 
 
