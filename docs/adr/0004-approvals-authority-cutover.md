@@ -12,11 +12,10 @@
 > safety properties, dispose of incomplete groups, then move the authority in one
 > transaction. None of that happened, and none of it should be built.
 >
-> A read-only inventory (PR #50) was built precisely so the question would be
-> settled by measurement rather than inference. The observation against the
-> designated sole target was `TARGET_ABSENT` — no Compose `db` service, no data
-> volume. There is no legacy estate: nothing to seal, nothing to compare,
-> nothing to dispose of.
+> A direct authorized check against the designated sole target found
+> `TARGET_ABSENT` — no Compose `db` service, no data volume. There is no legacy
+> estate: nothing to seal, nothing to compare, nothing to dispose of. (The
+> read-only inventory tool built for this question never ran; see ADR-0005.)
 >
 > What survives and is LIVE: the eligibility mapping (§ 2) and the digest
 > translation (§ 4a). Both were declared here before any code used them, and the

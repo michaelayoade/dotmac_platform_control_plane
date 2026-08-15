@@ -53,10 +53,12 @@ it owns and — just as importantly — what it must never become.
   verifies the effective outcome in both directions.
 
   **The switch was greenfield, and valid only because the legacy estate was
-  empty.** That is a measurement, not an assumption: a read-only inventory run
-  against the designated sole target observed `TARGET_ABSENT` — no Compose `db`
-  service, no data volume — so there was no approval history to seal, compare or
-  migrate. `v013` re-checks emptiness under `ACCESS EXCLUSIVE` in the same
+  empty.** That is an observation, not an assumption: a direct authorized
+  Docker-boundary check against the designated sole target found `TARGET_ABSENT`
+  — no Compose `db` service, no data volume — so there was no approval history to
+  seal, compare or migrate. (The read-only inventory tool never ran; its
+  contribution was refusing to report an absence it had not observed. See
+  ADR-0005.) `v013` re-checks emptiness under `ACCESS EXCLUSIVE` in the same
   transaction that drops the tables, and fails closed if a row exists. ADR-0004's
   sealed cutover is superseded and must not be built.
 
@@ -74,6 +76,15 @@ it owns and — just as importantly — what it must never become.
   composing assembly has acquired write authority. That distinction is what let
   v012 hold the module read-only and v013 hand it authority, both from this
   assembly, without the module knowing either phase existed.
+
+  **Retired with the switch:** the sealed-cutover implementation
+  (`approvals_cutover.py` and its test) and the read-only inventory tool. Both
+  queried `approval_policies` / `approval_records`, which `v013` drops, so
+  retaining them would preserve the appearance of a reference implementation
+  rather than one. They remain readable at `c3a0d1b`; a later cutover implements
+  locally from ADR-0031's protocol and its own current inventory, and the
+  extraction bar is unchanged at two CURRENT consumers. See ADR-0005 § "Retired
+  artifacts".
 
   **Lifecycle: below adopted.** Composed and authoritative in code is not
   adopted; the new owner has not run in production, because nothing has.

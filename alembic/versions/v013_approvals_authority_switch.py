@@ -8,9 +8,9 @@ tables are dropped.
 
 ADR-0004 originally specified a sealed cutover with parity measurement — correct
 for a running system with approval history to preserve. Vendor CP turned out not
-to be one: the read-only inventory reported `TARGET_ABSENT` against the
-designated sole target (no Compose `db` service, no data volume), so there is no
-legacy estate to seal, compare or migrate.
+to be one: a direct authorized check against the designated sole target found
+`TARGET_ABSENT` (no Compose `db` service, no data volume), so there is no legacy
+estate to seal, compare or migrate.
 
 Empty is therefore the premise the whole switch rests on, and it is CHECKED here
 rather than assumed. If either table holds a row, this migration raises and the

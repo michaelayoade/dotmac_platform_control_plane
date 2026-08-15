@@ -10,12 +10,15 @@ specified. That contract was correct for the situation it assumed — a running
 system with real approval history to seal, compare and dispose of. Vendor CP
 turned out not to be that system.
 
-A read-only inventory (PR #50) was built to decide the question by measurement
-rather than by inference, and the observation against the designated sole target
-was `TARGET_ABSENT`: no Compose `db` service and no data volume. There is no
-legacy estate, so there was nothing to seal, nothing to compare and nothing to
-migrate — and building parity machinery against an empty set would have been
-elaborate work producing no information.
+A direct authorized check against the designated sole target found
+`TARGET_ABSENT`: no Compose `db` service and no data volume. There is no legacy
+estate, so there was nothing to seal, nothing to compare and nothing to migrate —
+and building parity machinery against an empty set would have been elaborate work
+producing no information.
+
+(A read-only inventory tool was built for this question and never ran. Its
+contribution was refusing to report an absence it had not observed — see
+ADR-0005.)
 
 So the switch is a straight authority transfer, verified on the one fact that
 makes it valid: the legacy tables are EMPTY, checked under lock in the same
