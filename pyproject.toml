@@ -15,14 +15,14 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a50", extras = [
+dotmac-kernel = { version = "0.1.0a61", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
 # Vendor-owned immutable artifact identity and attestations. Exact-pinned from
 # the same private index; its manifest and migration locator are composed by the
 # assembly through the package's public top-level surface.
-dotmac-release-catalog = { version = "0.1.0a3", source = "forgejo" }
+dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
 # Installed in shadow mode: the independent owner and its migration lineage are
 # composed now, while the vendor-local allocation writer remains authoritative
 # until historical commercial rows have evidence-backed product mappings and
@@ -30,7 +30,7 @@ dotmac-release-catalog = { version = "0.1.0a3", source = "forgejo" }
 # product-qualified; that does not by itself authorize a writer cutover.
 # Exact-pinned from the private index; never a path dependency and never a
 # silent dual-write.
-dotmac-entitlement-allocation = { version = "0.1.0a3", source = "forgejo" }
+dotmac-entitlement-allocation = { version = "0.1.0a4", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).
