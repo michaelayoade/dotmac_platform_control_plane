@@ -4,7 +4,7 @@ The vendor control-plane database runs the KERNEL base migrations (shipped as
 `dotmac_kernel` package data, located via the public `versions_dir()`), the
 installed Release Catalog module lineage, the installed Entitlement Allocation
 module lineage, PLUS this repo's own `alembic/versions` — one revision graph,
-four separately-owned lineages. Because all shared packages are installed
+five separately-owned lineages. Because all shared packages are installed
 dependencies (not fixed repo paths),
 `version_locations` is composed programmatically rather than hard-coded in
 `alembic.ini`.

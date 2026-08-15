@@ -111,18 +111,37 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Restore the module's own grants.
+    """Refuse. Stepping this revision backwards would recreate TWO WRITERS.
 
-    Downgrade means "undo this migration", not "advance the cutover": it returns
-    the database to the state `ap_0001_approvals` left, which is the module's
-    normal grants. The cutover restores them too, but deliberately and in its own
-    sealed transaction (ADR-0004 § 3.1) — this is not that.
+    An earlier draft restored the module's `SELECT, INSERT, UPDATE, DELETE`
+    grants here, reasoning — correctly — about the LOCAL question: a downgrade
+    undoes its own migration, and the state before this one is the state
+    `ap_0001_approvals` left. That reasoning never reached the system question,
+    and the answer to it is different: while `vendor_cp.approvals` is still the
+    authoritative writer, handing `platform_api` write access to the module's
+    tables is exactly the two-writer state this whole shadow phase exists to
+    prevent. A correct local undo produced an incorrect global state.
+
+    Production policy already forbids schema downgrade, so the honest
+    implementation is to fail closed rather than to implement a path nobody may
+    take and everybody may misread.
+
+    The grants ARE restored — deliberately, once, inside the sealed cutover
+    transaction (ADR-0004 § 3.1), which is also where the legacy writer is
+    quiesced and the authority actually moves. Never as a side effect of
+    stepping a revision backwards.
+
+    Raising leaves nothing half-done: the composed upgrade runs in one
+    transaction, so this rolls back with everything else and the database keeps
+    both its grants and its revision state exactly as they were.
     """
-    for table in PLATFORM_TABLES:
-        op.execute(
-            f"GRANT SELECT, INSERT, UPDATE, DELETE ON {MODULE_SCHEMA}.{table} "
-            f"TO {ONLINE_PLATFORM_ROLE};"
-        )
+    raise RuntimeError(
+        "v012_approvals_shadow_readonly cannot be downgraded: restoring the "
+        "module's DML grants would give platform_api write access to tables "
+        "vendor_cp.approvals still owns, recreating the two-writer state the "
+        "shadow phase prevents. The grants are restored in the sealed cutover "
+        "transaction (ADR-0004 § 3.1), not by stepping backwards."
+    )
 
 
 def _verify_effective_privileges() -> None:

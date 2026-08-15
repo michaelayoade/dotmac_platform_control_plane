@@ -41,9 +41,10 @@ disagree, fix the drift.
    `PrerequisiteBinding` says where an effect comes from, and this assembly
    binds BOTH kernel effects — including `tenant_scope_catalog.v1`, because
    kernel `0001` really does create `public.tenants` here. A
-   `ModulePlaneSelection` says what this product installs, and it is EMPTY
-   until a selectable module is composed — which happens only behind a cutover
-   contract, never as a side effect of a version bump. Never reintroduce the a60
+   `ModulePlaneSelection` says what this product installs, and it selects
+   `PLATFORM` alone for `approvals` — never as a side effect of a version bump,
+   and only behind the cutover contract that authorised it. Never reintroduce
+   the a60
    model in which an absent binding selected a plane, and never create a tenants
    table, a sentinel tenant, or a nullable tenant column to satisfy a module
    (ADR-0028; `tests/architecture/test_migration_prerequisite_bindings.py`,
@@ -71,9 +72,14 @@ disagree, fix the drift.
     tables, request identity is never synthesized, and new request identity
     begins at the watermark. `src/vendor_cp/approvals_cutover.py` carries the
     enforceable half, including a two-directional ratchet on modules calling the
-    legacy decision surface — driving that set to empty is a retirement gate. Do
-    not compose, pin or plane-select `dotmac-approvals` while the contract
-    stands (`tests/architecture/test_approvals_cutover.py`).
+    legacy decision surface — driving that set to empty is a retirement gate.
+    `dotmac-approvals` is now composed in SHADOW under that contract: pinned,
+    PLATFORM-selected and READ-ONLY, with vendor `v012` removing the write
+    grants its own migration issues. Installation is not adoption — nothing may
+    WRITE the module's tables, and `downgrade()` on `v012` fails closed rather
+    than restoring grants that would recreate two writers
+    (`tests/architecture/test_approvals_cutover.py`,
+    `tests/migration/test_approvals_shadow.py`).
 13. **A shadow overlap is declared, one-writer, ratcheted and dated.** The
     legacy `public.allocations` / `public.allocation_entries` tables shadow the
     composed `mod_ealloc` schema. `src/vendor_cp/shadow_overlaps.py` is the

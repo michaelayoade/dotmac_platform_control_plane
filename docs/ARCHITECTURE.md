@@ -25,10 +25,11 @@ it owns and — just as importantly — what it must never become.
     bound, because that is simply true: this assembly runs the whole kernel base
     lineage, so `public.tenants`, `public.tenant_domains` and
     `public.app_current_tenant_id()` all exist here.
-  - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It is
-    **empty**, because no selectable module is composed yet: both installed
-    modules declare a single supported plane set, so their contract is atomic
-    and the kernel refuses a selection for them.
+  - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It
+    selects `ModulePlane.PLATFORM` for `approvals`, the one selectable module
+    composed here; Release Catalog and Entitlement Allocation each declare a
+    single supported plane set, so their contract is atomic and the kernel
+    refuses a selection for them.
 
   Kernel `0.1.0a60` briefly let the first imply the second, and this assembly is
   the case that broke it: binding the tenant catalogue truthfully would have
@@ -213,7 +214,7 @@ Compose project and from every product data plane:
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration
-backup, runs the four-lineage `scripts/migrate.py`, and only then replaces the
+backup, runs the five-lineage `scripts/migrate.py`, and only then replaces the
 application. The complete operator contract and rollback boundary are in
 `docs/operations/production-deployment.md`.
 

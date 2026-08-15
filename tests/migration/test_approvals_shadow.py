@@ -49,6 +49,7 @@ from vendor_cp.migrations import (
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = "mod_approvals"
+VENDOR_HEAD = "v012_approvals_shadow_readonly"
 ONLINE_ROLE = "platform_api"
 TENANT_ROLE = "app_user"
 
@@ -198,7 +199,66 @@ def test_the_rollback_canary_would_notice_a_surviving_schema(
     assert _schema_exists(scratch_db)
 
 
-# ── 4. After a successful upgrade: SELECT-only, no tenant access, empty ─────
+# ── 4. Downgrade fails closed, and fails INERTLY ────────────────────────────
+
+
+def _version_rows(url: str) -> set[str]:
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            return set(
+                conn.execute(text("SELECT version_num FROM alembic_version")).scalars()
+            )
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_is_refused_and_changes_nothing(scratch_db: str) -> None:
+    """Stepping this revision backwards would recreate TWO WRITERS.
+
+    Restoring the module's DML grants gives `platform_api` write access to
+    tables `vendor_cp.approvals` still owns — the exact state the shadow phase
+    prevents. So `downgrade()` raises, and this proves the refusal is INERT
+    rather than partial: a downgrade that raised AFTER revoking, or that left
+    the version row stepped back, would leave a database in a state nobody
+    chose, and would fail here.
+    """
+    _upgrade(scratch_db)
+    before = _version_rows(scratch_db)
+    assert VENDOR_HEAD in before
+
+    with pytest.raises(RuntimeError, match="cannot be downgraded"):
+        command.downgrade(make_alembic_config(scratch_db), "v011_product_identity")
+
+    # (a) the grants are exactly as the forward migration left them...
+    for table in PLATFORM_TABLES:
+        assert _holds(scratch_db, ONLINE_ROLE, table, "SELECT")
+        still_held = [
+            privilege
+            for privilege in WRITE_PRIVILEGES
+            if _holds(scratch_db, ONLINE_ROLE, table, privilege)
+        ]
+        assert not still_held, (
+            f"the refused downgrade restored {still_held} on {table} before "
+            "raising — a partial downgrade is worse than a completed one"
+        )
+
+    # (b) ...and the revision state did not move.
+    assert _version_rows(scratch_db) == before
+
+
+def test_the_downgrade_canary_reads_a_real_version_table(scratch_db: str) -> None:
+    """SENSITIVITY. Both halves above are 'nothing changed' assertions, which a
+    reader that can never see anything would satisfy. So prove the version
+    reader observes a real, expected value, and that the privilege reader is the
+    same one that reports a granted write elsewhere in this module."""
+    _upgrade(scratch_db)
+    rows = _version_rows(scratch_db)
+    assert rows, "the version reader found no rows at all"
+    assert VENDOR_HEAD in rows
+
+
+# ── 5. After a successful upgrade: SELECT-only, no tenant access, empty ─────
 
 
 @pytest.mark.parametrize("table", PLATFORM_TABLES)

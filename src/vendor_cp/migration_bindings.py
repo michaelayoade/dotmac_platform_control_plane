@@ -28,10 +28,10 @@ Both bindings below are therefore present and truthful, and the tenant plane of
 any dual-plane module stays out because it was never SELECTED — never because a
 binding was withheld.
 
-No selectable module is composed in this assembly yet, so the selection tuple is
-legitimately empty; see its own comment for why `dotmac-approvals` is not in it.
-The seam is still wired end to end, because the mechanism is what this change
-establishes and the first selection should be one line of diff.
+`dotmac-approvals` is the one selectable module composed here, and the selection
+below installs its PLATFORM plane only. Note what that does NOT say: selecting a
+plane chooses STORAGE SHAPE, never WRITE AUTHORITY. Vendor `v012` is what keeps
+the module read-only while the legacy writer is still authoritative.
 
 Both declarations are installed from `alembic/env.py` before Alembic builds the
 revision map, and both are mirrored into the graph-command environment

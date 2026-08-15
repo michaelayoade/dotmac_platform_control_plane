@@ -1,9 +1,10 @@
 # ADR-0004: Approvals authority cutover — one writer, and no invented history
 
-- **Status:** Accepted (contract only — authorises no composition)
+- **Status:** Accepted. Shadow composition discharged § 9a; the authority
+  has NOT moved — see "What this ADR does NOT authorise"
 - **Date:** 2026-08-15
 - **Owner:** Vendor control plane
-- **Supersedes nothing. Blocks:** shadow composition of `dotmac-approvals`
+- **Supersedes nothing. Discharged by:** the shadow composition (vendor `v012`)
 
 ## Context
 
