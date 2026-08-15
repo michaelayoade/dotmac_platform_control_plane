@@ -33,7 +33,6 @@ from sqlalchemy import engine_from_config, pool
 # registering their models on the same shared Base metadata.
 import vendor_cp.accounts.models  # noqa: F401
 import vendor_cp.allocations.models  # noqa: F401
-import vendor_cp.approvals.models  # noqa: F401
 import vendor_cp.contracts.models  # noqa: F401
 import vendor_cp.offers.models  # noqa: F401
 from vendor_cp.migration_bindings import (

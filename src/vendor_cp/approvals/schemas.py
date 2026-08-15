@@ -1,4 +1,11 @@
-"""Typed request/response models for the approvals API (no bare dicts)."""
+"""Typed request/response models for the approvals API (no bare dicts).
+
+Shapes follow the module's model, which is a REQUEST lifecycle: a request is
+opened against an exact policy revision and content digest by the subject's
+owner, and approvers then decide on that request. Vendor's old shape had no
+request at all — approvals were counted directly against a `(subject, digest)`
+tuple — so these are the module's concepts named in Vendor's API.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +13,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from vendor_cp.approvals.models import ApprovalPolicy
-from vendor_cp.approvals.service import ApprovalDecision
+from vendor_cp.approvals.adapter import PolicyView, RequestView
 
 
 class PublishPolicyRequest(BaseModel):
@@ -19,58 +25,60 @@ class PublishPolicyRequest(BaseModel):
 
 
 class PolicyResponse(BaseModel):
-    id: UUID
     policy_code: str
     version: int
     quorum: int
     allow_self_approval: bool
 
     @classmethod
-    def of(cls, p: ApprovalPolicy) -> PolicyResponse:
+    def of(cls, view: PolicyView) -> PolicyResponse:
         return cls(
-            id=p.id,
-            policy_code=p.policy_code,
-            version=p.version,
-            quorum=p.quorum,
-            allow_self_approval=p.allow_self_approval,
+            policy_code=view.policy_code,
+            version=view.version,
+            quorum=view.quorum,
+            allow_self_approval=view.allow_self_approval,
         )
 
 
-class RecordApprovalRequest(BaseModel):
+class RecordDecisionRequest(BaseModel):
+    """One approver's decision on an open request, bound to the content.
+
+    `content_hash` is not decoration: the module refuses a decision whose digest
+    no longer matches the request's, so an approver cannot approve content that
+    has changed under them.
+    """
+
     command_id: str = Field(min_length=1, max_length=200)
-    policy_code: str = Field(min_length=1, max_length=120)
-    policy_version: int = Field(ge=1)
-    subject_type: str = Field(min_length=1, max_length=120)
-    subject_id: str = Field(min_length=1, max_length=200)
+    request_id: UUID
     content_hash: str = Field(min_length=1, max_length=128)
+    approve: bool = True
 
 
-class RecordApprovalResponse(BaseModel):
-    """Ack for a recorded approval (idempotent: same id on replay)."""
+class RequestResponse(BaseModel):
+    """An approval request's current state."""
 
-    id: UUID
-
-
-class EvaluateResponse(BaseModel):
+    request_id: UUID
+    state: str
     satisfied: bool
-    quorum: int
-    distinct_approvers: int
+    satisfied_levels: int
+    total_levels: int
     reason: str
 
     @classmethod
-    def of(cls, d: ApprovalDecision) -> EvaluateResponse:
+    def of(cls, view: RequestView) -> RequestResponse:
         return cls(
-            satisfied=d.satisfied,
-            quorum=d.quorum,
-            distinct_approvers=d.distinct_approvers,
-            reason=d.reason,
+            request_id=view.request_id,
+            state=view.state,
+            satisfied=view.satisfied,
+            satisfied_levels=view.satisfied_levels,
+            total_levels=view.total_levels,
+            reason=view.reason,
         )
 
 
 __all__ = [
-    "PublishPolicyRequest",
     "PolicyResponse",
-    "RecordApprovalRequest",
-    "RecordApprovalResponse",
-    "EvaluateResponse",
+    "PublishPolicyRequest",
+    "RecordDecisionRequest",
+    "RequestResponse",
 ]

@@ -40,7 +40,7 @@ from dotmac_kernel.messaging import enqueue_platform_event, process_once_platfor
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vendor_cp.approvals import service as approvals
+from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts.models import Contract, ContractLine, ContractStatus
 from vendor_cp.offers.models import OfferVersion
 
@@ -344,6 +344,22 @@ def submit(
         row.status = ContractStatus.PENDING_APPROVAL.value
         session.flush()
         row.content_hash = _content_hash(row)
+        # Open the approval request HERE, not in the approvals API: the subject's
+        # owner is what knows the exact content digest an approval must bind to,
+        # and a request opened without one would be a request for nothing.
+        request = approvals.open_request(
+            session,
+            approvals.OpenRequestCommand(
+                command_id=f"{command.command_id}:approval-request",
+                policy_code=command.approval_policy_code,
+                policy_version=command.approval_policy_version,
+                subject_type=_SUBJECT,
+                subject_id=str(row.id),
+                content_hash=row.content_hash,
+                requested_by=command.submitter_id,
+            ),
+        )
+        row.approval_request_id = request.request_id
         _emit(
             session,
             row,
@@ -372,19 +388,18 @@ def approve(db: Session, command: TransitionCommand) -> ContractView:
     def handler(session: Session) -> Mapping[str, object]:
         row = _load(session, command.contract_id)
         _require_status(row, {ContractStatus.PENDING_APPROVAL.value})
-        decision = approvals.evaluate(
-            session,
-            policy_code=row.approval_policy_code or "",
-            policy_version=row.approval_policy_version or 0,
-            subject_type=_SUBJECT,
-            subject_id=str(row.id),
-            content_hash=row.content_hash or "",
-            submitter_id=row.submitter_id,
+        if row.approval_request_id is None:
+            raise ConflictError(
+                f"contract {row.id} has no approval request; it was not submitted "
+                "through the current path"
+            )
+        decision = approvals.evaluate_request(
+            session, request_id=row.approval_request_id
         )
         if not decision.satisfied:
             raise ConflictError(
                 f"approval policy not satisfied ({decision.reason}: "
-                f"{decision.distinct_approvers}/{decision.quorum})"
+                f"{decision.satisfied_levels}/{decision.total_levels} levels)"
             )
         row.status = ContractStatus.APPROVED.value
         _emit(
@@ -413,6 +428,11 @@ def reject(db: Session, command: TransitionCommand) -> ContractView:
         row.content_hash = None
         row.approval_policy_code = None
         row.approval_policy_version = None
+        # The request belonged to a digest that no longer exists. Resubmission
+        # opens a NEW one rather than reusing it — an approval is for exact
+        # content, and reusing the request would silently carry decisions across
+        # a change they were never given for.
+        row.approval_request_id = None
         row.last_reason = command.reason
         _emit(
             session,

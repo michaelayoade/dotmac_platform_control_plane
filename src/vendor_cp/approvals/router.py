@@ -1,8 +1,12 @@
-"""Approvals JSON API — a thin, platform-admin-only adapter.
+"""Approvals JSON API — a thin, platform-admin-only adapter over the module.
 
-Publish a policy version, record an approval (the acting platform admin is the
-approver), and evaluate the quorum for a content hash. Delegates to
-`ApprovalPolicyService`; `ConflictError` (immutable policy) → 409.
+Publish a policy revision, record a decision on an open request, and read a
+request's state. Every route delegates to `vendor_cp.approvals.adapter`; nothing
+here touches `dotmac_approvals` directly, and nothing here decides anything.
+
+Requests are OPENED by the subject's owner (see `vendor_cp.contracts.service`),
+not through this API. An approval request with no subject would be a request for
+nothing, and the owner is what knows the content digest to bind it to.
 """
 
 from __future__ import annotations
@@ -16,13 +20,12 @@ from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
-from vendor_cp.approvals import service
+from vendor_cp.approvals import adapter
 from vendor_cp.approvals.schemas import (
-    EvaluateResponse,
     PolicyResponse,
     PublishPolicyRequest,
-    RecordApprovalRequest,
-    RecordApprovalResponse,
+    RecordDecisionRequest,
+    RequestResponse,
 )
 
 router = APIRouter(prefix="/platform/vendor/approvals", tags=["approvals"])
@@ -34,62 +37,44 @@ Db = Annotated[Session, Depends(get_platform_db)]
 @router.post(
     "/policies", response_model=PolicyResponse, status_code=status.HTTP_201_CREATED
 )
-def publish_policy(body: PublishPolicyRequest, admin: Admin, db: Db) -> PolicyResponse:
-    policy = service.publish_policy_version(
-        db,
-        service.PublishPolicyCommand(
-            command_id=body.command_id,
-            policy_code=body.policy_code,
-            version=body.version,
-            quorum=body.quorum,
-            allow_self_approval=body.allow_self_approval,
-            actor_admin_id=admin.id,
-        ),
-    )
-    return PolicyResponse.of(policy)
-
-
-@router.post("", response_model=RecordApprovalResponse)
-def record_approval(
-    body: RecordApprovalRequest, admin: Admin, db: Db
-) -> RecordApprovalResponse:
-    record = service.record_approval(
-        db,
-        service.RecordApprovalCommand(
-            command_id=body.command_id,
-            policy_code=body.policy_code,
-            policy_version=body.policy_version,
-            subject_type=body.subject_type,
-            subject_id=body.subject_id,
-            content_hash=body.content_hash,
-            approver_id=admin.id,
-        ),
-    )
-    return RecordApprovalResponse(id=record.id)
-
-
-@router.get("/evaluate", response_model=EvaluateResponse)
-def evaluate(
-    policy_code: str,
-    policy_version: int,
-    subject_type: str,
-    subject_id: str,
-    content_hash: str,
-    _admin: Admin,
-    db: Db,
-    submitter_id: UUID | None = None,
-) -> EvaluateResponse:
-    return EvaluateResponse.of(
-        service.evaluate(
+def publish_policy(body: PublishPolicyRequest, _admin: Admin, db: Db) -> PolicyResponse:
+    return PolicyResponse.of(
+        adapter.publish_policy_version(
             db,
-            policy_code=policy_code,
-            policy_version=policy_version,
-            subject_type=subject_type,
-            subject_id=subject_id,
-            content_hash=content_hash,
-            submitter_id=submitter_id,
+            adapter.PublishPolicyCommand(
+                command_id=body.command_id,
+                policy_code=body.policy_code,
+                version=body.version,
+                quorum=body.quorum,
+                allow_self_approval=body.allow_self_approval,
+            ),
         )
     )
+
+
+@router.post("/decisions", response_model=RequestResponse)
+def record_decision(
+    body: RecordDecisionRequest, admin: Admin, db: Db
+) -> RequestResponse:
+    """The acting platform admin is the approver — the guard IS the eligibility
+    rule, which is why the actor is taken from it rather than from the body."""
+    return RequestResponse.of(
+        adapter.record_decision(
+            db,
+            adapter.RecordDecisionCommand(
+                command_id=body.command_id,
+                request_id=body.request_id,
+                approver_id=admin.id,
+                content_hash=body.content_hash,
+                approve=body.approve,
+            ),
+        )
+    )
+
+
+@router.get("/requests/{request_id}", response_model=RequestResponse)
+def read_request(request_id: UUID, _admin: Admin, db: Db) -> RequestResponse:
+    return RequestResponse.of(adapter.evaluate_request(db, request_id=request_id))
 
 
 __all__ = ["router"]

@@ -71,6 +71,11 @@ class Contract(Base, TimestampMixin):
     approval_policy_code: Mapped[str | None] = mapped_column(String(120))
     approval_policy_version: Mapped[int | None] = mapped_column(Integer)
     submitter_id: Mapped[UUID | None] = mapped_column(Uuid())
+    # The module's approval request this contract's approval hangs on. Set when
+    # the contract is submitted, because that is the moment the content digest
+    # exists to bind a request to. Nullable: a draft has no request yet, and a
+    # resubmission opens a new one.
+    approval_request_id: Mapped[UUID | None] = mapped_column(Uuid())
     activated_at: Mapped[object | None] = mapped_column(sa.DateTime(timezone=True))
     # Reserved for amendment/supersession (a later slice); unset here.
     superseded_by_id: Mapped[UUID | None] = mapped_column(Uuid())
