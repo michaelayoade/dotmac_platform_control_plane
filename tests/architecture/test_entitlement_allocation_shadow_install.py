@@ -66,7 +66,8 @@ def test_module_manifest_and_public_lineage_are_composed() -> None:
     assert allocation_module in build_spec().modules
     locations = composed_version_locations().split()
     assert str(allocation_versions_dir()) in locations
-    assert len(locations) == 4
+    # kernel + release catalog + entitlement allocation + approvals + vendor
+    assert len(locations) == 5
 
 
 def test_shadow_install_does_not_silently_switch_the_writer() -> None:

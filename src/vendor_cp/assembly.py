@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 
+from dotmac_approvals import module as approvals_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import ProductAssemblySpec
 from dotmac_release_catalog import module as release_catalog_module
@@ -41,6 +42,11 @@ ASSEMBLY_NAME = "dotmac-vendor-control-plane"
 STATEFUL_MODULES = (
     release_catalog_module,
     entitlement_allocation_module,
+    # Dual-plane and therefore SELECTABLE: composing it without an explicit
+    # `module_planes` entry fails `ProductAssemblySpec` construction. Composed in
+    # SHADOW under ADR-0004 — read-only, with vendor migration `v012` removing
+    # the write grants its own migration issues.
+    approvals_module,
 )
 
 # The vendor's own features, in mount order. A profile may withhold a SURFACE
@@ -84,9 +90,10 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
 
     return ProductAssemblySpec(
         name=ASSEMBLY_NAME,
-        # No selectable module is composed yet, so there is no plane to
-        # select (ADR-0028). `dotmac-approvals` is the first one that will be,
-        # and it arrives with the cutover contract — never before it.
+        # The INTENT half of the composition (ADR-0028): which plane of a
+        # selectable module this product installs. Not implied by the
+        # prerequisite bindings, which truthfully record that kernel 0001
+        # supplies a tenant catalogue this assembly declines to build on.
         module_planes=ASSEMBLY_MODULE_PLANES,
         modules=(
             *STATEFUL_MODULES,

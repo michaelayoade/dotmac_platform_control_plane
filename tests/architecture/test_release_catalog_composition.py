@@ -52,4 +52,5 @@ def test_vendor_ingestion_adapter_owns_its_audit_vocabulary() -> None:
 def test_release_catalog_public_migration_lineage_is_composed() -> None:
     locations = composed_version_locations().split()
     assert str(release_catalog_versions_dir()) in locations
-    assert len(locations) == 4
+    # kernel + release catalog + entitlement allocation + approvals + vendor
+    assert len(locations) == 5

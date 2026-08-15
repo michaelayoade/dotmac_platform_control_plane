@@ -30,9 +30,14 @@ KERNEL_HEAD = "0023_audit_actor_and_forensics"  # current pin (0.1.0a61)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
+# A STATIC head of its own lineage — but not a version ROW once `v012` depends
+# on it, because a `depends_on` edge makes its target an ancestor of the
+# depending revision. `alembic_version` holds current heads, not every applied
+# revision, so this appears in `script.get_heads()` and not in `_versions()`.
+APPROVALS_HEAD = "ap_0001_approvals"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v011_product_identity"
+VENDOR_HEAD = "v012_approvals_shadow_readonly"
 
 
 # `scratch_db` and the DSN rewriter MOVED to `tests/migration/conftest.py`.
@@ -131,8 +136,8 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         scratch_db,
         "SELECT relrowsecurity FROM pg_class WHERE oid='vendor_accounts'::regclass",
     )
-    # Four independent runtime heads: kernel, vendor assembly and both installed
-    # modules each retain their own migration authority.
+    # Five independent runtime heads: kernel, vendor assembly and the three
+    # installed modules each retain their own migration authority.
     assert _versions(scratch_db) == {
         KERNEL_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
@@ -150,14 +155,15 @@ def test_alembic_env_installs_the_vendor_prerequisite_bindings(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rehearsal 2 — four-head topology
+# Rehearsal 2 — five-head topology
 # ─────────────────────────────────────────────────────────────────────────────
-def test_four_head_topology(scratch_db: str) -> None:
+def test_five_head_topology(scratch_db: str) -> None:
     script = ScriptDirectory.from_config(make_alembic_config(scratch_db))
     assert set(script.get_heads()) == {
         KERNEL_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
+        APPROVALS_HEAD,
         VENDOR_HEAD,
     }
     kernel_head = script.get_revision("kernel@head")
@@ -388,6 +394,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
         synth_rev,
         ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
+        APPROVALS_HEAD,
         VENDOR_HEAD,
     }
 

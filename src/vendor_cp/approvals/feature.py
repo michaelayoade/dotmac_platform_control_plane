@@ -6,13 +6,14 @@ decision the control plane makes goes through it.
 
 ## Why it is named `vendor_approvals`
 
-`dotmac-approvals` exists as a published module and RESERVES the module code
-`approvals`. It is **not composed here** — not its manifest, not its lineage,
-not a plane selection. Shadow composition is a bounded authority-migration phase
-with exactly one authoritative writer, so it may land only behind a cutover
-contract naming the old and new authority, the identity mapping, open-request
-handling, parity measurement, the watermark, the rollback boundary and the
-retirement gate.
+`dotmac-approvals` is composed here — in SHADOW, and read-only — and it holds
+the module code `approvals`. A module registry has one owner per code, so this
+package cannot also be called that.
+
+Shadow composition is a bounded authority-migration phase with exactly one
+authoritative writer, and this package is that writer. The module's tables are
+empty, `platform_api` may only read them (vendor `v012`), and the authority moves
+only in the sealed cutover transaction of ADR-0004 § 3.1.
 
 The rename is therefore proactive, not consequential. A module registry holds one
 owner per code and `FeatureManifest.name` becomes that code, so a manifest still

@@ -22,7 +22,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from dotmac_kernel.planes import MODULE_PLANES_ENV_VAR, supported_plane_sets
+from dotmac_kernel.planes import (
+    MODULE_PLANES_ENV_VAR,
+    ModulePlane,
+    supported_plane_sets,
+)
 from dotmac_kernel.prerequisites import (
     BINDINGS_ENV_VAR,
     MODULE_DATABASE_ROLES_V1,
@@ -60,26 +64,51 @@ def test_a_bound_tenant_catalogue_selects_nothing_by_itself() -> None:
     """
     bound = {binding.prerequisite for binding in ASSEMBLY_PREREQUISITE_BINDINGS}
     assert TENANT_SCOPE_CATALOG_V1.name in bound
-    assert ASSEMBLY_MODULE_PLANES == ()
+
+    # The tenant catalogue is bound AND no tenant plane is selected. Under the
+    # a60 model those two facts could not both hold.
+    selected = {
+        ModulePlane(plane)
+        for selection in ASSEMBLY_MODULE_PLANES
+        for plane in selection.planes
+    }
+    assert ModulePlane.TENANT not in selected
 
 
-def test_every_composed_module_has_an_atomic_plane_contract() -> None:
-    """Why the empty selection is correct rather than merely absent.
+def test_every_selectable_composed_module_has_a_selection() -> None:
+    """The premise that makes the selection tuple correct rather than merely
+    present.
 
     A selectable module composed with no selection fails `ProductAssemblySpec`
-    construction. So an empty tuple is only honest while every composed module
-    declares exactly one supported plane set — this asserts that premise instead
-    of assuming it, and fails the moment a selectable module is composed.
+    construction on its own. This asserts the inverse and cheaper half: every
+    selectable module composed here appears in the declaration, and every entry
+    in the declaration names a module actually composed — so the tuple cannot
+    drift ahead of, or behind, the composition.
     """
-    selectable = [
-        manifest.code
+    composed = {
+        manifest.code: manifest
         for manifest in build_spec().modules
-        if getattr(manifest, "code", None) and len(supported_plane_sets(manifest)) > 1
-    ]
-    assert not selectable, (
-        "a selectable module is composed; declare its ModulePlaneSelection in "
-        f"ASSEMBLY_MODULE_PLANES and write the full plane proof: {selectable}"
-    )
+        if getattr(manifest, "code", None)
+    }
+    selectable = {
+        code
+        for code, manifest in composed.items()
+        if len(supported_plane_sets(manifest)) > 1
+    }
+    declared = {selection.module for selection in ASSEMBLY_MODULE_PLANES}
+
+    assert selectable == {"approvals"}, sorted(selectable)
+    assert declared == selectable, sorted(declared ^ selectable)
+
+
+def test_the_approvals_plane_selection_is_platform_only() -> None:
+    """Vendor approvals are control-plane state; there is no tenant here whose
+    approvals could be scoped."""
+    planes = {
+        selection.module: {ModulePlane(p) for p in selection.planes}
+        for selection in ASSEMBLY_MODULE_PLANES
+    }
+    assert planes == {"approvals": {ModulePlane.PLATFORM}}
 
 
 def test_the_assembly_spec_carries_the_selection_for_validation() -> None:

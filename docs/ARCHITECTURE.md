@@ -25,10 +25,11 @@ it owns and — just as importantly — what it must never become.
     bound, because that is simply true: this assembly runs the whole kernel base
     lineage, so `public.tenants`, `public.tenant_domains` and
     `public.app_current_tenant_id()` all exist here.
-  - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It is
-    **empty**, because no selectable module is composed yet: both installed
-    modules declare a single supported plane set, so their contract is atomic
-    and the kernel refuses a selection for them.
+  - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It
+    selects `ModulePlane.PLATFORM` for `approvals`, the one selectable module
+    composed here; Release Catalog and Entitlement Allocation each declare a
+    single supported plane set, so their contract is atomic and the kernel
+    refuses a selection for them.
 
   Kernel `0.1.0a60` briefly let the first imply the second, and this assembly is
   the case that broke it: binding the tenant catalogue truthfully would have
@@ -45,32 +46,29 @@ it owns and — just as importantly — what it must never become.
   no module schema holds a tenant-scoped table — and says plainly that the full
   four-fact proof (platform tables built, tenant tables absent, *because of the
   selection*) lands with the first shadow composition.
-- **Approvals is not composed here.** `dotmac-approvals` will be the first
-  selectable module Vendor installs, with `ModulePlane.PLATFORM`, but shadow
-  composition is a bounded authority-migration phase with exactly ONE
-  authoritative writer — not parallel operation.
+- `dotmac-approvals==0.1.0a4` is composed in **shadow**: pinned, its public
+  `versions_dir()` locator composed, and `ModulePlane.PLATFORM` selected. It is
+  **read-only** — vendor migration `v012` revokes every write and DDL privilege
+  the module's own migration grants `platform_api`, retains `SELECT`, and
+  verifies the effective outcome before it can commit. `vendor_cp.approvals`
+  remains the sole authoritative writer, and the module's tables stay empty,
+  until the sealing transaction in ADR-0004 § 3.1.
 
-  That contract now exists: **ADR-0004**
-  (`docs/adr/0004-approvals-authority-cutover.md`). It names the two
-  authorities, the policy/decision identity mapping and the explicit ABSENCE of
-  a request mapping, the watermark and how it is recorded, the drain-versus-
-  restart rule for incomplete groups, the parity measurements and the
-  differences accepted, the rollback boundary and the retirement gate. Its
-  enforceable half is `src/vendor_cp/approvals_cutover.py`, held by
-  `tests/architecture/test_approvals_cutover.py`.
+  **Vendor owns that restriction, and does not ask the module to weaken its
+  grants.** `ModulePlane.PLATFORM` selects storage shape — which of a dual-plane
+  module's tables get built — and says nothing about whether the composing
+  assembly has acquired write authority. Shadow-versus-active is Vendor's
+  migration state; a greenfield adopter should keep the module's normal write
+  grants.
 
-  Two facts from it worth knowing without opening it. Legacy approval records
-  are **never backfilled** into the module's tables — they stay immutable,
-  read-only evidence, and shadow comparison uses the module's PURE policy
-  engine, which imports no persistence and so needs nothing composed. And
-  **request identity is never synthesized**: a pre-watermark record has no
-  request id, no recoverable requester and no persisted terminal state, so new
-  request identity begins at the watermark rather than being invented backwards.
-
-  Already done for it: the vendor-local feature manifest is named
-  `vendor_approvals`, not `approvals`, because `dotmac-approvals` reserves the
-  module code `approvals` and a registry holds one owner per code. That
-  collision is off the cutover's path in advance; the routes are unchanged.
+  The transient grant never becomes a committed state: `depends_on` orders `v012`
+  after `ap_0001_approvals`, and `alembic/env.py` states
+  `transaction_per_migration=False` explicitly, so the whole composed upgrade is
+  one transaction. The one reachable hole — an ordinary
+  `alembic upgrade ap_0001_approvals`, which would stop after the module and
+  commit the grant — is closed by the deploy path refusing any target but
+  composed `heads`, with `env.py` additionally asserting in-transaction that
+  every lineage reached its head.
 - `dotmac-release-catalog==0.1.0a4` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration
@@ -216,7 +214,7 @@ Compose project and from every product data plane:
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration
-backup, runs the four-lineage `scripts/migrate.py`, and only then replaces the
+backup, runs the five-lineage `scripts/migrate.py`, and only then replaces the
 application. The complete operator contract and rollback boundary are in
 `docs/operations/production-deployment.md`.
 

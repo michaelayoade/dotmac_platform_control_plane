@@ -1,36 +1,33 @@
-"""What this assembly can honestly prove about planes today — and what it cannot.
+"""The ADR-0028 proof, now that a selectable module is actually composed.
 
-## The full ADR-0028 proof is NOT here
+The contract PR could assert only half of this and said so: the four-fact proof
+needs a SELECTABLE module, and none was composed then. `dotmac-approvals` is, so
+the proof it deferred is written here, against a real migrated database.
 
-The distinguishing proof of a61 needs four facts about one migrated database:
-kernel `0001` created `public.tenants`; the assembly explicitly selected
-`ModulePlane.PLATFORM` for a dual-plane module; that module's platform tables
-exist; its tenant tables do not. Facts two through four require a SELECTABLE
-module to be composed, and this bootstrap composes none. `dotmac-release-catalog`
-and `dotmac-entitlement-allocation` each declare a single supported plane set, so
-their contract is atomic and the kernel refuses a selection for them outright.
+All four facts, about ONE database:
 
-`dotmac-approvals` is the first selectable module Vendor will compose, and it
-arrives with the cutover contract, not before it. **The four-fact proof lands in
-that shadow-composition PR**, against `mod_approvals`. Anything asserted here
-before then would be a test whose name promised more than its body checked.
+1. kernel `0001` created `public.tenants` and `public.app_current_tenant_id()`;
+2. this assembly explicitly selected `ModulePlane.PLATFORM` for `approvals`;
+3. every `mod_approvals` PLATFORM table exists;
+4. no `mod_approvals` TENANT table exists.
 
-## What IS proven here
+Facts 1 and 4 together are the whole point, and neither alone would do. A control
+plane with no tenant catalogue would also lack tenant approval tables and would
+prove nothing about which mechanism kept them out; a control plane that simply
+never installed the module would prove nothing at all. Under kernel a60 this
+combination was unrepresentable — a bound catalogue WAS the instruction to build
+the tenant plane.
 
-The half that does not depend on a selectable module, and that still says
-something a reviewer would otherwise take on trust: the tenant catalogue really
-is present and really is bound, and no tenant-plane table exists anywhere in this
-database's module schemas regardless. That combination is the state the a60 model
-could not hold — under it a bound catalogue was itself the instruction to build
-tenant tables.
-
-It is deliberately NOT described as a proof of selection. Nothing here selects
-anything yet.
+Table names are imported from `dotmac_approvals.models`, never retyped: a proof
+that the tenant tables are absent must read the module's real list, or it keeps
+passing after the module renames one.
 """
 
 from __future__ import annotations
 
 from alembic import command
+from dotmac_approvals.models import PLATFORM_TABLES, TENANT_TABLES
+from dotmac_kernel.planes import ModulePlane
 from dotmac_kernel.prerequisites import TENANT_SCOPE_CATALOG_V1
 from sqlalchemy import create_engine, text
 
@@ -41,16 +38,7 @@ from vendor_cp.migration_bindings import (
 )
 from vendor_cp.migrations import make_alembic_config
 
-MODULE_SCHEMAS = ("mod_ealloc", "mod_rel")
-
-TENANT_SCOPED_MODULE_TABLES_SQL = (
-    "SELECT c.relname FROM pg_class c "
-    "JOIN pg_namespace n ON n.oid = c.relnamespace "
-    "JOIN information_schema.columns col "
-    "  ON col.table_schema = n.nspname AND col.table_name = c.relname "
-    "WHERE n.nspname = ANY(:schemas) "
-    "  AND c.relkind = 'r' AND col.column_name = 'tenant_id'"
-)
+APPROVALS_SCHEMA = "mod_approvals"
 
 
 def _upgrade(url: str, target: str = "heads") -> None:
@@ -66,25 +54,25 @@ def _scalar(url: str, statement: str, **params: object) -> object:
         engine.dispose()
 
 
-def _rows(url: str, statement: str, **params: object) -> list[str]:
-    engine = create_engine(url)
-    try:
-        with engine.connect() as conn:
-            return [row[0] for row in conn.execute(text(statement), params).all()]
-    finally:
-        engine.dispose()
+def _relation_exists(url: str, schema: str, table: str) -> bool:
+    return bool(
+        _scalar(
+            url,
+            "SELECT to_regclass(:qualified) IS NOT NULL",
+            qualified=f"{schema}.{table}",
+        )
+    )
 
 
-def test_the_tenant_catalogue_exists_and_is_bound(scratch_db: str) -> None:
-    """Fact one of the four, true today and worth pinning now.
-
-    Every later plane argument rests on it: this control plane genuinely has a
-    tenant catalogue, so keeping tenant tables out can never be explained away
-    by the catalogue being absent.
-    """
+def test_a_bound_tenant_catalogue_installs_only_the_selected_platform_plane(
+    scratch_db: str,
+) -> None:
+    """The combination kernel a60 could not express."""
     _upgrade(scratch_db)
 
-    assert _scalar(scratch_db, "SELECT to_regclass('public.tenants') IS NOT NULL")
+    # 1. The tenant catalogue is REALLY here — kernel 0001 built it — and this
+    #    assembly binds it, truthfully.
+    assert _relation_exists(scratch_db, "public", "tenants")
     assert _scalar(
         scratch_db,
         "SELECT to_regprocedure('public.app_current_tenant_id()') IS NOT NULL",
@@ -93,33 +81,60 @@ def test_the_tenant_catalogue_exists_and_is_bound(scratch_db: str) -> None:
         binding.prerequisite for binding in ASSEMBLY_PREREQUISITE_BINDINGS
     }
 
+    # 2. And the assembly selected the platform plane, explicitly.
+    selected = {
+        ModulePlane(plane)
+        for selection in ASSEMBLY_MODULE_PLANES
+        if selection.module == "approvals"
+        for plane in selection.planes
+    }
+    assert selected == {ModulePlane.PLATFORM}
 
-def test_no_module_schema_holds_a_tenant_scoped_table(scratch_db: str) -> None:
-    """The composed control plane builds no tenant plane at all — with a bound,
-    present catalogue sitting right there in `public`.
+    # 3. The selected plane was built.
+    missing = [
+        table
+        for table in PLATFORM_TABLES
+        if not _relation_exists(scratch_db, APPROVALS_SCHEMA, table)
+    ]
+    assert not missing, f"selected PLATFORM approval tables are absent: {missing}"
 
-    A weaker statement than the a61 selection proof, and labelled as such: with
-    no selectable module composed this shows the OUTCOME without demonstrating
-    the MECHANISM. The mechanism is proven in the shadow-composition PR.
-    """
+    # 4. The unselected plane was not — despite its prerequisite being bound.
+    built = [
+        table
+        for table in TENANT_TABLES
+        if _relation_exists(scratch_db, APPROVALS_SCHEMA, table)
+    ]
+    assert not built, (
+        "tenant approval tables exist in a control plane that never selected "
+        f"the tenant plane: {built}"
+    )
+
+
+def test_the_proof_is_reading_real_table_names(scratch_db: str) -> None:
+    """SENSITIVITY. Fact 4 is an ABSENCE, and an absence is also what a typo
+    produces. So: both lists are non-empty and disjoint, and the same reader that
+    reports the tenant tables missing finds the platform tables present."""
+    assert TENANT_TABLES and PLATFORM_TABLES
+    assert not set(TENANT_TABLES) & set(PLATFORM_TABLES)
+
     _upgrade(scratch_db)
-    tenant_scoped = _rows(
-        scratch_db, TENANT_SCOPED_MODULE_TABLES_SQL, schemas=list(MODULE_SCHEMAS)
-    )
-    assert not tenant_scoped, (
-        "the vendor control plane is not a product data plane — no module "
-        f"schema may hold a tenant-scoped table: {tenant_scoped}"
-    )
+    assert _relation_exists(scratch_db, APPROVALS_SCHEMA, PLATFORM_TABLES[0])
+    assert not _relation_exists(scratch_db, APPROVALS_SCHEMA, TENANT_TABLES[0])
 
 
-def test_the_assembly_selects_no_module_plane_because_none_is_selectable() -> None:
-    """Guards the claim this file's docstring makes.
+def test_the_spec_carries_the_selection_the_database_reflects() -> None:
+    """Kernel-side validation runs on what the SPEC declares. A selection living
+    only in `migration_bindings` would order migrations correctly and still let
+    `create_app` compose a selectable module with no stated intent."""
+    assert tuple(build_spec().module_planes) == ASSEMBLY_MODULE_PLANES
 
-    A selectable module composed WITHOUT a selection already fails
-    `ProductAssemblySpec` construction. This asserts the cheaper inverse: while
-    the selection tuple is empty, the reduced proof above is the honest one —
-    and the moment it stops being empty this test fails, sending the next author
-    to write the full four-fact proof instead of inheriting this one.
-    """
-    assert ASSEMBLY_MODULE_PLANES == ()
-    assert tuple(build_spec().module_planes) == ()
+
+def test_the_vendor_local_approval_tables_are_untouched(scratch_db: str) -> None:
+    """The module is composed in SHADOW. `vendor_cp.approvals` remains the
+    authoritative writer, so its `public` tables must still be there — and must
+    not have been replaced by the module's identically-named TENANT tables,
+    which live in `mod_approvals` and were never built."""
+    _upgrade(scratch_db)
+    assert _relation_exists(scratch_db, "public", "approval_policies")
+    assert _relation_exists(scratch_db, "public", "approval_records")
+    assert not _relation_exists(scratch_db, APPROVALS_SCHEMA, "approval_policies")

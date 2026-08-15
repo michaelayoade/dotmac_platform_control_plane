@@ -20,7 +20,7 @@ The host then performs one ordered operation:
 1. pull the exact digest;
 2. start/verify PostgreSQL;
 3. take a host-local `pg_dump` backup;
-4. run `scripts/migrate.py`, the owner that composes all four lineages;
+4. run `scripts/migrate.py`, the owner that composes all five lineages;
 5. demote the first-cluster `app_admin` bootstrap superuser;
 6. replace the app and prove `/health` on the loopback port.
 

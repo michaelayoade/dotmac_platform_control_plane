@@ -12,7 +12,8 @@ Release Catalog module, the Entitlement Allocation module and the vendor
 lineage — deriving its table set from the live catalogue rather than a literal
 list. Two halves, because the composed database has two namespaces:
 
-1. **Module schemas** (`mod_rel`, `mod_ealloc`) go through the kernel's own
+1. **Module schemas** (`mod_rel`, `mod_ealloc`, `mod_approvals`) go through the
+   kernel's own
    canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. That
    is the contract every registered module schema is held to fleet-wide, and
    consuming it rather than re-deriving it is the point: a rule the kernel
@@ -87,7 +88,7 @@ APP_ROLE = "app_user"
 # The two schemas the kernel's module gate must find. Asserted because
 # `audit_live_schemas` over zero schemas returns zero violations — the exact
 # shape of a gate that has silently stopped running.
-EXPECTED_MODULE_SCHEMAS = frozenset({"mod_ealloc", "mod_rel"})
+EXPECTED_MODULE_SCHEMAS = frozenset({"mod_approvals", "mod_ealloc", "mod_rel"})
 
 # THE TENANT CATALOGUE — its own category, and neither plane.
 #
@@ -380,7 +381,15 @@ def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
     next test proves each declared overlap was really reported, so the
     subtraction cannot quietly cover a clean database.
     """
-    registry = NamespaceRegistry.from_manifests(build_spec().modules)
+    spec = build_spec()
+    # `module_planes` is REQUIRED here, not optional decoration: without it the
+    # registry falls back to the atomic "every declared plane is installed"
+    # view, expects the module's TENANT tables, and reports them missing on a
+    # correct platform-only install. The expected set is a function of the
+    # assembly's SELECTION (ADR-0028), so the selection has to be supplied.
+    registry = NamespaceRegistry.from_manifests(
+        spec.modules, module_planes=spec.module_planes
+    )
     assert frozenset(audited_schemas(registry)) == EXPECTED_MODULE_SCHEMAS
 
     _upgrade(scratch_db)
@@ -408,7 +417,15 @@ def test_the_shadow_overlap_declaration_matches_the_database_exactly(
     allowed to shrink silently is exactly how a "temporary" exception outlives
     everyone who agreed to it.
     """
-    registry = NamespaceRegistry.from_manifests(build_spec().modules)
+    spec = build_spec()
+    # `module_planes` is REQUIRED here, not optional decoration: without it the
+    # registry falls back to the atomic "every declared plane is installed"
+    # view, expects the module's TENANT tables, and reports them missing on a
+    # correct platform-only install. The expected set is a function of the
+    # assembly's SELECTION (ADR-0028), so the selection has to be supplied.
+    registry = NamespaceRegistry.from_manifests(
+        spec.modules, module_planes=spec.module_planes
+    )
     _upgrade(scratch_db)
     with _connection(scratch_db) as conn:
         violations = audit_live_schemas(conn, registry)

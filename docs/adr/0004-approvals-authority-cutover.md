@@ -1,9 +1,10 @@
 # ADR-0004: Approvals authority cutover — one writer, and no invented history
 
-- **Status:** Accepted (contract only — authorises no composition)
+- **Status:** Accepted. Shadow composition discharged § 9a; the authority
+  has NOT moved — see "What this ADR does NOT authorise"
 - **Date:** 2026-08-15
 - **Owner:** Vendor control plane
-- **Supersedes nothing. Blocks:** shadow composition of `dotmac-approvals`
+- **Supersedes nothing. Discharged by:** the shadow composition (vendor `v012`)
 
 ## Context
 
@@ -587,9 +588,16 @@ The grant is restored — by the cutover change, not by the composing one — as
 (8) of the sealing transaction in § 3.1, which is the single moment the authority
 moves.
 
-**This is named here and implemented in the shadow PR.** Recording it now is the
-point: it is an obligation that falls between two phases, and the phase that
-creates the exposure is not the phase that reads this contract most closely.
+**IMPLEMENTED** by vendor migration `v012_approvals_shadow_readonly`, which also
+verifies its own outcome before it can commit. Recording the obligation before
+the phase that discharges it was the point: it falls between two phases, and the
+phase that creates the exposure is not the one that reads this contract closely.
+
+One clarification the implementation settled, worth keeping: `ModulePlane.PLATFORM`
+selects STORAGE SHAPE, never WRITE AUTHORITY. Shadow-versus-active is Vendor's
+migration state, so Vendor owns the restriction. A greenfield adopter should
+receive the module's normal write grants; asking the module to weaken them for
+everyone would push one product's migration state into a shared contract.
 
 ### 10. Future work — `RecoveredApprovalEvidence` (named, not built)
 
@@ -612,7 +620,9 @@ and does not authorise it.
 
 ## What this ADR does NOT authorise
 
-Composing `dotmac-approvals`, declaring a `ModulePlaneSelection` for it, or
-pinning it. Shadow composition begins only after this contract is accepted **and**
-the module ships the public `versions_dir()` locator this repository needs
-(recorded during PR #45), in a published release that is then exactly pinned.
+Any WRITE to the module's tables, or any move of the approval authority.
+
+Composition itself has now happened — `dotmac-approvals==0.1.0a4` is pinned,
+composed and PLATFORM-selected, read-only under § 9a — but that is installation,
+not adoption. `vendor_cp.approvals` remains the sole authoritative writer until
+the sealing transaction in § 3.1, and the module's tables stay empty until then.

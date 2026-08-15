@@ -342,6 +342,27 @@ trio = ["trio (>=0.30)"]
 wmi = ["wmi (>=1.5.1) ; platform_system == \"Windows\""]
 
 [[package]]
+name = "dotmac-approvals"
+version = "0.1.0a4"
+description = "DotMac dual-plane approval policy revisions, content-bound requests and decisions"
+optional = false
+python-versions = ">=3.11,<3.14"
+groups = ["main"]
+files = [
+    {file = "dotmac_approvals-0.1.0a4-py3-none-any.whl", hash = "sha256:3a43714403b82c6e632feed1ee1aac2a790d05c545f5e71106fc2d10031e86e3"},
+    {file = "dotmac_approvals-0.1.0a4.tar.gz", hash = "sha256:406543ec6291b937b6565b0f54f4cd4ba2b60964c8e10587fdf28fb8d0429bd6"},
+]
+
+[package.dependencies]
+dotmac-kernel = ">=0.1.0a61"
+sqlalchemy = ">=2.0,<3.0"
+
+[package.source]
+type = "legacy"
+url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
+reference = "forgejo"
+
+[[package]]
 name = "dotmac-entitlement-allocation"
 version = "0.1.0a4"
 description = "DotMac Entitlement Allocation — an immutable projection of what an activated contract entitles, validated against the product's manifest-declared capability catalogue (ADR-0006 M4)"
@@ -1551,4 +1572,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "50e687b9530f1bcf59f15bb1e4429ffb4c385c388a747017ffdf68e79a99e66f"
+content-hash = "3dd7c229c1ebccf1df66f3ce85e8baf4a086b501ccc6b591aa42dd651e54edb0"

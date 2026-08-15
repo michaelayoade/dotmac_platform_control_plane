@@ -4,7 +4,7 @@ The vendor control-plane database runs the KERNEL base migrations (shipped as
 `dotmac_kernel` package data, located via the public `versions_dir()`), the
 installed Release Catalog module lineage, the installed Entitlement Allocation
 module lineage, PLUS this repo's own `alembic/versions` — one revision graph,
-four separately-owned lineages. Because all shared packages are installed
+five separately-owned lineages. Because all shared packages are installed
 dependencies (not fixed repo paths),
 `version_locations` is composed programmatically rather than hard-coded in
 `alembic.ini`.
@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Final
 
 from alembic.config import Config
+from dotmac_approvals.migrations import versions_dir as approvals_versions_dir
 from dotmac_entitlement_allocation import (
     versions_dir as entitlement_allocation_versions_dir,
 )
@@ -33,13 +35,58 @@ VENDOR_VERSIONS = ALEMBIC_DIR / "versions"
 
 
 def composed_version_locations() -> str:
-    """Kernel, two independent modules and vendor migration lineages."""
+    """Kernel, three independent modules and vendor migration lineages."""
     return (
         f"{kernel_versions_dir()} "
         f"{release_catalog_versions_dir()} "
         f"{entitlement_allocation_versions_dir()} "
+        f"{approvals_versions_dir()} "
         f"{VENDOR_VERSIONS}"
     )
+
+
+#: The ONLY target the deploy path applies.
+#:
+#: `ap_0001_approvals` grants `platform_api` full DML on the approvals module's
+#: tables and vendor `v012` takes it away; both run in ONE transaction, so the
+#: grant is never a committed state. That guarantee has one reachable hole, and
+#: it is an ordinary command rather than an exotic one: `alembic upgrade
+#: ap_0001_approvals` stops after the module's own migration and COMMITS the
+#: grant. Nothing about it looks dangerous, which is why the deploy path refuses
+#: it rather than documenting it.
+COMPOSED_TARGET: Final[str] = "heads"
+
+
+def deploy_target_refusal(target: str) -> str | None:
+    """Why the deploy path will not apply `target`, or `None` if it will.
+
+    A function rather than a check inside the script, because the script is a
+    thin adapter and this is the decision.
+    """
+    if target == COMPOSED_TARGET:
+        return None
+    return (
+        f"refusing to upgrade to {target!r}: the deploy path applies composed "
+        f"{COMPOSED_TARGET!r} only.\n"
+        "A partial upgrade can stop after `ap_0001_approvals` and COMMIT the "
+        "module DML grant that vendor `v012` exists to remove — the shadow "
+        "composition is read-only only because both run in one transaction.\n"
+        "Drive an intermediate target through `make_alembic_config` (the "
+        "rehearsals do) if that is genuinely what you want."
+    )
+
+
+def deploy_config(url: str) -> Config:
+    """`make_alembic_config`, plus the deploy path's in-transaction post-condition.
+
+    `env.py` reads `require_composed_heads` and asserts, on the live connection,
+    that every composed lineage reached its head — so a half-composed database
+    rolls back instead of committing. Rehearsals deliberately do not set it: a
+    partial upgrade is the whole point there.
+    """
+    config = make_alembic_config(url)
+    config.attributes["require_composed_heads"] = True
+    return config
 
 
 def make_alembic_config(url: str) -> Config:
@@ -84,6 +131,9 @@ def make_alembic_config(url: str) -> Config:
 
 
 __all__ = [
+    "COMPOSED_TARGET",
+    "deploy_config",
+    "deploy_target_refusal",
     "REPO_ROOT",
     "ALEMBIC_DIR",
     "VENDOR_VERSIONS",
