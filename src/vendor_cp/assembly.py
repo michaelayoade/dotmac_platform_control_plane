@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 
+from dotmac_approvals import module as approvals_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import ProductAssemblySpec
 from dotmac_release_catalog import module as release_catalog_module
@@ -21,6 +22,7 @@ from vendor_cp.approvals.feature import feature as approvals_feature
 from vendor_cp.config import validate_runtime_configuration, vendor_settings
 from vendor_cp.console.feature import feature as console_feature
 from vendor_cp.contracts.feature import feature as contracts_feature
+from vendor_cp.migration_bindings import ASSEMBLY_MODULE_PLANES
 from vendor_cp.deployment_profile import (
     VendorDeploymentProfile,
     load_deployment_profile,
@@ -40,6 +42,11 @@ ASSEMBLY_NAME = "dotmac-vendor-control-plane"
 STATEFUL_MODULES = (
     release_catalog_module,
     entitlement_allocation_module,
+    # Dual-plane, and therefore SELECTABLE: composing it without an explicit
+    # `module_planes` entry fails `ProductAssemblySpec` construction. That is
+    # the point — a control plane and a product data plane install different
+    # halves of this one lineage, and neither is a default.
+    approvals_module,
 )
 
 # The vendor's own features, in mount order. A profile may withhold a SURFACE
@@ -83,6 +90,12 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
 
     return ProductAssemblySpec(
         name=ASSEMBLY_NAME,
+        # The intent half of the composition (ADR-0028). `dotmac-approvals`
+        # ships tenant AND platform planes; this assembly installs only the
+        # platform one, because there is no tenant here whose approvals could
+        # be scoped. Note this is NOT implied by the prerequisite bindings,
+        # which truthfully record that kernel 0001 supplies a tenant catalogue.
+        module_planes=ASSEMBLY_MODULE_PLANES,
         modules=(
             *STATEFUL_MODULES,
             *(

@@ -24,6 +24,7 @@ from dotmac_kernel import (  # noqa: F401
 )
 from dotmac_kernel.messaging import models as messaging_models  # noqa: F401
 from dotmac_kernel.models import Base
+from dotmac_kernel.planes import install_module_plane_selections
 from dotmac_kernel.prerequisites import install_prerequisite_bindings
 from sqlalchemy import engine_from_config, pool
 
@@ -35,14 +36,24 @@ import vendor_cp.allocations.models  # noqa: F401
 import vendor_cp.approvals.models  # noqa: F401
 import vendor_cp.contracts.models  # noqa: F401
 import vendor_cp.offers.models  # noqa: F401
-from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
+from vendor_cp.migration_bindings import (
+    ASSEMBLY_MODULE_PLANES,
+    ASSEMBLY_PREREQUISITE_BINDINGS,
+)
 from vendor_cp.migrations import composed_version_locations
 
-# Install before Alembic builds the revision map. Requiring module migrations
-# resolve their logical prerequisites into this assembly's physical ordering
-# edges at script-load time. The binding set intentionally omits the tenant
-# catalogue, so a dual-plane module builds only its platform plane here.
+# Both installed BEFORE Alembic builds the revision map: a composed module
+# lineage resolves its `depends_on` from them at script-load time, so an
+# assembly that composes a module without answering what it requires — or
+# without saying which of its planes it wants — fails loudly here rather than
+# ordering wrongly or emitting DDL nobody chose.
+#
+# They are two declarations because they answer two questions. The bindings say
+# where an effect comes from; the plane selection says what this product
+# installs. See `vendor_cp/migration_bindings.py` for why conflating them
+# breaks precisely this assembly (ADR-0028).
 install_prerequisite_bindings(ASSEMBLY_PREREQUISITE_BINDINGS)
+install_module_plane_selections(ASSEMBLY_MODULE_PLANES)
 
 config = context.config
 

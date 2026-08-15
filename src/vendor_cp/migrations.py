@@ -19,10 +19,13 @@ import os
 from pathlib import Path
 
 from alembic.config import Config
+from dotmac_approvals import versions_dir as approvals_versions_dir
 from dotmac_entitlement_allocation import (
     versions_dir as entitlement_allocation_versions_dir,
 )
 from dotmac_kernel.migrations import versions_dir as kernel_versions_dir
+from dotmac_kernel.planes import MODULE_PLANES_ENV_VAR
+from dotmac_kernel.prerequisites import BINDINGS_ENV_VAR
 from dotmac_release_catalog import versions_dir as release_catalog_versions_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,11 +34,12 @@ VENDOR_VERSIONS = ALEMBIC_DIR / "versions"
 
 
 def composed_version_locations() -> str:
-    """Kernel, two independent modules and vendor migration lineages."""
+    """Kernel, three independent modules and vendor migration lineages."""
     return (
         f"{kernel_versions_dir()} "
         f"{release_catalog_versions_dir()} "
         f"{entitlement_allocation_versions_dir()} "
+        f"{approvals_versions_dir()} "
         f"{VENDOR_VERSIONS}"
     )
 
@@ -54,6 +58,17 @@ def make_alembic_config(url: str) -> Config:
     # kernel engine from DATABASE_URL at import (it never connects here).
     os.environ["MIGRATION_DATABASE_URL"] = url
     os.environ.setdefault("DATABASE_URL", url)
+    # `alembic heads`, `history` and `show` build the revision map WITHOUT
+    # running `env.py`, so a lineage that resolves its `depends_on` from the
+    # installed bindings and plane selections would see neither. These two
+    # variables are the one channel both entry points share; setting them here
+    # keeps an INSPECTED graph identical to the one an upgrade applies.
+    os.environ.setdefault(
+        BINDINGS_ENV_VAR, "vendor_cp.migration_bindings:ASSEMBLY_PREREQUISITE_BINDINGS"
+    )
+    os.environ.setdefault(
+        MODULE_PLANES_ENV_VAR, "vendor_cp.migration_bindings:ASSEMBLY_MODULE_PLANES"
+    )
     return cfg
 
 
