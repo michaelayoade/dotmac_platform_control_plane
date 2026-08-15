@@ -67,19 +67,18 @@ disagree, fix the drift.
     `build_spec()`. It may not withhold a persistence owner and may not change
     behaviour; feature code never branches on a profile name (ADR-0003, deny
     case D6; `tests/architecture/test_deployment_profile.py`).
-12. **An authority cutover is contracted before it is composed.** ADR-0004 is
-    the Approvals contract: legacy votes are never backfilled into a module's
-    tables, request identity is never synthesized, and new request identity
-    begins at the watermark. `src/vendor_cp/approvals_cutover.py` carries the
-    enforceable half, including a two-directional ratchet on modules calling the
-    legacy decision surface — driving that set to empty is a retirement gate.
-    `dotmac-approvals` is now composed in SHADOW under that contract: pinned,
-    PLATFORM-selected and READ-ONLY, with vendor `v012` removing the write
-    grants its own migration issues. Installation is not adoption — nothing may
-    WRITE the module's tables, and `downgrade()` on `v012` fails closed rather
-    than restoring grants that would recreate two writers
-    (`tests/architecture/test_approvals_cutover.py`,
-    `tests/migration/test_approvals_shadow.py`).
+12. **An authority cutover is contracted before it is composed, and its premise
+    is checked.** ADR-0005 records the Approvals switch: the estate was MEASURED
+    (`TARGET_ABSENT`), not assumed, and `v013` re-checks emptiness under
+    `ACCESS EXCLUSIVE` in the same transaction that drops the legacy tables,
+    failing closed if a row exists. `dotmac-approvals` is the authority;
+    `vendor_cp.approvals.adapter` is the ONLY seam and is typed with no `Any`.
+    The retired local writer's call sites are ratcheted at ZERO. Do not build
+    parity, backfill, synthesized requests or sealed evidence against an empty
+    estate — ADR-0031 governs a cutover WITH data, and this was not one. Composed
+    and authoritative in code is NOT adopted
+    (`tests/architecture/test_approvals_authority.py`,
+    `tests/migration/test_authority_switch.py`).
 13. **A shadow overlap is declared, one-writer, ratcheted and dated.** The
     legacy `public.allocations` / `public.allocation_entries` tables shadow the
     composed `mod_ealloc` schema. `src/vendor_cp/shadow_overlaps.py` is the

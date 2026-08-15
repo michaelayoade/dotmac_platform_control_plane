@@ -199,6 +199,7 @@ def open_request(db: Session, command: OpenRequestCommand) -> RequestView:
     The module carries its own idempotency key as well; both are the command id,
     so a retry is a no-op at either layer rather than a second request.
     """
+
     def handler(session: Session) -> Mapping[str, object]:
         outcome = request_platform_approval(
             session,

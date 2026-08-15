@@ -29,8 +29,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vendor_cp.allocations import service as allocations
-from vendor_cp.approvals import service as approvals
+from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import service as contracts
+from vendor_cp.contracts.models import Contract
 from vendor_cp.licensing import service as licensing
 from vendor_cp.licensing.delivery_models import (
     AttemptOutcome,
@@ -72,6 +73,26 @@ def client(db: Session) -> Iterator[TestClient]:
         yield c
 
 
+def _approve(db: Session, contract_id: uuid.UUID, content_hash: str | None) -> None:
+    """Reach quorum on the contract's OWN approval request.
+
+    `submit` opened that request and stored its id on the row, so the id is read
+    back off the ORM row — the service returns a view, which does not carry it.
+    """
+    assert content_hash is not None
+    row = db.get(Contract, contract_id)
+    assert row is not None and row.approval_request_id is not None
+    approvals.record_decision(
+        db,
+        approvals.RecordDecisionCommand(
+            command_id=f"dec-{uuid.uuid4()}",
+            request_id=row.approval_request_id,
+            approver_id=uuid.uuid4(),
+            content_hash=content_hash,
+        ),
+    )
+
+
 def _catalogue(*codes: str) -> ProductCapabilityCatalogues:
     return ProductCapabilityCatalogues.from_capabilities({"dotmac-sub": tuple(codes)})
 
@@ -102,6 +123,19 @@ def _issue(db: Session) -> object:
             lines=(contracts.LineInput("off", 1, "cap.a", quantity=1),),
         ),
     )
+    # The policy must exist BEFORE submit: submit opens the approval
+    # request against that exact revision, so publishing after it would
+    # be too late.
+    approvals.publish_policy_version(
+        db,
+        approvals.PublishPolicyCommand(
+            command_id=f"pol-{uuid.uuid4()}",
+            policy_code="p",
+            version=1,
+            quorum=1,
+            allow_self_approval=False,
+        ),
+    )
     submitted = contracts.submit(
         db,
         contracts.SubmitCommand(
@@ -113,24 +147,7 @@ def _issue(db: Session) -> object:
         ),
         catalogues=_catalogue("cap.a"),
     )
-    approvals.publish_policy_version(
-        db,
-        approvals.PublishPolicyCommand(
-            command_id=f"pol-{uuid.uuid4()}", policy_code="p", version=1, quorum=1
-        ),
-    )
-    approvals.record_approval(
-        db,
-        approvals.RecordApprovalCommand(
-            command_id=f"a-{uuid.uuid4()}",
-            policy_code="p",
-            policy_version=1,
-            subject_type="contract",
-            subject_id=str(draft.id),
-            content_hash=submitted.content_hash or "",
-            approver_id=uuid.uuid4(),
-        ),
-    )
+    _approve(db, draft.id, submitted.content_hash)
     contracts.approve(
         db,
         contracts.TransitionCommand(

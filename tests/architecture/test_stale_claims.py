@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -128,6 +129,49 @@ def stated_lineage_counts(text: str) -> list[int]:
         token = match.group(1).lower()
         counts.append(NUMBER_WORDS.get(token, int(token) if token.isdigit() else 0))
     return counts
+
+
+#: A superseded design document must SAY so where a reader starts. ADR-0004
+#: designed a sealed cutover with parity; the estate turned out to be empty and
+#: ADR-0005 records what actually happened. The claim gated here is not a phrase
+#: to ban — it is a marker that must be PRESENT once the fact holds.
+SUPERSEDED_DESIGNS: Final = (
+    ("docs/adr/0004-approvals-authority-cutover.md", "SUPERSEDED by ADR-0005"),
+)
+
+
+def _authority_has_switched() -> bool:
+    """The legacy approval writer is gone, so any document still presenting the
+    sealed cutover as the plan is describing a path not taken."""
+    return not (ROOT / "src" / "vendor_cp" / "approvals" / "service.py").exists()
+
+
+def test_a_superseded_design_says_so_at_the_top() -> None:
+    """The gap this guard did NOT catch, closed.
+
+    The stale-claim guard passed cleanly through the authority switch, and it
+    should not have been able to: ADR-0004 described a sealed cutover that never
+    happened, and nothing in the claim list covered "this document designs a path
+    we did not take". A guard whose SHAPE is right but whose claim list misses
+    the transition in front of it is still a guard that missed it.
+    """
+    if not _authority_has_switched():
+        return
+    for relative, marker in SUPERSEDED_DESIGNS:
+        text = _flattened(ROOT / relative)
+        assert marker in text, (
+            f"{relative} designs a path that was not taken and carries no "
+            f"supersession marker ({marker!r})"
+        )
+        # And the marker belongs where a reader starts, not buried at the end.
+        assert marker in text[:1200], f"{relative}: supersession marker is buried"
+
+
+def test_the_supersession_marker_is_detectable(tmp_path: Path) -> None:
+    """SENSITIVITY: a document without the marker must be reported."""
+    missing = tmp_path / "adr.md"
+    missing.write_text("# ADR-0004\n\n- **Status:** Accepted\n")
+    assert "SUPERSEDED by ADR-0005" not in _flattened(missing)
 
 
 def _approvals_is_pinned() -> bool:

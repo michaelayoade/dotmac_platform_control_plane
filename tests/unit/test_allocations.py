@@ -22,8 +22,9 @@ from sqlalchemy.orm import Session
 from vendor_cp.allocations import service
 from vendor_cp.allocations.consumer import ContractEventConsumer
 from vendor_cp.allocations.models import Allocation, AllocationStatus
-from vendor_cp.approvals import service as approvals
+from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import service as contracts
+from vendor_cp.contracts.models import Contract
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
@@ -36,6 +37,26 @@ def db() -> Iterator[Session]:
             yield s
     finally:
         engine.dispose()
+
+
+def _approve(db: Session, contract_id: uuid.UUID, content_hash: str | None) -> None:
+    """Reach quorum on the contract's OWN approval request.
+
+    `submit` opened that request and stored its id on the row, so the id is read
+    back off the ORM row — the service returns a view, which does not carry it.
+    """
+    assert content_hash is not None
+    row = db.get(Contract, contract_id)
+    assert row is not None and row.approval_request_id is not None
+    approvals.record_decision(
+        db,
+        approvals.RecordDecisionCommand(
+            command_id=f"dec-{uuid.uuid4()}",
+            request_id=row.approval_request_id,
+            approver_id=uuid.uuid4(),
+            content_hash=content_hash,
+        ),
+    )
 
 
 def _catalogue(*codes: str) -> ProductCapabilityCatalogues:
@@ -73,6 +94,19 @@ def _activated_contract(db: Session):
         ),
     )
     submitter = uuid.uuid4()
+    # The policy must exist BEFORE submit: submit opens the approval
+    # request against that exact revision, so publishing after it would
+    # be too late.
+    approvals.publish_policy_version(
+        db,
+        approvals.PublishPolicyCommand(
+            command_id=f"pol-{uuid.uuid4()}",
+            policy_code="p",
+            version=1,
+            quorum=1,
+            allow_self_approval=False,
+        ),
+    )
     submitted = contracts.submit(
         db,
         contracts.SubmitCommand(
@@ -84,24 +118,7 @@ def _activated_contract(db: Session):
         ),
         catalogues=_catalogue("cap.a", "cap.b"),
     )
-    approvals.publish_policy_version(
-        db,
-        approvals.PublishPolicyCommand(
-            command_id=f"pol-{uuid.uuid4()}", policy_code="p", version=1, quorum=1
-        ),
-    )
-    approvals.record_approval(
-        db,
-        approvals.RecordApprovalCommand(
-            command_id=f"a-{uuid.uuid4()}",
-            policy_code="p",
-            policy_version=1,
-            subject_type="contract",
-            subject_id=str(draft.id),
-            content_hash=submitted.content_hash or "",
-            approver_id=uuid.uuid4(),
-        ),
-    )
+    _approve(db, draft.id, submitted.content_hash)
     contracts.approve(
         db,
         contracts.TransitionCommand(

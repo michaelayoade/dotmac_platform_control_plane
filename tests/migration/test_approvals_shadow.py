@@ -49,7 +49,6 @@ from vendor_cp.migrations import (
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = "mod_approvals"
-VENDOR_HEAD = "v012_approvals_shadow_readonly"
 ONLINE_ROLE = "platform_api"
 TENANT_ROLE = "app_user"
 
@@ -62,7 +61,15 @@ WRITE_PRIVILEGES = ("INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRI
 COLUMN_GRANTABLE = frozenset({"SELECT", "INSERT", "UPDATE", "REFERENCES"})
 
 
-def _upgrade(url: str, target: str = "heads") -> None:
+#: The shadow state exists BETWEEN v012 and v013. Once the authority switch runs,
+#: `platform_api` legitimately regains DML — so these canaries upgrade to the
+#: shadow revision, not to heads. Targeting heads here would assert the shadow
+#: restriction against a database that has correctly moved past it, which would
+#: be a test describing a phase the code has left.
+SHADOW_REVISION = "v012_approvals_shadow_readonly"
+
+
+def _upgrade(url: str, target: str = SHADOW_REVISION) -> None:
     command.upgrade(make_alembic_config(url), target)
 
 
@@ -225,7 +232,7 @@ def test_downgrade_is_refused_and_changes_nothing(scratch_db: str) -> None:
     """
     _upgrade(scratch_db)
     before = _version_rows(scratch_db)
-    assert VENDOR_HEAD in before
+    assert SHADOW_REVISION in before
 
     with pytest.raises(RuntimeError, match="cannot be downgraded"):
         command.downgrade(make_alembic_config(scratch_db), "v011_product_identity")
@@ -255,7 +262,7 @@ def test_the_downgrade_canary_reads_a_real_version_table(scratch_db: str) -> Non
     _upgrade(scratch_db)
     rows = _version_rows(scratch_db)
     assert rows, "the version reader found no rows at all"
-    assert VENDOR_HEAD in rows
+    assert SHADOW_REVISION in rows
 
 
 # ── 5. After a successful upgrade: SELECT-only, no tenant access, empty ─────
