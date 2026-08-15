@@ -98,9 +98,13 @@ lineage — rather than the tables someone remembered to name.
   FORCE RLS with a policy; everything with neither is the platform plane and
   must hold **no** privilege for `app_user`, across all seven PostgreSQL table
   privileges and their column-level forms.
-- The two kernel tables that break that rule on purpose (`tenants`,
-  `tenant_domains`, read-only to `app_user` by kernel 0001) are allowlisted and
-  separately asserted to be read-only.
+- The tenant CATALOGUE (`tenants`, `tenant_domains`) is a third category, not an
+  allowlisted exception: it is what tenancy is defined by, so kernel 0001 leaves
+  it outside RLS and grants it read-only to the tenant role. It is held to that
+  contract explicitly — no RLS, and no privilege beyond `SELECT`. `tenant_domains`
+  carries `tenant_id NOT NULL` as a parent FK rather than a scoping
+  discriminator, so classifying on that column alone wrongly demands FORCEd RLS
+  on it.
 - Nullable-`tenant_id` tables belong to neither plane. The three kernel tables
   in that state are named as **unmonitored**, not exempt, and the set is
   asserted exactly, so a fourth cannot appear quietly.

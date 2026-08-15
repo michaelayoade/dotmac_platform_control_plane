@@ -27,6 +27,7 @@ from vendor_cp.migrations import composed_version_locations
 from vendor_cp.offers import catalog as offer_catalogue
 from vendor_cp.offers import router as offer_router
 from vendor_cp.offers import service as offer_service
+from vendor_cp.shadow_overlaps import AUTHORITATIVE_WRITER, overlapped_legacy_tables
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -36,7 +37,29 @@ def test_entitlement_allocation_is_exact_pinned_from_forgejo() -> None:
     dependency = config["tool"]["poetry"]["dependencies"][
         "dotmac-entitlement-allocation"
     ]
-    assert dependency == {"version": "0.1.0a3", "source": "forgejo"}
+    assert dependency == {"version": "0.1.0a4", "source": "forgejo"}
+
+
+def test_the_module_owns_a_platform_plane_and_the_shadow_is_declared() -> None:
+    """a4 is what makes the shadow state auditable rather than merely tolerated.
+
+    Through a3 the module declared its tables under the TENANT contract while
+    its migration built platform-shaped ones, so the composed live-catalogue
+    audit could not hold `mod_ealloc` to any true contract. At a4 the tables are
+    `platform_tables`, the audit is meaningful, and the one thing it legitimately
+    reports — the legacy `public` tables shadowing the module's names — is
+    declared in `vendor_cp.shadow_overlaps` with an owner, a ratchet and an end.
+    """
+    assert allocation_module.tables == ()
+    assert set(allocation_module.platform_tables) == {
+        "allocations",
+        "allocation_entries",
+    }
+    assert overlapped_legacy_tables() == {
+        "public.allocations",
+        "public.allocation_entries",
+    }
+    assert AUTHORITATIVE_WRITER == "vendor_cp.allocations.service"
 
 
 def test_module_manifest_and_public_lineage_are_composed() -> None:

@@ -35,6 +35,13 @@ list. Two halves, because the composed database has two namespaces:
      through the kernel's canonical `ROLE_TABLE_PRIVILEGES_SQL`, which also
      catches a column-level grant that a table-level inquiry reports as
      "revoked".
+   * the TENANT CATALOGUE (`tenants`, `tenant_domains`) → its own category. It
+     is what tenancy is defined by, so kernel 0001 leaves it outside RLS and
+     grants it read-only to the tenant role. Note `tenant_domains` carries
+     `tenant_id NOT NULL` as a parent FK, not as a scoping discriminator, so a
+     classifier keyed on that column alone demands FORCEd RLS on a table the
+     kernel deliberately leaves open — CI caught exactly that. Excluded from
+     both planes and held to its own contract instead.
    * nullable `tenant_id` → NEITHER plane, and therefore **unmonitored** rather
      than exempt (ADR-0018). The kernel has exactly three such tables and they
      are named below; a fourth appearing fails, because an unmonitored region
@@ -81,14 +88,26 @@ APP_ROLE = "app_user"
 # shape of a gate that has silently stopped running.
 EXPECTED_MODULE_SCHEMAS = frozenset({"mod_ealloc", "mod_rel"})
 
-# Kernel-owned `public` tables the kernel deliberately GRANTS to the tenant role
-# despite their having no `tenant_id`: `GRANT SELECT ON tenants, tenant_domains
-# TO app_user, platform_api` (kernel 0001, `_grant_roles`). They are the tenant
-# catalogue — a tenant-scoped request resolves its own row through them — and
-# the grant is read-only, which is asserted separately below. Two entries, both
-# traceable to one migration line; a third would be a kernel decision this
-# assembly should have to look at rather than inherit.
-TENANT_CATALOGUE_READABLE = frozenset({"tenants", "tenant_domains"})
+# THE TENANT CATALOGUE — its own category, and neither plane.
+#
+# Kernel 0001 is explicit: "`tenants` and `tenant_domains` (NOT under RLS —
+# platform-level)". They are the thing tenancy is defined BY, so they cannot be
+# governed by a policy that calls `app_current_tenant_id()` to decide who may
+# read the row that defines the tenant. The kernel grants both read-only to the
+# tenant role in one line of `_grant_roles`.
+#
+# Naming them explicitly matters, because `tenant_domains` DOES carry
+# `tenant_id NOT NULL` — an FK to its parent tenant, not a scoping
+# discriminator. A classifier keyed purely on that column calls it tenant-plane
+# and then demands FORCEd RLS on a table the kernel deliberately leaves open;
+# CI caught exactly that. `tenants` itself has no such column and would have
+# slipped into the platform plane instead, where the read grant would have
+# looked like an un-revoked control-plane table.
+#
+# Two entries, both traceable to one migration line, and both held to their own
+# contract below: no RLS, and read-only to the tenant role. A third would be a
+# kernel decision this assembly should have to look at rather than inherit.
+TENANT_CATALOGUE = frozenset({"tenants", "tenant_domains"})
 
 # Kernel tables whose `tenant_id` is NULLABLE, so they sit in neither plane:
 # NULL means deployment/platform scope and a UUID means tenant scope, in one
@@ -183,7 +202,7 @@ class PublicSchema:
         scoped = {
             name
             for name, nullable in self.tenant_column_nullable.items()
-            if not nullable and name in self.rls
+            if not nullable and name in self.rls and name not in TENANT_CATALOGUE
         }
         subtypes = {
             name
@@ -200,8 +219,12 @@ class PublicSchema:
         )
 
     def platform_plane(self) -> frozenset[str]:
-        """Everything left: no tenant discriminator and no RLS."""
-        return self.tables - self.tenant_plane() - self.split_scope()
+        """Everything left: no tenant discriminator, no RLS, not the catalogue."""
+        return self.tables - self.tenant_plane() - self.split_scope() - TENANT_CATALOGUE
+
+    def tenant_catalogue(self) -> frozenset[str]:
+        """The catalogue tables actually present."""
+        return frozenset(TENANT_CATALOGUE & self.tables)
 
 
 def _public_schema(url: str) -> PublicSchema:
@@ -353,16 +376,35 @@ def test_every_platform_plane_public_table_is_revoked_from_the_tenant_role(
 
     bad = [
         f"{name}: {APP_ROLE} holds {sorted(held)}"
-        for name in sorted(platform - TENANT_CATALOGUE_READABLE)
+        for name in sorted(platform)
         if (held := schema.app_role_privileges.get(name, ()))
     ]
     assert not bad, f"platform-plane tables must be REVOKEd from {APP_ROLE}: {bad}"
 
-    # Without this the allowlist would also excuse an INSERT, a TRUNCATE or a
-    # TRIGGER on the tenant catalogue — "readable" is the premise it states.
+
+def test_the_tenant_catalogue_is_open_but_read_only(scratch_db: str) -> None:
+    """The catalogue's own contract, so excluding it from both planes is a
+    checked premise rather than a hole.
+
+    No RLS — a policy calling `app_current_tenant_id()` cannot decide who may
+    read the row that DEFINES the tenant. And read-only to the tenant role:
+    without this, "the catalogue is exempt" would also excuse an INSERT, a
+    TRUNCATE or a TRIGGER on it.
+    """
+    _upgrade(scratch_db)
+    schema = _public_schema(scratch_db)
+    catalogue = schema.tenant_catalogue()
+    assert catalogue == TENANT_CATALOGUE, sorted(catalogue)
+
+    under_rls = sorted(name for name in catalogue if schema.rls[name][0])
+    assert not under_rls, (
+        "the tenant catalogue is deliberately not under RLS (kernel 0001); "
+        f"a policy here would gate reading the row that defines the tenant: {under_rls}"
+    )
+
     over_granted = {
         name: sorted(set(schema.app_role_privileges.get(name, ())) - {"SELECT"})
-        for name in sorted(TENANT_CATALOGUE_READABLE & platform)
+        for name in sorted(catalogue)
     }
     assert not any(over_granted.values()), (
         "the tenant catalogue is readable, never writable, by the tenant role: "
