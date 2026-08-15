@@ -11,20 +11,60 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a60` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a61` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source.
-- Alembic installs Vendor's checked-in logical prerequisite bindings before it
-  builds the composed revision map. Kernel `0001_initial_tenant_schema` supplies
-  `module_database_roles.v1`; `tenant_scope_catalog.v1` is deliberately unbound,
-  so a dual-plane module creates only its platform tables in this assembly.
-- `dotmac-release-catalog==0.1.0a3` is the permanent owner of immutable release
+- **Two composition declarations, deliberately separate** (ADR-0028). Both are
+  checked in at `src/vendor_cp/migration_bindings.py` and both are installed
+  from `alembic/env.py` before Alembic builds the revision map:
+
+  - `ASSEMBLY_PREREQUISITE_BINDINGS` answers *where does an effect come from*.
+    Kernel `0001_initial_tenant_schema` supplies **both**
+    `module_database_roles.v1` and `tenant_scope_catalog.v1`, and both are
+    bound, because that is simply true: this assembly runs the whole kernel base
+    lineage, so `public.tenants`, `public.tenant_domains` and
+    `public.app_current_tenant_id()` all exist here.
+  - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It
+    selects `ModulePlane.PLATFORM` for `approvals`, and nothing else.
+
+  Kernel `0.1.0a60` briefly let the first imply the second, and this assembly is
+  the case that broke it: binding the tenant catalogue truthfully would have
+  installed tenant approval tables in a control plane that has no tenants, and
+  the only escape was to lie by withholding a binding whose effect the database
+  plainly provides. Availability is not intent.
+
+  Both are mirrored into `DOTMAC_MIGRATION_BINDINGS` /
+  `DOTMAC_MODULE_PLANE_SELECTIONS`, so `alembic heads|history|show` — which
+  never run `env.py` — inspect the same graph an upgrade applies.
+  `tests/migration/test_selected_planes.py` proves the four facts together
+  against a real database.
+- `dotmac-approvals==0.1.0a3` is composed in **shadow**, on the
+  entitlement-allocation pattern: manifest, lineage and PLATFORM plane
+  installed, while `vendor_cp.approvals` remains the sole authoritative writer.
+  Its feature manifest is named `vendor_approvals` because one registry holds
+  one owner per code; its routes are unchanged. Composing a selectable module
+  without a plane selection fails `ProductAssemblySpec` construction, which is
+  what makes the intent unskippable rather than merely documented.
+
+  Known gap: this release ships its lineage as package data but exposes no
+  public `versions_dir()`, unlike every other installable module, so
+  `vendor_cp.migrations.approvals_versions_dir` is this repository's one
+  reconstruction of a foreign package's layout. A test fails the build as soon
+  as upstream ships the locator, at which point the shim is deleted.
+- `dotmac-release-catalog==0.1.0a4` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration
   lineages. Its `mod_rel` tables are platform catalogues: `platform_api` may
   use the published grants and `app_user` is denied.
-- `dotmac-entitlement-allocation==0.1.0a3` is installed and its manifest and
+
+  a4 is a floor, not a courtesy bump. Through a3 the module declared those
+  tables in `ModuleManifest.tables` — the TENANT contract, meaning `tenant_id
+  NOT NULL` plus FORCEd RLS — while its migration built platform-shaped tables.
+  The declaration and the database disagreed, and nothing here looked because
+  nothing audited the live catalogue. a4 moves them to `platform_tables`
+  (ADR-0023), which is what makes the declaration true.
+- `dotmac-entitlement-allocation==0.1.0a4` is installed and its manifest and
   public migration lineage are composed. This is deliberately a **shadow
   installation**, not adoption: `vendor_cp.allocations` remains the sole
   authoritative writer and there is no dual-write. Vendor migration v011 makes
@@ -32,6 +72,53 @@ it owns and — just as importantly — what it must never become.
   the contract content hash, and emits it on contract events. Historical rows
   remain explicitly unclassified until an operator supplies evidence; the
   independent module therefore still receives no `ContractSnapshot`.
+
+## The composed database is audited whole
+
+`tests/migration/test_composed_live_catalog.py` audits the database this
+assembly actually produces — kernel lineage, three module lineages, vendor
+lineage — rather than the tables someone remembered to name.
+
+- The module schemas (`mod_rel`, `mod_ealloc`, `mod_approvals`) go through the
+  kernel's own canonical gate,
+  `dotmac_kernel.migrations.catalog.audit_live_schemas`. A rule the kernel
+  tightens tightens here in the release that ships it, and for `mod_approvals`
+  the expected table set follows this assembly's PLATFORM selection.
+- `public` is not walked by that gate (the compatibility namespace has
+  exceptions a module schema does not get), so this repository owns the policy
+  for it. Every table is classified from the live catalogue: `tenant_id NOT
+  NULL` and the kernel's no-column subtype tables are the tenant plane and must
+  FORCE RLS with a policy; everything with neither is the platform plane and
+  must hold **no** privilege for `app_user`, across all seven PostgreSQL table
+  privileges and their column-level forms.
+- The two kernel tables that break that rule on purpose (`tenants`,
+  `tenant_domains`, read-only to `app_user` by kernel 0001) are allowlisted and
+  separately asserted to be read-only.
+- Nullable-`tenant_id` tables belong to neither plane. The three kernel tables
+  in that state are named as **unmonitored**, not exempt, and the set is
+  asserted exactly, so a fourth cannot appear quietly.
+- The vendor lineage's own tables are derived by diffing `public` across
+  `kernel@head` and `heads`. This replaced a hand-written ten-name licence-table
+  list that could only ever prove what someone remembered; a future `v012` table
+  is swept the moment its migration runs.
+
+## Deployment profiles
+
+`src/vendor_cp/deployment_profile.py` declares which vendor SURFACES a
+deployment publishes. It is read in exactly one place — `build_spec()` — and a
+test fails the build if a second module imports the loader, because ADR-0003
+forbids feature code branching on a profile name.
+
+`production-bootstrap` (required by `scripts/deploy_production.sh` in the host
+env file) composes and runs everything and simply does not mount the `licensing`
+and `offers` routers. Those two features' domain owners are still vendor-local
+and reusable-looking; publishing their routes would make an external caller a
+constraint on deciding the owner. A withheld surface is not a disabled
+subsystem: licence key custody still loads at boot, and a test asserts it.
+
+A profile may never withhold a persistence owner. Every module manifest carries
+a migration lineage and owns schemas the database already contains, so an
+assembly missing one would no longer describe its own tables.
 
 ## Production topology
 

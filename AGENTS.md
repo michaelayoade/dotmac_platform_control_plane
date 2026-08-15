@@ -37,12 +37,32 @@ disagree, fix the drift.
    version that is** — this file deliberately does not repeat the number. A
    second copy of a version literal is a second thing to forget, which is
    exactly how this line came to say `a8` while the pin said `a9`.
-9. **Cross-repository engineering governance is pinned and required.**
-   `.dotmac/standards-profile.json` names the enrolled authority and fully typed
-   contract surface, and pins the accepted Governance source by exact commit.
-   The `Dotmac engineering standards` CI job must execute that same immutable
-   revision. Mutable tags/branches, copied rules, candidate mode, or a missing
-   required check are not substitutes.
+9. **Bindings state facts; plane selections state intent.** A
+   `PrerequisiteBinding` says where an effect comes from, and this assembly
+   binds BOTH kernel effects — including `tenant_scope_catalog.v1`, because
+   kernel `0001` really does create `public.tenants` here. A
+   `ModulePlaneSelection` says what this product installs, and it selects
+   `PLATFORM` alone for `approvals`. Never reintroduce the a60 model in which an
+   absent binding selected a plane, and never create a tenants table, a sentinel
+   tenant, or a nullable tenant column to satisfy a module (ADR-0028;
+   `tests/architecture/test_migration_prerequisite_bindings.py`,
+   `tests/migration/test_selected_planes.py`).
+10. **Every composed table is audited, none by name.** The module schemas go
+    through the kernel's `audit_live_schemas`; `public` is classified from the
+    live catalogue, and the vendor-owned subset is derived by diffing the
+    lineages. A privilege proof that names tables in a literal list is a
+    regression — it only ever covers what someone remembered
+    (`tests/migration/test_composed_live_catalog.py`).
+11. **A deployment profile selects surfaces and nothing else.** Read it once, in
+    `build_spec()`. It may not withhold a persistence owner and may not change
+    behaviour; feature code never branches on a profile name (ADR-0003, deny
+    case D6; `tests/architecture/test_deployment_profile.py`).
+12. **Cross-repository engineering governance is pinned and required.**
+    `.dotmac/standards-profile.json` names the enrolled authority and fully typed
+    contract surface, and pins the accepted Governance source by exact commit.
+    The `Dotmac engineering standards` CI job must execute that same immutable
+    revision. Mutable tags/branches, copied rules, candidate mode, or a missing
+    required check are not substitutes.
 
 ## Validation before any commit
 
