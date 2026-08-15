@@ -150,21 +150,26 @@ LEGACY_ALLOCATION_CALL_SITES: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Names from the composed module that vendor code MAY import while the legacy
-#: writer is authoritative: the composition handles, the typed catalogue port and
-#: its errors, and the read helpers. `stage_allocation` is deliberately absent —
-#: it is the module's WRITE surface, and importing it is how a second writer
-#: appears without anyone deciding to create one.
+#: Names from the composed module that vendor code imports today. This is the
+#: EXACT current set, not a permit for what the cutover will eventually need.
+#:
+#: It previously pre-authorised `ContractSnapshot`, `allocation_product` and
+#: `snapshot_fingerprint` — the three names the cutover actually turns on. That
+#: made the ratchet useless in the one direction that matters: the activation
+#: adapter could be built, the consumer switched and licence issuance repointed,
+#: all without a single guard moving. A name is added here in the change that
+#: starts using it, which is the change that should be arguing for it.
+#:
+#: `stage_allocation` is absent and stays absent: it is the module's WRITE
+#: surface, and importing it is how a second writer appears without anyone
+#: deciding to create one.
 MODULE_IMPORTS_ALLOWED_DURING_SHADOW: Final[frozenset[str]] = frozenset(
     {
         "AllocationError",
         "CapabilityCatalogueReader",
-        "ContractSnapshot",
         "UndeclaredCapabilityError",
         "UnknownProductError",
-        "allocation_product",
         "module",
-        "snapshot_fingerprint",
         "versions_dir",
     }
 )
@@ -173,6 +178,15 @@ MODULE_IMPORTS_ALLOWED_DURING_SHADOW: Final[frozenset[str]] = frozenset(
 #: means the module has started writing, which ends this shadow state — at which
 #: point the legacy writer must already be retired, not merely quieter.
 MODULE_WRITE_SURFACE: Final[frozenset[str]] = frozenset({"stage_allocation"})
+
+#: The composed module's importable package. Vendor code may use its top-level
+#: PUBLIC surface and nothing below it: reaching into `…​.service` bypasses the
+#: name allowlist above and is how the write surface arrives under another name.
+MODULE_PACKAGE: Final[str] = "dotmac_entitlement_allocation"
+
+#: The legacy models module. Any reference to it, in any import form, is a call
+#: site against tables scheduled for retirement.
+LEGACY_MODELS_MODULE: Final[str] = "vendor_cp.allocations.models"
 
 
 def overlapped_legacy_tables() -> frozenset[str]:
@@ -189,6 +203,8 @@ def overlap_for(legacy_table: str) -> ShadowOverlap | None:
 
 __all__ = [
     "AUTHORITATIVE_WRITER",
+    "LEGACY_MODELS_MODULE",
+    "MODULE_PACKAGE",
     "DECLARED_OVERLAP_COUNT",
     "LEGACY_ALLOCATION_CALL_SITES",
     "MODULE_IMPORTS_ALLOWED_DURING_SHADOW",

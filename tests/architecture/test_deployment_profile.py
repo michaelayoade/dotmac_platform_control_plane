@@ -25,6 +25,7 @@ import pytest
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import create_app
 from dotmac_release_catalog import module as release_catalog_module
+from import_scanner import reaches_module, scan_imports, source_files
 
 from vendor_cp import assembly
 from vendor_cp.deployment_profile import (
@@ -37,7 +38,9 @@ from vendor_cp.deployment_profile import (
     load_deployment_profile,
 )
 
-SRC = Path(__file__).resolve().parents[2] / "src" / "vendor_cp"
+SRC = Path(__file__).resolve().parents[2] / "src"
+PACKAGE = SRC / "vendor_cp"
+PROFILE_MODULE = "vendor_cp.deployment_profile"
 
 LICENSING_PREFIX = "/platform/vendor/licences"
 OFFERS_PREFIX = "/platform/vendor/offer-versions"
@@ -98,15 +101,41 @@ def test_an_unset_profile_composes_the_full_assembly(monkeypatch) -> None:
 
 def test_the_profile_is_read_in_exactly_one_place() -> None:
     """ADR-0003: profile names are conveniences over independent axes, and no
-    feature may branch on one. The composition module is the single reader; a
-    second import of the loader is a feature about to read a profile string."""
-    readers = [
+    feature may branch on one. The composition module is the single reader.
+
+    Scanned through `import_scanner`, because the earlier ImportFrom-only walk
+    could not see `import vendor_cp.deployment_profile as p` followed by
+    `p.load_deployment_profile()` — a second reader in every practical sense,
+    invisible to the guard that forbids one.
+    """
+    readers = sorted(
         path.relative_to(SRC).as_posix()
-        for path in SRC.rglob("*.py")
-        if "__pycache__" not in path.parts
-        for node in ast.walk(ast.parse(path.read_text()))
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "vendor_cp.deployment_profile"
-        and any(alias.name == "load_deployment_profile" for alias in node.names)
-    ]
-    assert readers == ["assembly.py"], readers
+        for path in source_files(PACKAGE)
+        if reaches_module(scan_imports(path, source_root=SRC), PROFILE_MODULE)
+    )
+    assert readers == ["vendor_cp/assembly.py"], (
+        "the deployment profile is read in exactly one place — composition. A "
+        f"second reader is a feature about to branch on a profile name: {readers}"
+    )
+
+
+def test_the_profile_reader_guard_is_not_vacuous() -> None:
+    """NON-VACUITY plus sensitivity for the form that was invisible.
+
+    The assertion above is an equality against a one-element list, which a
+    scanner returning nothing would fail — but only by accident of the expected
+    value being non-empty. These two checks make it deliberate: the real reader
+    is found, and a probe using the previously-blind `import x as y` form is
+    found too.
+    """
+    assembly = PACKAGE / "assembly.py"
+    assert reaches_module(scan_imports(assembly, source_root=SRC), PROFILE_MODULE)
+
+    probe = ast.parse("import vendor_cp.deployment_profile as p\n")
+    aliased = {
+        alias.name
+        for node in ast.walk(probe)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert PROFILE_MODULE in aliased

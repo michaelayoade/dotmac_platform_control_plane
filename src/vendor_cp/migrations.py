@@ -61,11 +61,24 @@ def make_alembic_config(url: str) -> Config:
     # installed bindings and plane selections would see neither. These two
     # variables are the one channel both entry points share; setting them here
     # keeps an INSPECTED graph identical to the one an upgrade applies.
-    os.environ.setdefault(
-        BINDINGS_ENV_VAR, "vendor_cp.migration_bindings:ASSEMBLY_PREREQUISITE_BINDINGS"
+    #
+    # ASSIGNED, never `setdefault`. These name THIS assembly's declarations, and
+    # the assembly is authoritative for them — so a value already exported into
+    # the process must lose, not win. `setdefault` had it exactly backwards: a
+    # stale or foreign `DOTMAC_MIGRATION_BINDINGS` left over from another
+    # assembly, a test, or a shell would survive, and `make_alembic_config`
+    # would then inspect a different graph from the one it applies. That is the
+    # precise failure the comment above claims to prevent.
+    #
+    # `DATABASE_URL` above is deliberately NOT in this group: it is the
+    # deployment's own runtime DSN, which this function does not own and must
+    # not overwrite — it only supplies a fallback so importing the kernel does
+    # not fail. `MIGRATION_DATABASE_URL` is owned here and is assigned.
+    os.environ[BINDINGS_ENV_VAR] = (
+        "vendor_cp.migration_bindings:ASSEMBLY_PREREQUISITE_BINDINGS"
     )
-    os.environ.setdefault(
-        MODULE_PLANES_ENV_VAR, "vendor_cp.migration_bindings:ASSEMBLY_MODULE_PLANES"
+    os.environ[MODULE_PLANES_ENV_VAR] = (
+        "vendor_cp.migration_bindings:ASSEMBLY_MODULE_PLANES"
     )
     return cfg
 

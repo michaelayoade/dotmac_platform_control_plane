@@ -9,13 +9,24 @@ ENFORCEABLE premise — otherwise the region is unmonitored, not exempt.
 So each premise gets a test:
 
 * **one writer at every instant** — nothing under `src/` imports the module's
-  write surface, so the legacy service cannot have quietly acquired a rival;
+  write surface or reaches past its public package, so the legacy service cannot
+  have quietly acquired a rival;
 * **no new legacy writer paths** — the set of modules touching the legacy
   allocation models is exact, so a new caller fails the build;
+* **the permitted imports are the ACTUAL imports** — not a pre-authorisation of
+  what the cutover will need, which would let the cutover proceed without the
+  ratchet ever moving;
 * **it names what removes it** — the cutover gate referenced actually exists in
   the checked-in architecture document;
 * **it expires** — a review date that fails loudly rather than a comment nobody
   re-reads.
+
+Every scan goes through `import_scanner`, which handles `import x`,
+`import x as y`, `from x import y`, `from x import y as z`, `from x.sub import
+y`, `from . import y` and `from .. import y`. The earlier version of this file
+matched only `from <exact module> import <name>`, so every other form could
+introduce a second writer while this exemption stayed green;
+`test_import_scanner.py` is the per-form mutation proof.
 
 The live half of the ratchet — that the database really does report these two
 overlaps and no others — lives in
@@ -25,15 +36,24 @@ database.
 
 from __future__ import annotations
 
-import ast
 from datetime import date
 from pathlib import Path
+
+from import_scanner import (
+    names_from,
+    reaches_module,
+    scan_imports,
+    source_files,
+    submodule_reach_ins,
+)
 
 from vendor_cp.shadow_overlaps import (
     AUTHORITATIVE_WRITER,
     DECLARED_OVERLAP_COUNT,
     LEGACY_ALLOCATION_CALL_SITES,
+    LEGACY_MODELS_MODULE,
     MODULE_IMPORTS_ALLOWED_DURING_SHADOW,
+    MODULE_PACKAGE,
     MODULE_WRITE_SURFACE,
     REVIEW_BY,
     SHADOW_OVERLAPS,
@@ -44,21 +64,9 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 PACKAGE = SRC / "vendor_cp"
 
-LEGACY_MODELS_MODULE = "vendor_cp.allocations.models"
-MODULE_PACKAGE = "dotmac_entitlement_allocation"
 
-
-def _source_files() -> list[Path]:
-    return [p for p in PACKAGE.rglob("*.py") if "__pycache__" not in p.parts]
-
-
-def _imports_from(path: Path, module: str) -> set[str]:
-    """Names imported from `module` by this file (empty when it imports none)."""
-    names: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text())):
-        if isinstance(node, ast.ImportFrom) and node.module == module:
-            names.update(alias.name for alias in node.names)
-    return names
+def _refs(path: Path):
+    return scan_imports(path, source_root=SRC)
 
 
 def test_the_declaration_covers_exactly_two_pairs() -> None:
@@ -81,16 +89,14 @@ def test_the_declaration_covers_exactly_two_pairs() -> None:
 def test_the_legacy_writer_is_still_the_only_writer() -> None:
     """The premise the whole exception rests on.
 
-    Shadow composition is a migration phase with ONE authoritative writer. The
-    enforceable form of that is: no vendor code imports the module's write
-    surface. `stage_allocation` appearing anywhere under `src/` means a second
-    writer exists, at which point this exception is describing a state that
-    ended.
+    Shadow composition is a migration phase with ONE authoritative writer, so no
+    vendor code may take the module's write surface — under any name, from the
+    package or from a submodule.
     """
     writers = sorted(
-        f"{path.relative_to(SRC).as_posix()}: {sorted(used)}"
-        for path in _source_files()
-        if (used := _imports_from(path, MODULE_PACKAGE) & MODULE_WRITE_SURFACE)
+        f"{path.relative_to(SRC).as_posix()}: {sorted(taken)}"
+        for path in source_files(PACKAGE)
+        if (taken := names_from(_refs(path), MODULE_PACKAGE) & MODULE_WRITE_SURFACE)
     )
     assert not writers, (
         "the composed module's write surface is imported, so the legacy service "
@@ -99,19 +105,56 @@ def test_the_legacy_writer_is_still_the_only_writer() -> None:
     )
 
 
+def test_no_source_file_reaches_past_the_module_public_surface() -> None:
+    """The other half of the one-writer premise.
+
+    A name allowlist on the package alone is bypassed by
+    `from dotmac_entitlement_allocation.service import stage_allocation`, which
+    takes the write surface without naming it at the package level. Reaching into
+    ANY submodule is refused, so the allowlist cannot be routed around.
+    """
+    reach_ins = sorted(
+        f"{path.relative_to(SRC).as_posix()}: {sorted(found)}"
+        for path in source_files(PACKAGE)
+        if (found := submodule_reach_ins(_refs(path), MODULE_PACKAGE))
+    )
+    assert not reach_ins, (
+        f"vendor code may use only the top-level {MODULE_PACKAGE} surface; "
+        f"reaching into a submodule bypasses the import allowlist: {reach_ins}"
+    )
+
+
 def test_module_imports_stay_inside_the_shadow_allowlist() -> None:
     """What vendor code may take from the module while the legacy writer owns
-    the data: composition handles, the typed catalogue port, its errors and the
-    read helpers. Anything else is the cutover starting without being declared."""
+    the data. Anything else is the cutover starting without being declared."""
     unexpected = sorted(
         f"{path.relative_to(SRC).as_posix()}: {sorted(extra)}"
-        for path in _source_files()
+        for path in source_files(PACKAGE)
         if (
-            extra := _imports_from(path, MODULE_PACKAGE)
+            extra := names_from(_refs(path), MODULE_PACKAGE)
             - MODULE_IMPORTS_ALLOWED_DURING_SHADOW
         )
     )
     assert not unexpected, f"undeclared import from {MODULE_PACKAGE}: {unexpected}"
+
+
+def test_the_allowlist_holds_no_name_nobody_imports() -> None:
+    """The allowlist is a RATCHET, so it may not run ahead of the code.
+
+    It previously pre-authorised the three names the cutover turns on
+    (`ContractSnapshot`, `allocation_product`, `snapshot_fingerprint`), which
+    meant the activation adapter could be built and the consumer switched with
+    this guard never moving. Exact equality forces that argument to happen in the
+    change that needs the name.
+    """
+    actually_imported: set[str] = set()
+    for path in source_files(PACKAGE):
+        actually_imported |= names_from(_refs(path), MODULE_PACKAGE)
+    assert actually_imported == set(MODULE_IMPORTS_ALLOWED_DURING_SHADOW), (
+        "the permitted-import set must equal what the code imports; a "
+        "pre-authorised name lets the cutover begin without moving this ratchet: "
+        f"{sorted(set(MODULE_IMPORTS_ALLOWED_DURING_SHADOW) ^ actually_imported)}"
+    )
 
 
 def test_no_new_call_sites_against_the_legacy_allocation_tables() -> None:
@@ -123,8 +166,8 @@ def test_no_new_call_sites_against_the_legacy_allocation_tables() -> None:
     """
     actual = {
         path.relative_to(SRC).as_posix()
-        for path in _source_files()
-        if _imports_from(path, LEGACY_MODELS_MODULE)
+        for path in source_files(PACKAGE)
+        if reaches_module(_refs(path), LEGACY_MODELS_MODULE)
     }
     assert actual == LEGACY_ALLOCATION_CALL_SITES, (
         "the set of modules touching the legacy allocation models changed; "
@@ -133,20 +176,28 @@ def test_no_new_call_sites_against_the_legacy_allocation_tables() -> None:
     )
 
 
-def test_the_call_site_detector_would_notice_a_new_importer(tmp_path: Path) -> None:
-    """SENSITIVITY. A ratchet that cannot see a violation is a comment.
+def test_these_guards_are_not_vacuous() -> None:
+    """NON-VACUITY for every scan above.
 
-    Writes a probe module that imports the legacy models and proves the same
-    reader reports it — without adding it to the package, so the real assertion
-    above stays honest.
+    Each guard is an assertion that a computed set is empty or equals a declared
+    one, and a scanner that silently returned nothing would satisfy most of them.
+    So: the declared sets are non-empty, and the scanner really does find imports
+    in real source files.
     """
-    probe = tmp_path / "probe.py"
-    probe.write_text(f"from {LEGACY_MODELS_MODULE} import Allocation\n")
-    assert _imports_from(probe, LEGACY_MODELS_MODULE) == {"Allocation"}
+    assert LEGACY_ALLOCATION_CALL_SITES
+    assert MODULE_IMPORTS_ALLOWED_DURING_SHADOW
+    assert MODULE_WRITE_SURFACE
 
-    clean = tmp_path / "clean.py"
-    clean.write_text("x = 1\n")
-    assert _imports_from(clean, LEGACY_MODELS_MODULE) == set()
+    files = source_files(PACKAGE)
+    assert len(files) > 30, "the source sweep found almost no files"
+    with_imports = [path for path in files if _refs(path)]
+    assert len(with_imports) > 20, "the scanner found almost no imports"
+
+    # And it really is reading THIS package's module surface, not an empty set.
+    seen: set[str] = set()
+    for path in files:
+        seen |= names_from(_refs(path), MODULE_PACKAGE)
+    assert seen, f"no import from {MODULE_PACKAGE} was observed at all"
 
 
 def test_every_overlap_names_a_gate_that_actually_exists() -> None:
@@ -163,10 +214,10 @@ def test_every_overlap_names_a_gate_that_actually_exists() -> None:
 def test_the_declaration_has_not_outlived_its_review_date() -> None:
     """The expiry, as a loud failure rather than a silent lapse.
 
-    Deliberately NOT an auto-disable: a date that quietly switches a gate back on
-    would break the build for a reason nobody connects to this file, and a date
-    that quietly switches it OFF would be worse. It fails here, naming the
-    cutover, so the overlap is either retired or re-justified by a person.
+    Deliberately NOT an auto-disable: a date that quietly switched a gate back on
+    would break the build for a reason nobody connects to this file, and one that
+    quietly switched it OFF would be worse. It fails here, naming the cutover, so
+    the overlap is either retired or re-justified by a person.
     """
     assert date.today() <= REVIEW_BY, (
         f"the allocation shadow overlap passed its review date ({REVIEW_BY}). "

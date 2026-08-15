@@ -19,10 +19,12 @@ defers, and to where.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-from dotmac_kernel.planes import supported_plane_sets
+from dotmac_kernel.planes import MODULE_PLANES_ENV_VAR, supported_plane_sets
 from dotmac_kernel.prerequisites import (
+    BINDINGS_ENV_VAR,
     MODULE_DATABASE_ROLES_V1,
     TENANT_SCOPE_CATALOG_V1,
 )
@@ -33,6 +35,7 @@ from vendor_cp.migration_bindings import (
     ASSEMBLY_PREREQUISITE_BINDINGS,
     KERNEL_ROOT_REVISION,
 )
+from vendor_cp.migrations import make_alembic_config
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -110,3 +113,54 @@ def test_graph_only_commands_see_the_same_declarations() -> None:
     assert "MODULE_PLANES_ENV_VAR" in source
     assert "vendor_cp.migration_bindings:ASSEMBLY_PREREQUISITE_BINDINGS" in source
     assert "vendor_cp.migration_bindings:ASSEMBLY_MODULE_PLANES" in source
+
+
+EXPECTED_BINDINGS_SPEC = "vendor_cp.migration_bindings:ASSEMBLY_PREREQUISITE_BINDINGS"
+EXPECTED_PLANES_SPEC = "vendor_cp.migration_bindings:ASSEMBLY_MODULE_PLANES"
+
+
+def test_the_assembly_overrides_stale_graph_environment(monkeypatch) -> None:
+    """The assembly wins over ambient environment state, in both directions.
+
+    `setdefault` preferred whatever was already exported, which is backwards for
+    a value this assembly owns: a stale or foreign `DOTMAC_MIGRATION_BINDINGS`
+    left by another assembly, a test or a shell would survive, and
+    `make_alembic_config` would inspect a graph different from the one it
+    applies.
+
+    Preloading deliberately WRONG values is the whole test — with `setdefault`
+    they survive and this fails.
+    """
+    monkeypatch.setenv(BINDINGS_ENV_VAR, "some_other_assembly:BINDINGS")
+    monkeypatch.setenv(MODULE_PLANES_ENV_VAR, "some_other_assembly:PLANES")
+
+    make_alembic_config("postgresql+psycopg://x@127.0.0.1:5432/y")
+
+    assert os.environ[BINDINGS_ENV_VAR] == EXPECTED_BINDINGS_SPEC
+    assert os.environ[MODULE_PLANES_ENV_VAR] == EXPECTED_PLANES_SPEC
+
+
+def test_the_graph_environment_is_set_when_absent_too(monkeypatch) -> None:
+    """NON-VACUITY for the test above: it must not pass merely because the
+    variables happen to be set correctly already."""
+    monkeypatch.delenv(BINDINGS_ENV_VAR, raising=False)
+    monkeypatch.delenv(MODULE_PLANES_ENV_VAR, raising=False)
+
+    make_alembic_config("postgresql+psycopg://x@127.0.0.1:5432/y")
+
+    assert os.environ[BINDINGS_ENV_VAR] == EXPECTED_BINDINGS_SPEC
+    assert os.environ[MODULE_PLANES_ENV_VAR] == EXPECTED_PLANES_SPEC
+
+
+def test_no_graph_declaration_is_configured_with_setdefault() -> None:
+    """MUTATION PROOF. The two tests above pass under `setdefault` whenever the
+    variables are unset, so they cannot by themselves keep it from coming back.
+    This reads the source and refuses the call shape outright."""
+    source = (ROOT / "src" / "vendor_cp" / "migrations.py").read_text()
+    for line in source.splitlines():
+        code = line.split("#", 1)[0]
+        if "setdefault" in code:
+            assert "DATABASE_URL" in code and "MIGRATION_DATABASE_URL" not in code, (
+                "graph declarations are assembly-owned and must be ASSIGNED, so "
+                f"ambient environment state loses: {line.strip()}"
+            )
