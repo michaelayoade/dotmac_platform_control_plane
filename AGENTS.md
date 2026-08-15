@@ -66,7 +66,15 @@ disagree, fix the drift.
     `build_spec()`. It may not withhold a persistence owner and may not change
     behaviour; feature code never branches on a profile name (ADR-0003, deny
     case D6; `tests/architecture/test_deployment_profile.py`).
-12. **A shadow overlap is declared, one-writer, ratcheted and dated.** The
+12. **An authority cutover is contracted before it is composed.** ADR-0004 is
+    the Approvals contract: legacy votes are never backfilled into a module's
+    tables, request identity is never synthesized, and new request identity
+    begins at the watermark. `src/vendor_cp/approvals_cutover.py` carries the
+    enforceable half, including a two-directional ratchet on modules calling the
+    legacy decision surface — driving that set to empty is a retirement gate. Do
+    not compose, pin or plane-select `dotmac-approvals` while the contract
+    stands (`tests/architecture/test_approvals_cutover.py`).
+13. **A shadow overlap is declared, one-writer, ratcheted and dated.** The
     legacy `public.allocations` / `public.allocation_entries` tables shadow the
     composed `mod_ealloc` schema. `src/vendor_cp/shadow_overlaps.py` is the
     ASSEMBLY-LOCAL declaration of exactly those two pairs: the legacy service
@@ -75,7 +83,7 @@ disagree, fix the drift.
     Never relax the kernel gate to solve this, and never rename a legacy table to
     hide the overlap (`tests/architecture/test_shadow_overlaps.py`,
     `tests/migration/test_composed_live_catalog.py`).
-13. **Cross-repository engineering governance is pinned and required.**
+14. **Cross-repository engineering governance is pinned and required.**
     `.dotmac/standards-profile.json` names the enrolled authority and fully typed
     contract surface, and pins the accepted Governance source by exact commit.
     The `Dotmac engineering standards` CI job must execute that same immutable

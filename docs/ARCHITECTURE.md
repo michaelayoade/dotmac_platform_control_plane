@@ -48,17 +48,29 @@ it owns and — just as importantly — what it must never become.
 - **Approvals is not composed here.** `dotmac-approvals` will be the first
   selectable module Vendor installs, with `ModulePlane.PLATFORM`, but shadow
   composition is a bounded authority-migration phase with exactly ONE
-  authoritative writer — not parallel operation — so it lands only behind a
-  cutover contract naming the old and new authority, the identity mapping,
-  open-request handling, parity measurement, the watermark, the rollback
-  boundary, the retirement gate, and a ratchet forbidding new local approval
-  call sites.
+  authoritative writer — not parallel operation.
 
-  What this repository has already done for it: the vendor-local feature
-  manifest is named `vendor_approvals`, not `approvals`, because
-  `dotmac-approvals` registers the module code `approvals` and a module registry
-  holds one owner per code. That collision is removed from the cutover's path in
-  advance; the routes are unchanged.
+  That contract now exists: **ADR-0004**
+  (`docs/adr/0004-approvals-authority-cutover.md`). It names the two
+  authorities, the policy/decision identity mapping and the explicit ABSENCE of
+  a request mapping, the watermark and how it is recorded, the drain-versus-
+  restart rule for incomplete groups, the parity measurements and the
+  differences accepted, the rollback boundary and the retirement gate. Its
+  enforceable half is `src/vendor_cp/approvals_cutover.py`, held by
+  `tests/architecture/test_approvals_cutover.py`.
+
+  Two facts from it worth knowing without opening it. Legacy approval records
+  are **never backfilled** into the module's tables — they stay immutable,
+  read-only evidence, and shadow comparison uses the module's PURE policy
+  engine, which imports no persistence and so needs nothing composed. And
+  **request identity is never synthesized**: a pre-watermark record has no
+  request id, no recoverable requester and no persisted terminal state, so new
+  request identity begins at the watermark rather than being invented backwards.
+
+  Already done for it: the vendor-local feature manifest is named
+  `vendor_approvals`, not `approvals`, because `dotmac-approvals` reserves the
+  module code `approvals` and a registry holds one owner per code. That
+  collision is off the cutover's path in advance; the routes are unchanged.
 - `dotmac-release-catalog==0.1.0a4` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration
