@@ -381,7 +381,15 @@ def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
     next test proves each declared overlap was really reported, so the
     subtraction cannot quietly cover a clean database.
     """
-    registry = NamespaceRegistry.from_manifests(build_spec().modules)
+    spec = build_spec()
+    # `module_planes` is REQUIRED here, not optional decoration: without it the
+    # registry falls back to the atomic "every declared plane is installed"
+    # view, expects the module's TENANT tables, and reports them missing on a
+    # correct platform-only install. The expected set is a function of the
+    # assembly's SELECTION (ADR-0028), so the selection has to be supplied.
+    registry = NamespaceRegistry.from_manifests(
+        spec.modules, module_planes=spec.module_planes
+    )
     assert frozenset(audited_schemas(registry)) == EXPECTED_MODULE_SCHEMAS
 
     _upgrade(scratch_db)
@@ -409,7 +417,15 @@ def test_the_shadow_overlap_declaration_matches_the_database_exactly(
     allowed to shrink silently is exactly how a "temporary" exception outlives
     everyone who agreed to it.
     """
-    registry = NamespaceRegistry.from_manifests(build_spec().modules)
+    spec = build_spec()
+    # `module_planes` is REQUIRED here, not optional decoration: without it the
+    # registry falls back to the atomic "every declared plane is installed"
+    # view, expects the module's TENANT tables, and reports them missing on a
+    # correct platform-only install. The expected set is a function of the
+    # assembly's SELECTION (ADR-0028), so the selection has to be supplied.
+    registry = NamespaceRegistry.from_manifests(
+        spec.modules, module_planes=spec.module_planes
+    )
     _upgrade(scratch_db)
     with _connection(scratch_db) as conn:
         violations = audit_live_schemas(conn, registry)

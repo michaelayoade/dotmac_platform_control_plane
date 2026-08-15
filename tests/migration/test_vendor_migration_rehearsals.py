@@ -30,6 +30,10 @@ KERNEL_HEAD = "0023_audit_actor_and_forensics"  # current pin (0.1.0a61)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
+# A STATIC head of its own lineage — but not a version ROW once `v012` depends
+# on it, because a `depends_on` edge makes its target an ancestor of the
+# depending revision. `alembic_version` holds current heads, not every applied
+# revision, so this appears in `script.get_heads()` and not in `_versions()`.
 APPROVALS_HEAD = "ap_0001_approvals"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
@@ -138,7 +142,6 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         KERNEL_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
-        APPROVALS_HEAD,
         VENDOR_HEAD,
     }
 
@@ -314,7 +317,6 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
         KERNEL_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
-        APPROVALS_HEAD,
         VENDOR_HEAD,
     }
 
@@ -360,7 +362,6 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
         KERNEL_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
-        APPROVALS_HEAD,
         VENDOR_HEAD,
     }
 
@@ -403,7 +404,6 @@ def test_kernel_advance_keeps_vendor_head_independent(
         synth_rev,
         ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
-        APPROVALS_HEAD,
         VENDOR_HEAD,
     }
 
