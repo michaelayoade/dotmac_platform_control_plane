@@ -27,6 +27,11 @@ from enum import StrEnum
 from typing import Final
 from uuid import UUID
 
+from dotmac_kernel.migrations.catalog import (
+    ROLE_TABLE_PRIVILEGES_SQL,
+    TABLE_PRIVILEGES,
+)
+
 # ── The two authorities ─────────────────────────────────────────────────────
 
 #: Authoritative today, and until the watermark row is committed.
@@ -324,17 +329,22 @@ SEAL_TRANSACTION_STEPS: Final[tuple[str, ...]] = (
     "grant_the_module_platform_tables_to_the_online_role",
 )
 
-#: PostgreSQL's complete table privilege set, named once so no check can quietly
-#: cover a subset.
-ALL_TABLE_PRIVILEGES: Final[tuple[str, ...]] = (
-    "SELECT",
-    "INSERT",
-    "UPDATE",
-    "DELETE",
-    "TRUNCATE",
-    "REFERENCES",
-    "TRIGGER",
-)
+#: PostgreSQL's complete table privilege set — IMPORTED from the kernel, never
+#: re-declared.
+#:
+#: An earlier draft re-typed this tuple locally and permuted it: kernel order is
+#: SELECT, INSERT, UPDATE, REFERENCES, DELETE, TRUNCATE, TRIGGER, and the local
+#: copy read ... DELETE, TRUNCATE, REFERENCES ... Since
+#: `ROLE_TABLE_PRIVILEGES_SQL` returns its answers POSITIONALLY in the kernel's
+#: order, zipping them against the permuted copy mislabels three privileges: the
+#: REFERENCES answer is read as DELETE, DELETE as TRUNCATE, TRUNCATE as
+#: REFERENCES. The seal's central guarantee could then report "DELETE is
+#: revoked" while DELETE was granted.
+#:
+#: A check that reports the WRONG privilege is worse than no check, because it
+#: manufactures confident evidence for a false claim. The only safe relationship
+#: with a positional result is to take the labels from whoever owns the query.
+ALL_TABLE_PRIVILEGES: Final[tuple[str, ...]] = TABLE_PRIVILEGES
 
 #: Revoked from the online platform role inside the transaction: every write and
 #: DDL privilege, and NOT `SELECT`.
@@ -376,6 +386,11 @@ LEGACY_PRIVILEGE_MATRIX: Final[dict[str, dict[str, bool]]] = {
 #: and migration role, unchanged by the seal: an estate with no way to correct a
 #: mistake is not safer, it is just stuck. It never serves a request.
 UNCONSTRAINED_OFFLINE_ROLE: Final[str] = "app_admin"
+
+#: The query that answers the matrix — the kernel's, by import. Named here so
+#: the reuse is literal rather than aspirational: this module and the composed
+#: live-catalogue audit ask the same question with the same labels.
+EFFECTIVE_PRIVILEGE_QUERY: Final[str] = ROLE_TABLE_PRIVILEGES_SQL
 
 #: Roles whose effective privileges are verified after the revoke. Verified, not
 #: assumed — a grant reaching a role through PUBLIC or through a role it inherits
@@ -434,78 +449,104 @@ RECORD_DIGEST_FIELDS: Final[tuple[str, ...]] = (
 # escapes every delimiter inside a string, plus explicit normalisation for the
 # types where equal values have several spellings.
 
-#: Domain tag and version, carried in every encoded row so a policy row and a
-#: record row can never collide even with identical field values — and so a
-#: future encoding change is a visible version bump rather than a silent
-#: reinterpretation of old digests.
+#: Domain tag and version for the DATASET envelope. Version 2: version 1 hashed
+#: joined rows, which left the domain, version and table inside the rows — so an
+#: EMPTY dataset had no rows at all, and empty policies and empty records both
+#: hashed the empty byte string to the same digest. A seal that cannot tell "no
+#: policies" from "no records" collides in exactly the case a fresh or fully
+#: drained estate hits.
 SEAL_ENCODING_DOMAIN: Final[str] = "dotmac.vendor.approvals.seal"
-SEAL_ENCODING_VERSION: Final[int] = 1
+SEAL_ENCODING_VERSION: Final[int] = 2
 
 #: Fixed, timezone-independent timestamp rendering: converted to UTC first, then
 #: always six fractional digits and a literal `Z`.
 SEAL_TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%S.%fZ"
 
+#: Every value carries a TYPE TAG. Version 1 normalised UUIDs and datetimes to
+#: plain strings, so a UUID collided with the identical string and a datetime
+#: with its own rendered text — cross-type collisions among the function's own
+#: accepted inputs.
+SEAL_TYPE_TAGS: Final[tuple[str, ...]] = (
+    "null",
+    "bool",
+    "int",
+    "uuid",
+    "timestamp",
+    "str",
+)
 
-def _render_value(value: object) -> object:
-    """One column value, normalised so equal values have ONE spelling.
+
+def _typed_value(value: object) -> list[object]:
+    """One column value as `[tag, payload]`, normalised so equal values have ONE
+    spelling and unequal TYPES can never share an encoding.
 
     Fails closed on anything unrecognised: a type nobody thought about must not
     reach the digest through `str()`, because that is exactly how an ambiguous
     rendering gets in.
     """
     if value is None:
-        return None
+        return ["null", None]
     # bool BEFORE int — `bool` is an `int` subclass, and `True` must not encode
-    # as `1`, which is a different value that would hash the same.
+    # as `1`, which is a different value that would otherwise hash the same.
     if isinstance(value, bool):
-        return value
+        return ["bool", value]
     if isinstance(value, int):
-        return value
+        return ["int", value]
     if isinstance(value, UUID):
-        return str(value).lower()
+        return ["uuid", str(value).lower()]
     if isinstance(value, datetime):
         if value.tzinfo is None:
             raise ValueError(
                 "a naive datetime has no single instant, so it cannot be "
                 "canonically encoded — read timestamps as timezone-aware"
             )
-        return value.astimezone(UTC).strftime(SEAL_TIMESTAMP_FORMAT)
+        return ["timestamp", value.astimezone(UTC).strftime(SEAL_TIMESTAMP_FORMAT)]
     if isinstance(value, str):
-        return value
+        return ["str", value]
     raise TypeError(f"no canonical encoding for {type(value).__name__}")
 
 
-def canonical_row(
-    table: str, fields: Sequence[str], values: Mapping[str, object]
-) -> str:
-    """One row as canonical JSON — injective, and self-delimiting.
+def _dumps(payload: object) -> str:
+    """Canonical JSON: ASCII-escaped, no whitespace, no NaN.
 
     `ensure_ascii=True` escapes `\x1f` as `\u001f` and a newline as `\n`, so a
-    delimiter inside a string value can never be mistaken for the frame. Field
-    ORDER comes from the declared tuple, not from the mapping.
+    delimiter inside a string value can never be mistaken for the frame.
     """
-    payload = [
-        SEAL_ENCODING_DOMAIN,
-        SEAL_ENCODING_VERSION,
-        table,
-        [_render_value(values[field]) for field in fields],
-    ]
     return json.dumps(
         payload, ensure_ascii=True, separators=(",", ":"), allow_nan=False
     )
 
 
+def canonical_row(fields: Sequence[str], values: Mapping[str, object]) -> str:
+    """One row as canonical JSON of `[tag, payload]` pairs, in declared order.
+
+    Carries no table: the table lives in the dataset envelope, which is what
+    keeps an empty dataset distinguishable.
+    """
+    return _dumps([_typed_value(values[field]) for field in fields])
+
+
 def seal_digest(
     table: str, fields: Sequence[str], rows: Iterable[Mapping[str, object]]
 ) -> str:
-    """SHA-256 over the sorted canonical rows of one sealed table.
+    """SHA-256 over the canonical ENVELOPE of one sealed table.
 
-    Sorting is over the encoded text, so it is deterministic without depending on
-    any database ordering — there is no trustworthy row order here, which is the
+    `[domain, version, table, field_names, sorted_typed_rows]` — so the domain,
+    version, table identity and column list are hashed even when there are no
+    rows at all. Rows sort by their encoded text, deterministic without depending
+    on any database ordering; there is no trustworthy row order here, for the
     same reason a random primary key cannot serve as a cursor.
     """
-    encoded = sorted(canonical_row(table, fields, row) for row in rows)
-    return hashlib.sha256("\n".join(encoded).encode("utf-8")).hexdigest()
+    typed_rows = [[_typed_value(row[field]) for field in fields] for row in rows]
+    typed_rows.sort(key=_dumps)
+    envelope = [
+        SEAL_ENCODING_DOMAIN,
+        SEAL_ENCODING_VERSION,
+        table,
+        list(fields),
+        typed_rows,
+    ]
+    return hashlib.sha256(_dumps(envelope).encode("utf-8")).hexdigest()
 
 
 #: Revoked from every online role once written, so the sealed set cannot be
@@ -555,6 +596,7 @@ __all__ = [
     "COARSE_ELIGIBILITY_RULE",
     "DIGEST_REJECTION_REASONS",
     "ALL_TABLE_PRIVILEGES",
+    "EFFECTIVE_PRIVILEGE_QUERY",
     "LEGACY_PRIVILEGE_MATRIX",
     "SEAL_ENCODING_DOMAIN",
     "SEAL_ENCODING_VERSION",

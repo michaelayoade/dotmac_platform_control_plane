@@ -210,49 +210,53 @@ theoretical one. Two digests therefore cover **every column of both tables**:
   `subject_type`, `subject_id`, `content_hash`, `approver_id`, `created_at`,
   `updated_at`.
 
-**The framing is a typed, injective encoding**, not a delimiter-separated one.
-An earlier draft joined column values with `\x1f` and rows with newlines, which
-is ambiguous and reachably so: `policy_code`, `subject_type`, `subject_id` and
-`content_hash` are plain strings that may legally contain those bytes, so two
-different sets could render to byte-identical input and hash the same. Timestamp
-text was ambiguous in a second way — its rendering varied with session timezone
-and formatting, so the same data hashed differently depending on who connected.
+**The framing is a typed, injective DATASET ENVELOPE** (encoding version 2), not
+a delimiter-separated one and not a join of encoded rows. Two earlier framings
+failed, and both failures are worth keeping written down:
 
-Each row is encoded as canonical JSON:
+*Version 0* joined column values with `\x1f` and rows with newlines. That is
+ambiguous and reachably so: `policy_code`, `subject_type`, `subject_id` and
+`content_hash` are plain strings that may legally contain those bytes, so two
+different sets could render to byte-identical input. Timestamp text was ambiguous
+in a second way — its rendering varied with session timezone, so the same data
+hashed differently depending on who connected.
+
+*Version 1* fixed the delimiters with canonical JSON per row, but still hashed
+the JOINED ROWS. The domain, version and table therefore lived only inside rows —
+and an **empty dataset has no rows**, so empty policies and empty records both
+hashed the empty byte string to the same digest. A seal that cannot distinguish
+"no policies" from "no records" collides in exactly the case a fresh or fully
+drained estate hits. Version 1 also normalised UUIDs and datetimes to plain
+strings, so a UUID collided with the identical string and a datetime with its own
+rendered text.
+
+**Version 2** hashes one envelope per table:
 
 ```json
-["dotmac.vendor.approvals.seal", 1, "<table>", [ <values in declared order> ]]
+["dotmac.vendor.approvals.seal", 2, "<table>", [<field names>], [<sorted typed rows>]]
 ```
 
-with `ensure_ascii=True` and no whitespace, so every delimiter inside a string is
-escaped by the encoding itself. Values are normalised so equal values have ONE
-spelling: timestamps converted to UTC and rendered `%Y-%m-%dT%H:%M:%S.%fZ`
-(a naive datetime is refused, having no single instant); UUIDs lowercase
-canonical; booleans and integers as JSON types, with `bool` handled before `int`
-so `True` cannot encode as `1`. Any other type raises rather than falling back to
-`str()`, because that fallback is precisely how an ambiguous rendering gets in.
+- the domain, version, table identity and column list are hashed **even when
+  there are no rows at all**;
+- every value carries a **type tag** — `["uuid","…"]`, `["timestamp","…"]`,
+  `["str","…"]`, `["int",n]`, `["bool",b]`, `["null",null]` — so a UUID, a
+  timestamp and a string with the same characters can never share an encoding;
+- JSON is emitted with `ensure_ascii=True` and no whitespace, so every delimiter
+  inside a string is escaped by the encoding itself;
+- timestamps are converted to UTC and rendered `%Y-%m-%dT%H:%M:%S.%fZ`; a naive
+  datetime is refused, having no single instant;
+- `bool` is handled before `int`, so `True` cannot encode as `1`;
+- any other type raises rather than falling back to `str()`, because that
+  fallback is precisely how an ambiguous rendering gets in;
+- rows sort by their encoded text — deterministic without depending on any
+  database order, for the same reason a random primary key cannot serve as a
+  cursor.
 
-The domain tag and version are carried in every row, so a policy row and a record
-row can never collide even with identical field values, and a future encoding
-change is a visible version bump rather than a silent reinterpretation of digests
-already recorded.
-
-Rows are then sorted by their encoded text and joined with newlines — safe now,
-because JSON escapes newlines inside strings — and SHA-256 is taken over the
-UTF-8 encoding. Sorting by encoded text rather than by any database order is
-deliberate: there is no trustworthy row order here, for the same reason a random
-primary key cannot serve as a cursor.
-
-**`id` is now included, and the earlier reasoning for excluding it was a
-category error.** A random value cannot ORDER a set — that is why it fails as a
-cursor — but it identifies a row perfectly well WITHIN one. Excluding it made a
-source-identity replacement invisible: delete a row and insert a replacement
-carrying different content under a new id, and count plus content-without-id
-could be made to agree. Excluding policy contents was the same hole one table
-over.
-
-`updated_at` is included so that an update which happens to preserve every other
-value still moves the digest.
+The framing changed, so the version changed with it: a new framing under an
+unchanged version would silently reinterpret digests already recorded. Golden
+vectors for the empty and populated cases are pinned in the test suite, so a
+future refactor is caught as a changed constant rather than passing because the
+implementation and a recomputed expectation moved together.
 
 The declared field lists are checked against the ORM models, so a column added to
 either table without being added to its digest fails the build rather than

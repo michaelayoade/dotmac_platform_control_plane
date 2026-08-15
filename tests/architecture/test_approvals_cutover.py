@@ -27,6 +27,10 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from dotmac_kernel.migrations.catalog import (
+    ROLE_TABLE_PRIVILEGES_SQL,
+    TABLE_PRIVILEGES,
+)
 from import_scanner import reaches_module, scan_imports, source_files
 
 from vendor_cp.approvals_cutover import (
@@ -35,6 +39,7 @@ from vendor_cp.approvals_cutover import (
     ALL_TABLE_PRIVILEGES,
     COARSE_ELIGIBILITY_RULE,
     DIGEST_REJECTION_REASONS,
+    EFFECTIVE_PRIVILEGE_QUERY,
     LEGACY_COMPOSITION_SITES,
     LEGACY_DECISION_CALL_SITES,
     LEGACY_DECISION_MODULE,
@@ -49,10 +54,10 @@ from vendor_cp.approvals_cutover import (
     RECOVERABLE_FACTS,
     RESTART_CONDITIONS,
     REVOKED_LEGACY_PRIVILEGES,
-    SEAL_ENCODING_DOMAIN,
     SEAL_ENCODING_VERSION,
     SEAL_LOCK_MODE,
     SEAL_TABLE,
+    SEAL_TIMESTAMP_FORMAT,
     SEAL_TRANSACTION_STEPS,
     SEALED_LEGACY_TABLES,
     SHARED_SAFETY_PROPERTIES,
@@ -640,7 +645,21 @@ def test_the_prose_assertions_survive_reflow() -> None:
     )
 
 
-# ── The canonical encoding is injective ─────────────────────────────────────
+# ── The canonical encoding is injective and typed ───────────────────────────
+
+# Pinned GOLDEN VECTORS. A refactor that changes the framing is caught here as a
+# changed constant, rather than passing because the implementation and a
+# recomputed expectation moved together. Bump deliberately, with the encoding
+# version, or not at all.
+GOLDEN_EMPTY_POLICIES = (
+    "7f738c17418ccccfa7ce60cad9e755dffb457f1eb791b1c9fde860599495ebb7"
+)
+GOLDEN_EMPTY_RECORDS = (
+    "ad1d7b9fdcff1125eaf5004a12fac36b620edb209d319cff1e1a2fc2ad0065b2"
+)
+GOLDEN_POPULATED_POLICY = (
+    "2fcf2d24f47c6c563a467c4b6359a0fb91b9254909c981b1ca71dbd7616a93ae"
+)
 
 
 def _policy_row(**overrides: object) -> dict[str, object]:
@@ -657,41 +676,82 @@ def _policy_row(**overrides: object) -> dict[str, object]:
     return row
 
 
-def test_delimiter_bearing_values_are_escaped_not_framed() -> None:
-    """SENSITIVITY for injectivity, on the case that killed the old framing.
+def _policy_digest(rows: list[dict[str, object]]) -> str:
+    return seal_digest("approval_policies", POLICY_DIGEST_FIELDS, rows)
 
-    The previous encoding joined fields with `\x1f` and rows with newlines, so a
-    string value CONTAINING those bytes could move the frame. `policy_code` and
-    `content_hash` are plain strings, so this is reachable rather than
-    theoretical.
+
+def test_empty_datasets_of_different_tables_do_not_collide() -> None:
+    """The defect version 1 could not survive.
+
+    v1 hashed JOINED ROWS, so the domain, version and table lived only inside
+    rows — and an empty dataset has none. Empty policies and empty records both
+    hashed the empty byte string to the same digest. That is a collision in
+    precisely the case a fresh or fully drained estate hits.
+    """
+    empty_policies = seal_digest("approval_policies", POLICY_DIGEST_FIELDS, [])
+    empty_records = seal_digest("approval_records", RECORD_DIGEST_FIELDS, [])
+    assert empty_policies != empty_records
+    assert empty_policies == GOLDEN_EMPTY_POLICIES
+    assert empty_records == GOLDEN_EMPTY_RECORDS
+
+
+def test_the_populated_digest_is_pinned() -> None:
+    """GOLDEN VECTOR for the non-empty path, and non-vacuity for the empty ones:
+    an implementation returning a constant would fail here."""
+    assert _policy_digest([_policy_row()]) == GOLDEN_POPULATED_POLICY
+    assert GOLDEN_POPULATED_POLICY != GOLDEN_EMPTY_POLICIES
+
+
+def test_a_uuid_and_the_identical_string_do_not_collide() -> None:
+    """Cross-type collision v1 allowed: it normalised a UUID to plain text, so a
+    string column holding those same characters encoded identically."""
+    identifier = UUID("00000000-0000-4000-8000-000000000001")
+    as_uuid = _policy_row(policy_code="x", id=identifier)
+    as_text = _policy_row(policy_code="x", id=str(identifier))
+    assert canonical_row(POLICY_DIGEST_FIELDS, as_uuid) != canonical_row(
+        POLICY_DIGEST_FIELDS, as_text
+    )
+    assert _policy_digest([as_uuid]) != _policy_digest([as_text])
+
+
+def test_a_datetime_and_its_rendered_string_do_not_collide() -> None:
+    """The same collision one type over: v1 rendered a datetime to text, so the
+    text itself encoded the same way."""
+    moment = datetime(2026, 8, 15, 12, 0, 0, tzinfo=UTC)
+    rendered = moment.strftime(SEAL_TIMESTAMP_FORMAT)
+    as_datetime = _policy_row(created_at=moment)
+    as_text = _policy_row(created_at=rendered)
+    assert canonical_row(POLICY_DIGEST_FIELDS, as_datetime) != canonical_row(
+        POLICY_DIGEST_FIELDS, as_text
+    )
+    assert _policy_digest([as_datetime]) != _policy_digest([as_text])
+
+
+def test_delimiter_bearing_values_are_escaped_not_framed() -> None:
+    """SENSITIVITY for injectivity, on the case that killed the original framing.
+
+    The first encoding joined fields with the unit separator and rows with
+    newlines, so a string value CONTAINING those bytes could move the frame.
+    `policy_code` and `content_hash` are plain strings, so this is reachable.
     """
     unit_separator = canonical_row(
-        "approval_policies", POLICY_DIGEST_FIELDS, _policy_row(policy_code="a\x1fb")
+        POLICY_DIGEST_FIELDS, _policy_row(policy_code="a\x1fb")
     )
-    newline = canonical_row(
-        "approval_policies", POLICY_DIGEST_FIELDS, _policy_row(policy_code="a\nb")
-    )
+    newline = canonical_row(POLICY_DIGEST_FIELDS, _policy_row(policy_code="a\nb"))
+    plain = canonical_row(POLICY_DIGEST_FIELDS, _policy_row(policy_code="ab"))
 
-    # Escaped by the encoding itself — the raw bytes never reach the frame.
     assert "\\u001f" in unit_separator
     assert "\x1f" not in unit_separator
     assert "\\n" in newline
     assert "\n" not in newline
-
-    plain = canonical_row(
-        "approval_policies", POLICY_DIGEST_FIELDS, _policy_row(policy_code="ab")
-    )
     assert len({unit_separator, newline, plain}) == 3
 
 
 def test_two_sets_differing_only_by_delimiter_placement_hash_differently() -> None:
-    """The precise failure: two SETS whose concatenation would be identical
-    under a delimiter-joined framing."""
+    """Two SETS whose concatenation would be identical under a delimiter join."""
     set_a = [_policy_row(policy_code="x\x1fy")]
     set_b = [_policy_row(policy_code="x"), _policy_row(policy_code="y")]
-    assert seal_digest("approval_policies", POLICY_DIGEST_FIELDS, set_a) != (
-        seal_digest("approval_policies", POLICY_DIGEST_FIELDS, set_b)
-    )
+    assert _policy_digest(set_a) != _policy_digest(set_b)
 
 
 def test_equivalent_timestamps_in_different_timezones_hash_identically() -> None:
@@ -707,28 +767,17 @@ def test_equivalent_timestamps_in_different_timezones_hash_identically() -> None
         utc.astimezone(timezone(timedelta(hours=2))),
         utc.astimezone(timezone(timedelta(hours=-5))),
     )
-    # Genuinely different renderings of one instant, or this proves nothing.
     assert len({moment.utcoffset() for moment in same_instants}) == 3
 
     digests = {
-        seal_digest(
-            "approval_policies",
-            POLICY_DIGEST_FIELDS,
-            [_policy_row(created_at=moment, updated_at=moment)],
-        )
+        _policy_digest([_policy_row(created_at=moment, updated_at=moment)])
         for moment in same_instants
     }
     assert len(digests) == 1, "the same instant hashed differently by timezone"
 
-    # NON-VACUITY: a genuinely different instant must still differ.
     later = utc.replace(second=1)
     assert (
-        seal_digest(
-            "approval_policies",
-            POLICY_DIGEST_FIELDS,
-            [_policy_row(created_at=later, updated_at=later)],
-        )
-        not in digests
+        _policy_digest([_policy_row(created_at=later, updated_at=later)]) not in digests
     )
 
 
@@ -737,33 +786,34 @@ def test_a_naive_timestamp_is_refused() -> None:
     encoded. Fail closed rather than guess a zone."""
     naive = datetime(2026, 8, 15, 12, 0, 0)  # noqa: DTZ001
     with pytest.raises(ValueError, match="naive datetime"):
-        canonical_row(
-            "approval_policies",
-            POLICY_DIGEST_FIELDS,
-            _policy_row(created_at=naive),
-        )
+        canonical_row(POLICY_DIGEST_FIELDS, _policy_row(created_at=naive))
 
 
 def test_true_does_not_encode_as_one() -> None:
     """`bool` is an `int` subclass, so an int-first branch would encode `True`
     as `1` — a different value hashing the same."""
-    as_bool = _policy_row(allow_self_approval=True)
-    as_int = _policy_row(allow_self_approval=1)
-    assert canonical_row("approval_policies", POLICY_DIGEST_FIELDS, as_bool) != (
-        canonical_row("approval_policies", POLICY_DIGEST_FIELDS, as_int)
-    )
+    assert canonical_row(
+        POLICY_DIGEST_FIELDS, _policy_row(allow_self_approval=True)
+    ) != canonical_row(POLICY_DIGEST_FIELDS, _policy_row(allow_self_approval=1))
 
 
 def test_the_two_tables_cannot_collide() -> None:
-    """Domain/version separation: identical field values under different table
-    tags must encode differently."""
+    """Domain/table separation now lives in the ENVELOPE, so identical rows under
+    different table identities differ — including when there are no rows."""
     row = _policy_row()
-    assert canonical_row("approval_policies", POLICY_DIGEST_FIELDS, row) != (
-        canonical_row("approval_records", POLICY_DIGEST_FIELDS, row)
+    assert seal_digest("approval_policies", POLICY_DIGEST_FIELDS, [row]) != seal_digest(
+        "approval_records", POLICY_DIGEST_FIELDS, [row]
     )
-    encoded = canonical_row("approval_policies", POLICY_DIGEST_FIELDS, row)
-    assert SEAL_ENCODING_DOMAIN in encoded
-    assert f",{SEAL_ENCODING_VERSION}," in encoded
+
+
+def test_the_field_list_is_part_of_the_identity() -> None:
+    """Two datasets with the same values but different column meaning are not
+    the same dataset."""
+    row = _policy_row()
+    reordered = tuple(reversed(POLICY_DIGEST_FIELDS))
+    assert seal_digest("approval_policies", POLICY_DIGEST_FIELDS, [row]) != (
+        seal_digest("approval_policies", reordered, [row])
+    )
 
 
 def test_row_order_does_not_change_the_digest() -> None:
@@ -771,16 +821,63 @@ def test_row_order_does_not_change_the_digest() -> None:
     inequality above could be passing on ordering rather than content."""
     a = _policy_row(policy_code="a")
     b = _policy_row(policy_code="b")
-    assert seal_digest("approval_policies", POLICY_DIGEST_FIELDS, [a, b]) == (
-        seal_digest("approval_policies", POLICY_DIGEST_FIELDS, [b, a])
-    )
+    assert _policy_digest([a, b]) == _policy_digest([b, a])
 
 
 def test_an_unencodable_type_raises_rather_than_stringifying() -> None:
     """A `str()` fallback is exactly how an ambiguous rendering gets in."""
     with pytest.raises(TypeError, match="no canonical encoding"):
-        canonical_row(
-            "approval_policies",
-            POLICY_DIGEST_FIELDS,
-            _policy_row(policy_code=object()),
-        )
+        canonical_row(POLICY_DIGEST_FIELDS, _policy_row(policy_code=object()))
+
+
+def test_the_encoding_version_moved_with_the_framing() -> None:
+    """A changed framing under an unchanged version would silently reinterpret
+    digests already recorded."""
+    assert SEAL_ENCODING_VERSION == 2
+    assert "version 1" in adr_text().lower() or "v1" in adr_text()
+
+
+# ── The privilege labels come from the kernel, positionally ─────────────────
+
+
+def test_the_privilege_tuple_is_the_kernels_exactly() -> None:
+    """EXACT tuple equality, never set equality.
+
+    `ROLE_TABLE_PRIVILEGES_SQL` returns its answers POSITIONALLY in the kernel's
+    order. A locally re-typed tuple was permuted at positions 4-6, so the
+    REFERENCES answer read as DELETE, DELETE as TRUNCATE and TRUNCATE as
+    REFERENCES — the seal could have reported "DELETE is revoked" while DELETE
+    was granted. Set equality is exactly what would let that pass.
+    """
+    assert ALL_TABLE_PRIVILEGES == TABLE_PRIVILEGES
+    assert list(ALL_TABLE_PRIVILEGES) == [
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "REFERENCES",
+        "DELETE",
+        "TRUNCATE",
+        "TRIGGER",
+    ]
+
+
+def test_the_query_is_the_kernels_by_import_not_by_copy() -> None:
+    """The reuse must be literal. A copied query would drift from the composed
+    live-catalogue audit on what "revoked" means."""
+    assert EFFECTIVE_PRIVILEGE_QUERY is ROLE_TABLE_PRIVILEGES_SQL
+
+    declaration = (SRC / "vendor_cp" / "approvals_cutover.py").read_text()
+    assert "from dotmac_kernel.migrations.catalog import" in declaration
+    assert (
+        "has_table_privilege" not in declaration
+    ), "the SQL is imported, never re-typed here"
+
+
+def test_the_positional_labels_line_up_with_the_query() -> None:
+    """INDEPENDENT EXPECTED TRUTH: read the order out of the SQL itself, so the
+    tuple is checked against the query rather than against another copy of the
+    tuple."""
+    aliases = ("AS sel", "AS ins", "AS upd", "AS refs", "AS del", "AS trunc", "AS trig")
+    positions = [ROLE_TABLE_PRIVILEGES_SQL.index(alias) for alias in aliases]
+    assert positions == sorted(positions), "the SQL select list changed order"
+    assert len(aliases) == len(ALL_TABLE_PRIVILEGES)
