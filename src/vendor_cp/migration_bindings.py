@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from dotmac_kernel.planes import ModulePlaneSelection
+from dotmac_kernel.planes import ModulePlane, ModulePlaneSelection
 from dotmac_kernel.prerequisites import (
     MODULE_DATABASE_ROLES_V1,
     TENANT_SCOPE_CATALOG_V1,
@@ -71,26 +71,22 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
     ),
 )
 
-#: EMPTY on purpose, and not a placeholder to fill in casually.
+#: The assembly's INSTALLATION INTENT, now that a selectable module is composed.
 #:
-#: This assembly composes no SELECTABLE module yet. `dotmac-release-catalog` and
-#: `dotmac-entitlement-allocation` each declare a single supported plane set, so
-#: their contract is atomic and the kernel rejects a selection for them outright.
+#: `dotmac-approvals` ships tenant AND platform planes. This assembly installs
+#: only the platform one: vendor approvals are control-plane state, and there is
+#: no tenant here whose approvals could be scoped. ERP selects the tenant plane
+#: from this same lineage and the starter selects both — which is exactly why the
+#: choice must be declared per assembly rather than inferred from any property
+#: the module or the database could observe.
 #:
-#: `dotmac-approvals` is the first module that will need an entry here —
-#: `ModulePlaneSelection(module="approvals", planes=(ModulePlane.PLATFORM,))`,
-#: because vendor approvals are control-plane state and no tenant exists here to
-#: scope them to. It is deliberately NOT composed in this change. Shadow
-#: composition is a bounded authority-migration phase with exactly ONE
-#: authoritative writer, not parallel operation, so it lands only behind a
-#: cutover contract naming the old and new authority, the identity mapping,
-#: open-request handling, parity measurement, the watermark, the rollback
-#: boundary and the retirement gate. Composing first and designing the cutover
-#: afterwards is how two writers end up live at once.
-#:
-#: The seam stays wired — the spec declares it and `env.py` installs it — so
-#: that change adds one line instead of re-deriving the mechanism.
-ASSEMBLY_MODULE_PLANES: Final[tuple[ModulePlaneSelection, ...]] = ()
+#: `ModulePlane.PLATFORM` selects STORAGE SHAPE. It says nothing about whether
+#: this assembly has acquired WRITE AUTHORITY over those tables — that is a
+#: migration-state question, and Vendor owns it. See vendor migration `v012`.
+ASSEMBLY_MODULE_PLANES: Final[tuple[ModulePlaneSelection, ...]] = (
+    ModulePlaneSelection(module="approvals", planes=(ModulePlane.PLATFORM,)),
+)
+
 
 __all__ = [
     "ASSEMBLY_MODULE_PLANES",

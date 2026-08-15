@@ -83,6 +83,34 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _require_composed_heads(connection: object) -> None:
+    """Every composed lineage actually reached its head — checked in-transaction.
+
+    The deploy entrypoint sets `require_composed_heads`; rehearsals driving an
+    intermediate target deliberately do not, because a partial upgrade is the
+    whole point there.
+
+    Raising here rolls back the ENTIRE composition, which matters for more than
+    tidiness: a database that stopped after `ap_0001_approvals` would have
+    committed the module DML grant that vendor `v012` exists to remove.
+    """
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import text
+
+    expected = set(ScriptDirectory.from_config(config).get_heads())
+    applied = set(
+        connection.execute(  # type: ignore[attr-defined]
+            text("SELECT version_num FROM alembic_version")
+        ).scalars()
+    )
+    missing = expected - applied
+    if missing:
+        raise RuntimeError(
+            "upgrade did not reach composed heads; missing "
+            f"{sorted(missing)} — refusing to commit a half-composed database"
+        )
+
+
 def run_migrations_online() -> None:
     configuration = config.get_section(config.config_ini_section) or {}
     configuration["sqlalchemy.url"] = get_url()
@@ -92,9 +120,27 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            # STATED, not inherited. This is Alembic's default, and the shadow
+            # composition's central guarantee rests entirely on it: the WHOLE
+            # composed upgrade runs in ONE transaction, so `ap_0001_approvals`
+            # granting `platform_api` full DML on the module tables and vendor
+            # `v012` taking it away again are never separately visible. The
+            # COMMITTED database moves straight from "no module tables" to
+            # "module tables, SELECT-only".
+            #
+            # Flip this to True and that guarantee silently disappears — each
+            # migration would commit on its own and the DML grant would be a
+            # real, observable, committed state. A default nobody wrote down is
+            # a default nobody notices changing, so it is written down.
+            transaction_per_migration=False,
+        )
         with context.begin_transaction():
             context.run_migrations()
+            if config.attributes.get("require_composed_heads"):
+                _require_composed_heads(connection)
 
 
 if context.is_offline_mode():

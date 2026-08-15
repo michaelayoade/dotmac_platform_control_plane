@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 
 from alembic.config import Config
+from dotmac_approvals.migrations import versions_dir as approvals_versions_dir
 from dotmac_entitlement_allocation import (
     versions_dir as entitlement_allocation_versions_dir,
 )
@@ -33,11 +34,12 @@ VENDOR_VERSIONS = ALEMBIC_DIR / "versions"
 
 
 def composed_version_locations() -> str:
-    """Kernel, two independent modules and vendor migration lineages."""
+    """Kernel, three independent modules and vendor migration lineages."""
     return (
         f"{kernel_versions_dir()} "
         f"{release_catalog_versions_dir()} "
         f"{entitlement_allocation_versions_dir()} "
+        f"{approvals_versions_dir()} "
         f"{VENDOR_VERSIONS}"
     )
 
