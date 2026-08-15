@@ -54,6 +54,7 @@ lineage: a `v012` table is covered the moment the migration runs.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -235,16 +236,41 @@ def _public_schema(url: str) -> PublicSchema:
 # ── 1. Module schemas: the kernel's own canonical gate ──────────────────────
 
 
+# The semantic discriminator of the ONE violation this assembly waives: the
+# kernel's host-squatter finding. Anything else the gate ever says about the same
+# pair of tables — a missing grant, an unexpected column, a policy — is a
+# different fact and must not be absorbed by an exception written for this one.
+HOST_SQUATTER_DISCRIMINATOR = "compatibility namespace"
+
+
+def _names_exactly(text: str, qualified: str) -> bool:
+    """Does `text` name `qualified` as a whole identifier?
+
+    A bare `in` test matches a PREFIX: `mod_ealloc.allocations` is a substring of
+    `mod_ealloc.allocations_archive`, so a future third overlap could be waived
+    by an exception written for the second. The lookarounds refuse a neighbouring
+    word, dot or underscore on either side, which is what makes "exactly two
+    pairs, a third is a new fact" enforceable rather than aspirational.
+    """
+    return re.search(rf"(?<![\w.]){re.escape(qualified)}(?![\w.])", text) is not None
+
+
 def _partition_shadow_overlaps(
     violations: tuple[str, ...],
 ) -> tuple[dict[str, list[str]], tuple[str, ...]]:
     """Split the gate's report into declared shadow overlaps and everything else.
 
-    Matched on the qualified legacy name that opens the message, plus the module
-    table appearing in it. Deliberately not an equality check against a rebuilt
-    sentence: copying the kernel's prose here would make a wording change look
-    like a contract change, and a bare `in` test on the table name would swallow
-    an unrelated violation about the same table.
+    Three conditions, all required, so the waiver is as narrow as the fact it
+    waives:
+
+    1. the message OPENS with a declared legacy table, matched exactly;
+    2. it names that overlap's module table as a whole identifier — not as a
+       prefix of a longer one;
+    3. it carries the host-squatter discriminator, so a different finding about
+       the same tables stays in `remaining`.
+
+    Deliberately not an equality check against a rebuilt sentence: copying the
+    kernel's prose here would make a wording change look like a contract change.
     """
     declared: dict[str, list[str]] = {
         overlap.legacy_table: [] for overlap in SHADOW_OVERLAPS
@@ -253,11 +279,89 @@ def _partition_shadow_overlaps(
     for violation in violations:
         legacy_table = violation.split(":", 1)[0]
         overlap = overlap_for(legacy_table)
-        if overlap is not None and overlap.module_table in violation:
-            declared[legacy_table].append(violation)
+        waived = (
+            overlap is not None
+            and _names_exactly(violation, overlap.legacy_table)
+            and _names_exactly(violation, overlap.module_table)
+            and HOST_SQUATTER_DISCRIMINATOR in violation
+        )
+        if waived and overlap is not None:
+            declared[overlap.legacy_table].append(violation)
         else:
             remaining.append(violation)
     return declared, tuple(remaining)
+
+
+# ── The waiver's own sensitivity proof (no database needed) ─────────────────
+
+_REAL = (
+    "public.allocations: a module table exists in the 'public' compatibility "
+    "namespace — the module owns mod_ealloc.allocations and nothing in 'public'"
+)
+
+
+def test_the_waiver_absorbs_the_declared_host_squatter() -> None:
+    """NON-VACUITY. If this failed, the negatives below would pass trivially and
+    the gate would be rejecting the very thing it is meant to waive."""
+    declared, remaining = _partition_shadow_overlaps((_REAL,))
+    assert remaining == ()
+    assert declared["public.allocations"] == [_REAL]
+
+
+@pytest.mark.parametrize(
+    ("violation", "why"),
+    [
+        pytest.param(
+            "public.allocations: tenant_id is nullable on a tenant-scoped table",
+            "a different finding about a declared table",
+            id="different-finding-same-table",
+        ),
+        pytest.param(
+            "public.allocations: a module table exists in the 'public' "
+            "compatibility namespace — the module owns "
+            "mod_ealloc.allocations_archive and nothing in 'public'",
+            "a THIRD overlap whose module name merely starts with a declared one",
+            id="near-miss-module-table",
+        ),
+        pytest.param(
+            "public.allocations_archive: a module table exists in the 'public' "
+            "compatibility namespace — the module owns "
+            "mod_ealloc.allocations_archive and nothing in 'public'",
+            "a third overlap whose legacy name starts with a declared one",
+            id="near-miss-legacy-table",
+        ),
+        pytest.param(
+            "mod_ealloc.allocations: RLS is enabled with no policy",
+            "a finding about the module table itself, not the overlap",
+            id="module-side-finding",
+        ),
+    ],
+)
+def test_the_waiver_refuses_everything_it_was_not_written_for(
+    violation: str, why: str
+) -> None:
+    """SENSITIVITY, one case per way the old substring match could be fooled.
+
+    The previous matcher accepted any message that started with a declared legacy
+    table and mentioned the module table anywhere — so a third overlap named
+    `allocations_archive` would have been silently absorbed by the exception
+    written for `allocations`, which is precisely what "exactly two pairs, a
+    third is a new fact" exists to prevent.
+    """
+    declared, remaining = _partition_shadow_overlaps((violation,))
+    assert remaining == (violation,), why
+    assert all(not found for found in declared.values())
+
+
+def test_exact_naming_refuses_prefixes_in_both_directions() -> None:
+    """The helper itself, since three assertions above depend on it."""
+    assert _names_exactly("owns mod_ealloc.allocations and", "mod_ealloc.allocations")
+    assert not _names_exactly(
+        "owns mod_ealloc.allocations_archive and", "mod_ealloc.allocations"
+    )
+    assert not _names_exactly(
+        "owns x.mod_ealloc.allocations and", "mod_ealloc.allocations"
+    )
 
 
 def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
@@ -402,14 +506,73 @@ def test_the_tenant_catalogue_is_open_but_read_only(scratch_db: str) -> None:
         f"a policy here would gate reading the row that defines the tenant: {under_rls}"
     )
 
-    over_granted = {
-        name: sorted(set(schema.app_role_privileges.get(name, ())) - {"SELECT"})
+    # EXACT equality, not "nothing beyond SELECT". The weaker form was satisfied
+    # by a fully REVOKED catalogue, which is not the contract at all: kernel 0001
+    # deliberately grants SELECT, and a tenant-scoped request resolves its own
+    # row through these tables. A guard that accepts an unreadable catalogue is
+    # asserting half of a two-sided rule and reporting the whole of it.
+    actual = {
+        name: set(schema.app_role_privileges.get(name, ()))
         for name in sorted(catalogue)
     }
-    assert not any(over_granted.values()), (
-        "the tenant catalogue is readable, never writable, by the tenant role: "
-        f"{over_granted}"
+    wrong = {name: sorted(held) for name, held in actual.items() if held != {"SELECT"}}
+    assert not wrong, (
+        f"the tenant catalogue must be exactly readable by {APP_ROLE} — SELECT "
+        f"present, nothing else: {wrong}"
     )
+
+
+def test_the_catalogue_guard_notices_a_revoked_catalogue(scratch_db: str) -> None:
+    """SENSITIVITY for the REQUIRED half, which is the half that was missing.
+
+    Revoke SELECT on a catalogue table and the reader must report it. Without
+    this, "exactly {SELECT}" could be satisfied by a privilege reader that
+    returned nothing for every table, and the previous "nothing beyond SELECT"
+    form would have passed outright.
+    """
+    _upgrade(scratch_db)
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("REVOKE SELECT ON tenant_domains FROM app_user"))
+        revoked = _public_schema(scratch_db).app_role_privileges.get(
+            "tenant_domains", ()
+        )
+        assert "SELECT" not in revoked, (
+            "the privilege reader did not observe a REVOKE, so the catalogue "
+            "guard cannot be trusted in the direction that requires a grant"
+        )
+        with engine.begin() as conn:
+            conn.execute(text("GRANT SELECT ON tenant_domains TO app_user"))
+    finally:
+        engine.dispose()
+
+    # And restored — otherwise this test would leave the scratch database in a
+    # state that makes the guard above pass or fail for the wrong reason.
+    assert "SELECT" in _public_schema(scratch_db).app_role_privileges.get(
+        "tenant_domains", ()
+    )
+
+
+def test_the_catalogue_guard_notices_an_over_granted_catalogue(
+    scratch_db: str,
+) -> None:
+    """SENSITIVITY for the FORBIDDEN half, so both directions are proven."""
+    _upgrade(scratch_db)
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("GRANT INSERT ON tenants TO app_user"))
+        held = _public_schema(scratch_db).app_role_privileges.get("tenants", ())
+        assert "INSERT" in held
+        with engine.begin() as conn:
+            conn.execute(text("REVOKE INSERT ON tenants FROM app_user"))
+    finally:
+        engine.dispose()
+
+    assert set(_public_schema(scratch_db).app_role_privileges.get("tenants", ())) == {
+        "SELECT"
+    }
 
 
 def test_the_unmonitored_split_scope_set_is_exactly_the_declared_one(
