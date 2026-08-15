@@ -21,44 +21,80 @@ from vendor_cp.approvals.feature import feature as approvals_feature
 from vendor_cp.config import validate_runtime_configuration, vendor_settings
 from vendor_cp.console.feature import feature as console_feature
 from vendor_cp.contracts.feature import feature as contracts_feature
+from vendor_cp.deployment_profile import (
+    VendorDeploymentProfile,
+    load_deployment_profile,
+)
 from vendor_cp.licensing.feature import feature as licensing_feature
 from vendor_cp.licensing.signer import install_runtime_licence_signers
+from vendor_cp.migration_bindings import ASSEMBLY_MODULE_PLANES
 from vendor_cp.offers.feature import feature as offers_feature
 from vendor_cp.provisioning.feature import feature as provisioning_feature
 from vendor_cp.release_evidence.feature import feature as release_evidence_feature
 
 ASSEMBLY_NAME = "dotmac-vendor-control-plane"
 
+# The persistence owners. Composed under EVERY profile, because each one carries
+# a migration lineage and a schema this database already contains: withholding
+# one would leave the assembly no longer describing its own tables, and the
+# composed live-catalogue audit would be walking schemas nobody declared.
+STATEFUL_MODULES = (
+    release_catalog_module,
+    entitlement_allocation_module,
+)
 
-def build_spec() -> ProductAssemblySpec:
+# The vendor's own features, in mount order. A profile may withhold a SURFACE
+# from this sequence; it may not reorder or add to it.
+VENDOR_SURFACES = (
+    release_evidence_feature,
+    console_feature,
+    accounts_feature,
+    offers_feature,
+    approvals_feature,
+    contracts_feature,
+    allocations_feature,
+    licensing_feature,
+    provisioning_feature,
+)
+
+
+def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssemblySpec:
     """Compose the vendor control-plane assembly.
 
     Slice 2: the platform-admin surface + the console shell. Slice 3 adds the
     vendor `accounts` feature (platform-level, option A). Slice 4 adds the
     `provisioning` contract laboratory (fake-only).
+
+    `profile` is the ONE place a deployment profile is read (see
+    `vendor_cp.deployment_profile`). It selects which vendor surfaces are
+    mounted and nothing else — no behaviour, no persistence, no decision. Tests
+    pass one explicitly; the process reads it from the environment.
     """
     validate_runtime_configuration(
         vendor_settings,
         environment=os.getenv("ENVIRONMENT", "development"),
     )
     # Key custody is a boot dependency, not a first-issuance surprise. The
-    # installed signer objects hold their key material for this process.
+    # installed signer objects hold their key material for this process — and
+    # deliberately still do under a profile that withholds the licensing
+    # ROUTES, because a withheld surface is not a disabled subsystem.
     install_runtime_licence_signers(vendor_settings)
+
+    effective = profile if profile is not None else load_deployment_profile()
 
     return ProductAssemblySpec(
         name=ASSEMBLY_NAME,
+        # No selectable module is composed yet, so there is no plane to
+        # select (ADR-0028). `dotmac-approvals` is the first one that will be,
+        # and it arrives with the cutover contract — never before it.
+        module_planes=ASSEMBLY_MODULE_PLANES,
         modules=(
-            release_catalog_module,
-            entitlement_allocation_module,
-            release_evidence_feature,
-            console_feature,
-            accounts_feature,
-            offers_feature,
-            approvals_feature,
-            contracts_feature,
-            allocations_feature,
-            licensing_feature,
-            provisioning_feature,
+            *STATEFUL_MODULES,
+            *(
+                feature
+                for feature in VENDOR_SURFACES
+                if effective.exposes(feature.name)
+            ),
         ),
         web_enabled=True,
     )

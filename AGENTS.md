@@ -37,12 +37,50 @@ disagree, fix the drift.
    version that is** — this file deliberately does not repeat the number. A
    second copy of a version literal is a second thing to forget, which is
    exactly how this line came to say `a8` while the pin said `a9`.
-9. **Cross-repository engineering governance is pinned and required.**
-   `.dotmac/standards-profile.json` names the enrolled authority and fully typed
-   contract surface, and pins the accepted Governance source by exact commit.
-   The `Dotmac engineering standards` CI job must execute that same immutable
-   revision. Mutable tags/branches, copied rules, candidate mode, or a missing
-   required check are not substitutes.
+9. **Bindings state facts; plane selections state intent.** A
+   `PrerequisiteBinding` says where an effect comes from, and this assembly
+   binds BOTH kernel effects — including `tenant_scope_catalog.v1`, because
+   kernel `0001` really does create `public.tenants` here. A
+   `ModulePlaneSelection` says what this product installs, and it is EMPTY
+   until a selectable module is composed — which happens only behind a cutover
+   contract, never as a side effect of a version bump. Never reintroduce the a60
+   model in which an absent binding selected a plane, and never create a tenants
+   table, a sentinel tenant, or a nullable tenant column to satisfy a module
+   (ADR-0028; `tests/architecture/test_migration_prerequisite_bindings.py`,
+   `tests/migration/test_selected_planes.py`).
+10. **Coverage is catalogue-derived; exceptions are named and ratcheted.** Two
+    halves, and the distinction between them is the rule. WHICH tables get
+    audited is never a literal list: module schemas go through the kernel's
+    `audit_live_schemas`, `public` is classified from the live catalogue, and
+    the vendor-owned subset is derived by diffing the lineages — so a table
+    added tomorrow is covered the moment its migration runs. WHAT an exceptional
+    category contains IS named exactly — `TENANT_CATALOGUE`,
+    `UNMONITORED_SPLIT_SCOPE`, `SHADOW_OVERLAPS` — and every such set is
+    ratcheted in both directions, so it cannot grow quietly or shrink without
+    the declaration being lowered in the same change. A privilege proof over a
+    hand-listed set of TABLES is the regression; a hand-listed set of
+    EXCEPTIONS, each justified and dated, is the contract
+    (`tests/migration/test_composed_live_catalog.py`,
+    `tests/architecture/test_shadow_overlaps.py`).
+11. **A deployment profile selects surfaces and nothing else.** Read it once, in
+    `build_spec()`. It may not withhold a persistence owner and may not change
+    behaviour; feature code never branches on a profile name (ADR-0003, deny
+    case D6; `tests/architecture/test_deployment_profile.py`).
+12. **A shadow overlap is declared, one-writer, ratcheted and dated.** The
+    legacy `public.allocations` / `public.allocation_entries` tables shadow the
+    composed `mod_ealloc` schema. `src/vendor_cp/shadow_overlaps.py` is the
+    ASSEMBLY-LOCAL declaration of exactly those two pairs: the legacy service
+    stays the only writer, no new legacy call sites may appear, the live set is
+    ratcheted in BOTH directions, and it names the cutover gate that deletes it.
+    Never relax the kernel gate to solve this, and never rename a legacy table to
+    hide the overlap (`tests/architecture/test_shadow_overlaps.py`,
+    `tests/migration/test_composed_live_catalog.py`).
+13. **Cross-repository engineering governance is pinned and required.**
+    `.dotmac/standards-profile.json` names the enrolled authority and fully typed
+    contract surface, and pins the accepted Governance source by exact commit.
+    The `Dotmac engineering standards` CI job must execute that same immutable
+    revision. Mutable tags/branches, copied rules, candidate mode, or a missing
+    required check are not substitutes.
 
 ## Validation before any commit
 

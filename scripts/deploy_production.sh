@@ -23,6 +23,13 @@ grep -Fqx 'SERVER_NAME=vendor-cp-prod' "$ENV_FILE" || die "server marker mismatc
 grep -Fqx 'ENVIRONMENT=production' "$ENV_FILE" || die "runtime is not production"
 grep -Fqx 'PLATFORM_ROOT_DOMAIN=vendor.dotmac.io' "$ENV_FILE" \
     || die "platform domain mismatch"
+# The deployment profile is REQUIRED here rather than defaulted in the image.
+# `load_deployment_profile` falls back to `full` so a developer sees the whole
+# assembly; a production host that omitted the line would inherit that fallback
+# and publish the licensing and offers routes the bootstrap profile exists to
+# withhold. Failing before the image starts is the only place that is cheap.
+grep -Fqx 'VENDOR_DEPLOYMENT_PROFILE=production-bootstrap' "$ENV_FILE" \
+    || die "deployment profile is not production-bootstrap"
 [[ -f "$HOST_ID_FILE" ]] || die "$HOST_ID_FILE is missing"
 [[ "$(tr -d '\r\n' < "$HOST_ID_FILE")" == "$EXPECTED_HOST_ID" ]] \
     || die "host identity mismatch"

@@ -11,16 +11,67 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a50` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a61` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source.
-- `dotmac-release-catalog==0.1.0a3` is the permanent owner of immutable release
+- **Two composition declarations, deliberately separate** (ADR-0028). Both are
+  checked in at `src/vendor_cp/migration_bindings.py` and both are installed
+  from `alembic/env.py` before Alembic builds the revision map:
+
+  - `ASSEMBLY_PREREQUISITE_BINDINGS` answers *where does an effect come from*.
+    Kernel `0001_initial_tenant_schema` supplies **both**
+    `module_database_roles.v1` and `tenant_scope_catalog.v1`, and both are
+    bound, because that is simply true: this assembly runs the whole kernel base
+    lineage, so `public.tenants`, `public.tenant_domains` and
+    `public.app_current_tenant_id()` all exist here.
+  - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It is
+    **empty**, because no selectable module is composed yet: both installed
+    modules declare a single supported plane set, so their contract is atomic
+    and the kernel refuses a selection for them.
+
+  Kernel `0.1.0a60` briefly let the first imply the second, and this assembly is
+  the case that broke it: binding the tenant catalogue truthfully would have
+  installed a dual-plane module's tenant tables in a control plane that has no
+  tenants, and the only escape was to lie by withholding a binding whose effect
+  the database plainly provides. Availability is not intent.
+
+  Both are mirrored into `DOTMAC_MIGRATION_BINDINGS` /
+  `DOTMAC_MODULE_PLANE_SELECTIONS`, so `alembic heads|history|show` — which
+  never run `env.py` — inspect the same graph an upgrade applies.
+
+  `tests/migration/test_selected_planes.py` proves the half of ADR-0028 that is
+  assertable without a selectable module — the catalogue exists, is bound, and
+  no module schema holds a tenant-scoped table — and says plainly that the full
+  four-fact proof (platform tables built, tenant tables absent, *because of the
+  selection*) lands with the first shadow composition.
+- **Approvals is not composed here.** `dotmac-approvals` will be the first
+  selectable module Vendor installs, with `ModulePlane.PLATFORM`, but shadow
+  composition is a bounded authority-migration phase with exactly ONE
+  authoritative writer — not parallel operation — so it lands only behind a
+  cutover contract naming the old and new authority, the identity mapping,
+  open-request handling, parity measurement, the watermark, the rollback
+  boundary, the retirement gate, and a ratchet forbidding new local approval
+  call sites.
+
+  What this repository has already done for it: the vendor-local feature
+  manifest is named `vendor_approvals`, not `approvals`, because
+  `dotmac-approvals` registers the module code `approvals` and a module registry
+  holds one owner per code. That collision is removed from the cutover's path in
+  advance; the routes are unchanged.
+- `dotmac-release-catalog==0.1.0a4` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration
   lineages. Its `mod_rel` tables are platform catalogues: `platform_api` may
   use the published grants and `app_user` is denied.
-- `dotmac-entitlement-allocation==0.1.0a3` is installed and its manifest and
+
+  a4 is a floor, not a courtesy bump. Through a3 the module declared those
+  tables in `ModuleManifest.tables` — the TENANT contract, meaning `tenant_id
+  NOT NULL` plus FORCEd RLS — while its migration built platform-shaped tables.
+  The declaration and the database disagreed, and nothing here looked because
+  nothing audited the live catalogue. a4 moves them to `platform_tables`
+  (ADR-0023), which is what makes the declaration true.
+- `dotmac-entitlement-allocation==0.1.0a4` is installed and its manifest and
   public migration lineage are composed. This is deliberately a **shadow
   installation**, not adoption: `vendor_cp.allocations` remains the sole
   authoritative writer and there is no dual-write. Vendor migration v011 makes
@@ -28,6 +79,101 @@ it owns and — just as importantly — what it must never become.
   the contract content hash, and emits it on contract events. Historical rows
   remain explicitly unclassified until an operator supplies evidence; the
   independent module therefore still receives no `ContractSnapshot`.
+
+## The composed database is audited whole
+
+`tests/migration/test_composed_live_catalog.py` audits the database this
+assembly actually produces — kernel lineage, both module lineages, vendor
+lineage — rather than the tables someone remembered to name.
+
+- The module schemas (`mod_rel`, `mod_ealloc`) go through the kernel's own
+  canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. A rule
+  the kernel tightens tightens here in the release that ships it, and the
+  expected table set derives from this assembly's plane selection rather than
+  from prerequisite availability.
+- `public` is not walked by that gate (the compatibility namespace has
+  exceptions a module schema does not get), so this repository owns the policy
+  for it. Every table is classified from the live catalogue: `tenant_id NOT
+  NULL` and the kernel's no-column subtype tables are the tenant plane and must
+  FORCE RLS with a policy; everything with neither is the platform plane and
+  must hold **no** privilege for `app_user`, across all seven PostgreSQL table
+  privileges and their column-level forms.
+- The tenant CATALOGUE (`tenants`, `tenant_domains`) is a third category, not an
+  allowlisted exception: it is what tenancy is defined by, so kernel 0001 leaves
+  it outside RLS and grants it read-only to the tenant role. It is held to that
+  contract explicitly — no RLS, and no privilege beyond `SELECT`. `tenant_domains`
+  carries `tenant_id NOT NULL` as a parent FK rather than a scoping
+  discriminator, so classifying on that column alone wrongly demands FORCEd RLS
+  on it.
+- Nullable-`tenant_id` tables belong to neither plane. The three kernel tables
+  in that state are named as **unmonitored**, not exempt, and the set is
+  asserted exactly, so a fourth cannot appear quietly.
+- The vendor lineage's own tables are derived by diffing `public` across
+  `kernel@head` and `heads`. This replaced a hand-written ten-name licence-table
+  list that could only ever prove what someone remembered; a future `v012` table
+  is swept the moment its migration runs.
+
+## The allocation shadow overlap (temporary, declared, dated)
+
+`public.allocations` and `public.allocation_entries` — created by vendor
+migration `v005` — carry the same names the composed
+`dotmac-entitlement-allocation` module owns in `mod_ealloc`. The kernel's
+live-catalogue gate reports that as a host squatter, and normally it is exactly
+right: a module table in the compatibility namespace usually means a module that
+never moved.
+
+Here it is the visible footprint of an authority migration that is deliberately
+unfinished, so `src/vendor_cp/shadow_overlaps.py` declares it — **assembly-local,
+exactly two pairs, and written to expire**.
+
+- **One writer at every instant.** `vendor_cp.allocations.service` is
+  authoritative and `mod_ealloc` stays empty. Enforced by a test that fails if
+  anything under `src/` imports the module's write surface (`stage_allocation`),
+  and by an allowlist of the module names vendor code may import while the
+  legacy writer owns the data.
+- **No new legacy call sites.** The set of modules importing the legacy
+  allocation models is exact — `allocations/service.py` (the writer),
+  `allocations/preflight.py` (read-only auditor), `licensing/service.py`
+  (reader). A new importer fails the build; new work belongs on the module's
+  boundary, not on tables scheduled for retirement.
+- **Two-directional ratchet.** The live audit asserts the database reports these
+  two overlaps and no others. Rising fails, because a third is a new fact needing
+  its own decision. **Falling also fails**, because a table that stops
+  overlapping means part of the cutover completed and the declaration must be
+  lowered in that same change — a backlog allowed to shrink quietly is how a
+  temporary exception outlives everyone who agreed to it.
+- **It names what removes it.** The "Allocation cutover gate" below, step 4: the
+  legacy models, service, FK and writer path are retired after parity. Then
+  `shadow_overlaps.py` is deleted rather than edited. A review date fails loudly
+  if that has not happened, so the exception gets re-justified by a person
+  instead of lapsing.
+
+Two things this is not. It is **not a kernel relaxation** — the gate is
+untouched and every other assembly still fails on a host squatter; only this
+assembly, for these two declared pairs, subtracts what it has justified. And it
+is **not a rename**: renaming the legacy tables would silence the gate by hiding
+a real migration state, so the overlap stays visible until the cutover retires
+it. It is also not a precedent for composing Approvals early — that stays blocked
+on its own cutover contract.
+
+
+## Deployment profiles
+
+`src/vendor_cp/deployment_profile.py` declares which vendor SURFACES a
+deployment publishes. It is read in exactly one place — `build_spec()` — and a
+test fails the build if a second module imports the loader, because ADR-0003
+forbids feature code branching on a profile name.
+
+`production-bootstrap` (required by `scripts/deploy_production.sh` in the host
+env file) composes and runs everything and simply does not mount the `licensing`
+and `offers` routers. Those two features' domain owners are still vendor-local
+and reusable-looking; publishing their routes would make an external caller a
+constraint on deciding the owner. A withheld surface is not a disabled
+subsystem: licence key custody still loads at boot, and a test asserts it.
+
+A profile may never withhold a persistence owner. Both module manifests carry a
+migration lineage and own schemas the database already contains, so an assembly
+missing one would no longer describe its own tables.
 
 ## Production topology
 

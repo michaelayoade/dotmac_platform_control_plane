@@ -15,14 +15,23 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a50", extras = [
+dotmac-kernel = { version = "0.1.0a61", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
 # Vendor-owned immutable artifact identity and attestations. Exact-pinned from
 # the same private index; its manifest and migration locator are composed by the
 # assembly through the package's public top-level surface.
-dotmac-release-catalog = { version = "0.1.0a3", source = "forgejo" }
+#
+# a4 is required, not merely preferred. Through a3 the module declared its two
+# tables in `ModuleManifest.tables` — the TENANT contract — while its migration
+# actually creates platform-shaped tables (no `tenant_id`, REVOKEd from
+# `app_user`). Nothing noticed, because nothing audited the live catalogue here.
+# The composed audit added in `tests/migration/test_composed_live_catalog.py`
+# does, and an a3 module fails it correctly: the declaration and the database
+# disagree. a4 moves both tables to `platform_tables`, which is what makes the
+# declaration true (ADR-0023).
+dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
 # Installed in shadow mode: the independent owner and its migration lineage are
 # composed now, while the vendor-local allocation writer remains authoritative
 # until historical commercial rows have evidence-backed product mappings and
@@ -30,7 +39,11 @@ dotmac-release-catalog = { version = "0.1.0a3", source = "forgejo" }
 # product-qualified; that does not by itself authorize a writer cutover.
 # Exact-pinned from the private index; never a path dependency and never a
 # silent dual-write.
-dotmac-entitlement-allocation = { version = "0.1.0a3", source = "forgejo" }
+#
+# a4 for the same reason as the release catalogue above: its `allocations` /
+# `allocation_entries` become declared `platform_tables`, so the composed
+# live-catalogue audit can hold them to the plane they are actually built on.
+dotmac-entitlement-allocation = { version = "0.1.0a4", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).
