@@ -57,6 +57,18 @@ def _refs(path: Path):
     return scan_imports(path, source_root=SRC)
 
 
+def adr_text() -> str:
+    """The ADR with runs of whitespace collapsed to single spaces.
+
+    Prose assertions must survive reflow. `begins at the watermark` was split
+    across a line break by the 80-column wrap, so a literal substring search
+    failed on text that says exactly what it is supposed to — a guard failing
+    for a typographical reason, which teaches everyone to loosen the guard.
+    Normalising once here keeps the assertions about MEANING.
+    """
+    return " ".join(ADR.read_text().split())
+
+
 def _outside_legacy_package() -> list[Path]:
     """Source files that are not part of the legacy owner itself."""
     return [path for path in source_files(PACKAGE) if LEGACY_DIR not in path.parents]
@@ -188,11 +200,11 @@ def test_request_identity_is_never_recoverable() -> None:
 def test_the_adr_states_the_absence_of_a_request_mapping() -> None:
     """The document and the declarations must agree. A contract whose prose and
     whose enforced constants disagree is worse than either alone."""
-    text = ADR.read_text()
+    text = adr_text()
     assert "Request identity does not map" in text
     assert "begins at the watermark" in text
     for fact in UNRECOVERABLE_FACTS:
-        assert fact.value.replace("_", " ") in text.lower()
+        assert fact.value.replace("_", " ") in text.lower(), fact
 
 
 # ── Scope of the shadow comparison ──────────────────────────────────────────
@@ -235,7 +247,7 @@ def test_the_adr_documents_every_declared_property() -> None:
     and not the other would otherwise look like a contract change, and matching
     loosely would let a property quietly disappear from the table.
     """
-    text = ADR.read_text()
+    text = adr_text()
     for prop in SHARED_SAFETY_PROPERTIES:
         assert f"`{prop.code}`" in text, prop.code
 
@@ -248,7 +260,7 @@ def test_the_watermark_boundary_is_an_id_not_a_clock() -> None:
     watermark written moments earlier. An id high-water mark is unambiguous
     under exactly that race, so the boundary column is not negotiable."""
     assert WATERMARK_BOUNDARY_COLUMN == "last_legacy_record_id"
-    text = ADR.read_text()
+    text = adr_text()
     assert WATERMARK_TABLE in text
     assert "not wall-clock time" in text
 
@@ -262,7 +274,7 @@ def test_the_restart_rule_is_data_not_judgement() -> None:
     become case-by-case reasoning about a particular customer or contract."""
     assert RESTART_CONDITIONS
     assert len(set(RESTART_CONDITIONS)) == len(RESTART_CONDITIONS)
-    text = ADR.read_text()
+    text = adr_text()
     assert "DRAIN" in text and "RESTART" in text
     assert "drain window is bounded" in text
 
@@ -293,6 +305,21 @@ def test_no_source_file_imports_the_new_authority() -> None:
 
 
 def test_the_authorities_are_the_ones_the_adr_names() -> None:
-    text = ADR.read_text()
+    text = adr_text()
     assert OLD_AUTHORITY.rsplit(".", 1)[0] in text
     assert NEW_AUTHORITY.replace("_", "-") in text
+
+
+def test_the_prose_assertions_survive_reflow() -> None:
+    """MUTATION PROOF for the normaliser.
+
+    Every ADR assertion above reads through `adr_text()`. If that ever went back
+    to a raw read, a wrapped phrase would fail again and the tempting fix is to
+    weaken the assertion rather than the matching. This proves the normaliser
+    joins across newlines, and that it is actually being used.
+    """
+    assert "begins at the watermark" in adr_text()
+    assert "begins at the watermark" not in ADR.read_text(), (
+        "the phrase is no longer wrapped, so this proof has stopped proving "
+        "anything — pick another wrapped phrase or delete it deliberately"
+    )
