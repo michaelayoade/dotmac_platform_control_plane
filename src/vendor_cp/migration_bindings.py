@@ -23,11 +23,15 @@ that truthful binding would have switched on tenant approval tables in a
 control plane with no tenants to scope them to, and the only way to avoid that
 was to lie by withholding a binding whose effect the database plainly provides.
 
-a61 separates the two. We bind what we have, and we select what we want: the
-Vendor Control Plane is not a product data plane, so it selects `PLATFORM`
-approvals and nothing else. The tenant plane's prerequisites are never
-resolved and its DDL is never emitted because of the SELECTION — never because
-of an absent binding.
+a61 separates the two: we bind what we HAVE, and we select what we INSTALL.
+Both bindings below are therefore present and truthful, and the tenant plane of
+any dual-plane module stays out because it was never SELECTED — never because a
+binding was withheld.
+
+No selectable module is composed in this assembly yet, so the selection tuple is
+legitimately empty; see its own comment for why `dotmac-approvals` is not in it.
+The seam is still wired end to end, because the mechanism is what this change
+establishes and the first selection should be one line of diff.
 
 Both declarations are installed from `alembic/env.py` before Alembic builds the
 revision map, and both are mirrored into the graph-command environment
@@ -40,7 +44,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from dotmac_kernel.planes import ModulePlane, ModulePlaneSelection
+from dotmac_kernel.planes import ModulePlaneSelection
 from dotmac_kernel.prerequisites import (
     MODULE_DATABASE_ROLES_V1,
     TENANT_SCOPE_CATALOG_V1,
@@ -67,15 +71,26 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
     ),
 )
 
-ASSEMBLY_MODULE_PLANES: Final[tuple[ModulePlaneSelection, ...]] = (
-    # The vendor control plane holds approval state for VENDOR decisions —
-    # offers, contracts, releases. No tenant exists here whose approvals could
-    # be scoped, so the tenant plane is not installed. ERP selects the tenant
-    # plane from this same lineage and the starter selects both, which is
-    # exactly why the choice has to be declared per assembly rather than
-    # inferred from any property the module or the database could observe.
-    ModulePlaneSelection(module="approvals", planes=(ModulePlane.PLATFORM,)),
-)
+#: EMPTY on purpose, and not a placeholder to fill in casually.
+#:
+#: This assembly composes no SELECTABLE module yet. `dotmac-release-catalog` and
+#: `dotmac-entitlement-allocation` each declare a single supported plane set, so
+#: their contract is atomic and the kernel rejects a selection for them outright.
+#:
+#: `dotmac-approvals` is the first module that will need an entry here —
+#: `ModulePlaneSelection(module="approvals", planes=(ModulePlane.PLATFORM,))`,
+#: because vendor approvals are control-plane state and no tenant exists here to
+#: scope them to. It is deliberately NOT composed in this change. Shadow
+#: composition is a bounded authority-migration phase with exactly ONE
+#: authoritative writer, not parallel operation, so it lands only behind a
+#: cutover contract naming the old and new authority, the identity mapping,
+#: open-request handling, parity measurement, the watermark, the rollback
+#: boundary and the retirement gate. Composing first and designing the cutover
+#: afterwards is how two writers end up live at once.
+#:
+#: The seam stays wired — the spec declares it and `env.py` installs it — so
+#: that change adds one line instead of re-deriving the mechanism.
+ASSEMBLY_MODULE_PLANES: Final[tuple[ModulePlaneSelection, ...]] = ()
 
 __all__ = [
     "ASSEMBLY_MODULE_PLANES",

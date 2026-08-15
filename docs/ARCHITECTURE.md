@@ -25,33 +25,40 @@ it owns and — just as importantly — what it must never become.
     bound, because that is simply true: this assembly runs the whole kernel base
     lineage, so `public.tenants`, `public.tenant_domains` and
     `public.app_current_tenant_id()` all exist here.
-  - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It
-    selects `ModulePlane.PLATFORM` for `approvals`, and nothing else.
+  - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It is
+    **empty**, because no selectable module is composed yet: both installed
+    modules declare a single supported plane set, so their contract is atomic
+    and the kernel refuses a selection for them.
 
   Kernel `0.1.0a60` briefly let the first imply the second, and this assembly is
   the case that broke it: binding the tenant catalogue truthfully would have
-  installed tenant approval tables in a control plane that has no tenants, and
-  the only escape was to lie by withholding a binding whose effect the database
-  plainly provides. Availability is not intent.
+  installed a dual-plane module's tenant tables in a control plane that has no
+  tenants, and the only escape was to lie by withholding a binding whose effect
+  the database plainly provides. Availability is not intent.
 
   Both are mirrored into `DOTMAC_MIGRATION_BINDINGS` /
   `DOTMAC_MODULE_PLANE_SELECTIONS`, so `alembic heads|history|show` — which
   never run `env.py` — inspect the same graph an upgrade applies.
-  `tests/migration/test_selected_planes.py` proves the four facts together
-  against a real database.
-- `dotmac-approvals==0.1.0a3` is composed in **shadow**, on the
-  entitlement-allocation pattern: manifest, lineage and PLATFORM plane
-  installed, while `vendor_cp.approvals` remains the sole authoritative writer.
-  Its feature manifest is named `vendor_approvals` because one registry holds
-  one owner per code; its routes are unchanged. Composing a selectable module
-  without a plane selection fails `ProductAssemblySpec` construction, which is
-  what makes the intent unskippable rather than merely documented.
 
-  Known gap: this release ships its lineage as package data but exposes no
-  public `versions_dir()`, unlike every other installable module, so
-  `vendor_cp.migrations.approvals_versions_dir` is this repository's one
-  reconstruction of a foreign package's layout. A test fails the build as soon
-  as upstream ships the locator, at which point the shim is deleted.
+  `tests/migration/test_selected_planes.py` proves the half of ADR-0028 that is
+  assertable without a selectable module — the catalogue exists, is bound, and
+  no module schema holds a tenant-scoped table — and says plainly that the full
+  four-fact proof (platform tables built, tenant tables absent, *because of the
+  selection*) lands with the first shadow composition.
+- **Approvals is not composed here.** `dotmac-approvals` will be the first
+  selectable module Vendor installs, with `ModulePlane.PLATFORM`, but shadow
+  composition is a bounded authority-migration phase with exactly ONE
+  authoritative writer — not parallel operation — so it lands only behind a
+  cutover contract naming the old and new authority, the identity mapping,
+  open-request handling, parity measurement, the watermark, the rollback
+  boundary, the retirement gate, and a ratchet forbidding new local approval
+  call sites.
+
+  What this repository has already done for it: the vendor-local feature
+  manifest is named `vendor_approvals`, not `approvals`, because
+  `dotmac-approvals` registers the module code `approvals` and a module registry
+  holds one owner per code. That collision is removed from the cutover's path in
+  advance; the routes are unchanged.
 - `dotmac-release-catalog==0.1.0a4` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration
@@ -76,14 +83,14 @@ it owns and — just as importantly — what it must never become.
 ## The composed database is audited whole
 
 `tests/migration/test_composed_live_catalog.py` audits the database this
-assembly actually produces — kernel lineage, three module lineages, vendor
+assembly actually produces — kernel lineage, both module lineages, vendor
 lineage — rather than the tables someone remembered to name.
 
-- The module schemas (`mod_rel`, `mod_ealloc`, `mod_approvals`) go through the
-  kernel's own canonical gate,
-  `dotmac_kernel.migrations.catalog.audit_live_schemas`. A rule the kernel
-  tightens tightens here in the release that ships it, and for `mod_approvals`
-  the expected table set follows this assembly's PLATFORM selection.
+- The module schemas (`mod_rel`, `mod_ealloc`) go through the kernel's own
+  canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. A rule
+  the kernel tightens tightens here in the release that ships it, and the
+  expected table set derives from this assembly's plane selection rather than
+  from prerequisite availability.
 - `public` is not walked by that gate (the compatibility namespace has
   exceptions a module schema does not get), so this repository owns the policy
   for it. Every table is classified from the live catalogue: `tenant_id NOT
@@ -116,9 +123,9 @@ and reusable-looking; publishing their routes would make an external caller a
 constraint on deciding the owner. A withheld surface is not a disabled
 subsystem: licence key custody still loads at boot, and a test asserts it.
 
-A profile may never withhold a persistence owner. Every module manifest carries
-a migration lineage and owns schemas the database already contains, so an
-assembly missing one would no longer describe its own tables.
+A profile may never withhold a persistence owner. Both module manifests carry a
+migration lineage and own schemas the database already contains, so an assembly
+missing one would no longer describe its own tables.
 
 ## Production topology
 

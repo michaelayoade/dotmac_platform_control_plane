@@ -12,8 +12,7 @@ Release Catalog module, the Entitlement Allocation module and the vendor
 lineage — deriving its table set from the live catalogue rather than a literal
 list. Two halves, because the composed database has two namespaces:
 
-1. **Module schemas** (`mod_rel`, `mod_ealloc`, `mod_approvals`) go through the
-   kernel's own
+1. **Module schemas** (`mod_rel`, `mod_ealloc`) go through the kernel's own
    canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. That
    is the contract every registered module schema is held to fleet-wide, and
    consuming it rather than re-deriving it is the point: a rule the kernel
@@ -74,7 +73,7 @@ APP_ROLE = "app_user"
 # The two schemas the kernel's module gate must find. Asserted because
 # `audit_live_schemas` over zero schemas returns zero violations — the exact
 # shape of a gate that has silently stopped running.
-EXPECTED_MODULE_SCHEMAS = frozenset({"mod_approvals", "mod_ealloc", "mod_rel"})
+EXPECTED_MODULE_SCHEMAS = frozenset({"mod_ealloc", "mod_rel"})
 
 # Kernel-owned `public` tables the kernel deliberately GRANTS to the tenant role
 # despite their having no `tenant_id`: `GRANT SELECT ON tenants, tenant_domains

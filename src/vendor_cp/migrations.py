@@ -18,7 +18,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import dotmac_approvals.migrations as approvals_migrations
 from alembic.config import Config
 from dotmac_entitlement_allocation import (
     versions_dir as entitlement_allocation_versions_dir,
@@ -33,33 +32,12 @@ ALEMBIC_DIR = REPO_ROOT / "alembic"
 VENDOR_VERSIONS = ALEMBIC_DIR / "versions"
 
 
-def approvals_versions_dir() -> Path:
-    """Locate the `dotmac-approvals` lineage — a SHIM, pending its own locator.
-
-    Every other installable module in the fleet ships a public
-    `versions_dir()`; `dotmac-release-catalog`'s says why in as many words:
-    "This public locator keeps the package layout owned here instead of making
-    every consumer reconstruct it from `__file__`." `dotmac-approvals` 0.1.0a3
-    ships the lineage as package data and exposes no such locator, so this is
-    the one consumer in the repository reconstructing a foreign package's
-    layout — precisely the thing the convention exists to prevent.
-
-    It is confined to this function on purpose, and
-    `tests/architecture/test_release_catalog_composition.py
-    ::test_the_approvals_locator_shim_is_still_needed` FAILS the moment the
-    upstream locator appears. A shim that nobody is told to delete is how a
-    workaround becomes the architecture.
-    """
-    return Path(approvals_migrations.__file__).resolve().parent / "versions"
-
-
 def composed_version_locations() -> str:
-    """Kernel, three independent modules and vendor migration lineages."""
+    """Kernel, two independent modules and vendor migration lineages."""
     return (
         f"{kernel_versions_dir()} "
         f"{release_catalog_versions_dir()} "
         f"{entitlement_allocation_versions_dir()} "
-        f"{approvals_versions_dir()} "
         f"{VENDOR_VERSIONS}"
     )
 

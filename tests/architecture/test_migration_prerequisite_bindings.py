@@ -1,28 +1,27 @@
 """Bindings state facts; plane selections state intent. Neither implies the other.
 
-Kernel 0.1.0a60 briefly conflated them, and this assembly is the case that
-proved it wrong: the Vendor Control Plane composes the kernel base lineage, so
-`public.tenants` and `app_current_tenant_id()` really do exist here, and under
-a60 binding that truth would have installed tenant approval tables in a control
-plane with no tenants.
+Kernel `0.1.0a60` conflated them, and this assembly is the case that proved it
+wrong: the Vendor Control Plane composes the kernel base lineage, so
+`public.tenants` and `app_current_tenant_id()` really do exist here. Under a60,
+binding that truth was itself the instruction to build a module's tenant plane,
+and the only way to keep tenant tables out of a control plane with no tenants was
+to withhold a binding whose effect the database plainly provides.
 
-The a61 declarations therefore hold four facts at once, and the tests below
-assert them SEPARATELY so a future edit cannot re-merge them by accident:
+a61 separates the two, so this assembly binds both kernel effects and states its
+installation intent separately. The tests below assert the two halves apart, so a
+future edit cannot quietly re-merge them.
 
-1. the tenant catalogue prerequisite IS bound — we do not lie about the database;
-2. the approvals plane selection is PLATFORM alone — we do not install a plane
-   we have no use for;
-3. the assembly spec carries that selection, so `ProductAssemblySpec` validates
-   it rather than a comment asserting it;
-4. Alembic installs both BEFORE it builds the revision map, and mirrors both
-   into the environment variables the graph-inspection commands read.
+The selection tuple is EMPTY today because no selectable module is composed —
+`dotmac-approvals` arrives with its cutover contract. `tests/migration/
+test_selected_planes.py` documents exactly which part of the ADR-0028 proof that
+defers, and to where.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from dotmac_kernel.planes import ModulePlane
+from dotmac_kernel.planes import supported_plane_sets
 from dotmac_kernel.prerequisites import (
     MODULE_DATABASE_ROLES_V1,
     TENANT_SCOPE_CATALOG_V1,
@@ -50,35 +49,38 @@ def test_the_assembly_binds_every_effect_the_kernel_lineage_supplies() -> None:
     }
 
 
-def test_the_assembly_installs_only_the_platform_approval_plane() -> None:
-    """The intent half. This is what keeps the tenant plane out — NOT the
-    binding above, which is present and truthful."""
-    assert {
-        (selection.module, frozenset(ModulePlane(p) for p in selection.planes))
-        for selection in ASSEMBLY_MODULE_PLANES
-    } == {("approvals", frozenset({ModulePlane.PLATFORM}))}
+def test_a_bound_tenant_catalogue_selects_nothing_by_itself() -> None:
+    """The half of ADR-0028 that is assertable with no selectable module.
 
-
-def test_a_bound_tenant_catalogue_does_not_select_the_tenant_plane() -> None:
-    """The distinguishing property of ADR-0028, as one assertion.
-
-    Both facts hold simultaneously, which is exactly the combination the a60
-    model could not express: the prerequisite is bound AND the tenant plane is
-    not selected.
+    The prerequisite is bound AND the assembly installs no tenant plane. Under
+    the a60 model those two facts could not both hold.
     """
     bound = {binding.prerequisite for binding in ASSEMBLY_PREREQUISITE_BINDINGS}
-    selected = {
-        ModulePlane(plane)
-        for selection in ASSEMBLY_MODULE_PLANES
-        if selection.module == "approvals"
-        for plane in selection.planes
-    }
     assert TENANT_SCOPE_CATALOG_V1.name in bound
-    assert ModulePlane.TENANT not in selected
+    assert ASSEMBLY_MODULE_PLANES == ()
+
+
+def test_every_composed_module_has_an_atomic_plane_contract() -> None:
+    """Why the empty selection is correct rather than merely absent.
+
+    A selectable module composed with no selection fails `ProductAssemblySpec`
+    construction. So an empty tuple is only honest while every composed module
+    declares exactly one supported plane set — this asserts that premise instead
+    of assuming it, and fails the moment a selectable module is composed.
+    """
+    selectable = [
+        manifest.code
+        for manifest in build_spec().modules
+        if getattr(manifest, "code", None) and len(supported_plane_sets(manifest)) > 1
+    ]
+    assert not selectable, (
+        "a selectable module is composed; declare its ModulePlaneSelection in "
+        f"ASSEMBLY_MODULE_PLANES and write the full plane proof: {selectable}"
+    )
 
 
 def test_the_assembly_spec_carries_the_selection_for_validation() -> None:
-    """Kernel-side validation only runs on what the spec declares. A selection
+    """Kernel-side validation only runs on what the SPEC declares. A selection
     living only in `migration_bindings` would order migrations correctly and
     still let `create_app` compose a selectable module with no stated intent."""
     assert tuple(build_spec().module_planes) == ASSEMBLY_MODULE_PLANES

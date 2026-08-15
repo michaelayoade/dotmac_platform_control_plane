@@ -41,11 +41,12 @@ disagree, fix the drift.
    `PrerequisiteBinding` says where an effect comes from, and this assembly
    binds BOTH kernel effects — including `tenant_scope_catalog.v1`, because
    kernel `0001` really does create `public.tenants` here. A
-   `ModulePlaneSelection` says what this product installs, and it selects
-   `PLATFORM` alone for `approvals`. Never reintroduce the a60 model in which an
-   absent binding selected a plane, and never create a tenants table, a sentinel
-   tenant, or a nullable tenant column to satisfy a module (ADR-0028;
-   `tests/architecture/test_migration_prerequisite_bindings.py`,
+   `ModulePlaneSelection` says what this product installs, and it is EMPTY
+   until a selectable module is composed — which happens only behind a cutover
+   contract, never as a side effect of a version bump. Never reintroduce the a60
+   model in which an absent binding selected a plane, and never create a tenants
+   table, a sentinel tenant, or a nullable tenant column to satisfy a module
+   (ADR-0028; `tests/architecture/test_migration_prerequisite_bindings.py`,
    `tests/migration/test_selected_planes.py`).
 10. **Every composed table is audited, none by name.** The module schemas go
     through the kernel's `audit_live_schemas`; `public` is classified from the

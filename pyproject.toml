@@ -44,13 +44,6 @@ dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
 # `allocation_entries` become declared `platform_tables`, so the composed
 # live-catalogue audit can hold them to the plane they are actually built on.
 dotmac-entitlement-allocation = { version = "0.1.0a4", source = "forgejo" }
-# The dual-plane approval-state owner (ADR-0026/ADR-0028). Composed in SHADOW,
-# exactly as the entitlement-allocation module was: its manifest, its lineage
-# and its PLATFORM plane are installed, while `vendor_cp.approvals` remains the
-# sole authoritative writer until a cutover is designed. Its `tenant_requires`
-# is never resolved here, because this assembly explicitly selects PLATFORM —
-# see `vendor_cp.migration_bindings.ASSEMBLY_MODULE_PLANES`.
-dotmac-approvals = { version = "0.1.0a3", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).
