@@ -634,6 +634,7 @@ def test_only_composition_sites_touch_the_new_authority() -> None:
         path.relative_to(SRC).as_posix()
         for path in source_files(PACKAGE)
         if reaches_module(_refs(path), NEW_AUTHORITY)
+        or submodule_reach_ins(_refs(path), NEW_AUTHORITY)
     }
     assert importers == {"vendor_cp/assembly.py", "vendor_cp/migrations.py"}, (
         "only composition may import the module during shadow; a caller is an "

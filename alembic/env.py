@@ -93,17 +93,44 @@ def _require_composed_heads(connection: object) -> None:
     Raising here rolls back the ENTIRE composition, which matters for more than
     tidiness: a database that stopped after `ap_0001_approvals` would have
     committed the module DML grant that vendor `v012` exists to remove.
+
+    ## Why this compares ANCESTRY, not the version rows
+
+    `alembic_version` holds current heads, not every applied revision — and a
+    `depends_on` edge makes its target an ANCESTOR of the depending revision
+    rather than a separate head. `ap_0001_approvals` is a static head of its own
+    lineage, but once `v012` depends on it and both are applied, it is no longer
+    a head ROW. Comparing static heads against version rows therefore reports it
+    missing on a perfectly complete database — which is exactly what CI caught
+    on the first run of this check.
+
+    So the question is "is every static head REACHED", answered over the ancestor
+    closure of what is applied.
     """
     from alembic.script import ScriptDirectory
     from sqlalchemy import text
 
-    expected = set(ScriptDirectory.from_config(config).get_heads())
+    script = ScriptDirectory.from_config(config)
     applied = set(
         connection.execute(  # type: ignore[attr-defined]
             text("SELECT version_num FROM alembic_version")
         ).scalars()
     )
-    missing = expected - applied
+
+    reached: set[str] = set()
+    pending = list(applied)
+    while pending:
+        revision_id = pending.pop()
+        if revision_id in reached:
+            continue
+        reached.add(revision_id)
+        revision = script.get_revision(revision_id)
+        for edge in (revision.down_revision, revision.dependencies):
+            if edge is None:
+                continue
+            pending.extend((edge,) if isinstance(edge, str) else tuple(edge))
+
+    missing = set(script.get_heads()) - reached
     if missing:
         raise RuntimeError(
             "upgrade did not reach composed heads; missing "
