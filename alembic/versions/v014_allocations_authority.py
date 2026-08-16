@@ -118,9 +118,7 @@ def upgrade() -> None:
             f"REVOKE ALL PRIVILEGES ON TABLE {MODULE_SCHEMA}.{table} "
             f"FROM {ONLINE_ROLE};"
         )
-        op.execute(
-            f"GRANT SELECT, INSERT ON {MODULE_SCHEMA}.{table} TO {ONLINE_ROLE};"
-        )
+        op.execute(f"GRANT SELECT, INSERT ON {MODULE_SCHEMA}.{table} TO {ONLINE_ROLE};")
     op.execute(
         "GRANT UPDATE (sealed, updated_at) ON "
         f"{MODULE_SCHEMA}.allocations TO {ONLINE_ROLE};"
@@ -226,9 +224,7 @@ def _verify_privileges(connection: object) -> None:
 
         for privilege in FORBIDDEN_TABLE_PRIVILEGES:
             if _table_holds(connection, ONLINE_ROLE, qualified, privilege):
-                failures.append(
-                    f"{ONLINE_ROLE} holds table {privilege} on {qualified}"
-                )
+                failures.append(f"{ONLINE_ROLE} holds table {privilege} on {qualified}")
 
         allowed_updates = (
             ALLOCATION_UPDATE_COLUMNS if table == "allocations" else frozenset()
@@ -249,9 +245,7 @@ def _verify_privileges(connection: object) -> None:
                 failures.append(
                     f"{ONLINE_ROLE} {expectation} UPDATE on {qualified}.{column}"
                 )
-            if _column_holds(
-                connection, ONLINE_ROLE, qualified, column, "REFERENCES"
-            ):
+            if _column_holds(connection, ONLINE_ROLE, qualified, column, "REFERENCES"):
                 failures.append(
                     f"{ONLINE_ROLE} holds REFERENCES on {qualified}.{column}"
                 )
@@ -279,9 +273,7 @@ def _columns(connection: object, qualified: str) -> tuple[str, ...]:
     )
 
 
-def _table_holds(
-    connection: object, role: str, qualified: str, privilege: str
-) -> bool:
+def _table_holds(connection: object, role: str, qualified: str, privilege: str) -> bool:
     return bool(
         connection.execute(  # type: ignore[attr-defined]
             sa.text("SELECT has_table_privilege(:role, :rel, :priv)"),
@@ -305,9 +297,7 @@ def _column_holds(
     )
 
 
-def _holds_any(
-    connection: object, role: str, qualified: str, privilege: str
-) -> bool:
+def _holds_any(connection: object, role: str, qualified: str, privilege: str) -> bool:
     statement = "SELECT has_table_privilege(:role, :rel, :priv)"
     if privilege in COLUMN_GRANTABLE:
         statement += " OR has_any_column_privilege(:role, :rel, :priv)"

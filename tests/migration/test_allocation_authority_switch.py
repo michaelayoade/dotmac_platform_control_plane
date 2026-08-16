@@ -119,9 +119,7 @@ def _columns(url: str, qualified: str) -> tuple[str, ...]:
         engine.dispose()
 
 
-def _privilege_snapshot(
-    url: str, role: str
-) -> tuple[tuple[str, str, str, bool], ...]:
+def _privilege_snapshot(url: str, role: str) -> tuple[tuple[str, str, str, bool], ...]:
     facts: list[tuple[str, str, str, bool]] = []
     for table in MODULE_TABLES:
         qualified = f"{SCHEMA}.{table}"
@@ -465,9 +463,7 @@ def test_downgrade_is_refused(scratch_db: str) -> None:
         command.downgrade(make_alembic_config(scratch_db), PRIOR_REVISION)
     # Inert: the switch's effects are all still in place.
     assert not _exists(scratch_db, "public.allocations")
-    assert _table_holds(
-        scratch_db, ONLINE_ROLE, f"{SCHEMA}.allocations", "INSERT"
-    )
+    assert _table_holds(scratch_db, ONLINE_ROLE, f"{SCHEMA}.allocations", "INSERT")
 
 
 def test_the_migration_takes_the_lock_it_needs_up_front() -> None:
@@ -484,5 +480,5 @@ def test_the_migration_takes_the_lock_it_needs_up_front() -> None:
     assert "IN SHARE MODE" not in source
     assert 'LOCK_TABLES = ("allocations", "allocation_entries")' in source
     assert 'DROP_TABLES = ("allocation_entries", "allocations")' in source
-    assert 'for table in LOCK_TABLES' in source
-    assert 'for table in DROP_TABLES' in source
+    assert "for table in LOCK_TABLES" in source
+    assert "for table in DROP_TABLES" in source
