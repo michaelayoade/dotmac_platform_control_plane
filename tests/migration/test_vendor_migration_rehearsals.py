@@ -37,7 +37,7 @@ ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 APPROVALS_HEAD = "ap_0001_approvals"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v013_approvals_authority_switch"
+VENDOR_HEAD = "v014_allocations_authority_switch"
 
 
 # `scratch_db` and the DSN rewriter MOVED to `tests/migration/conftest.py`.
@@ -112,8 +112,10 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     assert not _table_exists(scratch_db, "approval_records")
     assert _table_exists(scratch_db, "contracts")
     assert _table_exists(scratch_db, "contract_lines")
-    assert _table_exists(scratch_db, "allocations")
-    assert _table_exists(scratch_db, "allocation_entries")
+    # v014 DROPPED these: allocation authority moved to the module, and the
+    # empty legacy tables went with the writer that owned them.
+    assert not _table_exists(scratch_db, "allocations")
+    assert not _table_exists(scratch_db, "allocation_entries")
     assert "product_code" in _column_names(scratch_db, "offer_versions")
     assert "product_code" in _column_names(scratch_db, "contracts")
     # Kernel platform tables the AccountService depends on are present too.
@@ -317,7 +319,10 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     assert _qualified_table_exists(
         scratch_db, "mod_approvals.platform_approval_requests"
     )
-    assert _table_exists(scratch_db, "allocations")
+    # Allocations moved to the module too (v014); the legacy tables are created
+    # by v005 and dropped again within the same composed upgrade.
+    assert not _table_exists(scratch_db, "allocations")
+    assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _versions(scratch_db) == {

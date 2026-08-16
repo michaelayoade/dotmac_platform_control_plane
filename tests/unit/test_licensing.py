@@ -36,7 +36,7 @@ from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from vendor_cp.allocations import service as allocations
+from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import service as contracts
 from vendor_cp.contracts.models import Contract
@@ -99,8 +99,18 @@ def _catalogue(*codes: str) -> ProductCapabilityCatalogues:
     return ProductCapabilityCatalogues.from_capabilities({PRODUCT: tuple(codes)})
 
 
-def _staged_allocation(db: Session, *, suffix: str = "a") -> uuid.UUID:
-    """Drive contract → activate → stage, returning the staged allocation id."""
+def _staged_allocation(
+    db: Session, *, suffix: str = "a", customer_ref: str | None = None
+) -> uuid.UUID:
+    """Drive contract → activate → stage, returning the staged allocation id.
+
+    `customer_ref` is separable from `suffix` so a RENEWAL — a second contract
+    for the same customer — can be driven through the real path. The allocation
+    is the module's now, and its rows are immutable by design; a test that
+    reached in and rewrote `customer_ref` afterwards would be asserting against
+    a state production can never produce.
+    """
+    customer_ref = customer_ref or f"cust-{suffix}"
     offer_code = f"off-{suffix}"
     db.add(
         OfferVersion(
@@ -118,7 +128,7 @@ def _staged_allocation(db: Session, *, suffix: str = "a") -> uuid.UUID:
         contracts.CreateDraftCommand(
             command_id=f"d-{uuid.uuid4()}",
             product_code=PRODUCT,
-            customer_ref=f"cust-{suffix}",
+            customer_ref=customer_ref,
             legal_entity="Dotmac Ltd",
             currency_code="USD",
             term_start=date(2026, 1, 1),
@@ -174,8 +184,9 @@ def _staged_allocation(db: Session, *, suffix: str = "a") -> uuid.UUID:
             source_event_id=f"evt-{uuid.uuid4()}",
             contract_id=draft.id,
             content_hash=submitted.content_hash or "",
-            customer_ref=f"cust-{suffix}",
+            customer_ref=customer_ref,
         ),
+        catalogues=_catalogue("cap.a", "cap.b"),
     )
     return view.id
 
@@ -244,17 +255,11 @@ def test_second_allocation_issues_next_version_in_same_lineage(
     db: Session, signer
 ) -> None:
     first = _issue(db, _staged_allocation(db, suffix="a"), signer)
-    # A renewal for the SAME customer+product — a new allocation, same lineage.
-    second_alloc = _staged_allocation(db, suffix="a2")
+    # A renewal for the SAME customer+product — a new contract and a new
+    # allocation, but one customer, so one lineage.
+    second_alloc = _staged_allocation(db, suffix="a2", customer_ref="cust-a")
     licence = db.get(Licence, first.licence_id)
-    assert licence is not None
-    # Force the same lineage by matching customer_ref on the allocation.
-    from vendor_cp.allocations.models import Allocation
-
-    alloc_row = db.get(Allocation, second_alloc)
-    assert alloc_row is not None
-    alloc_row.customer_ref = licence.customer_ref
-    db.flush()
+    assert licence is not None and licence.customer_ref == "cust-a"
 
     second = _issue(db, second_alloc, signer)
     assert second.licence_id == first.licence_id
@@ -265,15 +270,7 @@ def test_a_lower_version_cannot_supersede_a_higher_one(db: Session, signer) -> N
     """The vendor's monotonic versions are what make the receiver's rollback
     guard work — prove the pairing end to end."""
     first = _issue(db, _staged_allocation(db, suffix="a"), signer)
-    second_alloc = _staged_allocation(db, suffix="a2")
-    from vendor_cp.allocations.models import Allocation
-
-    alloc_row = db.get(Allocation, second_alloc)
-    assert alloc_row is not None
-    licence = db.get(Licence, first.licence_id)
-    assert licence is not None
-    alloc_row.customer_ref = licence.customer_ref
-    db.flush()
+    second_alloc = _staged_allocation(db, suffix="a2", customer_ref="cust-a")
     second = _issue(db, second_alloc, signer)
 
     keyring = licensing.build_keyring(db)

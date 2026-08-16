@@ -140,6 +140,59 @@ SUPERSEDED_DESIGNS: Final = (
 )
 
 
+#: Guard EXEMPTIONS that have been retired, and the claims that may not outlive
+#: them. An exemption whose premise has evaporated is worse than no exemption: it
+#: keeps widening a gate for facts nobody has examined (ADR-0018). Removing the
+#: code is half the job; removing the prose that still promises it is the rest.
+#:
+#: Keyed on the module whose absence retires the claim, so this stays a GATE on a
+#: fact rather than a list of sentences to grep for.
+RETIRED_EXEMPTIONS: Final = (
+    (
+        "src/vendor_cp/shadow_overlaps.py",
+        (
+            "shadow overlap",
+            "SHADOW_OVERLAPS",
+            "declared shadow overlaps",
+            "host squatter",
+        ),
+    ),
+)
+
+
+def test_no_retired_exemption_is_still_described_as_live() -> None:
+    """The coverage gap this guard did not have.
+
+    It gated "nothing is selected" and "must not pin" claims on their facts, but
+    had nothing to say about an EXEMPTION that had been deleted while documents
+    went on describing it. That is the same failure one level up: a reader trusts
+    prose that promises a waiver the gate no longer applies.
+    """
+    for module, claims in RETIRED_EXEMPTIONS:
+        if (ROOT / module).exists():
+            continue  # still live; its claims are legitimate
+        offenders = [
+            f"{path.relative_to(ROOT)}: {claim!r}"
+            for path in _prose_files()
+            for claim in claims
+            if claim in _flattened(path)
+        ]
+        assert not offenders, (
+            f"{module} is retired, but these documents still describe its "
+            f"exemption as live: {offenders}"
+        )
+
+
+def test_the_retired_exemption_guard_is_not_vacuous() -> None:
+    """Each entry must name a module that is genuinely gone AND claims that could
+    be found if present — otherwise the gate above passes for the wrong reason."""
+    assert RETIRED_EXEMPTIONS
+    for module, claims in RETIRED_EXEMPTIONS:
+        assert claims, module
+        planted = " ".join(claims)
+        assert all(claim in planted for claim in claims)
+
+
 def _authority_has_switched() -> bool:
     """The legacy approval writer is gone, so any document still presenting the
     sealed cutover as the plan is describing a path not taken."""

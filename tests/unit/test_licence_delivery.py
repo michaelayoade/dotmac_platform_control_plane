@@ -45,7 +45,7 @@ from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from vendor_cp.allocations import service as allocations
+from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import service as contracts
 from vendor_cp.contracts.models import Contract
@@ -191,6 +191,7 @@ def _staged_allocation(db: Session, *, suffix: str, customer_ref: str) -> uuid.U
             content_hash=submitted.content_hash or "",
             customer_ref=customer_ref,
         ),
+        catalogues=_product_catalogues("cap.a", "cap.b"),
     ).id
 
 
