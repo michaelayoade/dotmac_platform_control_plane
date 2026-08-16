@@ -451,23 +451,16 @@ def test_v010_quarantines_legacy_deliveries_including_active_ones(
                 ),
                 {"id": ids["lic"]},
             )
-            conn.execute(
-                text(
-                    "INSERT INTO contracts (id, customer_ref, legal_entity, "
-                    "currency_code, term_start, term_end, status, content_hash) "
-                    "VALUES (:id, 'cust-legacy', 'Dotmac Ltd', 'USD', "
-                    "'2026-01-01', '2026-12-31', 'active', 'h')"
-                ),
-                {"id": ids["c"]},
-            )
-            conn.execute(
-                text(
-                    "INSERT INTO allocations (id, contract_id, customer_ref, "
-                    "content_hash, status, source_event_id) VALUES "
-                    "(:id, :c, 'cust-legacy', 'h', 'staged', 'evt')"
-                ),
-                {"id": ids["a"], "c": ids["c"]},
-            )
+            # No contract or allocation row is seeded. Since `v014`,
+            # `licence_issuances.allocation_id` is an OPAQUE reference — the
+            # allocation is owned by `dotmac-entitlement-allocation` and no
+            # foreign key crosses into a module's schema (ADR-0023) — so there is
+            # no referential integrity left to satisfy here.
+            #
+            # It also MUST NOT be seeded: this rehearsal upgrades to heads, and
+            # `v014` fails closed on a non-empty legacy estate. A fabricated row
+            # kept only for an FK that no longer exists would now block the very
+            # upgrade this test is rehearsing.
             conn.execute(
                 text(
                     "INSERT INTO licence_issuances (id, licence_id, allocation_id, "

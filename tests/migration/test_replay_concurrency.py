@@ -68,34 +68,17 @@ def two_deliveries(engine: Engine) -> Iterator[tuple[str, str]]:
             ),
             {"id": ids["licence"], "cust": f"cust-{suffix}"},
         )
-        # An allocation is required by the issuance FK; the licensing chain that
-        # normally produces one is irrelevant here, so a minimal contract +
-        # allocation pair is created to satisfy referential integrity.
-        contract_id = str(uuid.uuid4())
+        # `licence_issuances.allocation_id` is an OPAQUE reference since `v014`:
+        # the allocation it names is owned by `dotmac-entitlement-allocation` and
+        # lives in `mod_ealloc`, and no foreign key may cross into a module's
+        # schema (ADR-0023). So no allocation row is needed to satisfy
+        # referential integrity — there is no longer any to satisfy.
+        #
+        # That is a real simplification rather than a workaround: this proof is
+        # about `FOR UPDATE SKIP LOCKED` on delivery rows, and it previously had
+        # to fabricate a contract and an allocation for reasons that had nothing
+        # to do with what it measures.
         allocation_id = str(uuid.uuid4())
-        conn.execute(
-            text(
-                "INSERT INTO contracts (id, customer_ref, legal_entity, "
-                "currency_code, term_start, term_end, status, content_hash, "
-                "product_code) VALUES (:id, :cust, 'Dotmac Ltd', 'USD', "
-                "'2026-01-01', '2026-12-31', 'active', :hash, 'dotmac-sub')"
-            ),
-            {"id": contract_id, "cust": f"cust-{suffix}", "hash": f"h-{suffix}"},
-        )
-        conn.execute(
-            text(
-                "INSERT INTO allocations (id, contract_id, customer_ref, "
-                "content_hash, status, source_event_id) "
-                "VALUES (:id, :contract, :cust, :hash, 'staged', :evt)"
-            ),
-            {
-                "id": allocation_id,
-                "contract": contract_id,
-                "cust": f"cust-{suffix}",
-                "hash": f"h-{suffix}",
-                "evt": f"evt-{suffix}",
-            },
-        )
         conn.execute(
             text(
                 "INSERT INTO licence_issuances (id, licence_id, allocation_id, "
@@ -149,13 +132,7 @@ def two_deliveries(engine: Engine) -> Iterator[tuple[str, str]]:
                 text("DELETE FROM licence_issuances WHERE id = :id"),
                 {"id": ids["issuance"]},
             )
-            conn.execute(
-                text("DELETE FROM allocations WHERE contract_id = :id"),
-                {"id": contract_id},
-            )
-            conn.execute(
-                text("DELETE FROM contracts WHERE id = :id"), {"id": contract_id}
-            )
+
             conn.execute(
                 text("DELETE FROM licences WHERE id = :id"), {"id": ids["licence"]}
             )
