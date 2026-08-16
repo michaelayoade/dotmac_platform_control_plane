@@ -98,8 +98,14 @@ def _approve(db: Session, contract_id: uuid.UUID, content_hash: str | None) -> N
     )
 
 
-def _catalogue(*codes: str) -> ProductCapabilityCatalogues:
-    return ProductCapabilityCatalogues.from_capabilities({PRODUCT: tuple(codes)})
+def _catalogue(*codes: str, product: str = PRODUCT) -> ProductCapabilityCatalogues:
+    """The catalogue must name the product being staged.
+
+    It was pinned to `PRODUCT`, which held while every test used one product.
+    Staging a second one raises `UnknownProductError` — correctly: the module
+    refuses to allocate against a product it has no manifest for.
+    """
+    return ProductCapabilityCatalogues.from_capabilities({product: tuple(codes)})
 
 
 def _staged_allocation(
@@ -173,7 +179,7 @@ def _staged_allocation(
             approval_policy_version=1,
             submitter_id=uuid.uuid4(),
         ),
-        catalogues=_catalogue("cap.a", "cap.b"),
+        catalogues=_catalogue("cap.a", "cap.b", product=product),
     )
     _approve(db, draft.id, submitted.content_hash)
     contracts.approve(
@@ -198,7 +204,7 @@ def _staged_allocation(
             content_hash=submitted.content_hash or "",
             customer_ref=customer_ref,
         ),
-        catalogues=_catalogue("cap.a", "cap.b"),
+        catalogues=_catalogue("cap.a", "cap.b", product=product),
     )
     return view.id
 
