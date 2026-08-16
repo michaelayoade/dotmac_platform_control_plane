@@ -39,6 +39,16 @@ VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v014_allocations_authority"
 
+#: The vendor head as it stood BEFORE allocation authority moved.
+#:
+#: A rehearsal of "an existing deployment we are upgrading FROM" must name the
+#: revision it means. `vendor@head` is an alias, and using it here silently
+#: re-described the scenario every time the head advanced: once `v014` declared
+#: `depends_on = ea_0001_allocations`, upgrading to `vendor@head` installed the
+#: module lineage, so the "before modules" state the test set up was no longer
+#: that state at all.
+PREVIOUS_VENDOR_HEAD = "v013_approvals_authority_switch"
+
 
 # `scratch_db` and the DSN rewriter MOVED to `tests/migration/conftest.py`.
 # They were defined here, which meant the composed live-catalogue audit could
@@ -344,9 +354,9 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     scratch_db: str,
 ) -> None:
     """Rehearse a9 + vendor v010 to a45 + both installed module lineages."""
-    _upgrade(scratch_db, "vendor@head")
+    _upgrade(scratch_db, PREVIOUS_VENDOR_HEAD)
     _upgrade(scratch_db, PREVIOUS_KERNEL_HEAD)
-    assert _versions(scratch_db) == {PREVIOUS_KERNEL_HEAD, VENDOR_HEAD}
+    assert _versions(scratch_db) == {PREVIOUS_KERNEL_HEAD, PREVIOUS_VENDOR_HEAD}
     assert not _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert not _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
 
@@ -456,16 +466,28 @@ def test_v010_quarantines_legacy_deliveries_including_active_ones(
                 ),
                 {"id": ids["lic"]},
             )
-            # No contract or allocation row is seeded. Since `v014`,
-            # `licence_issuances.allocation_id` is an OPAQUE reference — the
-            # allocation is owned by `dotmac-entitlement-allocation` and no
-            # foreign key crosses into a module's schema (ADR-0023) — so there is
-            # no referential integrity left to satisfy here.
-            #
-            # It also MUST NOT be seeded: this rehearsal upgrades to heads, and
-            # `v014` fails closed on a non-empty legacy estate. A fabricated row
-            # kept only for an FK that no longer exists would now block the very
-            # upgrade this test is rehearsing.
+            # Seeded, because at the v009 state this rehearsal builds,
+            # `licence_issuances.allocation_id` still carries a real foreign key
+            # to `public.allocations`. `v014` later drops that constraint and the
+            # table with it — but this test is standing at v009, where the
+            # constraint exists and must be satisfied.
+            conn.execute(
+                text(
+                    "INSERT INTO contracts (id, customer_ref, legal_entity, "
+                    "currency_code, term_start, term_end, status, content_hash) "
+                    "VALUES (:id, 'cust-legacy', 'Dotmac Ltd', 'USD', "
+                    "'2026-01-01', '2026-12-31', 'active', 'h')"
+                ),
+                {"id": ids["c"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO allocations (id, contract_id, customer_ref, "
+                    "content_hash, status, source_event_id) VALUES "
+                    "(:id, :c, 'cust-legacy', 'h', 'staged', 'evt')"
+                ),
+                {"id": ids["a"], "c": ids["c"]},
+            )
             conn.execute(
                 text(
                     "INSERT INTO licence_issuances (id, licence_id, allocation_id, "
@@ -490,7 +512,15 @@ def test_v010_quarantines_legacy_deliveries_including_active_ones(
                     {"id": str(uuid.uuid4()), "d": ids[key], "state": state},
                 )
 
-        _upgrade(scratch_db, "heads")
+        # v010 EXACTLY, which is what this test is named for and all it needs.
+        #
+        # Driving it to `heads` would drag `v014`'s greenfield precondition into
+        # a test about delivery quarantine: the allocation row seeded above for
+        # v009's foreign key is precisely what `v014` fails closed on. The two
+        # requirements are irreconcilable at `heads` and neither is wrong — they
+        # just belong to different points in the lineage, which is what naming
+        # the target keeps straight.
+        _upgrade(scratch_db, "v010_delivery_hardening")
 
         with eng.connect() as conn:
             states = dict(
