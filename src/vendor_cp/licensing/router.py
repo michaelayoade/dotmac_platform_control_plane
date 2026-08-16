@@ -53,7 +53,6 @@ def issue(
         db,
         service.IssueLicenceCommand(
             allocation_id=payload.allocation_id,
-            product=payload.product,
             edition=payload.edition,
             not_before=payload.not_before,
             expires_at=payload.expires_at,

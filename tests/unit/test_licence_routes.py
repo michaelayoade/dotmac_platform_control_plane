@@ -28,7 +28,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vendor_cp.allocations import service as allocations
+from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import service as contracts
 from vendor_cp.contracts.models import Contract
@@ -170,10 +170,11 @@ def _issue(db: Session) -> object:
             content_hash=submitted.content_hash or "",
             customer_ref=CUSTOMER,
         ),
+        catalogues=_catalogue("cap.a"),
     )
     return licensing.issue_licence(
         db,
-        licensing.IssueLicenceCommand(allocation_id=alloc.id, product="dotmac-sub"),
+        licensing.IssueLicenceCommand(allocation_id=alloc.id),
         signer=EphemeralLicenceSigner(key_id="k1"),
         now=NOW,
     )

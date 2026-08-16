@@ -5,23 +5,47 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from vendor_cp.licensing.service import LicenceIssuanceView
 
 
 class IssueLicenceRequest(BaseModel):
     """Issue the next version for a staged allocation. Validity and binding come
-    from the contract/commercial policy — the route never guesses them."""
+    from the contract/commercial policy — the route never guesses them.
+
+    `product` is DELIBERATELY absent: it belongs to the allocation, and the
+    allocation is owned by `dotmac-entitlement-allocation`. Accepting it here
+    would let a caller name a product the allocation does not have, and the
+    licence would be issued into that lineage instead — a second authority for
+    a fact that already has one.
+    """
 
     allocation_id: UUID
-    product: str
     edition: str | None = None
     not_before: datetime | None = None
     expires_at: datetime | None = None
     grace_days: int = Field(default=0, ge=0)
     deployment_id: str | None = None
     constraints: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_retired_product(cls, data: object) -> object:
+        """REJECT a supplied `product`, rather than ignore it.
+
+        Silently dropping it would be worse than the bug it replaces: a caller
+        that believes it is selecting a product would keep believing that, and
+        the licence would go somewhere else with no complaint. An obsolete field
+        must fail loudly for exactly as long as anyone might still send it.
+        """
+        if isinstance(data, dict) and "product" in data:
+            raise ValueError(
+                "'product' is no longer accepted: the product is taken from the "
+                "allocation, which owns it. Remove the field — supplying it "
+                "cannot change the outcome, and accepting it would imply it can."
+            )
+        return data
 
 
 class LicenceIssuanceResponse(BaseModel):

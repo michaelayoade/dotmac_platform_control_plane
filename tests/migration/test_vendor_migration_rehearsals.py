@@ -37,7 +37,17 @@ ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 APPROVALS_HEAD = "ap_0001_approvals"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v013_approvals_authority_switch"
+VENDOR_HEAD = "v014_allocations_authority"
+
+#: The vendor head as it stood BEFORE allocation authority moved.
+#:
+#: A rehearsal of "an existing deployment we are upgrading FROM" must name the
+#: revision it means. `vendor@head` is an alias, and using it here silently
+#: re-described the scenario every time the head advanced: once `v014` declared
+#: `depends_on = ea_0001_allocations`, upgrading to `vendor@head` installed the
+#: module lineage, so the "before modules" state the test set up was no longer
+#: that state at all.
+PREVIOUS_VENDOR_HEAD = "v013_approvals_authority_switch"
 
 
 # `scratch_db` and the DSN rewriter MOVED to `tests/migration/conftest.py`.
@@ -112,8 +122,10 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     assert not _table_exists(scratch_db, "approval_records")
     assert _table_exists(scratch_db, "contracts")
     assert _table_exists(scratch_db, "contract_lines")
-    assert _table_exists(scratch_db, "allocations")
-    assert _table_exists(scratch_db, "allocation_entries")
+    # v014 DROPPED these: allocation authority moved to the module, and the
+    # empty legacy tables went with the writer that owned them.
+    assert not _table_exists(scratch_db, "allocations")
+    assert not _table_exists(scratch_db, "allocation_entries")
     assert "product_code" in _column_names(scratch_db, "offer_versions")
     assert "product_code" in _column_names(scratch_db, "contracts")
     # Kernel platform tables the AccountService depends on are present too.
@@ -138,11 +150,19 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         scratch_db,
         "SELECT relrowsecurity FROM pg_class WHERE oid='vendor_accounts'::regclass",
     )
-    # Five independent runtime heads: kernel, vendor assembly and the three
-    # installed modules each retain their own migration authority.
+    # VERSION ROWS, which are not the same set as the static heads.
+    #
+    # `alembic_version` holds current heads only, and a `depends_on` edge makes
+    # its target an ANCESTOR of the depending revision rather than a head in its
+    # own right. `v012` depends on `ap_0001_approvals` and `v014` on
+    # `ea_0001_allocations`, so both module revisions — while genuinely applied —
+    # stop being version ROWS once the vendor lineage reaches them.
+    #
+    # They are still static heads, and `test_five_head_topology` asserts all five
+    # through `script.get_heads()`. Listing them here as well would report them
+    # missing on a perfectly complete database.
     assert _versions(scratch_db) == {
         KERNEL_HEAD,
-        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -317,12 +337,14 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     assert _qualified_table_exists(
         scratch_db, "mod_approvals.platform_approval_requests"
     )
-    assert _table_exists(scratch_db, "allocations")
+    # Allocations moved to the module too (v014); the legacy tables are created
+    # by v005 and dropped again within the same composed upgrade.
+    assert not _table_exists(scratch_db, "allocations")
+    assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _versions(scratch_db) == {
         KERNEL_HEAD,
-        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -332,9 +354,9 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     scratch_db: str,
 ) -> None:
     """Rehearse a9 + vendor v010 to a45 + both installed module lineages."""
-    _upgrade(scratch_db, "vendor@head")
+    _upgrade(scratch_db, PREVIOUS_VENDOR_HEAD)
     _upgrade(scratch_db, PREVIOUS_KERNEL_HEAD)
-    assert _versions(scratch_db) == {PREVIOUS_KERNEL_HEAD, VENDOR_HEAD}
+    assert _versions(scratch_db) == {PREVIOUS_KERNEL_HEAD, PREVIOUS_VENDOR_HEAD}
     assert not _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert not _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
 
@@ -367,7 +389,6 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     )
     assert _versions(scratch_db) == {
         KERNEL_HEAD,
-        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -409,7 +430,6 @@ def test_kernel_advance_keeps_vendor_head_independent(
     assert _table_exists(scratch_db, "vendor_accounts")
     assert _versions(scratch_db) == {
         synth_rev,
-        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -446,6 +466,11 @@ def test_v010_quarantines_legacy_deliveries_including_active_ones(
                 ),
                 {"id": ids["lic"]},
             )
+            # Seeded, because at the v009 state this rehearsal builds,
+            # `licence_issuances.allocation_id` still carries a real foreign key
+            # to `public.allocations`. `v014` later drops that constraint and the
+            # table with it — but this test is standing at v009, where the
+            # constraint exists and must be satisfied.
             conn.execute(
                 text(
                     "INSERT INTO contracts (id, customer_ref, legal_entity, "
@@ -487,7 +512,15 @@ def test_v010_quarantines_legacy_deliveries_including_active_ones(
                     {"id": str(uuid.uuid4()), "d": ids[key], "state": state},
                 )
 
-        _upgrade(scratch_db, "heads")
+        # v010 EXACTLY, which is what this test is named for and all it needs.
+        #
+        # Driving it to `heads` would drag `v014`'s greenfield precondition into
+        # a test about delivery quarantine: the allocation row seeded above for
+        # v009's foreign key is precisely what `v014` fails closed on. The two
+        # requirements are irreconcilable at `heads` and neither is wrong — they
+        # just belong to different points in the lineage, which is what naming
+        # the target keeps straight.
+        _upgrade(scratch_db, "v010_delivery_hardening")
 
         with eng.connect() as conn:
             states = dict(

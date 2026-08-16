@@ -142,49 +142,51 @@ lineage — rather than the tables someone remembered to name.
   list that could only ever prove what someone remembered; a future `v012` table
   is swept the moment its migration runs.
 
-## The allocation shadow overlap (temporary, declared, dated)
+## Allocation authority (ADR-0006)
 
-`public.allocations` and `public.allocation_entries` — created by vendor
-migration `v005` — carry the same names the composed
-`dotmac-entitlement-allocation` module owns in `mod_ealloc`. The kernel's
-live-catalogue gate reports that as a host squatter, and normally it is exactly
-right: a module table in the compatibility namespace usually means a module that
-never moved.
+`dotmac-entitlement-allocation` owns allocations. `v014` transferred the
+authority: `platform_api` holds DML on `mod_ealloc`, and the legacy
+`public.allocations` / `public.allocation_entries` tables are dropped along with
+the writer that owned them.
 
-Here it is the visible footprint of an authority migration that is deliberately
-unfinished, so `src/vendor_cp/shadow_overlaps.py` declares it — **assembly-local,
-exactly two pairs, and written to expire**.
+**Greenfield, on the same observation as approvals.** A direct authorized check
+against the designated sole target found `TARGET_ABSENT` — no Compose `db`
+service, no data volume — so there was no allocation estate to seal, compare or
+migrate. `v014` re-checks emptiness under `ACCESS EXCLUSIVE` in the same
+transaction that drops the tables and fails closed if a row exists.
 
-- **One writer at every instant.** `vendor_cp.allocations.service` is
-  authoritative and `mod_ealloc` stays empty. Enforced by a test that fails if
-  anything under `src/` imports the module's write surface (`stage_allocation`),
-  and by an allowlist of the module names vendor code may import while the
-  legacy writer owns the data.
-- **No new legacy call sites.** The set of modules importing the legacy
-  allocation models is exact — `allocations/service.py` (the writer),
-  `allocations/preflight.py` (read-only auditor), `licensing/service.py`
-  (reader). A new importer fails the build; new work belongs on the module's
-  boundary, not on tables scheduled for retirement.
-- **Two-directional ratchet.** The live audit asserts the database reports these
-  two overlaps and no others. Rising fails, because a third is a new fact needing
-  its own decision. **Falling also fails**, because a table that stops
-  overlapping means part of the cutover completed and the declaration must be
-  lowered in that same change — a backlog allowed to shrink quietly is how a
-  temporary exception outlives everyone who agreed to it.
-- **It names what removes it.** The "Allocation cutover gate" below, step 4: the
-  legacy models, service, FK and writer path are retired after parity. Then
-  `shadow_overlaps.py` is deleted rather than edited. A review date fails loudly
-  if that has not happened, so the exception gets re-justified by a person
-  instead of lapsing.
+**`vendor_cp.allocations.adapter` is the only seam**, typed with no `Any`. The
+division of rules is deliberate: Vendor keeps the checks about VENDOR'S contract
+(it is `ACTIVE`, and the activation event's digest still matches the current
+version), because only Vendor can say what "stale" means about its own aggregate;
+the module keeps every rule about what a valid allocation IS. Contract activation
+stages through the adapter via `ContractEventConsumer`; licensing reads through
+it and takes the product from the module's `allocation_product()` — and there is
+no way to supply one instead. `IssueLicenceCommand` has no `product` field, and
+`IssueLicenceRequest` REJECTS the retired HTTP field rather than ignoring it, so
+a caller cannot select a licence lineage the allocation does not name. That one
+value flows to all four consequences: lineage, signed payload, audit record and
+outbox event.
 
-Two things this is not. It is **not a kernel relaxation** — the gate is
-untouched and every other assembly still fails on a host squatter; only this
-assembly, for these two declared pairs, subtracts what it has justified. And it
-is **not a rename**: renaming the legacy tables would silence the gate by hiding
-a real migration state, so the overlap stays visible until the cutover retires
-it. It is also not a precedent for composing Approvals early — that stays blocked
-on its own cutover contract.
+**The shadow-overlap exemption is gone.** It waived two host-squatter violations
+while the legacy tables shadowed `mod_ealloc`; `v014` dropped those tables, so
+its premise evaporated and it was REMOVED rather than lowered — an exemption
+describing nothing silently widens what the gate permits (ADR-0018). The composed
+audit now consumes the kernel gate with no subtraction, which is strictly
+stronger, and a guard fails the build if a subtraction helper returns.
 
+**Retired with the switch, beyond the runtime writer:** the allocation cutover
+preflight (`allocations/preflight.py` and its test), which audited legacy rows
+for a sealed cutover that is not happening and read tables that no longer exist;
+and `shadow_overlaps.py` with its architecture test. Both remain readable at
+`b76f5fa`. A later cutover implements locally from ADR-0031's protocol and its
+own current inventory, and the extraction bar is unchanged at two CURRENT
+consumers.
+
+**Lifecycle: below adopted.** Vendor CP now has no local writer for release
+artifacts, approvals or allocations — but adoption is earned by running in
+production with the local writer proven absent, not by landing code, and nothing
+has run.
 
 ## Deployment profiles
 

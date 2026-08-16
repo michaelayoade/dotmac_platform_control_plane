@@ -193,3 +193,40 @@ def test_no_graph_declaration_is_configured_with_setdefault() -> None:
                 "graph declarations are assembly-owned and must be ASSIGNED, so "
                 f"ambient environment state loses: {line.strip()}"
             )
+
+
+#: `alembic_version.version_num` is VARCHAR(32). A longer revision id is accepted
+#: everywhere until the moment it is INSERTED, which is after the migration has
+#: done its work — so the failure surfaces as a truncation error in the middle of
+#: a schema change rather than at authoring time.
+ALEMBIC_VERSION_NUM_LIMIT = 32
+
+
+def test_every_revision_id_fits_the_version_table() -> None:
+    """CI found this the expensive way: a 33-character id failed mid-upgrade with
+    "value too long for type character varying(32)", which names neither the
+    revision nor the column."""
+    versions = ROOT / "alembic" / "versions"
+    too_long: list[str] = []
+    for path in sorted(versions.glob("*.py")):
+        for line in path.read_text().splitlines():
+            code = line.split("#", 1)[0].strip()
+            if code.startswith("revision = "):
+                revision = code.split("=", 1)[1].strip().strip("\"'")
+                if len(revision) > ALEMBIC_VERSION_NUM_LIMIT:
+                    too_long.append(f"{path.name}: {revision} ({len(revision)})")
+    assert (
+        not too_long
+    ), f"revision ids must fit VARCHAR({ALEMBIC_VERSION_NUM_LIMIT}): {too_long}"
+
+
+def test_the_revision_length_guard_reads_real_revisions() -> None:
+    """NON-VACUITY: a reader that found no revisions would report none too long."""
+    versions = ROOT / "alembic" / "versions"
+    found = [
+        line
+        for path in versions.glob("*.py")
+        for line in path.read_text().splitlines()
+        if line.split("#", 1)[0].strip().startswith("revision = ")
+    ]
+    assert len(found) >= 14, found

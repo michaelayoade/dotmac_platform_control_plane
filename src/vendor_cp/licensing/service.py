@@ -48,7 +48,8 @@ from dotmac_kernel.messaging import enqueue_platform_event
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from vendor_cp.allocations.models import Allocation, AllocationStatus
+from vendor_cp.allocations import adapter as allocations
+from vendor_cp.allocations.adapter import AllocationView
 from vendor_cp.licensing.models import (
     IssuanceStatus,
     Licence,
@@ -83,10 +84,16 @@ class IssueLicenceCommand:
     contract term, `grace_days` from the versioned commercial policy — never an
     evaluator guess. `constraints` carries contracted operational semantics
     (e.g. HA/node counts) that no one in this path interprets.
+
+    There is deliberately no `product` field. The product belongs to the
+    allocation, whose owner is `dotmac-entitlement-allocation`, and it is read
+    from there via `allocations.allocation_product()`. A caller-supplied product
+    would be a second authority for a fact that has one — and, since it selects
+    the licence LINEAGE, a disagreement would issue the document into the wrong
+    one without anything noticing.
     """
 
     allocation_id: UUID
-    product: str
     edition: str | None = None
     not_before: datetime | None = None
     expires_at: datetime | None = None
@@ -237,7 +244,8 @@ def _build_payload(
     *,
     licence: Licence,
     version: int,
-    allocation: Allocation,
+    allocation: AllocationView,
+    product: str,
     issued_at: datetime,
 ) -> bytes:
     """The `dotmac-licence/1` payload, serialized ONCE — these exact bytes are
@@ -252,7 +260,7 @@ def _build_payload(
         "licence_id": str(licence.id),
         "licence_version": version,
         "issuer": command.issuer,
-        "product": command.product,
+        "product": product,
         "edition": command.edition,
         "subject": subject,
         "capabilities": [
@@ -323,10 +331,10 @@ def issue_licence(
     if existing is not None:
         return _view(existing)
 
-    allocation = db.get(Allocation, command.allocation_id)
+    allocation = allocations.read_allocation(db, command.allocation_id)
     if allocation is None:
         raise NotFoundError(f"allocation {command.allocation_id} not found")
-    if allocation.status != AllocationStatus.STAGED.value:
+    if allocation.status != str(allocations.STAGED_STATUS):
         raise BadRequestError(
             f"allocation {command.allocation_id} is {allocation.status!r}, "
             "not staged — nothing to issue"
@@ -343,15 +351,21 @@ def issue_licence(
     for s in signers:
         register_signing_key(db, key_id=s.key_id, public_key_b64=s.public_key_b64)
 
-    licence = _lineage(
-        db, customer_ref=allocation.customer_ref, product=command.product
-    )
+    # The product comes from the ALLOCATION's owner, never from the caller.
+    # It selects the licence lineage, so a caller-supplied value that disagreed
+    # with the allocation would issue this document into the wrong lineage —
+    # silently, because nothing downstream re-derives it. Read once here, then
+    # used for every consequence: lineage, signed payload, audit and outbox.
+    product = allocations.allocation_product(db, command.allocation_id)
+
+    licence = _lineage(db, customer_ref=allocation.customer_ref, product=product)
     version = _next_version(db, licence.id)
     payload = _build_payload(
         command,
         licence=licence,
         version=version,
         allocation=allocation,
+        product=product,
         issued_at=issued_at,
     )
     envelope = _envelope(payload, signers)
@@ -399,7 +413,7 @@ def issue_licence(
             "digest": digest,
             "key_id": signer.key_id,
             "allocation_id": str(allocation.id),
-            "product": command.product,
+            "product": product,
             "deployment_id": command.deployment_id,
             "capabilities": [e.capability_code for e in allocation.entries],
         },
@@ -413,7 +427,7 @@ def issue_licence(
             "digest": digest,
             "issuance_id": str(issuance.id),
             "customer_ref": licence.customer_ref,
-            "product": command.product,
+            "product": product,
         },
     )
     return _view(issuance)

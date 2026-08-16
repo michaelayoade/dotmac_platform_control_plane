@@ -36,7 +36,7 @@ from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy.orm import Session
 
 from vendor_cp import config as vendor_config
-from vendor_cp.allocations import service as allocations
+from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import service as contracts
 from vendor_cp.contracts.models import Contract
@@ -163,6 +163,7 @@ def _staged(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
             content_hash=submitted.content_hash or "",
             customer_ref=customer_ref,
         ),
+        catalogues=_catalogue("cap.a"),
     ).id
 
 
@@ -171,7 +172,6 @@ def _issue(db, *, suffix, customer_ref, signer, overlap_signers=()):
         db,
         licensing.IssueLicenceCommand(
             allocation_id=_staged(db, suffix=suffix, customer_ref=customer_ref),
-            product="dotmac-sub",
         ),
         signer=signer,
         overlap_signers=overlap_signers,

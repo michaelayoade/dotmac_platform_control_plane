@@ -55,9 +55,9 @@ lineage: a `v012` table is covered the moment the migration runs.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 from alembic import command
@@ -72,12 +72,6 @@ from sqlalchemy import Connection, create_engine, text
 
 from vendor_cp.assembly import build_spec
 from vendor_cp.migrations import make_alembic_config
-from vendor_cp.shadow_overlaps import (
-    DECLARED_OVERLAP_COUNT,
-    SHADOW_OVERLAPS,
-    overlap_for,
-    overlapped_legacy_tables,
-)
 
 # The tenant application role. Kernel 0001 gives it USAGE on `public`, so a
 # table there is reachable unless nothing was granted on it — which is why this
@@ -237,134 +231,6 @@ def _public_schema(url: str) -> PublicSchema:
 # ── 1. Module schemas: the kernel's own canonical gate ──────────────────────
 
 
-# The semantic discriminator of the ONE violation this assembly waives: the
-# kernel's host-squatter finding. Anything else the gate ever says about the same
-# pair of tables — a missing grant, an unexpected column, a policy — is a
-# different fact and must not be absorbed by an exception written for this one.
-HOST_SQUATTER_DISCRIMINATOR = "compatibility namespace"
-
-
-def _names_exactly(text: str, qualified: str) -> bool:
-    """Does `text` name `qualified` as a whole identifier?
-
-    A bare `in` test matches a PREFIX: `mod_ealloc.allocations` is a substring of
-    `mod_ealloc.allocations_archive`, so a future third overlap could be waived
-    by an exception written for the second. The lookarounds refuse a neighbouring
-    word, dot or underscore on either side, which is what makes "exactly two
-    pairs, a third is a new fact" enforceable rather than aspirational.
-    """
-    return re.search(rf"(?<![\w.]){re.escape(qualified)}(?![\w.])", text) is not None
-
-
-def _partition_shadow_overlaps(
-    violations: tuple[str, ...],
-) -> tuple[dict[str, list[str]], tuple[str, ...]]:
-    """Split the gate's report into declared shadow overlaps and everything else.
-
-    Three conditions, all required, so the waiver is as narrow as the fact it
-    waives:
-
-    1. the message OPENS with a declared legacy table, matched exactly;
-    2. it names that overlap's module table as a whole identifier — not as a
-       prefix of a longer one;
-    3. it carries the host-squatter discriminator, so a different finding about
-       the same tables stays in `remaining`.
-
-    Deliberately not an equality check against a rebuilt sentence: copying the
-    kernel's prose here would make a wording change look like a contract change.
-    """
-    declared: dict[str, list[str]] = {
-        overlap.legacy_table: [] for overlap in SHADOW_OVERLAPS
-    }
-    remaining: list[str] = []
-    for violation in violations:
-        legacy_table = violation.split(":", 1)[0]
-        overlap = overlap_for(legacy_table)
-        waived = (
-            overlap is not None
-            and _names_exactly(violation, overlap.legacy_table)
-            and _names_exactly(violation, overlap.module_table)
-            and HOST_SQUATTER_DISCRIMINATOR in violation
-        )
-        if waived and overlap is not None:
-            declared[overlap.legacy_table].append(violation)
-        else:
-            remaining.append(violation)
-    return declared, tuple(remaining)
-
-
-# ── The waiver's own sensitivity proof (no database needed) ─────────────────
-
-_REAL = (
-    "public.allocations: a module table exists in the 'public' compatibility "
-    "namespace — the module owns mod_ealloc.allocations and nothing in 'public'"
-)
-
-
-def test_the_waiver_absorbs_the_declared_host_squatter() -> None:
-    """NON-VACUITY. If this failed, the negatives below would pass trivially and
-    the gate would be rejecting the very thing it is meant to waive."""
-    declared, remaining = _partition_shadow_overlaps((_REAL,))
-    assert remaining == ()
-    assert declared["public.allocations"] == [_REAL]
-
-
-@pytest.mark.parametrize(
-    ("violation", "why"),
-    [
-        pytest.param(
-            "public.allocations: tenant_id is nullable on a tenant-scoped table",
-            "a different finding about a declared table",
-            id="different-finding-same-table",
-        ),
-        pytest.param(
-            "public.allocations: a module table exists in the 'public' "
-            "compatibility namespace — the module owns "
-            "mod_ealloc.allocations_archive and nothing in 'public'",
-            "a THIRD overlap whose module name merely starts with a declared one",
-            id="near-miss-module-table",
-        ),
-        pytest.param(
-            "public.allocations_archive: a module table exists in the 'public' "
-            "compatibility namespace — the module owns "
-            "mod_ealloc.allocations_archive and nothing in 'public'",
-            "a third overlap whose legacy name starts with a declared one",
-            id="near-miss-legacy-table",
-        ),
-        pytest.param(
-            "mod_ealloc.allocations: RLS is enabled with no policy",
-            "a finding about the module table itself, not the overlap",
-            id="module-side-finding",
-        ),
-    ],
-)
-def test_the_waiver_refuses_everything_it_was_not_written_for(
-    violation: str, why: str
-) -> None:
-    """SENSITIVITY, one case per way the old substring match could be fooled.
-
-    The previous matcher accepted any message that started with a declared legacy
-    table and mentioned the module table anywhere — so a third overlap named
-    `allocations_archive` would have been silently absorbed by the exception
-    written for `allocations`, which is precisely what "exactly two pairs, a
-    third is a new fact" exists to prevent.
-    """
-    declared, remaining = _partition_shadow_overlaps((violation,))
-    assert remaining == (violation,), why
-    assert all(not found for found in declared.values())
-
-
-def test_exact_naming_refuses_prefixes_in_both_directions() -> None:
-    """The helper itself, since three assertions above depend on it."""
-    assert _names_exactly("owns mod_ealloc.allocations and", "mod_ealloc.allocations")
-    assert not _names_exactly(
-        "owns mod_ealloc.allocations_archive and", "mod_ealloc.allocations"
-    )
-    assert not _names_exactly(
-        "owns x.mod_ealloc.allocations and", "mod_ealloc.allocations"
-    )
-
-
 def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
     scratch_db: str,
 ) -> None:
@@ -375,11 +241,12 @@ def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
     contract — while their migrations built platform-shaped tables, and nothing
     in this repo looked at the live catalogue to notice the disagreement.
 
-    The ONLY violations tolerated are the two declared shadow overlaps in
-    `vendor_cp.shadow_overlaps`, and they are subtracted here — in this
-    assembly's own test — rather than by softening anything the kernel does. The
-    next test proves each declared overlap was really reported, so the
-    subtraction cannot quietly cover a clean database.
+    NOTHING is tolerated any more. This test used to subtract two declared
+    shadow overlaps — the legacy `public.allocations` / `public.allocation_entries`
+    tables shadowing `mod_ealloc` — and that exemption retired with the tables
+    themselves in `v014`. An exemption whose premise has evaporated does not
+    become harmless; it silently widens what the gate permits (ADR-0018), so it
+    is removed rather than left describing nothing.
     """
     spec = build_spec()
     # `module_planes` is REQUIRED here, not optional decoration: without it the
@@ -396,56 +263,46 @@ def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
     with _connection(scratch_db) as conn:
         violations = audit_live_schemas(conn, registry)
 
-    _, remaining = _partition_shadow_overlaps(violations)
-    assert remaining == (), (
-        "the composed module schemas must satisfy the kernel gate except for "
-        f"the declared shadow overlaps: {remaining}"
+    assert violations == (), (
+        "the composed module schemas must satisfy the kernel gate with no "
+        f"exemptions at all: {violations}"
     )
 
 
-def test_the_shadow_overlap_declaration_matches_the_database_exactly(
-    scratch_db: str,
-) -> None:
-    """The two-directional ratchet.
+def test_no_waiver_mechanism_exists_for_the_kernel_gate(scratch_db: str) -> None:
+    """The exemption is GONE, and its absence is checked rather than assumed.
 
-    RISING fails: a third table shadowing the module schema is a new fact that
-    needs its own decision, not another entry appended to a list.
+    `vendor_cp.shadow_overlaps` declared two host-squatter waivers while the
+    legacy allocation tables shadowed `mod_ealloc`. `v014` drops those tables, so
+    the premise is gone — and a waiver whose premise has evaporated is worse than
+    no waiver, because it keeps widening the gate for facts nobody has examined.
 
-    FALLING fails too, and that is the direction that matters more. If a legacy
-    table stops overlapping, someone has completed part of the allocation
-    cutover, and the declaration must be lowered in that same change. A backlog
-    allowed to shrink silently is exactly how a "temporary" exception outlives
-    everyone who agreed to it.
+    Removing it is only half the job: this asserts the module is gone and that
+    the gate is consumed with no subtraction, so a future author cannot restore
+    a waiver quietly by re-adding the helper.
     """
+    assert not (
+        Path(__file__).resolve().parents[2] / "src" / "vendor_cp" / "shadow_overlaps.py"
+    ).exists()
+
+    # No subtraction helper survives in this suite either — the gate is consumed
+    # raw, so a waiver cannot creep back as a "small" filter.
+    #
+    # Asked of the MODULE NAMESPACE, not of the file's text: a source-text check
+    # would forbid a token its own assertion contains, and fail forever. (It did.)
+    import sys
+
+    suite = sys.modules[__name__]
+    assert not hasattr(suite, "_partition_shadow_overlaps")
+
+    # And the live gate really does report nothing to waive.
     spec = build_spec()
-    # `module_planes` is REQUIRED here, not optional decoration: without it the
-    # registry falls back to the atomic "every declared plane is installed"
-    # view, expects the module's TENANT tables, and reports them missing on a
-    # correct platform-only install. The expected set is a function of the
-    # assembly's SELECTION (ADR-0028), so the selection has to be supplied.
     registry = NamespaceRegistry.from_manifests(
         spec.modules, module_planes=spec.module_planes
     )
     _upgrade(scratch_db)
     with _connection(scratch_db) as conn:
-        violations = audit_live_schemas(conn, registry)
-
-    declared, _ = _partition_shadow_overlaps(violations)
-
-    unreported = sorted(table for table, found in declared.items() if not found)
-    assert not unreported, (
-        "these overlaps are declared but the database no longer has them — "
-        "lower the declaration in the change that removed them, and delete "
-        f"`vendor_cp.shadow_overlaps` once it is empty: {unreported}"
-    )
-    duplicated = sorted(table for table, found in declared.items() if len(found) > 1)
-    assert not duplicated, f"one overlap reported more than once: {duplicated}"
-
-    assert len(SHADOW_OVERLAPS) == DECLARED_OVERLAP_COUNT
-    assert overlapped_legacy_tables() == {
-        "public.allocations",
-        "public.allocation_entries",
-    }
+        assert audit_live_schemas(conn, registry) == ()
 
 
 @pytest.mark.parametrize("schema_name", sorted(EXPECTED_MODULE_SCHEMAS))
@@ -663,10 +520,20 @@ def test_every_vendor_owned_table_is_platform_plane_and_fully_revoked(
     schema = _public_schema(scratch_db)
     vendor_tables = schema.tables - kernel_tables - {ALEMBIC_BOOKKEEPING}
 
-    # Sensitivity: the diff must actually find the vendor lineage. Eleven
-    # migrations create well over a dozen tables; a floor rather than an exact
-    # count keeps this from becoming a second list to maintain.
-    assert len(vendor_tables) >= 15, sorted(vendor_tables)
+    # Sensitivity: the diff must actually find the vendor lineage. A floor
+    # rather than an exact count keeps this from becoming a second list to
+    # maintain.
+    #
+    # LOWERED 15 -> 14 by `v014_allocations_authority`, deliberately. Allocation
+    # authority moved to `dotmac-entitlement-allocation`, and the two legacy
+    # tables (`allocations`, `allocation_entries`) were dropped with the writer
+    # that owned them — so the vendor lineage genuinely owns one fewer pair than
+    # it did, and `mod_ealloc` is not in `public`.
+    #
+    # A floor that fails when the count FALLS is doing its job: it forces this
+    # decision to be made and written down rather than absorbed silently. Lower
+    # it only alongside the migration that retires the tables.
+    assert len(vendor_tables) >= 14, sorted(vendor_tables)
     assert "vendor_accounts" in vendor_tables
 
     misplaced = sorted(vendor_tables & (schema.tenant_plane() | schema.split_scope()))

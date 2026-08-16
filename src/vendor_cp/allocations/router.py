@@ -16,7 +16,7 @@ from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from vendor_cp.allocations import service
+from vendor_cp.allocations import adapter as service
 from vendor_cp.allocations.schemas import AllocationResponse
 
 router = APIRouter(prefix="/platform/vendor/allocations", tags=["allocations"])

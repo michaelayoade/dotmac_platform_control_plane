@@ -117,9 +117,13 @@ class LicenceIssuance(Base, TimestampMixin):
     licence_id: Mapped[UUID] = mapped_column(
         Uuid(), ForeignKey("licences.id", ondelete="CASCADE"), nullable=False
     )
-    allocation_id: Mapped[UUID] = mapped_column(
-        Uuid(), ForeignKey("allocations.id"), nullable=False
-    )
+    # An OPAQUE reference to an allocation the MODULE owns, deliberately without
+    # a foreign key. The allocation lives in `mod_ealloc`, and no FK may cross
+    # into a module's schema (ADR-0023): a module's tables are its own, and a
+    # constraint pointing at them would make this assembly's DDL depend on the
+    # module's. The uniqueness rule that matters — one issued version per staged
+    # allocation — is a constraint on THIS table and is unaffected.
+    allocation_id: Mapped[UUID] = mapped_column(Uuid(), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     # `sha256:<hex>` of the exact signed payload bytes — the identity the
     # acknowledgement is matched against.

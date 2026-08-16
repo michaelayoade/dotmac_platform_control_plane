@@ -56,7 +56,7 @@ disagree, fix the drift.
     the vendor-owned subset is derived by diffing the lineages — so a table
     added tomorrow is covered the moment its migration runs. WHAT an exceptional
     category contains IS named exactly — `TENANT_CATALOGUE`,
-    `UNMONITORED_SPLIT_SCOPE`, `SHADOW_OVERLAPS` — and every such set is
+    `UNMONITORED_SPLIT_SCOPE` — and every such set is
     ratcheted in both directions, so it cannot grow quietly or shrink without
     the declaration being lowered in the same change. A privilege proof over a
     hand-listed set of TABLES is the regression; a hand-listed set of
@@ -79,15 +79,14 @@ disagree, fix the drift.
     and authoritative in code is NOT adopted
     (`tests/architecture/test_approvals_authority.py`,
     `tests/migration/test_authority_switch.py`).
-13. **A shadow overlap is declared, one-writer, ratcheted and dated.** The
-    legacy `public.allocations` / `public.allocation_entries` tables shadow the
-    composed `mod_ealloc` schema. `src/vendor_cp/shadow_overlaps.py` is the
-    ASSEMBLY-LOCAL declaration of exactly those two pairs: the legacy service
-    stays the only writer, no new legacy call sites may appear, the live set is
-    ratcheted in BOTH directions, and it names the cutover gate that deletes it.
-    Never relax the kernel gate to solve this, and never rename a legacy table to
-    hide the overlap (`tests/architecture/test_shadow_overlaps.py`,
-    `tests/migration/test_composed_live_catalog.py`).
+13. **A guard exemption dies with its premise.** The assembly-local waiver for
+    the legacy allocation tables shadowing `mod_ealloc` was REMOVED when `v014`
+    dropped those tables, not lowered and not left describing nothing: an
+    exemption whose premise has evaporated keeps widening a gate for facts nobody
+    has examined (ADR-0018). The composed live-catalogue audit now consumes the
+    kernel gate raw, with no subtraction at all. When you retire an exemption,
+    delete its prose in the same change — `test_stale_claims.py` fails if a
+    document still describes a retired exemption as live.
 14. **Cross-repository engineering governance is pinned and required.**
     `.dotmac/standards-profile.json` names the enrolled authority and fully typed
     contract surface, and pins the accepted Governance source by exact commit.
