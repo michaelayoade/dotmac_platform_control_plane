@@ -1,5 +1,10 @@
 name: Engineering standards
 
+# Vendor Control Plane's adoption of the Governance-owned conformance engine
+# at profile schema version 9. The exact pin is repeated in the environment,
+# action ref and profile because GitHub does not allow expressions in `uses:`.
+# scripts/check_governance_pin.py owns their equality.
+
 on:
   push:
     branches: [main]
@@ -10,9 +15,24 @@ on:
 permissions:
   contents: read
 
+env:
+  GOVERNANCE_REF: "4f6fbf98c25f7cfbb3dacc4f3d2f5fd7e473f193"
+
 jobs:
+  pin-preflight:
+    name: Governance pin is a real approved revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the evaluated product revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Refuse a placeholder or moving Governance pin
+        run: python3 scripts/check_governance_pin.py
+
   standards:
     name: Dotmac engineering standards
+    needs: [pin-preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -20,6 +40,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Enforce the accepted Dotmac engineering standards
-        uses: michaelayoade/dotmac_governance/.github/actions/standards-check@1f5f1372238ef37eff71154694d5620008de0959
+        uses: michaelayoade/dotmac_governance/.github/actions/standards-check@4f6fbf98c25f7cfbb3dacc4f3d2f5fd7e473f193
         with:
           default-branch: ${{ github.event.repository.default_branch }}
