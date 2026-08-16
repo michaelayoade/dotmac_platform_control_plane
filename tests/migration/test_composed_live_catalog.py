@@ -520,10 +520,20 @@ def test_every_vendor_owned_table_is_platform_plane_and_fully_revoked(
     schema = _public_schema(scratch_db)
     vendor_tables = schema.tables - kernel_tables - {ALEMBIC_BOOKKEEPING}
 
-    # Sensitivity: the diff must actually find the vendor lineage. Eleven
-    # migrations create well over a dozen tables; a floor rather than an exact
-    # count keeps this from becoming a second list to maintain.
-    assert len(vendor_tables) >= 15, sorted(vendor_tables)
+    # Sensitivity: the diff must actually find the vendor lineage. A floor
+    # rather than an exact count keeps this from becoming a second list to
+    # maintain.
+    #
+    # LOWERED 15 -> 14 by `v014_allocations_authority`, deliberately. Allocation
+    # authority moved to `dotmac-entitlement-allocation`, and the two legacy
+    # tables (`allocations`, `allocation_entries`) were dropped with the writer
+    # that owned them — so the vendor lineage genuinely owns one fewer pair than
+    # it did, and `mod_ealloc` is not in `public`.
+    #
+    # A floor that fails when the count FALLS is doing its job: it forces this
+    # decision to be made and written down rather than absorbed silently. Lower
+    # it only alongside the migration that retires the tables.
+    assert len(vendor_tables) >= 14, sorted(vendor_tables)
     assert "vendor_accounts" in vendor_tables
 
     misplaced = sorted(vendor_tables & (schema.tenant_plane() | schema.split_scope()))

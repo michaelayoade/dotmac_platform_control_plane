@@ -140,11 +140,19 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         scratch_db,
         "SELECT relrowsecurity FROM pg_class WHERE oid='vendor_accounts'::regclass",
     )
-    # Five independent runtime heads: kernel, vendor assembly and the three
-    # installed modules each retain their own migration authority.
+    # VERSION ROWS, which are not the same set as the static heads.
+    #
+    # `alembic_version` holds current heads only, and a `depends_on` edge makes
+    # its target an ANCESTOR of the depending revision rather than a head in its
+    # own right. `v012` depends on `ap_0001_approvals` and `v014` on
+    # `ea_0001_allocations`, so both module revisions — while genuinely applied —
+    # stop being version ROWS once the vendor lineage reaches them.
+    #
+    # They are still static heads, and `test_five_head_topology` asserts all five
+    # through `script.get_heads()`. Listing them here as well would report them
+    # missing on a perfectly complete database.
     assert _versions(scratch_db) == {
         KERNEL_HEAD,
-        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -327,7 +335,6 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _versions(scratch_db) == {
         KERNEL_HEAD,
-        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -372,7 +379,6 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     )
     assert _versions(scratch_db) == {
         KERNEL_HEAD,
-        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -414,7 +420,6 @@ def test_kernel_advance_keeps_vendor_head_independent(
     assert _table_exists(scratch_db, "vendor_accounts")
     assert _versions(scratch_db) == {
         synth_rev,
-        ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
