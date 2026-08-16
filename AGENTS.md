@@ -92,7 +92,10 @@ disagree, fix the drift.
     contract surface, and pins the accepted Governance source by exact commit.
     The `Dotmac engineering standards` CI job must execute that same immutable
     revision. Mutable tags/branches, copied rules, candidate mode, or a missing
-    required check are not substitutes.
+    required check are not substitutes. The schema-9 external-connector ratchet
+    is Governance-owned and transitional: this assembly records its measured
+    baseline in `docs/external-connector-surface.md`, but never copies the
+    detector or treats the ratchet as runtime isolation.
 
 ## Validation before any commit
 
