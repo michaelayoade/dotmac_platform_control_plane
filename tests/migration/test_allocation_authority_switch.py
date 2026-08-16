@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 from alembic import command
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ProgrammingError
 
 from vendor_cp.migrations import make_alembic_config
 
@@ -35,8 +37,19 @@ LEGACY_TABLES = ("allocations", "allocation_entries")
 
 ONLINE_ROLE = "platform_api"
 TENANT_ROLE = "app_user"
-GRANTED = ("SELECT", "INSERT", "UPDATE", "DELETE")
-NEVER_GRANTED = ("TRUNCATE", "REFERENCES", "TRIGGER")
+REQUIRED_TABLE_PRIVILEGES = ("SELECT", "INSERT")
+FORBIDDEN_TABLE_PRIVILEGES = (
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+)
+ALL_TABLE_PRIVILEGES = (
+    *REQUIRED_TABLE_PRIVILEGES,
+    *FORBIDDEN_TABLE_PRIVILEGES,
+)
+ALLOCATION_UPDATE_COLUMNS = frozenset({"sealed", "updated_at"})
 COLUMN_GRANTABLE = frozenset({"SELECT", "INSERT", "UPDATE", "REFERENCES"})
 
 
@@ -50,21 +63,90 @@ def _upgrade_to_pre_switch(url: str) -> None:
         _upgrade(url, target)
 
 
-def _holds(url: str, role: str, qualified: str, privilege: str) -> bool:
-    statement = "SELECT has_table_privilege(:role, :rel, :priv)"
-    if privilege in COLUMN_GRANTABLE:
-        statement += " OR has_any_column_privilege(:role, :rel, :priv)"
+def _scalar(url: str, statement: str, parameters: dict[str, str]) -> bool:
     engine = create_engine(url)
     try:
         with engine.connect() as conn:
-            return bool(
+            return bool(conn.execute(text(statement), parameters).scalar())
+    finally:
+        engine.dispose()
+
+
+def _table_holds(url: str, role: str, qualified: str, privilege: str) -> bool:
+    return _scalar(
+        url,
+        "SELECT has_table_privilege(:role, :rel, :priv)",
+        {"role": role, "rel": qualified, "priv": privilege},
+    )
+
+
+def _column_holds(
+    url: str, role: str, qualified: str, column: str, privilege: str
+) -> bool:
+    return _scalar(
+        url,
+        "SELECT has_column_privilege(:role, :rel, :column, :priv)",
+        {"role": role, "rel": qualified, "column": column, "priv": privilege},
+    )
+
+
+def _holds_any(url: str, role: str, qualified: str, privilege: str) -> bool:
+    statement = "SELECT has_table_privilege(:role, :rel, :priv)"
+    if privilege in COLUMN_GRANTABLE:
+        statement += " OR has_any_column_privilege(:role, :rel, :priv)"
+    return _scalar(
+        url,
+        statement,
+        {"role": role, "rel": qualified, "priv": privilege},
+    )
+
+
+def _columns(url: str, qualified: str) -> tuple[str, ...]:
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            return tuple(
                 conn.execute(
-                    text(statement),
-                    {"role": role, "rel": qualified, "priv": privilege},
-                ).scalar()
+                    text(
+                        "SELECT attname FROM pg_attribute "
+                        "WHERE attrelid = to_regclass(:rel) "
+                        "AND attnum > 0 AND NOT attisdropped ORDER BY attnum"
+                    ),
+                    {"rel": qualified},
+                ).scalars()
             )
     finally:
         engine.dispose()
+
+
+def _privilege_snapshot(
+    url: str, role: str
+) -> tuple[tuple[str, str, str, bool], ...]:
+    facts: list[tuple[str, str, str, bool]] = []
+    for table in MODULE_TABLES:
+        qualified = f"{SCHEMA}.{table}"
+        for privilege in ALL_TABLE_PRIVILEGES:
+            facts.append(
+                (table, "table", privilege, _table_holds(url, role, qualified, privilege))
+            )
+        for column in _columns(url, qualified):
+            for privilege in ("UPDATE", "REFERENCES"):
+                facts.append(
+                    (
+                        table,
+                        column,
+                        privilege,
+                        _column_holds(url, role, qualified, column, privilege),
+                    )
+                )
+    return tuple(facts)
+
+
+def _role_url(url: str, role: str) -> str:
+    parsed = make_url(url)
+    return parsed.set(username=role, password=None).render_as_string(
+        hide_password=False
+    )
 
 
 def _exists(url: str, qualified: str) -> bool:
@@ -99,18 +181,12 @@ def test_a_populated_legacy_table_stops_the_switch(scratch_db: str) -> None:
     # role legitimately holds INSERT before this migration runs, and asserting
     # its ABSENCE would be importing an expectation from a phase that allocations
     # never had.
-    before = {
-        (table, privilege): _holds(
-            scratch_db, ONLINE_ROLE, f"{SCHEMA}.{table}", privilege
-        )
-        for table in ("allocations", "allocation_entries")
-        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
-    }
+    before = _privilege_snapshot(scratch_db, ONLINE_ROLE)
     # NON-VACUITY for the equality below. If `_holds` reported False for
     # everything — a broken reader, a mistyped relation — then `after == before`
     # would hold trivially and prove nothing. The module's install grant means
     # some of these must be True.
-    assert any(before.values()), (
+    assert any(fact[-1] for fact in before), (
         "the privilege reader observed nothing at all before the refusal; "
         "the unchanged-state comparison below would be vacuous"
     )
@@ -150,13 +226,7 @@ def test_a_populated_legacy_table_stops_the_switch(scratch_db: str) -> None:
     # measured before-state is what makes this a real "unchanged" assertion:
     # a refusal that granted something on its way out, or that revoked
     # something, fails here regardless of which way it went.
-    after = {
-        (table, privilege): _holds(
-            scratch_db, ONLINE_ROLE, f"{SCHEMA}.{table}", privilege
-        )
-        for table in ("allocations", "allocation_entries")
-        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
-    }
+    after = _privilege_snapshot(scratch_db, ONLINE_ROLE)
     assert after == before
 
 
@@ -173,15 +243,41 @@ def test_the_empty_check_is_not_vacuous(scratch_db: str) -> None:
 
 
 @pytest.mark.parametrize("table", MODULE_TABLES)
-def test_the_online_role_can_operate_the_module(scratch_db: str, table: str) -> None:
+def test_the_online_role_gets_the_module_exact_write_shape(
+    scratch_db: str, table: str
+) -> None:
     _upgrade(scratch_db)
     qualified = f"{SCHEMA}.{table}"
 
-    missing = [p for p in GRANTED if not _holds(scratch_db, ONLINE_ROLE, qualified, p)]
-    assert not missing, f"{ONLINE_ROLE} cannot operate {qualified}: {missing}"
+    missing = [
+        privilege
+        for privilege in REQUIRED_TABLE_PRIVILEGES
+        if not _table_holds(scratch_db, ONLINE_ROLE, qualified, privilege)
+    ]
+    assert not missing, f"{ONLINE_ROLE} cannot create/read {qualified}: {missing}"
 
-    excess = [p for p in NEVER_GRANTED if _holds(scratch_db, ONLINE_ROLE, qualified, p)]
-    assert not excess, f"{ONLINE_ROLE} holds {excess} on {qualified}"
+    excess = [
+        privilege
+        for privilege in FORBIDDEN_TABLE_PRIVILEGES
+        if _table_holds(scratch_db, ONLINE_ROLE, qualified, privilege)
+    ]
+    assert not excess, f"{ONLINE_ROLE} holds table privileges {excess} on {qualified}"
+
+    expected_updates = (
+        ALLOCATION_UPDATE_COLUMNS if table == "allocations" else frozenset()
+    )
+    columns = _columns(scratch_db, qualified)
+    actual_updates = {
+        column
+        for column in columns
+        if _column_holds(scratch_db, ONLINE_ROLE, qualified, column, "UPDATE")
+    }
+    assert actual_updates == expected_updates
+    assert not {
+        column
+        for column in columns
+        if _column_holds(scratch_db, ONLINE_ROLE, qualified, column, "REFERENCES")
+    }
 
 
 @pytest.mark.parametrize("table", MODULE_TABLES)
@@ -189,9 +285,9 @@ def test_the_tenant_role_is_still_shut_out(scratch_db: str, table: str) -> None:
     _upgrade(scratch_db)
     qualified = f"{SCHEMA}.{table}"
     held = [
-        p
-        for p in (*GRANTED, *NEVER_GRANTED)
-        if _holds(scratch_db, TENANT_ROLE, qualified, p)
+        privilege
+        for privilege in ALL_TABLE_PRIVILEGES
+        if _holds_any(scratch_db, TENANT_ROLE, qualified, privilege)
     ]
     assert not held, f"{TENANT_ROLE} holds {held} on {qualified}"
 
@@ -206,12 +302,89 @@ def test_the_privilege_reader_would_notice_a_missing_grant(scratch_db: str) -> N
     try:
         with engine.begin() as conn:
             conn.execute(text(f"REVOKE INSERT ON {qualified} FROM {ONLINE_ROLE}"))  # noqa: S608
-        assert not _holds(scratch_db, ONLINE_ROLE, qualified, "INSERT")
+        assert not _table_holds(scratch_db, ONLINE_ROLE, qualified, "INSERT")
         with engine.begin() as conn:
             conn.execute(text(f"GRANT INSERT ON {qualified} TO {ONLINE_ROLE}"))  # noqa: S608
     finally:
         engine.dispose()
-    assert _holds(scratch_db, ONLINE_ROLE, qualified, "INSERT")
+    assert _table_holds(scratch_db, ONLINE_ROLE, qualified, "INSERT")
+
+
+def test_raw_online_sql_cannot_rewrite_or_delete_allocation_facts(
+    scratch_db: str,
+) -> None:
+    """The service needs INSERT plus the one-way seal, not general DML."""
+    _upgrade(scratch_db)
+    online = create_engine(_role_url(scratch_db, ONLINE_ROLE))
+    allocation_id = str(uuid.uuid4())
+    try:
+        with online.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO mod_ealloc.allocations "
+                    "(id, contract_ref, product_code, customer_ref, content_hash, "
+                    "status, source_event_id, snapshot_fingerprint, sealed) "
+                    "VALUES (:id, :contract, 'dotmac-sub', 'customer-original', "
+                    "'content', 'staged', 'event', :fingerprint, false)"
+                ),
+                {
+                    "id": allocation_id,
+                    "contract": str(uuid.uuid4()),
+                    "fingerprint": "f" * 64,
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO mod_ealloc.allocation_entries "
+                    "(id, allocation_id, capability_code, quantity) "
+                    "VALUES (:id, :allocation, 'cap.a', 1)"
+                ),
+                {"id": str(uuid.uuid4()), "allocation": allocation_id},
+            )
+            conn.execute(
+                text(
+                    "UPDATE mod_ealloc.allocations "
+                    "SET sealed = true, updated_at = now() WHERE id = :id"
+                ),
+                {"id": allocation_id},
+            )
+
+        refused = (
+            "UPDATE mod_ealloc.allocations "
+            "SET customer_ref = 'tampered' WHERE id = :id",
+            "DELETE FROM mod_ealloc.allocation_entries WHERE allocation_id = :id",
+            "UPDATE mod_ealloc.allocation_entries SET quantity = 2 "
+            "WHERE allocation_id = :id",
+            "DELETE FROM mod_ealloc.allocations WHERE id = :id",
+        )
+        for statement in refused:
+            with pytest.raises(ProgrammingError, match="permission denied"):
+                with online.begin() as conn:
+                    conn.execute(text(statement), {"id": allocation_id})
+    finally:
+        online.dispose()
+
+    engine = create_engine(scratch_db)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT customer_ref, sealed FROM mod_ealloc.allocations "
+                    "WHERE id = :id"
+                ),
+                {"id": allocation_id},
+            ).one()
+            quantity = conn.execute(
+                text(
+                    "SELECT quantity FROM mod_ealloc.allocation_entries "
+                    "WHERE allocation_id = :id"
+                ),
+                {"id": allocation_id},
+            ).scalar_one()
+    finally:
+        engine.dispose()
+    assert row == ("customer-original", True)
+    assert quantity == 1
 
 
 # ── The estate is gone ──────────────────────────────────────────────────────
@@ -287,7 +460,9 @@ def test_downgrade_is_refused(scratch_db: str) -> None:
         command.downgrade(make_alembic_config(scratch_db), PRIOR_REVISION)
     # Inert: the switch's effects are all still in place.
     assert not _exists(scratch_db, "public.allocations")
-    assert _holds(scratch_db, ONLINE_ROLE, f"{SCHEMA}.allocations", "INSERT")
+    assert _table_holds(
+        scratch_db, ONLINE_ROLE, f"{SCHEMA}.allocations", "INSERT"
+    )
 
 
 def test_the_migration_takes_the_lock_it_needs_up_front() -> None:
@@ -302,3 +477,7 @@ def test_the_migration_takes_the_lock_it_needs_up_front() -> None:
     assert "IN ACCESS EXCLUSIVE MODE" in source
     assert source.index("LOCK TABLE") < source.index("_require_empty")
     assert "IN SHARE MODE" not in source
+    assert 'LOCK_TABLES = ("allocations", "allocation_entries")' in source
+    assert 'DROP_TABLES = ("allocation_entries", "allocations")' in source
+    assert 'for table in LOCK_TABLES' in source
+    assert 'for table in DROP_TABLES' in source

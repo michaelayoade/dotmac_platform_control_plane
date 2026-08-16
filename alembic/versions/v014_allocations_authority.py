@@ -22,6 +22,12 @@ acquired ONCE, before anything is read — which also makes the emptiness check
 meaningful, because under it "empty when checked" and "empty when dropped" are
 the same statement.
 
+Lock order is a separate invariant. The retired writer acquired the parent
+`allocations` table before its child `allocation_entries`; this migration locks
+in that same order so a writer already holding the parent is never made to wait
+on a child lock held by the migration. Drop order is the reverse because the
+child foreign key must disappear first.
+
 Revision ID: v014_allocations_authority
 Revises: v013_approvals_authority_switch
 Create Date: 2026-08-16
@@ -57,8 +63,10 @@ depends_on = "ea_0001_allocations"
 #: unexplained "cannot drop table" three statements later.
 DEPENDENT_TABLE = "licence_issuances"
 
-#: Dropped in dependency order — entries carry the FK to allocations.
-LEGACY_TABLES = ("allocation_entries", "allocations")
+#: Lock in the writer's parent-before-child order. Dropping must use the reverse
+#: order because the child carries the foreign key.
+LOCK_TABLES = ("allocations", "allocation_entries")
+DROP_TABLES = ("allocation_entries", "allocations")
 
 MODULE_SCHEMA = "mod_ealloc"
 MODULE_TABLES = ("allocations", "allocation_entries")
@@ -66,12 +74,22 @@ MODULE_TABLES = ("allocations", "allocation_entries")
 ONLINE_ROLE = "platform_api"
 TENANT_ROLE = "app_user"
 
-#: What the online role needs to OPERATE the module now that it is the authority.
-GRANTED = ("SELECT", "INSERT", "UPDATE", "DELETE")
-
-#: Never granted. Metadata and destructive privileges are not part of running an
-#: allocation workflow.
-NEVER_GRANTED = ("TRUNCATE", "REFERENCES", "TRIGGER")
+#: The module's database-enforced immutability contract. The online role may
+#: create and read an allocation, then make the one-way seal decision; it may not
+#: rewrite business facts, update entries, or delete either row.
+REQUIRED_TABLE_PRIVILEGES = ("SELECT", "INSERT")
+FORBIDDEN_TABLE_PRIVILEGES = (
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+)
+ALL_TABLE_PRIVILEGES = (
+    *REQUIRED_TABLE_PRIVILEGES,
+    *FORBIDDEN_TABLE_PRIVILEGES,
+)
+ALLOCATION_UPDATE_COLUMNS = frozenset({"sealed", "updated_at"})
 
 #: PostgreSQL grants only these per column; asking `has_any_column_privilege`
 #: about the others is an error rather than a `false`.
@@ -84,19 +102,29 @@ def upgrade() -> None:
     # (1) The strongest lock this migration needs, taken once and up front.
     op.execute(
         "LOCK TABLE "
-        + ", ".join(f"public.{table}" for table in LEGACY_TABLES)
+        + ", ".join(f"public.{table}" for table in LOCK_TABLES)
         + " IN ACCESS EXCLUSIVE MODE"
     )
 
     # (2) The premise, checked. Fail closed.
     _require_empty(connection)
 
-    # (3) Hand the online role the access it needs to operate the module.
+    # (3) Normalize to the MODULE'S access contract. A broad UPDATE or DELETE
+    #     grant would let raw SQL bypass its immutable-parent and append-defence
+    #     design. Table-level REVOKE also clears column grants in PostgreSQL, so
+    #     this starts from no direct privilege and adds the exact online shape.
     for table in MODULE_TABLES:
         op.execute(
-            f"GRANT {', '.join(GRANTED)} ON {MODULE_SCHEMA}.{table} "
-            f"TO {ONLINE_ROLE};"
+            f"REVOKE ALL PRIVILEGES ON TABLE {MODULE_SCHEMA}.{table} "
+            f"FROM {ONLINE_ROLE};"
         )
+        op.execute(
+            f"GRANT SELECT, INSERT ON {MODULE_SCHEMA}.{table} TO {ONLINE_ROLE};"
+        )
+    op.execute(
+        "GRANT UPDATE (sealed, updated_at) ON "
+        f"{MODULE_SCHEMA}.allocations TO {ONLINE_ROLE};"
+    )
 
     # (4) Verify the EFFECTIVE outcome, both directions, before committing.
     _verify_privileges(connection)
@@ -117,7 +145,7 @@ def upgrade() -> None:
 
     # (6) Drop the legacy estate. Empty by (2), and still empty because (1) has
     #     not been released.
-    for table in LEGACY_TABLES:
+    for table in DROP_TABLES:
         op.execute(f"DROP TABLE public.{table};")
 
 
@@ -155,7 +183,7 @@ def _drop_foreign_keys_into_legacy(connection: object) -> None:
             "AND t.relname = :dependent AND rn.nspname = 'public' "
             "AND r.relname = ANY(:targets)"
         ),
-        {"dependent": DEPENDENT_TABLE, "targets": list(LEGACY_TABLES)},
+        {"dependent": DEPENDENT_TABLE, "targets": list(DROP_TABLES)},
     ).scalars()
     for name in rows:
         op.execute(f'ALTER TABLE public.{DEPENDENT_TABLE} DROP CONSTRAINT "{name}";')
@@ -164,7 +192,7 @@ def _drop_foreign_keys_into_legacy(connection: object) -> None:
 def _require_empty(connection: object) -> None:
     """Both legacy tables hold nothing. The switch is valid only if so."""
     populated: list[str] = []
-    for table in LEGACY_TABLES:
+    for table in DROP_TABLES:
         count = connection.execute(  # type: ignore[attr-defined]
             sa.text(f"SELECT count(*) FROM public.{table}")  # noqa: S608
         ).scalar_one()
@@ -180,27 +208,54 @@ def _require_empty(connection: object) -> None:
 
 
 def _verify_privileges(connection: object) -> None:
-    """Assert the OUTCOME of the grant, both directions.
+    """Assert the exact EFFECTIVE privilege shape, including column grants.
 
-    Issuing `GRANT` is not proof the privilege arrived, any more than issuing
-    `REVOKE` proves one has gone: a grant reaching a role through `PUBLIC` or an
-    inherited role is invisible to the statement and visible to
-    `has_table_privilege`.
+    Issuing a GRANT or REVOKE proves only that a statement ran. Effective access
+    can still arrive through PUBLIC, role inheritance, or a column-level grant.
+    The verification therefore distinguishes table UPDATE from the two allowed
+    allocation columns and checks every live column, not a hand-maintained list.
     """
     failures: list[str] = []
     for table in MODULE_TABLES:
         qualified = f"{MODULE_SCHEMA}.{table}"
+        columns = _columns(connection, qualified)
 
-        for privilege in GRANTED:
-            if not _holds(connection, ONLINE_ROLE, qualified, privilege):
+        for privilege in REQUIRED_TABLE_PRIVILEGES:
+            if not _table_holds(connection, ONLINE_ROLE, qualified, privilege):
                 failures.append(f"{ONLINE_ROLE} lacks {privilege} on {qualified}")
 
-        for privilege in NEVER_GRANTED:
-            if _holds(connection, ONLINE_ROLE, qualified, privilege):
-                failures.append(f"{ONLINE_ROLE} holds {privilege} on {qualified}")
+        for privilege in FORBIDDEN_TABLE_PRIVILEGES:
+            if _table_holds(connection, ONLINE_ROLE, qualified, privilege):
+                failures.append(
+                    f"{ONLINE_ROLE} holds table {privilege} on {qualified}"
+                )
 
-        for privilege in (*GRANTED, *NEVER_GRANTED):
-            if _holds(connection, TENANT_ROLE, qualified, privilege):
+        allowed_updates = (
+            ALLOCATION_UPDATE_COLUMNS if table == "allocations" else frozenset()
+        )
+        missing_columns = allowed_updates.difference(columns)
+        if missing_columns:
+            failures.append(
+                f"{qualified} lacks allowed update columns {sorted(missing_columns)}"
+            )
+        for column in columns:
+            holds_update = _column_holds(
+                connection, ONLINE_ROLE, qualified, column, "UPDATE"
+            )
+            if holds_update != (column in allowed_updates):
+                expectation = "must hold" if column in allowed_updates else "must not hold"
+                failures.append(
+                    f"{ONLINE_ROLE} {expectation} UPDATE on {qualified}.{column}"
+                )
+            if _column_holds(
+                connection, ONLINE_ROLE, qualified, column, "REFERENCES"
+            ):
+                failures.append(
+                    f"{ONLINE_ROLE} holds REFERENCES on {qualified}.{column}"
+                )
+
+        for privilege in ALL_TABLE_PRIVILEGES:
+            if _holds_any(connection, TENANT_ROLE, qualified, privilege):
                 failures.append(f"{TENANT_ROLE} holds {privilege} on {qualified}")
 
     if failures:
@@ -209,7 +264,48 @@ def _verify_privileges(connection: object) -> None:
         )
 
 
-def _holds(connection: object, role: str, qualified: str, privilege: str) -> bool:
+def _columns(connection: object, qualified: str) -> tuple[str, ...]:
+    return tuple(
+        connection.execute(  # type: ignore[attr-defined]
+            sa.text(
+                "SELECT attname FROM pg_attribute "
+                "WHERE attrelid = to_regclass(:rel) "
+                "AND attnum > 0 AND NOT attisdropped ORDER BY attnum"
+            ),
+            {"rel": qualified},
+        ).scalars()
+    )
+
+
+def _table_holds(
+    connection: object, role: str, qualified: str, privilege: str
+) -> bool:
+    return bool(
+        connection.execute(  # type: ignore[attr-defined]
+            sa.text("SELECT has_table_privilege(:role, :rel, :priv)"),
+            {"role": role, "rel": qualified, "priv": privilege},
+        ).scalar()
+    )
+
+
+def _column_holds(
+    connection: object,
+    role: str,
+    qualified: str,
+    column: str,
+    privilege: str,
+) -> bool:
+    return bool(
+        connection.execute(  # type: ignore[attr-defined]
+            sa.text("SELECT has_column_privilege(:role, :rel, :column, :priv)"),
+            {"role": role, "rel": qualified, "column": column, "priv": privilege},
+        ).scalar()
+    )
+
+
+def _holds_any(
+    connection: object, role: str, qualified: str, privilege: str
+) -> bool:
     statement = "SELECT has_table_privilege(:role, :rel, :priv)"
     if privilege in COLUMN_GRANTABLE:
         statement += " OR has_any_column_privilege(:role, :rel, :priv)"
