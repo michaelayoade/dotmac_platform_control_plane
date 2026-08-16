@@ -35,10 +35,20 @@ from alembic import op
 revision = "v014_allocations_authority"
 down_revision = "v013_approvals_authority_switch"
 branch_labels = None
-# `ea_0001_allocations` is already an ancestor: the vendor root depends on the
-# kernel, and the module lineage is composed alongside it. Naming it again would
-# add an edge that says nothing new.
-depends_on = None
+# A REAL cross-lineage edge, and it must be stated.
+#
+# An earlier draft set this to None, reasoning that `ea_0001_allocations` was
+# "already an ancestor" because the module lineage is composed alongside the
+# vendor one. That is false, and the distinction is the point of a composed
+# graph: composed ALONGSIDE means both lineages are in the revision map, not
+# that either is ordered before the other. With no edge, Alembic is free to run
+# this revision first — and it did, issuing `GRANT ... ON mod_ealloc.allocations`
+# against a schema the module had not created yet.
+#
+# Approvals needed no equivalent edge only because `v012` already depended on
+# `ap_0001_approvals`. Nothing in the vendor lineage has ever depended on
+# `ea_0001_allocations`, so here the edge is load-bearing.
+depends_on = "ea_0001_allocations"
 
 #: The table holding the one foreign key that reaches INTO the legacy estate
 #: from outside it. The constraint NAME is discovered from the catalog rather

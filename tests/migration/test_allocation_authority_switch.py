@@ -91,6 +91,30 @@ def test_a_populated_legacy_table_stops_the_switch(scratch_db: str) -> None:
     """
     _upgrade_to_pre_switch(scratch_db)
 
+    # The privilege state BEFORE, so "nothing happened" is measured rather than
+    # guessed. It is deliberately not asserted to any particular value here:
+    # `ea_0001_allocations` grants the online role DML on the module's tables the
+    # moment it installs, and — unlike approvals, which vendor `v012` held
+    # read-only through a shadow phase — allocations was never revoked. So the
+    # role legitimately holds INSERT before this migration runs, and asserting
+    # its ABSENCE would be importing an expectation from a phase that allocations
+    # never had.
+    before = {
+        (table, privilege): _holds(
+            scratch_db, ONLINE_ROLE, f"{SCHEMA}.{table}", privilege
+        )
+        for table in ("allocations", "allocation_entries")
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+    }
+    # NON-VACUITY for the equality below. If `_holds` reported False for
+    # everything — a broken reader, a mistyped relation — then `after == before`
+    # would hold trivially and prove nothing. The module's install grant means
+    # some of these must be True.
+    assert any(before.values()), (
+        "the privilege reader observed nothing at all before the refusal; "
+        "the unchanged-state comparison below would be vacuous"
+    )
+
     engine = create_engine(scratch_db)
     try:
         with engine.begin() as conn:
@@ -118,10 +142,22 @@ def test_a_populated_legacy_table_stops_the_switch(scratch_db: str) -> None:
     with pytest.raises(RuntimeError, match="requires an EMPTY legacy"):
         _upgrade(scratch_db, SWITCH_REVISION)
 
-    # Nothing happened.
+    # Nothing happened: the legacy estate still stands...
     for table in LEGACY_TABLES:
         assert _exists(scratch_db, f"public.{table}")
-    assert not _holds(scratch_db, ONLINE_ROLE, f"{SCHEMA}.allocations", "INSERT")
+
+    # ...and no privilege moved in EITHER direction. Equality against the
+    # measured before-state is what makes this a real "unchanged" assertion:
+    # a refusal that granted something on its way out, or that revoked
+    # something, fails here regardless of which way it went.
+    after = {
+        (table, privilege): _holds(
+            scratch_db, ONLINE_ROLE, f"{SCHEMA}.{table}", privilege
+        )
+        for table in ("allocations", "allocation_entries")
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
+    }
+    assert after == before
 
 
 def test_the_empty_check_is_not_vacuous(scratch_db: str) -> None:
