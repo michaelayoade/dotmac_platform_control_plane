@@ -23,6 +23,7 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from dotmac_kernel import PlatformAuditEvent
 from dotmac_kernel.entitlements import TenantEntitlementGrant
 from dotmac_kernel.licensing import (
     AppliedLicence,
@@ -102,7 +103,11 @@ def _catalogue(*codes: str) -> ProductCapabilityCatalogues:
 
 
 def _staged_allocation(
-    db: Session, *, suffix: str = "a", customer_ref: str | None = None
+    db: Session,
+    *,
+    suffix: str = "a",
+    customer_ref: str | None = None,
+    product: str = PRODUCT,
 ) -> uuid.UUID:
     """Drive contract → activate → stage, returning the staged allocation id.
 
@@ -111,12 +116,17 @@ def _staged_allocation(
     is the module's now, and its rows are immutable by design; a test that
     reached in and rewrote `customer_ref` afterwards would be asserting against
     a state production can never produce.
+
+    `product` is settable for the same reason: since issuance takes the product
+    from the ALLOCATION, a test about two products must create two allocations
+    that genuinely differ — it can no longer pick a product at issue time,
+    because nothing accepts one there any more.
     """
     customer_ref = customer_ref or f"cust-{suffix}"
     offer_code = f"off-{suffix}"
     db.add(
         OfferVersion(
-            product_code=PRODUCT,
+            product_code=product,
             offer_code=offer_code,
             version=1,
             amount="10.00",
@@ -129,7 +139,7 @@ def _staged_allocation(
         db,
         contracts.CreateDraftCommand(
             command_id=f"d-{uuid.uuid4()}",
-            product_code=PRODUCT,
+            product_code=product,
             customer_ref=customer_ref,
             legal_entity="Dotmac Ltd",
             currency_code="USD",
@@ -198,7 +208,6 @@ def _issue(db, allocation_id, signer, **over):
         db,
         licensing.IssueLicenceCommand(
             allocation_id=allocation_id,
-            product=over.pop("product", PRODUCT),
             **over,
         ),
         signer=signer,
@@ -286,10 +295,12 @@ def test_a_lower_version_cannot_supersede_a_higher_one(db: Session, signer) -> N
 
 
 def test_distinct_products_are_distinct_lineages(db: Session, signer) -> None:
-    alloc_one = _staged_allocation(db, suffix="a")
-    alloc_two = _staged_allocation(db, suffix="b")
-    one = _issue(db, alloc_one, signer, product="dotmac-sub")
-    two = _issue(db, alloc_two, signer, product="dotmac-erp")
+    """Two products, two lineages — and the products now come from the
+    ALLOCATIONS, because that is the only place issuance will read them."""
+    alloc_one = _staged_allocation(db, suffix="a", product="dotmac-sub")
+    alloc_two = _staged_allocation(db, suffix="b", product="dotmac-erp")
+    one = _issue(db, alloc_one, signer)
+    two = _issue(db, alloc_two, signer)
     assert one.licence_id != two.licence_id
     assert one.version == two.version == 1
 
@@ -326,6 +337,92 @@ def test_issuance_emits_a_platform_outbox_event_atomically(db: Session, signer) 
     assert len(events) == 1
     assert events[0].payload["digest"] == issued.digest
     assert events[0].payload["licence_version"] == 1
+
+
+def test_the_caller_cannot_choose_the_product(db: Session, signer) -> None:
+    """A caller has no way to name a product, at either layer.
+
+    This is the single-writer boundary made unreachable rather than merely
+    discouraged: the product selects the licence LINEAGE, so a caller-supplied
+    value that disagreed with the allocation would file the document under the
+    wrong lineage and nothing downstream would re-derive it.
+    """
+    # The command has no such field — passing one is a TypeError, not a value
+    # that gets quietly ignored.
+    with pytest.raises(TypeError):
+        licensing.IssueLicenceCommand(  # type: ignore[call-arg]
+            allocation_id=_staged_allocation(db, suffix="tc"),
+            product="dotmac-erp",
+        )
+
+    # And the HTTP schema REJECTS it rather than dropping it. Silently ignoring
+    # would leave a caller believing it had chosen, which is worse than the bug.
+    from pydantic import ValidationError
+
+    from vendor_cp.licensing.schemas import IssueLicenceRequest
+
+    with pytest.raises(ValidationError, match="no longer accepted"):
+        IssueLicenceRequest(
+            allocation_id=uuid.uuid4(),
+            product="dotmac-erp",  # type: ignore[call-arg]
+        )
+
+
+def test_the_allocations_product_reaches_every_consequence(
+    db: Session, signer
+) -> None:
+    """One value, read once from its owner, and identical everywhere it lands.
+
+    Lineage, signed payload, audit record and outbox event are four independent
+    consequences. Asserting only one would let the others drift to a different
+    product without failing — and the signed payload is the one a deployment
+    actually verifies.
+    """
+    product = "dotmac-erp"
+    alloc = _staged_allocation(db, suffix="cons", product=product)
+    issued = _issue(db, alloc, signer)
+
+    # 1. Lineage.
+    licence = db.execute(
+        select(Licence).where(Licence.id == issued.licence_id)
+    ).scalar_one()
+    assert licence.product == product
+
+    # 2. The SIGNED payload — the bytes a deployment verifies. base64url,
+    #    unpadded, exactly as `_b64url` writes it.
+    raw = issued.envelope["payload_b64"]
+    assert isinstance(raw, str)
+    document = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+    assert document["product"] == product
+
+    # 3. The audit record.
+    audit = (
+        db.execute(
+            select(PlatformAuditEvent).where(
+                PlatformAuditEvent.entity_id == str(issued.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [e.details["product"] for e in audit] == [product]
+
+    # 4. The outbox event.
+    events = (
+        db.execute(
+            select(PlatformOutboxEvent).where(
+                PlatformOutboxEvent.event_type == "licence.issued"
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [e.payload["product"] for e in events] == [product]
+
+    # NON-VACUITY: the product asserted above is not the module-wide default, so
+    # four assertions passing cannot be an accident of everything being
+    # "dotmac-sub".
+    assert product != PRODUCT
 
 
 def test_issuance_writes_no_product_entitlement_grants(db: Session, signer) -> None:

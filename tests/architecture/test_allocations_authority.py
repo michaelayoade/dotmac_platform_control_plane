@@ -15,6 +15,7 @@ one distribution.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 from import_scanner import reaches_module, scan_imports, source_files
@@ -128,6 +129,52 @@ def test_the_adapter_really_does_use_that_surface() -> None:
     while the seam did nothing."""
     taken = _names_from_module(PACKAGE / "allocations" / "adapter.py")
     assert {"stage_allocation", "allocation_product"} <= taken
+
+
+def test_the_adapter_exposes_no_unused_public_surface() -> None:
+    """Every public adapter function has a real caller in this repository.
+
+    An adapter function nobody calls is worse than dead code, because the
+    documentation describes it as the path. `allocation_product()` shipped
+    exactly like that: defined here, named in ARCHITECTURE.md and ADR-0006 as
+    what licence issuance reads, and called by nothing — while issuance took the
+    product from the caller's command instead. The prose said one authority; the
+    code had two, and the prose is what stopped anyone looking.
+
+    So an unused public function fails the build rather than the review.
+    """
+    adapter_path = PACKAGE / "allocations" / "adapter.py"
+    tree = ast.parse(adapter_path.read_text())
+    public = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+    }
+    assert public, "the adapter defines no public functions; this guard is vacuous"
+
+    # Every identifier USED anywhere else in the package: attribute access
+    # (`allocations.allocation_product(...)`, which is how licensing reaches it),
+    # bare names, and imported aliases. `_names_from_module` is deliberately not
+    # reused here — it reports names imported FROM the module, and would see
+    # none of the attribute calls that are the adapter's actual usage shape.
+    callers: set[str] = set()
+    for path in source_files(PACKAGE):
+        if path == adapter_path:
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Attribute):
+                callers.add(node.attr)
+            elif isinstance(node, ast.Name):
+                callers.add(node.id)
+            elif isinstance(node, ast.ImportFrom):
+                callers.update(a.asname or a.name for a in node.names)
+
+    unused = sorted(public - callers)
+    assert not unused, (
+        f"public adapter functions with no caller in {PACKAGE.name}: {unused}. "
+        "Either wire them where the documentation says they are used, or remove "
+        "them — an unused seam is a claim nothing keeps true."
+    )
 
 
 def test_the_catalogue_port_stays_importable() -> None:

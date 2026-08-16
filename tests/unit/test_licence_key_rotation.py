@@ -172,7 +172,6 @@ def _issue(db, *, suffix, customer_ref, signer, overlap_signers=()):
         db,
         licensing.IssueLicenceCommand(
             allocation_id=_staged(db, suffix=suffix, customer_ref=customer_ref),
-            product="dotmac-sub",
         ),
         signer=signer,
         overlap_signers=overlap_signers,

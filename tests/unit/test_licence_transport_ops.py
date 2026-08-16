@@ -180,7 +180,6 @@ def _issue_and_stage(db, signer, *, suffix="a", customer_ref="cust-a"):
         db,
         licensing.IssueLicenceCommand(
             allocation_id=_staged(db, suffix=suffix, customer_ref=customer_ref),
-            product="dotmac-sub",
         ),
         signer=signer,
         now=NOW,

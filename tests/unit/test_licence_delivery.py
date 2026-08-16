@@ -199,9 +199,7 @@ def _issue(db, signer, *, suffix="a", customer_ref="cust-a", **over):
     alloc = _staged_allocation(db, suffix=suffix, customer_ref=customer_ref)
     return licensing.issue_licence(
         db,
-        licensing.IssueLicenceCommand(
-            allocation_id=alloc, product=over.pop("product", PRODUCT), **over
-        ),
+        licensing.IssueLicenceCommand(allocation_id=alloc, **over),
         signer=signer,
         now=NOW,
     )

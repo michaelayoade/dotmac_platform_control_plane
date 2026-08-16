@@ -174,7 +174,7 @@ def _issue(db: Session) -> object:
     )
     return licensing.issue_licence(
         db,
-        licensing.IssueLicenceCommand(allocation_id=alloc.id, product="dotmac-sub"),
+        licensing.IssueLicenceCommand(allocation_id=alloc.id),
         signer=EphemeralLicenceSigner(key_id="k1"),
         now=NOW,
     )

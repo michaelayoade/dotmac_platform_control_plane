@@ -161,7 +161,12 @@ division of rules is deliberate: Vendor keeps the checks about VENDOR'S contract
 version), because only Vendor can say what "stale" means about its own aggregate;
 the module keeps every rule about what a valid allocation IS. Contract activation
 stages through the adapter via `ContractEventConsumer`; licensing reads through
-it and takes the product from the module's `allocation_product()`.
+it and takes the product from the module's `allocation_product()` — and there is
+no way to supply one instead. `IssueLicenceCommand` has no `product` field, and
+`IssueLicenceRequest` REJECTS the retired HTTP field rather than ignoring it, so
+a caller cannot select a licence lineage the allocation does not name. That one
+value flows to all four consequences: lineage, signed payload, audit record and
+outbox event.
 
 **The shadow-overlap exemption is gone.** It waived two host-squatter violations
 while the legacy tables shadowed `mod_ealloc`; `v014` dropped those tables, so

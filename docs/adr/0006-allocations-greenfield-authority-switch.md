@@ -59,6 +59,19 @@ Move the authority in one forward migration
    pin a decision this consumer has no authority over. Licensing reads
    allocations through the adapter and takes the product from the module's
    `allocation_product()`.
+
+   **The caller cannot supply one.** An earlier draft of this switch left
+   `product` on `IssueLicenceCommand` and `IssueLicenceRequest` while this
+   document already described issuance as reading `allocation_product()` — and
+   issuance in fact used the caller's value to select the licence LINEAGE, with
+   nothing comparing it to the allocation. A disagreeing caller would have filed
+   a signed document under the wrong lineage silently. Both fields are now
+   removed; the HTTP schema REJECTS a supplied `product` rather than ignoring it,
+   because silently dropping it would leave a caller believing it had chosen.
+   The single allocation-owned value reaches lineage, signed payload, audit
+   record and outbox event, and
+   `test_the_adapter_exposes_no_unused_public_surface` fails the build if an
+   adapter function the documentation names again has no caller.
 6. **The legacy models, tables and call sites are gone**, and the call-site
    ratchet is held at zero.
 

@@ -156,7 +156,7 @@ def _issue(db: Session, signer, *, suffix: str, customer_ref: str):
     )
     return licensing.issue_licence(
         db,
-        licensing.IssueLicenceCommand(allocation_id=alloc.id, product="dotmac-sub"),
+        licensing.IssueLicenceCommand(allocation_id=alloc.id),
         signer=signer,
         now=NOW,
     )
