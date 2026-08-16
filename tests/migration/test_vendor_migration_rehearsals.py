@@ -37,7 +37,7 @@ ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 APPROVALS_HEAD = "ap_0001_approvals"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v014_allocations_authority_switch"
+VENDOR_HEAD = "v014_allocations_authority"
 
 
 # `scratch_db` and the DSN rewriter MOVED to `tests/migration/conftest.py`.

@@ -25,7 +25,7 @@ target is absent". The greenfield path is valid because someone looked.
 ## Decision
 
 Move the authority in one forward migration
-(`v014_allocations_authority_switch`), and retire the local writer.
+(`v014_allocations_authority`), and retire the local writer.
 
 1. **Empty is the premise, and it is CHECKED.** The migration locks both legacy
    tables, counts them, and raises if either holds a row — in which case nothing

@@ -7,9 +7,11 @@ and idempotent per allocation, capabilities come from the staged allocation,
 binding is contracted, key rotation behaves, and no private key material is
 ever persisted.
 
-The chain is driven end-to-end from a real ContractService activation →
-AllocationService staging → issuance, so the boundaries are exercised as they
-compose in production, not through hand-built fixtures.
+The chain is driven end-to-end from a real ContractService activation → staging
+through `vendor_cp.allocations.adapter` (the seam onto
+`dotmac-entitlement-allocation`, which is the allocation authority) → issuance,
+so the boundaries are exercised as they compose in production, not through
+hand-built fixtures.
 """
 
 from __future__ import annotations

@@ -22,7 +22,7 @@ acquired ONCE, before anything is read — which also makes the emptiness check
 meaningful, because under it "empty when checked" and "empty when dropped" are
 the same statement.
 
-Revision ID: v014_allocations_authority_switch
+Revision ID: v014_allocations_authority
 Revises: v013_approvals_authority_switch
 Create Date: 2026-08-16
 """
@@ -32,7 +32,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "v014_allocations_authority_switch"
+revision = "v014_allocations_authority"
 down_revision = "v013_approvals_authority_switch"
 branch_labels = None
 # `ea_0001_allocations` is already an ancestor: the vendor root depends on the
@@ -120,7 +120,7 @@ def downgrade() -> None:
     production policy forbids schema downgrade regardless.
     """
     raise RuntimeError(
-        "v014_allocations_authority_switch cannot be downgraded: the legacy "
+        "v014_allocations_authority cannot be downgraded: the legacy "
         "allocation writer no longer exists in the code, so restoring its tables "
         "would produce a database no running version can serve."
     )

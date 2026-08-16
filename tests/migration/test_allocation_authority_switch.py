@@ -18,7 +18,7 @@ from sqlalchemy import create_engine, text
 from vendor_cp.migrations import make_alembic_config
 
 PRIOR_REVISION = "v013_approvals_authority_switch"
-SWITCH_REVISION = "v014_allocations_authority_switch"
+SWITCH_REVISION = "v014_allocations_authority"
 
 SCHEMA = "mod_ealloc"
 MODULE_TABLES = ("allocations", "allocation_entries")
@@ -246,7 +246,7 @@ def test_the_migration_takes_the_lock_it_needs_up_front() -> None:
         Path(__file__).resolve().parents[2]
         / "alembic"
         / "versions"
-        / "v014_allocations_authority_switch.py"
+        / "v014_allocations_authority.py"
     ).read_text()
     assert "IN ACCESS EXCLUSIVE MODE" in source
     assert source.index("LOCK TABLE") < source.index("_require_empty")
