@@ -287,7 +287,13 @@ def test_no_waiver_mechanism_exists_for_the_kernel_gate(scratch_db: str) -> None
 
     # No subtraction helper survives in this suite either — the gate is consumed
     # raw, so a waiver cannot creep back as a "small" filter.
-    assert "_partition_shadow_overlaps" not in Path(__file__).read_text()
+    #
+    # Asked of the MODULE NAMESPACE, not of the file's text: a source-text check
+    # would forbid a token its own assertion contains, and fail forever. (It did.)
+    import sys
+
+    suite = sys.modules[__name__]
+    assert not hasattr(suite, "_partition_shadow_overlaps")
 
     # And the live gate really does report nothing to waive.
     spec = build_spec()

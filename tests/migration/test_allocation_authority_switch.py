@@ -17,6 +17,15 @@ from sqlalchemy import create_engine, text
 
 from vendor_cp.migrations import make_alembic_config
 
+#: Targeting the vendor lineage alone leaves the MODULE lineages unapplied —
+#: they are separate heads, and `mod_ealloc` would not exist. A pre-v014 database
+#: is every head EXCEPT the one under test, which Alembic cannot express in a
+#: single target, so the module heads are applied explicitly first.
+PRE_SWITCH_TARGETS = (
+    "rl_0001_release_artifacts",
+    "ea_0001_allocations",
+    "v013_approvals_authority_switch",
+)
 PRIOR_REVISION = "v013_approvals_authority_switch"
 SWITCH_REVISION = "v014_allocations_authority"
 
@@ -33,6 +42,12 @@ COLUMN_GRANTABLE = frozenset({"SELECT", "INSERT", "UPDATE", "REFERENCES"})
 
 def _upgrade(url: str, target: str = "heads") -> None:
     command.upgrade(make_alembic_config(url), target)
+
+
+def _upgrade_to_pre_switch(url: str) -> None:
+    """Everything except `v014` — including the module lineages."""
+    for target in PRE_SWITCH_TARGETS:
+        _upgrade(url, target)
 
 
 def _holds(url: str, role: str, qualified: str, privilege: str) -> bool:
@@ -74,7 +89,7 @@ def test_a_populated_legacy_table_stops_the_switch(scratch_db: str) -> None:
     A row in the legacy estate means the greenfield assumption was wrong, and the
     correct response to a wrong premise is to change nothing at all.
     """
-    _upgrade(scratch_db, PRIOR_REVISION)
+    _upgrade_to_pre_switch(scratch_db)
 
     engine = create_engine(scratch_db)
     try:
@@ -112,7 +127,7 @@ def test_a_populated_legacy_table_stops_the_switch(scratch_db: str) -> None:
 def test_the_empty_check_is_not_vacuous(scratch_db: str) -> None:
     """NON-VACUITY: the same migration succeeds on a genuinely empty estate, so
     the refusal above is about the ROWS rather than a broken migration."""
-    _upgrade(scratch_db, PRIOR_REVISION)
+    _upgrade_to_pre_switch(scratch_db)
     _upgrade(scratch_db, SWITCH_REVISION)
     for table in LEGACY_TABLES:
         assert not _exists(scratch_db, f"public.{table}")
