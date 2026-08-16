@@ -127,7 +127,12 @@ def _privilege_snapshot(
         qualified = f"{SCHEMA}.{table}"
         for privilege in ALL_TABLE_PRIVILEGES:
             facts.append(
-                (table, "table", privilege, _table_holds(url, role, qualified, privilege))
+                (
+                    table,
+                    "table",
+                    privilege,
+                    _table_holds(url, role, qualified, privilege),
+                )
             )
         for column in _columns(url, qualified):
             for privilege in ("UPDATE", "REFERENCES"):

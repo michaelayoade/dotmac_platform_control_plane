@@ -243,7 +243,9 @@ def _verify_privileges(connection: object) -> None:
                 connection, ONLINE_ROLE, qualified, column, "UPDATE"
             )
             if holds_update != (column in allowed_updates):
-                expectation = "must hold" if column in allowed_updates else "must not hold"
+                expectation = (
+                    "must hold" if column in allowed_updates else "must not hold"
+                )
                 failures.append(
                     f"{ONLINE_ROLE} {expectation} UPDATE on {qualified}.{column}"
                 )
