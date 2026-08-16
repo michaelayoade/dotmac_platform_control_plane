@@ -46,29 +46,48 @@ it owns and — just as importantly — what it must never become.
   no module schema holds a tenant-scoped table — and says plainly that the full
   four-fact proof (platform tables built, tenant tables absent, *because of the
   selection*) lands with the first shadow composition.
-- `dotmac-approvals==0.1.0a4` is composed in **shadow**: pinned, its public
-  `versions_dir()` locator composed, and `ModulePlane.PLATFORM` selected. It is
-  **read-only** — vendor migration `v012` revokes every write and DDL privilege
-  the module's own migration grants `platform_api`, retains `SELECT`, and
-  verifies the effective outcome before it can commit. `vendor_cp.approvals`
-  remains the sole authoritative writer, and the module's tables stay empty,
-  until the sealing transaction in ADR-0004 § 3.1.
+- `dotmac-approvals==0.1.0a4` is the **approval authority** (ADR-0005). Pinned,
+  its public `versions_dir()` locator composed, `ModulePlane.PLATFORM` selected,
+  and `platform_api` holding DML on `mod_approvals` — restored by vendor
+  migration `v013`, which reverses v012's shadow revoke as a forward revision and
+  verifies the effective outcome in both directions.
 
-  **Vendor owns that restriction, and does not ask the module to weaken its
-  grants.** `ModulePlane.PLATFORM` selects storage shape — which of a dual-plane
-  module's tables get built — and says nothing about whether the composing
-  assembly has acquired write authority. Shadow-versus-active is Vendor's
-  migration state; a greenfield adopter should keep the module's normal write
-  grants.
+  **The switch was greenfield, and valid only because the legacy estate was
+  empty.** That is an observation, not an assumption: a direct authorized
+  Docker-boundary check against the designated sole target found `TARGET_ABSENT`
+  — no Compose `db` service, no data volume — so there was no approval history to
+  seal, compare or migrate. (The read-only inventory tool never ran; its
+  contribution was refusing to report an absence it had not observed. See
+  ADR-0005.) `v013` re-checks emptiness under `ACCESS EXCLUSIVE` in the same
+  transaction that drops the tables, and fails closed if a row exists. ADR-0004's
+  sealed cutover is superseded and must not be built.
 
-  The transient grant never becomes a committed state: `depends_on` orders `v012`
-  after `ap_0001_approvals`, and `alembic/env.py` states
-  `transaction_per_migration=False` explicitly, so the whole composed upgrade is
-  one transaction. The one reachable hole — an ordinary
-  `alembic upgrade ap_0001_approvals`, which would stop after the module and
-  commit the grant — is closed by the deploy path refusing any target but
-  composed `heads`, with `env.py` additionally asserting in-transaction that
-  every lineage reached its head.
+  **`vendor_cp.approvals.adapter` is the only seam.** Typed, no `Any`, and it
+  uses the eligibility mapping (`PLATFORM_ADMIN_ROLE_ID`) and digest translation
+  declared during the contract phase before any code used them. Contracts open an
+  approval request at submit — the subject's owner knows the digest to bind it
+  to — carry `approval_request_id`, and evaluate it at approve. The legacy
+  writer, its models and its tables are gone, and the ratchet on its call sites
+  is held at zero.
+
+  **Vendor owned the shadow restriction, and still does not ask the module to
+  weaken its grants.** `ModulePlane.PLATFORM` selects storage shape — which of a
+  dual-plane module's tables get built — and says nothing about whether the
+  composing assembly has acquired write authority. That distinction is what let
+  v012 hold the module read-only and v013 hand it authority, both from this
+  assembly, without the module knowing either phase existed.
+
+  **Retired with the switch:** the sealed-cutover implementation
+  (`approvals_cutover.py` and its test) and the read-only inventory tool. Both
+  queried `approval_policies` / `approval_records`, which `v013` drops, so
+  retaining them would preserve the appearance of a reference implementation
+  rather than one. They remain readable at `c3a0d1b`; a later cutover implements
+  locally from ADR-0031's protocol and its own current inventory, and the
+  extraction bar is unchanged at two CURRENT consumers. See ADR-0005 § "Retired
+  artifacts".
+
+  **Lifecycle: below adopted.** Composed and authoritative in code is not
+  adopted; the new owner has not run in production, because nothing has.
 - `dotmac-release-catalog==0.1.0a4` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration

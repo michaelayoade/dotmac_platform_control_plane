@@ -1,10 +1,30 @@
 # ADR-0004: Approvals authority cutover — one writer, and no invented history
 
-- **Status:** Accepted. Shadow composition discharged § 9a; the authority
-  has NOT moved — see "What this ADR does NOT authorise"
+- **Status:** **SUPERSEDED by ADR-0005.** The situation this ADR assumed — a
+  running system with real approval history — did not obtain. Its reasoning is
+  kept because the reasoning was sound; only its premise was wrong.
 - **Date:** 2026-08-15
 - **Owner:** Vendor control plane
-- **Supersedes nothing. Discharged by:** the shadow composition (vendor `v012`)
+- **Superseded by:** `docs/adr/0005-approvals-greenfield-authority-switch.md`
+
+> **Read this first.** Everything below designs a SEALED CUTOVER: lock and seal a
+> legacy estate, compare it against the module's policy engine on five shared
+> safety properties, dispose of incomplete groups, then move the authority in one
+> transaction. None of that happened, and none of it should be built.
+>
+> A direct authorized check against the designated sole target found
+> `TARGET_ABSENT` — no Compose `db` service, no data volume. There is no legacy
+> estate: nothing to seal, nothing to compare, nothing to dispose of. (The
+> read-only inventory tool built for this question never ran; see ADR-0005.)
+>
+> What survives and is LIVE: the eligibility mapping (§ 2) and the digest
+> translation (§ 4a). Both were declared here before any code used them, and the
+> adapter uses them unchanged. What is historical: the seal (§ 3), the five-property
+> comparison (§ 4), disposition (§ 5), parity (§ 6), and the rollback boundary
+> (§ 7) — all of which presuppose data that does not exist.
+>
+> ADR-0031's sealed-evidence standard governs a cutover WITH data. This was not
+> one.
 
 ## Context
 

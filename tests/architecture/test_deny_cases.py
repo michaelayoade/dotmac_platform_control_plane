@@ -64,7 +64,12 @@ _CONNECTION_CONSTRUCTORS = ("create_engine", "sessionmaker", "psycopg.connect")
 #:
 #: An entry added here without those properties is a second database creeping in
 #: under an exemption written for something else.
-_D1_CONNECTION_ALLOWLIST = {"approvals_inventory.py"}
+#: EMPTY again. The read-only inventory was the one entry, and it retired with
+#: its purpose: the estate question was answered by a direct check
+#: (TARGET_ABSENT) and the tables the tool read no longer exist. An exemption
+#: that outlives the thing it was written for is an exemption the next author
+#: inherits without the argument that justified it.
+_D1_CONNECTION_ALLOWLIST: set[str] = set()
 
 
 def test_d1_no_engine_or_session_construction() -> None:

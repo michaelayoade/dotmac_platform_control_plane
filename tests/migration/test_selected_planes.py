@@ -129,12 +129,27 @@ def test_the_spec_carries_the_selection_the_database_reflects() -> None:
     assert tuple(build_spec().module_planes) == ASSEMBLY_MODULE_PLANES
 
 
-def test_the_vendor_local_approval_tables_are_untouched(scratch_db: str) -> None:
-    """The module is composed in SHADOW. `vendor_cp.approvals` remains the
-    authoritative writer, so its `public` tables must still be there — and must
-    not have been replaced by the module's identically-named TENANT tables,
-    which live in `mod_approvals` and were never built."""
+def test_the_legacy_tables_are_gone_and_were_not_replaced_in_place(
+    scratch_db: str,
+) -> None:
+    """The authority switched, and the plane selection still holds.
+
+    This test asserted the opposite during the shadow phase — that the legacy
+    `public` tables were untouched — which was right then and is wrong now: v013
+    dropped them along with the writer that owned them.
+
+    The half that does NOT change is the interesting one. The module's TENANT
+    tables share their names with the legacy ones (`approval_policies`,
+    `approval_records`), so "the legacy tables are gone" could equally describe
+    the module's tenant plane having been built over them. It was not: the
+    selection is PLATFORM-only, so those names now exist in neither namespace.
+    """
     _upgrade(scratch_db)
-    assert _relation_exists(scratch_db, "public", "approval_policies")
-    assert _relation_exists(scratch_db, "public", "approval_records")
+    assert not _relation_exists(scratch_db, "public", "approval_policies")
+    assert not _relation_exists(scratch_db, "public", "approval_records")
     assert not _relation_exists(scratch_db, APPROVALS_SCHEMA, "approval_policies")
+    assert not _relation_exists(scratch_db, APPROVALS_SCHEMA, "approval_records")
+
+    # And the plane that WAS selected is present, so these are not four absences
+    # produced by nothing having been installed at all.
+    assert _relation_exists(scratch_db, APPROVALS_SCHEMA, "platform_approval_requests")

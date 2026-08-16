@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from datetime import date
 
 import pytest
+from dotmac_approvals import SelfApprovalRefused
 from dotmac_entitlement_allocation import UndeclaredCapabilityError
 from dotmac_kernel import ConflictError, NotFoundError
 from dotmac_kernel.entitlements import TenantEntitlementGrant
@@ -22,7 +23,7 @@ from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from vendor_cp.approvals import service as approvals
+from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import service
 from vendor_cp.contracts.models import Contract, ContractStatus
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
@@ -92,7 +93,25 @@ def _draft(
     )
 
 
+def _policy(db: Session) -> None:
+    """Publish `two_person` v1 — a stable command id, so calling this again in the
+    same test REPLAYS rather than colliding with the immutable revision."""
+    approvals.publish_policy_version(
+        db,
+        approvals.PublishPolicyCommand(
+            command_id="pol-two_person-1",
+            policy_code="two_person",
+            version=1,
+            quorum=2,
+            allow_self_approval=False,
+        ),
+    )
+
+
 def _submit(db: Session, cid, catalogue, *, submitter=None):
+    # The policy must exist BEFORE submit: submit opens the approval request
+    # against that exact revision, so publishing afterwards would be too late.
+    _policy(db)
     return service.submit(
         db,
         service.SubmitCommand(
@@ -117,28 +136,63 @@ def _events(db: Session, event_type: str) -> int:
     )
 
 
-def _approve_quorum(db: Session, contract, content_hash: str, submitter) -> None:
-    approvals.publish_policy_version(
-        db,
-        approvals.PublishPolicyCommand(
-            command_id=f"p-{uuid.uuid4()}",
-            policy_code="two_person",
-            version=1,
-            quorum=2,
-        ),
-    )
+def _approve_quorum(db: Session, contract_id, content_hash: str | None) -> None:
+    """Reach the published quorum on the contract's OWN approval request.
+
+    The request id lives on the ORM row (`submit` set it); the service returns a
+    view, so read it back rather than inventing a subject/content lookup.
+    """
+    assert content_hash is not None
+    row = db.get(Contract, contract_id)
+    assert row is not None and row.approval_request_id is not None
     for _ in range(2):
-        approvals.record_approval(
+        approvals.record_decision(
             db,
-            approvals.RecordApprovalCommand(
-                command_id=f"a-{uuid.uuid4()}",
-                policy_code="two_person",
-                policy_version=1,
-                subject_type="contract",
-                subject_id=str(contract.id),
-                content_hash=content_hash,
+            approvals.RecordDecisionCommand(
+                command_id=f"dec-{uuid.uuid4()}",
+                request_id=row.approval_request_id,
                 approver_id=uuid.uuid4(),  # distinct, non-submitter
+                content_hash=content_hash,
             ),
+        )
+
+
+def test_a_submitter_cannot_self_approve_their_own_contract(db: Session) -> None:
+    """The domain safety property, end to end.
+
+    The authority-level rule is proven in `test_approvals.py`; this proves it
+    still holds through the CONTRACT path, which is where it matters — the
+    submitter is recorded as the request's requester, so the module refuses their
+    decision rather than silently not counting it.
+
+    The refusal shape changed with the authority: the legacy writer accepted the
+    row and excluded it from the count, so a self-approval looked recorded and
+    did nothing. Refusing at decision time is the better behaviour and the reason
+    to check it here rather than assume it transferred.
+    """
+    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
+    draft = _draft(db, cap="cap.a")
+    submitter = uuid.uuid4()
+    submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
+
+    row = db.get(Contract, draft.id)
+    assert row is not None and row.approval_request_id is not None
+
+    with pytest.raises(SelfApprovalRefused):
+        approvals.record_decision(
+            db,
+            approvals.RecordDecisionCommand(
+                command_id=f"dec-{uuid.uuid4()}",
+                request_id=row.approval_request_id,
+                approver_id=submitter,
+                content_hash=submitted.content_hash or "",
+            ),
+        )
+
+    # And the contract cannot be approved on the strength of it.
+    with pytest.raises(ConflictError):
+        service.approve(
+            db, service.TransitionCommand(command_id="ap-self", contract_id=draft.id)
         )
 
 
@@ -203,7 +257,7 @@ def test_activation_event_carries_the_hashed_product_identity(db: Session) -> No
     draft = _draft(db, cap="cap.a")
     submitter = uuid.uuid4()
     submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
-    _approve_quorum(db, submitted, submitted.content_hash, submitter)
+    _approve_quorum(db, draft.id, submitted.content_hash)
     service.approve(
         db, service.TransitionCommand(command_id="ap-product", contract_id=draft.id)
     )
@@ -241,7 +295,7 @@ def test_approval_is_separate_from_activation(db: Session) -> None:
     draft = _draft(db, cap="cap.a")
     submitter = uuid.uuid4()
     submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
-    _approve_quorum(db, submitted, submitted.content_hash, submitter)
+    _approve_quorum(db, draft.id, submitted.content_hash)
     approved = service.approve(
         db, service.TransitionCommand(command_id="ap-1", contract_id=draft.id)
     )
@@ -258,7 +312,7 @@ def test_activation_is_separate_rule_driven_and_writes_no_cross_plane_state(
     draft = _draft(db, cap="cap.a")
     submitter = uuid.uuid4()
     submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
-    _approve_quorum(db, submitted, submitted.content_hash, submitter)
+    _approve_quorum(db, draft.id, submitted.content_hash)
     service.approve(
         db, service.TransitionCommand(command_id="ap-1", contract_id=draft.id)
     )
@@ -289,7 +343,7 @@ def test_transitions_are_idempotent_and_atomic_with_their_event(db: Session) -> 
     draft = _draft(db, cap="cap.a")
     submitter = uuid.uuid4()
     submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
-    _approve_quorum(db, submitted, submitted.content_hash, submitter)
+    _approve_quorum(db, draft.id, submitted.content_hash)
     cmd = service.TransitionCommand(command_id="ap-dup", contract_id=draft.id)
     service.approve(db, cmd)
     service.approve(db, cmd)  # same command_id -> idempotent replay
