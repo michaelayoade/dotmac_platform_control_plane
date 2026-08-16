@@ -31,8 +31,9 @@ from sqlalchemy import engine_from_config, pool
 # Register the vendor's own models. Importing `vendor_cp.migrations` below also
 # loads both installed modules through their public top-level migration locators,
 # registering their models on the same shared Base metadata.
+# Allocations and approvals are owned by their modules now, and their models
+# are registered by importing those packages (via `vendor_cp.migrations`).
 import vendor_cp.accounts.models  # noqa: F401
-import vendor_cp.allocations.models  # noqa: F401
 import vendor_cp.contracts.models  # noqa: F401
 import vendor_cp.offers.models  # noqa: F401
 from vendor_cp.migration_bindings import (
