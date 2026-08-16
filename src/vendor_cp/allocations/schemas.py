@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from vendor_cp.allocations.service import AllocationView
+from vendor_cp.allocations.adapter import AllocationView
 
 
 class AllocationEntryResponse(BaseModel):
