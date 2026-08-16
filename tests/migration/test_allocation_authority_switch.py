@@ -179,6 +179,57 @@ def test_the_legacy_tables_are_dropped_and_the_module_owns_the_names(
         assert _exists(scratch_db, f"{SCHEMA}.{table}")
 
 
+def test_no_foreign_key_reaches_the_module_or_the_dropped_estate(
+    scratch_db: str,
+) -> None:
+    """`licence_issuances.allocation_id` used to carry an FK to
+    `public.allocations`.
+
+    That constraint had to go, and for two reasons rather than one. PostgreSQL
+    refuses to drop a table a foreign key still depends on, so it BLOCKED the
+    switch — the unit suite found it before CI did. And it must not simply be
+    re-pointed at `mod_ealloc.allocations`, because no FK may cross into a
+    module's schema (ADR-0023): a module's tables are its own, and a constraint
+    on them would make this assembly's DDL depend on the module's.
+
+    So the column stays as an OPAQUE reference. The rule that actually matters —
+    one issued version per staged allocation — is a unique constraint on
+    `licence_issuances` and is untouched, which this asserts too.
+    """
+    _upgrade(scratch_db)
+    engine = create_engine(scratch_db)
+    try:
+        with engine.connect() as conn:
+            crossing = conn.execute(
+                text(
+                    "SELECT c.conname, rn.nspname, r.relname FROM pg_constraint c "
+                    "JOIN pg_class t ON t.oid = c.conrelid "
+                    "JOIN pg_class r ON r.oid = c.confrelid "
+                    "JOIN pg_namespace rn ON rn.oid = r.relnamespace "
+                    "WHERE c.contype = 'f' AND t.relname = 'licence_issuances'"
+                )
+            ).all()
+            uniques = set(
+                conn.execute(
+                    text(
+                        "SELECT conname FROM pg_constraint c "
+                        "JOIN pg_class t ON t.oid = c.conrelid "
+                        "WHERE c.contype = 'u' AND t.relname = 'licence_issuances'"
+                    )
+                ).scalars()
+            )
+    finally:
+        engine.dispose()
+
+    offending = [row for row in crossing if row[2] in ("allocations",)]
+    assert (
+        not offending
+    ), f"a foreign key still points at an allocations table: {offending}"
+    assert (
+        "uq_licence_issuance_allocation" in uniques
+    ), "the one-issuance-per-allocation rule was lost with the foreign key"
+
+
 def test_downgrade_is_refused(scratch_db: str) -> None:
     _upgrade(scratch_db)
     with pytest.raises(RuntimeError, match="cannot be downgraded"):

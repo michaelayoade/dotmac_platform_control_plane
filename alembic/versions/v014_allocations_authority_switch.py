@@ -40,6 +40,13 @@ branch_labels = None
 # add an edge that says nothing new.
 depends_on = None
 
+#: The table holding the one foreign key that reaches INTO the legacy estate
+#: from outside it. The constraint NAME is discovered from the catalog rather
+#: than assumed: a guessed name silently does nothing under
+#: `DROP CONSTRAINT IF EXISTS`, and the failure would then surface as an
+#: unexplained "cannot drop table" three statements later.
+DEPENDENT_TABLE = "licence_issuances"
+
 #: Dropped in dependency order — entries carry the FK to allocations.
 LEGACY_TABLES = ("allocation_entries", "allocations")
 
@@ -84,7 +91,21 @@ def upgrade() -> None:
     # (4) Verify the EFFECTIVE outcome, both directions, before committing.
     _verify_privileges(connection)
 
-    # (5) Drop the legacy estate. Empty by (2), and still empty because (1) has
+    # (5) Release the one constraint that reaches INTO the legacy estate from
+    #     outside it. `licence_issuances.allocation_id` pointed at
+    #     `public.allocations`; the allocation it names now lives in
+    #     `mod_ealloc`, and no foreign key may cross into a module's schema
+    #     (ADR-0023) — a module's tables are its own, and a constraint pointing
+    #     at them would make this assembly's DDL depend on the module's. The
+    #     column stays as an OPAQUE reference, and the rule that actually
+    #     matters — one issued version per staged allocation — is a unique
+    #     constraint on `licence_issuances` and is untouched.
+    #
+    #     Without this, step (6) fails: PostgreSQL refuses to drop a table a
+    #     foreign key still depends on.
+    _drop_foreign_keys_into_legacy(connection)
+
+    # (6) Drop the legacy estate. Empty by (2), and still empty because (1) has
     #     not been released.
     for table in LEGACY_TABLES:
         op.execute(f"DROP TABLE public.{table};")
@@ -103,6 +124,31 @@ def downgrade() -> None:
         "allocation writer no longer exists in the code, so restoring its tables "
         "would produce a database no running version can serve."
     )
+
+
+def _drop_foreign_keys_into_legacy(connection: object) -> None:
+    """Release every FK from `licence_issuances` into the legacy estate.
+
+    Discovered, not named: the constraint's identifier is whatever PostgreSQL
+    assigned, and `DROP CONSTRAINT IF EXISTS` on a guessed name would succeed
+    while doing nothing — turning a precise failure here into a confusing
+    "cannot drop table" later.
+    """
+    rows = connection.execute(  # type: ignore[attr-defined]
+        sa.text(
+            "SELECT c.conname FROM pg_constraint c "
+            "JOIN pg_class t ON t.oid = c.conrelid "
+            "JOIN pg_class r ON r.oid = c.confrelid "
+            "JOIN pg_namespace tn ON tn.oid = t.relnamespace "
+            "JOIN pg_namespace rn ON rn.oid = r.relnamespace "
+            "WHERE c.contype = 'f' AND tn.nspname = 'public' "
+            "AND t.relname = :dependent AND rn.nspname = 'public' "
+            "AND r.relname = ANY(:targets)"
+        ),
+        {"dependent": DEPENDENT_TABLE, "targets": list(LEGACY_TABLES)},
+    ).scalars()
+    for name in rows:
+        op.execute(f'ALTER TABLE public.{DEPENDENT_TABLE} DROP CONSTRAINT "{name}";')
 
 
 def _require_empty(connection: object) -> None:
