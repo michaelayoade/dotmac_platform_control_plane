@@ -368,9 +368,7 @@ def test_the_caller_cannot_choose_the_product(db: Session, signer) -> None:
         )
 
 
-def test_the_allocations_product_reaches_every_consequence(
-    db: Session, signer
-) -> None:
+def test_the_allocations_product_reaches_every_consequence(db: Session, signer) -> None:
     """One value, read once from its owner, and identical everywhere it lands.
 
     Lineage, signed payload, audit record and outbox event are four independent
