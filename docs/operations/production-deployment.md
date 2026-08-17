@@ -45,11 +45,15 @@ verifies the final role and ownership contract before backup or migration becaus
 role never runs an application migration and its password is not retained in
 the host environment.
 
-The reconciliation allowlist contains only
+The automatic deployment reconciliation allowlist contains only
 `VENDOR_DEPLOYMENT_PROFILE`. It exists because the initial host bundle
 predated `production-bootstrap`; re-rendering the complete file would require
 OpenBao custody and a broad `sed` would risk secrets. The service refuses
 duplicates, changes no other declaration, and preserves mode and ownership.
+Release selection remains an explicit operator action: the same service's
+`pin-product-release` command validates the complete declaration through the
+runtime's canonical parser, changes exactly one product, and atomically
+preserves every other byte, mode, and owner in the secret-bearing `.env` file.
 
 The database, product-manifest documents, `.env`, and signing key stay on the
 host. The app image and Postgres image are immutable digest references. Neither
@@ -100,6 +104,7 @@ ssh -o "UserKnownHostsFile=$KNOWN_HOSTS" root@149.102.158.144 \
 rsync -azR -e "ssh -o UserKnownHostsFile=$KNOWN_HOSTS" \
   .env.production.example \
   scripts/materialize_production_secrets.py \
+  src/vendor_cp/product_release_pins.py \
   src/vendor_cp/production_secrets.py \
   root@149.102.158.144:/opt/dotmac/vendor-control-plane/
 PYTHONPATH=src python3 scripts/materialize_production_secrets.py push \
@@ -115,8 +120,8 @@ PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
 `seed` prints record paths only. `push` transfers a validated bundle only on SSH
 stdin and excludes the deployment private key. `sync-github-deploy-key` passes
 that held private key to `gh secret set` only on stdin. Install this exact
-adapter and its `src/vendor_cp/production_secrets.py` service on the target
-before `push`; never re-create the contract with shell substitutions.
+adapter and both versioned service modules on the target before `push`; never
+re-create the contract with shell substitutions.
 
 Prepare the GitHub `production` environment with:
 
@@ -177,24 +182,40 @@ docker compose --env-file .env -f docker-compose.production.yml \
 The current production evidence to ingest is:
 
 - product: `dotmac-sub`;
-- version: `7.177.0`;
-- source revision: `e2c3bb041d96570b4ad07cdedf8616c34d829f47`;
-- OCI digest: `sha256:8fce022f80d76c92ed07ed0a1beca1924b74b9276ce3b6fbd51e7e607d51cafd`;
+- version: `7.187.1`;
+- source revision: `121e1592db795d339c1bc6279277797891d41064`;
+- production release revision: `4489ca1712f3c263d914f2af0ebfcf044aa70605`;
+- OCI digest: `sha256:27b5324e765add48214b3668d39bb19557acbfac4c8a7edd98a4fb22b6e0c19a`;
 - product-manifest digest:
-  `sha256:76296d9d615dca4afb2574fca71e2bf140a5a7f7481082c734668018a7f9b1eb`;
-- producing build run: `31753249550`.
+  `sha256:e6e8ac94cf4d7840c4d61408add9727b26d60319c2d34fd61d04db8b2ced0f66`;
+- producing build run: `32002740276`;
+- successful production deploy run: `32009246911`.
 
 Download the exact canonical manifest artifact from that run. Do not recreate
 JSON from remembered capability codes. Verify its digest before mounting it
 read-only into a one-off `ops` container and invoke
 `scripts/catalogue_product_release.py` with the identities above. Only after
-the ingestion succeeds should `.env` pin `dotmac-sub` to the two exact digests
-and the app be restarted.
+ingestion succeeds, use the versioned operator seam rather than editing the
+secret-bearing file:
+
+```bash
+PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
+  pin-product-release \
+  --env-file .env \
+  --product-code dotmac-sub \
+  --artifact-digest <exact-published-OCI-digest> \
+  --product-manifest-digest <exact-canonical-manifest-digest>
+```
+
+Then redeploy the same approved image digest so application boot consumes the
+new pin. The command prints only the product code and whether a change was
+needed; it never prints the `.env` file or any held value.
 
 That earns Release Catalog's first real cutover only after the old Vendor
-artifact writer is proven retired. It does not cut over Entitlement Allocation:
-that module remains shadow-installed until the checked-in historical mapping,
-duplicate normalization, parity, and one-writer gates all pass.
+artifact writer is proven retired and the running application resolves the
+held document through this exact pin. Entitlement Allocation is already the
+greenfield production authority under `v014`; this release evidence supplies
+its product-scoped catalogue input rather than creating another writer.
 
 ## Rollback
 

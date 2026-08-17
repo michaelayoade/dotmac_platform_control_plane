@@ -89,6 +89,7 @@ jobs:
             scripts/deploy_production_with_registry_token.sh \
             scripts/materialize_production_secrets.py \
             deploy/postgres/init-roles.sh \
+            src/vendor_cp/product_release_pins.py \
             src/vendor_cp/production_secrets.py \
             "$remote:$TARGET_DIR/"
 

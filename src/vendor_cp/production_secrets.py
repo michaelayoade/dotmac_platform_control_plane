@@ -26,6 +26,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from vendor_cp.product_release_pins import (
+    ProductReleasePin,
+    parse_product_release_pins,
+    render_product_release_pins,
+)
+
 LICENCE_SIGNING_PATH = "secret/dotmac/licensing/signing-key"
 DATABASE_PATH = "secret/dotmac/vendor-control-plane/production/database"
 RUNTIME_PATH = "secret/dotmac/vendor-control-plane/production/runtime"
@@ -43,6 +49,7 @@ SECRET_FIELDS: Mapping[str, frozenset[str]] = {
 }
 
 OWNED_ENV_DECLARATIONS = frozenset({"VENDOR_DEPLOYMENT_PROFILE"})
+PRODUCT_RELEASE_PINS_DECLARATION = "VENDOR_PRODUCT_RELEASE_PINS_JSON"
 
 ENV_SECRET_KEYS = frozenset(
     {
@@ -503,6 +510,81 @@ def reconcile_host_environment_declarations(
             owner=(metadata.st_uid, metadata.st_gid),
         )
     return tuple(changed)
+
+
+def pin_product_release(
+    *,
+    env_file: Path,
+    product_code: str,
+    artifact_digest: str,
+    product_manifest_digest: str,
+) -> bool:
+    """Atomically add or replace one product's exact release evidence pin.
+
+    This is deliberately separate from deployment-profile reconciliation: the
+    assembly owns the profile declaration, while an operator owns the release
+    selection. The updater requires the declaration exactly once, validates the
+    complete existing object through the runtime's canonical parser, preserves
+    every other byte in the secret-bearing file, and is a no-op for an already
+    current pin.
+    """
+    if not env_file.is_file() or env_file.is_symlink():
+        raise ProductionSecretError("production env file must be a regular file")
+
+    try:
+        selected = ProductReleasePin(
+            artifact_digest=artifact_digest,
+            product_manifest_digest=product_manifest_digest,
+        )
+        # Rendering an otherwise empty map exercises the same product-code
+        # validation used for the complete declaration before touching disk.
+        render_product_release_pins({product_code: selected})
+    except ValueError as exc:
+        raise ProductionSecretError(str(exc)) from exc
+
+    content = env_file.read_text(encoding="utf-8")
+    lines = content.splitlines(keepends=True)
+    positions: list[int] = []
+    values: list[str] = []
+    for index, line in enumerate(lines):
+        physical_line = line.removesuffix("\n").removesuffix("\r")
+        key, separator, value = physical_line.partition("=")
+        if separator and key == PRODUCT_RELEASE_PINS_DECLARATION:
+            positions.append(index)
+            values.append(value)
+    if len(positions) != 1:
+        raise ProductionSecretError(
+            f"production env file must declare {PRODUCT_RELEASE_PINS_DECLARATION} "
+            "exactly once"
+        )
+
+    try:
+        pins = dict(parse_product_release_pins(values[0]))
+        pins[product_code] = selected
+        rendered = render_product_release_pins(pins)
+    except ValueError as exc:
+        raise ProductionSecretError(str(exc)) from exc
+
+    position = positions[0]
+    original_line = lines[position]
+    ending = (
+        "\r\n"
+        if original_line.endswith("\r\n")
+        else ("\n" if original_line.endswith("\n") else "")
+    )
+    replacement = f"{PRODUCT_RELEASE_PINS_DECLARATION}={rendered}{ending}"
+    if original_line == replacement:
+        return False
+    lines[position] = replacement
+
+    metadata = env_file.stat()
+    _atomic_write(
+        env_file,
+        "".join(lines),
+        mode=stat.S_IMODE(metadata.st_mode),
+        owner=(metadata.st_uid, metadata.st_gid),
+    )
+    return True
 
 
 def materialize_host_bundle(

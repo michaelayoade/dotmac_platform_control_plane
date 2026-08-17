@@ -271,6 +271,8 @@ def test_deployment_adapter_includes_the_owned_secret_materializer() -> None:
 
     assert "scripts/materialize_production_secrets.py" in workflow
     assert "src/vendor_cp/production_secrets.py" in workflow
+    assert "src/vendor_cp/product_release_pins.py" in workflow
+    assert "pin-product-release" in _text("scripts/materialize_production_secrets.py")
     assert '"options": {"cas": 0}' in service
     assert service.count("secret/dotmac/vendor-control-plane/production/") == 3
     assert "secret/dotmac/licensing/signing-key" in service

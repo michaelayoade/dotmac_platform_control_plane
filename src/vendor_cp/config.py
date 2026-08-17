@@ -9,36 +9,18 @@ provider mode, which is `fake` in this phase and FAILS STARTUP for anything else
 
 from __future__ import annotations
 
-import json
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+from vendor_cp.product_release_pins import (
+    ProductReleasePin,
+    parse_product_release_pins,
+)
 
 
 class ProductionConfigurationError(RuntimeError):
     """The process would start with a production-unsafe identity or mode."""
-
-
-@dataclass(frozen=True, slots=True)
-class ProductReleasePin:
-    """Exact artifact and product-manifest identities selected by an operator."""
-
-    artifact_digest: str
-    product_manifest_digest: str
-
-    def __post_init__(self) -> None:
-        if _SHA256_RE.fullmatch(self.artifact_digest) is None:
-            raise ValueError(
-                "artifact_digest must be 'sha256:' plus 64 lowercase hex digits"
-            )
-        if _SHA256_RE.fullmatch(self.product_manifest_digest) is None:
-            raise ValueError(
-                "product_manifest_digest must be 'sha256:' plus 64 lowercase "
-                "hex digits"
-            )
 
 
 @dataclass(frozen=True)
@@ -97,45 +79,11 @@ def load_vendor_settings() -> VendorSettings:
             "supply exact product release pins"
         )
     raw_pins = os.getenv("VENDOR_PRODUCT_RELEASE_PINS_JSON", "{}")
-    try:
-        parsed = json.loads(raw_pins)
-    except json.JSONDecodeError as exc:
-        raise ValueError("VENDOR_PRODUCT_RELEASE_PINS_JSON must be valid JSON") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("VENDOR_PRODUCT_RELEASE_PINS_JSON must be an object")
-    product_release_pins: list[tuple[str, ProductReleasePin]] = []
-    for product_code, document in parsed.items():
-        if (
-            not isinstance(product_code, str)
-            or not product_code
-            or product_code != product_code.strip()
-        ):
-            raise ValueError("product release pin keys must be non-blank strings")
-        if not isinstance(document, dict) or set(document) != {
-            "artifact_digest",
-            "product_manifest_digest",
-        }:
-            raise ValueError(
-                f"release pin for product {product_code!r} must contain exactly "
-                "artifact_digest and product_manifest_digest"
-            )
-        if not all(isinstance(value, str) for value in document.values()):
-            raise ValueError(
-                f"release pin digests for product {product_code!r} must be strings"
-            )
-        product_release_pins.append(
-            (
-                product_code,
-                ProductReleasePin(
-                    artifact_digest=document["artifact_digest"],
-                    product_manifest_digest=document["product_manifest_digest"],
-                ),
-            )
-        )
+    product_release_pins = parse_product_release_pins(raw_pins)
     signing = os.getenv("VENDOR_LICENCE_SIGNING_MODE", "ephemeral").strip().lower()
     return VendorSettings(
         provider_mode=mode,
-        product_release_pins=tuple(product_release_pins),
+        product_release_pins=product_release_pins,
         product_manifest_directory=Path(
             os.getenv(
                 "VENDOR_PRODUCT_MANIFEST_DIRECTORY",
