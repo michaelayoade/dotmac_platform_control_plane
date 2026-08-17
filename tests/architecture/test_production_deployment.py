@@ -174,6 +174,11 @@ def test_deploy_workflow_requires_the_named_target_and_an_immutable_digest() -> 
     assert "sha256:[0-9a-f]{64}" in workflow
     assert "VENDOR_PRODUCTION_KNOWN_HOSTS" in workflow
     assert "VENDOR_PRODUCTION_SSH_KEY" in workflow
+    reconcile = workflow.index("reconcile-declarations")
+    deploy = workflow.index("deploy_production_with_registry_token.sh")
+    assert reconcile < deploy
+    assert "--env-template .env.production.example" in workflow
+    assert "--env-file .env" in workflow
 
 
 def test_deploy_uses_an_ephemeral_registry_credential_over_stdin() -> None:
