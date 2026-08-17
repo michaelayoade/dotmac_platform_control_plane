@@ -268,6 +268,11 @@ The deployment path never creates or repairs the marker itself.
   KV v2 CAS, and the script is a thin operator adapter. Runtime settings never
   read OpenBao, and GHCR authentication remains a per-deploy Actions token
   rather than a fifth persistent record.
+  The dependency-free `vendor_cp.product_release_pins` contract is shared by
+  runtime configuration and the host operator. `pin-product-release` therefore
+  cannot accept a declaration the process later rejects, and changes one
+  operator-owned pin without re-rendering or exposing the secret-bearing host
+  environment.
 - **Vendor accounts** (slice 3) — the vendor-owned `AccountService`: typed
   commands + outcomes, atomic transaction ownership, idempotency, audit,
   platform-admin-only adapters.

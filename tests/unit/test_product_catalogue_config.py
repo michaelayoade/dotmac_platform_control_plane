@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import pytest
 
+import vendor_cp.config as config
+import vendor_cp.production_secrets as production_secrets
 from vendor_cp.config import load_vendor_settings
+from vendor_cp.product_release_pins import parse_product_release_pins
+
+
+def test_runtime_and_operator_use_the_same_pin_parser() -> None:
+    assert config.parse_product_release_pins is parse_product_release_pins
+    assert production_secrets.parse_product_release_pins is parse_product_release_pins
 
 
 def test_product_release_pins_bind_artifact_and_manifest_digests(monkeypatch) -> None:

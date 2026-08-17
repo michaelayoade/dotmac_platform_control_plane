@@ -14,6 +14,7 @@ from vendor_cp.production_secrets import (
     build_host_bundle,
     client_from_environment,
     materialize_host_bundle,
+    pin_product_release,
     reconcile_host_environment_declarations,
     seed_missing_records,
     sync_github_deploy_key,
@@ -55,6 +56,15 @@ def _parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--env-template", required=True, type=Path)
     reconcile.add_argument("--env-file", required=True, type=Path)
 
+    pin = subparsers.add_parser(
+        "pin-product-release",
+        help="atomically select exact catalogued evidence for one product",
+    )
+    pin.add_argument("--env-file", required=True, type=Path)
+    pin.add_argument("--product-code", required=True)
+    pin.add_argument("--artifact-digest", required=True)
+    pin.add_argument("--product-manifest-digest", required=True)
+
     github = subparsers.add_parser(
         "sync-github-deploy-key", help="pipe the held key into gh secret set"
     )
@@ -94,6 +104,18 @@ def main() -> int:
                 print("reconciled production declarations: " + ", ".join(changed))
             else:
                 print("production declarations already current")
+            return 0
+        if args.command == "pin-product-release":
+            if os.geteuid() != 0:
+                raise ProductionSecretError("pin-product-release must run as root")
+            pin_changed = pin_product_release(
+                env_file=args.env_file,
+                product_code=args.product_code,
+                artifact_digest=args.artifact_digest,
+                product_manifest_digest=args.product_manifest_digest,
+            )
+            state = "updated" if pin_changed else "already current"
+            print(f"product release pin {state}: {args.product_code!r}")
             return 0
         if args.command == "sync-github-deploy-key":
             sync_github_deploy_key(

@@ -24,6 +24,7 @@ from vendor_cp.production_secrets import (
     ProductionSecretError,
     build_host_bundle,
     materialize_host_bundle,
+    pin_product_release,
     reconcile_host_environment_declarations,
     seed_missing_records,
     sync_github_deploy_key,
@@ -392,3 +393,165 @@ def test_reconcile_refuses_duplicate_owned_declarations(tmp_path: Path) -> None:
         )
 
     assert env_file.read_text(encoding="utf-8") == original
+
+
+def test_product_release_pin_updates_only_its_declaration_atomically(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    secret_line = "JWT_SECRET=held-value-with-spaces  "
+    env_file.write_text(
+        "APP_ENV=production\n"
+        + secret_line
+        + "\n"
+        + 'VENDOR_PRODUCT_RELEASE_PINS_JSON={"dotmac-erp":'
+        + '{"artifact_digest":"sha256:'
+        + "c" * 64
+        + '","product_manifest_digest":"sha256:'
+        + "d" * 64
+        + '"}}\n'
+        + "OPERATOR_OWNED=unchanged\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o640)
+    before = env_file.stat()
+
+    changed = pin_product_release(
+        env_file=env_file,
+        product_code="dotmac-sub",
+        artifact_digest=f"sha256:{'a' * 64}",
+        product_manifest_digest=f"sha256:{'b' * 64}",
+    )
+
+    rendered = env_file.read_text(encoding="utf-8")
+    declaration = next(
+        line
+        for line in rendered.splitlines()
+        if line.startswith("VENDOR_PRODUCT_RELEASE_PINS_JSON=")
+    )
+    pins = json.loads(declaration.partition("=")[2])
+    assert changed is True
+    assert list(pins) == ["dotmac-erp", "dotmac-sub"]
+    assert pins["dotmac-sub"] == {
+        "artifact_digest": f"sha256:{'a' * 64}",
+        "product_manifest_digest": f"sha256:{'b' * 64}",
+    }
+    assert secret_line in rendered
+    assert "OPERATOR_OWNED=unchanged\n" in rendered
+    after = env_file.stat()
+    assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode)
+    assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+
+
+def test_product_release_pin_is_an_idempotent_noop(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'VENDOR_PRODUCT_RELEASE_PINS_JSON={"dotmac-sub":'
+        + '{"artifact_digest":"sha256:'
+        + "a" * 64
+        + '","product_manifest_digest":"sha256:'
+        + "b" * 64
+        + '"}}\n',
+        encoding="utf-8",
+    )
+    before = env_file.stat()
+
+    changed = pin_product_release(
+        env_file=env_file,
+        product_code="dotmac-sub",
+        artifact_digest=f"sha256:{'a' * 64}",
+        product_manifest_digest=f"sha256:{'b' * 64}",
+    )
+
+    after = env_file.stat()
+    assert changed is False
+    assert after.st_ino == before.st_ino
+    assert after.st_mtime_ns == before.st_mtime_ns
+
+
+@pytest.mark.parametrize(
+    "declaration, error",
+    (
+        ("VENDOR_PRODUCT_RELEASE_PINS_JSON=not-json\n", "valid JSON"),
+        (
+            "VENDOR_PRODUCT_RELEASE_PINS_JSON={}\n"
+            "VENDOR_PRODUCT_RELEASE_PINS_JSON={}\n",
+            "exactly once",
+        ),
+    ),
+)
+def test_product_release_pin_refuses_an_ambiguous_or_invalid_current_value(
+    tmp_path: Path,
+    declaration: str,
+    error: str,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "JWT_SECRET=must-not-change\n" + declaration,
+        encoding="utf-8",
+    )
+    original = env_file.read_bytes()
+
+    with pytest.raises((ProductionSecretError, ValueError), match=error):
+        pin_product_release(
+            env_file=env_file,
+            product_code="dotmac-sub",
+            artifact_digest=f"sha256:{'a' * 64}",
+            product_manifest_digest=f"sha256:{'b' * 64}",
+        )
+
+    assert env_file.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "product_code, artifact_digest, manifest_digest",
+    (
+        (" dotmac-sub", f"sha256:{'a' * 64}", f"sha256:{'b' * 64}"),
+        ("dotmac-sub", f"sha256:{'A' * 64}", f"sha256:{'b' * 64}"),
+        ("dotmac-sub", f"sha256:{'a' * 63}", f"sha256:{'b' * 64}"),
+        ("dotmac-sub", f"sha256:{'a' * 64}", f"sha256:{'B' * 64}"),
+    ),
+)
+def test_product_release_pin_refuses_invalid_identity_before_writing(
+    tmp_path: Path,
+    product_code: str,
+    artifact_digest: str,
+    manifest_digest: str,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "JWT_SECRET=must-not-change\nVENDOR_PRODUCT_RELEASE_PINS_JSON={}\n",
+        encoding="utf-8",
+    )
+    original = env_file.read_bytes()
+
+    with pytest.raises(ProductionSecretError):
+        pin_product_release(
+            env_file=env_file,
+            product_code=product_code,
+            artifact_digest=artifact_digest,
+            product_manifest_digest=manifest_digest,
+        )
+
+    assert env_file.read_bytes() == original
+
+
+def test_product_release_pin_refuses_a_symlinked_environment_file(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "held.env"
+    env_file = tmp_path / ".env"
+    target.write_text("VENDOR_PRODUCT_RELEASE_PINS_JSON={}\n", encoding="utf-8")
+    env_file.symlink_to(target)
+
+    with pytest.raises(ProductionSecretError, match="regular file"):
+        pin_product_release(
+            env_file=env_file,
+            product_code="dotmac-sub",
+            artifact_digest=f"sha256:{'a' * 64}",
+            product_manifest_digest=f"sha256:{'b' * 64}",
+        )
+
+    assert target.read_text(encoding="utf-8") == (
+        "VENDOR_PRODUCT_RELEASE_PINS_JSON={}\n"
+    )
