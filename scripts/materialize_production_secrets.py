@@ -85,9 +85,7 @@ def main() -> int:
             return 0
         if args.command == "reconcile-declarations":
             if os.geteuid() != 0:
-                raise ProductionSecretError(
-                    "reconcile-declarations must run as root"
-                )
+                raise ProductionSecretError("reconcile-declarations must run as root")
             changed = reconcile_host_environment_declarations(
                 env_template=args.env_template,
                 env_file=args.env_file,
