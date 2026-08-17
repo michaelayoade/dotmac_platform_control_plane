@@ -2,6 +2,9 @@ name: Build immutable production image
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -13,26 +16,47 @@ concurrency:
 
 env:
   IMAGE_REPOSITORY: ghcr.io/michaelayoade/dotmac_vendor_control_plane
+  SOURCE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+  SOURCE_BRANCH: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
 
 jobs:
   build:
+    # A PR run and a failed main run may emit workflow_run events too. Neither
+    # may publish production bytes.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
       reference: ${{ steps.publish.outputs.reference }}
     steps:
-      - name: Require main
-        env:
-          DISPATCHED_REF: ${{ github.ref_name }}
+      - name: Require a successful main event
         run: |
           set -euo pipefail
-          test "$DISPATCHED_REF" = "main" || {
+          test "$SOURCE_BRANCH" = "main" || {
             echo "Production images may only be built from main." >&2
             exit 1
           }
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
 
       - name: Check out exact source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+
+      - name: Re-assert that the successful SHA is still current main
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --no-tags --depth=1 origin main
+          current_main="$(git rev-parse FETCH_HEAD)"
+          test "$current_main" = "$SOURCE_SHA" || {
+            echo "Refusing stale image build: $SOURCE_SHA is not current main." >&2
+            exit 1
+          }
 
       - name: Authenticate to GHCR
         env:
@@ -48,10 +72,10 @@ jobs:
           FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: |
           set -euo pipefail
-          tag="${IMAGE_REPOSITORY}:${GITHUB_SHA}"
+          tag="${IMAGE_REPOSITORY}:${SOURCE_SHA}"
           DOCKER_BUILDKIT=1 docker build \
             --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
-            --build-arg "SOURCE_REVISION=${GITHUB_SHA}" \
+            --build-arg "SOURCE_REVISION=${SOURCE_SHA}" \
             --tag "$tag" .
           docker push "$tag"
           docker pull "$tag"
@@ -77,4 +101,5 @@ jobs:
             echo '```text'
             echo '${{ steps.publish.outputs.reference }}'
             echo '```'
+            echo "Source: \`$SOURCE_SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"
