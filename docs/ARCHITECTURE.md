@@ -239,6 +239,13 @@ backup, runs the five-lineage `scripts/migrate.py`, and only then replaces the
 application. The complete operator contract and rollback boundary are in
 `docs/operations/production-deployment.md`.
 
+`scripts/bootstrap_production_host.sh` alone owns `/etc/dotmac-host-id`. The
+marker is its final atomic write after the held signing key, Certbot account,
+hostname-valid certificate, final nginx configuration, and host environment
+have all been verified. An existing Certbot account may be reused without
+restating its contact; a new registration still requires an explicit contact.
+The deployment path never creates or repairs the marker itself.
+
 ## Ownership (what this control plane owns)
 
 - **Production secret materialization** — `vendor_cp.production_secrets` is the

@@ -120,10 +120,20 @@ temporary directory on the named server, then run:
 CERTBOT_EMAIL=<operator-email> bash scripts/bootstrap_production_host.sh
 ```
 
+`CERTBOT_EMAIL` is required only when the host has no registered Certbot
+account. A host with an existing account reuses that account rather than
+duplicating its contact declaration; bootstrap still refuses to register an
+account without a contact. The production host currently carries the retained
+Marketing certificate and its registered Certbot account, so the Vendor
+certificate uses that existing account.
+
 The first run creates `.env` from `.env.production.example` and intentionally
 stops. The checked-in materializer owns filling every secret field; inspect the
-result without printing its values. Keep `VENDOR_PRODUCT_RELEASE_PINS_JSON={}`
-for the first healthy boot.
+result without printing its values. The `/etc/dotmac-host-id` marker is written
+atomically only after the signing key, certificate hostname and lifetime,
+final nginx configuration, and populated host environment are all present. A
+failed partial bootstrap therefore cannot authorize a deployment. Keep
+`VENDOR_PRODUCT_RELEASE_PINS_JSON={}` for the first healthy boot.
 
 ## First release
 
