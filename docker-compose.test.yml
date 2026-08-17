@@ -2,9 +2,12 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: ${TEST_DB_ADMIN_USER:-postgres}
+      POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${TEST_DB_ADMIN_PASSWORD:-postgres}
       POSTGRES_DB: ${TEST_DB_NAME:-vendor_cp_test}
+      VENDOR_DB_ADMIN_PASSWORD: admin
+      VENDOR_DB_APP_USER_PASSWORD: app
+      VENDOR_DB_PLATFORM_API_PASSWORD: platform
       # Disposable localhost-only test DB. The kernel's initial migration creates
       # app_user/platform_api/app_admin with LOGIN but no password, so TCP auth
       # would fail without trust; acceptable here — the container binds only to
@@ -12,8 +15,10 @@ services:
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
       - "${TEST_DB_PORT:-5439}:5432"
+    volumes:
+      - ./deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/001-vendor-roles.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U app_admin -d ${TEST_DB_NAME:-vendor_cp_test}"]
       interval: 2s
       timeout: 2s
       retries: 15

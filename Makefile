@@ -6,6 +6,7 @@ TEST_DB_PORT ?= 5439
 TEST_DB_NAME ?= vendor_cp_test
 TEST_DB_ADMIN_USER ?= postgres
 TEST_DB_ADMIN_PASSWORD ?= postgres
+TEST_DB_MIGRATOR_USER ?= app_admin
 
 install:  ## Install deps (kernel from Forgejo; set POETRY_HTTP_BASIC_FORGEJO_* from OpenBao)
 	poetry install
@@ -24,9 +25,9 @@ test-db-up:  ## Start disposable test Postgres and migrate (creates roles + sche
 	TEST_DB_PORT=$(TEST_DB_PORT) TEST_DB_NAME=$(TEST_DB_NAME) \
 	TEST_DB_ADMIN_USER=$(TEST_DB_ADMIN_USER) TEST_DB_ADMIN_PASSWORD=$(TEST_DB_ADMIN_PASSWORD) \
 	docker compose -f docker-compose.test.yml up -d --wait
-	# First migration runs as the cluster superuser so the kernel's initial
-	# migration can CREATE the app_user/platform_api/app_admin roles.
-	MIGRATION_DATABASE_URL=postgresql+psycopg://$(TEST_DB_ADMIN_USER):$(TEST_DB_ADMIN_PASSWORD)@$(TEST_DB_HOST):$(TEST_DB_PORT)/$(TEST_DB_NAME) \
+	# The init script creates the permanent production-shaped migrator before
+	# any kernel or module DDL. The cluster bootstrap role never runs migrations.
+	MIGRATION_DATABASE_URL=postgresql+psycopg://$(TEST_DB_MIGRATOR_USER)@$(TEST_DB_HOST):$(TEST_DB_PORT)/$(TEST_DB_NAME) \
 	poetry run python scripts/migrate.py
 
 test-db-down:  ## Stop + remove the test Postgres

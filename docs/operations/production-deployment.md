@@ -21,18 +21,23 @@ The host then performs one ordered operation:
    declaration from the versioned template while preserving every held secret
    and operator-owned value;
 2. pull the exact digest;
-3. start/verify PostgreSQL;
-4. take a host-local `pg_dump` backup;
-5. demote the first-cluster `app_admin` bootstrap superuser while retaining
-   migration-only `BYPASSRLS` and database-owner authority;
+3. generate an ephemeral verifier for the separate `postgres` cluster-bootstrap
+   role and start PostgreSQL;
+4. verify that initialization created `app_admin` as a non-superuser,
+   `BYPASSRLS` database/schema owner and removed the bootstrap verifier;
+5. take a host-local `pg_dump` backup;
 6. run `scripts/migrate.py`, the owner that composes all five lineages;
 7. replace the app and prove `/health` on the loopback port.
 
-Demotion precedes the composed migration because
-`module_database_roles.v1` fails closed when its provider is still a
-superuser. The official Postgres image creates `POSTGRES_USER` as a bootstrap
-superuser on a fresh volume, while modules require the final role contract
-before their first DDL.
+The official Postgres image creates `POSTGRES_USER=postgres` as its bootstrap
+superuser on a fresh volume. The first-cluster initializer creates the distinct
+permanent `app_admin` migrator with `NOSUPERUSER`, `BYPASSRLS`, database
+ownership, and `public` schema ownership before any kernel or module DDL, then
+removes the ephemeral bootstrap password. The deploy owner verifies that role
+and ownership contract before backup or migration because
+`module_database_roles.v1` fails closed on a superuser migrator. The bootstrap
+role never runs an application migration and its password is not retained in
+the host environment.
 
 The reconciliation allowlist contains only
 `VENDOR_DEPLOYMENT_PROFILE`. It exists because the initial host bundle

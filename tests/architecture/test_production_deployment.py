@@ -61,15 +61,25 @@ def test_production_compose_pulls_only_and_keeps_state_private() -> None:
 
     db_block = compose.split("  db:\n", 1)[1].split("  app:\n", 1)[0]
     assert "ports:" not in db_block
+    assert "POSTGRES_USER: postgres" in db_block
+    assert "POSTGRES_PASSWORD: ${VENDOR_DB_BOOTSTRAP_PASSWORD:?" in db_block
+    assert "POSTGRES_PASSWORD: ${VENDOR_DB_ADMIN_PASSWORD" not in db_block
+    assert "pg_isready -U app_admin" in db_block
 
 
 def test_database_initialization_never_embeds_passwords() -> None:
     initializer = _text("deploy/postgres/init-roles.sh")
 
+    assert "\\getenv admin_password VENDOR_DB_ADMIN_PASSWORD" in initializer
     assert "\\getenv app_user_password VENDOR_DB_APP_USER_PASSWORD" in initializer
     assert (
         "\\getenv platform_api_password VENDOR_DB_PLATFORM_API_PASSWORD" in initializer
     )
+    assert "CREATE ROLE app_admin LOGIN NOSUPERUSER BYPASSRLS" in initializer
+    assert "ALTER ROLE app_admin PASSWORD :'admin_password'" in initializer
+    assert 'ALTER DATABASE :"database_name" OWNER TO app_admin' in initializer
+    assert "ALTER SCHEMA public OWNER TO app_admin" in initializer
+    assert "ALTER ROLE postgres PASSWORD NULL" in initializer
     assert "PASSWORD :'app_user_password'" in initializer
     assert "PASSWORD :'platform_api_password'" in initializer
     assert "set -x" not in initializer
@@ -87,6 +97,7 @@ def test_platform_admin_bootstrap_uses_kernel_transaction_authority() -> None:
 
 def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> None:
     deploy = _text("scripts/deploy_production.sh")
+    compose = _text("docker-compose.production.yml")
 
     assert "docker compose" in deploy
     assert "docker compose build" not in deploy
@@ -97,11 +108,18 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     assert "SERVER_NAME=vendor-cp-prod" in deploy
 
     backup = deploy.index("pg_dump")
-    demote = deploy.index("ALTER ROLE app_admin NOSUPERUSER BYPASSRLS")
+    bootstrap_password = deploy.index("secrets.token_urlsafe")
+    start_db = deploy.index("up -d --wait db")
+    verify_roles = deploy.index("module database role contract is not satisfied")
     migrate = deploy.index("scripts/migrate.py")
     replace = deploy.index("up -d app")
-    assert backup < demote < migrate < replace
-    assert deploy.count("ALTER ROLE app_admin NOSUPERUSER BYPASSRLS") == 1
+    assert bootstrap_password < start_db < verify_roles < backup < migrate < replace
+    assert "ALTER ROLE app_admin" not in deploy
+    assert (
+        "VENDOR_DB_BOOTSTRAP_PASSWORD"
+        not in compose.split("  app:\n", 1)[1].split("  ops:\n", 1)[0]
+    )
+    assert "VENDOR_DB_BOOTSTRAP_PASSWORD" not in compose.split("  ops:\n", 1)[1]
 
 
 def test_production_environment_has_no_secret_defaults() -> None:
@@ -164,6 +182,12 @@ def test_every_test_job_runs_on_a_github_hosted_runner() -> None:
     assert workflow.count("runs-on: ubuntu-latest") == 3
     assert "DOCKER_BUILDKIT=1 docker build" in workflow
     assert "from vendor_cp.main import app" in workflow
+    assert "postgresql+psycopg://app_admin@localhost:5439/vendor_cp_test" in workflow
+    test_compose = _text("docker-compose.test.yml")
+    assert "POSTGRES_USER: postgres" in test_compose
+    assert (
+        "./deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/" in test_compose
+    )
 
 
 def test_deploy_workflow_requires_the_named_target_and_an_immutable_digest() -> None:
