@@ -97,9 +97,11 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     assert "SERVER_NAME=vendor-cp-prod" in deploy
 
     backup = deploy.index("pg_dump")
+    demote = deploy.index("ALTER ROLE app_admin NOSUPERUSER BYPASSRLS")
     migrate = deploy.index("scripts/migrate.py")
     replace = deploy.index("up -d app")
-    assert backup < migrate < replace
+    assert backup < demote < migrate < replace
+    assert deploy.count("ALTER ROLE app_admin NOSUPERUSER BYPASSRLS") == 1
 
 
 def test_production_environment_has_no_secret_defaults() -> None:

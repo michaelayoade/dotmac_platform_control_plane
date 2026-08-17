@@ -221,7 +221,8 @@ Compose project and from every product data plane:
   Linux capabilities dropped;
 - `app_user`, `platform_api`, and `app_admin` remain distinct. The official
   Postgres image bootstraps a new cluster as `app_admin`; the deploy owner
-  permanently demotes it after the first composed migration;
+  permanently demotes it after the first backup and before the first composed
+  migration, because module prerequisites refuse a superuser migrator;
 - the licence primary key is held from OpenBao path
   `secret/dotmac/licensing/signing-key`, mounted read-only, loaded at assembly
   boot, and retained in process memory. Production refuses an ephemeral issuer
