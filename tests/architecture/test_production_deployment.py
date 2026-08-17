@@ -174,8 +174,8 @@ def test_deploy_workflow_requires_the_named_target_and_an_immutable_digest() -> 
     assert "sha256:[0-9a-f]{64}" in workflow
     assert "VENDOR_PRODUCTION_KNOWN_HOSTS" in workflow
     assert "VENDOR_PRODUCTION_SSH_KEY" in workflow
-    reconcile = workflow.index("reconcile-declarations")
-    deploy = workflow.index("deploy_production_with_registry_token.sh")
+    reconcile = workflow.index("Reconcile assembly-owned host declarations")
+    deploy = workflow.index("Deploy the approved digest")
     assert reconcile < deploy
     assert "--env-template .env.production.example" in workflow
     assert "--env-file .env" in workflow
@@ -209,7 +209,7 @@ def test_deployment_adapter_includes_the_owned_secret_materializer() -> None:
     assert "secret/dotmac/licensing/signing-key" in service
     assert "production/ghcr-read" not in service
     assert "required reviewer" in operations.lower()
-    assert "remains blocked" in operations
+    assert "first production dispatch on 2026-08-17 was held at that gate" in operations
 
 
 def test_nginx_contract_routes_only_to_the_loopback_vendor_app() -> None:
