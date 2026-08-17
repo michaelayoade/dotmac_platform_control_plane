@@ -25,6 +25,27 @@ services:
       retries: 20
     networks: [vendor_backend]
 
+  manifest-init:
+    image: ${VENDOR_POSTGRES_IMAGE:-postgres:16}
+    profiles: ["ops"]
+    user: "0:0"
+    network_mode: none
+    volumes:
+      - vendor_product_manifests:/manifests:rw
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        chown 10001:10001 /manifests &&
+        chmod 0750 /manifests
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+
   app:
     image: ${VENDOR_APP_IMAGE:?Set VENDOR_APP_IMAGE to an immutable digest reference}
     env_file: .env
