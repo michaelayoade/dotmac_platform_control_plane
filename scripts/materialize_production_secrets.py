@@ -14,6 +14,7 @@ from vendor_cp.production_secrets import (
     build_host_bundle,
     client_from_environment,
     materialize_host_bundle,
+    reconcile_host_environment_declarations,
     seed_missing_records,
     sync_github_deploy_key,
     transfer_host_bundle,
@@ -47,6 +48,13 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("/root/.ssh/authorized_keys"),
     )
 
+    reconcile = subparsers.add_parser(
+        "reconcile-declarations",
+        help="atomically update only assembly-owned non-secret host declarations",
+    )
+    reconcile.add_argument("--env-template", required=True, type=Path)
+    reconcile.add_argument("--env-file", required=True, type=Path)
+
     github = subparsers.add_parser(
         "sync-github-deploy-key", help="pipe the held key into gh secret set"
     )
@@ -74,6 +82,20 @@ def main() -> int:
                 known_hosts_file=args.known_hosts,
             )
             print("production host secrets materialized")
+            return 0
+        if args.command == "reconcile-declarations":
+            if os.geteuid() != 0:
+                raise ProductionSecretError(
+                    "reconcile-declarations must run as root"
+                )
+            changed = reconcile_host_environment_declarations(
+                env_template=args.env_template,
+                env_file=args.env_file,
+            )
+            if changed:
+                print("reconciled production declarations: " + ", ".join(changed))
+            else:
+                print("production declarations already current")
             return 0
         if args.command == "sync-github-deploy-key":
             sync_github_deploy_key(
