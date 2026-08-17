@@ -26,10 +26,18 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'platform_api') THEN
         CREATE ROLE platform_api LOGIN NOSUPERUSER NOBYPASSRLS;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'outbox_dispatcher') THEN
+        CREATE ROLE outbox_dispatcher LOGIN NOSUPERUSER NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_roles WHERE rolname = 'platform_outbox_dispatcher'
+    ) THEN
+        CREATE ROLE platform_outbox_dispatcher LOGIN NOSUPERUSER NOBYPASSRLS;
+    END IF;
 END
 $roles$;
 
-ALTER ROLE app_admin NOSUPERUSER BYPASSRLS LOGIN;
+ALTER ROLE app_admin NOSUPERUSER NOCREATEROLE BYPASSRLS LOGIN;
 ALTER ROLE app_admin PASSWORD :'admin_password';
 ALTER ROLE app_user PASSWORD :'app_user_password';
 ALTER ROLE platform_api PASSWORD :'platform_api_password';

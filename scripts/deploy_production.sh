@@ -55,8 +55,8 @@ docker pull "$VENDOR_APP_IMAGE"
 compose up -d --wait db
 
 readonly ROLE_CONTRACT="$(compose exec -T db sh -c \
-    'psql --username app_admin --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT rolsuper::text || '\''|'\'' || rolbypassrls::text || '\''|'\'' || rolcanlogin::text FROM pg_roles WHERE rolname = current_user"')"
-[[ "$ROLE_CONTRACT" == "false|true|true" ]] \
+    'psql --username app_admin --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT rolsuper::text || '\''|'\'' || rolcreaterole::text || '\''|'\'' || rolbypassrls::text || '\''|'\'' || rolcanlogin::text FROM pg_roles WHERE rolname = current_user"')"
+[[ "$ROLE_CONTRACT" == "false|false|true|true" ]] \
     || die "module database role contract is not satisfied"
 readonly OWNER_CONTRACT="$(compose exec -T db sh -c \
     'psql --username app_admin --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT pg_get_userbyid(datdba) || '\''|'\'' || (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='\''public'\'') FROM pg_database WHERE datname = current_database()"')"

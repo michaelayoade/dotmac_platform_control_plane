@@ -177,10 +177,21 @@ def test_ci_cluster_rehearses_the_production_role_bootstrap(
         with server.connect() as conn:
             assert conn.execute(
                 text(
-                    "SELECT rolsuper, rolbypassrls, rolcanlogin "
+                    "SELECT rolsuper, rolcreaterole, rolbypassrls, rolcanlogin "
                     "FROM pg_roles WHERE rolname='app_admin'"
                 )
-            ).one() == (False, True, True)
+            ).one() == (False, False, True, True)
+            assert conn.execute(
+                text(
+                    "SELECT rolname, rolsuper, rolcreaterole, rolbypassrls "
+                    "FROM pg_roles WHERE rolname IN "
+                    "('outbox_dispatcher', 'platform_outbox_dispatcher') "
+                    "ORDER BY rolname"
+                )
+            ).all() == [
+                ("outbox_dispatcher", False, False, False),
+                ("platform_outbox_dispatcher", False, False, False),
+            ]
             assert conn.execute(
                 text(
                     "SELECT rolpassword IS NULL FROM pg_authid "

@@ -31,10 +31,12 @@ The host then performs one ordered operation:
 
 The official Postgres image creates `POSTGRES_USER=postgres` as its bootstrap
 superuser on a fresh volume. The first-cluster initializer creates the distinct
-permanent `app_admin` migrator with `NOSUPERUSER`, `BYPASSRLS`, database
-ownership, and `public` schema ownership before any kernel or module DDL, then
-removes the ephemeral bootstrap password. The deploy owner verifies that role
-and ownership contract before backup or migration because
+permanent `app_admin` migrator with `NOSUPERUSER`, `NOCREATEROLE`, `BYPASSRLS`,
+database ownership, and `public` schema ownership before any kernel or module
+DDL. It also creates the kernel's two narrow dispatcher login roles, so later
+kernel revisions do not need to grant cluster-wide role authority to the
+migrator, then removes the ephemeral bootstrap password. The deploy owner
+verifies the final role and ownership contract before backup or migration because
 `module_database_roles.v1` fails closed on a superuser migrator. The bootstrap
 role never runs an application migration and its password is not retained in
 the host environment.

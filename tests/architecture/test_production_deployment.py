@@ -76,6 +76,14 @@ def test_database_initialization_never_embeds_passwords() -> None:
         "\\getenv platform_api_password VENDOR_DB_PLATFORM_API_PASSWORD" in initializer
     )
     assert "CREATE ROLE app_admin LOGIN NOSUPERUSER BYPASSRLS" in initializer
+    assert "CREATE ROLE outbox_dispatcher LOGIN NOSUPERUSER NOBYPASSRLS" in initializer
+    assert (
+        "CREATE ROLE platform_outbox_dispatcher LOGIN NOSUPERUSER NOBYPASSRLS"
+        in initializer
+    )
+    assert (
+        "ALTER ROLE app_admin NOSUPERUSER NOCREATEROLE BYPASSRLS LOGIN" in initializer
+    )
     assert "ALTER ROLE app_admin PASSWORD :'admin_password'" in initializer
     assert 'ALTER DATABASE :"database_name" OWNER TO app_admin' in initializer
     assert "ALTER SCHEMA public OWNER TO app_admin" in initializer
@@ -115,6 +123,7 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     replace = deploy.index("up -d app")
     assert bootstrap_password < start_db < verify_roles < backup < migrate < replace
     assert "ALTER ROLE app_admin" not in deploy
+    assert '"false|false|true|true"' in deploy
     assert (
         "VENDOR_DB_BOOTSTRAP_PASSWORD"
         not in compose.split("  app:\n", 1)[1].split("  ops:\n", 1)[0]
