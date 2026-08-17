@@ -215,6 +215,9 @@ Compose project and from every product data plane:
 - a GitHub-hosted workflow builds the application once, publishes it to GHCR,
   and emits the immutable registry digest; the production host only pulls;
 - nginx terminates TLS and proxies to the loopback-only application port;
+- container and deploy health probes call the loopback endpoint with the
+  canonical `vendor.dotmac.io` host identity; trusted-host rejection remains
+  active for raw IP host headers;
 - PostgreSQL has no published port and its volume belongs only to the Vendor
   Compose project;
 - the application runs as UID/GID 10001 on a read-only filesystem, with all

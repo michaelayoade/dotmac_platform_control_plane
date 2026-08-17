@@ -78,6 +78,7 @@ compose --profile ops run --rm --no-deps ops scripts/migrate.py
 
 compose up -d app --wait
 curl --fail --silent --show-error --max-time 10 \
+    --header "Host: vendor.dotmac.io" \
     "http://127.0.0.1:${VENDOR_APP_PORT:-8100}/health" >/dev/null
 
 printf 'Deployed %s; pre-migration backup: %s\n' \

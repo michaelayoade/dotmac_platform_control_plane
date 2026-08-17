@@ -56,6 +56,7 @@ def test_production_compose_pulls_only_and_keeps_state_private() -> None:
     assert 'profiles: ["ops"]' in compose
     assert "no-new-privileges:true" in compose
     assert "cap_drop:" in compose and "- ALL" in compose
+    assert "headers={'Host': 'vendor.dotmac.io'}" in compose
     assert "vendor_backend:\n    internal: true" in compose
     assert 'com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"' in compose
 
@@ -124,6 +125,7 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     assert bootstrap_password < start_db < verify_roles < backup < migrate < replace
     assert "ALTER ROLE app_admin" not in deploy
     assert '"false|false|true|true"' in deploy
+    assert '--header "Host: vendor.dotmac.io"' in deploy
     assert (
         "VENDOR_DB_BOOTSTRAP_PASSWORD"
         not in compose.split("  app:\n", 1)[1].split("  ops:\n", 1)[0]

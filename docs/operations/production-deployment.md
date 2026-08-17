@@ -27,7 +27,9 @@ The host then performs one ordered operation:
    `BYPASSRLS` database/schema owner and removed the bootstrap verifier;
 5. take a host-local `pg_dump` backup;
 6. run `scripts/migrate.py`, the owner that composes all five lineages;
-7. replace the app and prove `/health` on the loopback port.
+7. replace the app and prove `/health` on the loopback port while declaring
+   `Host: vendor.dotmac.io`, so the probe passes through the same trusted-host
+   boundary as production traffic rather than weakening it for an IP-only probe.
 
 The official Postgres image creates `POSTGRES_USER=postgres` as its bootstrap
 superuser on a fresh volume. The first-cluster initializer creates the distinct
