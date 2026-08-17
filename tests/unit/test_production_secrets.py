@@ -24,6 +24,7 @@ from vendor_cp.production_secrets import (
     ProductionSecretError,
     build_host_bundle,
     materialize_host_bundle,
+    reconcile_host_environment_declarations,
     seed_missing_records,
     sync_github_deploy_key,
     transfer_host_bundle,
@@ -316,3 +317,80 @@ def test_openbao_error_does_not_disclose_response_body(
         client.read_optional(DATABASE_PATH)
 
     assert sentinel not in str(caught.value)
+
+
+def test_reconcile_updates_only_the_owned_profile_and_preserves_secrets(
+    tmp_path: Path,
+) -> None:
+    template = tmp_path / ".env.production.example"
+    env_file = tmp_path / ".env"
+    template.write_text(
+        "APP_ENV=production\n"
+        "VENDOR_DEPLOYMENT_PROFILE=production-bootstrap\n"
+        "VENDOR_DB_ADMIN_PASSWORD=\n",
+        encoding="utf-8",
+    )
+    env_file.write_text(
+        "APP_ENV=production\n"
+        "VENDOR_DEPLOYMENT_PROFILE=full\n"
+        "VENDOR_DB_ADMIN_PASSWORD=must-stay-held\n"
+        "OPERATOR_OWNED=must-stay-unchanged\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+
+    changed = reconcile_host_environment_declarations(
+        env_template=template,
+        env_file=env_file,
+    )
+
+    rendered = env_file.read_text(encoding="utf-8")
+    assert changed == ("VENDOR_DEPLOYMENT_PROFILE",)
+    assert rendered.count("VENDOR_DEPLOYMENT_PROFILE=production-bootstrap") == 1
+    assert "VENDOR_DB_ADMIN_PASSWORD=must-stay-held" in rendered
+    assert "OPERATOR_OWNED=must-stay-unchanged" in rendered
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+
+
+def test_reconcile_adds_a_missing_owned_profile_without_rendering_secrets(
+    tmp_path: Path,
+) -> None:
+    template = tmp_path / ".env.production.example"
+    env_file = tmp_path / ".env"
+    template.write_text(
+        "VENDOR_DEPLOYMENT_PROFILE=production-bootstrap\n", encoding="utf-8"
+    )
+    env_file.write_text(
+        "VENDOR_DB_ADMIN_PASSWORD=must-stay-held\n", encoding="utf-8"
+    )
+
+    reconcile_host_environment_declarations(
+        env_template=template,
+        env_file=env_file,
+    )
+
+    assert env_file.read_text(encoding="utf-8") == (
+        "VENDOR_DB_ADMIN_PASSWORD=must-stay-held\n"
+        "VENDOR_DEPLOYMENT_PROFILE=production-bootstrap\n"
+    )
+
+
+def test_reconcile_refuses_duplicate_owned_declarations(tmp_path: Path) -> None:
+    template = tmp_path / ".env.production.example"
+    env_file = tmp_path / ".env"
+    template.write_text(
+        "VENDOR_DEPLOYMENT_PROFILE=production-bootstrap\n", encoding="utf-8"
+    )
+    original = (
+        "VENDOR_DEPLOYMENT_PROFILE=full\n"
+        "VENDOR_DEPLOYMENT_PROFILE=production-bootstrap\n"
+    )
+    env_file.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ProductionSecretError, match="repeats"):
+        reconcile_host_environment_declarations(
+            env_template=template,
+            env_file=env_file,
+        )
+
+    assert env_file.read_text(encoding="utf-8") == original
