@@ -53,18 +53,20 @@ compose exec -T db sh -c \
     > "$BACKUP_TMP"
 mv "$BACKUP_TMP" "$BACKUP_PATH"
 
-# This is the one composed migration owner: kernel, Vendor, Release Catalog,
-# and Entitlement Allocation advance together before the app is replaced.
-compose --profile ops run --rm --no-deps ops scripts/migrate.py
-
 # The official Postgres image needs app_admin as its bootstrap superuser on a
-# new volume. Once the initial migration has created/granted every runtime
-# role, demote it permanently while retaining the migration-only RLS bypass.
+# new volume. The module_database_roles.v1 prerequisite explicitly refuses a
+# superuser migrator, so demote it after the first backup and BEFORE any module
+# lineage verifies that provider effect. Database ownership retains CREATE;
+# BYPASSRLS retains the narrow migration requirement.
 if [[ "$(compose exec -T db sh -c \
     'psql --username app_admin --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT rolsuper FROM pg_roles WHERE rolname = current_user"')" == "t" ]]; then
     compose exec -T db sh -c \
         'exec psql --username app_admin --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 --command "ALTER ROLE app_admin NOSUPERUSER BYPASSRLS"'
 fi
+
+# This is the one composed migration owner: kernel, Vendor, Release Catalog,
+# Entitlement Allocation, and Approvals advance before the app is replaced.
+compose --profile ops run --rm --no-deps ops scripts/migrate.py
 
 compose up -d app --wait
 curl --fail --silent --show-error --max-time 10 \

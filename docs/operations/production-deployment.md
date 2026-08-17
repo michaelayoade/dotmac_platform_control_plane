@@ -23,9 +23,16 @@ The host then performs one ordered operation:
 2. pull the exact digest;
 3. start/verify PostgreSQL;
 4. take a host-local `pg_dump` backup;
-5. run `scripts/migrate.py`, the owner that composes all five lineages;
-6. demote the first-cluster `app_admin` bootstrap superuser;
+5. demote the first-cluster `app_admin` bootstrap superuser while retaining
+   migration-only `BYPASSRLS` and database-owner authority;
+6. run `scripts/migrate.py`, the owner that composes all five lineages;
 7. replace the app and prove `/health` on the loopback port.
+
+Demotion precedes the composed migration because
+`module_database_roles.v1` fails closed when its provider is still a
+superuser. The official Postgres image creates `POSTGRES_USER` as a bootstrap
+superuser on a fresh volume, while modules require the final role contract
+before their first DDL.
 
 The reconciliation allowlist contains only
 `VENDOR_DEPLOYMENT_PROFILE`. It exists because the initial host bundle

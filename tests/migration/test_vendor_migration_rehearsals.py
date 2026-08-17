@@ -168,6 +168,39 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     }
 
 
+def test_fresh_cluster_superuser_is_demoted_before_module_ddl(
+    scratch_db: str,
+    postgres_url: str,
+) -> None:
+    """Rehearse the official-image first-cluster role transition.
+
+    PostgreSQL creates POSTGRES_USER as a superuser. The kernel provider can
+    create its base tables in that state, but every module must refuse the
+    claimed module_database_roles.v1 effect until the deploy owner demotes
+    app_admin. The failed composed upgrade is transactional and retryable.
+    """
+    server = create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+    try:
+        with server.begin() as conn:
+            conn.execute(text("ALTER ROLE app_admin SUPERUSER"))
+        with pytest.raises(
+            RuntimeError,
+            match="role 'app_admin' must have rolsuper=False",
+        ):
+            _upgrade(scratch_db, "heads")
+        assert not _table_exists(scratch_db, "vendor_accounts")
+
+        with server.begin() as conn:
+            conn.execute(text("ALTER ROLE app_admin NOSUPERUSER BYPASSRLS"))
+        _upgrade(scratch_db, "heads")
+        assert _table_exists(scratch_db, "vendor_accounts")
+        assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    finally:
+        with server.begin() as conn:
+            conn.execute(text("ALTER ROLE app_admin NOSUPERUSER BYPASSRLS"))
+        server.dispose()
+
+
 def test_alembic_env_installs_the_vendor_prerequisite_bindings(
     scratch_db: str,
 ) -> None:
