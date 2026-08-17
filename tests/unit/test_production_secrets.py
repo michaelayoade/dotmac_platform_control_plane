@@ -360,9 +360,7 @@ def test_reconcile_adds_a_missing_owned_profile_without_rendering_secrets(
     template.write_text(
         "VENDOR_DEPLOYMENT_PROFILE=production-bootstrap\n", encoding="utf-8"
     )
-    env_file.write_text(
-        "VENDOR_DB_ADMIN_PASSWORD=must-stay-held\n", encoding="utf-8"
-    )
+    env_file.write_text("VENDOR_DB_ADMIN_PASSWORD=must-stay-held\n", encoding="utf-8")
 
     reconcile_host_environment_declarations(
         env_template=template,
