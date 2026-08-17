@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import tempfile
 import urllib.error
@@ -40,6 +41,8 @@ SECRET_FIELDS: Mapping[str, frozenset[str]] = {
         {"private_key_openssh", "public_key_openssh", "username"}
     ),
 }
+
+OWNED_ENV_DECLARATIONS = frozenset({"VENDOR_DEPLOYMENT_PROFILE"})
 
 ENV_SECRET_KEYS = frozenset(
     {
@@ -429,6 +432,77 @@ def _render_env(template: str, bundle: HostSecretBundle) -> str:
             "production env template is missing required secret keys"
         )
     return "\n".join(rendered) + "\n"
+
+
+def reconcile_host_environment_declarations(
+    *,
+    env_template: Path,
+    env_file: Path,
+) -> tuple[str, ...]:
+    """Reconcile assembly-owned, non-secret declarations without touching secrets.
+
+    The OpenBao materializer renders the complete file only when it holds the
+    complete secret bundle. Ordinary deploys hold no such bundle, but a checked-in
+    non-secret declaration may still change between releases. This seam updates
+    only the exact allowlist above, refuses duplicate declarations, preserves every
+    other byte-bearing value, and atomically retains the file's mode and owner.
+    """
+    if not env_template.is_file() or env_template.is_symlink():
+        raise ProductionSecretError("production env template must be a regular file")
+    if not env_file.is_file() or env_file.is_symlink():
+        raise ProductionSecretError("production env file must be a regular file")
+
+    template_lines = env_template.read_text(encoding="utf-8").splitlines()
+    current_lines = env_file.read_text(encoding="utf-8").splitlines()
+    desired: dict[str, str] = {}
+    for key in OWNED_ENV_DECLARATIONS:
+        values = [
+            line.partition("=")[2]
+            for line in template_lines
+            if line.partition("=")[:2] == (key, "=")
+        ]
+        if len(values) != 1:
+            raise ProductionSecretError(
+                f"production env template must declare {key} exactly once"
+            )
+        if not values[0] or "\x00" in values[0] or "\r" in values[0]:
+            raise ProductionSecretError(
+                f"production env template has an unsafe value for {key}"
+            )
+        desired[key] = values[0]
+
+    positions: dict[str, list[int]] = {key: [] for key in OWNED_ENV_DECLARATIONS}
+    for index, line in enumerate(current_lines):
+        key, separator, _value = line.partition("=")
+        if separator and key in positions:
+            positions[key].append(index)
+    repeated = sorted(key for key, found in positions.items() if len(found) > 1)
+    if repeated:
+        raise ProductionSecretError(
+            f"production env file repeats owned declarations: {', '.join(repeated)}"
+        )
+
+    changed: list[str] = []
+    for key in sorted(OWNED_ENV_DECLARATIONS):
+        replacement = f"{key}={desired[key]}"
+        found = positions[key]
+        if found:
+            if current_lines[found[0]] != replacement:
+                current_lines[found[0]] = replacement
+                changed.append(key)
+        else:
+            current_lines.append(replacement)
+            changed.append(key)
+
+    if changed:
+        metadata = env_file.stat()
+        _atomic_write(
+            env_file,
+            "\n".join(current_lines) + "\n",
+            mode=stat.S_IMODE(metadata.st_mode),
+            owner=(metadata.st_uid, metadata.st_gid),
+        )
+    return tuple(changed)
 
 
 def materialize_host_bundle(
