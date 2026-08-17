@@ -17,12 +17,21 @@ the named `vendor-cp-prod` target, and transfers only the deployment adapter.
 
 The host then performs one ordered operation:
 
-1. pull the exact digest;
-2. start/verify PostgreSQL;
-3. take a host-local `pg_dump` backup;
-4. run `scripts/migrate.py`, the owner that composes all five lineages;
-5. demote the first-cluster `app_admin` bootstrap superuser;
-6. replace the app and prove `/health` on the loopback port.
+1. atomically reconcile the exact assembly-owned, non-secret deployment-profile
+   declaration from the versioned template while preserving every held secret
+   and operator-owned value;
+2. pull the exact digest;
+3. start/verify PostgreSQL;
+4. take a host-local `pg_dump` backup;
+5. run `scripts/migrate.py`, the owner that composes all five lineages;
+6. demote the first-cluster `app_admin` bootstrap superuser;
+7. replace the app and prove `/health` on the loopback port.
+
+The reconciliation allowlist contains only
+`VENDOR_DEPLOYMENT_PROFILE`. It exists because the initial host bundle
+predated `production-bootstrap`; re-rendering the complete file would require
+OpenBao custody and a broad `sed` would risk secrets. The service refuses
+duplicates, changes no other declaration, and preserves mode and ownership.
 
 The database, product-manifest documents, `.env`, and signing key stay on the
 host. The app image and Postgres image are immutable digest references. Neither
@@ -99,9 +108,9 @@ Prepare the GitHub `production` environment with:
 - required reviewers enabled.
 
 Verify the required reviewer in GitHub's live environment settings before any
-dispatch. On 2026-08-14, GitHub rejected that protection for the repository's
-current plan, so production deployment remains blocked until GitHub reports an
-effective human reviewer gate. A protected-branch policy alone is insufficient.
+dispatch. The first production dispatch on 2026-08-17 was held at that gate and
+released only after the connected owner approved the exact main SHA, immutable
+digest, and named target. A protected-branch policy alone is insufficient.
 
 After the signing key has been held at its canonical host path, transfer only
 the versioned bootstrap script, nginx files, and environment example to a
