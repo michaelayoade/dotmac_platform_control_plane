@@ -226,10 +226,12 @@ def test_nginx_contract_routes_only_to_the_loopback_vendor_app() -> None:
     )
 
 
-def test_host_bootstrap_requires_held_key_material_and_an_explicit_email() -> None:
+def test_host_bootstrap_requires_held_key_and_a_registered_certbot_contact() -> None:
     bootstrap = _text("scripts/bootstrap_production_host.sh")
 
     assert "CERTBOT_EMAIL" in bootstrap
+    assert "certbot show_account --non-interactive" in bootstrap
+    assert "--register-unsafely-without-email" not in bootstrap
     assert "vendor-cp-prod" in bootstrap
     assert (
         "/run/secrets/dotmac/vendor-control-plane/licence-signing/primary.key"
