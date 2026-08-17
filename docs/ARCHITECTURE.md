@@ -218,6 +218,10 @@ Compose project and from every product data plane:
 - container and deploy health probes call the loopback endpoint with the
   canonical `vendor.dotmac.io` host identity; trusted-host rejection remains
   active for raw IP host headers;
+- the deploy owner reconciles the named product-manifest volume to UID/GID
+  10001 and mode `0750` through a networkless, read-only-root initializer with
+  only `CHOWN`/`FOWNER`; the app mounts it read-only and only one-off ops mounts
+  it read-write;
 - PostgreSQL has no published port and its volume belongs only to the Vendor
   Compose project;
 - the application runs as UID/GID 10001 on a read-only filesystem, with all

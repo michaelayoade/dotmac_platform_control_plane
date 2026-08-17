@@ -112,3 +112,24 @@ jobs:
             --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
             dotmac-vendor-control-plane:ci \
             -c "from vendor_cp.main import app; assert app is not None"
+      - name: Rehearse production manifest-volume ownership
+        env:
+          VENDOR_APP_IMAGE: dotmac-vendor-control-plane:ci
+          VENDOR_DB_BOOTSTRAP_PASSWORD: bootstrap-placeholder
+          VENDOR_DB_ADMIN_PASSWORD: admin-placeholder
+          VENDOR_DB_APP_USER_PASSWORD: app-placeholder
+          VENDOR_DB_PLATFORM_API_PASSWORD: platform-placeholder
+          VENDOR_LICENCE_SIGNING_KEY_HOST_FILE: /tmp/not-used
+        run: |
+          set -euo pipefail
+          volume=dotmac_vendor_control_plane_vendor_product_manifests
+          cleanup() {
+            docker volume rm "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker compose -f docker-compose.production.yml \
+            --profile ops run --rm --no-deps manifest-init
+          observed="$(docker run --rm --network none \
+            --volume "$volume:/manifests:ro" \
+            postgres:16 stat -c '%u:%g %a' /manifests)"
+          test "$observed" = "10001:10001 750"

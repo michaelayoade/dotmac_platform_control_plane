@@ -53,6 +53,7 @@ compose() {
 
 docker pull "$VENDOR_APP_IMAGE"
 compose up -d --wait db
+compose --profile ops run --rm --no-deps manifest-init
 
 readonly ROLE_CONTRACT="$(compose exec -T db sh -c \
     'psql --username app_admin --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT rolsuper::text || '\''|'\'' || rolcreaterole::text || '\''|'\'' || rolbypassrls::text || '\''|'\'' || rolcanlogin::text FROM pg_roles WHERE rolname = current_user"')"

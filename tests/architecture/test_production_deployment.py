@@ -60,6 +60,18 @@ def test_production_compose_pulls_only_and_keeps_state_private() -> None:
     assert "vendor_backend:\n    internal: true" in compose
     assert 'com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"' in compose
 
+    manifest_init = compose.split("  manifest-init:\n", 1)[1].split("  app:\n", 1)[0]
+    assert 'profiles: ["ops"]' in manifest_init
+    assert 'user: "0:0"' in manifest_init
+    assert "network_mode: none" in manifest_init
+    assert "vendor_product_manifests:/manifests:rw" in manifest_init
+    assert "chown 10001:10001 /manifests" in manifest_init
+    assert "chmod 0750 /manifests" in manifest_init
+    assert "cap_drop:" in manifest_init and "- ALL" in manifest_init
+    assert "cap_add:" in manifest_init and "- CHOWN" in manifest_init
+    assert "- FOWNER" in manifest_init
+    assert "no-new-privileges:true" in manifest_init
+
     db_block = compose.split("  db:\n", 1)[1].split("  app:\n", 1)[0]
     assert "ports:" not in db_block
     assert "POSTGRES_USER: postgres" in db_block
@@ -119,10 +131,19 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     backup = deploy.index("pg_dump")
     bootstrap_password = deploy.index("secrets.token_urlsafe")
     start_db = deploy.index("up -d --wait db")
+    initialize_manifests = deploy.index("run --rm --no-deps manifest-init")
     verify_roles = deploy.index("module database role contract is not satisfied")
     migrate = deploy.index("scripts/migrate.py")
     replace = deploy.index("up -d app")
-    assert bootstrap_password < start_db < verify_roles < backup < migrate < replace
+    assert (
+        bootstrap_password
+        < start_db
+        < initialize_manifests
+        < verify_roles
+        < backup
+        < migrate
+        < replace
+    )
     assert "ALTER ROLE app_admin" not in deploy
     assert '"false|false|true|true"' in deploy
     assert '--header "Host: vendor.dotmac.io"' in deploy
@@ -199,6 +220,15 @@ def test_every_test_job_runs_on_a_github_hosted_runner() -> None:
     assert (
         "./deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/" in test_compose
     )
+
+
+def test_hosted_ci_executes_the_manifest_volume_initializer() -> None:
+    workflow = _text(".github/workflows/ci.yml")
+
+    assert "Rehearse production manifest-volume ownership" in workflow
+    assert "run --rm --no-deps manifest-init" in workflow
+    assert "postgres:16 stat -c '%u:%g %a' /manifests" in workflow
+    assert 'test "$observed" = "10001:10001 750"' in workflow
 
 
 def test_deploy_workflow_requires_the_named_target_and_an_immutable_digest() -> None:

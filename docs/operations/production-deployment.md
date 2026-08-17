@@ -23,11 +23,13 @@ The host then performs one ordered operation:
 2. pull the exact digest;
 3. generate an ephemeral verifier for the separate `postgres` cluster-bootstrap
    role and start PostgreSQL;
-4. verify that initialization created `app_admin` as a non-superuser,
+4. reconcile the product-manifest volume to UID/GID 10001 and mode `0750`
+   through the isolated, capability-limited `manifest-init` service;
+5. verify that initialization created `app_admin` as a non-superuser,
    `BYPASSRLS` database/schema owner and removed the bootstrap verifier;
-5. take a host-local `pg_dump` backup;
-6. run `scripts/migrate.py`, the owner that composes all five lineages;
-7. replace the app and prove `/health` on the loopback port while declaring
+6. take a host-local `pg_dump` backup;
+7. run `scripts/migrate.py`, the owner that composes all five lineages;
+8. replace the app and prove `/health` on the loopback port while declaring
    `Host: vendor.dotmac.io`, so the probe passes through the same trusted-host
    boundary as production traffic rather than weakening it for an IP-only probe.
 
@@ -52,7 +54,9 @@ duplicates, changes no other declaration, and preserves mode and ownership.
 The database, product-manifest documents, `.env`, and signing key stay on the
 host. The app image and Postgres image are immutable digest references. Neither
 PostgreSQL nor the application port is publicly bound; nginx is the only public
-entry point.
+entry point. The named product-manifest volume is initialized by the deployment
+owner before the app starts: the long-running app mounts it read-only, while the
+one-off ops profile is the only UID 10001 process that mounts it read-write.
 
 ## One-time host contract
 
