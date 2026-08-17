@@ -220,9 +220,15 @@ Compose project and from every product data plane:
 - the application runs as UID/GID 10001 on a read-only filesystem, with all
   Linux capabilities dropped;
 - `app_user`, `platform_api`, and `app_admin` remain distinct. The official
-  Postgres image bootstraps a new cluster as `app_admin`; the deploy owner
-  permanently demotes it after the first backup and before the first composed
-  migration, because module prerequisites refuse a superuser migrator;
+  Postgres image bootstraps a new cluster through a separate `postgres`
+  superuser with an ephemeral verifier. Its first-cluster initializer creates
+  permanent `app_admin` directly as `NOSUPERUSER NOCREATEROLE BYPASSRLS`,
+  creates the kernel's two narrow dispatcher login roles, transfers database
+  and `public` schema ownership to the migrator, and removes the bootstrap
+  verifier before the temporary server stops. The deploy owner verifies that
+  final contract before backup or composed migration; the bootstrap role never
+  owns or runs application migrations and `app_admin` never gains cluster-wide
+  role-creation authority;
 - the licence primary key is held from OpenBao path
   `secret/dotmac/licensing/signing-key`, mounted read-only, loaded at assembly
   boot, and retained in process memory. Production refuses an ephemeral issuer

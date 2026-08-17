@@ -168,36 +168,55 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     }
 
 
-def test_fresh_cluster_superuser_is_demoted_before_module_ddl(
-    scratch_db: str,
+def test_ci_cluster_rehearses_the_production_role_bootstrap(
     postgres_url: str,
 ) -> None:
-    """Rehearse the official-image first-cluster role transition.
-
-    PostgreSQL creates POSTGRES_USER as a superuser. The kernel provider can
-    create its base tables in that state, but every module must refuse the
-    claimed module_database_roles.v1 effect until the deploy owner demotes
-    app_admin. The failed composed upgrade is transactional and retryable.
-    """
-    server = create_engine(postgres_url, isolation_level="AUTOCOMMIT")
+    """CI starts the same separate bootstrap/migrator roles as production."""
+    server = create_engine(postgres_url)
     try:
-        with server.begin() as conn:
-            conn.execute(text("ALTER ROLE app_admin SUPERUSER"))
-        with pytest.raises(
-            RuntimeError,
-            match="role 'app_admin' must have rolsuper=False",
-        ):
-            _upgrade(scratch_db, "heads")
-        assert not _table_exists(scratch_db, "vendor_accounts")
-
-        with server.begin() as conn:
-            conn.execute(text("ALTER ROLE app_admin NOSUPERUSER BYPASSRLS"))
-        _upgrade(scratch_db, "heads")
-        assert _table_exists(scratch_db, "vendor_accounts")
-        assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+        with server.connect() as conn:
+            assert conn.execute(
+                text(
+                    "SELECT rolsuper, rolcreaterole, rolbypassrls, rolcanlogin "
+                    "FROM pg_roles WHERE rolname='app_admin'"
+                )
+            ).one() == (False, False, True, True)
+            assert conn.execute(
+                text(
+                    "SELECT rolname, rolsuper, rolcreaterole, rolbypassrls "
+                    "FROM pg_roles WHERE rolname IN "
+                    "('outbox_dispatcher', 'platform_outbox_dispatcher') "
+                    "ORDER BY rolname"
+                )
+            ).all() == [
+                ("outbox_dispatcher", False, False, False),
+                ("platform_outbox_dispatcher", False, False, False),
+            ]
+            assert conn.execute(
+                text(
+                    "SELECT rolpassword IS NULL FROM pg_authid "
+                    "WHERE rolname='postgres'"
+                )
+            ).scalar_one()
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT pg_get_userbyid(datdba) FROM pg_database "
+                        "WHERE datname=current_database()"
+                    )
+                ).scalar_one()
+                == "app_admin"
+            )
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT pg_get_userbyid(nspowner) FROM pg_namespace "
+                        "WHERE nspname='public'"
+                    )
+                ).scalar_one()
+                == "app_admin"
+            )
     finally:
-        with server.begin() as conn:
-            conn.execute(text("ALTER ROLE app_admin NOSUPERUSER BYPASSRLS"))
         server.dispose()
 
 

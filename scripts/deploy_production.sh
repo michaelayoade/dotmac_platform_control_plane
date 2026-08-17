@@ -34,6 +34,16 @@ grep -Fqx 'VENDOR_DEPLOYMENT_PROFILE=production-bootstrap' "$ENV_FILE" \
 [[ "$(tr -d '\r\n' < "$HOST_ID_FILE")" == "$EXPECTED_HOST_ID" ]] \
     || die "host identity mismatch"
 
+# The official image requires a bootstrap password even though that role is
+# not the application migrator. Generate it per deploy, pass it only to the DB
+# service, and let first-cluster initialization remove the stored verifier.
+readonly VENDOR_DB_BOOTSTRAP_PASSWORD="$(
+    python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+)"
+[[ "$VENDOR_DB_BOOTSTRAP_PASSWORD" =~ ^[A-Za-z0-9_-]{64}$ ]] \
+    || die "could not generate the database bootstrap credential"
+export VENDOR_DB_BOOTSTRAP_PASSWORD
+
 readonly VENDOR_APP_IMAGE="ghcr.io/michaelayoade/dotmac_vendor_control_plane@${DIGEST}"
 export VENDOR_APP_IMAGE
 
@@ -44,6 +54,15 @@ compose() {
 docker pull "$VENDOR_APP_IMAGE"
 compose up -d --wait db
 
+readonly ROLE_CONTRACT="$(compose exec -T db sh -c \
+    'psql --username app_admin --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT rolsuper::text || '\''|'\'' || rolcreaterole::text || '\''|'\'' || rolbypassrls::text || '\''|'\'' || rolcanlogin::text FROM pg_roles WHERE rolname = current_user"')"
+[[ "$ROLE_CONTRACT" == "false|false|true|true" ]] \
+    || die "module database role contract is not satisfied"
+readonly OWNER_CONTRACT="$(compose exec -T db sh -c \
+    'psql --username app_admin --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT pg_get_userbyid(datdba) || '\''|'\'' || (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='\''public'\'') FROM pg_database WHERE datname = current_database()"')"
+[[ "$OWNER_CONTRACT" == "app_admin|app_admin" ]] \
+    || die "module database ownership contract is not satisfied"
+
 mkdir -p "$BACKUP_DIR"
 readonly TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 readonly BACKUP_PATH="${BACKUP_DIR}/vendor-control-plane-${TIMESTAMP}.dump"
@@ -52,17 +71,6 @@ compose exec -T db sh -c \
     'exec pg_dump --username app_admin --dbname "$POSTGRES_DB" --format custom' \
     > "$BACKUP_TMP"
 mv "$BACKUP_TMP" "$BACKUP_PATH"
-
-# The official Postgres image needs app_admin as its bootstrap superuser on a
-# new volume. The module_database_roles.v1 prerequisite explicitly refuses a
-# superuser migrator, so demote it after the first backup and BEFORE any module
-# lineage verifies that provider effect. Database ownership retains CREATE;
-# BYPASSRLS retains the narrow migration requirement.
-if [[ "$(compose exec -T db sh -c \
-    'psql --username app_admin --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT rolsuper FROM pg_roles WHERE rolname = current_user"')" == "t" ]]; then
-    compose exec -T db sh -c \
-        'exec psql --username app_admin --dbname "$POSTGRES_DB" --set ON_ERROR_STOP=1 --command "ALTER ROLE app_admin NOSUPERUSER BYPASSRLS"'
-fi
 
 # This is the one composed migration owner: kernel, Vendor, Release Catalog,
 # Entitlement Allocation, and Approvals advance before the app is replaced.

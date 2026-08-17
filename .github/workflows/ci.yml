@@ -81,7 +81,7 @@ jobs:
       - name: Start disposable Postgres + migrate
         run: |
           docker compose -f docker-compose.test.yml up -d --wait
-          MIGRATION_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test \
+          MIGRATION_DATABASE_URL=postgresql+psycopg://app_admin@localhost:5439/vendor_cp_test \
             poetry run python scripts/migrate.py
       - name: Migration rehearsals + replay concurrency
         env:
