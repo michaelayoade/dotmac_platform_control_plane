@@ -92,6 +92,17 @@ jobs:
             src/vendor_cp/production_secrets.py \
             "$remote:$TARGET_DIR/"
 
+      - name: Reconcile assembly-owned host declarations
+        run: |
+          set -euo pipefail
+          remote="${TARGET_USER}@${TARGET_HOST}"
+          ssh -i "$HOME/.ssh/vendor-production" "$remote" \
+            "cd '$TARGET_DIR' && \
+              env PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
+                reconcile-declarations \
+                --env-template .env.production.example \
+                --env-file .env"
+
       - name: Deploy the approved digest
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
