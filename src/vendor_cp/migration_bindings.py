@@ -58,9 +58,22 @@ from dotmac_kernel.prerequisites import (
 KERNEL_ROOT_REVISION: Final[str] = "0001_initial_tenant_schema"
 
 ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
+    # Keep the declaration in the canonical prerequisite-name order returned by
+    # `installed_bindings()`. Order is not semantic, but one stable order makes
+    # the installed graph and this checked-in declaration directly comparable.
+    PrerequisiteBinding(
+        prerequisite=IDEMPOTENCY_LEDGER_V1.name,
+        provider_revision="0018_idempotency_one_owner",
+        provider_owner="kernel",
+    ),
     PrerequisiteBinding(
         prerequisite=MODULE_DATABASE_ROLES_V1.name,
         provider_revision=KERNEL_ROOT_REVISION,
+        provider_owner="kernel",
+    ),
+    PrerequisiteBinding(
+        prerequisite=PLATFORM_AUDIT_LOG_V1.name,
+        provider_revision="0026_platform_audit_log",
         provider_owner="kernel",
     ),
     # Bound because it is TRUE, not because anything here wants a tenant plane.
@@ -70,16 +83,6 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
     PrerequisiteBinding(
         prerequisite=TENANT_SCOPE_CATALOG_V1.name,
         provider_revision=KERNEL_ROOT_REVISION,
-        provider_owner="kernel",
-    ),
-    PrerequisiteBinding(
-        prerequisite=IDEMPOTENCY_LEDGER_V1.name,
-        provider_revision="0018_idempotency_one_owner",
-        provider_owner="kernel",
-    ),
-    PrerequisiteBinding(
-        prerequisite=PLATFORM_AUDIT_LOG_V1.name,
-        provider_revision="0026_platform_audit_log",
         provider_owner="kernel",
     ),
 )

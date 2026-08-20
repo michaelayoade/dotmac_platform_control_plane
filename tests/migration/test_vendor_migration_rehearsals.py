@@ -158,15 +158,16 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     #
     # `alembic_version` holds current heads only, and a `depends_on` edge makes
     # its target an ANCESTOR of the depending revision rather than a head in its
-    # own right. `v012` depends on `ap_0001_approvals` and `v014` on
-    # `ea_0001_allocations`, so both module revisions — while genuinely applied —
-    # stop being version ROWS once the vendor lineage reaches them.
+    # own right. `v012` depends on `ap_0001_approvals`, `v014` on
+    # `ea_0001_allocations`, and `v015` on `cg_0001_agreements`. Commercial
+    # Agreements in turn depends on kernel `0018` and `0026`, so the current
+    # kernel head is an ancestor too. All four revisions are genuinely applied;
+    # none remains a version ROW once the Vendor lineage reaches v015.
     #
     # They are still static heads, and `test_six_head_topology` asserts all six
     # through `script.get_heads()`. Listing them here as well would report them
     # missing on a perfectly complete database.
     assert _versions(scratch_db) == {
-        KERNEL_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -404,7 +405,6 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _versions(scratch_db) == {
-        KERNEL_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
@@ -450,7 +450,6 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
         == 1
     )
     assert _versions(scratch_db) == {
-        KERNEL_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
     }
