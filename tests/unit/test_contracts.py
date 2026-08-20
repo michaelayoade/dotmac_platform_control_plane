@@ -1,21 +1,21 @@
-"""Unit tests for ContractService (SQLite) — the design's acceptance cases.
-
-Proves: submit rejects an undeclared capability (WS1), submit freezes an immutable
-priced snapshot with exact Money, approval is separate from activation, activation
-is a separate rule-driven command that emits `contract.activated` and writes NO
-cross-plane state, and transitions are idempotent + atomic with their platform
-outbox event. See docs/design/contract-service.md.
-"""
+"""Vendor's typed seams into Commercial Agreements and Approvals."""
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from dotmac_approvals import SelfApprovalRefused
-from dotmac_entitlement_allocation import UndeclaredCapabilityError
+from dotmac_commercial_agreements import (
+    AGREEMENT_ACTIVATED_V1,
+    AGREEMENT_APPROVED_V1,
+    AGREEMENT_PROPOSED_V1,
+    AgreementError,
+    AgreementStatus,
+    UndeclaredCapabilityError,
+)
 from dotmac_kernel import ConflictError, NotFoundError
 from dotmac_kernel.entitlements import TenantEntitlementGrant
 from dotmac_kernel.messaging import PlatformOutboxEvent
@@ -24,43 +24,42 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import adapter as approvals
-from vendor_cp.contracts import service
-from vendor_cp.contracts.models import Contract, ContractStatus
+from vendor_cp.contracts import adapter as agreements
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
+
+PRODUCT = "dotmac-sub"
 
 
 @pytest.fixture
 def db() -> Iterator[Session]:
     engine = create_test_engine()
     try:
-        with isolated_session(engine) as s:
-            yield s
+        with isolated_session(engine) as session:
+            yield session
     finally:
         engine.dispose()
 
 
 def _catalogue(*codes: str) -> ProductCapabilityCatalogues:
-    return ProductCapabilityCatalogues.from_capabilities({"dotmac-sub": tuple(codes)})
+    return ProductCapabilityCatalogues.from_capabilities({PRODUCT: tuple(codes)})
 
 
 def _offer(
     db: Session,
     *,
-    code: str,
-    ver: int,
-    caps: list[str],
-    amount: str,
-    product_code: str = "dotmac-sub",
+    product_code: str = PRODUCT,
+    code: str = "off",
+    amount: str = "19.99",
 ) -> None:
     db.add(
         OfferVersion(
             product_code=product_code,
             offer_code=code,
-            version=ver,
+            version=1,
             amount=amount,
             currency_code="USD",
-            capability_codes=caps,
+            capability_codes=["cap.a"],
         )
     )
     db.flush()
@@ -69,59 +68,82 @@ def _offer(
 def _draft(
     db: Session,
     *,
-    cap: str = "cap.a",
-    offer_code: str = "off",
-    ver: int = 1,
-    product_code: str = "dotmac-sub",
-):
-    return service.create_draft(
+    product_code: str = PRODUCT,
+    catalogue: ProductCapabilityCatalogues | None = None,
+) -> agreements.ContractView:
+    return agreements.create_draft(
         db,
-        service.CreateDraftCommand(
-            command_id=f"d-{uuid.uuid4()}",
+        agreements.CreateDraftCommand(
+            command_id=f"draft-{uuid.uuid4()}",
+            reference=f"AGR-{uuid.uuid4()}",
             product_code=product_code,
-            customer_ref="cust-1",
-            legal_entity="Dotmac Ltd",
-            currency_code="USD",
+            counterparty_ref="counterparty-1",
+            agreement_type="software_subscription",
             term_start=date(2026, 1, 1),
             term_end=date(2026, 12, 31),
-            lines=(
-                service.LineInput(
-                    offer_code=offer_code, offer_version=ver, capability_code=cap
-                ),
-            ),
+            lines=(agreements.LineInput("off", 1, "cap.a"),),
         ),
+        catalogues=catalogue or _catalogue("cap.a"),
     )
 
 
-def _policy(db: Session) -> None:
-    """Publish `two_person` v1 — a stable command id, so calling this again in the
-    same test REPLAYS rather than colliding with the immutable revision."""
+def _policy(db: Session, *, quorum: int = 1) -> None:
     approvals.publish_policy_version(
         db,
         approvals.PublishPolicyCommand(
-            command_id="pol-two_person-1",
-            policy_code="two_person",
+            command_id=f"policy-{uuid.uuid4()}",
+            policy_code="commercial",
             version=1,
-            quorum=2,
+            quorum=quorum,
             allow_self_approval=False,
         ),
     )
 
 
-def _submit(db: Session, cid, catalogue, *, submitter=None):
-    # The policy must exist BEFORE submit: submit opens the approval request
-    # against that exact revision, so publishing afterwards would be too late.
+def _propose(
+    db: Session,
+    agreement_id: uuid.UUID,
+    *,
+    requested_by: uuid.UUID | None = None,
+) -> agreements.ContractView:
     _policy(db)
-    return service.submit(
+    return agreements.propose(
         db,
-        service.SubmitCommand(
-            command_id=f"s-{uuid.uuid4()}",
-            contract_id=cid,
-            approval_policy_code="two_person",
+        agreements.ProposeCommand(
+            command_id=f"propose-{uuid.uuid4()}",
+            agreement_id=agreement_id,
+            approval_policy_code="commercial",
             approval_policy_version=1,
-            submitter_id=submitter or uuid.uuid4(),
+            requested_by=requested_by or uuid.uuid4(),
         ),
-        catalogues=catalogue,
+        catalogues=_catalogue("cap.a"),
+    )
+
+
+def _decide(db: Session, proposed: agreements.ContractView, actor: uuid.UUID) -> None:
+    assert proposed.approval_request_id is not None
+    assert proposed.content_hash is not None
+    approvals.record_decision(
+        db,
+        approvals.RecordDecisionCommand(
+            command_id=f"decision-{uuid.uuid4()}",
+            request_id=proposed.approval_request_id,
+            approver_id=actor,
+            content_hash=proposed.content_hash,
+        ),
+    )
+
+
+def _approve(db: Session, proposed: agreements.ContractView) -> agreements.ContractView:
+    assert proposed.approval_request_id is not None
+    _decide(db, proposed, uuid.uuid4())
+    return agreements.approve(
+        db,
+        agreements.ApprovalCommand(
+            command_id=f"approve-{uuid.uuid4()}",
+            agreement_id=proposed.id,
+            approval_request_id=proposed.approval_request_id,
+        ),
     )
 
 
@@ -136,249 +158,200 @@ def _events(db: Session, event_type: str) -> int:
     )
 
 
-def _approve_quorum(db: Session, contract_id, content_hash: str | None) -> None:
-    """Reach the published quorum on the contract's OWN approval request.
+def test_draft_resolves_and_freezes_vendor_offer_terms(db: Session) -> None:
+    _offer(db)
+    draft = _draft(db)
+    assert draft.status == AgreementStatus.DRAFT.value
+    assert draft.product_code == PRODUCT
+    assert draft.lines[0].unit_amount == "19.99"
+    assert draft.lines[0].unit_currency_code == "USD"
+    assert draft.lines[0].offer_ref is not None
 
-    The request id lives on the ORM row (`submit` set it); the service returns a
-    view, so read it back rather than inventing a subject/content lookup.
-    """
-    assert content_hash is not None
-    row = db.get(Contract, contract_id)
-    assert row is not None and row.approval_request_id is not None
-    for _ in range(2):
-        approvals.record_decision(
-            db,
-            approvals.RecordDecisionCommand(
-                command_id=f"dec-{uuid.uuid4()}",
-                request_id=row.approval_request_id,
-                approver_id=uuid.uuid4(),  # distinct, non-submitter
-                content_hash=content_hash,
-            ),
-        )
+    proposed = _propose(db, draft.id)
+    assert proposed.status == AgreementStatus.PROPOSED.value
+    assert proposed.content_hash is not None
+    assert proposed.approval_request_id is not None
+    assert _events(db, AGREEMENT_PROPOSED_V1) == 1
 
 
-def test_a_submitter_cannot_self_approve_their_own_contract(db: Session) -> None:
-    """The domain safety property, end to end.
-
-    The authority-level rule is proven in `test_approvals.py`; this proves it
-    still holds through the CONTRACT path, which is where it matters — the
-    submitter is recorded as the request's requester, so the module refuses their
-    decision rather than silently not counting it.
-
-    The refusal shape changed with the authority: the legacy writer accepted the
-    row and excluded it from the count, so a self-approval looked recorded and
-    did nothing. Refusing at decision time is the better behaviour and the reason
-    to check it here rather than assume it transferred.
-    """
-    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
-    draft = _draft(db, cap="cap.a")
-    submitter = uuid.uuid4()
-    submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
-
-    row = db.get(Contract, draft.id)
-    assert row is not None and row.approval_request_id is not None
-
-    with pytest.raises(SelfApprovalRefused):
-        approvals.record_decision(
-            db,
-            approvals.RecordDecisionCommand(
-                command_id=f"dec-{uuid.uuid4()}",
-                request_id=row.approval_request_id,
-                approver_id=submitter,
-                content_hash=submitted.content_hash or "",
-            ),
-        )
-
-    # And the contract cannot be approved on the strength of it.
-    with pytest.raises(ConflictError):
-        service.approve(
-            db, service.TransitionCommand(command_id="ap-self", contract_id=draft.id)
-        )
-
-
-def test_submit_rejects_undeclared_capability(db: Session) -> None:
-    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
-    draft = _draft(db, cap="cap.a")
-    # Catalogue does NOT declare cap.a -> WS1 require fails at submit.
+def test_draft_rejects_an_undeclared_capability(db: Session) -> None:
+    _offer(db)
     with pytest.raises(UndeclaredCapabilityError):
-        _submit(db, draft.id, _catalogue("cap.other"))
+        _draft(db, catalogue=_catalogue("cap.other"))
 
 
-def test_submit_freezes_exact_priced_snapshot(db: Session) -> None:
-    _offer(db, code="off", ver=1, caps=["cap.a"], amount="19.99")
-    draft = _draft(db, cap="cap.a")
-    assert draft.status == ContractStatus.DRAFT.value
-    assert draft.lines[0].unit_amount is None  # not priced until submit
-    submitted = _submit(db, draft.id, _catalogue("cap.a"))
-    assert submitted.status == ContractStatus.PENDING_APPROVAL.value
-    assert submitted.product_code == "dotmac-sub"
-    # Exact Money, frozen onto the line as a string (never float).
-    assert submitted.lines[0].unit_amount == "19.99"
-    assert submitted.lines[0].unit_currency_code == "USD"
-    assert submitted.content_hash is not None
-    assert _events(db, "contract.submitted") == 1
-
-
-def test_contract_refuses_an_offer_owned_by_another_product(db: Session) -> None:
-    _offer(
-        db,
-        code="off",
-        ver=1,
-        caps=["cap.a"],
-        amount="19.99",
-        product_code="dotmac-erp",
-    )
+def test_offer_resolution_is_product_qualified(db: Session) -> None:
+    _offer(db, product_code="dotmac-erp")
     with pytest.raises(NotFoundError, match="offer version.*not found"):
-        _draft(db, cap="cap.a")
+        _draft(db)
 
 
-def test_contract_content_hash_binds_the_product_identity(db: Session) -> None:
-    for product in ("dotmac-sub", "dotmac-erp"):
-        _offer(
-            db,
-            code="off",
-            ver=1,
-            caps=["cap.a"],
-            amount="19.99",
-            product_code=product,
-        )
+def test_the_accepted_digest_binds_product_identity(db: Session) -> None:
+    _offer(db, product_code=PRODUCT)
+    _offer(db, product_code="dotmac-erp")
     catalogues = ProductCapabilityCatalogues.from_capabilities(
-        {"dotmac-sub": ("cap.a",), "dotmac-erp": ("cap.a",)}
+        {PRODUCT: ("cap.a",), "dotmac-erp": ("cap.a",)}
     )
-    sub = _draft(db, product_code="dotmac-sub")
-    erp = _draft(db, product_code="dotmac-erp")
-    submitted_sub = _submit(db, sub.id, catalogues)
-    submitted_erp = _submit(db, erp.id, catalogues)
-    assert submitted_sub.content_hash != submitted_erp.content_hash
-
-
-def test_activation_event_carries_the_hashed_product_identity(db: Session) -> None:
-    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
-    draft = _draft(db, cap="cap.a")
-    submitter = uuid.uuid4()
-    submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
-    _approve_quorum(db, draft.id, submitted.content_hash)
-    service.approve(
-        db, service.TransitionCommand(command_id="ap-product", contract_id=draft.id)
-    )
-    service.activate(
+    _policy(db)
+    sub = _draft(db, product_code=PRODUCT, catalogue=catalogues)
+    erp = _draft(db, product_code="dotmac-erp", catalogue=catalogues)
+    sub_proposed = agreements.propose(
         db,
-        service.TransitionCommand(
-            command_id="act-product",
-            contract_id=draft.id,
-            activation_evidence="countersigned",
+        agreements.ProposeCommand(
+            command_id=f"propose-{uuid.uuid4()}",
+            agreement_id=sub.id,
+            approval_policy_code="commercial",
+            approval_policy_version=1,
+            requested_by=uuid.uuid4(),
         ),
+        catalogues=catalogues,
     )
-    event = db.scalar(
-        select(PlatformOutboxEvent).where(
-            PlatformOutboxEvent.event_type == "contract.activated"
+    erp_proposed = agreements.propose(
+        db,
+        agreements.ProposeCommand(
+            command_id=f"propose-{uuid.uuid4()}",
+            agreement_id=erp.id,
+            approval_policy_code="commercial",
+            approval_policy_version=1,
+            requested_by=uuid.uuid4(),
+        ),
+        catalogues=catalogues,
+    )
+    assert sub_proposed.content_hash != erp_proposed.content_hash
+
+
+def test_a_requester_cannot_approve_their_own_agreement(db: Session) -> None:
+    _offer(db)
+    draft = _draft(db)
+    requester = uuid.uuid4()
+    proposed = _propose(db, draft.id, requested_by=requester)
+    with pytest.raises(SelfApprovalRefused):
+        _decide(db, proposed, requester)
+
+    assert proposed.approval_request_id is not None
+    with pytest.raises(ConflictError, match="not approved"):
+        agreements.approve(
+            db,
+            agreements.ApprovalCommand(
+                command_id="approve-self",
+                agreement_id=draft.id,
+                approval_request_id=proposed.approval_request_id,
+            ),
         )
-    )
-    assert event is not None
-    assert event.payload["product_code"] == "dotmac-sub"
-
-
-def test_historical_contract_without_product_fails_closed(db: Session) -> None:
-    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
-    draft = _draft(db, cap="cap.a")
-    row = db.get(Contract, draft.id)
-    assert row is not None
-    row.product_code = None
-    db.flush()
-    with pytest.raises(ConflictError, match="has no product identity"):
-        _submit(db, draft.id, _catalogue("cap.a"))
-    assert _events(db, "contract.submitted") == 0
 
 
 def test_approval_is_separate_from_activation(db: Session) -> None:
-    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
-    draft = _draft(db, cap="cap.a")
-    submitter = uuid.uuid4()
-    submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
-    _approve_quorum(db, draft.id, submitted.content_hash)
-    approved = service.approve(
-        db, service.TransitionCommand(command_id="ap-1", contract_id=draft.id)
-    )
-    # APPROVED is a commercial decision — it is NOT active.
-    assert approved.status == ContractStatus.APPROVED.value
-    assert _events(db, "contract.approved") == 1
-    assert _events(db, "contract.activated") == 0
+    _offer(db)
+    approved = _approve(db, _propose(db, _draft(db).id))
+    assert approved.status == AgreementStatus.APPROVED.value
+    assert _events(db, AGREEMENT_APPROVED_V1) == 1
+    assert _events(db, AGREEMENT_ACTIVATED_V1) == 0
 
 
-def test_activation_is_separate_rule_driven_and_writes_no_cross_plane_state(
+def test_activation_requires_both_approval_and_activation_evidence(
     db: Session,
 ) -> None:
-    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
-    draft = _draft(db, cap="cap.a")
-    submitter = uuid.uuid4()
-    submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
-    _approve_quorum(db, draft.id, submitted.content_hash)
-    service.approve(
-        db, service.TransitionCommand(command_id="ap-1", contract_id=draft.id)
-    )
-    # Activation requires evidence (rule-driven), not a bare request.
-    with pytest.raises(ConflictError):
-        service.activate(
-            db, service.TransitionCommand(command_id="act-x", contract_id=draft.id)
+    _offer(db)
+    proposed = _propose(db, _draft(db).id)
+    approved = _approve(db, proposed)
+    assert proposed.approval_request_id is not None
+
+    with pytest.raises(AgreementError, match="named activation rule"):
+        agreements.activate(
+            db,
+            agreements.ActivateCommand(
+                command_id="activate-without-rule",
+                agreement_id=approved.id,
+                approval_request_id=proposed.approval_request_id,
+                activation_rule="",
+                activation_reference="countersignature-1",
+                activation_satisfied_at=datetime.now(UTC),
+            ),
         )
-    active = service.activate(
+
+    active = agreements.activate(
         db,
-        service.TransitionCommand(
-            command_id="act-1",
-            contract_id=draft.id,
-            activation_evidence="countersigned 2026-01-05",
+        agreements.ActivateCommand(
+            command_id="activate-1",
+            agreement_id=approved.id,
+            approval_request_id=proposed.approval_request_id,
+            activation_rule="countersigned",
+            activation_reference="countersignature-1",
+            activation_satisfied_at=datetime.now(UTC),
         ),
     )
-    assert active.status == ContractStatus.ACTIVE.value
-    assert _events(db, "contract.activated") == 1
-    # ContractService writes NO WS2 grants — that is the data plane's job.
+    assert active.status == AgreementStatus.ACTIVE.value
+    assert _events(db, AGREEMENT_ACTIVATED_V1) == 1
     assert (
         int(db.scalar(select(func.count()).select_from(TenantEntitlementGrant)) or 0)
         == 0
     )
 
 
-def test_transitions_are_idempotent_and_atomic_with_their_event(db: Session) -> None:
-    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
-    draft = _draft(db, cap="cap.a")
-    submitter = uuid.uuid4()
-    submitted = _submit(db, draft.id, _catalogue("cap.a"), submitter=submitter)
-    _approve_quorum(db, draft.id, submitted.content_hash)
-    cmd = service.TransitionCommand(command_id="ap-dup", contract_id=draft.id)
-    service.approve(db, cmd)
-    service.approve(db, cmd)  # same command_id -> idempotent replay
-    # Exactly one transition, exactly one event (no double-emit).
-    assert _events(db, "contract.approved") == 1
-
-
-def test_failed_guard_emits_no_event_atomic_rollback(db: Session) -> None:
-    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
-    draft = _draft(db, cap="cap.a")
-    # Activate straight from draft is an illegal transition -> ConflictError, and
-    # because the emit is inside the same handler, NO event is left behind.
-    with pytest.raises(ConflictError):
-        service.activate(
-            db,
-            service.TransitionCommand(
-                command_id="act-bad",
-                contract_id=draft.id,
-                activation_evidence="x",
-            ),
-        )
-    assert _events(db, "contract.activated") == 0
-
-
-def test_reject_clears_snapshot_and_returns_to_draft(db: Session) -> None:
-    _offer(db, code="off", ver=1, caps=["cap.a"], amount="10.00")
-    draft = _draft(db, cap="cap.a")
-    submitted = _submit(db, draft.id, _catalogue("cap.a"))
-    assert submitted.content_hash is not None
-    rejected = service.reject(
+def test_activation_fact_names_the_authoritative_agreement(db: Session) -> None:
+    _offer(db)
+    proposed = _propose(db, _draft(db).id)
+    approved = _approve(db, proposed)
+    assert proposed.approval_request_id is not None
+    agreements.activate(
         db,
-        service.TransitionCommand(
-            command_id="rj-1", contract_id=draft.id, reason="pricing off"
+        agreements.ActivateCommand(
+            command_id="activate-fact",
+            agreement_id=approved.id,
+            approval_request_id=proposed.approval_request_id,
+            activation_rule="countersigned",
+            activation_reference="countersignature-1",
+            activation_satisfied_at=datetime.now(UTC),
         ),
     )
-    assert rejected.status == ContractStatus.DRAFT.value
-    assert rejected.content_hash is None  # must be re-submitted
-    assert _events(db, "contract.rejected") == 1
+    event = db.scalar(
+        select(PlatformOutboxEvent).where(
+            PlatformOutboxEvent.event_type == AGREEMENT_ACTIVATED_V1
+        )
+    )
+    assert event is not None
+    assert event.payload["agreement_id"] == str(approved.id)
+    assert event.payload["content_hash"] == approved.content_hash
+
+
+def test_an_idempotent_approval_emits_one_fact(db: Session) -> None:
+    _offer(db)
+    proposed = _propose(db, _draft(db).id)
+    _decide(db, proposed, uuid.uuid4())
+    assert proposed.approval_request_id is not None
+    command = agreements.ApprovalCommand(
+        command_id="approve-replay",
+        agreement_id=proposed.id,
+        approval_request_id=proposed.approval_request_id,
+    )
+    agreements.approve(db, command)
+    agreements.approve(db, command)
+    assert _events(db, AGREEMENT_APPROVED_V1) == 1
+
+
+def test_a_refused_transition_emits_no_fact(db: Session) -> None:
+    _offer(db)
+    draft = _draft(db)
+    with pytest.raises(AgreementError):
+        agreements.reject(
+            db,
+            agreements.TransitionCommand(
+                command_id="reject-draft", agreement_id=draft.id
+            ),
+        )
+    assert _events(db, "agreement.rejected.v1") == 0
+
+
+def test_reject_clears_the_frozen_snapshot(db: Session) -> None:
+    _offer(db)
+    proposed = _propose(db, _draft(db).id)
+    rejected = agreements.reject(
+        db,
+        agreements.TransitionCommand(
+            command_id="reject-1",
+            agreement_id=proposed.id,
+            reason="pricing changed",
+        ),
+    )
+    assert rejected.status == AgreementStatus.DRAFT.value
+    assert rejected.content_hash is None

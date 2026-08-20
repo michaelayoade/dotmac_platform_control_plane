@@ -1,7 +1,7 @@
 """Allocations JSON API — READ-ONLY, platform-admin-only.
 
 There is deliberately NO create/mutate endpoint: an allocation is a projection of an
-activated contract, staged by the `contract.activated` consumer — never created by
+activated agreement, staged by the versioned activation consumer — never created by
 hand. This route only lets an operator inspect what was staged.
 """
 

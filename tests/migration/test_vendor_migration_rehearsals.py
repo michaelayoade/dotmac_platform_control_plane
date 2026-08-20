@@ -35,9 +35,10 @@ ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 # depending revision. `alembic_version` holds current heads, not every applied
 # revision, so this appears in `script.get_heads()` and not in `_versions()`.
 APPROVALS_HEAD = "ap_0001_approvals"
+COMMERCIAL_AGREEMENTS_HEAD = "cg_0001_agreements"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v014_allocations_authority"
+VENDOR_HEAD = "v015_agreements_authority"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:
@@ -120,14 +121,14 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # legacy tables went with the writer that owned them.
     assert not _table_exists(scratch_db, "approval_policies")
     assert not _table_exists(scratch_db, "approval_records")
-    assert _table_exists(scratch_db, "contracts")
-    assert _table_exists(scratch_db, "contract_lines")
+    # v015 DROPPED these after checking the greenfield premise under lock.
+    assert not _table_exists(scratch_db, "contracts")
+    assert not _table_exists(scratch_db, "contract_lines")
     # v014 DROPPED these: allocation authority moved to the module, and the
     # empty legacy tables went with the writer that owned them.
     assert not _table_exists(scratch_db, "allocations")
     assert not _table_exists(scratch_db, "allocation_entries")
     assert "product_code" in _column_names(scratch_db, "offer_versions")
-    assert "product_code" in _column_names(scratch_db, "contracts")
     # Kernel platform tables the AccountService depends on are present too.
     assert _table_exists(scratch_db, "platform_audit_events")
     assert _table_exists(scratch_db, "platform_idempotency_records")
@@ -135,6 +136,9 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     assert _qualified_table_exists(scratch_db, "mod_rel.artifact_attestations")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocation_entries")
+    assert _qualified_table_exists(scratch_db, "mod_agreements.agreements")
+    assert _qualified_table_exists(scratch_db, "mod_agreements.agreement_lines")
+    assert _qualified_table_exists(scratch_db, "mod_agreements.agreement_events")
     cols = _column_names(scratch_db, "vendor_accounts")
     assert {
         "id",
@@ -158,7 +162,7 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # `ea_0001_allocations`, so both module revisions — while genuinely applied —
     # stop being version ROWS once the vendor lineage reaches them.
     #
-    # They are still static heads, and `test_five_head_topology` asserts all five
+    # They are still static heads, and `test_six_head_topology` asserts all six
     # through `script.get_heads()`. Listing them here as well would report them
     # missing on a perfectly complete database.
     assert _versions(scratch_db) == {
@@ -229,25 +233,28 @@ def test_alembic_env_installs_the_vendor_prerequisite_bindings(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rehearsal 2 — five-head topology
+# Rehearsal 2 — six-head topology
 # ─────────────────────────────────────────────────────────────────────────────
-def test_five_head_topology(scratch_db: str) -> None:
+def test_six_head_topology(scratch_db: str) -> None:
     script = ScriptDirectory.from_config(make_alembic_config(scratch_db))
     assert set(script.get_heads()) == {
         KERNEL_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         APPROVALS_HEAD,
+        COMMERCIAL_AGREEMENTS_HEAD,
         VENDOR_HEAD,
     }
     kernel_head = script.get_revision("kernel@head")
     vendor_head = script.get_revision("vendor@head")
     release_catalog_head = script.get_revision("release_catalog@head")
     allocation_head = script.get_revision("entitlement_allocation@head")
+    agreement_head = script.get_revision("commercial_agreements@head")
     assert kernel_head.revision == KERNEL_HEAD
     assert vendor_head.revision == VENDOR_HEAD
     assert release_catalog_head.revision == RELEASE_CATALOG_HEAD
     assert allocation_head.revision == ENTITLEMENT_ALLOCATION_HEAD
+    assert agreement_head.revision == COMMERCIAL_AGREEMENTS_HEAD
     # The vendor head is the tip of a single-parent chain that walks back to the
     # vendor ROOT; the ROOT is its own branch that DEPENDS ON (is not a child of)
     # a kernel head, so the lineages advance independently.
@@ -382,7 +389,7 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     _upgrade(scratch_db, "heads")
     assert _table_exists(scratch_db, "vendor_accounts")
     assert _table_exists(scratch_db, "offer_versions")
-    assert _table_exists(scratch_db, "contracts")
+    assert not _table_exists(scratch_db, "contracts")
     # The module owns approvals now; the legacy tables are created by v003 and
     # dropped again by v013 within the same composed upgrade.
     assert not _table_exists(scratch_db, "approval_policies")
@@ -393,6 +400,7 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     # by v005 and dropped again within the same composed upgrade.
     assert not _table_exists(scratch_db, "allocations")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    assert _qualified_table_exists(scratch_db, "mod_agreements.agreements")
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _versions(scratch_db) == {
@@ -405,12 +413,13 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
 def test_upgrade_from_previous_vendor_deployment_preserves_data(
     scratch_db: str,
 ) -> None:
-    """Rehearse a9 + vendor v010 to a45 + both installed module lineages."""
+    """Rehearse an existing empty Vendor estate into all module lineages."""
     _upgrade(scratch_db, PREVIOUS_VENDOR_HEAD)
     _upgrade(scratch_db, PREVIOUS_KERNEL_HEAD)
     assert _versions(scratch_db) == {PREVIOUS_KERNEL_HEAD, PREVIOUS_VENDOR_HEAD}
     assert not _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert not _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    assert not _qualified_table_exists(scratch_db, "mod_agreements.agreements")
 
     account_id = str(uuid.uuid4())
     eng = create_engine(scratch_db)
@@ -431,6 +440,7 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
 
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    assert _qualified_table_exists(scratch_db, "mod_agreements.agreements")
     assert (
         _q(
             scratch_db,
@@ -454,7 +464,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
 ) -> None:
     """Simulate a FUTURE kernel migration (a child of the kernel head). The
     vendor and module heads must remain separate heads — and a composed upgrade
-    must still apply all four lineages."""
+    must still apply all six lineages."""
     synth_rev = "9999_synthetic_kernel_advance"
     (tmp_path / f"{synth_rev}.py").write_text(
         "revision = '9999_synthetic_kernel_advance'\n"
@@ -475,6 +485,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
         ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         APPROVALS_HEAD,
+        COMMERCIAL_AGREEMENTS_HEAD,
         VENDOR_HEAD,
     }
 
@@ -646,7 +657,7 @@ def test_v011_preserves_historical_rows_as_explicitly_unclassified(
                 {"id": contract_id},
             )
 
-        _upgrade(scratch_db, "heads")
+        _upgrade(scratch_db, "v011_product_identity")
 
         with eng.connect() as conn:
             assert (
@@ -668,7 +679,7 @@ def test_v011_preserves_historical_rows_as_explicitly_unclassified(
 
 
 def test_v011_offer_identity_is_product_qualified_in_postgres(scratch_db: str) -> None:
-    _upgrade(scratch_db, "heads")
+    _upgrade(scratch_db, "v011_product_identity")
     eng = create_engine(scratch_db)
     try:
         with eng.begin() as conn:
@@ -699,7 +710,7 @@ def test_v011_offer_identity_is_product_qualified_in_postgres(scratch_db: str) -
 
 def test_v011_rejects_new_unclassified_commercial_rows(scratch_db: str) -> None:
     """NOT VALID preserves history; it still governs every new write."""
-    _upgrade(scratch_db, "heads")
+    _upgrade(scratch_db, "v011_product_identity")
     eng = create_engine(scratch_db)
     try:
         with pytest.raises(DBAPIError, match="ck_offer_versions_product_identity"):

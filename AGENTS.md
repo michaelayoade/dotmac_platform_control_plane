@@ -42,7 +42,7 @@ disagree, fix the drift.
    exactly how this line came to say `a8` while the pin said `a9`.
 9. **Bindings state facts; plane selections state intent.** A
    `PrerequisiteBinding` says where an effect comes from, and this assembly
-   binds both kernel effects required by the currently composed modules —
+   binds every kernel effect required by the currently composed modules —
    including `tenant_scope_catalog.v1`, because
    kernel `0001` really does create `public.tenants` here. A
    `ModulePlaneSelection` says what this product installs, and it selects
@@ -77,12 +77,18 @@ disagree, fix the drift.
     `ACCESS EXCLUSIVE` in the same transaction that drops the legacy tables,
     failing closed if a row exists. `dotmac-approvals` is the authority;
     `vendor_cp.approvals.adapter` is the ONLY seam and is typed with no `Any`.
-    The retired local writer's call sites are ratcheted at ZERO. Do not build
+    The retired local writer's call sites are ratcheted at ZERO. Commercial
+    Agreements follows the same checked-premise shape under ADR-0008 and
+    `v015`: `dotmac-commercial-agreements` is the sole agreement lifecycle,
+    history, audit and outbox owner; `vendor_cp.contracts.adapter` is the only
+    seam; and the retired service/models call sites stay at zero. Do not build
     parity, backfill, synthesized requests or sealed evidence against an empty
     estate — ADR-0031 governs a cutover WITH data, and this was not one. Composed
     and authoritative in code is NOT adopted
     (`tests/architecture/test_approvals_authority.py`,
-    `tests/migration/test_authority_switch.py`).
+    `tests/migration/test_authority_switch.py`,
+    `tests/architecture/test_commercial_agreements_authority.py`,
+    `tests/migration/test_commercial_agreements_authority_switch.py`).
 13. **A guard exemption dies with its premise.** The assembly-local waiver for
     the legacy allocation tables shadowing `mod_ealloc` was REMOVED when `v014`
     dropped those tables, not lowered and not left describing nothing: an

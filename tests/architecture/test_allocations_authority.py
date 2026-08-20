@@ -187,7 +187,7 @@ def test_the_catalogue_port_stays_importable() -> None:
         for path in source_files(PACKAGE)
         if _names_from_module(path) & PORT_NAMES
     }
-    assert "vendor_cp/contracts/service.py" in port_users
+    assert "vendor_cp/contracts/adapter.py" in port_users
     assert "vendor_cp/offers/service.py" in port_users
 
 
@@ -211,8 +211,7 @@ def test_the_adapter_is_typed_at_the_seam() -> None:
 
 def test_offers_and_licensing_surfaces_stay_withheld() -> None:
     """Their module ownership is unsettled, and enabling them now would begin
-    creating fresh legacy production data immediately after three domains were
-    cleaned up."""
+    creating fresh legacy production data after the authority cutovers."""
     from vendor_cp.deployment_profile import PRODUCTION_BOOTSTRAP, deployment_profile
 
     withheld = deployment_profile(PRODUCTION_BOOTSTRAP).withheld_surfaces

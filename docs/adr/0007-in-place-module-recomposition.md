@@ -66,3 +66,11 @@ with the coherent slice that consumes it.
 - Brand Profiles preserves the published first-adopter evidence order.
 - Adoption evidence is recorded only after a product has actually run the
   released owner with its former local writer absent.
+
+## Amendment — 2026-08-20 (Commercial Agreements target is greenfield)
+
+ADR-0008 records that the designated target was directly observed as
+`TARGET_ABSENT`. Step 2's row-migration instruction therefore has no rows to act
+on and is superseded for this target by a checked empty-estate switch. Vendor
+revision `v015` rechecks the premise under `ACCESS EXCLUSIVE` and refuses a
+populated table; it never synthesizes contracts, hashes or history.

@@ -1,5 +1,10 @@
 # ContractService — design (state machine + acceptance cases)
 
+> **SUPERSEDED by ADR-0008 (2026-08-20).** This records the retired local
+> design. `dotmac-commercial-agreements==0.1.0a1` now owns the lifecycle and
+> emits `agreement.*.v1` facts; Vendor retains only its typed adapter. The
+> as-built contract is `docs/ARCHITECTURE.md`.
+
 > **Status:** Implementation AUTHORIZED (2026-07-31). Every kernel dependency
 > ContractService needs has published: WS1 (a3), WS4 (a2), WS2 (a4), the vendor
 > OfferVersion + ApprovalPolicy owners (merged), and — the last blocker — the

@@ -14,11 +14,10 @@ The module validates ALLOCATION rules: capabilities are declared by the product'
 catalogue, entries are non-empty, duplicates are refused, staging is idempotent
 on the source event. It knows nothing about Vendor contracts, and should not.
 
-The checks that stay on this side are the ones about VENDOR'S contract — that it
-is ACTIVE, and that the activation event's digest still matches the contract's
-current version. A stale event must not project an allocation, and only Vendor
-can say what "stale" means about its own aggregate. Pushing those into the module
-would give it an opinion about a domain it deliberately has no model of.
+Commercial Agreements now answers whether an agreement is ACTIVE and whether an
+activation fact still matches its frozen digest. This adapter receives that
+typed snapshot; it does not read another owner's tables or reconstruct its
+lifecycle.
 
 ## Reading
 
@@ -45,11 +44,10 @@ from dotmac_entitlement_allocation import (
     allocation_product as module_allocation_product,
 )
 from dotmac_entitlement_allocation import stage_allocation as module_stage_allocation
-from dotmac_kernel import NotFoundError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from vendor_cp.contracts.models import Contract, ContractStatus
+from vendor_cp.contracts import adapter as agreements
 
 #: Re-exported so callers test against the module's own constant rather than a
 #: second copy of the string.
@@ -68,7 +66,6 @@ class StageAllocationCommand:
     source_event_id: str
     contract_id: UUID
     content_hash: str
-    customer_ref: str
     actor_admin_id: UUID | None = None
 
 
@@ -92,30 +89,20 @@ class AllocationView:
     replayed: bool = False
 
 
-def _snapshot(contract: Contract, command: StageAllocationCommand) -> ContractSnapshot:
-    """Vendor's activated contract as the module's `ContractSnapshot`.
-
-    `product_code` is required by the module and is never invented: v011 made
-    commercial identity product-qualified precisely so this could be read rather
-    than guessed, and a contract without one cannot be allocated.
-    """
-    product_code = contract.product_code
-    if not product_code:
-        raise NotFoundError(
-            f"contract {contract.id} carries no product_code; an allocation "
-            "cannot be attributed to a product that was never recorded"
-        )
+def _snapshot(
+    agreement: agreements.ActiveAgreementSnapshot,
+    command: StageAllocationCommand,
+) -> ContractSnapshot:
+    """Translate the agreement owner's accepted snapshot to allocation input."""
     return ContractSnapshot(
-        contract_ref=contract.id,
-        product_code=product_code,
-        customer_ref=contract.customer_ref,
+        contract_ref=agreement.agreement_id,
+        product_code=agreement.product_code,
+        customer_ref=agreement.counterparty_ref,
         content_hash=command.content_hash,
         source_event_id=command.source_event_id,
         entries=tuple(
-            ContractEntitlement(
-                capability_code=line.capability_code, quantity=line.quantity
-            )
-            for line in contract.lines
+            ContractEntitlement(capability_code=capability_code, quantity=quantity)
+            for capability_code, quantity in agreement.capabilities
         ),
     )
 
@@ -128,26 +115,18 @@ def stage_allocation(
 ) -> AllocationView:
     """Project an activated contract into the module's immutable allocation.
 
-    The staleness checks are Vendor's, about Vendor's contract; everything about
-    what a valid allocation IS belongs to the module.
+    Commercial Agreements owns and checks agreement state. Everything about
+    what a valid allocation IS belongs to Entitlement Allocation.
     """
-    contract = db.get(Contract, command.contract_id)
-    if contract is None:
-        raise NotFoundError(f"contract {command.contract_id} not found")
-    if contract.status != ContractStatus.ACTIVE.value:
-        raise NotFoundError(
-            f"contract {command.contract_id} is {contract.status!r}, not active "
-            "— nothing to allocate"
-        )
-    if contract.content_hash != command.content_hash:
-        raise NotFoundError(
-            "activation event content_hash does not match the contract's current "
-            "version — stale event, skipping"
-        )
+    agreement = agreements.active_snapshot(
+        db,
+        command.contract_id,
+        expected_content_hash=command.content_hash,
+    )
 
     view = module_stage_allocation(
         db,
-        _snapshot(contract, command),
+        _snapshot(agreement, command),
         catalogues=catalogues,
         actor_admin_id=command.actor_admin_id,
     )

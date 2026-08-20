@@ -13,6 +13,7 @@ import os
 from dataclasses import replace
 
 from dotmac_approvals import module as approvals_module
+from dotmac_commercial_agreements import module as commercial_agreements_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import FeatureManifest, ProductAssemblySpec
 from dotmac_release_catalog import module as release_catalog_module
@@ -48,6 +49,9 @@ STATEFUL_MODULES = (
     # approval authority under ADR-0005; vendor migration `v013` restored online
     # DML after the bounded v012 shadow phase and retired the local writer.
     approvals_module,
+    # Platform-only and atomic: Vendor v015 checks the empty legacy premise,
+    # retires the local owner and makes this module the sole agreement writer.
+    commercial_agreements_module,
 )
 
 # The vendor's own features, in mount order. A profile may strip a feature's

@@ -127,7 +127,7 @@ sealed-cutover prose survive its own supersession in #51.
 
 The `production-bootstrap` profile continues to withhold both surfaces. Their
 module ownership is unsettled, and enabling them now would begin creating fresh
-legacy production data immediately after three domains were cleaned up — the
+legacy production data immediately after the authority cutovers — the
 precise shape of the problem this sequence of changes exists to remove.
 
 ## Lifecycle

@@ -7,8 +7,8 @@ binding that truth was itself the instruction to build a module's tenant plane,
 and the only way to keep tenant tables out of a control plane with no tenants was
 to withhold a binding whose effect the database plainly provides.
 
-The separation introduced in a61 remains at a77, so this assembly binds the two
-kernel effects its currently composed modules require and states installation
+The separation introduced in a61 remains at a77, so this assembly binds every
+kernel effect its currently composed modules require and states installation
 intent separately. The tests below assert the two halves apart, so a future edit
 cannot quietly re-merge them. Approvals is selectable and its platform plane is
 declared explicitly; its tenant plane remains absent.
@@ -26,7 +26,9 @@ from dotmac_kernel.planes import (
 )
 from dotmac_kernel.prerequisites import (
     BINDINGS_ENV_VAR,
+    IDEMPOTENCY_LEDGER_V1,
     MODULE_DATABASE_ROLES_V1,
+    PLATFORM_AUDIT_LOG_V1,
     TENANT_SCOPE_CATALOG_V1,
 )
 
@@ -45,9 +47,8 @@ def test_the_assembly_binds_the_required_kernel_effects() -> None:
     """Including the tenant catalogue. A binding is an observation, and kernel
     0001 observably creates `public.tenants` in this database.
 
-    Kernel a77 supplies additional named effects, but no currently composed
-    lineage requires them. A binding is added when a composed consumer declares
-    that requirement; availability alone is not assembly intent.
+    Commercial Agreements declares the idempotency and platform-audit effects;
+    their bindings name the exact supplying kernel revisions.
     """
     assert {
         (binding.prerequisite, binding.provider_revision, binding.provider_owner)
@@ -55,6 +56,8 @@ def test_the_assembly_binds_the_required_kernel_effects() -> None:
     } == {
         (MODULE_DATABASE_ROLES_V1.name, KERNEL_ROOT_REVISION, "kernel"),
         (TENANT_SCOPE_CATALOG_V1.name, KERNEL_ROOT_REVISION, "kernel"),
+        (IDEMPOTENCY_LEDGER_V1.name, "0018_idempotency_one_owner", "kernel"),
+        (PLATFORM_AUDIT_LOG_V1.name, "0026_platform_audit_log", "kernel"),
     }
 
 

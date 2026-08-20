@@ -47,7 +47,9 @@ from typing import Final
 
 from dotmac_kernel.planes import ModulePlane, ModulePlaneSelection
 from dotmac_kernel.prerequisites import (
+    IDEMPOTENCY_LEDGER_V1,
     MODULE_DATABASE_ROLES_V1,
+    PLATFORM_AUDIT_LOG_V1,
     TENANT_SCOPE_CATALOG_V1,
     PrerequisiteBinding,
 )
@@ -68,6 +70,16 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
     PrerequisiteBinding(
         prerequisite=TENANT_SCOPE_CATALOG_V1.name,
         provider_revision=KERNEL_ROOT_REVISION,
+        provider_owner="kernel",
+    ),
+    PrerequisiteBinding(
+        prerequisite=IDEMPOTENCY_LEDGER_V1.name,
+        provider_revision="0018_idempotency_one_owner",
+        provider_owner="kernel",
+    ),
+    PrerequisiteBinding(
+        prerequisite=PLATFORM_AUDIT_LOG_V1.name,
+        provider_revision="0026_platform_audit_log",
         provider_owner="kernel",
     ),
 )

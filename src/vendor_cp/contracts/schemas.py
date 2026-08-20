@@ -1,13 +1,13 @@
-"""Typed request/response models for the contracts API (no bare dicts)."""
+"""Typed HTTP values for Vendor's Commercial Agreements adapter."""
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from vendor_cp.contracts.service import ContractView
+from vendor_cp.contracts.adapter import ContractView
 
 
 class LineRequest(BaseModel):
@@ -19,77 +19,111 @@ class LineRequest(BaseModel):
 
 class CreateDraftRequest(BaseModel):
     command_id: str = Field(min_length=1, max_length=200)
+    reference: str = Field(min_length=1, max_length=120)
     product_code: str = Field(min_length=1, max_length=120)
-    customer_ref: str = Field(min_length=1, max_length=200)
-    legal_entity: str = Field(min_length=1, max_length=200)
-    currency: str = Field(min_length=3, max_length=3)
+    counterparty_ref: str = Field(min_length=1, max_length=200)
+    agreement_type: str = Field(min_length=1, max_length=120)
     term_start: date
     term_end: date
-    activation_rule: str = Field(default="manual_confirmation", max_length=60)
     lines: list[LineRequest] = Field(min_length=1)
 
 
-class SubmitRequest(BaseModel):
+class ProposeRequest(BaseModel):
     command_id: str = Field(min_length=1, max_length=200)
     approval_policy_code: str = Field(min_length=1, max_length=120)
     approval_policy_version: int = Field(ge=1)
-    submitter_id: UUID
+    requested_by: UUID
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class ApprovalRequest(BaseModel):
+    command_id: str = Field(min_length=1, max_length=200)
+    approval_request_id: UUID
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class ActivateRequest(ApprovalRequest):
+    activation_rule: str = Field(min_length=1, max_length=120)
+    activation_reference: str = Field(min_length=1, max_length=200)
+    activation_satisfied_at: datetime
 
 
 class TransitionRequest(BaseModel):
     command_id: str = Field(min_length=1, max_length=200)
+    expected_status: str | None = Field(default=None, max_length=24)
+    expected_version: int | None = Field(default=None, ge=1)
     reason: str | None = Field(default=None, max_length=500)
-    activation_evidence: str | None = Field(default=None, max_length=500)
-    effective_date: date | None = None
-    impact_acknowledged: bool = False
+
+
+class TerminateRequest(TransitionRequest):
+    effective_date: date
+    impact_acknowledged: bool
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class LineResponse(BaseModel):
-    offer_code: str
-    offer_version: int
+    product_code: str
     capability_code: str
     quantity: int
-    unit_amount: str | None
-    unit_currency_code: str | None
+    unit_amount: str
+    unit_currency_code: str
+    offer_ref: str | None
+    release_ref: str | None
 
 
 class ContractResponse(BaseModel):
     id: UUID
+    reference: str
+    agreement_family_id: UUID
+    agreement_version: int
     product_code: str
-    customer_ref: str
+    counterparty_ref: str
+    agreement_type: str
     status: str
     content_hash: str | None
-    activation_rule: str
+    record_version: int
+    activation_rule: str | None
+    approval_request_id: UUID | None
     lines: list[LineResponse]
 
     @classmethod
-    def of(cls, v: ContractView) -> ContractResponse:
+    def of(cls, value: ContractView) -> ContractResponse:
         return cls(
-            id=v.id,
-            product_code=v.product_code,
-            customer_ref=v.customer_ref,
-            status=v.status,
-            content_hash=v.content_hash,
-            activation_rule=v.activation_rule,
+            id=value.id,
+            reference=value.reference,
+            agreement_family_id=value.agreement_family_id,
+            agreement_version=value.agreement_version,
+            product_code=value.product_code,
+            counterparty_ref=value.counterparty_ref,
+            agreement_type=value.agreement_type,
+            status=value.status,
+            content_hash=value.content_hash,
+            record_version=value.record_version,
+            activation_rule=value.activation_rule,
+            approval_request_id=value.approval_request_id,
             lines=[
                 LineResponse(
-                    offer_code=ln.offer_code,
-                    offer_version=ln.offer_version,
-                    capability_code=ln.capability_code,
-                    quantity=ln.quantity,
-                    unit_amount=ln.unit_amount,
-                    unit_currency_code=ln.unit_currency_code,
+                    product_code=line.product_code,
+                    capability_code=line.capability_code,
+                    quantity=line.quantity,
+                    unit_amount=line.unit_amount,
+                    unit_currency_code=line.unit_currency_code,
+                    offer_ref=line.offer_ref,
+                    release_ref=line.release_ref,
                 )
-                for ln in v.lines
+                for line in value.lines
             ],
         )
 
 
 __all__ = [
-    "LineRequest",
-    "CreateDraftRequest",
-    "SubmitRequest",
-    "TransitionRequest",
-    "LineResponse",
+    "ActivateRequest",
+    "ApprovalRequest",
     "ContractResponse",
+    "CreateDraftRequest",
+    "LineRequest",
+    "LineResponse",
+    "ProposeRequest",
+    "TerminateRequest",
+    "TransitionRequest",
 ]

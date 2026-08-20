@@ -137,6 +137,7 @@ def stated_lineage_counts(text: str) -> list[int]:
 #: to ban — it is a marker that must be PRESENT once the fact holds.
 SUPERSEDED_DESIGNS: Final = (
     ("docs/adr/0004-approvals-authority-cutover.md", "SUPERSEDED by ADR-0005"),
+    ("docs/design/contract-service.md", "SUPERSEDED by ADR-0008"),
 )
 
 

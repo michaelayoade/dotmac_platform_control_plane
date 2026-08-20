@@ -191,7 +191,9 @@ def test_the_legacy_tables_are_dropped(scratch_db: str) -> None:
 
 
 def test_the_contract_carries_its_approval_request(scratch_db: str) -> None:
-    _upgrade(scratch_db)
+    # Assert the historical v013 effect at v013. At composed heads v015 has
+    # retired this entire legacy table in favour of Commercial Agreements.
+    _upgrade(scratch_db, SWITCH_REVISION)
     engine = create_engine(scratch_db)
     try:
         with engine.connect() as conn:

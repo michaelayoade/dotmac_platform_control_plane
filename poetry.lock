@@ -363,6 +363,27 @@ url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
 reference = "forgejo"
 
 [[package]]
+name = "dotmac-commercial-agreements"
+version = "0.1.0a1"
+description = "DotMac Commercial Agreements — the durable commercial agreement between the platform operator and a counterparty, its immutable accepted snapshot, its evidence-bound lifecycle and its append-only history (ADR-0033 § 1)"
+optional = false
+python-versions = ">=3.11,<3.14"
+groups = ["main"]
+files = [
+    {file = "dotmac_commercial_agreements-0.1.0a1-py3-none-any.whl", hash = "sha256:3101542034699dca036741ba7eba06d48ca4f453a3d0e384b7ea13b8ffa50e02"},
+    {file = "dotmac_commercial_agreements-0.1.0a1.tar.gz", hash = "sha256:fdd4bf1e0219342db836587c3467bc3b3ab38337c1788896ca1069f26700989e"},
+]
+
+[package.dependencies]
+dotmac-kernel = ">=0.1.0a77"
+sqlalchemy = ">=2.0,<3.0"
+
+[package.source]
+type = "legacy"
+url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
+reference = "forgejo"
+
+[[package]]
 name = "dotmac-entitlement-allocation"
 version = "0.1.0a4"
 description = "DotMac Entitlement Allocation — an immutable projection of what an activated contract entitles, validated against the product's manifest-declared capability catalogue (ADR-0006 M4)"
@@ -1572,4 +1593,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "cfd235686af84bb1af181526925d1d8a3abf45557a360264ea0eccbfb4090518"
+content-hash = "66a8de2614e96e811119e9e0f1bd626ca603a0d889d1108bdfa646848e75d9b6"

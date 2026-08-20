@@ -22,7 +22,7 @@ NEVER writes a product data plane's `tenant_entitlement_grants` (ruling C4).
 
 Transaction-authority contract: receives a `Session` and only add/flush. State
 change + platform audit + platform outbox event commit in ONE transaction
-(never audit-only), the same discipline as `ContractService`.
+(never audit-only), the same discipline as Commercial Agreements.
 """
 
 from __future__ import annotations

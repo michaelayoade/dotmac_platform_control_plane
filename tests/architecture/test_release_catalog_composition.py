@@ -25,7 +25,7 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
 
     assert dependencies["dotmac-kernel"]["version"] == "0.1.0a77"
     assert dependencies["dotmac-kernel"]["source"] == "forgejo"
-    # BOTH module pins are asserted. Only the release catalogue was, which is
+    # Every authority module pin is asserted. Only the release catalogue was, which is
     # how the entitlement-allocation pin could have drifted to a range or to a
     # path dependency without a single test noticing.
     assert dependencies["dotmac-release-catalog"] == {
@@ -34,6 +34,14 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
     }
     assert dependencies["dotmac-entitlement-allocation"] == {
         "version": "0.1.0a4",
+        "source": "forgejo",
+    }
+    assert dependencies["dotmac-approvals"] == {
+        "version": "0.1.0a4",
+        "source": "forgejo",
+    }
+    assert dependencies["dotmac-commercial-agreements"] == {
+        "version": "0.1.0a1",
         "source": "forgejo",
     }
 
@@ -52,5 +60,5 @@ def test_vendor_ingestion_adapter_owns_its_audit_vocabulary() -> None:
 def test_release_catalog_public_migration_lineage_is_composed() -> None:
     locations = composed_version_locations().split()
     assert str(release_catalog_versions_dir()) in locations
-    # kernel + release catalog + entitlement allocation + approvals + vendor
-    assert len(locations) == 5
+    # kernel + release catalog + allocation + approvals + agreements + vendor
+    assert len(locations) == 6

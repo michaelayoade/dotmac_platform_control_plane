@@ -1,33 +1,28 @@
-"""Contracts JSON API — a thin, platform-admin-only adapter around ContractService.
-
-Each mutating route maps to one named lifecycle command; `ContractService` owns the
-guards, the atomic state+audit+outbox-event commit, and the transitions.
-`ConflictError` (bad transition / unmet guard) → 409; `NotFoundError` → 404.
-"""
+"""Thin platform-admin HTTP adapter for Commercial Agreements."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Annotated
 from uuid import UUID
 
-from dotmac_entitlement_allocation import AllocationError
-from dotmac_kernel import PlatformAdmin
+from dotmac_kernel import NotFoundError, PlatformAdmin
 from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
-from vendor_cp.contracts import service
+from vendor_cp.contracts import adapter
 from vendor_cp.contracts.schemas import (
+    ActivateRequest,
+    ApprovalRequest,
     ContractResponse,
     CreateDraftRequest,
-    SubmitRequest,
+    ProposeRequest,
+    TerminateRequest,
     TransitionRequest,
 )
-from vendor_cp.offers.catalog import (
-    catalogue_domain_error,
-    configured_product_capability_catalogues,
-)
+from vendor_cp.offers.catalog import configured_product_capability_catalogues
 
 router = APIRouter(prefix="/platform/vendor/contracts", tags=["contracts"])
 
@@ -37,125 +32,191 @@ Db = Annotated[Session, Depends(get_platform_db)]
 
 @router.post("", response_model=ContractResponse, status_code=status.HTTP_201_CREATED)
 def create_draft(body: CreateDraftRequest, admin: Admin, db: Db) -> ContractResponse:
-    view = service.create_draft(
-        db,
-        service.CreateDraftCommand(
-            command_id=body.command_id,
-            product_code=body.product_code,
-            customer_ref=body.customer_ref,
-            legal_entity=body.legal_entity,
-            currency_code=body.currency,
-            term_start=body.term_start,
-            term_end=body.term_end,
-            activation_rule=body.activation_rule,
-            lines=tuple(
-                service.LineInput(
-                    offer_code=li.offer_code,
-                    offer_version=li.offer_version,
-                    capability_code=li.capability_code,
-                    quantity=li.quantity,
-                )
-                for li in body.lines
-            ),
-            actor_admin_id=admin.id,
-        ),
-    )
-    return ContractResponse.of(view)
-
-
-@router.post("/{contract_id}/submit", response_model=ContractResponse)
-def submit(
-    contract_id: UUID, body: SubmitRequest, admin: Admin, db: Db
-) -> ContractResponse:
     try:
-        view = service.submit(
+        value = adapter.create_draft(
             db,
-            service.SubmitCommand(
+            adapter.CreateDraftCommand(
                 command_id=body.command_id,
-                contract_id=contract_id,
-                approval_policy_code=body.approval_policy_code,
-                approval_policy_version=body.approval_policy_version,
-                submitter_id=body.submitter_id,
+                reference=body.reference,
+                product_code=body.product_code,
+                counterparty_ref=body.counterparty_ref,
+                agreement_type=body.agreement_type,
+                term_start=body.term_start,
+                term_end=body.term_end,
+                lines=tuple(
+                    adapter.LineInput(
+                        offer_code=line.offer_code,
+                        offer_version=line.offer_version,
+                        capability_code=line.capability_code,
+                        quantity=line.quantity,
+                    )
+                    for line in body.lines
+                ),
                 actor_admin_id=admin.id,
             ),
             catalogues=configured_product_capability_catalogues(db),
         )
-    except AllocationError as exc:
-        raise catalogue_domain_error(exc) from exc
-    return ContractResponse.of(view)
+    except adapter.AgreementError as exc:
+        raise adapter.agreement_domain_error(exc) from exc
+    return ContractResponse.of(value)
 
 
-def _cmd(
-    contract_id: UUID, body: TransitionRequest, admin: PlatformAdmin
-) -> service.TransitionCommand:
-    return service.TransitionCommand(
+@router.post("/{agreement_id}/propose", response_model=ContractResponse)
+def propose(
+    agreement_id: UUID, body: ProposeRequest, admin: Admin, db: Db
+) -> ContractResponse:
+    try:
+        value = adapter.propose(
+            db,
+            adapter.ProposeCommand(
+                command_id=body.command_id,
+                agreement_id=agreement_id,
+                approval_policy_code=body.approval_policy_code,
+                approval_policy_version=body.approval_policy_version,
+                requested_by=body.requested_by,
+                expected_version=body.expected_version,
+                actor_admin_id=admin.id,
+            ),
+            catalogues=configured_product_capability_catalogues(db),
+        )
+    except adapter.AgreementError as exc:
+        raise adapter.agreement_domain_error(exc) from exc
+    return ContractResponse.of(value)
+
+
+@router.post("/{agreement_id}/approve", response_model=ContractResponse)
+def approve(
+    agreement_id: UUID, body: ApprovalRequest, admin: Admin, db: Db
+) -> ContractResponse:
+    try:
+        value = adapter.approve(
+            db,
+            adapter.ApprovalCommand(
+                command_id=body.command_id,
+                agreement_id=agreement_id,
+                approval_request_id=body.approval_request_id,
+                expected_version=body.expected_version,
+                actor_admin_id=admin.id,
+            ),
+        )
+    except adapter.AgreementError as exc:
+        raise adapter.agreement_domain_error(exc) from exc
+    return ContractResponse.of(value)
+
+
+@router.post("/{agreement_id}/activate", response_model=ContractResponse)
+def activate(
+    agreement_id: UUID, body: ActivateRequest, admin: Admin, db: Db
+) -> ContractResponse:
+    try:
+        value = adapter.activate(
+            db,
+            adapter.ActivateCommand(
+                command_id=body.command_id,
+                agreement_id=agreement_id,
+                approval_request_id=body.approval_request_id,
+                activation_rule=body.activation_rule,
+                activation_reference=body.activation_reference,
+                activation_satisfied_at=body.activation_satisfied_at,
+                expected_version=body.expected_version,
+                actor_admin_id=admin.id,
+            ),
+        )
+    except adapter.AgreementError as exc:
+        raise adapter.agreement_domain_error(exc) from exc
+    return ContractResponse.of(value)
+
+
+def _transition_command(
+    agreement_id: UUID, body: TransitionRequest, admin: PlatformAdmin
+) -> adapter.TransitionCommand:
+    return adapter.TransitionCommand(
         command_id=body.command_id,
-        contract_id=contract_id,
+        agreement_id=agreement_id,
+        expected_status=body.expected_status,
+        expected_version=body.expected_version,
         reason=body.reason,
-        activation_evidence=body.activation_evidence,
-        effective_date=body.effective_date,
-        impact_acknowledged=body.impact_acknowledged,
         actor_admin_id=admin.id,
     )
 
 
-@router.post("/{contract_id}/approve", response_model=ContractResponse)
-def approve(
-    contract_id: UUID, body: TransitionRequest, admin: Admin, db: Db
+def _apply_transition(
+    operation: Callable[[Session, adapter.TransitionCommand], adapter.ContractView],
+    db: Session,
+    command: adapter.TransitionCommand,
 ) -> ContractResponse:
-    return ContractResponse.of(service.approve(db, _cmd(contract_id, body, admin)))
+    try:
+        value = operation(db, command)
+    except adapter.AgreementError as exc:
+        raise adapter.agreement_domain_error(exc) from exc
+    return ContractResponse.of(value)
 
 
-@router.post("/{contract_id}/reject", response_model=ContractResponse)
+@router.post("/{agreement_id}/reject", response_model=ContractResponse)
 def reject(
-    contract_id: UUID, body: TransitionRequest, admin: Admin, db: Db
+    agreement_id: UUID, body: TransitionRequest, admin: Admin, db: Db
 ) -> ContractResponse:
-    return ContractResponse.of(service.reject(db, _cmd(contract_id, body, admin)))
+    return _apply_transition(
+        adapter.reject, db, _transition_command(agreement_id, body, admin)
+    )
 
 
-@router.post("/{contract_id}/activate", response_model=ContractResponse)
-def activate(
-    contract_id: UUID, body: TransitionRequest, admin: Admin, db: Db
-) -> ContractResponse:
-    return ContractResponse.of(service.activate(db, _cmd(contract_id, body, admin)))
-
-
-@router.post("/{contract_id}/suspend", response_model=ContractResponse)
+@router.post("/{agreement_id}/suspend", response_model=ContractResponse)
 def suspend(
-    contract_id: UUID, body: TransitionRequest, admin: Admin, db: Db
+    agreement_id: UUID, body: TransitionRequest, admin: Admin, db: Db
 ) -> ContractResponse:
-    return ContractResponse.of(service.suspend(db, _cmd(contract_id, body, admin)))
+    return _apply_transition(
+        adapter.suspend, db, _transition_command(agreement_id, body, admin)
+    )
 
 
-@router.post("/{contract_id}/reinstate", response_model=ContractResponse)
+@router.post("/{agreement_id}/reinstate", response_model=ContractResponse)
 def reinstate(
-    contract_id: UUID, body: TransitionRequest, admin: Admin, db: Db
+    agreement_id: UUID, body: TransitionRequest, admin: Admin, db: Db
 ) -> ContractResponse:
-    return ContractResponse.of(service.reinstate(db, _cmd(contract_id, body, admin)))
+    return _apply_transition(
+        adapter.reinstate, db, _transition_command(agreement_id, body, admin)
+    )
 
 
-@router.post("/{contract_id}/terminate", response_model=ContractResponse)
-def terminate(
-    contract_id: UUID, body: TransitionRequest, admin: Admin, db: Db
-) -> ContractResponse:
-    return ContractResponse.of(service.terminate(db, _cmd(contract_id, body, admin)))
-
-
-@router.post("/{contract_id}/cancel", response_model=ContractResponse)
+@router.post("/{agreement_id}/cancel", response_model=ContractResponse)
 def cancel(
-    contract_id: UUID, body: TransitionRequest, admin: Admin, db: Db
+    agreement_id: UUID, body: TransitionRequest, admin: Admin, db: Db
 ) -> ContractResponse:
-    return ContractResponse.of(service.cancel(db, _cmd(contract_id, body, admin)))
+    return _apply_transition(
+        adapter.cancel, db, _transition_command(agreement_id, body, admin)
+    )
 
 
-@router.get("/{contract_id}", response_model=ContractResponse)
-def get_contract(contract_id: UUID, _admin: Admin, db: Db) -> ContractResponse:
-    from dotmac_kernel import NotFoundError
+@router.post("/{agreement_id}/terminate", response_model=ContractResponse)
+def terminate(
+    agreement_id: UUID, body: TerminateRequest, admin: Admin, db: Db
+) -> ContractResponse:
+    try:
+        value = adapter.terminate(
+            db,
+            adapter.TerminateCommand(
+                command_id=body.command_id,
+                agreement_id=agreement_id,
+                effective_date=body.effective_date,
+                impact_acknowledged=body.impact_acknowledged,
+                reason=body.reason,
+                expected_status=body.expected_status,
+                expected_version=body.expected_version,
+                actor_admin_id=admin.id,
+            ),
+        )
+    except adapter.AgreementError as exc:
+        raise adapter.agreement_domain_error(exc) from exc
+    return ContractResponse.of(value)
 
-    view = service.get(db, contract_id)
-    if view is None:
-        raise NotFoundError(f"contract {contract_id} not found")
-    return ContractResponse.of(view)
+
+@router.get("/{agreement_id}", response_model=ContractResponse)
+def get_contract(agreement_id: UUID, _admin: Admin, db: Db) -> ContractResponse:
+    value = adapter.get(db, agreement_id)
+    if value is None:
+        raise NotFoundError(f"agreement {agreement_id} not found")
+    return ContractResponse.of(value)
 
 
 __all__ = ["router"]

@@ -21,6 +21,10 @@ lifecycle — never a product's tenants, subscribers, or customer data.
 - **Approvals:** `dotmac-approvals==0.1.0a4`, platform-plane only and the
   authority under ADR-0005. Vendor retains the typed route/identity adapter,
   not a second policy engine.
+- **Commercial Agreements:** `dotmac-commercial-agreements==0.1.0a1`,
+  platform-only and the agreement authority under ADR-0008. Vendor retains one
+  typed offer/catalogue/approval-evidence adapter; the local lifecycle writer
+  and tables are absent.
 - **Product capability evidence:** Vendor config pins exact product OCI and
   manifest digests; the adapter verifies their Release Catalog association and
   derives capabilities only from held kernel-canonical document bytes.
@@ -74,10 +78,9 @@ release-evidence ingestion, and rollback boundary.
 
 ## Scope this phase
 
-The assembly owns vendor accounts, immutable offers, commercial contracts,
-licence issuance/delivery, and the provisioning laboratory. It composes Release
-Catalog, Entitlement Allocation and Approvals as their authoritative owners.
-ADR-0007 keeps this repository and database while Commercial Agreements,
-Licensing, Deployment Control and Brand Profiles replace the remaining local
-owners one contracted slice at a time. External connector execution remains in
-Dotmac Integrator.
+The assembly owns vendor accounts, immutable offers, licence issuance/delivery,
+and the provisioning laboratory. It composes Release Catalog, Entitlement
+Allocation, Approvals and Commercial Agreements as their authoritative owners.
+ADR-0007 keeps this repository and database while Licensing, Deployment Control
+and Brand Profiles replace the remaining local owners one contracted slice at a
+time. External connector execution remains in Dotmac Integrator.

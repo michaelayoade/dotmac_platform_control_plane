@@ -12,7 +12,8 @@ Release Catalog module, the Entitlement Allocation module and the vendor
 lineage — deriving its table set from the live catalogue rather than a literal
 list. Two halves, because the composed database has two namespaces:
 
-1. **Module schemas** (`mod_rel`, `mod_ealloc`, `mod_approvals`) go through the
+1. **Module schemas** (`mod_rel`, `mod_ealloc`, `mod_approvals`,
+   `mod_agreements`) go through the
    kernel's own
    canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. That
    is the contract every registered module schema is held to fleet-wide, and
@@ -82,7 +83,9 @@ APP_ROLE = "app_user"
 # The two schemas the kernel's module gate must find. Asserted because
 # `audit_live_schemas` over zero schemas returns zero violations — the exact
 # shape of a gate that has silently stopped running.
-EXPECTED_MODULE_SCHEMAS = frozenset({"mod_approvals", "mod_ealloc", "mod_rel"})
+EXPECTED_MODULE_SCHEMAS = frozenset(
+    {"mod_agreements", "mod_approvals", "mod_ealloc", "mod_rel"}
+)
 
 # THE TENANT CATALOGUE — its own category, and neither plane.
 #
@@ -234,7 +237,7 @@ def _public_schema(url: str) -> PublicSchema:
 def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
     scratch_db: str,
 ) -> None:
-    """`mod_rel` and `mod_ealloc`, held to the contract the kernel defines.
+    """Every composed module schema, held to the contract the kernel defines.
 
     This is the gate that makes the a4 module pins load-bearing. Through a3 both
     modules declared their tables in `ModuleManifest.tables` — the TENANT
@@ -524,16 +527,15 @@ def test_every_vendor_owned_table_is_platform_plane_and_fully_revoked(
     # rather than an exact count keeps this from becoming a second list to
     # maintain.
     #
-    # LOWERED 15 -> 14 by `v014_allocations_authority`, deliberately. Allocation
-    # authority moved to `dotmac-entitlement-allocation`, and the two legacy
-    # tables (`allocations`, `allocation_entries`) were dropped with the writer
-    # that owned them — so the vendor lineage genuinely owns one fewer pair than
-    # it did, and `mod_ealloc` is not in `public`.
+    # LOWERED 14 -> 12 by `v015_agreements_authority`, deliberately. Commercial
+    # Agreements moved to `dotmac-commercial-agreements`, and the two empty
+    # legacy tables were dropped with their writer. `mod_agreements` is audited
+    # above and is not part of `public`.
     #
     # A floor that fails when the count FALLS is doing its job: it forces this
     # decision to be made and written down rather than absorbed silently. Lower
     # it only alongside the migration that retires the tables.
-    assert len(vendor_tables) >= 14, sorted(vendor_tables)
+    assert len(vendor_tables) >= 12, sorted(vendor_tables)
     assert "vendor_accounts" in vendor_tables
 
     misplaced = sorted(vendor_tables & (schema.tenant_plane() | schema.split_scope()))
