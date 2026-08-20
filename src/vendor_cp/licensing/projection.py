@@ -124,8 +124,9 @@ class RegisterTargetCommand:
     This is the ONLY supported way `licence_delivery_targets` is written.
     Without it the table had no named writer, so every caller — including
     tests — reached for raw inserts, which is precisely how a projection drifts
-    from the authority it projects. When `FleetDesiredStateService` lands, this
-    command becomes its subscriber rather than a parallel source of truth.
+    from the authority it projects. When Deployment Control is composed, this
+    command becomes its adapter subscriber rather than a parallel source of
+    truth.
     """
 
     target_ref: str

@@ -1,25 +1,13 @@
-"""The vendor-local approval feature — versioned approval policy + records.
+"""The Vendor approval adapter surface over the composed approvals module.
 
-This is the ONLY approval owner in this assembly. It writes
-`public.approval_policies` and `public.approval_records`, and every approval
-decision the control plane makes goes through it.
+`dotmac-approvals` is the ONLY approval owner in this assembly. Vendor's routes
+delegate through the typed adapter; the retired local models, writer and tables
+are gone under ADR-0005.
 
 ## Why it is named `vendor_approvals`
 
-`dotmac-approvals` is composed here — in SHADOW, and read-only — and it holds
-the module code `approvals`. A module registry has one owner per code, so this
-package cannot also be called that.
-
-Shadow composition is a bounded authority-migration phase with exactly one
-authoritative writer, and this package is that writer. The module's tables are
-empty, `platform_api` may only read them (vendor `v012`), and the authority moves
-only in the sealed cutover transaction of ADR-0004 § 3.1.
-
-The rename is therefore proactive, not consequential. A module registry holds one
-owner per code and `FeatureManifest.name` becomes that code, so a manifest still
-called `approvals` would collide with the module on the cutover's first line of
-composition. Renaming now takes that off the cutover's path instead of leaving it
-as the cutover's first surprise.
+`dotmac-approvals` holds the module code `approvals`. A module registry has one
+owner per code, so this adapter package cannot also be called that.
 
 The HTTP surface is unchanged: routes still live under
 `/platform/vendor/approvals`. A manifest name is a composition identifier, not a

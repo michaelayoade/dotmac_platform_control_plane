@@ -10,10 +10,11 @@ kernel code, no private kernel imports (deny-case D5).
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 from dotmac_approvals import module as approvals_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
-from dotmac_kernel import ProductAssemblySpec
+from dotmac_kernel import FeatureManifest, ProductAssemblySpec
 from dotmac_release_catalog import module as release_catalog_module
 
 from vendor_cp.accounts.feature import feature as accounts_feature
@@ -43,14 +44,15 @@ STATEFUL_MODULES = (
     release_catalog_module,
     entitlement_allocation_module,
     # Dual-plane and therefore SELECTABLE: composing it without an explicit
-    # `module_planes` entry fails `ProductAssemblySpec` construction. Composed in
-    # SHADOW under ADR-0004 — read-only, with vendor migration `v012` removing
-    # the write grants its own migration issues.
+    # `module_planes` entry fails `ProductAssemblySpec` construction. It is the
+    # approval authority under ADR-0005; vendor migration `v013` restored online
+    # DML after the bounded v012 shadow phase and retired the local writer.
     approvals_module,
 )
 
-# The vendor's own features, in mount order. A profile may withhold a SURFACE
-# from this sequence; it may not reorder or add to it.
+# The vendor's own features, in mount order. A profile may strip a feature's
+# route/nav SURFACE; it may not remove its manifest declarations, reorder the
+# features or add one.
 VENDOR_SURFACES = (
     release_evidence_feature,
     console_feature,
@@ -62,6 +64,15 @@ VENDOR_SURFACES = (
     licensing_feature,
     provisioning_feature,
 )
+
+
+def _profiled_surface(
+    feature: FeatureManifest, profile: VendorDeploymentProfile
+) -> FeatureManifest:
+    """Keep a feature's declarations installed while withholding its routes."""
+    if profile.exposes(feature.name):
+        return feature
+    return replace(feature, routers=(), web_routers=(), nav=())
 
 
 def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssemblySpec:
@@ -97,11 +108,7 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
         module_planes=ASSEMBLY_MODULE_PLANES,
         modules=(
             *STATEFUL_MODULES,
-            *(
-                feature
-                for feature in VENDOR_SURFACES
-                if effective.exposes(feature.name)
-            ),
+            *(_profiled_surface(feature, effective) for feature in VENDOR_SURFACES),
         ),
         web_enabled=True,
     )

@@ -11,6 +11,20 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 _DUMMY = "postgresql+psycopg://x:x@127.0.0.1:5432/vendor_control_plane_test"
 os.environ.setdefault("DATABASE_URL", _DUMMY)
 os.environ.setdefault("PLATFORM_DATABASE_URL", _DUMMY)
+
+from dotmac_kernel import AuditActionRegistry, install_audit_actions  # noqa: E402
+
+from vendor_cp.assembly import STATEFUL_MODULES, VENDOR_SURFACES  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def install_composed_audit_action_registry() -> None:
+    """Mirror `create_app` for service tests that call the write side directly."""
+    install_audit_actions(
+        AuditActionRegistry.from_manifests((*STATEFUL_MODULES, *VENDOR_SURFACES))
+    )

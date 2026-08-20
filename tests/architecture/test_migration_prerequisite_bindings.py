@@ -7,14 +7,11 @@ binding that truth was itself the instruction to build a module's tenant plane,
 and the only way to keep tenant tables out of a control plane with no tenants was
 to withhold a binding whose effect the database plainly provides.
 
-a61 separates the two, so this assembly binds both kernel effects and states its
-installation intent separately. The tests below assert the two halves apart, so a
-future edit cannot quietly re-merge them.
-
-The selection tuple is EMPTY today because no selectable module is composed —
-`dotmac-approvals` arrives with its cutover contract. `tests/migration/
-test_selected_planes.py` documents exactly which part of the ADR-0028 proof that
-defers, and to where.
+The separation introduced in a61 remains at a77, so this assembly binds the two
+kernel effects its currently composed modules require and states installation
+intent separately. The tests below assert the two halves apart, so a future edit
+cannot quietly re-merge them. Approvals is selectable and its platform plane is
+declared explicitly; its tenant plane remains absent.
 """
 
 from __future__ import annotations
@@ -44,9 +41,14 @@ from vendor_cp.migrations import make_alembic_config
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_the_assembly_binds_every_effect_the_kernel_lineage_supplies() -> None:
+def test_the_assembly_binds_the_required_kernel_effects() -> None:
     """Including the tenant catalogue. A binding is an observation, and kernel
-    0001 observably creates `public.tenants` in this database."""
+    0001 observably creates `public.tenants` in this database.
+
+    Kernel a77 supplies additional named effects, but no currently composed
+    lineage requires them. A binding is added when a composed consumer declares
+    that requirement; availability alone is not assembly intent.
+    """
     assert {
         (binding.prerequisite, binding.provider_revision, binding.provider_owner)
         for binding in ASSEMBLY_PREREQUISITE_BINDINGS

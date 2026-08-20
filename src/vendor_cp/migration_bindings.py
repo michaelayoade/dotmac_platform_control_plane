@@ -23,15 +23,16 @@ that truthful binding would have switched on tenant approval tables in a
 control plane with no tenants to scope them to, and the only way to avoid that
 was to lie by withholding a binding whose effect the database plainly provides.
 
-a61 separates the two: we bind what we HAVE, and we select what we INSTALL.
-Both bindings below are therefore present and truthful, and the tenant plane of
-any dual-plane module stays out because it was never SELECTED — never because a
-binding was withheld.
+The separation introduced in a61 remains the contract at the a77 pin: we bind
+what we HAVE, and we select what we INSTALL. Both bindings below are therefore
+present and truthful, and the tenant plane of any dual-plane module stays out
+because it was never SELECTED — never because a binding was withheld.
 
 `dotmac-approvals` is the one selectable module composed here, and the selection
 below installs its PLATFORM plane only. Note what that does NOT say: selecting a
-plane chooses STORAGE SHAPE, never WRITE AUTHORITY. Vendor `v012` is what keeps
-the module read-only while the legacy writer is still authoritative.
+plane chooses STORAGE SHAPE, never WRITE AUTHORITY. Vendor `v012` imposed the
+bounded shadow restriction; `v013` later restored DML and transferred authority
+under ADR-0005.
 
 Both declarations are installed from `alembic/env.py` before Alembic builds the
 revision map, and both are mirrored into the graph-command environment
@@ -82,7 +83,8 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
 #:
 #: `ModulePlane.PLATFORM` selects STORAGE SHAPE. It says nothing about whether
 #: this assembly has acquired WRITE AUTHORITY over those tables — that is a
-#: migration-state question, and Vendor owns it. See vendor migration `v012`.
+#: migration-state question, and Vendor owns it. See vendor migrations `v012`
+#: and `v013`.
 ASSEMBLY_MODULE_PLANES: Final[tuple[ModulePlaneSelection, ...]] = (
     ModulePlaneSelection(module="approvals", planes=(ModulePlane.PLATFORM,)),
 )

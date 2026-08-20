@@ -22,6 +22,13 @@
 > [`2026-07-18-kernel-program-directive.md`](../reviews/2026-07-18-kernel-program-directive.md).
 > Nothing here may be represented in README/ARCHITECTURE as current runtime behavior.
 > Scope recorded from Michael's directive of 2026-07-30.
+>
+> **Ownership amendment — 2026-08-20.** ADR-0007 supersedes this design's
+> Vendor-local `FleetDesiredStateService` and `DeploymentRunner` owner labels.
+> The released independent Deployment Control module owns desired state; the
+> separately deployed Dotmac Integrator owns provider transport and execution.
+> The names below remain historical design vocabulary, not authorization to
+> implement either owner locally in this assembly.
 
 > **Kernel-contract rule for this document:** every kernel contract is referenced **by name
 > only**, with a pointer to
