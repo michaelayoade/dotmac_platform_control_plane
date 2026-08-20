@@ -15,7 +15,7 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a61", extras = [
+dotmac-kernel = { version = "0.1.0a77", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
@@ -44,11 +44,10 @@ dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
 # `allocation_entries` become declared `platform_tables`, so the composed
 # live-catalogue audit can hold them to the plane they are actually built on.
 dotmac-entitlement-allocation = { version = "0.1.0a4", source = "forgejo" }
-# The dual-plane approval-state owner (ADR-0026/ADR-0028), composed in SHADOW
-# under the cutover contract in `docs/adr/0004-approvals-authority-cutover.md`.
-# READ-ONLY here: `vendor_cp.approvals` remains the sole authoritative writer,
-# and vendor migration `v012` takes away the write grants this module's own
-# migration issues. See that migration for why Vendor owns that restriction.
+# The dual-plane approval-state authority (ADR-0005/ADR-0028), composed on its
+# PLATFORM plane only. Vendor migration `v013` restored the module's online DML,
+# dropped the empty legacy tables and retired the local writer; Vendor retains
+# only its typed adapter.
 dotmac-approvals = { version = "0.1.0a4", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE

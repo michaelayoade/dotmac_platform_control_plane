@@ -177,14 +177,14 @@ class TargetStatus(str, Enum):
 class LicenceDeliveryTarget(Base, TimestampMixin):
     """A licensing-owned projection of where a licence may be delivered.
 
-    Deliberately NOT named `deployments`: `docs/design/domain-foundation.md`
-    assigns the authoritative Deployment entity to `FleetDesiredStateService`,
-    and ARCHITECTURE.md still records deployment intent as design-only. Having
-    licensing quietly create that table would have made it the de-facto owner
-    of an entity another service is specified to own — a source-of-truth
-    violation dressed as a convenience. This is a narrow delivery-target
-    projection owned by `EntitlementProjectionService`; when the fleet slice
-    lands, this is rebuilt from it rather than competing with it.
+    Deliberately NOT named `deployments`: ADR-0007 assigns the authoritative
+    Deployment entity to the independent Deployment Control module, which is
+    released but not yet composed here. Having licensing quietly create that
+    table would have made it the de-facto owner of an entity another module is
+    specified to own — a source-of-truth violation dressed as a convenience.
+    This is a narrow delivery-target projection owned by
+    `EntitlementProjectionService`; when the module cutover lands, this is
+    rebuilt from its desired state rather than competing with it.
 
     Registration alone is NOT authorisation — staging additionally requires an
     `active` status, a customer matching the licence lineage, and (for a bound

@@ -11,10 +11,17 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a61` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a77` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source.
+- The a61 → a77 compatibility uplift moves no domain writer and composes no new
+  module. It does cross kernel a68's platform-audit registry enforcement, so
+  every Vendor-owned platform audit action is now declared on exactly one
+  installed feature manifest and swept by
+  `tests/architecture/test_platform_audit_actions.py`. The a74–a77 releases
+  themselves add only the four published module namespace allocations used by
+  the cutovers sequenced in ADR-0007.
 - **Two composition declarations, deliberately separate** (ADR-0028). Both are
   checked in at `src/vendor_cp/migration_bindings.py` and both are installed
   from `alembic/env.py` before Alembic builds the revision map:
@@ -188,6 +195,24 @@ artifacts, approvals or allocations — but adoption is earned by running in
 production with the local writer proven absent, not by landing code, and nothing
 has run.
 
+## In-place module recomposition (ADR-0007)
+
+This repository, runtime and control-plane database remain the Vendor product
+assembly. There is no replacement repository and no second control plane. The
+remaining local owners move through separately reviewable expand/migrate/
+contract slices: Commercial Agreements first, then the Licensing issuer, then
+greenfield Deployment Control. Brand Profiles' platform plane follows its
+checked-in Sub-first adoption unless that extraction decision is explicitly
+amended at the source.
+
+Each authority-moving slice must pin and compose one released module, install
+its lineage and platform-plane intent, migrate or prove the absence of rows,
+switch one writer, and retire the replaced local owner in the same coherent
+change. Merely pinning kernel a77 does none of those things. External provider
+I/O, credentials, retries and connector scheduling remain owned by the separate
+Dotmac Integrator; module-owned desired state in `mod_deploy` is not permission
+to build a second Vendor-local fleet or connector engine.
+
 ## Deployment profiles
 
 `src/vendor_cp/deployment_profile.py` declares which vendor SURFACES a
@@ -202,7 +227,7 @@ and reusable-looking; publishing their routes would make an external caller a
 constraint on deciding the owner. A withheld surface is not a disabled
 subsystem: licence key custody still loads at boot, and a test asserts it.
 
-A profile may never withhold a persistence owner. Both module manifests carry a
+A profile may never withhold a persistence owner. All three module manifests carry a
 migration lineage and own schemas the database already contains, so an assembly
 missing one would no longer describe its own tables.
 
@@ -331,7 +356,7 @@ The deployment path never creates or repairs the marker itself.
   kernel's `ProvisioningProvider` contract (plan → apply → observe → cancel)
   against the Vendor-owned `LaboratoryProvisioningProvider`, plus test-only
   conformance via the kernel's `check_provisioning_provider_contract`. A
-  **laboratory** — simulation only, no fleet tables, no runner, no real
+  **laboratory** — simulation only, no Vendor-owned fleet tables, no runner, no real
   infrastructure, no SSH; the only state is the provider's in-memory operation
   ledger. Runtime code never imports `dotmac_kernel.testing`. The real runner +
   activation contracts are a later, design-gated slice.
@@ -351,17 +376,20 @@ a build-failing architecture test (`tests/architecture/test_deny_cases.py`):
 |---|---|---|
 | **D1** | One control-plane database; the kernel owns the engine. No `create_engine`/`sessionmaker`, no product DSNs. | A cache or a product DB must never become a parallel authority; the vendor CP has exactly one datastore. |
 | **D2** | No product data-plane imports (`dotmac_sub`/`crm`/`erp`/`app`). | ERP/ISP/CRM remain separate data planes; collaboration is API/webhook only. An ISP operator is a *tenant*, its subscribers are the product's parties — never the vendor CP's. |
-| **D3** | Vendor-owned simulation provider only; real config fails startup; no real-provider SDKs or runtime testing-kit imports. | A request-time access check never calls a payment/cloud provider; the runner + activation contracts are a later, design-gated slice. |
+| **D3** | Vendor-owned simulation provider only; real config fails startup; no real-provider SDKs or runtime testing-kit imports. | A request-time access check never calls a payment/cloud provider; future module-owned desired state still leaves connector execution in Integrator. |
 | **D4** | Platform-admin auth through the kernel (`require_platform_admin`). | One authority for platform-actor identity; no re-implemented auth to drift. |
 | **D5** | Only the kernel's public surface; no private/internal/copied code. | Products compose a pinned kernel and improve it via declared extension points — never fork or copy it. |
 
-## Still design-only (do NOT implement yet)
+## Still design-only (do NOT implement outside its contracted slice)
 
-Fleet desired state, update authority, support access, the full provisioning
-runner, and observed fleet health. Independent-module extraction of the
-existing approvals, contracts, allocation and licensing implementations follows
-their adjudication/cutover dossiers; their existing vendor-local code is not
-evidence that those extractions already happened.
+Deployment Control is released but not yet composed here. Until its own cutover
+lands, fleet desired state, update authority, support access and observed fleet
+health remain absent. The permitted future persistence owner is the module's
+`mod_deploy` lineage, never a Vendor-local set of fleet tables; the full provider
+runner remains outside this application behind Dotmac Integrator. Commercial
+Agreements, Licensing and Brand Profiles likewise move only through the ordered
+ADR-0007 cutovers; existing Vendor-local code is not evidence that extraction or
+adoption already happened.
 
 ## Migrating existing products
 
@@ -375,9 +403,12 @@ big-bang rewrite, and never by this control plane reaching into their databases.
 `licence_delivery_targets` is a **licensing-owned projection** of where a
 licence may be delivered, written only by
 `EntitlementProjectionService.register_delivery_target`. It is deliberately NOT
-the authoritative `Deployment` entity: `docs/design/domain-foundation.md`
-assigns that to `FleetDesiredStateService`, and deployment intent remains
-design-only. Naming the licensing table `deployments` would have made licensing
+the authoritative `Deployment` entity. The historical
+`docs/design/domain-foundation.md` names `FleetDesiredStateService`; ADR-0007
+supersedes that local-owner label with the independent Deployment Control
+module, which is released but not yet composed here. Naming the licensing table
+`deployments` would have made licensing
 the de-facto owner of an entity another service is specified to own — a
-source-of-truth violation dressed as a convenience. When the fleet slice lands,
-this projection is rebuilt from it rather than competing with it.
+source-of-truth violation dressed as a convenience. When the module cutover
+lands, this projection is rebuilt from its desired state rather than competing
+with it.

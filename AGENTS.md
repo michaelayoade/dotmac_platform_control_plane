@@ -21,7 +21,10 @@ disagree, fix the drift.
    `VENDOR_PROVIDER_MODE` FAILS STARTUP; no real-provider SDKs are imported
    (**D3**). Runtime code implements the side-effect-free laboratory provider
    locally and never imports `dotmac_kernel.testing`; the kernel test kit is
-   test-only. No fleet tables, no `DeploymentRunner` yet.
+   test-only. No **Vendor-owned** fleet tables and no Vendor
+   `DeploymentRunner`: a later contracted cutover may compose the independent
+   Deployment Control module's `mod_deploy` desired-state tables, while real
+   provider transport remains exclusively behind Dotmac Integrator (ADR-0007).
 5. **Platform-admin auth through the kernel.** Vendor admin surfaces depend on
    `dotmac_kernel.platform_auth.require_platform_admin`; auth is never
    re-implemented (**D4**).
@@ -39,7 +42,8 @@ disagree, fix the drift.
    exactly how this line came to say `a8` while the pin said `a9`.
 9. **Bindings state facts; plane selections state intent.** A
    `PrerequisiteBinding` says where an effect comes from, and this assembly
-   binds BOTH kernel effects — including `tenant_scope_catalog.v1`, because
+   binds both kernel effects required by the currently composed modules —
+   including `tenant_scope_catalog.v1`, because
    kernel `0001` really does create `public.tenants` here. A
    `ModulePlaneSelection` says what this product installs, and it selects
    `PLATFORM` alone for `approvals` — never as a side effect of a version bump,
@@ -96,6 +100,12 @@ disagree, fix the drift.
     is Governance-owned and transitional: this assembly records its measured
     baseline in `docs/external-connector-surface.md`, but never copies the
     detector or treats the ratchet as runtime isolation.
+15. **Platform audit actions are declared vocabulary.** Every `vendor.*` action
+    passed to `write_platform_audit_event` is declared by exactly one installed
+    Vendor feature manifest, and every declaration has a real caller. Kernel
+    a68 made the platform writer enforce the manifest registry; the a77 pin may
+    not cross that boundary with undeclared actions
+    (`tests/architecture/test_platform_audit_actions.py`; ADR-0007).
 
 ## Validation before any commit
 

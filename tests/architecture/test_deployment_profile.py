@@ -2,7 +2,7 @@
 
 Three properties are worth failing the build over:
 
-1. **A profile never drops a persistence owner.** The two module manifests carry
+1. **A profile never drops a persistence owner.** The three module manifests carry
    migration lineages and own schemas this database already contains. A profile
    that withheld one would produce an assembly that no longer describes its own
    tables, and the composed live-catalogue audit would walk a schema nobody
@@ -22,6 +22,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from dotmac_approvals import module as approvals_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import create_app
 from dotmac_release_catalog import module as release_catalog_module
@@ -52,11 +53,12 @@ def _paths(profile_code: str) -> set[str]:
     return {getattr(route, "path", "") for route in app.routes}
 
 
-def test_every_profile_composes_both_persistence_owners() -> None:
+def test_every_profile_composes_all_persistence_owners() -> None:
     for profile in PROFILES:
         modules = assembly.build_spec(profile).modules
         assert release_catalog_module in modules, profile.code
         assert entitlement_allocation_module in modules, profile.code
+        assert approvals_module in modules, profile.code
 
 
 def test_production_bootstrap_withholds_licensing_and_offers() -> None:
@@ -66,6 +68,23 @@ def test_production_bootstrap_withholds_licensing_and_offers() -> None:
     # SENSITIVITY: the check must be able to see a mounted vendor surface, or it
     # would pass just as well against an assembly that mounted nothing at all.
     assert [p for p in paths if p.startswith(CONTRACTS_PREFIX)], paths
+
+
+def test_a_withheld_surface_keeps_its_manifest_declarations() -> None:
+    """Hiding routes must not unregister vocabulary an active subsystem uses."""
+    modules = {
+        manifest.name: manifest
+        for manifest in assembly.build_spec(
+            deployment_profile(PRODUCTION_BOOTSTRAP)
+        ).modules
+    }
+
+    for original in (assembly.licensing_feature, assembly.offers_feature):
+        profiled = modules[original.name]
+        assert tuple(profiled.routers) == ()
+        assert tuple(profiled.web_routers) == ()
+        assert tuple(profiled.nav) == ()
+        assert profiled.audit_actions == original.audit_actions
 
 
 def test_the_full_profile_mounts_the_surfaces_bootstrap_withholds() -> None:

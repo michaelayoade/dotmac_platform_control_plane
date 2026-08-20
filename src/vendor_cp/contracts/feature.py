@@ -13,6 +13,18 @@ from vendor_cp.contracts.router import router
 feature = FeatureManifest(
     name="contracts",
     routers=[router],
+    audit_actions=(
+        "vendor.contract.drafted",
+        "vendor.contract.submitted",
+        "vendor.contract.approved",
+        "vendor.contract.rejected",
+        "vendor.contract.activated",
+        "vendor.contract.suspended",
+        "vendor.contract.reinstated",
+        "vendor.contract.terminated",
+        "vendor.contract.expired",
+        "vendor.contract.cancelled",
+    ),
     core=True,
     enabled_by_default=True,
 )

@@ -10,7 +10,7 @@ digest-bound release evidence.
 
 Production never builds from a checkout. `Build immutable production image`
 runs on a disposable GitHub-hosted runner, uses a BuildKit secret to resolve the
-three exact Forgejo package pins, publishes one SHA-tagged GHCR image, and emits
+four exact Forgejo package pins, publishes one SHA-tagged GHCR image, and emits
 its immutable registry digest. `Deploy immutable image to production` accepts
 only that digest shape, requires the `production` environment approval, verifies
 the named `vendor-cp-prod` target, and transfers only the deployment adapter.

@@ -11,15 +11,16 @@ lifecycle — never a product's tenants, subscribers, or customer data.
   **only** from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`).
   The testing extra supports tests only; runtime code never imports it. No
   copied kernel code or private imports (deny-case D5).
-- **Release Catalog:** `dotmac-release-catalog==0.1.0a3`, exact-pinned from the
+- **Release Catalog:** `dotmac-release-catalog==0.1.0a4`, exact-pinned from the
   same registry. The assembly composes its manifest and public Alembic lineage;
   its `mod_rel` platform-catalog tables remain inaccessible to `app_user`.
-- **Entitlement Allocation:** `dotmac-entitlement-allocation==0.1.0a3`, also
+- **Entitlement Allocation:** `dotmac-entitlement-allocation==0.1.0a4`, also
   exact-pinned and composed through its public manifest and Alembic locator.
-  This is a shadow installation, not a writer cutover: the vendor-local
-  allocation projection remains authoritative. New commercial writes carry an
-  explicit product identity, but historical rows still need evidence-backed
-  classification and the checked-in allocation preflight has not passed.
+  It is the allocation authority under ADR-0006; the retired Vendor-local
+  writer and tables are absent.
+- **Approvals:** `dotmac-approvals==0.1.0a4`, platform-plane only and the
+  authority under ADR-0005. Vendor retains the typed route/identity adapter,
+  not a second policy engine.
 - **Product capability evidence:** Vendor config pins exact product OCI and
   manifest digests; the adapter verifies their Release Catalog association and
   derives capabilities only from held kernel-canonical document bytes.
@@ -73,10 +74,10 @@ release-evidence ingestion, and rollback boundary.
 
 ## Scope this phase
 
-The assembly owns vendor accounts, immutable offers, approvals, commercial
-contracts, its legacy allocation projection, licence issuance/delivery, and the
-provisioning laboratory. It now composes the independently published Release
-Catalog for immutable artifact identity and attestations, plus Entitlement
-Allocation in shadow mode. Fleet desired state, the full provisioning runner,
-update authority, support access, and observed health remain future independent
-slices.
+The assembly owns vendor accounts, immutable offers, commercial contracts,
+licence issuance/delivery, and the provisioning laboratory. It composes Release
+Catalog, Entitlement Allocation and Approvals as their authoritative owners.
+ADR-0007 keeps this repository and database while Commercial Agreements,
+Licensing, Deployment Control and Brand Profiles replace the remaining local
+owners one contracted slice at a time. External connector execution remains in
+Dotmac Integrator.

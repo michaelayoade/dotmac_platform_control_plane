@@ -14,6 +14,7 @@ from vendor_cp.accounts.router import router
 feature = FeatureManifest(
     name="accounts",
     routers=[router],
+    audit_actions=("vendor.account.created",),
     core=True,
     enabled_by_default=True,
 )
