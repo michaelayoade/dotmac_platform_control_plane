@@ -125,8 +125,8 @@ it owns and — just as importantly — what it must never become.
 ## The composed database is audited whole
 
 `tests/migration/test_composed_live_catalog.py` audits the database this
-assembly actually produces — kernel lineage, all four module lineages, vendor
-lineage — rather than the tables someone remembered to name.
+assembly actually produces — all six lineages: kernel, the four module owners,
+and Vendor — rather than the tables someone remembered to name.
 
 - The module schemas (`mod_rel`, `mod_ealloc`, `mod_approvals`,
   `mod_agreements`) go through the kernel's own
