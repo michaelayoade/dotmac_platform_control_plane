@@ -1,2 +1,1 @@
-"""The `contracts` domain — ContractService, the owner of commercial-contract
-shape + lifecycle. See `docs/design/contract-service.md`."""
+"""Vendor's one typed adapter into the Commercial Agreements authority."""

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from dotmac_approvals import (
@@ -51,13 +52,19 @@ from dotmac_approvals import (
     Evaluation,
     PolicyRevision,
 )
+from dotmac_approvals.models import (
+    PlatformApprovalDecision,
+    PlatformApprovalRequest,
+)
 from dotmac_approvals.service import (
     evaluate_platform_approval,
     publish_platform_policy_version,
     record_platform_decision,
     request_platform_approval,
 )
+from dotmac_kernel import ConflictError
 from dotmac_kernel.messaging import process_once_platform
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vendor_cp.approvals_authority import PLATFORM_ADMIN_ROLE_ID, translate_digest
@@ -145,6 +152,23 @@ class RequestView:
             total_levels=evaluation.total_levels,
             reason=evaluation.reason,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedRequestEvidence:
+    """The exact approval fact a subject owner may act on.
+
+    This is evidence, not a second evaluation: state comes from the Approvals
+    module and every identity/digest field is copied from its authoritative
+    request and immutable decisions.
+    """
+
+    request_id: UUID
+    policy_code: str
+    policy_version: int
+    content_hash: str
+    decided_at: datetime
+    approver_refs: tuple[str, ...]
 
 
 # ── Operations ──────────────────────────────────────────────────────────────
@@ -263,12 +287,83 @@ def evaluate_request(db: Session, *, request_id: UUID) -> RequestView:
     )
 
 
+def approved_request_evidence(
+    db: Session,
+    *,
+    request_id: UUID,
+    subject_type: str,
+    subject_id: str,
+    content_hash: str,
+) -> ApprovedRequestEvidence:
+    """Return content-bound approved evidence for one exact subject.
+
+    Commercial Agreements is handed this value and checks it against its own
+    frozen digest. Vendor does not turn an approval status into a writable
+    agreement state; the agreement module performs that guarded transition.
+    """
+    request = db.get(PlatformApprovalRequest, request_id)
+    if request is None:
+        raise ConflictError(f"approval request {request_id} not found")
+    expected_digest = translate_digest(content_hash)
+    mismatches: list[str] = []
+    if request.subject_type != subject_type:
+        mismatches.append("subject_type")
+    if request.subject_id != subject_id:
+        mismatches.append("subject_id")
+    if request.content_digest != expected_digest:
+        mismatches.append("content_digest")
+    if mismatches:
+        raise ConflictError(
+            f"approval request {request_id} does not bind to this agreement "
+            f"({', '.join(mismatches)})"
+        )
+
+    evaluation = evaluate_platform_approval(db, request_id=request_id)
+    if evaluation.state is not ApprovalState.APPROVED:
+        raise ConflictError(
+            f"approval request {request_id} is {evaluation.state}, not approved"
+        )
+    if request.completed_at is None:
+        raise ConflictError(
+            f"approval request {request_id} is approved without completed_at"
+        )
+
+    approvers = tuple(
+        str(actor_id)
+        for actor_id in db.scalars(
+            select(PlatformApprovalDecision.actor_id)
+            .where(
+                PlatformApprovalDecision.request_id == request_id,
+                PlatformApprovalDecision.action == str(DecisionAction.APPROVE),
+            )
+            .order_by(
+                PlatformApprovalDecision.decided_at,
+                PlatformApprovalDecision.id,
+            )
+        )
+    )
+    if not approvers:
+        raise ConflictError(
+            f"approval request {request_id} is approved without approval decisions"
+        )
+    return ApprovedRequestEvidence(
+        request_id=request_id,
+        policy_code=request.policy_code,
+        policy_version=request.policy_version,
+        content_hash=content_hash,
+        decided_at=request.completed_at,
+        approver_refs=approvers,
+    )
+
+
 __all__ = [
+    "ApprovedRequestEvidence",
     "OpenRequestCommand",
     "PolicyView",
     "PublishPolicyCommand",
     "RecordDecisionCommand",
     "RequestView",
+    "approved_request_evidence",
     "evaluate_request",
     "open_request",
     "publish_policy_version",

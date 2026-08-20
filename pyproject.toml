@@ -32,13 +32,10 @@ dotmac-kernel = { version = "0.1.0a77", extras = [
 # disagree. a4 moves both tables to `platform_tables`, which is what makes the
 # declaration true (ADR-0023).
 dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
-# Installed in shadow mode: the independent owner and its migration lineage are
-# composed now, while the vendor-local allocation writer remains authoritative
-# until historical commercial rows have evidence-backed product mappings and
-# the data preflight in docs/ARCHITECTURE.md passes. New writes are
-# product-qualified; that does not by itself authorize a writer cutover.
-# Exact-pinned from the private index; never a path dependency and never a
-# silent dual-write.
+# The allocation authority under ADR-0006. Vendor migration `v014` checked the
+# greenfield premise, dropped the empty local tables and retired their writer;
+# Vendor retains only its typed assembly adapter. Exact-pinned from the private
+# index; never a path dependency and never a silent dual-write.
 #
 # a4 for the same reason as the release catalogue above: its `allocations` /
 # `allocation_entries` become declared `platform_tables`, so the composed
@@ -49,6 +46,11 @@ dotmac-entitlement-allocation = { version = "0.1.0a4", source = "forgejo" }
 # dropped the empty legacy tables and retired the local writer; Vendor retains
 # only its typed adapter.
 dotmac-approvals = { version = "0.1.0a4", source = "forgejo" }
+# The platform-only Commercial Agreements authority. Vendor migration `v015`
+# checks the greenfield premise under lock, drops the empty legacy tables, and
+# leaves this module as the one lifecycle/history/audit/outbox writer. Vendor
+# retains only typed offer, catalogue and approval-evidence adapters.
+dotmac-commercial-agreements = { version = "0.1.0a1", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).

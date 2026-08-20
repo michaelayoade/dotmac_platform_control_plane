@@ -38,8 +38,7 @@ from sqlalchemy.orm import Session
 from vendor_cp import config as vendor_config
 from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
-from vendor_cp.contracts import service as contracts
-from vendor_cp.contracts.models import Contract
+from vendor_cp.contracts import adapter as contracts
 from vendor_cp.licensing import service as licensing
 from vendor_cp.licensing import signer as signer_module
 from vendor_cp.licensing.models import SigningKeyStatus
@@ -66,22 +65,16 @@ def db() -> Iterator[Session]:
         engine.dispose()
 
 
-def _approve(db: Session, contract_id: uuid.UUID, content_hash: str | None) -> None:
-    """Reach quorum on the contract's OWN approval request.
-
-    `submit` opened that request and stored its id on the row, so the id is read
-    back off the ORM row — the service returns a view, which does not carry it.
-    """
-    assert content_hash is not None
-    row = db.get(Contract, contract_id)
-    assert row is not None and row.approval_request_id is not None
+def _approve(db: Session, proposed: contracts.ContractView) -> None:
+    assert proposed.content_hash is not None
+    assert proposed.approval_request_id is not None
     approvals.record_decision(
         db,
         approvals.RecordDecisionCommand(
             command_id=f"dec-{uuid.uuid4()}",
-            request_id=row.approval_request_id,
+            request_id=proposed.approval_request_id,
             approver_id=uuid.uuid4(),
-            content_hash=content_hash,
+            content_hash=proposed.content_hash,
         ),
     )
 
@@ -107,14 +100,15 @@ def _staged(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
         db,
         contracts.CreateDraftCommand(
             command_id=f"d-{uuid.uuid4()}",
+            reference=f"AGR-{uuid.uuid4()}",
             product_code="dotmac-sub",
-            customer_ref=customer_ref,
-            legal_entity="Dotmac Ltd",
-            currency_code="USD",
+            counterparty_ref=customer_ref,
+            agreement_type="software_subscription",
             term_start=date(2026, 1, 1),
             term_end=date(2026, 12, 31),
             lines=(contracts.LineInput(offer_code, 1, "cap.a", quantity=1),),
         ),
+        catalogues=_catalogue("cap.a"),
     )
     # The policy must exist BEFORE submit: submit opens the approval
     # request against that exact revision, so publishing after it would
@@ -129,30 +123,36 @@ def _staged(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
             allow_self_approval=False,
         ),
     )
-    submitted = contracts.submit(
+    proposed = contracts.propose(
         db,
-        contracts.SubmitCommand(
+        contracts.ProposeCommand(
             command_id=f"s-{uuid.uuid4()}",
-            contract_id=draft.id,
+            agreement_id=draft.id,
             approval_policy_code=f"p-{suffix}",
             approval_policy_version=1,
-            submitter_id=uuid.uuid4(),
+            requested_by=uuid.uuid4(),
         ),
         catalogues=_catalogue("cap.a"),
     )
-    _approve(db, draft.id, submitted.content_hash)
+    _approve(db, proposed)
+    assert proposed.approval_request_id is not None
     contracts.approve(
         db,
-        contracts.TransitionCommand(
-            command_id=f"ap-{uuid.uuid4()}", contract_id=draft.id
+        contracts.ApprovalCommand(
+            command_id=f"ap-{uuid.uuid4()}",
+            agreement_id=draft.id,
+            approval_request_id=proposed.approval_request_id,
         ),
     )
-    contracts.activate(
+    active = contracts.activate(
         db,
-        contracts.TransitionCommand(
+        contracts.ActivateCommand(
             command_id=f"act-{uuid.uuid4()}",
-            contract_id=draft.id,
-            activation_evidence="countersigned",
+            agreement_id=draft.id,
+            approval_request_id=proposed.approval_request_id,
+            activation_rule="countersigned",
+            activation_reference="signature-1",
+            activation_satisfied_at=NOW,
         ),
     )
     return allocations.stage_allocation(
@@ -160,8 +160,7 @@ def _staged(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
         allocations.StageAllocationCommand(
             source_event_id=f"evt-{uuid.uuid4()}",
             contract_id=draft.id,
-            content_hash=submitted.content_hash or "",
-            customer_ref=customer_ref,
+            content_hash=active.content_hash or "",
         ),
         catalogues=_catalogue("cap.a"),
     ).id

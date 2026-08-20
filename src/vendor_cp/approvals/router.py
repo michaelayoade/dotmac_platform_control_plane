@@ -4,7 +4,7 @@ Publish a policy revision, record a decision on an open request, and read a
 request's state. Every route delegates to `vendor_cp.approvals.adapter`; nothing
 here touches `dotmac_approvals` directly, and nothing here decides anything.
 
-Requests are OPENED by the subject's owner (see `vendor_cp.contracts.service`),
+Requests are OPENED by the subject's owner through `vendor_cp.contracts.adapter`,
 not through this API. An approval request with no subject would be a request for
 nothing, and the owner is what knows the content digest to bind it to.
 """

@@ -15,14 +15,12 @@ import tomllib
 from pathlib import Path
 from typing import get_type_hints
 
-from dotmac_entitlement_allocation import CapabilityCatalogueReader
 from dotmac_entitlement_allocation import module as allocation_module
 from dotmac_entitlement_allocation import versions_dir as allocation_versions_dir
 from sqlalchemy.orm import configure_mappers
 
 from vendor_cp.assembly import build_spec
-from vendor_cp.contracts import router as contract_router
-from vendor_cp.contracts import service as contract_service
+from vendor_cp.contracts import adapter as agreement_adapter
 from vendor_cp.migrations import composed_version_locations
 from vendor_cp.offers import catalog as offer_catalogue
 from vendor_cp.offers import router as offer_router
@@ -55,8 +53,8 @@ def test_module_manifest_and_public_lineage_are_composed() -> None:
     assert allocation_module in build_spec().modules
     locations = composed_version_locations().split()
     assert str(allocation_versions_dir()) in locations
-    # kernel + release catalog + entitlement allocation + approvals + vendor
-    assert len(locations) == 5
+    # kernel + release catalog + allocation + approvals + agreements + vendor
+    assert len(locations) == 6
 
 
 def test_the_module_mappers_load_in_this_process() -> None:
@@ -65,22 +63,23 @@ def test_the_module_mappers_load_in_this_process() -> None:
     configure_mappers()
 
 
-def test_commercial_services_consume_the_module_owned_catalogue_port() -> None:
+def test_commercial_adapters_consume_the_product_catalogue() -> None:
+    from dotmac_entitlement_allocation import CapabilityCatalogueReader
+
     assert (
         get_type_hints(offer_service.publish_offer_version)["catalogues"]
         is CapabilityCatalogueReader
     )
     assert (
-        get_type_hints(contract_service.submit)["catalogues"]
-        is CapabilityCatalogueReader
+        get_type_hints(agreement_adapter.create_draft)["catalogues"]
+        is offer_catalogue.ProductCapabilityCatalogues
     )
     source = inspect.getsource(offer_catalogue)
     assert "class ProductCapabilityCatalogueReader" not in source
     assert "active_capabilities" not in source
 
 
-def test_catalogue_module_errors_are_mapped_at_both_http_boundaries() -> None:
-    for endpoint in (offer_router.publish, contract_router.submit):
-        source = inspect.getsource(endpoint)
-        assert "except AllocationError" in source
-        assert "catalogue_domain_error" in source
+def test_offer_catalogue_errors_are_mapped_at_the_http_boundary() -> None:
+    source = inspect.getsource(offer_router.publish)
+    assert "except AllocationError" in source
+    assert "catalogue_domain_error" in source

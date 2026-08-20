@@ -31,12 +31,15 @@ it owns and — just as importantly — what it must never become.
     `module_database_roles.v1` and `tenant_scope_catalog.v1`, and both are
     bound, because that is simply true: this assembly runs the whole kernel base
     lineage, so `public.tenants`, `public.tenant_domains` and
-    `public.app_current_tenant_id()` all exist here.
+    `public.app_current_tenant_id()` all exist here. Kernel
+    `0018_idempotency_one_owner` and `0026_platform_audit_log` supply the two
+    request-time effects Commercial Agreements declares; those effects are
+    bound explicitly rather than inferred from composition order.
   - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It
     selects `ModulePlane.PLATFORM` for `approvals`, the one selectable module
-    composed here; Release Catalog and Entitlement Allocation each declare a
-    single supported plane set, so their contract is atomic and the kernel
-    refuses a selection for them.
+    composed here; Release Catalog, Entitlement Allocation and Commercial
+    Agreements each declare a single supported plane set, so their contract is
+    atomic and the kernel refuses a selection for them.
 
   Kernel `0.1.0a60` briefly let the first imply the second, and this assembly is
   the case that broke it: binding the tenant catalogue truthfully would have
@@ -107,22 +110,26 @@ it owns and — just as importantly — what it must never become.
   The declaration and the database disagreed, and nothing here looked because
   nothing audited the live catalogue. a4 moves them to `platform_tables`
   (ADR-0023), which is what makes the declaration true.
-- `dotmac-entitlement-allocation==0.1.0a4` is installed and its manifest and
-  public migration lineage are composed. This is deliberately a **shadow
-  installation**, not adoption: `vendor_cp.allocations` remains the sole
-  authoritative writer and there is no dual-write. Vendor migration v011 makes
-  new immutable offers and contracts product-qualified, binds that identity into
-  the contract content hash, and emits it on contract events. Historical rows
-  remain explicitly unclassified until an operator supplies evidence; the
-  independent module therefore still receives no `ContractSnapshot`.
+- `dotmac-entitlement-allocation==0.1.0a4` is the allocation authority under
+  ADR-0006. Its manifest and public lineage are composed, `v014` retired the
+  empty legacy tables and local writer, and Vendor retains one typed adapter.
+- `dotmac-commercial-agreements==0.1.0a1` is the commercial-agreement authority
+  under ADR-0008. Its platform-only manifest and `cg_0001_agreements` lineage
+  are composed. `v015` checks the greenfield premise under lock, drops the empty
+  `public.contracts` / `public.contract_lines` estate, and leaves
+  `mod_agreements` as the sole lifecycle, history, audit and outbox writer.
+  Vendor retains one typed adapter that resolves immutable offers, supplies the
+  product capability catalogue, and converts the authoritative Approvals
+  request into content-bound evidence.
 
 ## The composed database is audited whole
 
 `tests/migration/test_composed_live_catalog.py` audits the database this
-assembly actually produces — kernel lineage, both module lineages, vendor
-lineage — rather than the tables someone remembered to name.
+assembly actually produces — all six lineages: kernel, the four module owners,
+and Vendor — rather than the tables someone remembered to name.
 
-- The module schemas (`mod_rel`, `mod_ealloc`) go through the kernel's own
+- The module schemas (`mod_rel`, `mod_ealloc`, `mod_approvals`,
+  `mod_agreements`) go through the kernel's own
   canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. A rule
   the kernel tightens tightens here in the release that ships it, and the
   expected table set derives from this assembly's plane selection rather than
@@ -162,12 +169,12 @@ service, no data volume — so there was no allocation estate to seal, compare o
 migrate. `v014` re-checks emptiness under `ACCESS EXCLUSIVE` in the same
 transaction that drops the tables and fails closed if a row exists.
 
-**`vendor_cp.allocations.adapter` is the only seam**, typed with no `Any`. The
-division of rules is deliberate: Vendor keeps the checks about VENDOR'S contract
-(it is `ACTIVE`, and the activation event's digest still matches the current
-version), because only Vendor can say what "stale" means about its own aggregate;
-the module keeps every rule about what a valid allocation IS. Contract activation
-stages through the adapter via `ContractEventConsumer`; licensing reads through
+**`vendor_cp.allocations.adapter` is the only seam**, typed with no `Any`.
+Commercial Agreements answers whether the agreement is `ACTIVE` and whether the
+versioned activation fact still matches its frozen digest; Vendor does not read
+or reconstruct that owner's state. Entitlement Allocation keeps every rule
+about what a valid allocation IS. Agreement activation stages through the
+adapter via `ContractEventConsumer`; licensing reads through
 it and takes the product from the module's `allocation_product()` — and there is
 no way to supply one instead. `IssueLicenceCommand` has no `product` field, and
 `IssueLicenceRequest` REJECTS the retired HTTP field rather than ignoring it, so
@@ -198,10 +205,10 @@ has run.
 ## In-place module recomposition (ADR-0007)
 
 This repository, runtime and control-plane database remain the Vendor product
-assembly. There is no replacement repository and no second control plane. The
-remaining local owners move through separately reviewable expand/migrate/
-contract slices: Commercial Agreements first, then the Licensing issuer, then
-greenfield Deployment Control. Brand Profiles' platform plane follows its
+assembly. There is no replacement repository and no second control plane.
+Commercial Agreements moved first under ADR-0008. The remaining local owners
+move through separately reviewable expand/migrate/contract slices: the Licensing
+issuer next, then greenfield Deployment Control. Brand Profiles' platform plane follows its
 checked-in Sub-first adoption unless that extraction decision is explicitly
 amended at the source.
 
@@ -227,7 +234,7 @@ and reusable-looking; publishing their routes would make an external caller a
 constraint on deciding the owner. A withheld surface is not a disabled
 subsystem: licence key custody still loads at boot, and a test asserts it.
 
-A profile may never withhold a persistence owner. All three module manifests carry a
+A profile may never withhold a persistence owner. All four stateful module manifests carry a
 migration lineage and own schemas the database already contains, so an assembly
 missing one would no longer describe its own tables.
 
@@ -274,7 +281,7 @@ Compose project and from every product data plane:
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration
-backup, runs the five-lineage `scripts/migrate.py`, and only then replaces the
+backup, runs the six-lineage `scripts/migrate.py`, and only then replaces the
 application. The complete operator contract and rollback boundary are in
 `docs/operations/production-deployment.md`.
 
@@ -302,45 +309,21 @@ The deployment path never creates or repairs the marker itself.
   commands + outcomes, atomic transaction ownership, idempotency, audit,
   platform-admin-only adapters.
 - **Commercial lifecycle (as-built)** — immutable product-qualified offers,
-  versioned approvals, product-qualified contracts, the legacy allocation
-  projection, and signed licence issuance and delivery. Offer and contract
-  services consume `dotmac-entitlement-allocation`'s product-scoped
-  `CapabilityCatalogueReader` port. The assembly config names only exact
+  Commercial Agreements, Approvals, Entitlement Allocation, and signed licence
+  issuance and delivery. `dotmac-commercial-agreements` owns agreement shape,
+  lifecycle, append-only history, audit and versioned transition facts;
+  `dotmac-approvals` owns the content-bound decision; and
+  `dotmac-entitlement-allocation` owns the immutable allocation. Vendor adapters
+  translate between those owners and the local OfferVersion catalogue without
+  reading another owner's ORM or maintaining a parallel status path. The
+  assembly config names only exact
   artifact and product-manifest digests per product. The adapter requires the
   digest-addressed container row and its matching `product_manifest`
   attestation, reads the held canonical bytes through a local document-reader
   port, and delegates digest/canonical/product/version verification to kernel
   a50 before deriving capabilities. The old raw capability-list configuration
-  is rejected. These commercial features remain vendor-local owners until each
-  approved independent-module cutover explicitly retires its corresponding
-  local writer.
-- **Allocation cutover gate** — Entitlement Allocation can become authoritative
-  only after one coherent change proves all of the following:
-
-  1. **expand delivered for new writes:** the commercial-contract owner persists,
-     hashes, and emits an explicit product identity; historical offers and
-     contracts must still be mapped from evidence before the v011 checks can be
-     validated;
-  2. **typed boundary delivered:** commercial services and the cutover preflight
-     consume the allocation module's product-scoped catalogue port rather than
-     owning a duplicate protocol. Release-bound, digest-verified product-manifest
-     snapshots now supply that port;
-  3. every live legacy allocation entry validates against its product's
-     manifest and duplicate capability codes are normalized before switching;
-  4. the activation adapter constructs the module's `ContractSnapshot`, the
-     consumer switches once, licence issuance reads `allocation_product()`, and
-     the legacy models, service, FK and writer path are retired after parity.
-
-  `preflight_allocation_cutover` is the read-only proof for steps 1–3. It scans
-  offers, contracts, allocations, and entries; reports every known divergence;
-  and accepts only immutable, evidence-referenced mapping proposals. It never
-  changes a legacy row. Separate canonical digests bind the exact operator
-  classification set and every relevant persisted fact the report observed;
-  neither digest makes a proposal authoritative. Shadow runs may observe normal
-  traffic, but the final cutover proof must run after the legacy writer is
-  quiesced, so a passing observation cannot move before the writer switch.
-  Until all four gates pass, the module tables are empty and non-authoritative.
-  A partial switch would either invent product identity or create two writers.
+  is rejected. Licensing remains the next Vendor-local commercial owner to move
+  under ADR-0007; Agreements, Approvals and Allocation have no local writer.
 - **Release artifacts and attestations** — owned by the independently published
   `dotmac-release-catalog`, not by a vendor-local feature or table. Vendor's
   `release_evidence` service is the thin ingestion adapter: it holds exact
@@ -386,10 +369,11 @@ Deployment Control is released but not yet composed here. Until its own cutover
 lands, fleet desired state, update authority, support access and observed fleet
 health remain absent. The permitted future persistence owner is the module's
 `mod_deploy` lineage, never a Vendor-local set of fleet tables; the full provider
-runner remains outside this application behind Dotmac Integrator. Commercial
-Agreements, Licensing and Brand Profiles likewise move only through the ordered
-ADR-0007 cutovers; existing Vendor-local code is not evidence that extraction or
-adoption already happened.
+runner remains outside this application behind Dotmac Integrator. Licensing and
+Brand Profiles likewise move only through the ordered ADR-0007 cutovers;
+existing Vendor-local code is not evidence that extraction or adoption already
+happened. Commercial Agreements is composed and authoritative under ADR-0008,
+but remains below adopted until it actually runs.
 
 ## Migrating existing products
 

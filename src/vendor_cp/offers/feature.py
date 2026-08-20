@@ -1,7 +1,7 @@
 """The `offers` feature manifest — immutable priced offer versions.
 
 JSON API only (`routers`). `core=True`: offer versions are foundational to the
-commercial domain (ContractService pins them).
+commercial domain (the Commercial Agreements adapter pins them).
 """
 
 from __future__ import annotations

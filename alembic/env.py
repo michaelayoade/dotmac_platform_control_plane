@@ -3,7 +3,7 @@
 Connects as `app_admin` (the RLS-bypass migration role) — set
 `MIGRATION_DATABASE_URL` or `DATABASE_URL`. `target_metadata` is the kernel
 `Base` (all kernel models), the installed modules and the vendor's own models,
-so autogenerate sees the whole composed schema. The five lineages' directories
+so autogenerate sees the whole composed schema. The six lineages' directories
 are composed programmatically (`vendor_cp.migrations`), not in `alembic.ini`,
 because the shared owners are installed packages with environment-specific
 paths.
@@ -34,7 +34,6 @@ from sqlalchemy import engine_from_config, pool
 # Allocations and approvals are owned by their modules now, and their models
 # are registered by importing those packages (via `vendor_cp.migrations`).
 import vendor_cp.accounts.models  # noqa: F401
-import vendor_cp.contracts.models  # noqa: F401
 import vendor_cp.offers.models  # noqa: F401
 from vendor_cp.migration_bindings import (
     ASSEMBLY_MODULE_PLANES,
