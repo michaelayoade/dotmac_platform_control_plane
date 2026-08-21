@@ -66,4 +66,4 @@ def test_release_catalog_public_migration_lineage_is_composed() -> None:
     assert str(release_catalog_versions_dir()) in locations
     # kernel + release catalog + allocation + approvals + agreements
     # + licensing + vendor
-    assert len(locations) == 7
+    assert len(locations) == 8

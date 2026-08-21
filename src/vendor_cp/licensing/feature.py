@@ -17,8 +17,12 @@ feature = FeatureManifest(
     name="licence_delivery",
     routers=[router],
     audit_actions=(
-        "vendor.licence.delivery_target_registered",
-        "vendor.licence.delivery_target_updated",
+        # One code replaced two at the ADR-0011 cutover. `registered` and
+        # `updated` distinguished create from update on a caller's claim; a
+        # reconciliation is one operation against an authority that already
+        # decided, so splitting it would name a difference that no longer means
+        # anything.
+        "vendor.licence.delivery_target_reconciled",
         "vendor.licence.delivery_mapped",
         "vendor.licence.delivered",
         "vendor.licence.ack_received",

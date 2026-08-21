@@ -14,6 +14,7 @@ from dataclasses import replace
 
 from dotmac_approvals import module as approvals_module
 from dotmac_commercial_agreements import module as commercial_agreements_module
+from dotmac_deployment_control import module as deployment_control_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import FeatureManifest, ProductAssemblySpec
 from dotmac_licensing import module as licensing_module
@@ -56,6 +57,16 @@ STATEFUL_MODULES = (
     # Platform-only and atomic: Vendor v016 retires the empty local issuer;
     # delivery and product-held key custody remain Vendor responsibilities.
     licensing_module,
+    # Platform-only and atomic. A module that decides what a fleet of
+    # deployments should run cannot live inside one of them, so there is no
+    # tenant plane to select and `ASSEMBLY_MODULE_PLANES` gains nothing.
+    #
+    # Composed as a GREENFIELD owner for plans, rollouts, credentials and
+    # observations — no revision in this lineage ever created one. The
+    # deployment-TARGET half was an authority cutover: `v017` sealed the
+    # independent registration path, and `vendor_cp.deployment.adapter` is the
+    # only seam (ADR-0011).
+    deployment_control_module,
 )
 
 # The vendor's own features, in mount order. A profile may strip a feature's

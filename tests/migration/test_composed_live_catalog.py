@@ -84,7 +84,14 @@ APP_ROLE = "app_user"
 # `audit_live_schemas` over zero schemas returns zero violations — the exact
 # shape of a gate that has silently stopped running.
 EXPECTED_MODULE_SCHEMAS = frozenset(
-    {"mod_agreements", "mod_approvals", "mod_ealloc", "mod_licensing", "mod_rel"}
+    {
+        "mod_agreements",
+        "mod_approvals",
+        "mod_deploy",
+        "mod_ealloc",
+        "mod_licensing",
+        "mod_rel",
+    }
 )
 
 # THE TENANT CATALOGUE — its own category, and neither plane.

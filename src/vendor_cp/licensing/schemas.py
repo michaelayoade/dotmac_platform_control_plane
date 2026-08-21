@@ -149,14 +149,17 @@ class RevocationListResponse(BaseModel):
     revoked_licence_ids: list[str]
 
 
-class RegisterTargetRequest(BaseModel):
-    """Register or synchronise a delivery target. `connection_ref` is an opaque
-    handle a transport interprets — never a destination URL from the caller."""
+class ReconcileTargetRequest(BaseModel):
+    """Project a deployment target the fleet owner already knows about.
 
-    target_ref: str = Field(min_length=1, max_length=200)
-    customer_ref: str = Field(min_length=1, max_length=200)
-    connection_ref: str | None = Field(default=None, max_length=200)
-    status: str = Field(default="active")
+    ONE field, and the four that are gone are the point (ADR-0011). `target_ref`,
+    `customer_ref`, `connection_ref` and `status` used to arrive from the caller,
+    which is what made this table a second authority over deployment-target
+    identity. They now come from `mod_deploy`; a caller may say WHICH target to
+    project and nothing about what it is.
+    """
+
+    deployment_target_id: UUID
 
 
 class DeliveryTargetResponse(BaseModel):
@@ -223,7 +226,7 @@ __all__ = [
     "RevocationEntryResponse",
     "RevocationListResponse",
     "PipelineHealthResponse",
-    "RegisterTargetRequest",
+    "ReconcileTargetRequest",
     "DeliveryTargetResponse",
     "MapLegacyDeliveryRequest",
     "DispatchRequest",

@@ -1,9 +1,9 @@
 # ADR-0011: Compose Deployment Control, and cut deployment-target authority over to it
 
-- **Status:** Accepted (contract). § 4's measurement gate is DISCHARGED —
-  Michael named `149.102.158.144` (`vendor-cp-prod`) on 2026-08-21 and the
-  estate measured empty. The empty branch is selected and the slice is
-  unblocked; it is not yet implemented.
+- **Status:** Accepted and IMPLEMENTED. The measurement gate was discharged on
+  2026-08-21 (§ 4, empty), and the composition plus the target-authority cutover
+  landed in one change. See the amendment at the end for the one thing the
+  implementation changed.
 - **Date:** 2026-08-21
 - **Owner:** Vendor control plane
 - **Follows:** ADR-0007 § 4, which sequenced this slice
@@ -316,3 +316,54 @@ quiet reordering ADR-0007 forbids.
 fixes what the slice must do before anyone writes it, and names the measurement
 that decides which shape it takes. Adoption is recorded only after the module
 runs in production with the Vendor target-registration authority absent.
+
+
+## Amendment — 2026-08-21 (the seal is DELETE-only, and the writer is reconciled)
+
+§ 4 specified that the forward revision REVOKEs `INSERT`, `UPDATE` and `DELETE`
+on `licence_delivery_targets` from `platform_api`. Implementing it surfaced a
+contradiction with ADR-0010 § 1, and Michael ruled on the resolution.
+
+**The contradiction.** `projection._authorised_target` resolves a delivery
+against a *registered* projection row. If the projection is unwritable and the
+registration route is gone, no target can ever exist, `_authorised_target`
+always raises `NotFound`, and staging is permanently impossible. That is
+removing the delivery path, not sealing an authority — and ADR-0010 § 1 requires
+the existing logging and offline-bundle behaviour PRESERVED until its own
+cutover, behind mirror/seal/activate gates this slice does not have. The full
+revoke reached past ADR-0011's mandate into ADR-0010's.
+
+**The resolution: reconciled, with a DELETE-only revoke.**
+
+- `register_delivery_target` is retired. Its replacement takes no caller-supplied
+  identity at all: `vendor_cp.deployment.adapter.resolve_target` reads the
+  authoritative record from `mod_deploy` and returns `DeploymentTargetFacts`,
+  which is constructible nowhere else. `projection.reconcile_delivery_target`
+  accepts only that type. `POST /targets` keeps its path and method — the
+  operation is still "make this destination available" — but its body now names
+  a target the fleet owner owns instead of describing one.
+- `platform_api` KEEPS `INSERT` and `UPDATE`, because the reconciler needs them.
+- `DELETE` is revoked, and that one is not a compromise: a projection is rebuilt
+  from its authority, never deleted. A role holding `DELETE` on a projection can
+  only destroy evidence.
+
+**State the weakness plainly.** The single-writer guarantee is now provenance
+plus an architecture ratchet, not a database privilege. A future caller could
+reacquire the ability to write arbitrary values by constructing the facts type
+outside the adapter; `test_only_the_adapter_constructs_the_provenance_type`
+fails if anything but the adapter and the seam's own unit tests does. That is
+weaker than a grant, and it is recorded as weaker rather than described as a
+seal it is not. ADR-0010 removes the table and the question with it.
+
+**Consequences for the retired vocabulary.** `vendor.licence.delivery_target_registered`
+and `_updated` retired with their writer — ADR-0008's every-declared-code-has-a-consumer
+rule makes that the same change, not a follow-up. One code replaced them:
+`vendor.licence.delivery_target_reconciled`. `registered` versus `updated`
+distinguished create from update on a caller's claim, and a reconciliation
+against an authority that already decided has no such difference to name.
+
+**What did NOT change.** `_authorised_target` still performs every eligibility
+check separately — active status, customer match, bound-deployment match —
+because registration was never authorisation and reconciliation is not either.
+The customer-repointing refusal is gone, and only that: the customer is no
+longer a caller's claim to get wrong, so a change is a correction to project.

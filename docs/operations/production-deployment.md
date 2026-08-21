@@ -28,7 +28,7 @@ The host then performs one ordered operation:
 5. verify that initialization created `app_admin` as a non-superuser,
    `BYPASSRLS` database/schema owner and removed the bootstrap verifier;
 6. take a host-local `pg_dump` backup;
-7. run `scripts/migrate.py`, the owner that composes all seven lineages;
+7. run `scripts/migrate.py`, the owner that composes all eight lineages;
 8. replace the app and prove `/health` on the loopback port while declaring
    `Host: vendor.dotmac.io`, so the probe passes through the same trusted-host
    boundary as production traffic rather than weakening it for an IP-only probe.
