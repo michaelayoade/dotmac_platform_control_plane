@@ -1,7 +1,9 @@
 # ADR-0011: Compose Deployment Control, and cut deployment-target authority over to it
 
-- **Status:** Accepted (contract). Execution gated on the estate measurement in
-  § 4, which requires a target Michael names explicitly.
+- **Status:** Accepted (contract). § 4's measurement gate is DISCHARGED —
+  Michael named `149.102.158.144` (`vendor-cp-prod`) on 2026-08-21 and the
+  estate measured empty. The empty branch is selected and the slice is
+  unblocked; it is not yet implemented.
 - **Date:** 2026-08-21
 - **Owner:** Vendor control plane
 - **Follows:** ADR-0007 § 4, which sequenced this slice
@@ -155,6 +157,118 @@ governs a cutover with data.
 Either way a forward vendor revision is owed. The earlier draft's claim that
 this slice needs no vendor migration was derived from the wrong classification
 and is withdrawn.
+
+### The measurement, taken 2026-08-21 — EMPTY
+
+Michael named the target: `149.102.158.144`, whose `/etc/dotmac-host-id` marker
+reads `vendor-cp-prod`. Read-only counts, no mutation.
+
+**Coordinates** (`deployment_run`, per `AGENTS.md` rule 17):
+
+| | |
+| --- | --- |
+| Host | `149.102.158.144`, marker `vendor-cp-prod` |
+| Database | `vendor_control_plane` in `dotmac_vendor_control_plane-db-1` |
+| Running image | `ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:56ec553139c449dc7da46a8873b3c03e95a61e43c970cd1675e28a202b2991cc` |
+| Applied heads | `0023_audit_actor_and_forensics`, `rl_0001_release_artifacts`, `v014_allocations_authority` |
+| Observed at | 2026-08-21T12:44:24Z |
+
+**Result:**
+
+| Table | Rows |
+| --- | --- |
+| `licence_delivery_targets` | **0** |
+| `licence_deliveries` | **0** |
+| `licence_delivery_states` | 0 |
+| `licence_delivery_attempts` | 0 |
+| `licence_ack_records` | 0 |
+
+Both tables under § 4 were confirmed to be ordinary tables (`relkind = 'r'`),
+so this is an empty table rather than a missing one — the distinction a bare
+`count(*)` failing open would hide. The other three are recorded because
+ADR-0010 will need them and reading them cost nothing.
+
+**Two facts the measurement added that the lineage could not.** `mod_deploy`
+does not exist on this database, and no table anywhere in it matches
+`%deployment%` or `%rollout%` — so the greenfield half of § 1 is now observed
+rather than inferred from "no revision created one". And `platform_api` holds
+`SELECT, INSERT, UPDATE, DELETE` on `licence_delivery_targets`, which is the
+seal's actual work: revoking the three write privileges while keeping `SELECT`
+is what makes the projection structurally read-only rather than read-only by
+the absence of a caller.
+
+**Read the premise narrowly: NEVER POPULATED, not "exercised and wrote
+nothing".** The rest of this database is empty too — `vendor_accounts` 0,
+`offer_versions` 0, `platform_admins` 0, `mod_approvals` 0, `mod_ealloc` 0 —
+and `platform_audit_events` holds exactly ONE row, whose only action is
+`vendor.release_evidence.catalogued`. The two write-path audit codes are absent
+from that ledger, but a ledger with one event total is weak evidence: it is
+equally consistent with the writer never being called and with the deployment
+barely being used at all.
+
+That distinction does not change which branch applies — zero rows is zero rows,
+and the sealed path is correct either way. It changes what the measurement may
+be cited FOR. It licenses sealing; it does not license skipping the recheck,
+and it is not evidence that the registration path is unreachable.
+
+**Production was behind main when this was taken, and has since caught up.** At
+12:44Z the applied vendor head was `v014`. Deploy run `32485479666` then took
+production to `af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e` at image
+`sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d`,
+applying kernel `0024`–`0026`, `v015`, `v016` and the a5/a6 verification
+revisions in one run.
+
+**Re-verified at 2026-08-21T14:17:32Z on the new image and heads
+(`ap_0002_outbox_relay`, `ea_0003_platform_audit_log`,
+`rl_0001_release_artifacts`, `v016_licensing_authority`): the delivery estate is
+still zero, and `mod_deploy` is still absent.** The measurement therefore held
+across a deploy that rewrote five other lineages, which is stronger evidence
+than the single observation was — and it is the only reason the earlier
+observation is still usable. The refresh happened because the state changed, not
+because a date passed.
+
+**This is a temporal negative, and it is recorded as one.** An absence describes
+a moment. Its refresh responsibility is not prose: the forward revision below
+re-checks both tables under `ACCESS EXCLUSIVE` in the same transaction that
+seals the write path, and fails closed on any row. The observation licenses
+writing that revision; the revision, not this table, is what licenses applying
+it.
+
+### The path this selects
+
+The **empty** branch. The forward vendor revision, in ONE transaction:
+
+1. takes `ACCESS EXCLUSIVE` on all five delivery tables in a **fixed, declared
+   order** — `licence_deliveries`, `licence_delivery_states`,
+   `licence_delivery_targets`, `licence_delivery_attempts`,
+   `licence_ack_records`. All five rather than the two under measurement,
+   because the seal is only meaningful if nothing in the estate can move under
+   it; a fixed order because two concurrent runs taking them in opposite orders
+   deadlock;
+2. re-counts, and checks the RELATIONSHIPS as well as the tables — deliveries
+   with and without `target_id`, referenced versus unreferenced targets,
+   dangling `target_id`, dangling `target_ref`. A table-count-only recheck
+   passes on a dangling reference, which is exactly the state a half-migrated
+   estate would be in;
+3. aborts without change if anything is non-zero. The premise is re-proved at
+   execution time on the real database, or the revision does nothing;
+4. REVOKEs `INSERT`, `UPDATE` and `DELETE` on `licence_delivery_targets` from
+   `platform_api`, retaining `SELECT`, and verifies the effective outcome in
+   both directions as `v012`/`v013` did;
+5. leaves the table in place. It is not dropped here — ADR-0010 owns that, and
+   dropping it now would merge two cutovers.
+
+**Step 4 must land before the locks release, and that ordering is the whole
+point.** `POST /targets` → `register_delivery_target` is still mounted and
+reachable while this runs. Checking emptiness under a lock and then releasing it
+with the writer still live preserves precisely the race the check exists to
+close: a registration landing between the recheck and the seal. "Empty when
+measured" and "cannot become non-empty" are different claims, and only the
+second licenses a seal.
+
+No backfill, no comparison, no writer-switch ceremony: there is nothing to
+migrate, and building parity machinery against an empty estate is the defect
+ADR-0031 seals against and that ADR-0005 already refused once.
 
 ### 5. Retired with this slice
 

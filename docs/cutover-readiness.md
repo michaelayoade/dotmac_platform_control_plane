@@ -79,7 +79,7 @@ amendment at the owning source. Six slices, three landed.
 | 1 | Kernel a61 → a77 | — | landed (#63) |
 | 2 | Commercial Agreements | `dotmac-commercial-agreements` | landed (#64), ADR-0008, `v015` |
 | 3 | Licensing issuer | `dotmac-licensing` | landed (#65), ADR-0009, `v016` |
-| 4 | **Deployment Control** | `dotmac-deployment-control` | **contracted (ADR-0011); release available; execution gated on an estate measurement** |
+| 4 | **Deployment Control** | `dotmac-deployment-control` | **contracted (ADR-0011); release available; estate measured EMPTY 2026-08-21 — unblocked, not yet implemented** |
 | 5 | Licence delivery | `dotmac-integration` in Dotmac Integrator | contracted (ADR-0010), blocked on 4 |
 | 6 | Brand Profiles, platform plane | `dotmac-brand-profiles` | released; **deferred by local decision** behind another product |
 
@@ -138,23 +138,76 @@ catching.
 
 ### The measurement, which is an operator obligation
 
-Before ADR-0011 may claim an empty premise, `licence_delivery_targets` **and**
-`licence_deliveries` must be measured on a target Michael names explicitly — a
-target is never inferred from deployment history. `licence_deliveries` is
-included because `target_id` is a foreign key into the registry: an emptiness
-claim about targets that ignores the rows depending on them is not a
-measurement.
+**Taken 2026-08-21. Result: empty.** Michael named `149.102.158.144`, whose
+`/etc/dotmac-host-id` marker reads `vendor-cp-prod`. Read-only counts, no
+mutation. `licence_deliveries` was measured alongside the targets because
+`target_id` is a foreign key into the registry — an emptiness claim about
+targets that ignores the rows depending on them is not a measurement.
 
-- **Empty** → a forward vendor revision rechecks both under
-  `ACCESS EXCLUSIVE` in the same transaction that seals the independent
-  registration path, failing closed on any row. The `v013`–`v016` shape.
-- **Non-empty** → backfill targets into `mod_deploy` through the module's own
-  command, compare, switch the writer, and retain the Vendor table as a
-  module-derived projection with no independent write path until ADR-0010.
+| | |
+| --- | --- |
+| Host | `149.102.158.144`, marker `vendor-cp-prod` |
+| Database | `vendor_control_plane` |
+| Running image | `…@sha256:56ec553139c449dc7da46a8873b3c03e95a61e43c970cd1675e28a202b2991cc` |
+| Applied heads | `0023_audit_actor_and_forensics`, `rl_0001_release_artifacts`, `v014_allocations_authority` |
+| Observed at | 2026-08-21T12:44:24Z |
+| `licence_delivery_targets` | **0 rows** |
+| `licence_deliveries` | **0 rows** |
+| the other three delivery tables | 0 rows |
 
-Either way a forward vendor revision is owed. The earlier draft's claim that
-this slice needs no vendor migration came from the wrong classification and is
-withdrawn.
+Both are ordinary tables (`relkind = 'r'`), so this is an empty table rather
+than a missing one — the distinction a bare `count(*)` failing open would hide.
+
+Two things the live database showed that the lineage could not: `mod_deploy`
+does not exist and no table matches `%deployment%` or `%rollout%`, so § 1's
+greenfield half is observed rather than inferred; and `platform_api` holds
+`SELECT, INSERT, UPDATE, DELETE` on `licence_delivery_targets`, which is the
+seal's real work.
+
+**Read the premise narrowly — NEVER POPULATED, not "exercised and wrote
+nothing".** The rest of the database is empty too: `vendor_accounts` 0,
+`offer_versions` 0, `platform_admins` 0, `mod_approvals` 0, `mod_ealloc` 0, and
+`platform_audit_events` holds exactly one row whose only action is
+`vendor.release_evidence.catalogued`. The two write-path audit codes are absent
+from that ledger, but a ledger with one event total is weak evidence — equally
+consistent with the writer never being called and with the deployment barely
+being used. Zero rows is still zero rows, so the branch is unchanged; what
+narrows is what the measurement may be cited FOR. It licenses sealing. It does
+not license skipping the recheck, and it is not evidence the registration path
+is unreachable.
+
+**Production is behind main and that does not weaken the result.** The applied
+vendor head is `v014`, so `v015`/`v016` have not run there — consistent with
+Agreements and Licensing remaining below adopted. Neither touches a delivery
+table.
+
+**This is a temporal negative and is recorded as one.** Its refresh
+responsibility is not prose: the forward revision re-checks both tables under
+`ACCESS EXCLUSIVE` in the same transaction that seals the write path and fails
+closed on any row. The observation licenses writing that revision; the revision
+is what licenses applying it.
+
+### The path this selects — empty
+
+One transaction: `ACCESS EXCLUSIVE` on **all five** delivery tables in a fixed
+declared order (a seal means nothing if the rest of the estate can move under
+it, and a fixed order stops two concurrent runs deadlocking); re-count the
+tables **and the relationships** — deliveries with and without `target_id`,
+referenced versus unreferenced targets, dangling `target_id`, dangling
+`target_ref`, because a count-only recheck passes on a dangling reference;
+abort without change on anything non-zero; then REVOKE
+`INSERT`/`UPDATE`/`DELETE` on `licence_delivery_targets` from `platform_api`
+while retaining `SELECT`, verifying the effective outcome in both directions as
+`v012`/`v013` did. The table is **not** dropped — ADR-0010 owns that.
+
+**The revoke must land before the locks release.** `POST /targets` →
+`register_delivery_target` is still mounted and reachable while the revision
+runs. Checking emptiness under a lock and then releasing it with the writer live
+preserves exactly the race the check exists to close.
+
+No backfill and no comparison: there is nothing to migrate, and building parity
+machinery against an empty estate is what ADR-0031 seals against and what
+ADR-0005 already refused once.
 
 ## What else retires, and when
 
@@ -273,12 +326,18 @@ entitlement-allocation `0.1.0a6` are pinned, the `outbox_relay.v1` binding names
 `ea_0002` and `ea_0003` revisions run in the composed migration rehearsal. Moved
 no authority and touched no slice below.
 
-**2. Deployment Control composition — `version:minor`.** Pin `0.1.0a2`; compose
-its manifest and `versions_dir()` so `dc_0001` runs; leave
-`ASSEMBLY_MODULE_PLANES` unchanged; add the typed adapter; execute the
-deployment-target authority transition, in whichever shape the § "The
-measurement" result requires. One change, because a composed module beside a
-live independent registrar is the state this slice exists to avoid.
+**2. Deployment Control composition — `version:minor`. UNBLOCKED, not started.**
+The estate measured empty on 2026-08-21, so the shape is settled. Pin `0.1.0a2`;
+compose its manifest and `versions_dir()` so `dc_0001` runs; leave
+`ASSEMBLY_MODULE_PLANES` unchanged (one supported plane set); add the typed
+adapter; delete the write-authority surface named above with its two audit
+codes; and add the forward vendor revision that re-checks under lock and revokes
+the three write privileges from `platform_api`.
+
+One change, because a composed module beside a live independent registrar is the
+state this slice exists to avoid. Expect it to touch more than it looks: the
+composed lineage count rises, so every document stating it moves with the same
+commit, and `tests/architecture/test_stale_claims.py` fails until they do.
 
 **3. Brand Profiles — separate and blocked** until the extraction dossier's
 first-adopter evidence changes. Not a Vendor decision to make.

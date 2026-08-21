@@ -77,3 +77,32 @@ either owner.
 - Deployment Control a1 is the next ADR-0007 authority slice. ADR-0010 then
   moves the deliberately retained delivery/retry boundary to Dotmac Integrator
   before Brand Profiles.
+
+## Lifecycle — adopted 2026-08-21
+
+Deploy run `32485479666` took production to
+`af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e` at image
+`sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d`,
+applying `v016` in the same run as kernel `0024`–`0026`, `v015` and the a5/a6
+verification revisions.
+
+Verified directly against that database at 2026-08-21T14:17:32Z:
+
+- `mod_licensing` live with six tables;
+- all five local issuer tables **absent** — `licences`, `licence_issuances`,
+  `licence_signing_keys`, `revocation_lists`, `revocation_entries`;
+- `app_user` holding **zero** privileges on any `mod_*` schema.
+
+`v016`'s under-lock recheck did not abort, so the five tables were empty at
+execution time as well as at observation time.
+
+**What this does NOT adopt.** Vendor's retained delivery projection and
+transport evidence — `licence_delivery_targets`, `licence_deliveries`,
+`licence_delivery_states`, `licence_delivery_attempts`, `licence_ack_records` —
+remain Vendor-owned and were measured empty on the same database. ADR-0010
+RETIRES that path rather than adopting it, so it has no adoption milestone to
+reach. Its estate measurement is recorded in ADR-0011 § 4.
+
+**Owed at the extraction source:** `packages/dotmac-licensing/EXTRACTION.toml` in
+`dotmac_starter_mt` should gain this assembly as a contract consumer and this run
+as adoption evidence. That dossier is the authority (`AGENTS.md` rule 17).

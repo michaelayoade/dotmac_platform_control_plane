@@ -236,10 +236,27 @@ writer proven absent — not by landing code, and not by a neighbouring owner
 having done it.
 
 Approvals and Entitlement Allocation cleared that bar on 2026-08-17 with
-production deploy `32022599873` (ADR-0005 and ADR-0006 § "Adoption plan" carry
-the evidence and the repins each still owes). Commercial Agreements and
-Licensing switched AFTER that deploy and remain below adopted until the next
-one runs them.
+production deploy `32022599873`; ADR-0005 and ADR-0006 § "Adoption plan" carry
+the evidence and the repins, both now discharged.
+
+**Commercial Agreements and Licensing cleared it on 2026-08-21.** Deploy run
+`32485479666` took production to `af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e` at
+image `sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d`,
+applying kernel `0024`–`0026`, `v015`, `v016` and the a5/a6 verification
+revisions in one run. Verified directly on that database at 14:17Z: applied
+heads `ap_0002_outbox_relay`, `ea_0003_platform_audit_log`,
+`rl_0001_release_artifacts`, `v016_licensing_authority`; `mod_agreements` and
+`mod_licensing` live with six licensing tables; **all eleven legacy tables
+absent** — `contracts`, `contract_lines`, the five local issuer tables, and the
+approval and allocation pairs; and `app_user` holding **zero** privileges on any
+`mod_*` schema, which is what the platform-plane isolation actually is.
+
+That same run is the a5/a6 pins' proof: `ap_0002` and `ea_0003` are DDL-free
+revisions whose entire bodies verify their declared prerequisites, so they were
+checked against the real database at deploy rather than only in rehearsal.
+
+So all five composed owners are now adopted. What remains below adopted is
+Vendor's own retained delivery path, which ADR-0010 retires rather than adopts.
 
 ## In-place module recomposition (ADR-0007)
 
@@ -424,13 +441,33 @@ it was given a narrower name. `src/vendor_cp/cutover_readiness.py` inventories
 both halves at symbol level with per-file call-site counts, ratcheted in both
 directions.
 
-Execution is gated on measuring `licence_delivery_targets` and
-`licence_deliveries` on a target Michael names explicitly — never one inferred
-from deployment history. An empty result permits a sealed empty-estate revision
-in the `v013`–`v016` shape; a non-empty result requires backfill into
-`mod_deploy`, comparison, a writer switch, and retention of the Vendor table as
-a module-derived projection until ADR-0010. Either way a forward vendor revision
-is owed.
+**The estate was measured on 2026-08-21 and is EMPTY.** Michael named
+`149.102.158.144` (marker `vendor-cp-prod`); read-only counts on
+`vendor_control_plane` returned zero rows in `licence_delivery_targets`,
+`licence_deliveries` and the other three delivery tables, at applied heads
+`0023_audit_actor_and_forensics` / `rl_0001_release_artifacts` /
+`v014_allocations_authority`. The live database also showed no `mod_deploy`
+schema and no table matching `%deployment%` or `%rollout%`, so the greenfield
+half is observed rather than inferred. Full coordinates in ADR-0011 § 4.
+
+The premise is narrow and is recorded as such: **never populated**, not
+"exercised and wrote nothing". The rest of that database is empty too, and
+`platform_audit_events` holds one row. That does not change the branch — zero
+rows is zero rows — but it bounds what the measurement may be cited for.
+
+That selects the sealed empty-estate path in the `v013`–`v016` shape: one
+transaction taking `ACCESS EXCLUSIVE` on all five delivery tables in a fixed
+order, re-checking counts AND relationships, aborting on anything non-zero, and
+REVOKEing `INSERT`/`UPDATE`/`DELETE` on `licence_delivery_targets` from
+`platform_api` while retaining `SELECT` — `platform_api` holds all four today,
+which is the seal's real work. The revoke lands before the locks release,
+because `POST /targets` stays mounted while the revision runs and "empty when
+measured" is not "cannot become non-empty". The table is not dropped; ADR-0010
+owns that.
+
+An absence describes a moment, so that under-lock re-check is the measurement's
+refresh responsibility rather than a second observation someone must remember
+to take.
 
 ADR-0010's licence-delivery transfer is the next slice after Deployment Control
 and must land before Brand Profiles. Until then the current logging/offline path
@@ -450,8 +487,10 @@ observe, so it is background rather than the load-bearing reason — as of
 deferral lifts: no model, service, migration or template in this assembly holds
 a brand record, which is measured rather than assumed.
 
-Commercial Agreements and Licensing are composed and authoritative under
-ADR-0008/0009, but remain below adopted until they actually run.
+Commercial Agreements and Licensing are composed, authoritative under
+ADR-0008/0009, and **adopted since 2026-08-21** — deploy run `32485479666` ran
+them in production with all eleven legacy tables absent. See the lifecycle
+section above for the verified evidence.
 
 ## Migrating existing products
 
