@@ -1,5 +1,17 @@
 # DeploymentCredentialService — WS8 V6 deployment authentication design
 
+> **Retirement amendment — 2026-08-21.** This brief is no longer a design to
+> implement. It was reviewed and abandoned without merging, and
+> `dotmac-deployment-control` now owns what it specified: `dc_0001` builds
+> `target_credentials`, `observation_receipts` and `observation_attempts`, and
+> carries the claim/proof separation, the append-only attempt log, the
+> stable-verdict replay rule and the half-open eligibility window described
+> below — the module's own extraction dossier cites this line as their
+> provenance. ADR-0011 contracts that composition and retires this document
+> with it; what remains here is historical reasoning, not a Vendor
+> implementation licence. Vendor-owned credential or fleet tables stay
+> forbidden (hard rule 4).
+
 > **As-built sequencing amendment — 2026-08-20.** The local delivery,
 > acknowledgement-admission and retry roles described below are transitional.
 > ADR-0010 freezes them and schedules delivery execution, raw transport

@@ -7,6 +7,8 @@ lifecycle — never a product's tenants, subscribers, or customer data.
 
 - **Hard rules:** `AGENTS.md` (canonical). **As-built + boundaries:**
   `docs/ARCHITECTURE.md`. **Decisions:** `docs/adr/`.
+  **What the next cutovers need before they are written:**
+  `docs/cutover-readiness.md`.
 - **Kernel:** consumed at the exact version pinned in `pyproject.toml`, resolved
   **only** from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`).
   The testing extra supports tests only; runtime code never imports it. No

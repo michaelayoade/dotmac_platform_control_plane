@@ -96,8 +96,13 @@ it owns and — just as importantly — what it must never become.
   extraction bar is unchanged at two CURRENT consumers. See ADR-0005 § "Retired
   artifacts".
 
-  **Lifecycle: below adopted.** Composed and authoritative in code is not
-  adopted; the new owner has not run in production, because nothing has.
+  **Lifecycle: adopted since 2026-08-17.** Production deploy `32022599873`
+  runs `mod_approvals` live with the legacy `public` tables absent and
+  `app_user` holding no module privilege; the extraction dossier records this
+  assembly as the contract consumer. One item survives adoption: the pin is
+  `0.1.0a4`, which writes the outbox relay without declaring
+  `outbox_relay.v1`. The repin to a5 and its binding are ADR-0005
+  § "Adoption plan".
 - `dotmac-release-catalog==0.1.0a4` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration
@@ -206,11 +211,17 @@ and `shadow_overlaps.py` with its architecture test. Both remain readable at
 own current inventory, and the extraction bar is unchanged at two CURRENT
 consumers.
 
-**Lifecycle: below adopted.** Vendor CP now has no local writer for release
-artifacts, approvals, allocations, agreements or licensing issuance — but
-adoption is earned by running in
-production with the local writer proven absent, not by landing code, and nothing
-has run.
+**Lifecycle: split, and the split is the point.** Vendor CP now has no local
+writer for release artifacts, approvals, allocations, agreements or licensing
+issuance. Adoption is earned per owner, by running in production with the local
+writer proven absent — not by landing code, and not by a neighbouring owner
+having done it.
+
+Approvals and Entitlement Allocation cleared that bar on 2026-08-17 with
+production deploy `32022599873` (ADR-0005 and ADR-0006 § "Adoption plan" carry
+the evidence and the repins each still owes). Commercial Agreements and
+Licensing switched AFTER that deploy and remain below adopted until the next
+one runs them.
 
 ## In-place module recomposition (ADR-0007)
 
@@ -379,16 +390,50 @@ a build-failing architecture test (`tests/architecture/test_deny_cases.py`):
 
 ## Still design-only (do NOT implement outside its contracted slice)
 
-Deployment Control is released but not yet composed here. Until its own cutover
-lands, fleet desired state, update authority, support access and observed fleet
-health remain absent. The permitted future persistence owner is the module's
-`mod_deploy` lineage, never a Vendor-local set of fleet tables; the full provider
-runner remains outside this application behind Dotmac Integrator. ADR-0010's
-licence-delivery transfer is the next slice after Deployment Control and must
-land before Brand Profiles. Until then, the current logging/offline path is
-frozen and no connected Vendor transport or additional retry policy may be
-added. Commercial Agreements and Licensing are composed and authoritative
-under ADR-0008/0009, but remain below adopted until they actually run.
+Deployment Control is released (`0.1.0a2`, tagged) and CONTRACTED here
+(ADR-0011) but not composed. Until that slice lands, fleet desired state, update
+authority, support access and observed fleet health remain absent. The permitted
+persistence owner is the module's `mod_deploy` lineage, never a Vendor-local set
+of fleet tables; the full provider runner remains outside this application
+behind Dotmac Integrator.
+
+**That slice is two differently-shaped halves.** Greenfield for plans,
+rollouts, credentials and observations — no Vendor owner has ever existed for
+any of them. A narrow AUTHORITY CUTOVER for deployment-target identity:
+`register_delivery_target` and `licence_delivery_targets` are a named authority
+over that subject today, and a second authority does not stop being one because
+it was given a narrower name. `src/vendor_cp/cutover_readiness.py` inventories
+both halves at symbol level with per-file call-site counts, ratcheted in both
+directions.
+
+Execution is gated on measuring `licence_delivery_targets` and
+`licence_deliveries` on a target Michael names explicitly — never one inferred
+from deployment history. An empty result permits a sealed empty-estate revision
+in the `v013`–`v016` shape; a non-empty result requires backfill into
+`mod_deploy`, comparison, a writer switch, and retention of the Vendor table as
+a module-derived projection until ADR-0010. Either way a forward vendor revision
+is owed.
+
+ADR-0010's licence-delivery transfer is the next slice after Deployment Control
+and must land before Brand Profiles. Until then the current logging/offline path
+is frozen and no connected Vendor transport or additional retry policy may be
+added.
+
+Brand Profiles is released (`0.1.0a1`, peeled commit
+`ed69f9dfdeea493dab7d7ba25c04e940f0870545`) and its platform-plane composition
+is PREPARED (`docs/cutover-readiness.md`). It is not composed, and the reason
+stated here is a LOCAL one: **this assembly is deferred by ADR-0007 § 6.** That
+is a decision this repository holds and can be held to. Whether `dotmac_sub` has
+finished adopting is a temporal claim about a repository this one cannot
+observe, so it is background rather than the load-bearing reason — as of
+`dotmac_starter_mt@20d24703e70e4d361de2f406165df4b36cbee507`,
+`packages/dotmac-brand-profiles/EXTRACTION.toml` carried `status =
+"audit-complete"` with no contract consumer. There is nothing to retire when the
+deferral lifts: no model, service, migration or template in this assembly holds
+a brand record, which is measured rather than assumed.
+
+Commercial Agreements and Licensing are composed and authoritative under
+ADR-0008/0009, but remain below adopted until they actually run.
 
 ## Migrating existing products
 
@@ -410,6 +455,12 @@ module, which is released but not yet composed here. Naming the licensing table
 the de-facto owner of an entity another service is specified to own — a
 source-of-truth violation dressed as a convenience. When the Deployment Control
 cutover lands, this projection may only be reconciled from its desired state.
-ADR-0010 then retires the projection when delivery execution moves to
-Integrator; it must not become a permanent cache or a second destination
-registry.
+**It is nevertheless a second authority over Deployment Control's subject, and
+ADR-0011 treats it as one.** `register_delivery_target` holds the ref, customer,
+connection and status, refuses to re-point a target at another customer, and
+writes two declared audit codes — the narrower name avoided the wrong OWNER
+label, not the ownership. ADR-0011 migrates that write path once
+`mod_deploy.deployment_targets` exists, after measuring the estate on a named
+target; what survives here may only be reconciled from that owner. ADR-0010 then
+retires the projection when delivery execution moves to Integrator; it must not
+become a permanent cache or a second destination registry.

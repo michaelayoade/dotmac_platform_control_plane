@@ -91,3 +91,43 @@ byte-for-byte, move only public key material and continue the revocation-list
 lineage. Vendor retains its separately owned delivery projection and evidence.
 ADR-0010 makes that retention temporary and schedules its retirement after the
 Deployment Control cutover and before Brand Profiles.
+
+## Amendment — 2026-08-21 (Deployment Control is a2, and step 4's "greenfield" is half right)
+
+ADR-0011 contracts step 4 and corrects two things.
+
+**The release.** `dotmac-deployment-control` `0.1.0a2` is published and tagged
+(Starter PR #308 at `5c87272a`, release run `32471956734`). Step 4 composes a2,
+not the a1 it named: a1 returns the raw unique-constraint error instead of the
+canonical verdict when two genuinely concurrent first observations race, and
+this assembly — receiving arrivals from deployments it does not control over an
+at-least-once transport — is where that fires.
+
+**The classification.** Step 4 called this a greenfield composition. That holds
+for plans, rollouts, credentials and observations, none of which has ever had a
+Vendor owner. It does NOT hold for deployment-target identity:
+`register_delivery_target` and `licence_delivery_targets` are a named authority
+over that subject today, complete with a customer-binding invariant and two
+declared audit codes. A second authority does not stop being one because it was
+given a narrower name.
+
+So step 4 is a greenfield composition AND a narrow authority cutover. The
+premise for the cutover half is measured, not assumed: `licence_delivery_targets`
+and `licence_deliveries` are counted on a target Michael names explicitly, and
+the result decides between a sealed empty-estate revision and a backfill with a
+writer switch. Either way a forward vendor revision is owed — the earlier
+reading, that this slice needed no vendor migration, came from the wrong
+classification and is withdrawn.
+
+The module declares one supported plane set, so `ASSEMBLY_MODULE_PLANES` gains
+nothing.
+
+## Amendment — 2026-08-21 (steps 2 and 3 have run; step 7 is met for two earlier owners)
+
+Step 7 records adoption only after a released owner runs with its former local
+writer absent. That condition was met on 2026-08-17 for Approvals and
+Entitlement Allocation: production deploy `32022599873` ran main `f8f8c3fd` at
+an immutable image digest with `mod_approvals` and `mod_ealloc` live and the
+legacy `public` tables absent. ADR-0005 and ADR-0006 carry the evidence and the
+remaining repin action. Commercial Agreements and Licensing remain below
+adopted — their switches landed after that deploy.

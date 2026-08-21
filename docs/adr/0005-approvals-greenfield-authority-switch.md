@@ -145,6 +145,51 @@ absent". That lesson belongs in the record above, not in a retained tool.
 
 ## Lifecycle
 
-**Below adopted.** Composed and authoritative in code is not adopted: the new
-owner has not run in production, because nothing has. The lifecycle advances when
-it does, on evidence, not on this ADR being accepted.
+**Adopted, on evidence, since 2026-08-17.** This section said "the new owner has
+not run in production, because nothing has", and that stopped being true two
+days after it was written. The correction matters more than the milestone: a
+lifecycle claim that only ever moves when someone remembers to move it is a
+claim a reader cannot use.
+
+Production deploy `32022599873` runs main `f8f8c3fd636e663e4a17275c19e82fc1667aa52a`
+at immutable image `sha256:56ec553139c449dc7da46a8873b3c03e95a61e43c970cd1675e28a202b2991cc`
+with `mod_approvals` live, `public.approval_policies` and
+`public.approval_records` absent, and `app_user` holding no module privilege.
+**The oracle for that claim**, since adoption is not observable from this
+repository (`AGENTS.md` rule 17): an `adoption_evidence` citation at
+`dotmac_starter_mt@20d24703e70e4d361de2f406165df4b36cbee507`, path `packages/dotmac-approvals/EXTRACTION.toml`, where
+`status = "adopted"`, `contract_consumers` names this assembly, and
+`adoption_evidence` carries the same commit, deploy run, image digest,
+`v013_approvals_authority` and live `mod_approvals` schema. The commit and path
+are both required: either alone leaves a reader unable to re-read what was read.
+The dossier is the authority; this section cites it rather than restating
+adoption as a local fact.
+
+## Adoption plan — what is still owed
+
+Adoption is not the end of the plan, and one item survives it.
+
+**Repin to `0.1.0a5`.** This assembly pins `0.1.0a4`. Every release through a4
+writes `public.outbox_events` and `public.platform_outbox_events` at request
+time — `emit_platform_events` calls the kernel relay — without declaring
+`outbox_relay.v1`. a5 declares it and adds `ap_0002_outbox_relay`, a
+verification-only revision whose entire body is `require_prerequisites`.
+
+This assembly is not exposed to the runtime half of that defect. It runs the
+whole kernel base lineage, so both relay tables exist here; an adopter running
+only its own lineage would take an `UndefinedTable` on the first approval
+decision that emitted an event, with the approval transaction rolling back
+alongside it. What is missing here is the PROOF, not the table — which is
+exactly the kind of gap that stays invisible until an assembly that does not
+run the kernel lineage copies this one.
+
+The repin slice moves the pin, adds an `outbox_relay.v1` binding to
+`ASSEMBLY_PREREQUISITE_BINDINGS` — expected provider `0012_platform_outbox`,
+the descendant completing both planes of the effect, to be PROVEN by
+`tests/architecture/test_migration_prerequisite_bindings.py` rather than
+assumed — and verifies `ap_0002` against the migrated database before deploy.
+It is independent of the ADR-0007 slices and may be taken in any order relative
+to them. See `docs/cutover-readiness.md`.
+
+**Not owed:** a second product's cutover. ERP is the remaining candidate and
+owns its own retirement; nothing in this assembly gates it.

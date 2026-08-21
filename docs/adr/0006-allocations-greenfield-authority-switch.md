@@ -132,6 +132,43 @@ precise shape of the problem this sequence of changes exists to remove.
 
 ## Lifecycle
 
-**Below adopted.** Vendor CP now has no local writer for release artifacts,
-approvals or allocations. Adoption is earned by running in production with the
-local writer proven absent, not by landing code, and nothing has run.
+**Adopted, on evidence, since 2026-08-17.** This section said adoption is
+earned by running in production with the local writer proven absent, "and
+nothing has run". It ran two days later, and the sentence outlived the fact —
+which is the failure mode `tests/architecture/test_stale_claims.py` exists for
+and did not cover, because a lifecycle label is prose about the world rather
+than about this repository.
+
+Production deploy `32022599873` runs main `f8f8c3fd636e663e4a17275c19e82fc1667aa52a`
+at immutable image `sha256:56ec553139c449dc7da46a8873b3c03e95a61e43c970cd1675e28a202b2991cc`
+with `mod_ealloc` live and `public.allocations` / `public.allocation_entries`
+absent. **The oracle for that claim**, since adoption is not observable from this
+repository (`AGENTS.md` rule 17): an `adoption_evidence` citation at
+`dotmac_starter_mt@20d24703e70e4d361de2f406165df4b36cbee507`, path
+`packages/dotmac-entitlement-allocation/EXTRACTION.toml`, where `status =
+"adopted"`, `contract_consumers` names this assembly, and `adoption_evidence`
+carries the same commit, deploy run, image digest, `v014_allocations_authority`
+head and live `mod_ealloc` schema. It is held at `adopted`, not advanced to
+`reuse-proven`, until a second real vendor or OEM control plane completes its
+own cutover — also the dossier's call, not this one's.
+
+## Adoption plan — what is still owed
+
+**Repin to `0.1.0a6`.** This assembly pins `0.1.0a4`, which declares neither of
+the two kernel effects `stage_allocation` writes at request time: the
+idempotency ledger it delegates at-most-once execution to, and the platform
+audit log it writes inside that operation. a6 declares both and adds the
+DDL-free `ea_0002` and `ea_0003` verification revisions. (`0.1.0a5` carried
+only the first half and was deliberately never published; do not pin it.)
+
+Both effects are already bound in `ASSEMBLY_PREREQUISITE_BINDINGS` — to kernel
+`0018_idempotency_one_owner` and `0026_platform_audit_log` — because Commercial
+Agreements and Licensing declare them. So unlike the approvals repin, this one
+adds no binding; it makes an existing one carry a consumer that was silently
+depending on it. Verify both DDL-free revisions against the migrated database
+before deployment.
+
+**Not owed:** delivery or acknowledgement state here. Licence issuance owns
+that lifecycle, and ADR-0010 moves its transport half to Integrator.
+
+See `docs/cutover-readiness.md` for how this sits beside the ADR-0007 slices.
