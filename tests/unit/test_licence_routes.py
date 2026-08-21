@@ -31,14 +31,14 @@ from sqlalchemy.orm import Session
 from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import adapter as contracts
-from vendor_cp.licensing import service as licensing
+from vendor_cp.licensing import adapter as licensing
 from vendor_cp.licensing.delivery_models import (
     AttemptOutcome,
     DeliveryState,
     LicenceDeliveryAttempt,
 )
 from vendor_cp.licensing.router import router
-from vendor_cp.licensing.signer import EphemeralLicenceSigner
+from vendor_cp.licensing.signing_adapter import EphemeralLicenceSigner
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 

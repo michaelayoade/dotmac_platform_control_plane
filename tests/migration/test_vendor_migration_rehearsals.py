@@ -36,9 +36,10 @@ ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 # revision, so this appears in `script.get_heads()` and not in `_versions()`.
 APPROVALS_HEAD = "ap_0001_approvals"
 COMMERCIAL_AGREEMENTS_HEAD = "cg_0001_agreements"
+LICENSING_HEAD = "li_0001_licensing"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v015_agreements_authority"
+VENDOR_HEAD = "v016_licensing_authority"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:
@@ -128,6 +129,16 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # empty legacy tables went with the writer that owned them.
     assert not _table_exists(scratch_db, "allocations")
     assert not _table_exists(scratch_db, "allocation_entries")
+    # v016 retired only the local issuer. Delivery remains Vendor-owned.
+    for retired in (
+        "licence_signing_keys",
+        "licences",
+        "licence_issuances",
+        "licence_revocation_entries",
+        "licence_revocation_lists",
+    ):
+        assert not _table_exists(scratch_db, retired)
+    assert _table_exists(scratch_db, "licence_deliveries")
     assert "product_code" in _column_names(scratch_db, "offer_versions")
     # Kernel platform tables the AccountService depends on are present too.
     assert _table_exists(scratch_db, "platform_audit_events")
@@ -139,6 +150,12 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     assert _qualified_table_exists(scratch_db, "mod_agreements.agreements")
     assert _qualified_table_exists(scratch_db, "mod_agreements.agreement_lines")
     assert _qualified_table_exists(scratch_db, "mod_agreements.agreement_events")
+    assert _qualified_table_exists(scratch_db, "mod_licensing.signing_keys")
+    assert _qualified_table_exists(scratch_db, "mod_licensing.licences")
+    assert _qualified_table_exists(scratch_db, "mod_licensing.licence_issuances")
+    assert _qualified_table_exists(scratch_db, "mod_licensing.licence_acknowledgements")
+    assert _qualified_table_exists(scratch_db, "mod_licensing.revocations")
+    assert _qualified_table_exists(scratch_db, "mod_licensing.revocation_lists")
     cols = _column_names(scratch_db, "vendor_accounts")
     assert {
         "id",
@@ -159,12 +176,13 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # `alembic_version` holds current heads only, and a `depends_on` edge makes
     # its target an ANCESTOR of the depending revision rather than a head in its
     # own right. `v012` depends on `ap_0001_approvals`, `v014` on
-    # `ea_0001_allocations`, and `v015` on `cg_0001_agreements`. Commercial
+    # `ea_0001_allocations`, `v015` on `cg_0001_agreements`, and `v016` on
+    # `li_0001_licensing`. Commercial
     # Agreements in turn depends on kernel `0018` and `0026`, so the current
     # kernel head is an ancestor too. All four revisions are genuinely applied;
-    # none remains a version ROW once the Vendor lineage reaches v015.
+    # none remains a version ROW once the Vendor lineage reaches v016.
     #
-    # They are still static heads, and `test_six_head_topology` asserts all six
+    # They are still static heads, and `test_seven_head_topology` asserts all seven
     # through `script.get_heads()`. Listing them here as well would report them
     # missing on a perfectly complete database.
     assert _versions(scratch_db) == {
@@ -234,9 +252,9 @@ def test_alembic_env_installs_the_vendor_prerequisite_bindings(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rehearsal 2 — six-head topology
+# Rehearsal 2 — seven-head topology
 # ─────────────────────────────────────────────────────────────────────────────
-def test_six_head_topology(scratch_db: str) -> None:
+def test_seven_head_topology(scratch_db: str) -> None:
     script = ScriptDirectory.from_config(make_alembic_config(scratch_db))
     assert set(script.get_heads()) == {
         KERNEL_HEAD,
@@ -244,6 +262,7 @@ def test_six_head_topology(scratch_db: str) -> None:
         RELEASE_CATALOG_HEAD,
         APPROVALS_HEAD,
         COMMERCIAL_AGREEMENTS_HEAD,
+        LICENSING_HEAD,
         VENDOR_HEAD,
     }
     kernel_head = script.get_revision("kernel@head")
@@ -251,11 +270,13 @@ def test_six_head_topology(scratch_db: str) -> None:
     release_catalog_head = script.get_revision("release_catalog@head")
     allocation_head = script.get_revision("entitlement_allocation@head")
     agreement_head = script.get_revision("commercial_agreements@head")
+    licensing_head = script.get_revision("licensing@head")
     assert kernel_head.revision == KERNEL_HEAD
     assert vendor_head.revision == VENDOR_HEAD
     assert release_catalog_head.revision == RELEASE_CATALOG_HEAD
     assert allocation_head.revision == ENTITLEMENT_ALLOCATION_HEAD
     assert agreement_head.revision == COMMERCIAL_AGREEMENTS_HEAD
+    assert licensing_head.revision == LICENSING_HEAD
     # The vendor head is the tip of a single-parent chain that walks back to the
     # vendor ROOT; the ROOT is its own branch that DEPENDS ON (is not a child of)
     # a kernel head, so the lineages advance independently.
@@ -348,7 +369,7 @@ def test_platform_role_access_and_tenant_role_denial(
                         "VALUES (gen_random_uuid(), 'x', 'y')"
                     )
                 )
-        # The WS8 licence tables carried the same REVOKE, proven here by a
+        # The old WS8 licence tables carried the same REVOKE, proven here by a
         # ten-name literal list. That list is GONE: it covered the tables
         # someone remembered, so every later migration silently widened the gap
         # between what shipped and what was checked.
@@ -356,12 +377,15 @@ def test_platform_role_access_and_tenant_role_denial(
         # `test_composed_live_catalog.py` now sweeps EVERY vendor-owned table,
         # derived by diffing `public` across the two lineages, for all seven
         # PostgreSQL table privileges including the column-level ones. One
-        # licence table stays here as the live-connection counterpart: the
-        # sweep reads `has_table_privilege`, and this proves a real connection
-        # is refused, so a catalogue that lied would not pass both.
+        # module-owned licence table stays here as the live-connection
+        # counterpart: the sweep reads `has_table_privilege`, and this proves a
+        # real connection is refused, so a catalogue that lied would not pass
+        # both.
         with appu.connect() as conn:
             with pytest.raises(DBAPIError, match="permission denied"):
-                conn.execute(text("SELECT count(*) FROM licences")).scalar()
+                conn.execute(
+                    text("SELECT count(*) FROM mod_licensing.licences")
+                ).scalar()
         with appu.connect() as conn:
             with pytest.raises(DBAPIError, match="permission denied"):
                 conn.execute(
@@ -420,6 +444,7 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     assert not _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert not _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert not _qualified_table_exists(scratch_db, "mod_agreements.agreements")
+    assert not _qualified_table_exists(scratch_db, "mod_licensing.licences")
 
     account_id = str(uuid.uuid4())
     eng = create_engine(scratch_db)
@@ -441,6 +466,7 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _qualified_table_exists(scratch_db, "mod_agreements.agreements")
+    assert _qualified_table_exists(scratch_db, "mod_licensing.licences")
     assert (
         _q(
             scratch_db,
@@ -463,7 +489,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
 ) -> None:
     """Simulate a FUTURE kernel migration (a child of the kernel head). The
     vendor and module heads must remain separate heads — and a composed upgrade
-    must still apply all six lineages."""
+    must still apply all seven lineages."""
     synth_rev = "9999_synthetic_kernel_advance"
     (tmp_path / f"{synth_rev}.py").write_text(
         "revision = '9999_synthetic_kernel_advance'\n"
@@ -485,6 +511,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
         RELEASE_CATALOG_HEAD,
         APPROVALS_HEAD,
         COMMERCIAL_AGREEMENTS_HEAD,
+        LICENSING_HEAD,
         VENDOR_HEAD,
     }
 

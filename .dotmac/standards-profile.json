@@ -15,24 +15,27 @@
   "enforcement_mode": "required",
   "authorities": [
     {
-      "authority_id": "licence-issuance",
-      "subject": "Vendor-side signing and immutable lineage/version assignment for staged licence allocations.",
+      "authority_id": "licence-signing-custody",
+      "subject": "Vendor-held private signing-key custody and runtime signer selection supplied to the Licensing module.",
       "protected_resources": [
-        "signed-licence-document",
-        "licence-lineage-version"
+        "licence-signing-private-key-custody",
+        "licence-runtime-signer-selection"
       ],
-      "owner_component": "licence-issuance-service",
-      "owner_implementation": "src/vendor_cp/licensing/service.py",
-      "decision_interface": "vendor_cp.licensing.service.issue_licence",
-      "canonical_writer_paths": ["src/vendor_cp/licensing/service.py"],
-      "adapter_paths": ["src/vendor_cp/licensing/router.py"],
-      "drift_test_paths": ["tests/unit/test_licensing.py"]
+      "owner_component": "licence-signing-adapter",
+      "owner_implementation": "src/vendor_cp/licensing/signing_adapter.py",
+      "decision_interface": "vendor_cp.licensing.signing_adapter.runtime_licence_signers",
+      "canonical_writer_paths": ["src/vendor_cp/licensing/signing_adapter.py"],
+      "adapter_paths": ["src/vendor_cp/licensing/adapter.py"],
+      "drift_test_paths": [
+        "tests/architecture/test_licensing_authority.py",
+        "tests/unit/test_licence_key_rotation.py"
+      ]
     }
   ],
   "typed_contract_surfaces": [
     {
-      "surface_id": "licence-issuance-service-contract",
-      "paths": ["src/vendor_cp/licensing/service.py"],
+      "surface_id": "licensing-module-adapter-contract",
+      "paths": ["src/vendor_cp/licensing/adapter.py"],
       "require_public_annotations": true,
       "forbid_any": true,
       "require_immutable_records": true

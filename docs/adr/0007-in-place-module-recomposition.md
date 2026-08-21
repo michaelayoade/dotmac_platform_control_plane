@@ -45,9 +45,16 @@ a parallel application.
    provider credentials, connector retries and schedules remain forbidden.
    External execution stays in Dotmac Integrator. The abandoned local V6 PR
    line is retired when this composition lands.
-5. Compose Brand Profiles' platform plane only after the checked-in Sub-first
+5. Move licence delivery to Dotmac Integrator under ADR-0010. This follows
+   Deployment Control so routing consumes its authoritative deployment
+   reference, and it retires Vendor's target projection, transport attempts,
+   retry/health policy and raw acknowledgement ledger after an explicit
+   mirror/seal/activation proof.
+6. Compose Brand Profiles' platform plane only after the checked-in Sub-first
    adoption completes. Reversing that order requires an explicit amendment to
    the extraction decision; Vendor will not silently become the first adopter.
+7. Record adoption evidence only after each released owner actually runs with
+   its former local writer absent.
 
 Every authority-moving step requires its own cutover ADR or dated amendment,
 data premise, forward migration, one-writer proof, focused architecture and
@@ -74,3 +81,13 @@ ADR-0008 records that the designated target was directly observed as
 on and is superseded for this target by a checked empty-estate switch. Vendor
 revision `v015` rechecks the premise under `ACCESS EXCLUSIVE` and refuses a
 populated table; it never synthesizes contracts, hashes or history.
+
+## Amendment — 2026-08-20 (Licensing issuer target is greenfield)
+
+ADR-0009 records that the same designated target observation applies to the
+issuer estate. Revision `v016` rechecks all five local issuer tables under lock
+and refuses any row, because a populated cutover must preserve signed envelopes
+byte-for-byte, move only public key material and continue the revocation-list
+lineage. Vendor retains its separately owned delivery projection and evidence.
+ADR-0010 makes that retention temporary and schedules its retirement after the
+Deployment Control cutover and before Brand Profiles.

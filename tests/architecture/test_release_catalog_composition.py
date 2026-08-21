@@ -44,6 +44,10 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
         "version": "0.1.0a1",
         "source": "forgejo",
     }
+    assert dependencies["dotmac-licensing"] == {
+        "version": "0.1.0a1",
+        "source": "forgejo",
+    }
 
 
 def test_release_catalog_manifest_is_composed() -> None:
@@ -60,5 +64,6 @@ def test_vendor_ingestion_adapter_owns_its_audit_vocabulary() -> None:
 def test_release_catalog_public_migration_lineage_is_composed() -> None:
     locations = composed_version_locations().split()
     assert str(release_catalog_versions_dir()) in locations
-    # kernel + release catalog + allocation + approvals + agreements + vendor
-    assert len(locations) == 6
+    # kernel + release catalog + allocation + approvals + agreements
+    # + licensing + vendor
+    assert len(locations) == 7

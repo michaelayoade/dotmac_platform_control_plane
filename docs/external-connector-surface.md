@@ -44,3 +44,10 @@ Zero means only that the accepted detector saw zero measured spellings. It
 does not prove that the assembly lacks external connectivity. The ratchet
 reaches its sunset only with ADR 0011's runtime package, secret, egress,
 ingress, and inbox/outbox conditions.
+
+It also does not assign semantic ownership of the existing Vendor delivery
+attempts or retry state. Those logging/offline paths are temporary and frozen:
+ADR-0010 schedules their transfer to `dotmac-integration` in Dotmac Integrator
+after Deployment Control and before Brand Profiles. No connected transport,
+provider credential, schedule, checkpoint, lease, backoff policy or new retry
+owner may be added here while that cutover is pending.

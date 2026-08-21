@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
-from vendor_cp.licensing.service import LicenceIssuanceView
+from vendor_cp.licensing.adapter import LicenceIssuanceView
 
 
 class IssueLicenceRequest(BaseModel):

@@ -33,7 +33,7 @@ class VendorSettings:
     # exact artifact digest.
     product_release_pins: tuple[tuple[str, ProductReleasePin], ...] = ()
     product_manifest_directory: Path = Path("/run/dotmac/product-manifests")
-    # WS8 licence signing (see vendor_cp.licensing.signer). "ephemeral" (an
+    # WS8 licence signing (see vendor_cp.licensing.signing_adapter). "ephemeral" (an
     # in-memory keypair, dev/test only) or "configured" (a real key read from
     # licence_signing_key_file). Ephemeral is the DEFAULT so a missing
     # configuration cannot silently become a real issuer; an unknown mode fails

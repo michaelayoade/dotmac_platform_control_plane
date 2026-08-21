@@ -81,14 +81,21 @@ disagree, fix the drift.
     Agreements follows the same checked-premise shape under ADR-0008 and
     `v015`: `dotmac-commercial-agreements` is the sole agreement lifecycle,
     history, audit and outbox owner; `vendor_cp.contracts.adapter` is the only
-    seam; and the retired service/models call sites stay at zero. Do not build
+    seam; and the retired service/models call sites stay at zero. Licensing
+    follows under ADR-0009 and `v016`: `dotmac-licensing` is the sole issuer,
+    lifecycle, acknowledgement and revocation owner;
+    `vendor_cp.licensing.adapter` is the only seam; Vendor temporarily retains
+    product-held signing custody and delivery; and all six retired or
+    ownership-ambiguous module paths stay at zero. Do not build
     parity, backfill, synthesized requests or sealed evidence against an empty
     estate — ADR-0031 governs a cutover WITH data, and this was not one. Composed
     and authoritative in code is NOT adopted
     (`tests/architecture/test_approvals_authority.py`,
     `tests/migration/test_authority_switch.py`,
     `tests/architecture/test_commercial_agreements_authority.py`,
-    `tests/migration/test_commercial_agreements_authority_switch.py`).
+    `tests/migration/test_commercial_agreements_authority_switch.py`,
+    `tests/architecture/test_licensing_authority.py`,
+    `tests/migration/test_licensing_authority_switch.py`).
 13. **A guard exemption dies with its premise.** The assembly-local waiver for
     the legacy allocation tables shadowing `mod_ealloc` was REMOVED when `v014`
     dropped those tables, not lowered and not left describing nothing: an
@@ -112,6 +119,16 @@ disagree, fix the drift.
     a68 made the platform writer enforce the manifest registry; the a77 pin may
     not cross that boundary with undeclared actions
     (`tests/architecture/test_platform_audit_actions.py`; ADR-0007).
+16. **Vendor licence delivery is transitional and frozen.** ADR-0010 schedules
+    its transfer after Deployment Control and before Brand Profiles. Until that
+    cutover, preserve only the current logging and authenticated offline-bundle
+    paths: do not add network transport, a provider client or credential,
+    scheduling, checkpoints, leases, backoff, or another retry owner. The
+    Governance connector ratchet must remain at zero. At cutover,
+    `dotmac-integration` in Dotmac Integrator becomes the sole owner of
+    delivery attempts, retry, health and repair; Vendor retains only private-key
+    custody plus thin immutable-artifact and acknowledgement adapters
+    (`docs/external-connector-surface.md`; ADR-0010).
 
 ## Validation before any commit
 

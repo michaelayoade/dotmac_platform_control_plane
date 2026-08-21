@@ -3,7 +3,7 @@
 Connects as `app_admin` (the RLS-bypass migration role) — set
 `MIGRATION_DATABASE_URL` or `DATABASE_URL`. `target_metadata` is the kernel
 `Base` (all kernel models), the installed modules and the vendor's own models,
-so autogenerate sees the whole composed schema. The six lineages' directories
+so autogenerate sees the whole composed schema. The seven lineages' directories
 are composed programmatically (`vendor_cp.migrations`), not in `alembic.ini`,
 because the shared owners are installed packages with environment-specific
 paths.
@@ -29,11 +29,12 @@ from dotmac_kernel.prerequisites import install_prerequisite_bindings
 from sqlalchemy import engine_from_config, pool
 
 # Register the vendor's own models. Importing `vendor_cp.migrations` below also
-# loads both installed modules through their public top-level migration locators,
+# loads all installed modules through their public top-level migration locators,
 # registering their models on the same shared Base metadata.
-# Allocations and approvals are owned by their modules now, and their models
-# are registered by importing those packages (via `vendor_cp.migrations`).
+# Shared authority models are registered by importing their packages via
+# `vendor_cp.migrations`; only retained Vendor models are imported explicitly.
 import vendor_cp.accounts.models  # noqa: F401
+import vendor_cp.licensing.delivery_models  # noqa: F401
 import vendor_cp.offers.models  # noqa: F401
 from vendor_cp.migration_bindings import (
     ASSEMBLY_MODULE_PLANES,

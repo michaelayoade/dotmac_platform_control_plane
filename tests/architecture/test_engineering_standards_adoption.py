@@ -53,6 +53,43 @@ def test_the_profile_declares_the_accepted_schema_nine_surface() -> None:
     )
 
 
+def test_the_profile_tracks_the_remaining_vendor_licensing_boundary() -> None:
+    profile = _profile()
+    assert profile["authorities"] == [
+        {
+            "authority_id": "licence-signing-custody",
+            "subject": (
+                "Vendor-held private signing-key custody and runtime signer "
+                "selection supplied to the Licensing module."
+            ),
+            "protected_resources": [
+                "licence-signing-private-key-custody",
+                "licence-runtime-signer-selection",
+            ],
+            "owner_component": "licence-signing-adapter",
+            "owner_implementation": "src/vendor_cp/licensing/signing_adapter.py",
+            "decision_interface": (
+                "vendor_cp.licensing.signing_adapter.runtime_licence_signers"
+            ),
+            "canonical_writer_paths": ["src/vendor_cp/licensing/signing_adapter.py"],
+            "adapter_paths": ["src/vendor_cp/licensing/adapter.py"],
+            "drift_test_paths": [
+                "tests/architecture/test_licensing_authority.py",
+                "tests/unit/test_licence_key_rotation.py",
+            ],
+        }
+    ]
+    assert profile["typed_contract_surfaces"] == [
+        {
+            "surface_id": "licensing-module-adapter-contract",
+            "paths": ["src/vendor_cp/licensing/adapter.py"],
+            "require_public_annotations": True,
+            "forbid_any": True,
+            "require_immutable_records": True,
+        }
+    ]
+
+
 def test_the_review_record_equals_the_declared_baseline() -> None:
     declared = _profile()["external_connector_surface"]["baselines"]
     rows = _EVIDENCE_ROW.findall(EVIDENCE.read_text(encoding="utf-8"))

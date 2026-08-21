@@ -1,8 +1,8 @@
 """`EntitlementProjectionService` — delivery staging + acknowledgement truth.
 
 The second WS8 vendor owner (`docs/design/licence-service.md`). It owns
-**delivery and acknowledgement state, and nothing else**: it never signs, never
-builds documents (that is `LicenceIssuanceService`), and never writes a product
+**delivery evidence and projection state, and nothing else**: it never signs,
+never builds documents (that is `dotmac-licensing`), and never writes a product
 data plane's WS2 grants (ruling C4).
 
 Its one hard rule: **`active` means the data plane committed a local projection
@@ -19,6 +19,8 @@ follows from that:
   caller cannot establish that for any licence. A platform admin is not a
   deployment: admin-submitted acks are evidence, permanently, by design and
   not pending some later feature.
+- Authenticated, issuer-valid reports are forwarded to `dotmac-licensing` in
+  the same transaction; Vendor does not maintain a parallel licence status.
 - Anything else is recorded and QUARANTINED, never acted on. An ack naming a
   digest we never issued is the mis-issue/tamper tripwire; deleting it would
   destroy the evidence.
@@ -44,6 +46,7 @@ from dotmac_kernel.messaging import enqueue_platform_event
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from vendor_cp.licensing import adapter as licensing
 from vendor_cp.licensing.delivery_models import (
     AckDisposition,
     AckStatus,
@@ -54,10 +57,8 @@ from vendor_cp.licensing.delivery_models import (
     LicenceDeliveryTarget,
     TargetStatus,
 )
-from vendor_cp.licensing.models import Licence, LicenceIssuance
 
 _EVENT_DELIVERED = "licence.delivered"
-_EVENT_ACTIVATED = "licence.activated"
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,8 +224,8 @@ def map_legacy_delivery(
             f"delivery {delivery_id} already has a destination — a delivery "
             "fact is immutable and may not be re-pointed"
         )
-    issuance = db.get(LicenceIssuance, delivery.issuance_id)
-    if issuance is None:  # unreachable: FK-enforced
+    issuance = licensing.issuance_for_delivery(db, delivery.issuance_id)
+    if issuance is None:
         raise RuntimeError(f"delivery {delivery_id} references a missing issuance")
     target = _authorised_target(db, target_ref=target_ref, issuance=issuance)
 
@@ -243,7 +244,7 @@ def map_legacy_delivery(
 
 
 def _authorised_target(
-    db: Session, *, target_ref: str, issuance: LicenceIssuance
+    db: Session, *, target_ref: str, issuance: licensing.DeliveryIssuanceView
 ) -> LicenceDeliveryTarget:
     """Resolve a target AND authorise it for this issuance. Registration is not
     authorisation; each check below is a distinct failure mode, so each is made
@@ -264,13 +265,10 @@ def _authorised_target(
             "active — a suspended or retired destination must not receive "
             "licences"
         )
-    licence = db.get(Licence, issuance.licence_id)
-    if licence is None:  # unreachable: FK-enforced
-        raise RuntimeError(f"issuance {issuance.id} references a missing licence")
-    if target.customer_ref != licence.customer_ref:
+    if target.customer_ref != issuance.subject_ref:
         raise BadRequestError(
             "refusing cross-customer delivery: the licence lineage belongs to "
-            f"{licence.customer_ref!r} but target {target.target_ref!r} belongs "
+            f"{issuance.subject_ref!r} but target {target.target_ref!r} belongs "
             f"to {target.customer_ref!r}"
         )
     bound_to = _issued_deployment_id(issuance)
@@ -315,7 +313,7 @@ def stage_delivery(db: Session, command: StageDeliveryCommand) -> DeliveryView:
     Idempotent per `(issuance_id, target_ref)`: delivery is at-least-once, so a
     repeat is the SAME fact, never a second one.
     """
-    issuance = db.get(LicenceIssuance, command.issuance_id)
+    issuance = licensing.issuance_for_delivery(db, command.issuance_id)
     if issuance is None:
         raise NotFoundError(f"licence issuance {command.issuance_id} not found")
 
@@ -437,42 +435,53 @@ def _audit_ack(
 
 def _highest_active_version(db: Session, licence_id: UUID) -> int:
     """The newest version of this lineage already acknowledged as applied."""
-    rows = db.execute(
-        select(LicenceIssuance.version)
-        .join(LicenceDelivery, LicenceDelivery.issuance_id == LicenceIssuance.id)
+    issuance_ids = db.execute(
+        select(LicenceDelivery.issuance_id)
         .join(
             LicenceDeliveryState,
             LicenceDeliveryState.delivery_id == LicenceDelivery.id,
         )
         .where(
-            LicenceIssuance.licence_id == licence_id,
             LicenceDeliveryState.state == DeliveryState.ACTIVE.value,
         )
     ).scalars()
-    return max((int(v) for v in rows), default=0)
+    versions = (
+        issuance.version
+        for issuance_id in issuance_ids
+        if (issuance := licensing.issuance_for_delivery(db, issuance_id)) is not None
+        and issuance.licence_id == licence_id
+    )
+    return max(versions, default=0)
 
 
-def _issued_deployment_id(issuance: LicenceIssuance) -> str | None:
-    """The deployment the document was BOUND to, read back from the frozen
-    envelope's payload — the issued fact, not a caller's claim."""
-    import base64
-    import json
+def _issued_deployment_id(
+    issuance: licensing.DeliveryIssuanceView,
+) -> str | None:
+    """The binding recorded by the issuer, not a caller's claim."""
+    return issuance.deployment_ref
 
-    payload_b64 = issuance.envelope.get("payload_b64")
-    if not isinstance(payload_b64, str):
-        return None
-    try:
-        payload = base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4))
-        document = json.loads(payload)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(document, dict):
-        return None
-    subject = document.get("subject")
-    if not isinstance(subject, dict):
-        return None
-    bound = subject.get("deployment_id")
-    return bound if isinstance(bound, str) else None
+
+def _acknowledge_issuer(
+    db: Session,
+    *,
+    ack: AcknowledgementInput,
+    record: LicenceAckRecord,
+    issuance: licensing.DeliveryIssuanceView,
+    authenticated_deployment_ref: str,
+    actor_admin_id: UUID | None,
+) -> None:
+    """Record a verified installation report with the licence authority."""
+    if ack.status not in {AckStatus.APPLIED.value, AckStatus.REJECTED.value}:
+        return
+    licensing.acknowledge_installation(
+        db,
+        issuance=issuance,
+        outcome=ack.status,
+        reason=ack.reason,
+        reported_at=record.created_at,
+        authenticated_deployment_ref=authenticated_deployment_ref,
+        actor_admin_id=actor_admin_id,
+    )
 
 
 def ingest_acknowledgement(
@@ -511,24 +520,15 @@ def ingest_acknowledgement(
         licence_uuid = UUID(ack.licence_id)
     except (ValueError, AttributeError):
         licence_uuid = None
-    licence = db.get(Licence, licence_uuid) if licence_uuid is not None else None
-    if licence is None:
-        record = _record(
+    issuance = (
+        licensing.find_issuance(
             db,
-            ack,
-            AckDisposition.UNKNOWN_LICENCE,
-            authenticated_deployment_ref=authenticated_deployment_ref,
+            licence_id=licence_uuid,
+            version=ack.licence_version,
         )
-        _audit_ack(db, ack, record, AckDisposition.UNKNOWN_LICENCE, actor_admin_id)
-        return AckOutcome(record.id, AckDisposition.UNKNOWN_LICENCE.value, False)
-
-    # 2. …at a version we actually issued?
-    issuance = db.execute(
-        select(LicenceIssuance).where(
-            LicenceIssuance.licence_id == licence.id,
-            LicenceIssuance.version == ack.licence_version,
-        )
-    ).scalar_one_or_none()
+        if licence_uuid is not None
+        else None
+    )
     if issuance is None:
         record = _record(
             db,
@@ -539,7 +539,7 @@ def ingest_acknowledgement(
         _audit_ack(db, ack, record, AckDisposition.UNKNOWN_LICENCE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.UNKNOWN_LICENCE.value, False)
 
-    # 3. …with the digest WE issued? A mismatch means the deployment applied a
+    # 2. …with the digest WE issued? A mismatch means the deployment applied a
     #    document we did not produce (or produced a claim about one).
     if ack.digest != issuance.digest:
         record = _record(
@@ -614,6 +614,14 @@ def ingest_acknowledgement(
             delivery_id=delivery.id if delivery else None,
             authenticated_deployment_ref=authenticated_deployment_ref,
         )
+        _acknowledge_issuer(
+            db,
+            ack=ack,
+            record=record,
+            issuance=issuance,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+            actor_admin_id=actor_admin_id,
+        )
         _audit_ack(db, ack, record, AckDisposition.REJECTED_BY_RECEIVER, actor_admin_id)
         return AckOutcome(
             record.id,
@@ -623,7 +631,7 @@ def ingest_acknowledgement(
         )
 
     # 7. A late ack for an older version must NEVER regress a newer active one.
-    highest_active = _highest_active_version(db, licence.id)
+    highest_active = _highest_active_version(db, issuance.licence_id)
     if ack.licence_version < highest_active:
         record = _record(
             db,
@@ -631,6 +639,14 @@ def ingest_acknowledgement(
             AckDisposition.STALE,
             delivery_id=delivery.id if delivery else None,
             authenticated_deployment_ref=authenticated_deployment_ref,
+        )
+        _acknowledge_issuer(
+            db,
+            ack=ack,
+            record=record,
+            issuance=issuance,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+            actor_admin_id=actor_admin_id,
         )
         _audit_ack(db, ack, record, AckDisposition.STALE, actor_admin_id)
         return AckOutcome(
@@ -649,6 +665,14 @@ def ingest_acknowledgement(
             AckDisposition.UNKNOWN_LICENCE,
             authenticated_deployment_ref=authenticated_deployment_ref,
         )
+        _acknowledge_issuer(
+            db,
+            ack=ack,
+            record=record,
+            issuance=issuance,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+            actor_admin_id=actor_admin_id,
+        )
         _audit_ack(db, ack, record, AckDisposition.UNKNOWN_LICENCE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.UNKNOWN_LICENCE.value, False)
 
@@ -661,6 +685,14 @@ def ingest_acknowledgement(
             delivery_id=delivery.id,
             authenticated_deployment_ref=authenticated_deployment_ref,
         )
+        _acknowledge_issuer(
+            db,
+            ack=ack,
+            record=record,
+            issuance=issuance,
+            authenticated_deployment_ref=authenticated_deployment_ref,
+            actor_admin_id=actor_admin_id,
+        )
         _audit_ack(db, ack, record, AckDisposition.DUPLICATE, actor_admin_id)
         return AckOutcome(record.id, AckDisposition.DUPLICATE.value, False, delivery.id)
 
@@ -671,22 +703,18 @@ def ingest_acknowledgement(
         delivery_id=delivery.id,
         authenticated_deployment_ref=authenticated_deployment_ref,
     )
+    _acknowledge_issuer(
+        db,
+        ack=ack,
+        record=record,
+        issuance=issuance,
+        authenticated_deployment_ref=authenticated_deployment_ref,
+        actor_admin_id=actor_admin_id,
+    )
     state.state = DeliveryState.ACTIVE.value
     state.activating_ack_id = record.id
     db.flush()
     _audit_ack(db, ack, record, AckDisposition.ACCEPTED, actor_admin_id)
-    enqueue_platform_event(
-        db,
-        event_type=_EVENT_ACTIVATED,
-        payload={
-            "delivery_id": str(delivery.id),
-            "issuance_id": str(issuance.id),
-            "licence_id": str(licence.id),
-            "licence_version": issuance.version,
-            "digest": issuance.digest,
-            "ack_id": str(record.id),
-        },
-    )
     return AckOutcome(record.id, AckDisposition.ACCEPTED.value, True, delivery.id)
 
 

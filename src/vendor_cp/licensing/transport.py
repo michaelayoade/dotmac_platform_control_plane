@@ -48,6 +48,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vendor_cp.config import vendor_settings
+from vendor_cp.licensing import adapter as licensing
 from vendor_cp.licensing.delivery_models import (
     AttemptOutcome,
     DeliveryState,
@@ -55,7 +56,6 @@ from vendor_cp.licensing.delivery_models import (
     LicenceDeliveryAttempt,
     LicenceDeliveryState,
 )
-from vendor_cp.licensing.models import LicenceIssuance
 
 LOGGING_MODE = "logging"
 OFFLINE_MODE = "offline_bundle"
@@ -275,8 +275,8 @@ class DispatchReport:
 
 
 def _packet(db: Session, delivery: LicenceDelivery) -> DeliveryPacket:
-    issuance = db.get(LicenceIssuance, delivery.issuance_id)
-    if issuance is None:  # unreachable: FK-enforced
+    issuance = licensing.issuance_for_delivery(db, delivery.issuance_id)
+    if issuance is None:
         raise RuntimeError(f"delivery {delivery.id} references a missing issuance")
     return DeliveryPacket(
         delivery_id=delivery.id,

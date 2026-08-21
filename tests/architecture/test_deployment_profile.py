@@ -2,7 +2,7 @@
 
 Three properties are worth failing the build over:
 
-1. **A profile never drops a persistence owner.** The four module manifests carry
+1. **A profile never drops a persistence owner.** The five module manifests carry
    migration lineages and own schemas this database already contains. A profile
    that withheld one would produce an assembly that no longer describes its own
    tables, and the composed live-catalogue audit would walk a schema nobody
@@ -26,6 +26,7 @@ from dotmac_approvals import module as approvals_module
 from dotmac_commercial_agreements import module as commercial_agreements_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import create_app
+from dotmac_licensing import module as licensing_module
 from dotmac_release_catalog import module as release_catalog_module
 from import_scanner import reaches_module, scan_imports, source_files
 
@@ -61,6 +62,7 @@ def test_every_profile_composes_all_persistence_owners() -> None:
         assert entitlement_allocation_module in modules, profile.code
         assert approvals_module in modules, profile.code
         assert commercial_agreements_module in modules, profile.code
+        assert licensing_module in modules, profile.code
 
 
 def test_production_bootstrap_withholds_licensing_and_offers() -> None:

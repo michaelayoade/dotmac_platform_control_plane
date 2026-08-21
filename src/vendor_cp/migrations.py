@@ -2,10 +2,10 @@
 
 The vendor control-plane database runs the KERNEL base migrations (shipped as
 `dotmac_kernel` package data, located via the public `versions_dir()`), the
-installed Release Catalog, Entitlement Allocation, Approvals and Commercial
-Agreements module lineages, PLUS this repo's own `alembic/versions` — one
-revision graph, six separately-owned lineages. Because all shared packages are
-installed dependencies (not fixed repo paths),
+installed Release Catalog, Entitlement Allocation, Approvals, Commercial
+Agreements and Licensing module lineages, PLUS this repo's own
+`alembic/versions` — one revision graph, seven separately-owned lineages.
+Because all shared packages are installed dependencies (not fixed repo paths),
 `version_locations` is composed programmatically rather than hard-coded in
 `alembic.ini`.
 
@@ -30,6 +30,7 @@ from dotmac_entitlement_allocation import (
 from dotmac_kernel.migrations import versions_dir as kernel_versions_dir
 from dotmac_kernel.planes import MODULE_PLANES_ENV_VAR
 from dotmac_kernel.prerequisites import BINDINGS_ENV_VAR
+from dotmac_licensing import versions_dir as licensing_versions_dir
 from dotmac_release_catalog import versions_dir as release_catalog_versions_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -38,13 +39,14 @@ VENDOR_VERSIONS = ALEMBIC_DIR / "versions"
 
 
 def composed_version_locations() -> str:
-    """Kernel, four independent modules and Vendor migration lineages."""
+    """Kernel, five independent modules and Vendor migration lineages."""
     return (
         f"{kernel_versions_dir()} "
         f"{release_catalog_versions_dir()} "
         f"{entitlement_allocation_versions_dir()} "
         f"{approvals_versions_dir()} "
         f"{commercial_agreements_versions_dir()} "
+        f"{licensing_versions_dir()} "
         f"{VENDOR_VERSIONS}"
     )
 

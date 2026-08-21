@@ -14,7 +14,6 @@ a no-op on SQLite, so the unit suite structurally cannot prove this.
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import Iterator
 
@@ -42,16 +41,16 @@ def sessions(engine: Engine) -> sessionmaker[Session]:
 
 @pytest.fixture
 def two_deliveries(engine: Engine) -> Iterator[tuple[str, str]]:
-    """Two eligible deliveries in the REAL tables, with the target, licence and
-    issuance rows their FKs require. Inserted with SQL rather than the service
-    chain to keep the test about locking; the rows are shaped exactly as the
-    service writes them."""
+    """Two eligible deliveries in the REAL tables, with their required target.
+
+    `issuance_id` became an opaque module reference under `v016`; this locking
+    proof does not fabricate issuer rows it never reads. Inserted with SQL
+    rather than the service chain to keep the test about locking.
+    """
     suffix = uuid.uuid4().hex[:8]
     ids: dict[str, str] = {
-        key: str(uuid.uuid4())
-        for key in ("target", "licence", "issuance", "d1", "d2", "s1", "s2")
+        key: str(uuid.uuid4()) for key in ("target", "issuance", "d1", "d2", "s1", "s2")
     }
-    envelope = json.dumps({"schema": "dotmac-licence-envelope/1"})
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -60,39 +59,6 @@ def two_deliveries(engine: Engine) -> Iterator[tuple[str, str]]:
                 "VALUES (:id, :ref, :cust, 'active')"
             ),
             {"id": ids["target"], "ref": f"target-{suffix}", "cust": f"cust-{suffix}"},
-        )
-        conn.execute(
-            text(
-                "INSERT INTO licences (id, customer_ref, product, generation) "
-                "VALUES (:id, :cust, 'dotmac-sub', 1)"
-            ),
-            {"id": ids["licence"], "cust": f"cust-{suffix}"},
-        )
-        # `licence_issuances.allocation_id` is an OPAQUE reference since `v014`:
-        # the allocation it names is owned by `dotmac-entitlement-allocation` and
-        # lives in `mod_ealloc`, and no foreign key may cross into a module's
-        # schema (ADR-0023). So no allocation row is needed to satisfy
-        # referential integrity — there is no longer any to satisfy.
-        #
-        # That is a real simplification rather than a workaround: this proof is
-        # about `FOR UPDATE SKIP LOCKED` on delivery rows, and it previously had
-        # to fabricate a contract and an allocation for reasons that had nothing
-        # to do with what it measures.
-        allocation_id = str(uuid.uuid4())
-        conn.execute(
-            text(
-                "INSERT INTO licence_issuances (id, licence_id, allocation_id, "
-                "version, digest, key_id, envelope, status) "
-                "VALUES (:id, :licence, :alloc, 1, :digest, 'k', "
-                "CAST(:envelope AS jsonb), 'issued')"
-            ),
-            {
-                "id": ids["issuance"],
-                "licence": ids["licence"],
-                "alloc": allocation_id,
-                "digest": f"sha256:{suffix}",
-                "envelope": envelope,
-            },
         )
         for delivery_key, state_key, n in (("d1", "s1", 1), ("d2", "s2", 2)):
             conn.execute(
@@ -128,14 +94,6 @@ def two_deliveries(engine: Engine) -> Iterator[tuple[str, str]]:
                     text(f"DELETE FROM {table} WHERE {key} = ANY(:ids)"),  # noqa: S608
                     {"ids": [ids["d1"], ids["d2"]]},
                 )
-            conn.execute(
-                text("DELETE FROM licence_issuances WHERE id = :id"),
-                {"id": ids["issuance"]},
-            )
-
-            conn.execute(
-                text("DELETE FROM licences WHERE id = :id"), {"id": ids["licence"]}
-            )
             conn.execute(
                 text("DELETE FROM licence_delivery_targets WHERE id = :id"),
                 {"id": ids["target"]},

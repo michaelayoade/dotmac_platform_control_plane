@@ -1,4 +1,4 @@
-"""The licence signing seam — ephemeral for dev/test, configured for real use.
+"""Vendor's product-held signing adapter.
 
 Signing is the vendor control plane's job: the kernel deliberately ships no
 signer (it verifies only), so the Ed25519 signing lives here. What does NOT
@@ -78,8 +78,7 @@ class SigningKeyUnavailableError(RuntimeError):
 
 @runtime_checkable
 class LicenceSignerProvider(Protocol):
-    """What issuance needs from a signer — and nothing more. Deliberately no
-    key export, no rotation control: those belong to custody/ops."""
+    """The structural product implementation of Licensing's signer port."""
 
     @property
     def key_id(self) -> str: ...

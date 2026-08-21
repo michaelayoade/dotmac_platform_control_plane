@@ -13,7 +13,7 @@ lineage — deriving its table set from the live catalogue rather than a literal
 list. Two halves, because the composed database has two namespaces:
 
 1. **Module schemas** (`mod_rel`, `mod_ealloc`, `mod_approvals`,
-   `mod_agreements`) go through the
+   `mod_agreements`, `mod_licensing`) go through the
    kernel's own
    canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. That
    is the contract every registered module schema is held to fleet-wide, and
@@ -80,11 +80,11 @@ from vendor_cp.migrations import make_alembic_config
 # migrations for an explicit REVOKE.
 APP_ROLE = "app_user"
 
-# The two schemas the kernel's module gate must find. Asserted because
+# The five schemas the kernel's module gate must find. Asserted because
 # `audit_live_schemas` over zero schemas returns zero violations — the exact
 # shape of a gate that has silently stopped running.
 EXPECTED_MODULE_SCHEMAS = frozenset(
-    {"mod_agreements", "mod_approvals", "mod_ealloc", "mod_rel"}
+    {"mod_agreements", "mod_approvals", "mod_ealloc", "mod_licensing", "mod_rel"}
 )
 
 # THE TENANT CATALOGUE — its own category, and neither plane.
@@ -527,15 +527,17 @@ def test_every_vendor_owned_table_is_platform_plane_and_fully_revoked(
     # rather than an exact count keeps this from becoming a second list to
     # maintain.
     #
-    # LOWERED 14 -> 12 by `v015_agreements_authority`, deliberately. Commercial
+    # LOWERED 14 -> 12 by `v015_agreements_authority`, then 12 -> 7 by
+    # `v016_licensing_authority`, deliberately. Commercial
     # Agreements moved to `dotmac-commercial-agreements`, and the two empty
     # legacy tables were dropped with their writer. `mod_agreements` is audited
-    # above and is not part of `public`.
+    # above and is not part of `public`. Licensing's five issuer tables moved
+    # to `mod_licensing`; the five delivery tables remain in `public`.
     #
     # A floor that fails when the count FALLS is doing its job: it forces this
     # decision to be made and written down rather than absorbed silently. Lower
     # it only alongside the migration that retires the tables.
-    assert len(vendor_tables) >= 12, sorted(vendor_tables)
+    assert len(vendor_tables) >= 7, sorted(vendor_tables)
     assert "vendor_accounts" in vendor_tables
 
     misplaced = sorted(vendor_tables & (schema.tenant_plane() | schema.split_scope()))

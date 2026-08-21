@@ -1,10 +1,13 @@
 # Vendor Control Plane — Domain Foundation Design (Lane B)
 
-> **Commercial-owner amendment (2026-08-20):** ADR-0008 supersedes this
-> document's `ContractService` and `contract.*` labels. The published
-> `dotmac-commercial-agreements` module is the owner and emits versioned
-> `agreement.*.v1` facts. See `docs/ARCHITECTURE.md` for as-built boundaries;
-> the remaining material below is historical design context.
+> **Shared-owner amendment (2026-08-20):** ADR-0008/0009 supersede this
+> document's local Commercial Agreements and Licensing owner labels. The
+> published modules own those decisions and emit versioned facts; Vendor keeps
+> offers, signing-key custody and typed adapters, and temporarily keeps
+> delivery. ADR-0010 schedules delivery/retry ownership to move to Integrator
+> after Deployment Control and before Brand Profiles. See
+> `docs/ARCHITECTURE.md` for as-built boundaries; the remaining material below
+> is historical design context.
 
 > **📍 Authoritative home (moved 2026-07-31).** This is the source-of-truth
 > vendor-control-plane domain-foundation design, now owned by this repository

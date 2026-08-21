@@ -101,9 +101,10 @@ class LicenceDelivery(Base, TimestampMixin):
     )
 
     id: Mapped[UUID] = uuid_pk()
-    issuance_id: Mapped[UUID] = mapped_column(
-        Uuid(), ForeignKey("licence_issuances.id"), nullable=False
-    )
+    # Opaque reference into the independently-owned Licensing lineage.  A
+    # cross-lineage foreign key would couple Vendor delivery DDL to the module;
+    # the typed adapter resolves and validates it before staging or dispatch.
+    issuance_id: Mapped[UUID] = mapped_column(Uuid(), nullable=False)
     # The REGISTERED deployment's ref, resolved at staging — not a caller-
     # supplied destination. Kept denormalised for display/uniqueness alongside
     # the FK below.
