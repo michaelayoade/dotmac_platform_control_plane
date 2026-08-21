@@ -164,6 +164,18 @@ greenfield half is observed rather than inferred; and `platform_api` holds
 `SELECT, INSERT, UPDATE, DELETE` on `licence_delivery_targets`, which is the
 seal's real work.
 
+**Read the premise narrowly — NEVER POPULATED, not "exercised and wrote
+nothing".** The rest of the database is empty too: `vendor_accounts` 0,
+`offer_versions` 0, `platform_admins` 0, `mod_approvals` 0, `mod_ealloc` 0, and
+`platform_audit_events` holds exactly one row whose only action is
+`vendor.release_evidence.catalogued`. The two write-path audit codes are absent
+from that ledger, but a ledger with one event total is weak evidence — equally
+consistent with the writer never being called and with the deployment barely
+being used. Zero rows is still zero rows, so the branch is unchanged; what
+narrows is what the measurement may be cited FOR. It licenses sealing. It does
+not license skipping the recheck, and it is not evidence the registration path
+is unreachable.
+
 **Production is behind main and that does not weaken the result.** The applied
 vendor head is `v014`, so `v015`/`v016` have not run there — consistent with
 Agreements and Licensing remaining below adopted. Neither touches a delivery
@@ -177,12 +189,21 @@ is what licenses applying it.
 
 ### The path this selects — empty
 
-The forward vendor revision takes `ACCESS EXCLUSIVE` on both tables, re-counts,
-aborts if either is non-empty, REVOKEs `INSERT`/`UPDATE`/`DELETE` on
-`licence_delivery_targets` from `platform_api` while retaining `SELECT`, and
-verifies the effective outcome in both directions as `v012`/`v013` did. The
-table is **not** dropped — ADR-0010 owns that, and dropping it here would merge
-two cutovers.
+One transaction: `ACCESS EXCLUSIVE` on **all five** delivery tables in a fixed
+declared order (a seal means nothing if the rest of the estate can move under
+it, and a fixed order stops two concurrent runs deadlocking); re-count the
+tables **and the relationships** — deliveries with and without `target_id`,
+referenced versus unreferenced targets, dangling `target_id`, dangling
+`target_ref`, because a count-only recheck passes on a dangling reference;
+abort without change on anything non-zero; then REVOKE
+`INSERT`/`UPDATE`/`DELETE` on `licence_delivery_targets` from `platform_api`
+while retaining `SELECT`, verifying the effective outcome in both directions as
+`v012`/`v013` did. The table is **not** dropped — ADR-0010 owns that.
+
+**The revoke must land before the locks release.** `POST /targets` →
+`register_delivery_target` is still mounted and reachable while the revision
+runs. Checking emptiness under a lock and then releasing it with the writer live
+preserves exactly the race the check exists to close.
 
 No backfill and no comparison: there is nothing to migrate, and building parity
 machinery against an empty estate is what ADR-0031 seals against and what

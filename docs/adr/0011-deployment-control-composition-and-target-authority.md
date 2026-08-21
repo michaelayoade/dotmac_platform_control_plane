@@ -197,6 +197,20 @@ seal's actual work: revoking the three write privileges while keeping `SELECT`
 is what makes the projection structurally read-only rather than read-only by
 the absence of a caller.
 
+**Read the premise narrowly: NEVER POPULATED, not "exercised and wrote
+nothing".** The rest of this database is empty too — `vendor_accounts` 0,
+`offer_versions` 0, `platform_admins` 0, `mod_approvals` 0, `mod_ealloc` 0 —
+and `platform_audit_events` holds exactly ONE row, whose only action is
+`vendor.release_evidence.catalogued`. The two write-path audit codes are absent
+from that ledger, but a ledger with one event total is weak evidence: it is
+equally consistent with the writer never being called and with the deployment
+barely being used at all.
+
+That distinction does not change which branch applies — zero rows is zero rows,
+and the sealed path is correct either way. It changes what the measurement may
+be cited FOR. It licenses sealing; it does not license skipping the recheck,
+and it is not evidence that the registration path is unreachable.
+
 **Production is behind main, and that does not weaken the result.** The applied
 vendor head is `v014`, so `v015` and `v016` have not run there — consistent with
 Commercial Agreements and Licensing remaining below adopted. Neither touches a
@@ -212,15 +226,35 @@ it.
 
 ### The path this selects
 
-The **empty** branch. The forward vendor revision:
+The **empty** branch. The forward vendor revision, in ONE transaction:
 
-1. takes `ACCESS EXCLUSIVE` on `licence_delivery_targets` and
-   `licence_deliveries`, re-counts both, and aborts if either is non-empty;
-2. REVOKEs `INSERT`, `UPDATE` and `DELETE` on `licence_delivery_targets` from
+1. takes `ACCESS EXCLUSIVE` on all five delivery tables in a **fixed, declared
+   order** — `licence_deliveries`, `licence_delivery_states`,
+   `licence_delivery_targets`, `licence_delivery_attempts`,
+   `licence_ack_records`. All five rather than the two under measurement,
+   because the seal is only meaningful if nothing in the estate can move under
+   it; a fixed order because two concurrent runs taking them in opposite orders
+   deadlock;
+2. re-counts, and checks the RELATIONSHIPS as well as the tables — deliveries
+   with and without `target_id`, referenced versus unreferenced targets,
+   dangling `target_id`, dangling `target_ref`. A table-count-only recheck
+   passes on a dangling reference, which is exactly the state a half-migrated
+   estate would be in;
+3. aborts without change if anything is non-zero. The premise is re-proved at
+   execution time on the real database, or the revision does nothing;
+4. REVOKEs `INSERT`, `UPDATE` and `DELETE` on `licence_delivery_targets` from
    `platform_api`, retaining `SELECT`, and verifies the effective outcome in
    both directions as `v012`/`v013` did;
-3. leaves the table in place. It is not dropped here — ADR-0010 owns that, and
+5. leaves the table in place. It is not dropped here — ADR-0010 owns that, and
    dropping it now would merge two cutovers.
+
+**Step 4 must land before the locks release, and that ordering is the whole
+point.** `POST /targets` → `register_delivery_target` is still mounted and
+reachable while this runs. Checking emptiness under a lock and then releasing it
+with the writer still live preserves precisely the race the check exists to
+close: a registration landing between the recheck and the seal. "Empty when
+measured" and "cannot become non-empty" are different claims, and only the
+second licenses a seal.
 
 No backfill, no comparison, no writer-switch ceremony: there is nothing to
 migrate, and building parity machinery against an empty estate is the defect

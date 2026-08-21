@@ -433,11 +433,20 @@ directions.
 schema and no table matching `%deployment%` or `%rollout%`, so the greenfield
 half is observed rather than inferred. Full coordinates in ADR-0011 § 4.
 
-That selects the sealed empty-estate path in the `v013`–`v016` shape: a forward
-vendor revision re-checks both tables under `ACCESS EXCLUSIVE`, aborts on any
-row, and REVOKEs `INSERT`/`UPDATE`/`DELETE` on `licence_delivery_targets` from
+The premise is narrow and is recorded as such: **never populated**, not
+"exercised and wrote nothing". The rest of that database is empty too, and
+`platform_audit_events` holds one row. That does not change the branch — zero
+rows is zero rows — but it bounds what the measurement may be cited for.
+
+That selects the sealed empty-estate path in the `v013`–`v016` shape: one
+transaction taking `ACCESS EXCLUSIVE` on all five delivery tables in a fixed
+order, re-checking counts AND relationships, aborting on anything non-zero, and
+REVOKEing `INSERT`/`UPDATE`/`DELETE` on `licence_delivery_targets` from
 `platform_api` while retaining `SELECT` — `platform_api` holds all four today,
-which is the seal's real work. The table is not dropped; ADR-0010 owns that.
+which is the seal's real work. The revoke lands before the locks release,
+because `POST /targets` stays mounted while the revision runs and "empty when
+measured" is not "cannot become non-empty". The table is not dropped; ADR-0010
+owns that.
 
 An absence describes a moment, so that under-lock re-check is the measurement's
 refresh responsibility rather than a second observation someone must remember
