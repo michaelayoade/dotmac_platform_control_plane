@@ -42,14 +42,15 @@ from dotmac_kernel.licensing import (
 )
 from dotmac_kernel.messaging import PlatformOutboxEvent
 from dotmac_kernel.testing import create_test_engine, isolated_session
+from dotmac_licensing import LicenceAcknowledgement as ModuleLicenceAcknowledgement
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import adapter as contracts
+from vendor_cp.licensing import adapter as licensing
 from vendor_cp.licensing import projection
-from vendor_cp.licensing import service as licensing
 from vendor_cp.licensing.delivery_models import (
     AckDisposition,
     DeliveryState,
@@ -59,7 +60,7 @@ from vendor_cp.licensing.delivery_models import (
     LicenceDeliveryTarget,
     TargetStatus,
 )
-from vendor_cp.licensing.signer import EphemeralLicenceSigner
+from vendor_cp.licensing.signing_adapter import EphemeralLicenceSigner
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
@@ -392,17 +393,17 @@ def test_cross_plane_canary_activate_to_active(db, signer) -> None:
     assert (
         projection.delivery_status(db, delivery.id).state == DeliveryState.ACTIVE.value
     )
-    activated = (
+    acknowledged = (
         db.execute(
             select(PlatformOutboxEvent).where(
-                PlatformOutboxEvent.event_type == "licence.activated"
+                PlatformOutboxEvent.event_type == "licence.acknowledged.v1"
             )
         )
         .scalars()
         .all()
     )
-    assert len(activated) == 1
-    assert activated[0].payload["digest"] == issued.digest
+    assert len(acknowledged) == 1
+    assert acknowledged[0].payload["digest"] == issued.digest
 
 
 def test_receiver_commit_failure_produces_no_applied_ack(db, signer) -> None:
@@ -618,6 +619,20 @@ def test_duplicate_acknowledgement_is_idempotent(db, signer) -> None:
     # Both are retained: the log is append-only.
     assert (
         db.execute(select(func.count()).select_from(LicenceAckRecord)).scalar_one() == 2
+    )
+    assert (
+        db.execute(
+            select(func.count()).select_from(ModuleLicenceAcknowledgement)
+        ).scalar_one()
+        == 1
+    )
+    assert (
+        db.execute(
+            select(func.count())
+            .select_from(PlatformOutboxEvent)
+            .where(PlatformOutboxEvent.event_type == "licence.acknowledged.v1")
+        ).scalar_one()
+        == 1
     )
 
 

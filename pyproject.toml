@@ -51,6 +51,10 @@ dotmac-approvals = { version = "0.1.0a4", source = "forgejo" }
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor
 # retains only typed offer, catalogue and approval-evidence adapters.
 dotmac-commercial-agreements = { version = "0.1.0a1", source = "forgejo" }
+# The platform-only Licensing issuer authority. Vendor v016 checks the
+# greenfield premise under lock, drops the empty local issuer tables and keeps
+# only key custody plus the separately owned delivery projection.
+dotmac-licensing = { version = "0.1.0a1", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).

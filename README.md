@@ -78,9 +78,10 @@ release-evidence ingestion, and rollback boundary.
 
 ## Scope this phase
 
-The assembly owns vendor accounts, immutable offers, licence issuance/delivery,
-and the provisioning laboratory. It composes Release Catalog, Entitlement
-Allocation, Approvals and Commercial Agreements as their authoritative owners.
-ADR-0007 keeps this repository and database while Licensing, Deployment Control
-and Brand Profiles replace the remaining local owners one contracted slice at a
-time. External connector execution remains in Dotmac Integrator.
+The assembly owns vendor accounts, immutable offers, licence delivery and key
+custody, and the provisioning laboratory. It composes Release Catalog,
+Entitlement Allocation, Approvals, Commercial Agreements and Licensing as their
+authoritative owners. ADR-0007 keeps this repository and database while
+Deployment Control replaces the next local owner, ADR-0010 moves the temporary
+licence delivery/retry path to Dotmac Integrator, and Brand Profiles follows its
+Sub-first adoption. External connector execution remains in Dotmac Integrator.

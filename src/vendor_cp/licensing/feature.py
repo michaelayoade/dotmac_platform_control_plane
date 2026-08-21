@@ -1,7 +1,8 @@
-"""The `licensing` feature manifest — WS8 licence issuance (vendor side).
+"""Vendor's retained WS8 licence route and delivery surface.
 
 `core=True`: signed delivery is the contracted hand-off from the vendor control
-plane to a product data plane, not an optional add-on.
+plane to a product data plane, not an optional add-on. Issuer persistence and
+lifecycle declarations belong to the separately composed `licensing` module.
 """
 
 from __future__ import annotations
@@ -11,7 +12,9 @@ from dotmac_kernel.features import FeatureManifest
 from vendor_cp.licensing.router import router
 
 feature = FeatureManifest(
-    name="licensing",
+    # Distinct from the composed module manifest named `licensing`: this is
+    # Vendor's retained route/delivery surface, not a second issuer module.
+    name="licence_delivery",
     routers=[router],
     audit_actions=(
         "vendor.licence.delivery_target_registered",
@@ -24,9 +27,6 @@ feature = FeatureManifest(
         "vendor.licence.delivery_resumed",
         "vendor.licence.delivery_attempt_failed",
         "vendor.licence.bundle_exported",
-        "vendor.licence.revoked",
-        "vendor.licence.revocation_list_published",
-        "vendor.licence.issued",
     ),
     core=True,
     enabled_by_default=True,

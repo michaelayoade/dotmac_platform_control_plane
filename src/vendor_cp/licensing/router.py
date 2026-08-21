@@ -16,12 +16,11 @@ from dotmac_kernel import BadRequestError, PlatformAdmin
 from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import APIRouter, Depends, Response
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vendor_cp.licensing import ops, projection, revocation, service, transport
+from vendor_cp.licensing import adapter as licensing
+from vendor_cp.licensing import delivery_ops, projection, transport
 from vendor_cp.licensing.delivery_models import TargetStatus
-from vendor_cp.licensing.models import LicenceSigningKey
 from vendor_cp.licensing.schemas import (
     AcknowledgementRequest,
     AckOutcomeResponse,
@@ -49,9 +48,9 @@ Db = Annotated[Session, Depends(get_platform_db)]
 def issue(
     payload: IssueLicenceRequest, admin: Admin, db: Db
 ) -> LicenceIssuanceResponse:
-    view = service.issue_licence(
+    view = licensing.issue_licence(
         db,
-        service.IssueLicenceCommand(
+        licensing.IssueLicenceCommand(
             allocation_id=payload.allocation_id,
             edition=payload.edition,
             not_before=payload.not_before,
@@ -70,13 +69,13 @@ def list_issuances(
     licence_id: UUID, _admin: Admin, db: Db
 ) -> list[LicenceIssuanceResponse]:
     return [
-        LicenceIssuanceResponse.of(v) for v in service.list_issuances(db, licence_id)
+        LicenceIssuanceResponse.of(v) for v in licensing.list_issuances(db, licence_id)
     ]
 
 
 @router.get("/keyring", response_model=list[SigningKeyResponse])
 def keyring(_admin: Admin, db: Db) -> list[SigningKeyResponse]:
-    rows = db.execute(select(LicenceSigningKey)).scalars().all()
+    rows = licensing.list_signing_keys(db)
     return [
         SigningKeyResponse(
             key_id=r.key_id, public_key_b64=r.public_key_b64, status=r.status
@@ -142,9 +141,9 @@ def revoke(
 ) -> RevocationEntryResponse:
     """Append a revocation entry. It reaches deployments only when the next
     list snapshot is published and imported — revoking is not delivery."""
-    entry = revocation.revoke_licence(
+    entry = licensing.revoke_licence(
         db,
-        revocation.RevokeLicenceCommand(
+        licensing.RevokeLicenceCommand(
             licence_id=payload.licence_id,
             reason=payload.reason,
             actor_admin_id=admin.id,
@@ -156,14 +155,14 @@ def revoke(
 @router.post("/revocations/publish", response_model=RevocationListResponse)
 def publish_revocation_list(admin: Admin, db: Db) -> RevocationListResponse:
     """Sign and record a FULL cumulative snapshot at the next list version."""
-    view = revocation.publish_revocation_list(db, actor_admin_id=admin.id)
+    view = licensing.publish_revocation_list(db, actor_admin_id=admin.id)
     return RevocationListResponse(
         id=view.id,
         list_version=view.list_version,
         digest=view.digest,
         key_id=view.key_id,
         entry_count=view.entry_count,
-        envelope=view.envelope,
+        envelope=dict(view.envelope),
         revoked_licence_ids=list(view.revoked_licence_ids),
     )
 
@@ -171,17 +170,17 @@ def publish_revocation_list(admin: Admin, db: Db) -> RevocationListResponse:
 @router.get("/revocations/latest", response_model=RevocationListResponse | None)
 def latest_revocation_list(_admin: Admin, db: Db) -> RevocationListResponse | None:
     """What a deployment should be importing right now."""
-    row = revocation.latest_list(db)
-    if row is None:
+    view = licensing.latest_revocation_list(db)
+    if view is None:
         return None
     return RevocationListResponse(
-        id=row.id,
-        list_version=row.list_version,
-        digest=row.digest,
-        key_id=row.key_id,
-        entry_count=row.entry_count,
-        envelope=dict(row.envelope),
-        revoked_licence_ids=list(revocation.revoked_licence_ids(db)),
+        id=view.id,
+        list_version=view.list_version,
+        digest=view.digest,
+        key_id=view.key_id,
+        entry_count=view.entry_count,
+        envelope=dict(view.envelope),
+        revoked_licence_ids=list(view.revoked_licence_ids),
     )
 
 
@@ -189,7 +188,7 @@ def latest_revocation_list(_admin: Admin, db: Db) -> RevocationListResponse | No
 def pipeline_health(_admin: Admin, db: Db) -> PipelineHealthResponse:
     """Operational signals for alerting. Read-only; injects the clock so a
     report is reproducible."""
-    health = ops.pipeline_health(db, now=datetime.now(UTC))
+    health = delivery_ops.pipeline_health(db, now=datetime.now(UTC))
     return PipelineHealthResponse(
         never_attempted=health.never_attempted,
         attempted_never_sent=health.attempted_never_sent,

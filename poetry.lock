@@ -437,6 +437,27 @@ url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
 reference = "forgejo"
 
 [[package]]
+name = "dotmac-licensing"
+version = "0.1.0a1"
+description = "DotMac Licensing — the issuer half of WS8: signed, versioned, revocable software-use authority derived from an active agreement's allocated entitlement (ADR-0033 § 2)"
+optional = false
+python-versions = ">=3.11,<3.14"
+groups = ["main"]
+files = [
+    {file = "dotmac_licensing-0.1.0a1-py3-none-any.whl", hash = "sha256:a1e9a7c4cb0a576229a1cddcc9fcbf1e4cf7fbe5255da65c98215d8f04fd3ceb"},
+    {file = "dotmac_licensing-0.1.0a1.tar.gz", hash = "sha256:691ce3c6d481a6b1b569c1a745de3845ea71b981b29ddf349c770928e33b947f"},
+]
+
+[package.dependencies]
+dotmac-kernel = ">=0.1.0a77"
+sqlalchemy = ">=2.0,<3.0"
+
+[package.source]
+type = "legacy"
+url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
+reference = "forgejo"
+
+[[package]]
 name = "dotmac-release-catalog"
 version = "0.1.0a4"
 description = "DotMac Release Catalogue — immutable, digest-addressed published artifacts and the attestations that vouch for them (ADR-0006 M3)"
@@ -1593,4 +1614,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "66a8de2614e96e811119e9e0f1bd626ca603a0d889d1108bdfa646848e75d9b6"
+content-hash = "9c339c6068ac90f63a68fbfc3e2bf42ff260ec76d5bc767ce4153f224da57e9e"

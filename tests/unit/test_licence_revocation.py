@@ -16,22 +16,19 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime
 
 import pytest
+from dotmac_kernel import BadRequestError
 from dotmac_kernel.licensing import StaleRevocationListError, verify_revocation_list
 from dotmac_kernel.messaging import PlatformOutboxEvent
 from dotmac_kernel.testing import create_test_engine, isolated_session
+from dotmac_licensing import Licence, Revocation, RevocationList
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import adapter as contracts
-from vendor_cp.licensing import revocation
-from vendor_cp.licensing import service as licensing
-from vendor_cp.licensing.revocation_models import (
-    LicenceRevocationEntry,
-    LicenceRevocationList,
-)
-from vendor_cp.licensing.signer import EphemeralLicenceSigner
+from vendor_cp.licensing import adapter as licensing
+from vendor_cp.licensing.signing_adapter import EphemeralLicenceSigner
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
@@ -162,7 +159,7 @@ def _issue(db: Session, signer, *, suffix: str, customer_ref: str):
 
 
 def _publish(db, signer):
-    return revocation.publish_revocation_list(db, signer=signer, now=NOW)
+    return licensing.publish_revocation_list(db, signer=signer, now=NOW)
 
 
 # ── Entries are append-only and idempotent ──────────────────────────────────
@@ -170,19 +167,19 @@ def _publish(db, signer):
 
 def test_revoking_appends_an_entry_with_reason_and_event(db, signer) -> None:
     issued = _issue(db, signer, suffix="a", customer_ref="cust-a")
-    revocation.revoke_licence(
+    licensing.revoke_licence(
         db,
-        revocation.RevokeLicenceCommand(
+        licensing.RevokeLicenceCommand(
             licence_id=issued.licence_id, reason="contract terminated"
         ),
     )
-    entry = db.execute(select(LicenceRevocationEntry)).scalar_one()
+    entry = db.execute(select(Revocation)).scalar_one()
     assert entry.licence_id == issued.licence_id
     assert entry.reason == "contract terminated"
     events = (
         db.execute(
             select(PlatformOutboxEvent).where(
-                PlatformOutboxEvent.event_type == "licence.revoked"
+                PlatformOutboxEvent.event_type == "licence.revoked.v1"
             )
         )
         .scalars()
@@ -193,26 +190,19 @@ def test_revoking_appends_an_entry_with_reason_and_event(db, signer) -> None:
 
 def test_revoking_twice_is_idempotent(db, signer) -> None:
     issued = _issue(db, signer, suffix="a", customer_ref="cust-a")
-    cmd = revocation.RevokeLicenceCommand(licence_id=issued.licence_id, reason="fraud")
-    first = revocation.revoke_licence(db, cmd)
-    second = revocation.revoke_licence(db, cmd)
+    cmd = licensing.RevokeLicenceCommand(licence_id=issued.licence_id, reason="fraud")
+    first = licensing.revoke_licence(db, cmd)
+    second = licensing.revoke_licence(db, cmd)
     assert first.id == second.id
-    assert (
-        db.execute(
-            select(func.count()).select_from(LicenceRevocationEntry)
-        ).scalar_one()
-        == 1
-    )
+    assert db.execute(select(func.count()).select_from(Revocation)).scalar_one() == 1
 
 
 def test_revoking_requires_a_reason(db, signer) -> None:
-    from dotmac_kernel import BadRequestError
-
     issued = _issue(db, signer, suffix="a", customer_ref="cust-a")
     with pytest.raises(BadRequestError):
-        revocation.revoke_licence(
+        licensing.revoke_licence(
             db,
-            revocation.RevokeLicenceCommand(licence_id=issued.licence_id, reason="  "),
+            licensing.RevokeLicenceCommand(licence_id=issued.licence_id, reason="  "),
         )
 
 
@@ -220,9 +210,9 @@ def test_revoking_an_unknown_licence_is_rejected(db) -> None:
     from dotmac_kernel import NotFoundError
 
     with pytest.raises(NotFoundError):
-        revocation.revoke_licence(
+        licensing.revoke_licence(
             db,
-            revocation.RevokeLicenceCommand(licence_id=uuid.uuid4(), reason="x"),
+            licensing.RevokeLicenceCommand(licence_id=uuid.uuid4(), reason="x"),
         )
 
 
@@ -231,8 +221,8 @@ def test_revoking_an_unknown_licence_is_rejected(db) -> None:
 
 def test_published_list_verifies_with_the_pinned_kernel(db, signer) -> None:
     issued = _issue(db, signer, suffix="a", customer_ref="cust-a")
-    revocation.revoke_licence(
-        db, revocation.RevokeLicenceCommand(licence_id=issued.licence_id, reason="r")
+    licensing.revoke_licence(
+        db, licensing.RevokeLicenceCommand(licence_id=issued.licence_id, reason="r")
     )
     view = _publish(db, signer)
 
@@ -245,7 +235,7 @@ def test_published_list_verifies_with_the_pinned_kernel(db, signer) -> None:
     events = (
         db.execute(
             select(PlatformOutboxEvent).where(
-                PlatformOutboxEvent.event_type == "licence.revocation_list_published"
+                PlatformOutboxEvent.event_type == "licence.revocation_list.published.v1"
             )
         )
         .scalars()
@@ -284,12 +274,12 @@ def test_empty_list_is_publishable(db, signer) -> None:
 def test_each_published_set_is_a_superset_of_the_previous(db, signer) -> None:
     a = _issue(db, signer, suffix="a", customer_ref="cust-a")
     b = _issue(db, signer, suffix="b", customer_ref="cust-b")
-    revocation.revoke_licence(
-        db, revocation.RevokeLicenceCommand(licence_id=a.licence_id, reason="r1")
+    licensing.revoke_licence(
+        db, licensing.RevokeLicenceCommand(licence_id=a.licence_id, reason="r1")
     )
     v1 = _publish(db, signer)
-    revocation.revoke_licence(
-        db, revocation.RevokeLicenceCommand(licence_id=b.licence_id, reason="r2")
+    licensing.revoke_licence(
+        db, licensing.RevokeLicenceCommand(licence_id=b.licence_id, reason="r2")
     )
     v2 = _publish(db, signer)
 
@@ -305,25 +295,24 @@ def test_publication_fails_closed_if_a_previously_revoked_id_is_omitted(
     shrink the set) must make the NEXT publication refuse, rather than quietly
     restoring the deployment's access."""
     issued = _issue(db, signer, suffix="a", customer_ref="cust-a")
-    revocation.revoke_licence(
-        db, revocation.RevokeLicenceCommand(licence_id=issued.licence_id, reason="r")
+    licensing.revoke_licence(
+        db, licensing.RevokeLicenceCommand(licence_id=issued.licence_id, reason="r")
     )
     _publish(db, signer)
 
     # Simulate an operator/bug removing the entry — the omission path.
-    entry = db.execute(select(LicenceRevocationEntry)).scalar_one()
+    entry = db.execute(select(Revocation)).scalar_one()
     db.delete(entry)
     db.flush()
 
-    with pytest.raises(revocation.RevocationListRegressionError, match="omits"):
+    with pytest.raises(BadRequestError, match="omit"):
         _publish(db, signer)
 
     # Nothing was recorded: the last published list is still v1, intact.
     assert (
-        db.execute(select(func.count()).select_from(LicenceRevocationList)).scalar_one()
-        == 1
+        db.execute(select(func.count()).select_from(RevocationList)).scalar_one() == 1
     )
-    assert revocation.latest_list(db).list_version == 1
+    assert licensing.latest_list(db).list_version == 1
 
 
 def test_reissue_under_a_new_lineage_is_the_recovery_path(db, signer) -> None:
@@ -335,9 +324,9 @@ def test_reissue_under_a_new_lineage_is_the_recovery_path(db, signer) -> None:
     revoked lineage and every "recovery" document would be dead on arrival.
     """
     revoked = _issue(db, signer, suffix="a", customer_ref="cust-a")
-    revocation.revoke_licence(
+    licensing.revoke_licence(
         db,
-        revocation.RevokeLicenceCommand(licence_id=revoked.licence_id, reason="r"),
+        licensing.RevokeLicenceCommand(licence_id=revoked.licence_id, reason="r"),
     )
     _publish(db, signer)
 
@@ -346,12 +335,10 @@ def test_reissue_under_a_new_lineage_is_the_recovery_path(db, signer) -> None:
     assert replacement.licence_id != revoked.licence_id
     assert replacement.version == 1  # a fresh lineage restarts at v1
 
-    from vendor_cp.licensing.models import Licence
-
     generations = sorted(
         g
         for g in db.execute(
-            select(Licence.generation).where(Licence.customer_ref == "cust-a")
+            select(Licence.generation).where(Licence.subject_ref == "cust-a")
         ).scalars()
     )
     assert generations == [1, 2]

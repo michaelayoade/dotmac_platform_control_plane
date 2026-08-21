@@ -53,6 +53,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from vendor_cp.licensing import adapter as licensing
 from vendor_cp.licensing.delivery_models import (
     AckDisposition,
     AttemptOutcome,
@@ -62,7 +63,6 @@ from vendor_cp.licensing.delivery_models import (
     LicenceDeliveryAttempt,
     LicenceDeliveryState,
 )
-from vendor_cp.licensing.revocation_models import LicenceRevocationList
 
 DEFAULT_ACK_SLA = timedelta(hours=24)
 # Acknowledgement counts are windowed so one historical event cannot pin the
@@ -241,9 +241,7 @@ def pipeline_health(
             ).scalar_one()
         )
 
-    latest_list = db.execute(
-        select(func.max(LicenceRevocationList.list_version))
-    ).scalar()
+    latest_list = licensing.latest_revocation_list_version(db)
 
     return LicencePipelineHealth(
         never_attempted=never_attempted,

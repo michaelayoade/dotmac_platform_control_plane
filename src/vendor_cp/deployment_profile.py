@@ -13,16 +13,15 @@ string.
 ## Why a profile at all, and why now
 
 Publishing an HTTP route is a commitment. The moment an external caller depends
-on `POST /licences`, this repository is the owner of that contract, and a later
-decision to extract licence issuance into an independently released module —
-the way Release Catalog and Entitlement Allocation were extracted — has to
-carry a compatibility burden it never agreed to.
+on `POST /licences`, this assembly owns the adapter and delivery contract even
+though the composed module owns issuer behavior. That operator surface should
+be published deliberately, with its compatibility burden understood.
 
-`licensing` and `offers` are exactly the two features whose domain owners are
-still VENDOR-LOCAL and reusable-looking: priced offer versions and signed
-licence issuance/revocation are both plausible shared modules, and both are
-implemented here as ordinary in-repo services. Until that ownership question is
-answered, a production deployment should run them without ADVERTISING them.
+`licence_delivery` and `offers` are the two high-consequence operator surfaces
+still withheld during production bootstrap. Licensing's issuer is now the
+composed shared module; Vendor retains the route adapter, product-held signing
+custody and delivery projection. Withholding a route never changes that
+ownership.
 
 So `production-bootstrap` withholds those two features' routers. It withholds
 nothing else, and it disables no behaviour: the services, their tables, the
@@ -32,12 +31,13 @@ that is expensive to take back.
 
 ## What a profile may never do
 
-A profile selects SURFACES. It may not drop a persistence owner: the Release
-Catalog, Entitlement Allocation and Approvals module manifests carry migration
-lineages and schema ownership, so withholding one would mean an assembly whose
-database is no longer described by its composition. `withheld_surfaces` is
-validated against the surface-only feature names for that reason, and the
-assembly test asserts all three stateful modules survive every profile.
+A profile selects SURFACES. It may not drop a persistence owner: Release
+Catalog, Entitlement Allocation, Approvals, Commercial Agreements and Licensing
+carry migration lineages and schema ownership, so withholding one would mean an
+assembly whose database is no longer described by its composition.
+`withheld_surfaces` is validated against the surface-only feature names for
+that reason, and the assembly test asserts all five stateful modules survive
+every profile.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ PRODUCTION_BOOTSTRAP: Final[str] = "production-bootstrap"
 #: Feature names a profile is allowed to withhold. A persistence owner is
 #: deliberately absent: see the module docstring.
 WITHHOLDABLE_SURFACES: Final[frozenset[str]] = frozenset(
-    {"licensing", "offers", "provisioning", "console"}
+    {"licence_delivery", "offers", "provisioning", "console"}
 )
 
 
@@ -109,14 +109,13 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_BOOTSTRAP,
-        version="1",
-        withheld_surfaces=frozenset({"licensing", "offers"}),
+        version="2",
+        withheld_surfaces=frozenset({"licence_delivery", "offers"}),
         rationale=(
-            "Licence issuance/revocation and priced offer versions are still "
-            "owned by vendor-local services that look like extraction "
-            "candidates. Their behaviour runs; their routes are not published, "
-            "so no external caller becomes a constraint on deciding the owner. "
-            "Retire this withholding in the change that names the owner."
+            "Licence issuance/revocation is module-owned, while Vendor retains "
+            "its high-consequence route and delivery surface. Priced offers "
+            "remain Vendor-owned. Both behaviours run during bootstrap, but "
+            "their operator routes are withheld until explicitly published."
         ),
     ),
 )

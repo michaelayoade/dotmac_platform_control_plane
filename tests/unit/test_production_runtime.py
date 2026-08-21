@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from vendor_cp import assembly
 from vendor_cp.config import ProductionConfigurationError, VendorSettings
-from vendor_cp.licensing import signer as signer_module
+from vendor_cp.licensing import signing_adapter as signer_module
 
 
 def _configured_settings(key_file: str) -> VendorSettings:

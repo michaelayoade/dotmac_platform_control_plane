@@ -25,8 +25,9 @@ from vendor_cp import config as vendor_config
 from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import adapter as contracts
-from vendor_cp.licensing import ops, projection
-from vendor_cp.licensing import service as licensing
+from vendor_cp.licensing import adapter as licensing
+from vendor_cp.licensing import delivery_ops as ops
+from vendor_cp.licensing import projection
 from vendor_cp.licensing import transport as transport_module
 from vendor_cp.licensing.delivery_models import (
     AttemptOutcome,
@@ -35,7 +36,7 @@ from vendor_cp.licensing.delivery_models import (
     LicenceDeliveryAttempt,
     LicenceDeliveryTarget,
 )
-from vendor_cp.licensing.signer import EphemeralLicenceSigner
+from vendor_cp.licensing.signing_adapter import EphemeralLicenceSigner
 from vendor_cp.licensing.transport import (
     DeliveryPacket,
     LoggingTransport,
@@ -277,10 +278,8 @@ def test_offline_bundle_carries_the_signed_revocation_list_when_supplied(
     """The revocation list IS authenticated, so it can travel with the bundle —
     unlike the keyring, which would be worthless beside the document it
     authenticates."""
-    from vendor_cp.licensing import revocation
-
     issued, delivery = _issue_and_stage(db, signer)
-    published = revocation.publish_revocation_list(db, signer=signer, now=NOW)
+    published = licensing.publish_revocation_list(db, signer=signer, now=NOW)
     packet = DeliveryPacket(
         delivery_id=delivery.id,
         licence_id=issued.licence_id,
@@ -576,8 +575,6 @@ def test_parked_deliveries_are_their_own_alert_bucket(db, signer) -> None:
 
 
 def test_latest_published_revocation_list_is_reported(db, signer) -> None:
-    from vendor_cp.licensing import revocation
-
-    revocation.publish_revocation_list(db, signer=signer, now=NOW)
+    licensing.publish_revocation_list(db, signer=signer, now=NOW)
     health = ops.pipeline_health(db, now=NOW)
     assert health.latest_revocation_list_version == 1

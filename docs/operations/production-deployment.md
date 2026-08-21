@@ -10,7 +10,7 @@ digest-bound release evidence.
 
 Production never builds from a checkout. `Build immutable production image`
 runs on a disposable GitHub-hosted runner, uses a BuildKit secret to resolve the
-four exact Forgejo package pins, publishes one SHA-tagged GHCR image, and emits
+six exact Forgejo package pins, publishes one SHA-tagged GHCR image, and emits
 its immutable registry digest. `Deploy immutable image to production` accepts
 only that digest shape, requires the `production` environment approval, verifies
 the named `vendor-cp-prod` target, and transfers only the deployment adapter.
@@ -28,7 +28,7 @@ The host then performs one ordered operation:
 5. verify that initialization created `app_admin` as a non-superuser,
    `BYPASSRLS` database/schema owner and removed the bootstrap verifier;
 6. take a host-local `pg_dump` backup;
-7. run `scripts/migrate.py`, the owner that composes all six lineages;
+7. run `scripts/migrate.py`, the owner that composes all seven lineages;
 8. replace the app and prove `/health` on the loopback port while declaring
    `Host: vendor.dotmac.io`, so the probe passes through the same trusted-host
    boundary as production traffic rather than weakening it for an IP-only probe.

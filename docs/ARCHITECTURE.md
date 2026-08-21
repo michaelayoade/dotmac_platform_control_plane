@@ -33,13 +33,13 @@ it owns and — just as importantly — what it must never become.
     lineage, so `public.tenants`, `public.tenant_domains` and
     `public.app_current_tenant_id()` all exist here. Kernel
     `0018_idempotency_one_owner` and `0026_platform_audit_log` supply the two
-    request-time effects Commercial Agreements declares; those effects are
-    bound explicitly rather than inferred from composition order.
+    request-time effects Commercial Agreements and Licensing declare; those
+    effects are bound explicitly rather than inferred from composition order.
   - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It
     selects `ModulePlane.PLATFORM` for `approvals`, the one selectable module
-    composed here; Release Catalog, Entitlement Allocation and Commercial
-    Agreements each declare a single supported plane set, so their contract is
-    atomic and the kernel refuses a selection for them.
+    composed here; Release Catalog, Entitlement Allocation, Commercial
+    Agreements and Licensing each declare a single supported plane set, so
+    their contract is atomic and the kernel refuses a selection for them.
 
   Kernel `0.1.0a60` briefly let the first imply the second, and this assembly is
   the case that broke it: binding the tenant catalogue truthfully would have
@@ -121,15 +121,24 @@ it owns and — just as importantly — what it must never become.
   Vendor retains one typed adapter that resolves immutable offers, supplies the
   product capability catalogue, and converts the authoritative Approvals
   request into content-bound evidence.
+- `dotmac-licensing==0.1.0a1` is the Licensing issuer authority under ADR-0009.
+  Its platform-only manifest and `li_0001_licensing` lineage are composed.
+  `v016` rechecks the greenfield premise under lock, drops the five empty local
+  issuer tables, and leaves `mod_licensing` as the sole lineage, issuance,
+  public-key registry, lifecycle, acknowledgement and revocation writer.
+  Vendor retains one typed grant/signer adapter and product-held private-key
+  custody. Its delivery projection/transport tables are a temporary owner under
+  ADR-0009, frozen pending ADR-0010's post-Deployment-Control Integrator
+  cutover.
 
 ## The composed database is audited whole
 
 `tests/migration/test_composed_live_catalog.py` audits the database this
-assembly actually produces — all six lineages: kernel, the four module owners,
+assembly actually produces — all seven lineages: kernel, the five module owners,
 and Vendor — rather than the tables someone remembered to name.
 
 - The module schemas (`mod_rel`, `mod_ealloc`, `mod_approvals`,
-  `mod_agreements`) go through the kernel's own
+  `mod_agreements`, `mod_licensing`) go through the kernel's own
   canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. A rule
   the kernel tightens tightens here in the release that ships it, and the
   expected table set derives from this assembly's plane selection rather than
@@ -174,9 +183,9 @@ Commercial Agreements answers whether the agreement is `ACTIVE` and whether the
 versioned activation fact still matches its frozen digest; Vendor does not read
 or reconstruct that owner's state. Entitlement Allocation keeps every rule
 about what a valid allocation IS. Agreement activation stages through the
-adapter via `ContractEventConsumer`; licensing reads through
-it and takes the product from the module's `allocation_product()` — and there is
-no way to supply one instead. `IssueLicenceCommand` has no `product` field, and
+adapter via `ContractEventConsumer`; the Licensing adapter reads that typed
+allocation snapshot and takes the product from it — and there is no way to
+supply one instead. `IssueLicenceCommand` has no `product` field, and
 `IssueLicenceRequest` REJECTS the retired HTTP field rather than ignoring it, so
 a caller cannot select a licence lineage the allocation does not name. That one
 value flows to all four consequences: lineage, signed payload, audit record and
@@ -198,7 +207,8 @@ own current inventory, and the extraction bar is unchanged at two CURRENT
 consumers.
 
 **Lifecycle: below adopted.** Vendor CP now has no local writer for release
-artifacts, approvals or allocations — but adoption is earned by running in
+artifacts, approvals, allocations, agreements or licensing issuance — but
+adoption is earned by running in
 production with the local writer proven absent, not by landing code, and nothing
 has run.
 
@@ -206,11 +216,12 @@ has run.
 
 This repository, runtime and control-plane database remain the Vendor product
 assembly. There is no replacement repository and no second control plane.
-Commercial Agreements moved first under ADR-0008. The remaining local owners
-move through separately reviewable expand/migrate/contract slices: the Licensing
-issuer next, then greenfield Deployment Control. Brand Profiles' platform plane follows its
-checked-in Sub-first adoption unless that extraction decision is explicitly
-amended at the source.
+Commercial Agreements moved first under ADR-0008 and Licensing followed under
+ADR-0009. The remaining local owners move through separately reviewable
+expand/migrate/contract slices: greenfield Deployment Control next, then the
+ADR-0010 licence-delivery cutover to Dotmac Integrator, then Brand Profiles'
+platform plane after its checked-in Sub-first adoption. Reordering those steps
+requires an explicit amendment at the owning source.
 
 Each authority-moving slice must pin and compose one released module, install
 its lineage and platform-plane intent, migrate or prove the absence of rows,
@@ -229,14 +240,13 @@ forbids feature code branching on a profile name.
 
 `production-bootstrap` (required by `scripts/deploy_production.sh` in the host
 env file) composes and runs everything and simply does not mount the `licensing`
-and `offers` routers. Those two features' domain owners are still vendor-local
-and reusable-looking; publishing their routes would make an external caller a
-constraint on deciding the owner. A withheld surface is not a disabled
+and `offers` routers. Licensing's issuer is composed; Vendor still owns its
+route adapter, key custody and delivery. A withheld surface is not a disabled
 subsystem: licence key custody still loads at boot, and a test asserts it.
 
-A profile may never withhold a persistence owner. All four stateful module manifests carry a
-migration lineage and own schemas the database already contains, so an assembly
-missing one would no longer describe its own tables.
+A profile may never withhold a persistence owner. All five stateful module
+manifests carry a migration lineage and own schemas the database already
+contains, so an assembly missing one would no longer describe its own tables.
 
 ## Production topology
 
@@ -281,7 +291,7 @@ Compose project and from every product data plane:
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration
-backup, runs the six-lineage `scripts/migrate.py`, and only then replaces the
+backup, runs the seven-lineage `scripts/migrate.py`, and only then replaces the
 application. The complete operator contract and rollback boundary are in
 `docs/operations/production-deployment.md`.
 
@@ -309,12 +319,14 @@ The deployment path never creates or repairs the marker itself.
   commands + outcomes, atomic transaction ownership, idempotency, audit,
   platform-admin-only adapters.
 - **Commercial lifecycle (as-built)** — immutable product-qualified offers,
-  Commercial Agreements, Approvals, Entitlement Allocation, and signed licence
-  issuance and delivery. `dotmac-commercial-agreements` owns agreement shape,
+  Commercial Agreements, Approvals, Entitlement Allocation, signed licence
+  issuance, and delivery. `dotmac-commercial-agreements` owns agreement shape,
   lifecycle, append-only history, audit and versioned transition facts;
   `dotmac-approvals` owns the content-bound decision; and
-  `dotmac-entitlement-allocation` owns the immutable allocation. Vendor adapters
-  translate between those owners and the local OfferVersion catalogue without
+  `dotmac-entitlement-allocation` owns the immutable allocation, and
+  `dotmac-licensing` owns the issuer lifecycle, public-key registry,
+  acknowledgements and revocation. Vendor adapters translate between those
+  owners and the local OfferVersion catalogue without
   reading another owner's ORM or maintaining a parallel status path. The
   assembly config names only exact
   artifact and product-manifest digests per product. The adapter requires the
@@ -322,8 +334,10 @@ The deployment path never creates or repairs the marker itself.
   attestation, reads the held canonical bytes through a local document-reader
   port, and delegates digest/canonical/product/version verification to kernel
   a50 before deriving capabilities. The old raw capability-list configuration
-  is rejected. Licensing remains the next Vendor-local commercial owner to move
-  under ADR-0007; Agreements, Approvals and Allocation have no local writer.
+  is rejected. Agreements, Approvals, Allocation and Licensing have no local
+  writer; Vendor retains key custody and temporarily retains delivery under
+  ADR-0009. ADR-0010 freezes that path and schedules its transfer to Integrator
+  immediately after Deployment Control.
 - **Release artifacts and attestations** — owned by the independently published
   `dotmac-release-catalog`, not by a vendor-local feature or table. Vendor's
   `release_evidence` service is the thin ingestion adapter: it holds exact
@@ -369,11 +383,12 @@ Deployment Control is released but not yet composed here. Until its own cutover
 lands, fleet desired state, update authority, support access and observed fleet
 health remain absent. The permitted future persistence owner is the module's
 `mod_deploy` lineage, never a Vendor-local set of fleet tables; the full provider
-runner remains outside this application behind Dotmac Integrator. Licensing and
-Brand Profiles likewise move only through the ordered ADR-0007 cutovers;
-existing Vendor-local code is not evidence that extraction or adoption already
-happened. Commercial Agreements is composed and authoritative under ADR-0008,
-but remains below adopted until it actually runs.
+runner remains outside this application behind Dotmac Integrator. ADR-0010's
+licence-delivery transfer is the next slice after Deployment Control and must
+land before Brand Profiles. Until then, the current logging/offline path is
+frozen and no connected Vendor transport or additional retry policy may be
+added. Commercial Agreements and Licensing are composed and authoritative
+under ADR-0008/0009, but remain below adopted until they actually run.
 
 ## Migrating existing products
 
@@ -384,8 +399,8 @@ big-bang rewrite, and never by this control plane reaching into their databases.
 
 ## Licence delivery targets vs. the Deployment entity (2026-08-02)
 
-`licence_delivery_targets` is a **licensing-owned projection** of where a
-licence may be delivered, written only by
+`licence_delivery_targets` is a **temporary Vendor delivery projection** of
+where a licence may be delivered, written only by
 `EntitlementProjectionService.register_delivery_target`. It is deliberately NOT
 the authoritative `Deployment` entity. The historical
 `docs/design/domain-foundation.md` names `FleetDesiredStateService`; ADR-0007
@@ -393,6 +408,8 @@ supersedes that local-owner label with the independent Deployment Control
 module, which is released but not yet composed here. Naming the licensing table
 `deployments` would have made licensing
 the de-facto owner of an entity another service is specified to own — a
-source-of-truth violation dressed as a convenience. When the module cutover
-lands, this projection is rebuilt from its desired state rather than competing
-with it.
+source-of-truth violation dressed as a convenience. When the Deployment Control
+cutover lands, this projection may only be reconciled from its desired state.
+ADR-0010 then retires the projection when delivery execution moves to
+Integrator; it must not become a permanent cache or a second destination
+registry.

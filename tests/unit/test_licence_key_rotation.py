@@ -33,16 +33,16 @@ from dotmac_kernel.licensing import (
     verify_licence,
 )
 from dotmac_kernel.testing import create_test_engine, isolated_session
+from dotmac_licensing import SigningKeyStatus
 from sqlalchemy.orm import Session
 
 from vendor_cp import config as vendor_config
 from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import adapter as contracts
-from vendor_cp.licensing import service as licensing
-from vendor_cp.licensing import signer as signer_module
-from vendor_cp.licensing.models import SigningKeyStatus
-from vendor_cp.licensing.signer import (
+from vendor_cp.licensing import adapter as licensing
+from vendor_cp.licensing import signing_adapter as signer_module
+from vendor_cp.licensing.signing_adapter import (
     ConfiguredLicenceSigner,
     EphemeralLicenceSigner,
     SigningKeyUnavailableError,

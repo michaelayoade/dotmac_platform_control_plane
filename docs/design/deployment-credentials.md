@@ -1,5 +1,13 @@
 # DeploymentCredentialService — WS8 V6 deployment authentication design
 
+> **As-built sequencing amendment — 2026-08-20.** The local delivery,
+> acknowledgement-admission and retry roles described below are transitional.
+> ADR-0010 freezes them and schedules delivery execution, raw transport
+> evidence, retries, health and repair to move to Dotmac Integrator after
+> Deployment Control and before Brand Profiles. Vendor's eventual surface is
+> limited to authenticated immutable-artifact reads and valid-acknowledgement
+> delegation; this historical brief does not authorize a connected transport.
+
 > **Status:** Implementation brief (2026-08-04). The kernel contract this
 > depends on is **published** (dotmac-kernel **0.1.0a9**, tagged
 > `dotmac-kernel-v0.1.0a9`, pinned in `pyproject.toml`): `DeploymentSigner`,

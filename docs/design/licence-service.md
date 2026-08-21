@@ -1,5 +1,15 @@
 # LicenceIssuanceService + EntitlementProjectionService — WS8 vendor slice design
 
+> **As-built amendment — 2026-08-20.** ADR-0009 composes
+> `dotmac-licensing==0.1.0a1` as the issuer authority. The issuer/table/event
+> sections below are the extraction source contract, not current local
+> ownership: issuer state now lives in `mod_licensing` and emits the module's
+> versioned facts. Vendor retains product-held key custody and temporarily
+> retains the delivery, transport and quarantined-evidence half described here.
+> ADR-0010 freezes that implementation and schedules its transfer to Integrator
+> after Deployment Control and before Brand Profiles; this document is not
+> authority to extend it.
+
 > **Status:** Implementation brief (2026-08-01), implemented. The kernel WS8
 > contract it was written against **published** as dotmac-kernel **0.1.0a7**
 > (`dotmac_kernel.licensing` — DSSE envelope, Ed25519 keyring, offline

@@ -210,9 +210,9 @@ def test_the_adapter_is_typed_at_the_seam() -> None:
 
 
 def test_offers_and_licensing_surfaces_stay_withheld() -> None:
-    """Their module ownership is unsettled, and enabling them now would begin
-    creating fresh legacy production data after the authority cutovers."""
+    """Bootstrap still withholds the high-consequence delivery/issuer route and
+    the Vendor-owned offer surface; persistence owners remain composed."""
     from vendor_cp.deployment_profile import PRODUCTION_BOOTSTRAP, deployment_profile
 
     withheld = deployment_profile(PRODUCTION_BOOTSTRAP).withheld_surfaces
-    assert {"licensing", "offers"} <= withheld
+    assert {"licence_delivery", "offers"} <= withheld

@@ -1,4 +1,4 @@
-"""Unit tests for `LicenceIssuanceService` (SQLite).
+"""Composition tests for Vendor's typed Licensing adapter (SQLite).
 
 The vendor half of WS8, against the acceptance cases in
 `docs/design/licence-service.md`: every issued envelope verifies through the
@@ -36,20 +36,15 @@ from dotmac_kernel.licensing import (
 )
 from dotmac_kernel.messaging import PlatformOutboxEvent
 from dotmac_kernel.testing import create_test_engine, isolated_session
+from dotmac_licensing import Licence, LicenceIssuance, SigningKey, SigningKeyStatus
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import adapter as contracts
-from vendor_cp.licensing import service as licensing
-from vendor_cp.licensing.models import (
-    Licence,
-    LicenceIssuance,
-    LicenceSigningKey,
-    SigningKeyStatus,
-)
-from vendor_cp.licensing.signer import (
+from vendor_cp.licensing import adapter as licensing
+from vendor_cp.licensing.signing_adapter import (
     EphemeralLicenceSigner,
     SigningKeyUnavailableError,
     SigningModeNotPermittedError,
@@ -275,7 +270,7 @@ def test_second_allocation_issues_next_version_in_same_lineage(
     # allocation, but one customer, so one lineage.
     second_alloc = _staged_allocation(db, suffix="a2", customer_ref="cust-a")
     licence = db.get(Licence, first.licence_id)
-    assert licence is not None and licence.customer_ref == "cust-a"
+    assert licence is not None and licence.subject_ref == "cust-a"
 
     second = _issue(db, second_alloc, signer)
     assert second.licence_id == first.licence_id
@@ -333,7 +328,7 @@ def test_issuance_emits_a_platform_outbox_event_atomically(db: Session, signer) 
     events = (
         db.execute(
             select(PlatformOutboxEvent).where(
-                PlatformOutboxEvent.event_type == "licence.issued"
+                PlatformOutboxEvent.event_type == "licence.issued.v1"
             )
         )
         .scalars()
@@ -389,7 +384,7 @@ def test_the_allocations_product_reaches_every_consequence(db: Session, signer) 
     licence = db.execute(
         select(Licence).where(Licence.id == issued.licence_id)
     ).scalar_one()
-    assert licence.product == product
+    assert licence.product_code == product
 
     # 2. The SIGNED payload — the bytes a deployment verifies. base64url,
     #    unpadded, exactly as `_b64url` writes it.
@@ -408,19 +403,19 @@ def test_the_allocations_product_reaches_every_consequence(db: Session, signer) 
         .scalars()
         .all()
     )
-    assert [e.details["product"] for e in audit] == [product]
+    assert [e.details["product_code"] for e in audit] == [product]
 
     # 4. The outbox event.
     events = (
         db.execute(
             select(PlatformOutboxEvent).where(
-                PlatformOutboxEvent.event_type == "licence.issued"
+                PlatformOutboxEvent.event_type == "licence.issued.v1"
             )
         )
         .scalars()
         .all()
     )
-    assert [e.payload["product"] for e in events] == [product]
+    assert [e.payload["product_code"] for e in events] == [product]
 
     # NON-VACUITY: the product asserted above is not the module-wide default, so
     # four assertions passing cannot be an accident of everything being
@@ -493,7 +488,7 @@ def test_signing_key_public_material_is_registered_on_issue(
 ) -> None:
     _issue(db, _staged_allocation(db), signer)
     row = db.execute(
-        select(LicenceSigningKey).where(LicenceSigningKey.key_id == "vendor-key-1")
+        select(SigningKey).where(SigningKey.key_id == "vendor-key-1")
     ).scalar_one()
     assert row.public_key_b64 == signer.public_key_b64
     assert row.status == SigningKeyStatus.ACTIVE.value
@@ -502,11 +497,11 @@ def test_signing_key_public_material_is_registered_on_issue(
 def test_no_private_key_material_is_persisted(db: Session, signer) -> None:
     """Structural: the key table has no private column, and nothing anywhere
     stores the private bytes."""
-    assert "private" not in {c.name for c in LicenceSigningKey.__table__.columns}
+    assert "private" not in {c.name for c in SigningKey.__table__.columns}
     _issue(db, _staged_allocation(db), signer)
     private_bytes = signer._private_key.private_bytes_raw()  # noqa: SLF001 (test)
     leaked = base64.urlsafe_b64encode(private_bytes).rstrip(b"=").decode()
-    row = db.execute(select(LicenceSigningKey)).scalar_one()
+    row = db.execute(select(SigningKey)).scalar_one()
     assert leaked not in (row.public_key_b64, row.key_id)
 
 
@@ -529,7 +524,7 @@ def test_a_key_outside_the_registry_is_unknown_to_deployments(
     alloc = _staged_allocation(db)
     issued = _issue(db, alloc, signer)
     stranger_ring = licensing.build_keyring(db)
-    db.execute(select(LicenceSigningKey))  # registry currently holds vendor-key-1 only
+    db.execute(select(SigningKey))  # registry currently holds vendor-key-1 only
     # Rebuild an envelope claiming an unregistered key id.
     envelope = dict(issued.envelope)
     signatures = [dict(s) for s in envelope["signatures"]]  # type: ignore[union-attr]
@@ -544,7 +539,7 @@ def test_a_key_outside_the_registry_is_unknown_to_deployments(
 
 def test_unknown_signing_mode_refuses_to_build(monkeypatch) -> None:
     from vendor_cp import config as vendor_config
-    from vendor_cp.licensing import signer as signer_module
+    from vendor_cp.licensing import signing_adapter as signer_module
 
     monkeypatch.setattr(
         signer_module,
@@ -561,7 +556,7 @@ def test_configured_mode_without_a_key_fails_startup(monkeypatch) -> None:
     """`configured` is a real mode now, but selecting it without key material
     must fail loudly rather than fall back to a throwaway key."""
     from vendor_cp import config as vendor_config
-    from vendor_cp.licensing import signer as signer_module
+    from vendor_cp.licensing import signing_adapter as signer_module
 
     monkeypatch.setattr(
         signer_module,

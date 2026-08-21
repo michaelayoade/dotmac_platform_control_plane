@@ -16,6 +16,7 @@ from dotmac_approvals import module as approvals_module
 from dotmac_commercial_agreements import module as commercial_agreements_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import FeatureManifest, ProductAssemblySpec
+from dotmac_licensing import module as licensing_module
 from dotmac_release_catalog import module as release_catalog_module
 
 from vendor_cp.accounts.feature import feature as accounts_feature
@@ -29,7 +30,7 @@ from vendor_cp.deployment_profile import (
     load_deployment_profile,
 )
 from vendor_cp.licensing.feature import feature as licensing_feature
-from vendor_cp.licensing.signer import install_runtime_licence_signers
+from vendor_cp.licensing.signing_adapter import install_runtime_licence_signers
 from vendor_cp.migration_bindings import ASSEMBLY_MODULE_PLANES
 from vendor_cp.offers.feature import feature as offers_feature
 from vendor_cp.provisioning.feature import feature as provisioning_feature
@@ -52,6 +53,9 @@ STATEFUL_MODULES = (
     # Platform-only and atomic: Vendor v015 checks the empty legacy premise,
     # retires the local owner and makes this module the sole agreement writer.
     commercial_agreements_module,
+    # Platform-only and atomic: Vendor v016 retires the empty local issuer;
+    # delivery and product-held key custody remain Vendor responsibilities.
+    licensing_module,
 )
 
 # The vendor's own features, in mount order. A profile may strip a feature's
