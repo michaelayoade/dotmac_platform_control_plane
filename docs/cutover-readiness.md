@@ -79,7 +79,7 @@ amendment at the owning source. Six slices, three landed.
 | 1 | Kernel a61 → a77 | — | landed (#63) |
 | 2 | Commercial Agreements | `dotmac-commercial-agreements` | landed (#64), ADR-0008, `v015` |
 | 3 | Licensing issuer | `dotmac-licensing` | landed (#65), ADR-0009, `v016` |
-| 4 | **Deployment Control** | `dotmac-deployment-control` | **contracted (ADR-0011); release available; estate measured EMPTY 2026-08-21 — unblocked, not yet implemented** |
+| 4 | **Deployment Control** | `dotmac-deployment-control` | **LANDED** — a2 composed, `v017` sealed the target registrar (ADR-0011 + its 2026-08-21 amendment) |
 | 5 | Licence delivery | `dotmac-integration` in Dotmac Integrator | contracted (ADR-0010), blocked on 4 |
 | 6 | Brand Profiles, platform plane | `dotmac-brand-profiles` | released; **deferred by local decision** behind another product |
 
@@ -93,7 +93,7 @@ amendment at the owning source. Six slices, three landed.
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
 | `dotmac-commercial-agreements` | `0.1.0a1` | a1 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
-| `dotmac-deployment-control` | not pinned | **a2, tagged** (Starter PR #308 at `5c87272a`, release run `32471956734`) | pinned by the ADR-0011 slice that consumes it |
+| `dotmac-deployment-control` | `0.1.0a2` | a2 | current |
 | `dotmac-brand-profiles` | not pinned | a1, tagged | deferred by local decision (ADR-0007 § 6) |
 
 ADR-0007's rule is that a package enters with the coherent slice that consumes
@@ -187,27 +187,25 @@ responsibility is not prose: the forward revision re-checks both tables under
 closed on any row. The observation licenses writing that revision; the revision
 is what licenses applying it.
 
-### The path this selects — empty
+### The path this selects — empty, and it has been taken
 
-One transaction: `ACCESS EXCLUSIVE` on **all five** delivery tables in a fixed
-declared order (a seal means nothing if the rest of the estate can move under
-it, and a fixed order stops two concurrent runs deadlocking); re-count the
-tables **and the relationships** — deliveries with and without `target_id`,
-referenced versus unreferenced targets, dangling `target_id`, dangling
-`target_ref`, because a count-only recheck passes on a dangling reference;
-abort without change on anything non-zero; then REVOKE
-`INSERT`/`UPDATE`/`DELETE` on `licence_delivery_targets` from `platform_api`
-while retaining `SELECT`, verifying the effective outcome in both directions as
-`v012`/`v013` did. The table is **not** dropped — ADR-0010 owns that.
+`v017_deployment_target_authority` implements it: `ACCESS EXCLUSIVE` on all five
+delivery tables in a fixed declared order, counts AND relationships re-checked
+(dangling `target_id`, dangling `target_ref`, referenced versus unreferenced
+targets), abort without change on anything non-zero, then `REVOKE DELETE` on
+`licence_delivery_targets` from `platform_api` — inside the same transaction, so
+it lands before the locks release — and the effective outcome verified in both
+directions.
 
-**The revoke must land before the locks release.** `POST /targets` →
-`register_delivery_target` is still mounted and reachable while the revision
-runs. Checking emptiness under a lock and then releasing it with the writer live
-preserves exactly the race the check exists to close.
+`INSERT` and `UPDATE` are RETAINED. The reconciler needs them, and an unwritable
+projection would make staging permanently impossible, which removes the delivery
+path rather than sealing an authority. The single-writer guarantee is therefore
+provenance plus a ratchet, not a privilege: `DeploymentTargetFacts` is
+constructible only in `vendor_cp.deployment.adapter`, from a record `mod_deploy`
+returned. Weaker than a grant, and recorded as weaker. ADR-0011's 2026-08-21
+amendment carries the full reasoning.
 
-No backfill and no comparison: there is nothing to migrate, and building parity
-machinery against an empty estate is what ADR-0031 seals against and what
-ADR-0005 already refused once.
+The table is not dropped — ADR-0010 owns that.
 
 ## What else retires, and when
 
@@ -326,18 +324,17 @@ entitlement-allocation `0.1.0a6` are pinned, the `outbox_relay.v1` binding names
 `ea_0002` and `ea_0003` revisions run in the composed migration rehearsal. Moved
 no authority and touched no slice below.
 
-**2. Deployment Control composition — `version:minor`. UNBLOCKED, not started.**
-The estate measured empty on 2026-08-21, so the shape is settled. Pin `0.1.0a2`;
-compose its manifest and `versions_dir()` so `dc_0001` runs; leave
-`ASSEMBLY_MODULE_PLANES` unchanged (one supported plane set); add the typed
-adapter; delete the write-authority surface named above with its two audit
-codes; and add the forward vendor revision that re-checks under lock and revokes
-the three write privileges from `platform_api`.
+**2. Deployment Control composition — `version:minor`. LANDED.** a2 pinned and
+composed, `dc_0001` runs, `ASSEMBLY_MODULE_PLANES` unchanged, the typed adapter
+added, the write-authority surface retired with its two audit codes, and `v017`
+sealing the registrar. The composed lineage count rose, so every document
+stating it moved in the same commit — which is what the derived guard in
+`test_stale_claims.py` is for.
 
-One change, because a composed module beside a live independent registrar is the
-state this slice exists to avoid. Expect it to touch more than it looks: the
-composed lineage count rises, so every document stating it moves with the same
-commit, and `tests/architecture/test_stale_claims.py` fails until they do.
+**One change to the plan, ruled on by Michael:** the seal revokes `DELETE` only.
+A full write-revoke would make the projection unwritable, and staging resolves
+against a projection row — so it would have removed the delivery path that
+ADR-0010 § 1 requires preserved. See ADR-0011's 2026-08-21 amendment.
 
 **3. Brand Profiles — separate and blocked** until the extraction dossier's
 first-adopter evidence changes. Not a Vendor decision to make.

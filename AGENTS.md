@@ -190,13 +190,17 @@ disagree, fix the drift.
     subject.** ADR-0011's Deployment Control slice is greenfield for plans,
     rollouts, credentials and observations, and a narrow AUTHORITY CUTOVER for
     deployment-target identity — `register_delivery_target` and
-    `licence_delivery_targets` own that subject today. Classify by SUBJECT and
-    WRITER, never by table name: the narrow name avoided the wrong owner
-    LABEL, not the ownership. A forward vendor revision is owed either way —
-    the 2026-08-21 measurement returned empty, so it is the sealing shape, and
-    the seal is a REVOKE of `INSERT`/`UPDATE`/`DELETE` from `platform_api`
-    rather than the absence of a caller. A privilege a role still holds is a
-    writer waiting for code.
+    `licence_delivery_targets` held that subject. Classify by SUBJECT and
+    WRITER, never by table name: the narrow name avoided the wrong owner LABEL,
+    not the ownership.
+
+    Both halves landed together in `v017`, and the seal is narrower than first
+    specified. `DELETE` is revoked from `platform_api`; `INSERT` and `UPDATE`
+    are RETAINED, because staging resolves against a projection row and an
+    unwritable projection removes the delivery path ADR-0010 § 1 requires
+    preserved. So the single-writer guarantee here is PROVENANCE plus a ratchet
+    — `DeploymentTargetFacts` is constructible only in the deployment adapter —
+    not a privilege. Weaker than a grant, and to be described as weaker.
 
     The inventory is at SYMBOL level with per-file call-site counts in
     `src/vendor_cp/cutover_readiness.py`, ratcheted in both directions and split

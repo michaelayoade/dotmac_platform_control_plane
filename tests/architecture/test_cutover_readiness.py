@@ -37,12 +37,14 @@ from vendor_cp.cutover_readiness import (
     DELIVERY_TRANSPORT_MODULES,
     FOREIGN_TABLE_MARKERS,
     NOT_A_DEPLOYMENT_WRITER,
+    RETIRED_AUDIT_ACTIONS,
     RETIRED_DESIGN_BRIEFS,
-    TARGET_AUTHORITY_AUDIT_ACTIONS,
-    TARGET_AUTHORITY_ROUTES,
-    TARGET_AUTHORITY_SYMBOLS,
+    RETIRED_TARGET_AUTHORITY_SYMBOLS,
+    SEALING_REVISION,
     TARGET_ESTATE_MEASUREMENT,
     TARGET_PROJECTION_SYMBOLS,
+    TARGET_RECONCILIATION_AUDIT_ACTION,
+    TARGET_RECONCILIATION_SYMBOLS,
     VENDOR_OWNED_TABLES,
 )
 
@@ -169,28 +171,98 @@ def test_the_tablename_scan_can_see_a_planted_model(tmp_path: Path) -> None:
     assert declared_tablenames(tmp_path) == {"planted_table"}
 
 
-# ── The deployment-target authority, ratcheted at symbol level ─────────────
+# ── The deployment-target authority, after the ADR-0011 cutover ────────────
 
 
-def test_the_target_write_authority_call_sites_are_exact() -> None:
-    """The half ADR-0011 must MIGRATE, not merely stop calling.
+def retired_spellings(module: str, name: str) -> list[str]:
+    """Every way the retired symbol was actually reached.
 
-    Ratcheted in both directions and per file, because the failure this catches
-    is subtle: deleting `register_delivery_target` while `projection.py`
-    remains would leave a path-level ledger green while the authority moved.
+    Qualified attribute access through the module's usual alias, and the
+    from-import that would bind the bare name locally. NOT the bare name on its
+    own: `dotmac_deployment_control` publishes its own `RegisterTargetCommand`,
+    and matching that would report the replacement path as a resurrection of
+    the thing it replaced.
+    """
+    alias = module.rsplit(".", 1)[-1]
+    return [
+        rf"\b{re.escape(alias)}\.{re.escape(name)}\b",
+        rf"from\s+{re.escape(module)}\s+import[^\n]*\b{re.escape(name)}\b",
+    ]
+
+
+def test_the_retired_target_authority_has_no_call_sites() -> None:
+    """Ratcheted at ZERO, per retired spelling, not per file and not per bare
+    name.
+
+    Deleting `register_delivery_target` while `projection.py` survives is the
+    transition a path-level ledger misses — and `projection.py` does survive,
+    because it still owns the projection the reconciler writes.
+    """
+    surviving: dict[str, list[str]] = {}
+    for module, name in RETIRED_TARGET_AUTHORITY_SYMBOLS:
+        hits = sorted(
+            path.relative_to(ROOT).as_posix()
+            for path in _scanned()
+            for pattern in retired_spellings(module, name)
+            if re.search(pattern, path.read_text())
+        )
+        if hits:
+            surviving[f"{module}.{name}"] = hits
+    assert surviving == {}, surviving
+
+
+def test_the_retired_scan_does_not_match_the_modules_own_command() -> None:
+    """SENSITIVITY, and the false positive that produced this shape.
+
+    `dotmac_deployment_control.RegisterTargetCommand` is the command the
+    REPLACEMENT path calls. A bare-name ratchet reported it as the retired
+    Vendor command coming back.
+    """
+    module_use = (
+        "import dotmac_deployment_control as deployment_control\n"
+        "deployment_control.RegisterTargetCommand(command_id='x')\n"
+    )
+    vendor_use = "projection.RegisterTargetCommand(target_ref='x')\n"
+    patterns = retired_spellings(
+        "vendor_cp.licensing.projection", "RegisterTargetCommand"
+    )
+    assert not any(re.search(p, module_use) for p in patterns)
+    assert any(re.search(p, vendor_use) for p in patterns)
+
+
+def test_the_zero_ratchet_is_not_vacuous() -> None:
+    """A zero-ratchet over an empty name list passes forever."""
+    assert RETIRED_TARGET_AUTHORITY_SYMBOLS
+    assert RETIRED_AUDIT_ACTIONS
+
+
+def test_the_zero_ratchet_can_see_a_reacquired_writer(tmp_path: Path) -> None:
+    """SENSITIVITY: the same scanner, against a file that does call it."""
+    probe = tmp_path / "probe.py"
+    probe.write_text("register_delivery_target(db, command)\n")
+    pattern = re.compile(r"\bregister_delivery_target\b")
+    assert pattern.findall(probe.read_text())
+
+
+def test_the_reconciliation_seam_call_sites_are_exact() -> None:
+    """The replacement path, ratcheted in both directions.
+
+    This is the single-writer guarantee and it is weaker than a grant:
+    `platform_api` keeps INSERT and UPDATE because the reconciler needs them.
+    What stops an independent write is that `DeploymentTargetFacts` can only be
+    built in the deployment adapter — so a new caller appearing anywhere here is
+    the thing worth failing on.
     """
     drift = {
         symbol: {"declared": declared, "actual": call_sites(symbol)}
-        for symbol, declared in TARGET_AUTHORITY_SYMBOLS.items()
+        for symbol, declared in TARGET_RECONCILIATION_SYMBOLS.items()
         if call_sites(symbol) != declared
     }
     assert drift == {}, drift
 
 
 def test_the_target_projection_call_sites_are_exact() -> None:
-    """The half that survives ADR-0011 as a reconciled projection and retires
-    at ADR-0010. Separate from the write path on purpose: conflating them is
-    how "we composed the owner" becomes "we still have two"."""
+    """The half that survives to ADR-0010."""
     drift = {
         symbol: {"declared": declared, "actual": call_sites(symbol)}
         for symbol, declared in TARGET_PROJECTION_SYMBOLS.items()
@@ -199,39 +271,49 @@ def test_the_target_projection_call_sites_are_exact() -> None:
     assert drift == {}, drift
 
 
-def test_the_write_and_projection_inventories_do_not_overlap() -> None:
-    """A symbol in both would mean the cutover boundary is not decided."""
-    assert not set(TARGET_AUTHORITY_SYMBOLS) & set(TARGET_PROJECTION_SYMBOLS)
-    assert TARGET_AUTHORITY_SYMBOLS and TARGET_PROJECTION_SYMBOLS
+def test_only_the_adapter_constructs_the_provenance_type() -> None:
+    """The seam's whole enforcement, stated as an assertion.
 
-
-def test_the_call_site_scan_can_see_a_new_caller(tmp_path: Path) -> None:
-    """SENSITIVITY. Both assertions above compare against a declared mapping,
-    which a scanner returning nothing would satisfy by matching an empty dict
-    only if the declaration were also empty — so prove the scanner counts."""
-    probe = tmp_path / "caller.py"
-    probe.write_text(
-        "from vendor_cp.licensing.projection import register_delivery_target\n"
-        "register_delivery_target(db, command)\n"
+    If any module other than the adapter could construct `DeploymentTargetFacts`,
+    a caller could supply a target_ref and customer_ref again and the projection
+    would be independently registered under a new name.
+    """
+    constructors = sorted(
+        path.relative_to(ROOT).as_posix()
+        for path in _scanned()
+        if re.search(r"DeploymentTargetFacts\(", path.read_text())
+        and path.suffix == ".py"
     )
-    pattern = re.compile(r"\bregister_delivery_target\b")
-    assert len(pattern.findall(probe.read_text())) == 2
+    assert constructors == [
+        "src/vendor_cp/deployment/adapter.py",
+        # The unit tests construct it deliberately, to exercise the seam rather
+        # than reach around it with a raw insert.
+        "tests/unit/test_licence_delivery.py",
+    ], constructors
 
 
-def test_the_target_write_surface_is_still_mounted_where_declared() -> None:
-    """The routes and audit vocabulary the write authority owns. Both must be
-    present TODAY — this is the pre-cutover inventory, and an entry naming
-    something already gone is describing someone else's retirement."""
-    router = (SRC / "vendor_cp" / "licensing" / "router.py").read_text()
-    for method, path in TARGET_AUTHORITY_ROUTES:
-        assert f'@router.{method}("{path}"' in router, (method, path)
-
+def test_the_audit_vocabulary_moved_with_the_writer() -> None:
+    """ADR-0008: a declared code with no consumer fails the boot, and a writer
+    with an undeclared code fails the write. Both directions, in one change."""
     manifest = (SRC / "vendor_cp" / "licensing" / "feature.py").read_text()
-    for action in TARGET_AUTHORITY_AUDIT_ACTIONS:
-        assert f'"{action}"' in manifest, action
-        # ADR-0008: a declared code with no consumer fails the build, so the
-        # writer and its vocabulary retire in the same change or neither does.
-        assert call_sites(action) or action in manifest
+    assert f'"{TARGET_RECONCILIATION_AUDIT_ACTION}"' in manifest
+    for retired in RETIRED_AUDIT_ACTIONS:
+        assert f'"{retired}"' not in manifest, retired
+        assert call_sites(retired) == {}, retired
+
+
+def test_the_sealing_revision_exists_and_is_the_vendor_head() -> None:
+    """The declaration names a revision; the lineage had better contain it."""
+    path = ROOT / "alembic" / "versions" / f"{SEALING_REVISION}.py"
+    assert path.exists(), SEALING_REVISION
+    body = path.read_text()
+    assert f'revision = "{SEALING_REVISION}"' in body
+    # It must depend on the module lineage: sealing Vendor's registrar before
+    # mod_deploy exists would leave no authority at all.
+    assert 'depends_on = "dc_0001_deployment_control"' in body
+    # DELETE only. INSERT/UPDATE stay for the reconciler (ADR-0011 s 4).
+    assert 'REVOKED_PRIVILEGE = "DELETE"' in body
+    assert "REVOKE {REVOKED_PRIVILEGE}" in body
 
 
 def test_every_delivery_transport_module_still_exists() -> None:

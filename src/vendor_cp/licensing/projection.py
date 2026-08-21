@@ -46,6 +46,7 @@ from dotmac_kernel.messaging import enqueue_platform_event
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from vendor_cp.deployment.adapter import DeploymentTargetFacts
 from vendor_cp.licensing import adapter as licensing
 from vendor_cp.licensing.delivery_models import (
     AckDisposition,
@@ -115,84 +116,75 @@ class AckOutcome:
         return AckDisposition(self.disposition).is_quarantined
 
 
-# ── Delivery targets (the one writer) ───────────────────────────────────────
+# ── Delivery targets (a projection, reconciled — never registered) ─────────
 
 
-@dataclass(frozen=True, slots=True)
-class RegisterTargetCommand:
-    """Register or synchronise a delivery target.
-
-    This is the ONLY supported way `licence_delivery_targets` is written.
-    Without it the table had no named writer, so every caller — including
-    tests — reached for raw inserts, which is precisely how a projection drifts
-    from the authority it projects. When Deployment Control is composed, this
-    command becomes its adapter subscriber rather than a parallel source of
-    truth.
-    """
-
-    target_ref: str
-    customer_ref: str
-    connection_ref: str | None = None
-    status: TargetStatus = TargetStatus.ACTIVE
-    actor_admin_id: UUID | None = None
-
-
-def register_delivery_target(
-    db: Session, command: RegisterTargetCommand
+def reconcile_delivery_target(
+    db: Session,
+    facts: DeploymentTargetFacts,
+    *,
+    actor_admin_id: UUID | None = None,
 ) -> LicenceDeliveryTarget:
-    """Create or update a delivery target, audited. Idempotent on
-    `target_ref`; changing the customer of an existing target is REFUSED —
-    that would silently re-point a destination at another customer's
-    licences, which the cross-customer staging check could then no longer
-    catch."""
-    if not command.target_ref.strip() or not command.customer_ref.strip():
-        raise BadRequestError("a delivery target needs a ref and a customer")
+    """Project a deployment target the FLEET OWNER knows about, audited.
 
+    This replaced the registration command at the ADR-0011 cutover, and the
+    difference is the whole point: that command took `target_ref`,
+    `customer_ref`, `connection_ref` and `status` from its caller, which made
+    this table a second authority over deployment-target identity. The
+    retired name is in ADR-0011 and in the ratchet, not here.
+    `DeploymentTargetFacts` can only be built by `vendor_cp.deployment.adapter`
+    from a record `mod_deploy` returned, so every value written here has a
+    provenance.
+
+    Idempotent on `target_ref`. The old customer-repointing refusal is gone
+    along with the reason for it: the customer is no longer a caller's claim to
+    get wrong, it is whatever the fleet owner says it is, so a change here is a
+    correction to be projected rather than an attack to be blocked. What has NOT
+    changed is that this is only a projection — `_authorised_target` still
+    performs every eligibility check separately, because registration was never
+    authorisation and reconciliation is not either.
+
+    `connection_ref` is deliberately cleared. It is transport metadata the
+    module does not own, and ADR-0010 removes the column with the rest of the
+    delivery estate.
+    """
     row = db.execute(
         select(LicenceDeliveryTarget).where(
-            LicenceDeliveryTarget.target_ref == command.target_ref
+            LicenceDeliveryTarget.target_ref == facts.target_ref
         )
     ).scalar_one_or_none()
-    if row is not None:
-        if row.customer_ref != command.customer_ref:
-            raise BadRequestError(
-                f"delivery target {command.target_ref!r} belongs to "
-                f"{row.customer_ref!r}; re-pointing it at "
-                f"{command.customer_ref!r} would move a destination between "
-                "customers — register a new target instead"
-            )
-        row.connection_ref = command.connection_ref
-        row.status = command.status.value
-        db.flush()
-        action = "vendor.licence.delivery_target_updated"
-    else:
+    if row is None:
         row = LicenceDeliveryTarget(
-            target_ref=command.target_ref,
-            customer_ref=command.customer_ref,
-            connection_ref=command.connection_ref,
-            status=command.status.value,
+            target_ref=facts.target_ref,
+            customer_ref=facts.customer_ref,
+            connection_ref=None,
+            status=facts.status.value,
         )
         db.add(row)
-        db.flush()
-        action = "vendor.licence.delivery_target_registered"
+    else:
+        row.customer_ref = facts.customer_ref
+        row.connection_ref = None
+        row.status = facts.status.value
+    db.flush()
 
     write_platform_audit_event(
         db,
-        actor_admin_id=command.actor_admin_id,
-        action=action,
+        actor_admin_id=actor_admin_id,
+        action="vendor.licence.delivery_target_reconciled",
         entity_type="licence_delivery_target",
         entity_id=str(row.id),
         details={
             "target_ref": row.target_ref,
             "customer_ref": row.customer_ref,
             "status": row.status,
+            "deployment_target_id": str(facts.target_id),
         },
     )
     return row
 
 
 def list_delivery_targets(db: Session) -> list[LicenceDeliveryTarget]:
-    """All registered delivery targets. Lives here rather than in the router so
+    """All projected delivery targets. Lives here rather than in the router so
     the route stays a thin adapter — a direct query in a handler is how a
     second, unowned read path starts."""
     return list(
@@ -750,8 +742,7 @@ def list_acknowledgements(db: Session, licence_id: str) -> list[Mapping[str, obj
 
 
 __all__ = [
-    "RegisterTargetCommand",
-    "register_delivery_target",
+    "reconcile_delivery_target",
     "list_delivery_targets",
     "map_legacy_delivery",
     "StageDeliveryCommand",

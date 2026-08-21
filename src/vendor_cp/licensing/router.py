@@ -12,15 +12,15 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from dotmac_kernel import BadRequestError, PlatformAdmin
+from dotmac_kernel import PlatformAdmin
 from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 
+from vendor_cp.deployment import adapter as deployment_adapter
 from vendor_cp.licensing import adapter as licensing
 from vendor_cp.licensing import delivery_ops, projection, transport
-from vendor_cp.licensing.delivery_models import TargetStatus
 from vendor_cp.licensing.schemas import (
     AcknowledgementRequest,
     AckOutcomeResponse,
@@ -30,7 +30,7 @@ from vendor_cp.licensing.schemas import (
     LicenceIssuanceResponse,
     MapLegacyDeliveryRequest,
     PipelineHealthResponse,
-    RegisterTargetRequest,
+    ReconcileTargetRequest,
     RevocationEntryResponse,
     RevocationListResponse,
     RevokeLicenceRequest,
@@ -210,29 +210,20 @@ def pipeline_health(_admin: Admin, db: Db) -> PipelineHealthResponse:
 
 
 @router.post("/targets", response_model=DeliveryTargetResponse)
-def register_target(
-    payload: RegisterTargetRequest, admin: Admin, db: Db
+def reconcile_target(
+    payload: ReconcileTargetRequest, admin: Admin, db: Db
 ) -> DeliveryTargetResponse:
-    """Register/synchronise a delivery target — the ONE writer for the target
-    projection. Without this endpoint a clean deployment could never stage a
-    delivery at all, because staging requires a registered destination."""
-    try:
-        status = TargetStatus(payload.status)
-    except ValueError as exc:
-        raise BadRequestError(
-            f"unknown target status {payload.status!r} — expected one of "
-            f"{[s.value for s in TargetStatus]}"
-        ) from exc
-    row = projection.register_delivery_target(
-        db,
-        projection.RegisterTargetCommand(
-            target_ref=payload.target_ref,
-            customer_ref=payload.customer_ref,
-            connection_ref=payload.connection_ref,
-            status=status,
-            actor_admin_id=admin.id,
-        ),
-    )
+    """Project a deployment target from `mod_deploy` into the delivery
+    projection.
+
+    Same path and method as the registration endpoint it replaces, because the
+    operation is still "make this destination available for staging" — but the
+    body now names a target the fleet owner owns instead of describing one. Two
+    calls, and neither decides anything: the adapter reads the authoritative
+    record, the projection writes what it returned.
+    """
+    facts = deployment_adapter.resolve_target(db, payload.deployment_target_id)
+    row = projection.reconcile_delivery_target(db, facts, actor_admin_id=admin.id)
     return DeliveryTargetResponse(
         id=row.id,
         target_ref=row.target_ref,

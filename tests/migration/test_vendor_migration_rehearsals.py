@@ -54,9 +54,14 @@ ENTITLEMENT_ALLOCATION_HEAD = "ea_0003_platform_audit_log"
 APPROVALS_HEAD = "ap_0002_outbox_relay"
 COMMERCIAL_AGREEMENTS_HEAD = "cg_0001_agreements"
 LICENSING_HEAD = "li_0001_licensing"
+# Composed at the ADR-0011 cutover. Unlike approvals and allocation, this
+# module head IS depended on by a vendor revision — `v017` names it — so it
+# is an ancestor and NOT a version row, the same shape `ap_0001` had before
+# a5 moved that lineage past it.
+DEPLOYMENT_CONTROL_HEAD = "dc_0001_deployment_control"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v016_licensing_authority"
+VENDOR_HEAD = "v017_deployment_target_authority"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:
@@ -199,7 +204,7 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # kernel head is an ancestor too. All four revisions are genuinely applied;
     # none remains a version ROW once the Vendor lineage reaches v016.
     #
-    # They are still static heads, and `test_seven_head_topology` asserts all seven
+    # They are still static heads, and `test_eight_head_topology` asserts all eight
     # through `script.get_heads()`. Listing them here as well would report them
     # missing on a perfectly complete database.
     #
@@ -275,9 +280,9 @@ def test_alembic_env_installs_the_vendor_prerequisite_bindings(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rehearsal 2 — seven-head topology
+# Rehearsal 2 — eight-head topology
 # ─────────────────────────────────────────────────────────────────────────────
-def test_seven_head_topology(scratch_db: str) -> None:
+def test_eight_head_topology(scratch_db: str) -> None:
     script = ScriptDirectory.from_config(make_alembic_config(scratch_db))
     assert set(script.get_heads()) == {
         KERNEL_HEAD,
@@ -286,6 +291,7 @@ def test_seven_head_topology(scratch_db: str) -> None:
         APPROVALS_HEAD,
         COMMERCIAL_AGREEMENTS_HEAD,
         LICENSING_HEAD,
+        DEPLOYMENT_CONTROL_HEAD,
         VENDOR_HEAD,
     }
     kernel_head = script.get_revision("kernel@head")
@@ -294,12 +300,14 @@ def test_seven_head_topology(scratch_db: str) -> None:
     allocation_head = script.get_revision("entitlement_allocation@head")
     agreement_head = script.get_revision("commercial_agreements@head")
     licensing_head = script.get_revision("licensing@head")
+    deployment_head = script.get_revision("deployment_control@head")
     assert kernel_head.revision == KERNEL_HEAD
     assert vendor_head.revision == VENDOR_HEAD
     assert release_catalog_head.revision == RELEASE_CATALOG_HEAD
     assert allocation_head.revision == ENTITLEMENT_ALLOCATION_HEAD
     assert agreement_head.revision == COMMERCIAL_AGREEMENTS_HEAD
     assert licensing_head.revision == LICENSING_HEAD
+    assert deployment_head.revision == DEPLOYMENT_CONTROL_HEAD
     # The vendor head is the tip of a single-parent chain that walks back to the
     # vendor ROOT; the ROOT is its own branch that DEPENDS ON (is not a child of)
     # a kernel head, so the lineages advance independently.
@@ -539,6 +547,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
         APPROVALS_HEAD,
         COMMERCIAL_AGREEMENTS_HEAD,
         LICENSING_HEAD,
+        DEPLOYMENT_CONTROL_HEAD,
         VENDOR_HEAD,
     }
 

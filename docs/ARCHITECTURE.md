@@ -144,6 +144,27 @@ it owns and — just as importantly — what it must never become.
   Vendor retains one typed adapter that resolves immutable offers, supplies the
   product capability catalogue, and converts the authoritative Approvals
   request into content-bound evidence.
+- `dotmac-deployment-control==0.1.0a2` is the owner of deployment identity,
+  desired state, immutable plans, rollouts and authenticated observations under
+  ADR-0011. Platform-only and atomic — one supported plane set, so no
+  `ModulePlaneSelection` is possible and `ASSEMBLY_MODULE_PLANES` gains nothing.
+  Its `dc_0001_deployment_control` lineage builds `mod_deploy`; both declared
+  prerequisites were already bound, so composing it added no binding.
+
+  **Greenfield for plans, rollouts, credentials and observations** — no revision
+  in this lineage ever created one, verified against the live database as well
+  as the lineage. **An authority cutover for deployment-target identity:**
+  `register_delivery_target` held that subject and is retired, ratcheted at zero
+  call sites. `vendor_cp.deployment.adapter` is the only seam, and
+  `DeploymentTargetFacts` is constructible nowhere else, which is what stops the
+  projection being independently registered again.
+
+  `v017` sealed it: five delivery tables locked in a fixed order, counts AND
+  relationships re-checked, then `DELETE` revoked from `platform_api` before the
+  locks release. `INSERT`/`UPDATE` are retained because the reconciler needs
+  them — see ADR-0011's 2026-08-21 amendment for why a full revoke would have
+  broken the path ADR-0010 § 1 requires preserved, and for the fact that the
+  resulting guarantee is a ratchet rather than a privilege.
 - `dotmac-licensing==0.1.0a1` is the Licensing issuer authority under ADR-0009.
   Its platform-only manifest and `li_0001_licensing` lineage are composed.
   `v016` rechecks the greenfield premise under lock, drops the five empty local
@@ -157,7 +178,7 @@ it owns and — just as importantly — what it must never become.
 ## The composed database is audited whole
 
 `tests/migration/test_composed_live_catalog.py` audits the database this
-assembly actually produces — all seven lineages: kernel, the five module owners,
+assembly actually produces — all eight lineages: kernel, the six module owners,
 and Vendor — rather than the tables someone remembered to name.
 
 - The module schemas (`mod_rel`, `mod_ealloc`, `mod_approvals`,
@@ -337,7 +358,7 @@ Compose project and from every product data plane:
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration
-backup, runs the seven-lineage `scripts/migrate.py`, and only then replaces the
+backup, runs the eight-lineage `scripts/migrate.py`, and only then replaces the
 application. The complete operator contract and rollback boundary are in
 `docs/operations/production-deployment.md`.
 
@@ -425,54 +446,24 @@ a build-failing architecture test (`tests/architecture/test_deny_cases.py`):
 
 ## Still design-only (do NOT implement outside its contracted slice)
 
-Deployment Control is released (`0.1.0a2`, tagged) and CONTRACTED here
-(ADR-0011) but not composed. Until that slice lands, fleet desired state, update
-authority, support access and observed fleet health remain absent. The permitted
-persistence owner is the module's `mod_deploy` lineage, never a Vendor-local set
-of fleet tables; the full provider runner remains outside this application
-behind Dotmac Integrator.
+Deployment Control is COMPOSED (ADR-0011). What remains absent is what the
+module deliberately does not own: the provider runner, connector execution,
+retries and health stay outside this application behind Dotmac Integrator, and
+`DeliveryIntent` is a provider-neutral value this assembly returns but never
+acts on. Vendor-owned fleet tables and a Vendor `DeploymentRunner` remain
+forbidden (hard rule 4) — the prohibition was always on a VENDOR-owned fleet
+owner, and composing the independent one is what makes it affordable.
 
-**That slice is two differently-shaped halves.** Greenfield for plans,
-rollouts, credentials and observations — no Vendor owner has ever existed for
-any of them. A narrow AUTHORITY CUTOVER for deployment-target identity:
-`register_delivery_target` and `licence_delivery_targets` are a named authority
-over that subject today, and a second authority does not stop being one because
-it was given a narrower name. `src/vendor_cp/cutover_readiness.py` inventories
-both halves at symbol level with per-file call-site counts, ratcheted in both
-directions.
+Vendor has no operator surface for the module's own commands yet: registering a
+target, setting desired state, proposing a plan and requesting a rollout are
+`mod_deploy`'s, and this assembly reads targets rather than writing them. That
+surface is a later, separately reviewed slice.
 
-**The estate was measured on 2026-08-21 and is EMPTY.** Michael named
-`149.102.158.144` (marker `vendor-cp-prod`); read-only counts on
-`vendor_control_plane` returned zero rows in `licence_delivery_targets`,
-`licence_deliveries` and the other three delivery tables, at applied heads
-`0023_audit_actor_and_forensics` / `rl_0001_release_artifacts` /
-`v014_allocations_authority`. The live database also showed no `mod_deploy`
-schema and no table matching `%deployment%` or `%rollout%`, so the greenfield
-half is observed rather than inferred. Full coordinates in ADR-0011 § 4.
-
-The premise is narrow and is recorded as such: **never populated**, not
-"exercised and wrote nothing". The rest of that database is empty too, and
-`platform_audit_events` holds one row. That does not change the branch — zero
-rows is zero rows — but it bounds what the measurement may be cited for.
-
-That selects the sealed empty-estate path in the `v013`–`v016` shape: one
-transaction taking `ACCESS EXCLUSIVE` on all five delivery tables in a fixed
-order, re-checking counts AND relationships, aborting on anything non-zero, and
-REVOKEing `INSERT`/`UPDATE`/`DELETE` on `licence_delivery_targets` from
-`platform_api` while retaining `SELECT` — `platform_api` holds all four today,
-which is the seal's real work. The revoke lands before the locks release,
-because `POST /targets` stays mounted while the revision runs and "empty when
-measured" is not "cannot become non-empty". The table is not dropped; ADR-0010
-owns that.
-
-An absence describes a moment, so that under-lock re-check is the measurement's
-refresh responsibility rather than a second observation someone must remember
-to take.
-
-ADR-0010's licence-delivery transfer is the next slice after Deployment Control
-and must land before Brand Profiles. Until then the current logging/offline path
-is frozen and no connected Vendor transport or additional retry policy may be
-added.
+ADR-0010's licence-delivery transfer is the next slice and must land before
+Brand Profiles. Until then the current logging/offline path is frozen and no
+connected Vendor transport or additional retry policy may be added. The
+delivery-target projection is now reconciled from `mod_deploy` and may never
+again be independently registered.
 
 Brand Profiles is released (`0.1.0a1`, peeled commit
 `ed69f9dfdeea493dab7d7ba25c04e940f0870545`) and its platform-plane composition
@@ -480,17 +471,10 @@ is PREPARED (`docs/cutover-readiness.md`). It is not composed, and the reason
 stated here is a LOCAL one: **this assembly is deferred by ADR-0007 § 6.** That
 is a decision this repository holds and can be held to. Whether `dotmac_sub` has
 finished adopting is a temporal claim about a repository this one cannot
-observe, so it is background rather than the load-bearing reason — as of
-`dotmac_starter_mt@20d24703e70e4d361de2f406165df4b36cbee507`,
-`packages/dotmac-brand-profiles/EXTRACTION.toml` carried `status =
-"audit-complete"` with no contract consumer. There is nothing to retire when the
-deferral lifts: no model, service, migration or template in this assembly holds
-a brand record, which is measured rather than assumed.
-
-Commercial Agreements and Licensing are composed, authoritative under
-ADR-0008/0009, and **adopted since 2026-08-21** — deploy run `32485479666` ran
-them in production with all eleven legacy tables absent. See the lifecycle
-section above for the verified evidence.
+observe, so it is background rather than the load-bearing reason. There is
+nothing to retire when the deferral lifts: no model, service, migration or
+template in this assembly holds a brand record, which is measured rather than
+assumed.
 
 ## Migrating existing products
 

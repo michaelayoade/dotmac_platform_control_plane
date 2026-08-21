@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 
+import dotmac_deployment_control as deployment_control
 import pytest
 from dotmac_kernel import PlatformAdmin
 from dotmac_kernel.db import get_platform_db
@@ -179,20 +180,67 @@ def _issue(db: Session) -> object:
     )
 
 
+def _deployment_target(db: Session, *, target_ref: str = TARGET) -> uuid.UUID:
+    """Create an ACTIVE target in `mod_deploy` and return its id.
+
+    Two module commands, not one, and the second is not ceremony: a freshly
+    registered target is `REGISTERED` — known, with no desired state — which
+    `vendor_cp.deployment.adapter` maps to Vendor `SUSPENDED` rather than
+    `ACTIVE`. A target that is not converging on anything must not receive a
+    licence, so the test has to give it a desired state to make it eligible.
+    That mapping is the fail-closed half of the adapter and this is what
+    exercises it.
+    """
+    view = deployment_control.register_target(
+        db,
+        deployment_control.RegisterTargetCommand(
+            command_id=f"reg-{target_ref}",
+            target_ref=target_ref,
+            subject_ref=CUSTOMER,
+            product_code="vendor-cp",
+            environment="test",
+        ),
+    )
+    deployment_control.set_desired_state(
+        db,
+        deployment_control.SetDesiredStateCommand(
+            command_id=f"desire-{target_ref}",
+            target_id=view.id,
+            desired=deployment_control.DesiredDeployment(release_ref="rel-1"),
+        ),
+    )
+    db.flush()
+    return view.id
+
+
+def _reconcile(client: TestClient, db: Session, *, target_ref: str = TARGET):
+    """Project a deployment target through the route under test."""
+    return client.post(
+        "/platform/vendor/licences/targets",
+        json={
+            "deployment_target_id": str(_deployment_target(db, target_ref=target_ref))
+        },
+    )
+
+
 # ── The adapters a clean deployment needs ───────────────────────────────────
 
 
-def test_a_clean_deployment_can_register_a_target_and_stage(client, db) -> None:
-    """Before these adapters existed, this whole flow was unreachable at
-    runtime: staging demands a registered target and nothing could create one."""
+def test_a_clean_deployment_can_reconcile_a_target_and_stage(client, db) -> None:
+    """The whole flow, end to end, after the ADR-0011 cutover.
+
+    It used to be unreachable at runtime for want of any way to create a target;
+    it is reachable again, but only through the fleet owner. The route no longer
+    accepts a destination description — it accepts a deployment target id and
+    projects what `mod_deploy` says about it.
+    """
     issued = _issue(db)
 
-    registered = client.post(
-        "/platform/vendor/licences/targets",
-        json={"target_ref": TARGET, "customer_ref": CUSTOMER},
-    )
-    assert registered.status_code == 200
-    assert registered.json()["target_ref"] == TARGET
+    reconciled = _reconcile(client, db)
+    assert reconciled.status_code == 200
+    assert reconciled.json()["target_ref"] == TARGET
+    # Transport metadata the module does not own is not invented.
+    assert reconciled.json()["connection_ref"] is None
 
     listed = client.get("/platform/vendor/licences/targets")
     assert [t["target_ref"] for t in listed.json()] == [TARGET]
@@ -205,16 +253,50 @@ def test_a_clean_deployment_can_register_a_target_and_stage(client, db) -> None:
     assert staged.json()["state"] == DeliveryState.DELIVERED.value
 
 
-def test_registering_an_unknown_status_is_rejected(client) -> None:
+def test_reconciling_an_unknown_deployment_target_is_refused(client) -> None:
+    """The replacement for the old unknown-status test, and a stricter claim.
+
+    A caller can no longer supply a bad STATUS because it cannot supply a status
+    at all. What it can still do is name a target the fleet owner has never heard
+    of, and inventing a destination for it is exactly what this cutover removes.
+    """
     response = client.post(
         "/platform/vendor/licences/targets",
-        json={
-            "target_ref": TARGET,
-            "customer_ref": CUSTOMER,
-            "status": "definitely-not-a-status",
-        },
+        json={"deployment_target_id": str(uuid.uuid4())},
     )
-    assert response.status_code == 400
+    assert response.status_code == 404
+
+
+def test_a_target_without_desired_state_may_not_receive_a_licence(client, db) -> None:
+    """Fail-closed mapping: `REGISTERED` means known, not converging.
+
+    Mapping it onto Vendor `ACTIVE` would be the registration-is-authorisation
+    confusion `_authorised_target` exists to refuse, one level up.
+    """
+    issued = _issue(db)
+    view = deployment_control.register_target(
+        db,
+        deployment_control.RegisterTargetCommand(
+            command_id="reg-idle",
+            target_ref="dep-idle",
+            subject_ref=CUSTOMER,
+            product_code="vendor-cp",
+            environment="test",
+        ),
+    )
+    db.flush()
+    projected = client.post(
+        "/platform/vendor/licences/targets",
+        json={"deployment_target_id": str(view.id)},
+    )
+    assert projected.status_code == 200
+    assert projected.json()["status"] == "suspended"
+
+    refused = client.post(
+        "/platform/vendor/licences/deliveries",
+        json={"issuance_id": str(issued.id), "target_ref": "dep-idle"},
+    )
+    assert refused.status_code == 400
 
 
 # ── Export is the only delivery path, and it is honest ──────────────────────
@@ -222,10 +304,7 @@ def test_registering_an_unknown_status_is_rejected(client) -> None:
 
 def test_export_returns_the_bundle_and_records_a_real_handoff(client, db) -> None:
     issued = _issue(db)
-    client.post(
-        "/platform/vendor/licences/targets",
-        json={"target_ref": TARGET, "customer_ref": CUSTOMER},
-    )
+    _reconcile(client, db)
     delivery = client.post(
         "/platform/vendor/licences/deliveries",
         json={"issuance_id": str(issued.id), "target_ref": TARGET},
@@ -264,10 +343,7 @@ def test_map_and_resume_are_reachable_over_http(client, db) -> None:
     )
 
     issued = _issue(db)
-    client.post(
-        "/platform/vendor/licences/targets",
-        json={"target_ref": TARGET, "customer_ref": CUSTOMER},
-    )
+    _reconcile(client, db)
     delivery = client.post(
         "/platform/vendor/licences/deliveries",
         json={"issuance_id": str(issued.id), "target_ref": TARGET},

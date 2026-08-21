@@ -122,47 +122,76 @@ FOREIGN_TABLE_MARKERS: Final[tuple[str, ...]] = (
     "theme",
 )
 
-# ── The deployment-target authority, at symbol level ───────────────────────
+# ── The deployment-target authority, after the cutover ─────────────────────
 
-#: The WRITE path that stops being a source of truth when `mod_deploy` is
-#: composed. Each symbol maps to the exact files that reference it and how many
-#: times, ratcheted in both directions: a new caller fails, and so does a
-#: symbol quietly disappearing while its neighbours stay.
+#: RETIRED by ADR-0011, and ratcheted at ZERO — as (module, name) pairs, not
+#: bare names.
 #:
-#: This is the half ADR-0011 must migrate, not merely stop calling.
-TARGET_AUTHORITY_SYMBOLS: Final[dict[str, dict[str, int]]] = {
-    "register_delivery_target": {
-        "src/vendor_cp/licensing/projection.py": 2,
-        "src/vendor_cp/licensing/router.py": 1,
-        "tests/unit/test_licence_delivery.py": 8,
-    },
-    "RegisterTargetCommand": {
+#: The qualification is not tidiness. `dotmac_deployment_control` publishes its
+#: OWN `RegisterTargetCommand`, and the module's command is exactly what the
+#: replacement path is supposed to call. A bare-name scan reported the route
+#: tests using the module's command as a resurrection of Vendor's retired one —
+#: a false positive that would have been "fixed" by deleting the honest test or
+#: by lowering the ratchet to nothing.
+#:
+#: So the scan looks for the RETIRED SPELLINGS: the qualified attribute access
+#: (`projection.register_delivery_target`) and the from-import that would bind
+#: the bare name locally. Both are how the retired symbol was actually reached.
+RETIRED_TARGET_AUTHORITY_SYMBOLS: Final[tuple[tuple[str, str], ...]] = (
+    ("vendor_cp.licensing.projection", "register_delivery_target"),
+    ("vendor_cp.licensing.projection", "RegisterTargetCommand"),
+    ("vendor_cp.licensing.schemas", "RegisterTargetRequest"),
+)
+
+#: The replacement seam, and the reason the ratchet above can be zero without
+#: the delivery path breaking. `DeploymentTargetFacts` is constructible only in
+#: `vendor_cp.deployment.adapter`, from a record `mod_deploy` returned, so the
+#: projection's values carry a provenance the type system enforces.
+#:
+#: This is the single-writer guarantee, and it is WEAKER than a grant: ADR-0011
+#: § 4 keeps `INSERT`/`UPDATE` with `platform_api` because the reconciler needs
+#: them. Only `DELETE` is revoked. Recorded plainly rather than described as a
+#: seal it is not.
+TARGET_RECONCILIATION_SYMBOLS: Final[dict[str, dict[str, int]]] = {
+    "DeploymentTargetFacts": {
+        "src/vendor_cp/deployment/adapter.py": 5,
         "src/vendor_cp/licensing/projection.py": 3,
-        "src/vendor_cp/licensing/router.py": 1,
-        "tests/unit/test_licence_delivery.py": 6,
+        "tests/unit/test_licence_delivery.py": 3,
     },
-    "RegisterTargetRequest": {
-        "src/vendor_cp/licensing/router.py": 2,
+    "resolve_target": {
+        "src/vendor_cp/deployment/adapter.py": 3,
+        "src/vendor_cp/licensing/router.py": 1,
+        "tests/unit/test_licence_delivery.py": 2,
+    },
+    "reconcile_delivery_target": {
+        "src/vendor_cp/deployment/adapter.py": 1,
+        "src/vendor_cp/licensing/router.py": 1,
+        "src/vendor_cp/licensing/projection.py": 2,
+        "tests/unit/test_licence_delivery.py": 3,
+    },
+    "ReconcileTargetRequest": {
         "src/vendor_cp/licensing/schemas.py": 2,
+        "src/vendor_cp/licensing/router.py": 2,
     },
 }
 
-#: The READ and projection path. It survives ADR-0011 as a rebuildable
-#: projection reconciled from `mod_deploy`, and retires with the rest of the
-#: delivery estate at ADR-0010. Declared separately from the write path because
-#: conflating them is how "we composed the owner" turns into "we still have two".
+#: The READ and projection path. It survives as a rebuildable projection
+#: reconciled from `mod_deploy`, and retires with the rest of the delivery
+#: estate at ADR-0010.
 TARGET_PROJECTION_SYMBOLS: Final[dict[str, dict[str, int]]] = {
     "list_delivery_targets": {
-        "src/vendor_cp/licensing/projection.py": 2,
         "src/vendor_cp/licensing/router.py": 1,
+        "src/vendor_cp/licensing/projection.py": 2,
         "tests/unit/test_licence_delivery.py": 1,
     },
     "_authorised_target": {
-        "src/vendor_cp/licensing/projection.py": 3,
+        "src/vendor_cp/deployment/adapter.py": 1,
+        "src/vendor_cp/licensing/projection.py": 4,
+        "tests/unit/test_licence_routes.py": 1,
     },
     "DeliveryTargetResponse": {
-        "src/vendor_cp/licensing/router.py": 7,
         "src/vendor_cp/licensing/schemas.py": 2,
+        "src/vendor_cp/licensing/router.py": 7,
     },
     "LicenceDeliveryTarget": {
         "src/vendor_cp/licensing/delivery_models.py": 2,
@@ -171,45 +200,41 @@ TARGET_PROJECTION_SYMBOLS: Final[dict[str, dict[str, int]]] = {
         "tests/unit/test_licence_transport_ops.py": 4,
     },
     "TargetStatus": {
+        "src/vendor_cp/deployment/adapter.py": 8,
         "src/vendor_cp/licensing/delivery_models.py": 3,
-        "src/vendor_cp/licensing/projection.py": 4,
-        "src/vendor_cp/licensing/router.py": 3,
-        "tests/unit/test_licence_delivery.py": 2,
+        "src/vendor_cp/licensing/projection.py": 2,
+        "tests/unit/test_licence_delivery.py": 5,
     },
 }
 
-#: The HTTP surface through which the write authority is reachable. Method and
-#: path, as mounted by the licensing router.
-TARGET_AUTHORITY_ROUTES: Final[tuple[tuple[str, str], ...]] = (
-    ("post", "/targets"),
-    ("get", "/targets"),
+#: The declared platform-audit vocabulary the reconciler owns. ONE code replaced
+#: the registrar's two: `registered` and `updated` distinguished create from
+#: update on a caller's claim, and a reconciliation against an authority that
+#: already decided has no such difference to name.
+TARGET_RECONCILIATION_AUDIT_ACTION: Final[str] = (
+    "vendor.licence.delivery_target_reconciled"
 )
 
-#: The declared platform-audit vocabulary the write path owns. Both are
-#: `vendor.*` and both are declared on the licensing feature manifest, so
-#: retiring the writer without retiring these would leave a declared code with
-#: no consumer (ADR-0008's rule, enforced by
-#: `tests/architecture/test_platform_audit_actions.py`).
-TARGET_AUTHORITY_AUDIT_ACTIONS: Final[tuple[str, ...]] = (
+#: Retired with the writer. ADR-0008's every-declared-code-has-a-consumer rule
+#: means these had to go in the same change, or the boot would fail on a
+#: declaration nothing writes.
+RETIRED_AUDIT_ACTIONS: Final[tuple[str, ...]] = (
     "vendor.licence.delivery_target_registered",
     "vendor.licence.delivery_target_updated",
 )
 
-#: The obligation a test cannot discharge.
-#:
-#: Before ADR-0011 may claim an empty premise it must MEASURE these tables on a
-#: target Michael names explicitly — never one inferred from deployment history.
-#: An empty result permits sealing the independent registration path in a
-#: forward vendor revision that rechecks emptiness under `ACCESS EXCLUSIVE`; a
-#: non-empty result requires backfill into `mod_deploy`, comparison, a writer
-#: switch and retention of the Vendor table as a module-derived projection.
-#:
-#: `licence_deliveries` is included because `target_id` is a foreign key into
-#: the registry: targets cannot be reasoned about without the rows depending on
-#: them.
+#: DISCHARGED 2026-08-21 — measured empty on the host Michael named, and
+#: re-verified after the deploy that took production to `af9fcf6`. Retained
+#: because `v017` re-checks these same tables under `ACCESS EXCLUSIVE`: the
+#: observation licensed writing that revision, and the revision is what
+#: licenses applying it.
 TARGET_ESTATE_MEASUREMENT: Final[frozenset[str]] = frozenset(
     {"licence_delivery_targets", "licence_deliveries"}
 )
+
+#: The revision that seals the write path. Named so the readiness declaration
+#: and the lineage cannot drift apart silently.
+SEALING_REVISION: Final[str] = "v017_deployment_target_authority"
 
 # ── Whole modules ADR-0010 retires ─────────────────────────────────────────
 
@@ -289,9 +314,11 @@ __all__ = [
     "FOREIGN_TABLE_MARKERS",
     "NOT_A_DEPLOYMENT_WRITER",
     "RETIRED_DESIGN_BRIEFS",
-    "TARGET_AUTHORITY_AUDIT_ACTIONS",
-    "TARGET_AUTHORITY_ROUTES",
-    "TARGET_AUTHORITY_SYMBOLS",
+    "RETIRED_AUDIT_ACTIONS",
+    "RETIRED_TARGET_AUTHORITY_SYMBOLS",
+    "SEALING_REVISION",
+    "TARGET_RECONCILIATION_AUDIT_ACTION",
+    "TARGET_RECONCILIATION_SYMBOLS",
     "TARGET_ESTATE_MEASUREMENT",
     "TARGET_PROJECTION_SYMBOLS",
     "VENDOR_OWNED_TABLES",

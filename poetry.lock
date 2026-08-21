@@ -384,6 +384,27 @@ url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
 reference = "forgejo"
 
 [[package]]
+name = "dotmac-deployment-control"
+version = "0.1.0a2"
+description = "DotMac Deployment Control — desired deployment intent, immutable plans, approval-gated rollouts, authenticated target acknowledgements and drift reconciliation for licensed deployments (ADR-0033 § 3)"
+optional = false
+python-versions = ">=3.11,<3.14"
+groups = ["main"]
+files = [
+    {file = "dotmac_deployment_control-0.1.0a2-py3-none-any.whl", hash = "sha256:eea89322e0828fd827df59913092bf22874431343738b6794ed31e6c4501c852"},
+    {file = "dotmac_deployment_control-0.1.0a2.tar.gz", hash = "sha256:ca896144462a36e7d74375728abc04c745480b3789a5b83540d4de82c0c3318b"},
+]
+
+[package.dependencies]
+dotmac-kernel = ">=0.1.0a77"
+sqlalchemy = ">=2.0,<3.0"
+
+[package.source]
+type = "legacy"
+url = "https://registry.dotmac.io/api/packages/dotmac/pypi/simple"
+reference = "forgejo"
+
+[[package]]
 name = "dotmac-entitlement-allocation"
 version = "0.1.0a6"
 description = "DotMac Entitlement Allocation — an immutable projection of what an activated contract entitles, validated against the product's manifest-declared capability catalogue (ADR-0006 M4)"
@@ -1614,4 +1635,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "7360ba4505c4feddb80e7f61d8fa6ae9790abb9c8906bd3bca0a3daca2768f4c"
+content-hash = "a3b52f1e5f7ce8b9c92b3b671182ceb7f12bb34a37237e7ca0478538a7f9d36a"

@@ -25,6 +25,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
+from uuid import uuid4
 
 import pytest
 from dotmac_kernel import (
@@ -49,6 +50,7 @@ from sqlalchemy.orm import Session
 from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import adapter as contracts
+from vendor_cp.deployment.adapter import DeploymentTargetFacts
 from vendor_cp.licensing import adapter as licensing
 from vendor_cp.licensing import projection
 from vendor_cp.licensing.delivery_models import (
@@ -302,6 +304,32 @@ def _receive(
 
 
 # ── Delivery staging ────────────────────────────────────────────────────────
+
+
+def _target(
+    db,
+    *,
+    target_ref: str = "dep-1",
+    customer_ref: str = "cust-a",
+    status: TargetStatus = TargetStatus.ACTIVE,
+):
+    """Project a delivery target the way production now does.
+
+    These tests used to call the registration command with caller-chosen values.
+    That path is gone (ADR-0011): the only way a target reaches this projection
+    is as facts the deployment adapter read out of `mod_deploy`. Constructing
+    `DeploymentTargetFacts` here keeps the tests honest about that seam instead
+    of reaching around it.
+    """
+    return projection.reconcile_delivery_target(
+        db,
+        DeploymentTargetFacts(
+            target_id=uuid4(),
+            target_ref=target_ref,
+            customer_ref=customer_ref,
+            status=status,
+        ),
+    )
 
 
 def test_staging_records_the_fact_state_and_event_atomically(db, signer) -> None:
@@ -727,46 +755,41 @@ def test_projection_writes_no_product_entitlement_grants(db, signer) -> None:
 # ── The delivery-target projection has ONE writer ───────────────────────────
 
 
-def test_register_delivery_target_is_the_writer_and_is_idempotent(db) -> None:
-    first = projection.register_delivery_target(
-        db,
-        projection.RegisterTargetCommand(
-            target_ref="dep-1", customer_ref="cust-a", connection_ref="edge-1"
-        ),
-    )
-    second = projection.register_delivery_target(
-        db,
-        projection.RegisterTargetCommand(
-            target_ref="dep-1", customer_ref="cust-a", connection_ref="edge-2"
-        ),
-    )
+def test_reconciling_a_target_is_the_writer_and_is_idempotent(db) -> None:
+    first = _target(db)
+    second = _target(db)
     assert first.id == second.id
-    assert second.connection_ref == "edge-2"
+    assert second.status == TargetStatus.ACTIVE.value
 
 
-def test_a_target_cannot_be_repointed_to_another_customer(db) -> None:
-    """Re-pointing would move a destination between customers, after which the
-    cross-customer staging check could no longer catch it — the guard would
-    still pass while delivering to the wrong party."""
-    projection.register_delivery_target(
-        db, projection.RegisterTargetCommand(target_ref="dep-1", customer_ref="cust-a")
-    )
-    with pytest.raises(BadRequestError, match="between customers"):
-        projection.register_delivery_target(
-            db,
-            projection.RegisterTargetCommand(target_ref="dep-1", customer_ref="cust-b"),
-        )
+def test_a_reconciled_target_follows_the_fleet_owner_across_customers(db) -> None:
+    """The old command REFUSED a customer change, because the customer was a
+    caller's claim and moving it would defeat the cross-customer staging check.
+
+    After ADR-0011 the customer is whatever `mod_deploy` says it is, so a change
+    is a correction to be projected rather than an attack to be blocked — and
+    the staging check still runs against the projected value, which is what
+    keeps the original guarantee intact.
+    """
+    first = _target(db, customer_ref="cust-a")
+    second = _target(db, customer_ref="cust-b")
+    assert first.id == second.id
+    assert second.customer_ref == "cust-b"
+
+
+def test_a_reconciled_target_never_carries_a_connection_ref(db) -> None:
+    """Transport metadata the module does not own is not invented here; the
+    column goes with the rest of the delivery estate at ADR-0010."""
+    assert _target(db).connection_ref is None
 
 
 def test_a_suspended_target_cannot_receive_a_licence(db, signer) -> None:
     issued = _issue(db, signer)
-    projection.register_delivery_target(
+    _target(
         db,
-        projection.RegisterTargetCommand(
-            target_ref="dep-suspended",
-            customer_ref="cust-a",
-            status=TargetStatus.SUSPENDED,
-        ),
+        target_ref="dep-suspended",
+        customer_ref="cust-a",
+        status=TargetStatus.SUSPENDED,
     )
     with pytest.raises(BadRequestError, match="not\\s+active"):
         projection.stage_delivery(
@@ -787,10 +810,7 @@ def test_mapping_a_legacy_delivery_applies_the_same_authorisation(db, signer) ->
     row.target_id = None
     db.flush()
 
-    projection.register_delivery_target(
-        db,
-        projection.RegisterTargetCommand(target_ref="dep-other", customer_ref="cust-z"),
-    )
+    _target(db, target_ref="dep-other", customer_ref="cust-z")
     with pytest.raises(BadRequestError, match="cross-customer"):
         projection.map_legacy_delivery(
             db, delivery_id=delivery.id, target_ref="dep-other"
@@ -858,10 +878,14 @@ def test_proven_identity_is_visible_to_operators(db, signer) -> None:
 def test_every_operational_service_is_reachable_from_a_route() -> None:
     """Structural guard against the gap this batch fixed.
 
-    `register_delivery_target`, `map_legacy_delivery` and `resume_delivery`
-    existed with NO caller outside tests, so a clean deployment could not
-    register a target, map a quarantined delivery, or resume it. Code that only
-    tests call is not a feature.
+    The target writer, `map_legacy_delivery` and `resume_delivery` existed with
+    NO caller outside tests, so a clean deployment could not make a destination
+    available, map a quarantined delivery, or resume it. Code that only tests
+    call is not a feature.
+
+    The target writer is now `reconcile_delivery_target`, reached through
+    `deployment_adapter.resolve_target` — the ADR-0011 cutover changed which
+    service the route calls, not whether a route calls one.
 
     `dispatch_pending` is deliberately ABSENT from this list: generic replay is
     disabled while both reference transports are in-process, because an
@@ -879,7 +903,8 @@ def test_every_operational_service_is_reachable_from_a_route() -> None:
         if getattr(route, "endpoint", None) is not None
     )
     for service_call in (
-        "projection.register_delivery_target",
+        "deployment_adapter.resolve_target",
+        "projection.reconcile_delivery_target",
         "projection.list_delivery_targets",
         "projection.map_legacy_delivery",
         "transport.resume_delivery",
