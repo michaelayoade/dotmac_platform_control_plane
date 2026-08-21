@@ -343,18 +343,18 @@ wmi = ["wmi (>=1.5.1) ; platform_system == \"Windows\""]
 
 [[package]]
 name = "dotmac-approvals"
-version = "0.1.0a4"
+version = "0.1.0a5"
 description = "DotMac dual-plane approval policy revisions, content-bound requests and decisions"
 optional = false
 python-versions = ">=3.11,<3.14"
 groups = ["main"]
 files = [
-    {file = "dotmac_approvals-0.1.0a4-py3-none-any.whl", hash = "sha256:3a43714403b82c6e632feed1ee1aac2a790d05c545f5e71106fc2d10031e86e3"},
-    {file = "dotmac_approvals-0.1.0a4.tar.gz", hash = "sha256:406543ec6291b937b6565b0f54f4cd4ba2b60964c8e10587fdf28fb8d0429bd6"},
+    {file = "dotmac_approvals-0.1.0a5-py3-none-any.whl", hash = "sha256:26beac3654866d413c21bb838b8bf9527233da8478ad429d98310429f978f83a"},
+    {file = "dotmac_approvals-0.1.0a5.tar.gz", hash = "sha256:8e780285bc3561bc9b18e062081fe9770c806c1e28560cba7017790a6eed5101"},
 ]
 
 [package.dependencies]
-dotmac-kernel = ">=0.1.0a61"
+dotmac-kernel = ">=0.1.0a67"
 sqlalchemy = ">=2.0,<3.0"
 
 [package.source]
@@ -385,18 +385,18 @@ reference = "forgejo"
 
 [[package]]
 name = "dotmac-entitlement-allocation"
-version = "0.1.0a4"
+version = "0.1.0a6"
 description = "DotMac Entitlement Allocation — an immutable projection of what an activated contract entitles, validated against the product's manifest-declared capability catalogue (ADR-0006 M4)"
 optional = false
 python-versions = ">=3.11,<3.14"
 groups = ["main"]
 files = [
-    {file = "dotmac_entitlement_allocation-0.1.0a4-py3-none-any.whl", hash = "sha256:7b9695ec5e6bd1071beb98091db51be64309bdf8876b623a421b6ebc807fc083"},
-    {file = "dotmac_entitlement_allocation-0.1.0a4.tar.gz", hash = "sha256:0d0b8338978f34aa77400d2d8273ee869b0314fed5359fc22abf34865146bc69"},
+    {file = "dotmac_entitlement_allocation-0.1.0a6-py3-none-any.whl", hash = "sha256:bf2db1e9776f494e7d831fd3bc67212dff885c24b4d79a7fa401f4aa909590e7"},
+    {file = "dotmac_entitlement_allocation-0.1.0a6.tar.gz", hash = "sha256:c63be1e05ffb3827765ad096c682e58a09a557f1aea2267ae46bf487990fdd61"},
 ]
 
 [package.dependencies]
-dotmac-kernel = ">=0.1.0a56"
+dotmac-kernel = ">=0.1.0a68"
 sqlalchemy = ">=2.0,<3.0"
 
 [package.source]
@@ -1614,4 +1614,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "9c339c6068ac90f63a68fbfc3e2bf42ff260ec76d5bc767ce4153f224da57e9e"
+content-hash = "7360ba4505c4feddb80e7f61d8fa6ae9790abb9c8906bd3bca0a3daca2768f4c"
