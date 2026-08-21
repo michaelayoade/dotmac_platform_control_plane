@@ -174,19 +174,60 @@ def test_the_tablename_scan_can_see_a_planted_model(tmp_path: Path) -> None:
 # ── The deployment-target authority, after the ADR-0011 cutover ────────────
 
 
+def retired_spellings(module: str, name: str) -> list[str]:
+    """Every way the retired symbol was actually reached.
+
+    Qualified attribute access through the module's usual alias, and the
+    from-import that would bind the bare name locally. NOT the bare name on its
+    own: `dotmac_deployment_control` publishes its own `RegisterTargetCommand`,
+    and matching that would report the replacement path as a resurrection of
+    the thing it replaced.
+    """
+    alias = module.rsplit(".", 1)[-1]
+    return [
+        rf"\b{re.escape(alias)}\.{re.escape(name)}\b",
+        rf"from\s+{re.escape(module)}\s+import[^\n]*\b{re.escape(name)}\b",
+    ]
+
+
 def test_the_retired_target_authority_has_no_call_sites() -> None:
-    """Ratcheted at ZERO, per symbol, not per file.
+    """Ratcheted at ZERO, per retired spelling, not per file and not per bare
+    name.
 
     Deleting `register_delivery_target` while `projection.py` survives is the
     transition a path-level ledger misses — and `projection.py` does survive,
     because it still owns the projection the reconciler writes.
     """
-    surviving = {
-        symbol: call_sites(symbol)
-        for symbol in RETIRED_TARGET_AUTHORITY_SYMBOLS
-        if call_sites(symbol)
-    }
+    surviving: dict[str, list[str]] = {}
+    for module, name in RETIRED_TARGET_AUTHORITY_SYMBOLS:
+        hits = sorted(
+            path.relative_to(ROOT).as_posix()
+            for path in _scanned()
+            for pattern in retired_spellings(module, name)
+            if re.search(pattern, path.read_text())
+        )
+        if hits:
+            surviving[f"{module}.{name}"] = hits
     assert surviving == {}, surviving
+
+
+def test_the_retired_scan_does_not_match_the_modules_own_command() -> None:
+    """SENSITIVITY, and the false positive that produced this shape.
+
+    `dotmac_deployment_control.RegisterTargetCommand` is the command the
+    REPLACEMENT path calls. A bare-name ratchet reported it as the retired
+    Vendor command coming back.
+    """
+    module_use = (
+        "import dotmac_deployment_control as deployment_control\n"
+        "deployment_control.RegisterTargetCommand(command_id='x')\n"
+    )
+    vendor_use = "projection.RegisterTargetCommand(target_ref='x')\n"
+    patterns = retired_spellings(
+        "vendor_cp.licensing.projection", "RegisterTargetCommand"
+    )
+    assert not any(re.search(p, module_use) for p in patterns)
+    assert any(re.search(p, vendor_use) for p in patterns)
 
 
 def test_the_zero_ratchet_is_not_vacuous() -> None:

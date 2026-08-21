@@ -124,19 +124,23 @@ FOREIGN_TABLE_MARKERS: Final[tuple[str, ...]] = (
 
 # ── The deployment-target authority, after the cutover ─────────────────────
 
-#: RETIRED by ADR-0011, and ratcheted at ZERO. These are the symbols that made
-#: `licence_delivery_targets` a second authority over deployment-target
-#: identity: each took `target_ref`, `customer_ref`, `connection_ref` and
-#: `status` from its caller.
+#: RETIRED by ADR-0011, and ratcheted at ZERO — as (module, name) pairs, not
+#: bare names.
 #:
-#: Zero call sites, asserted — not "the file is gone". Deleting
-#: `register_delivery_target` while `projection.py` survives is exactly the
-#: transition a path-level ledger misses, and `projection.py` survives here
-#: because it still owns the projection.
-RETIRED_TARGET_AUTHORITY_SYMBOLS: Final[tuple[str, ...]] = (
-    "register_delivery_target",
-    "RegisterTargetCommand",
-    "RegisterTargetRequest",
+#: The qualification is not tidiness. `dotmac_deployment_control` publishes its
+#: OWN `RegisterTargetCommand`, and the module's command is exactly what the
+#: replacement path is supposed to call. A bare-name scan reported the route
+#: tests using the module's command as a resurrection of Vendor's retired one —
+#: a false positive that would have been "fixed" by deleting the honest test or
+#: by lowering the ratchet to nothing.
+#:
+#: So the scan looks for the RETIRED SPELLINGS: the qualified attribute access
+#: (`projection.register_delivery_target`) and the from-import that would bind
+#: the bare name locally. Both are how the retired symbol was actually reached.
+RETIRED_TARGET_AUTHORITY_SYMBOLS: Final[tuple[tuple[str, str], ...]] = (
+    ("vendor_cp.licensing.projection", "register_delivery_target"),
+    ("vendor_cp.licensing.projection", "RegisterTargetCommand"),
+    ("vendor_cp.licensing.schemas", "RegisterTargetRequest"),
 )
 
 #: The replacement seam, and the reason the ratchet above can be zero without
@@ -183,6 +187,7 @@ TARGET_PROJECTION_SYMBOLS: Final[dict[str, dict[str, int]]] = {
     "_authorised_target": {
         "src/vendor_cp/deployment/adapter.py": 1,
         "src/vendor_cp/licensing/projection.py": 4,
+        "tests/unit/test_licence_routes.py": 1,
     },
     "DeliveryTargetResponse": {
         "src/vendor_cp/licensing/schemas.py": 2,
