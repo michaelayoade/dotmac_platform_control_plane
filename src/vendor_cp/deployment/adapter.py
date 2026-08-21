@@ -37,7 +37,7 @@ from uuid import UUID
 
 from dotmac_deployment_control import TargetStatus as ModuleTargetStatus
 from dotmac_deployment_control import get_target
-from dotmac_kernel.errors import NotFoundError
+from dotmac_kernel import NotFoundError
 from sqlalchemy.orm import Session
 
 from vendor_cp.licensing.delivery_models import TargetStatus
