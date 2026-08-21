@@ -168,8 +168,12 @@ disagree, fix the drift.
     decision it was standing in for. Prefer the second: "this assembly is
     deferred by ADR-0007 § 6" is derivable here and permanent until the ADR
     changes, where "another product has no first adopter yet" is a claim about
-    a repository this one cannot see. The delivery-target estate is the first
-    form and its refresh point is ADR-0011 § 4; Brand Profiles is the second.
+    a repository this one cannot see. Brand Profiles is the second form. The
+    delivery-target estate is the first: measured empty on 2026-08-21 against
+    the host Michael named, and its refresh responsibility is not a reminder —
+    it is the under-lock re-check inside the forward revision that measurement
+    licenses (ADR-0011 § 4). An as-of observation whose refresh lives in code
+    cannot quietly age.
 
     The rule exists because a declaration called `AWAITING_RELEASE_TAG` asserted
     a distribution was absent from `pyproject.toml`, was described as gating on
@@ -188,7 +192,11 @@ disagree, fix the drift.
     deployment-target identity — `register_delivery_target` and
     `licence_delivery_targets` own that subject today. Classify by SUBJECT and
     WRITER, never by table name: the narrow name avoided the wrong owner
-    LABEL, not the ownership. A forward vendor revision is owed either way.
+    LABEL, not the ownership. A forward vendor revision is owed either way —
+    the 2026-08-21 measurement returned empty, so it is the sealing shape, and
+    the seal is a REVOKE of `INSERT`/`UPDATE`/`DELETE` from `platform_api`
+    rather than the absence of a caller. A privilege a role still holds is a
+    writer waiting for code.
 
     The inventory is at SYMBOL level with per-file call-site counts in
     `src/vendor_cp/cutover_readiness.py`, ratcheted in both directions and split

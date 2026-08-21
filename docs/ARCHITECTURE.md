@@ -424,13 +424,24 @@ it was given a narrower name. `src/vendor_cp/cutover_readiness.py` inventories
 both halves at symbol level with per-file call-site counts, ratcheted in both
 directions.
 
-Execution is gated on measuring `licence_delivery_targets` and
-`licence_deliveries` on a target Michael names explicitly — never one inferred
-from deployment history. An empty result permits a sealed empty-estate revision
-in the `v013`–`v016` shape; a non-empty result requires backfill into
-`mod_deploy`, comparison, a writer switch, and retention of the Vendor table as
-a module-derived projection until ADR-0010. Either way a forward vendor revision
-is owed.
+**The estate was measured on 2026-08-21 and is EMPTY.** Michael named
+`149.102.158.144` (marker `vendor-cp-prod`); read-only counts on
+`vendor_control_plane` returned zero rows in `licence_delivery_targets`,
+`licence_deliveries` and the other three delivery tables, at applied heads
+`0023_audit_actor_and_forensics` / `rl_0001_release_artifacts` /
+`v014_allocations_authority`. The live database also showed no `mod_deploy`
+schema and no table matching `%deployment%` or `%rollout%`, so the greenfield
+half is observed rather than inferred. Full coordinates in ADR-0011 § 4.
+
+That selects the sealed empty-estate path in the `v013`–`v016` shape: a forward
+vendor revision re-checks both tables under `ACCESS EXCLUSIVE`, aborts on any
+row, and REVOKEs `INSERT`/`UPDATE`/`DELETE` on `licence_delivery_targets` from
+`platform_api` while retaining `SELECT` — `platform_api` holds all four today,
+which is the seal's real work. The table is not dropped; ADR-0010 owns that.
+
+An absence describes a moment, so that under-lock re-check is the measurement's
+refresh responsibility rather than a second observation someone must remember
+to take.
 
 ADR-0010's licence-delivery transfer is the next slice after Deployment Control
 and must land before Brand Profiles. Until then the current logging/offline path

@@ -1,7 +1,9 @@
 # ADR-0011: Compose Deployment Control, and cut deployment-target authority over to it
 
-- **Status:** Accepted (contract). Execution gated on the estate measurement in
-  § 4, which requires a target Michael names explicitly.
+- **Status:** Accepted (contract). § 4's measurement gate is DISCHARGED —
+  Michael named `149.102.158.144` (`vendor-cp-prod`) on 2026-08-21 and the
+  estate measured empty. The empty branch is selected and the slice is
+  unblocked; it is not yet implemented.
 - **Date:** 2026-08-21
 - **Owner:** Vendor control plane
 - **Follows:** ADR-0007 § 4, which sequenced this slice
@@ -155,6 +157,74 @@ governs a cutover with data.
 Either way a forward vendor revision is owed. The earlier draft's claim that
 this slice needs no vendor migration was derived from the wrong classification
 and is withdrawn.
+
+### The measurement, taken 2026-08-21 — EMPTY
+
+Michael named the target: `149.102.158.144`, whose `/etc/dotmac-host-id` marker
+reads `vendor-cp-prod`. Read-only counts, no mutation.
+
+**Coordinates** (`deployment_run`, per `AGENTS.md` rule 17):
+
+| | |
+| --- | --- |
+| Host | `149.102.158.144`, marker `vendor-cp-prod` |
+| Database | `vendor_control_plane` in `dotmac_vendor_control_plane-db-1` |
+| Running image | `ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:56ec553139c449dc7da46a8873b3c03e95a61e43c970cd1675e28a202b2991cc` |
+| Applied heads | `0023_audit_actor_and_forensics`, `rl_0001_release_artifacts`, `v014_allocations_authority` |
+| Observed at | 2026-08-21T12:44:24Z |
+
+**Result:**
+
+| Table | Rows |
+| --- | --- |
+| `licence_delivery_targets` | **0** |
+| `licence_deliveries` | **0** |
+| `licence_delivery_states` | 0 |
+| `licence_delivery_attempts` | 0 |
+| `licence_ack_records` | 0 |
+
+Both tables under § 4 were confirmed to be ordinary tables (`relkind = 'r'`),
+so this is an empty table rather than a missing one — the distinction a bare
+`count(*)` failing open would hide. The other three are recorded because
+ADR-0010 will need them and reading them cost nothing.
+
+**Two facts the measurement added that the lineage could not.** `mod_deploy`
+does not exist on this database, and no table anywhere in it matches
+`%deployment%` or `%rollout%` — so the greenfield half of § 1 is now observed
+rather than inferred from "no revision created one". And `platform_api` holds
+`SELECT, INSERT, UPDATE, DELETE` on `licence_delivery_targets`, which is the
+seal's actual work: revoking the three write privileges while keeping `SELECT`
+is what makes the projection structurally read-only rather than read-only by
+the absence of a caller.
+
+**Production is behind main, and that does not weaken the result.** The applied
+vendor head is `v014`, so `v015` and `v016` have not run there — consistent with
+Commercial Agreements and Licensing remaining below adopted. Neither touches a
+delivery table, so the estate this measurement describes is the one the next
+deploy will carry forward.
+
+**This is a temporal negative, and it is recorded as one.** An absence describes
+a moment. Its refresh responsibility is not prose: the forward revision below
+re-checks both tables under `ACCESS EXCLUSIVE` in the same transaction that
+seals the write path, and fails closed on any row. The observation licenses
+writing that revision; the revision, not this table, is what licenses applying
+it.
+
+### The path this selects
+
+The **empty** branch. The forward vendor revision:
+
+1. takes `ACCESS EXCLUSIVE` on `licence_delivery_targets` and
+   `licence_deliveries`, re-counts both, and aborts if either is non-empty;
+2. REVOKEs `INSERT`, `UPDATE` and `DELETE` on `licence_delivery_targets` from
+   `platform_api`, retaining `SELECT`, and verifies the effective outcome in
+   both directions as `v012`/`v013` did;
+3. leaves the table in place. It is not dropped here — ADR-0010 owns that, and
+   dropping it now would merge two cutovers.
+
+No backfill, no comparison, no writer-switch ceremony: there is nothing to
+migrate, and building parity machinery against an empty estate is the defect
+ADR-0031 seals against and that ADR-0005 already refused once.
 
 ### 5. Retired with this slice
 
