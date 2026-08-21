@@ -49,6 +49,7 @@ from dotmac_kernel.planes import ModulePlane, ModulePlaneSelection
 from dotmac_kernel.prerequisites import (
     IDEMPOTENCY_LEDGER_V1,
     MODULE_DATABASE_ROLES_V1,
+    OUTBOX_RELAY_V1,
     PLATFORM_AUDIT_LOG_V1,
     TENANT_SCOPE_CATALOG_V1,
     PrerequisiteBinding,
@@ -69,6 +70,26 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
     PrerequisiteBinding(
         prerequisite=MODULE_DATABASE_ROLES_V1.name,
         provider_revision=KERNEL_ROOT_REVISION,
+        provider_owner="kernel",
+    ),
+    # `dotmac-approvals` 0.1.0a5 is the first release here to REQUIRE the relay;
+    # a4 did not, so this binding arrives with that repin rather than having been
+    # owed all along. Re-derived at the pin bump, which is when a `requires`
+    # change is the whole point of looking.
+    #
+    # `0012_platform_outbox`, NOT `0011_outbox_relay_leasing`. The effect spans
+    # BOTH planes — `outbox_events` and `platform_outbox_events`, each with its
+    # own claim/settle pair, dispatcher role and grant posture — and 0011
+    # completes only the tenant half. Bound to 0011, a database stopped there
+    # would order correctly, satisfy the binding, and have no platform relay for
+    # the first guarded platform effect to write. Same failure shape as binding
+    # the idempotency ledger to the lineage root instead of `0018`.
+    #
+    # Satisfiable on the production target today: its kernel head is
+    # `0023_audit_actor_and_forensics`, which is downstream of 0012.
+    PrerequisiteBinding(
+        prerequisite=OUTBOX_RELAY_V1.name,
+        provider_revision="0012_platform_outbox",
         provider_owner="kernel",
     ),
     PrerequisiteBinding(

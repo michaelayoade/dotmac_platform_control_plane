@@ -88,8 +88,8 @@ amendment at the owning source. Six slices, three landed.
 | Distribution | Pinned here | Released | Position |
 | --- | --- | --- | --- |
 | `dotmac-kernel` | `0.1.0a77` | a85 | current pin satisfies every composed floor |
-| `dotmac-approvals` | `0.1.0a4` | a5 | **repin owed** — see below |
-| `dotmac-entitlement-allocation` | `0.1.0a4` | a6 | **repin owed** — see below |
+| `dotmac-approvals` | `0.1.0a5` | a5 | current — repin taken with its `outbox_relay.v1` binding |
+| `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current — a5 was never published, do not pin it |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
 | `dotmac-commercial-agreements` | `0.1.0a1` | a1 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
@@ -247,12 +247,17 @@ plan"; short form:
   `public` tables absent and `app_user` holding no module privileges. The
   extraction dossiers record both as `adopted` with this assembly as their
   contract consumer.
-- **The remaining work is a repin, and it is a declaration gap rather than a
-  live fault.** Both are pinned at `0.1.0a4`, and both a4 releases
-  under-declare a prerequisite they write at request time: approvals writes the
-  outbox tables without declaring `outbox_relay.v1` (fixed in a5), and
-  allocation writes the idempotency ledger and platform audit log without
-  declaring either (fixed in a6; a5 was never published).
+- **The repin is TAKEN.** It was a declaration gap rather than a live fault:
+  both a4 releases under-declared a prerequisite they write at request time —
+  approvals wrote the outbox tables without declaring `outbox_relay.v1` (fixed
+  in a5), and allocation wrote the idempotency ledger and platform audit log
+  without declaring either (fixed in a6; a5 was never published). The pins are
+  now `0.1.0a5` and `0.1.0a6`, and `outbox_relay.v1` is bound to kernel
+  `0012_platform_outbox` — the revision that completes BOTH planes of the
+  effect, not `0011_outbox_relay_leasing`, which completes only the tenant
+  half. The three revisions this composes (`ap_0002`, `ea_0002`, `ea_0003`)
+  are verification-only: each `upgrade()` body is `require_prerequisites` and
+  contains no `op.<ddl>` call at all.
 - This assembly is not exposed to the runtime half. It runs the whole kernel
   base lineage, so `public.outbox_events`, `public.platform_outbox_events` and
   both request-time tables exist here. An adopter running only its own lineage

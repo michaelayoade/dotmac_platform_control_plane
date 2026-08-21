@@ -33,11 +33,11 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
         "source": "forgejo",
     }
     assert dependencies["dotmac-entitlement-allocation"] == {
-        "version": "0.1.0a4",
+        "version": "0.1.0a6",
         "source": "forgejo",
     }
     assert dependencies["dotmac-approvals"] == {
-        "version": "0.1.0a4",
+        "version": "0.1.0a5",
         "source": "forgejo",
     }
     assert dependencies["dotmac-commercial-agreements"] == {

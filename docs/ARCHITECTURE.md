@@ -56,7 +56,7 @@ it owns and — just as importantly — what it must never become.
   no module schema holds a tenant-scoped table — and says plainly that the full
   four-fact proof (platform tables built, tenant tables absent, *because of the
   selection*) lands with the first shadow composition.
-- `dotmac-approvals==0.1.0a4` is the **approval authority** (ADR-0005). Pinned,
+- `dotmac-approvals==0.1.0a5` is the **approval authority** (ADR-0005). Pinned,
   its public `versions_dir()` locator composed, `ModulePlane.PLATFORM` selected,
   and `platform_api` holding DML on `mod_approvals` — restored by vendor
   migration `v013`, which reverses v012's shadow revoke as a forward revision and
@@ -99,10 +99,11 @@ it owns and — just as importantly — what it must never become.
   **Lifecycle: adopted since 2026-08-17.** Production deploy `32022599873`
   runs `mod_approvals` live with the legacy `public` tables absent and
   `app_user` holding no module privilege; the extraction dossier records this
-  assembly as the contract consumer. One item survives adoption: the pin is
-  `0.1.0a4`, which writes the outbox relay without declaring
-  `outbox_relay.v1`. The repin to a5 and its binding are ADR-0005
-  § "Adoption plan".
+  assembly as the contract consumer. The one item that survived adoption is now
+  closed: a4 wrote the outbox relay without declaring `outbox_relay.v1`, and the
+  repin to `0.1.0a5` composes `ap_0002_outbox_relay` — a DDL-free revision whose
+  entire `upgrade()` is `require_prerequisites` — against the
+  `outbox_relay.v1` binding added beside it.
 - `dotmac-release-catalog==0.1.0a4` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration
@@ -115,9 +116,13 @@ it owns and — just as importantly — what it must never become.
   The declaration and the database disagreed, and nothing here looked because
   nothing audited the live catalogue. a4 moves them to `platform_tables`
   (ADR-0023), which is what makes the declaration true.
-- `dotmac-entitlement-allocation==0.1.0a4` is the allocation authority under
+- `dotmac-entitlement-allocation==0.1.0a6` is the allocation authority under
   ADR-0006. Its manifest and public lineage are composed, `v014` retired the
   empty legacy tables and local writer, and Vendor retains one typed adapter.
+  a6 declares the two kernel effects `stage_allocation` writes at request time
+  and composes the DDL-free `ea_0002`/`ea_0003` verification revisions; both
+  effects were already bound. `0.1.0a5` carried only half of that and was never
+  published — do not pin it.
 - `dotmac-commercial-agreements==0.1.0a1` is the commercial-agreement authority
   under ADR-0008. Its platform-only manifest and `cg_0001_agreements` lineage
   are composed. `v015` checks the greenfield premise under lock, drops the empty

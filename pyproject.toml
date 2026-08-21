@@ -40,12 +40,12 @@ dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
 # a4 for the same reason as the release catalogue above: its `allocations` /
 # `allocation_entries` become declared `platform_tables`, so the composed
 # live-catalogue audit can hold them to the plane they are actually built on.
-dotmac-entitlement-allocation = { version = "0.1.0a4", source = "forgejo" }
+dotmac-entitlement-allocation = { version = "0.1.0a6", source = "forgejo" }
 # The dual-plane approval-state authority (ADR-0005/ADR-0028), composed on its
 # PLATFORM plane only. Vendor migration `v013` restored the module's online DML,
 # dropped the empty legacy tables and retired the local writer; Vendor retains
 # only its typed adapter.
-dotmac-approvals = { version = "0.1.0a4", source = "forgejo" }
+dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor

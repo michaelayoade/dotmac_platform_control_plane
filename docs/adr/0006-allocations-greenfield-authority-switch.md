@@ -152,9 +152,9 @@ head and live `mod_ealloc` schema. It is held at `adopted`, not advanced to
 `reuse-proven`, until a second real vendor or OEM control plane completes its
 own cutover — also the dossier's call, not this one's.
 
-## Adoption plan — what is still owed
+## Adoption plan — TAKEN
 
-**Repin to `0.1.0a6`.** This assembly pins `0.1.0a4`, which declares neither of
+**Repin to `0.1.0a6` — DONE.** This assembly previously pinned `0.1.0a4`, which declared neither of
 the two kernel effects `stage_allocation` writes at request time: the
 idempotency ledger it delegates at-most-once execution to, and the platform
 audit log it writes inside that operation. a6 declares both and adds the

@@ -165,11 +165,18 @@ are both required: either alone leaves a reader unable to re-read what was read.
 The dossier is the authority; this section cites it rather than restating
 adoption as a local fact.
 
-## Adoption plan — what is still owed
+## Adoption plan — TAKEN
 
-Adoption is not the end of the plan, and one item survives it.
+Adoption was not the end of the plan, and one item survived it. It is now
+closed: this assembly pins `0.1.0a5` and binds `outbox_relay.v1` to kernel
+`0012_platform_outbox` in the same change, because `ap_0002_outbox_relay`
+resolves that binding at `alembic upgrade` and a repin without it would fail
+the migration rather than the review.
 
-**Repin to `0.1.0a5`.** This assembly pins `0.1.0a4`. Every release through a4
+The reasoning that motivated it is kept below, because the defect it describes
+is the reason the binding exists.
+
+**Repin to `0.1.0a5` — DONE.** This assembly previously pinned `0.1.0a4`. Every release through a4
 writes `public.outbox_events` and `public.platform_outbox_events` at request
 time — `emit_platform_events` calls the kernel relay — without declaring
 `outbox_relay.v1`. a5 declares it and adds `ap_0002_outbox_relay`, a
