@@ -72,3 +72,33 @@ parity evidence.
   adoption evidence is updated only after Vendor actually runs the released
   module with the former local writer absent.
 - Licensing issuer is the next ADR-0007 authority slice.
+
+## Lifecycle — adopted 2026-08-21
+
+Composed and authoritative in code is not adopted. This one ran.
+
+Deploy run `32485479666` took production to
+`af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e` at image
+`sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d`,
+applying `v015` along with kernel `0024`–`0026`, `v016` and the a5/a6
+verification revisions in a single run.
+
+Verified directly against that database at 2026-08-21T14:17:32Z rather than
+inferred from the deploy succeeding:
+
+- applied heads `ap_0002_outbox_relay`, `ea_0003_platform_audit_log`,
+  `rl_0001_release_artifacts`, `v016_licensing_authority`;
+- `mod_agreements` live;
+- `public.contracts` and `public.contract_lines` **absent**, which is the
+  local-writer half of the adoption test;
+- `app_user` holding **zero** privileges on any `mod_*` schema.
+
+The greenfield premise `v015` rechecks under `ACCESS EXCLUSIVE` held: the
+migration did not abort, so the legacy tables were empty at execution time as
+well as at observation time.
+
+**Owed at the extraction source:** `packages/dotmac-commercial-agreements/EXTRACTION.toml`
+in `dotmac_starter_mt` should gain this assembly as a contract consumer and this
+run as adoption evidence. That dossier is the authority for adoption
+(`AGENTS.md` rule 17); this section cites what it will record, and does not
+substitute for it.

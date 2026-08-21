@@ -211,11 +211,21 @@ and the sealed path is correct either way. It changes what the measurement may
 be cited FOR. It licenses sealing; it does not license skipping the recheck,
 and it is not evidence that the registration path is unreachable.
 
-**Production is behind main, and that does not weaken the result.** The applied
-vendor head is `v014`, so `v015` and `v016` have not run there — consistent with
-Commercial Agreements and Licensing remaining below adopted. Neither touches a
-delivery table, so the estate this measurement describes is the one the next
-deploy will carry forward.
+**Production was behind main when this was taken, and has since caught up.** At
+12:44Z the applied vendor head was `v014`. Deploy run `32485479666` then took
+production to `af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e` at image
+`sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d`,
+applying kernel `0024`–`0026`, `v015`, `v016` and the a5/a6 verification
+revisions in one run.
+
+**Re-verified at 2026-08-21T14:17:32Z on the new image and heads
+(`ap_0002_outbox_relay`, `ea_0003_platform_audit_log`,
+`rl_0001_release_artifacts`, `v016_licensing_authority`): the delivery estate is
+still zero, and `mod_deploy` is still absent.** The measurement therefore held
+across a deploy that rewrote five other lineages, which is stronger evidence
+than the single observation was — and it is the only reason the earlier
+observation is still usable. The refresh happened because the state changed, not
+because a date passed.
 
 **This is a temporal negative, and it is recorded as one.** An absence describes
 a moment. Its refresh responsibility is not prose: the forward revision below

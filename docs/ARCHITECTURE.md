@@ -236,10 +236,27 @@ writer proven absent — not by landing code, and not by a neighbouring owner
 having done it.
 
 Approvals and Entitlement Allocation cleared that bar on 2026-08-17 with
-production deploy `32022599873` (ADR-0005 and ADR-0006 § "Adoption plan" carry
-the evidence and the repins each still owes). Commercial Agreements and
-Licensing switched AFTER that deploy and remain below adopted until the next
-one runs them.
+production deploy `32022599873`; ADR-0005 and ADR-0006 § "Adoption plan" carry
+the evidence and the repins, both now discharged.
+
+**Commercial Agreements and Licensing cleared it on 2026-08-21.** Deploy run
+`32485479666` took production to `af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e` at
+image `sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d`,
+applying kernel `0024`–`0026`, `v015`, `v016` and the a5/a6 verification
+revisions in one run. Verified directly on that database at 14:17Z: applied
+heads `ap_0002_outbox_relay`, `ea_0003_platform_audit_log`,
+`rl_0001_release_artifacts`, `v016_licensing_authority`; `mod_agreements` and
+`mod_licensing` live with six licensing tables; **all eleven legacy tables
+absent** — `contracts`, `contract_lines`, the five local issuer tables, and the
+approval and allocation pairs; and `app_user` holding **zero** privileges on any
+`mod_*` schema, which is what the platform-plane isolation actually is.
+
+That same run is the a5/a6 pins' proof: `ap_0002` and `ea_0003` are DDL-free
+revisions whose entire bodies verify their declared prerequisites, so they were
+checked against the real database at deploy rather than only in rehearsal.
+
+So all five composed owners are now adopted. What remains below adopted is
+Vendor's own retained delivery path, which ADR-0010 retires rather than adopts.
 
 ## In-place module recomposition (ADR-0007)
 
@@ -470,8 +487,10 @@ observe, so it is background rather than the load-bearing reason — as of
 deferral lifts: no model, service, migration or template in this assembly holds
 a brand record, which is measured rather than assumed.
 
-Commercial Agreements and Licensing are composed and authoritative under
-ADR-0008/0009, but remain below adopted until they actually run.
+Commercial Agreements and Licensing are composed, authoritative under
+ADR-0008/0009, and **adopted since 2026-08-21** — deploy run `32485479666` ran
+them in production with all eleven legacy tables absent. See the lifecycle
+section above for the verified evidence.
 
 ## Migrating existing products
 
