@@ -152,21 +152,26 @@ head and live `mod_ealloc` schema. It is held at `adopted`, not advanced to
 `reuse-proven`, until a second real vendor or OEM control plane completes its
 own cutover — also the dossier's call, not this one's.
 
-## Adoption plan — what is still owed
+## Adoption plan — discharged 2026-08-21
 
-**Repin to `0.1.0a6`.** This assembly pins `0.1.0a4`, which declares neither of
-the two kernel effects `stage_allocation` writes at request time: the
+**Repin to `0.1.0a6` — done.** This assembly pinned `0.1.0a4`, which declared
+neither of the two kernel effects `stage_allocation` writes at request time: the
 idempotency ledger it delegates at-most-once execution to, and the platform
-audit log it writes inside that operation. a6 declares both and adds the
-DDL-free `ea_0002` and `ea_0003` verification revisions. (`0.1.0a5` carried
-only the first half and was deliberately never published; do not pin it.)
+audit log it writes inside that same operation. a6 declares both and adds the
+DDL-free `ea_0002` and `ea_0003` verification revisions.
 
-Both effects are already bound in `ASSEMBLY_PREREQUISITE_BINDINGS` — to kernel
-`0018_idempotency_one_owner` and `0026_platform_audit_log` — because Commercial
-Agreements and Licensing declare them. So unlike the approvals repin, this one
-adds no binding; it makes an existing one carry a consumer that was silently
-depending on it. Verify both DDL-free revisions against the migrated database
-before deployment.
+`0.1.0a5` carried only the first half of that repair and was deliberately never
+published; it must not be pinned, and
+`test_the_unpublished_release_is_never_pinned` refuses it rather than leaving
+that to memory.
+
+**No binding was added, and that is the point of the exercise.** Both effects
+were already bound — to kernel `0018_idempotency_one_owner` and
+`0026_platform_audit_log` — because Commercial Agreements and Licensing declare
+them. So unlike the approvals repin, this one gave an existing binding a
+consumer that had been depending on it silently since a1. The bindings test now
+derives the required set from every composed manifest, which is what turns that
+from a thing someone noticed into a thing the build checks.
 
 **Not owed:** delivery or acknowledgement state here. Licence issuance owns
 that lifecycle, and ADR-0010 moves its transport half to Integrator.

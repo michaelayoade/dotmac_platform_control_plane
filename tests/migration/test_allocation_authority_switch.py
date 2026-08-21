@@ -23,9 +23,15 @@ from vendor_cp.migrations import make_alembic_config
 #: they are separate heads, and `mod_ealloc` would not exist. A pre-v014 database
 #: is every head EXCEPT the one under test, which Alembic cannot express in a
 #: single target, so the module heads are applied explicitly first.
+#:
+#: `ea_0003_platform_audit_log` rather than `ea_0001_allocations` since the a6
+#: repin: a6 chains two DDL-free verification revisions after the tables, so
+#: naming the lineage ROOT here would leave the module short of its head and
+#: quietly stop exercising the prerequisite checks in the pre-switch state this
+#: test is meant to reproduce faithfully.
 PRE_SWITCH_TARGETS = (
     "rl_0001_release_artifacts",
-    "ea_0001_allocations",
+    "ea_0003_platform_audit_log",
     "v013_approvals_authority_switch",
 )
 PRIOR_REVISION = "v013_approvals_authority_switch"

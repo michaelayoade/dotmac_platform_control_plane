@@ -28,6 +28,7 @@ from dotmac_kernel.prerequisites import (
     BINDINGS_ENV_VAR,
     IDEMPOTENCY_LEDGER_V1,
     MODULE_DATABASE_ROLES_V1,
+    OUTBOX_RELAY_V1,
     PLATFORM_AUDIT_LOG_V1,
     TENANT_SCOPE_CATALOG_V1,
 )
@@ -48,7 +49,9 @@ def test_the_assembly_binds_the_required_kernel_effects() -> None:
     0001 observably creates `public.tenants` in this database.
 
     Commercial Agreements declares the idempotency and platform-audit effects;
-    their bindings name the exact supplying kernel revisions.
+    Approvals a5 declares the outbox relay. Each binding names the exact
+    supplying revision, which for a multi-part effect is the DESCENDANT that
+    completes it, never the lineage root that begins it.
     """
     assert {
         (binding.prerequisite, binding.provider_revision, binding.provider_owner)
@@ -57,8 +60,32 @@ def test_the_assembly_binds_the_required_kernel_effects() -> None:
         (MODULE_DATABASE_ROLES_V1.name, KERNEL_ROOT_REVISION, "kernel"),
         (TENANT_SCOPE_CATALOG_V1.name, KERNEL_ROOT_REVISION, "kernel"),
         (IDEMPOTENCY_LEDGER_V1.name, "0018_idempotency_one_owner", "kernel"),
+        (OUTBOX_RELAY_V1.name, "0012_platform_outbox", "kernel"),
         (PLATFORM_AUDIT_LOG_V1.name, "0026_platform_audit_log", "kernel"),
     }
+
+
+def test_every_effect_a_composed_module_declares_is_bound() -> None:
+    """The derivation the exact set above cannot do on its own.
+
+    Approvals wrote both relay tables from a1 and declared nothing until a5, so
+    for three releases this assembly satisfied an effect no test could see it
+    needed. Deriving the requirement from the composed manifests is what makes
+    the next undeclared-then-declared effect fail here instead of at deploy.
+
+    `tenant_requires` is deliberately NOT collected. It is the requirement of a
+    plane this assembly does not install, and demanding a binding for it would
+    reintroduce the a60 confusion in miniature — availability standing in for
+    intent. `platform_requires` IS collected, because the platform plane is the
+    one selected here.
+    """
+    bound = {binding.prerequisite for binding in ASSEMBLY_PREREQUISITE_BINDINGS}
+    required: set[str] = set()
+    for module in build_spec().modules:
+        required.update(getattr(module, "requires", ()) or ())
+        required.update(getattr(module, "platform_requires", ()) or ())
+    assert required <= bound, sorted(required - bound)
+    assert required, "no composed module declares a prerequisite at all"
 
 
 def test_a_bound_tenant_catalogue_selects_nothing_by_itself() -> None:

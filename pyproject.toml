@@ -37,15 +37,39 @@ dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
 # Vendor retains only its typed assembly adapter. Exact-pinned from the private
 # index; never a path dependency and never a silent dual-write.
 #
-# a4 for the same reason as the release catalogue above: its `allocations` /
-# `allocation_entries` become declared `platform_tables`, so the composed
-# live-catalogue audit can hold them to the plane they are actually built on.
-dotmac-entitlement-allocation = { version = "0.1.0a4", source = "forgejo" }
+# a4 moved its `allocations` / `allocation_entries` to declared
+# `platform_tables`, so the composed live-catalogue audit can hold them to the
+# plane they are actually built on.
+#
+# a6 declares the two kernel effects `stage_allocation` writes at REQUEST time
+# and every release through a4 consumed without naming: the idempotency ledger
+# it delegates at-most-once execution to, and the platform audit log it writes
+# inside that same operation. `ea_0002` and `ea_0003` are DDL-free revisions
+# whose entire bodies verify those prerequisites, so the dependency fails at
+# deploy rather than on the first allocation.
+#
+# a5 is skipped deliberately and must never be pinned: it carried only the first
+# half of that repair and was never published to the index.
+dotmac-entitlement-allocation = { version = "0.1.0a6", source = "forgejo" }
 # The dual-plane approval-state authority (ADR-0005/ADR-0028), composed on its
 # PLATFORM plane only. Vendor migration `v013` restored the module's online DML,
 # dropped the empty legacy tables and retired the local writer; Vendor retains
 # only its typed adapter.
-dotmac-approvals = { version = "0.1.0a4", source = "forgejo" }
+#
+# a5 declares `outbox_relay.v1`. Every release through a4 called
+# `emit_platform_events` -> `enqueue_platform_event`, writing
+# `public.platform_outbox_events` at REQUEST time, while declaring nothing:
+# `ap_0001` creates the approval tables in `mod_approvals` and the relay is the
+# kernel's. An adopter running only its own lineage took `UndefinedTable` on the
+# first approval decision that emitted an event, with the approval transaction
+# rolling back alongside it.
+#
+# This assembly was never exposed to that, because it runs the whole kernel base
+# lineage and therefore already has both relay tables. What it lacked was the
+# PROOF — which is why the repin comes with the `outbox_relay.v1` binding in
+# `vendor_cp.migration_bindings` and the DDL-free `ap_0002_outbox_relay`
+# verification revision. See ADR-0005 s "Adoption plan".
+dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor

@@ -34,7 +34,19 @@ def test_entitlement_allocation_is_exact_pinned_from_forgejo() -> None:
     dependency = config["tool"]["poetry"]["dependencies"][
         "dotmac-entitlement-allocation"
     ]
-    assert dependency == {"version": "0.1.0a4", "source": "forgejo"}
+    assert dependency == {"version": "0.1.0a6", "source": "forgejo"}
+
+
+def test_the_unpublished_release_is_never_pinned() -> None:
+    """a5 carried only the first half of the persisted-dependency repair and was
+    deliberately never published to the index. Pinning it would resolve to
+    nothing; naming it here is cheaper than rediscovering that from a failed
+    install."""
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    dependency = config["tool"]["poetry"]["dependencies"][
+        "dotmac-entitlement-allocation"
+    ]
+    assert dependency["version"] != "0.1.0a5"
 
 
 def test_the_module_owns_a_platform_plane_and_the_names_are_free() -> None:

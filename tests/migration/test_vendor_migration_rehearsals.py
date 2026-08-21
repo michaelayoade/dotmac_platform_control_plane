@@ -29,12 +29,29 @@ from vendor_cp.migrations import composed_version_locations, make_alembic_config
 KERNEL_HEAD = "0026_platform_audit_log"  # current pin (0.1.0a77)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
-ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
-# A STATIC head of its own lineage — but not a version ROW once `v012` depends
-# on it, because a `depends_on` edge makes its target an ancestor of the
-# depending revision. `alembic_version` holds current heads, not every applied
-# revision, so this appears in `script.get_heads()` and not in `_versions()`.
-APPROVALS_HEAD = "ap_0001_approvals"
+
+# The a5/a6 repin extended two module lineages, and it changed the version-ROW
+# topology as well as the head names — which is the whole reason these rehearsals
+# name revisions instead of using `@head` aliases.
+#
+# Before: `v012` depends on `ap_0001_approvals` and `v014` on
+# `ea_0001_allocations`, so each module head was an ANCESTOR of a vendor
+# revision. A `depends_on` edge makes its target an ancestor of the depending
+# revision, and `alembic_version` holds current heads rather than every applied
+# revision — so both appeared in `script.get_heads()` and NOT in `_versions()`.
+#
+# After: the vendor `depends_on` edges still point at the lineage ROOTS, while
+# the heads have moved on to DDL-free verification revisions nothing depends on.
+# `ap_0002_outbox_relay` and `ea_0003_platform_audit_log` are therefore both
+# static heads AND version rows, and the `_versions()` expectations below grew by
+# exactly those two.
+#
+# The vendor edges are deliberately NOT re-pointed at the new heads. They express
+# what v012 and v014 need — the approval and allocation TABLES — and a
+# verification revision is not that. Widening a dependency to whatever happens to
+# be at the tip would make every future module release a vendor-lineage change.
+ENTITLEMENT_ALLOCATION_HEAD = "ea_0003_platform_audit_log"
+APPROVALS_HEAD = "ap_0002_outbox_relay"
 COMMERCIAL_AGREEMENTS_HEAD = "cg_0001_agreements"
 LICENSING_HEAD = "li_0001_licensing"
 VENDOR_ROOT = "v001_vendor_accounts"
@@ -185,9 +202,15 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # They are still static heads, and `test_seven_head_topology` asserts all seven
     # through `script.get_heads()`. Listing them here as well would report them
     # missing on a perfectly complete database.
+    #
+    # The approvals and allocation HEADS are a different case since the a5/a6
+    # repin: the vendor edges depend on those lineages' ROOTS, so their new
+    # DDL-free tips are depended on by nothing and remain version rows.
     assert _versions(scratch_db) == {
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
+        APPROVALS_HEAD,
+        ENTITLEMENT_ALLOCATION_HEAD,
     }
 
 
@@ -431,6 +454,8 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     assert _versions(scratch_db) == {
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
+        APPROVALS_HEAD,
+        ENTITLEMENT_ALLOCATION_HEAD,
     }
 
 
@@ -478,6 +503,8 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     assert _versions(scratch_db) == {
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
+        APPROVALS_HEAD,
+        ENTITLEMENT_ALLOCATION_HEAD,
     }
 
 
@@ -521,6 +548,8 @@ def test_kernel_advance_keeps_vendor_head_independent(
         synth_rev,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
+        APPROVALS_HEAD,
+        ENTITLEMENT_ALLOCATION_HEAD,
     }
 
 

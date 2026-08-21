@@ -165,31 +165,40 @@ are both required: either alone leaves a reader unable to re-read what was read.
 The dossier is the authority; this section cites it rather than restating
 adoption as a local fact.
 
-## Adoption plan — what is still owed
+## Adoption plan — discharged 2026-08-21
 
-Adoption is not the end of the plan, and one item survives it.
+Adoption is not the end of the plan, and one item survived it. It is now closed.
 
-**Repin to `0.1.0a5`.** This assembly pins `0.1.0a4`. Every release through a4
-writes `public.outbox_events` and `public.platform_outbox_events` at request
-time — `emit_platform_events` calls the kernel relay — without declaring
+**Repin to `0.1.0a5` — done.** This assembly pinned `0.1.0a4`. Every release
+through a4 wrote `public.outbox_events` and `public.platform_outbox_events` at
+request time — `emit_platform_events` calls the kernel relay — without declaring
 `outbox_relay.v1`. a5 declares it and adds `ap_0002_outbox_relay`, a
 verification-only revision whose entire body is `require_prerequisites`.
 
-This assembly is not exposed to the runtime half of that defect. It runs the
+This assembly was never exposed to the runtime half of that defect. It runs the
 whole kernel base lineage, so both relay tables exist here; an adopter running
 only its own lineage would take an `UndefinedTable` on the first approval
 decision that emitted an event, with the approval transaction rolling back
-alongside it. What is missing here is the PROOF, not the table — which is
-exactly the kind of gap that stays invisible until an assembly that does not
-run the kernel lineage copies this one.
+alongside it. What was missing here was the PROOF, not the table — exactly the
+kind of gap that stays invisible until an assembly that does not run the kernel
+lineage copies this one.
 
-The repin slice moves the pin, adds an `outbox_relay.v1` binding to
-`ASSEMBLY_PREREQUISITE_BINDINGS` — expected provider `0012_platform_outbox`,
-the descendant completing both planes of the effect, to be PROVEN by
-`tests/architecture/test_migration_prerequisite_bindings.py` rather than
-assumed — and verifies `ap_0002` against the migrated database before deploy.
-It is independent of the ADR-0007 slices and may be taken in any order relative
-to them. See `docs/cutover-readiness.md`.
+The repin moved the pin and added the `outbox_relay.v1` binding to
+`ASSEMBLY_PREREQUISITE_BINDINGS`, naming provider `0012_platform_outbox`. Two
+things about that revision are worth stating, because both were reasoned rather
+than assumed:
+
+- It is the DESCENDANT that completes the effect, not the root that begins it.
+  `0008_outbox_inbox` creates the tenant table, `0011_outbox_relay_leasing` adds
+  the lease and retry columns, and `0012_platform_outbox` adds the platform peer
+  and the claim/settle pair. The effect spans all three, so binding 0008 would
+  name a revision supplying part of an effect — the same error as binding a
+  lineage root for the idempotency ledger instead of `0018`.
+- The starter reference assembly binds the same revision, which is corroboration
+  rather than derivation: the binding is checked against this database by
+  `tests/architecture/test_migration_prerequisite_bindings.py`, and that test
+  now also DERIVES the required set from the composed manifests, so the next
+  effect a module starts declaring fails here rather than at deploy.
 
 **Not owed:** a second product's cutover. ERP is the remaining candidate and
 owns its own retirement; nothing in this assembly gates it.

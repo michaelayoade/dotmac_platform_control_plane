@@ -88,8 +88,8 @@ amendment at the owning source. Six slices, three landed.
 | Distribution | Pinned here | Released | Position |
 | --- | --- | --- | --- |
 | `dotmac-kernel` | `0.1.0a77` | a85 | current pin satisfies every composed floor |
-| `dotmac-approvals` | `0.1.0a4` | a5 | **repin owed** — see below |
-| `dotmac-entitlement-allocation` | `0.1.0a4` | a6 | **repin owed** — see below |
+| `dotmac-approvals` | `0.1.0a5` | a5 | current |
+| `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current (a5 unpublished; never pin it) |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
 | `dotmac-commercial-agreements` | `0.1.0a1` | a1 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
@@ -247,30 +247,31 @@ plan"; short form:
   `public` tables absent and `app_user` holding no module privileges. The
   extraction dossiers record both as `adopted` with this assembly as their
   contract consumer.
-- **The remaining work is a repin, and it is a declaration gap rather than a
-  live fault.** Both are pinned at `0.1.0a4`, and both a4 releases
-  under-declare a prerequisite they write at request time: approvals writes the
-  outbox tables without declaring `outbox_relay.v1` (fixed in a5), and
-  allocation writes the idempotency ledger and platform audit log without
-  declaring either (fixed in a6; a5 was never published).
-- This assembly is not exposed to the runtime half. It runs the whole kernel
+- **The repin is done.** Both were pinned at `0.1.0a4`, and both a4 releases
+  under-declared a prerequisite they write at request time: approvals wrote the
+  outbox tables without declaring `outbox_relay.v1` (a5), and allocation wrote
+  the idempotency ledger and platform audit log without declaring either (a6;
+  a5 was never published and is refused by a test). Approvals a5 brought the
+  `outbox_relay.v1` binding to `0012_platform_outbox`; allocation a6 needed no
+  new binding, because Commercial Agreements and Licensing had already bound
+  both effects.
+- This assembly was never exposed to the runtime half. It runs the whole kernel
   base lineage, so `public.outbox_events`, `public.platform_outbox_events` and
   both request-time tables exist here. An adopter running only its own lineage
   would take an `UndefinedTable` on the first decision that emitted an event;
-  this one will not. What is missing is the proof, not the table.
+  this one would not. What was missing was the proof, not the table — and the
+  bindings test now DERIVES the required effect set from the composed
+  manifests, so the next silently-consumed effect fails here.
 
 ## Recommended PR sequence
 
 Three changes, in this order, each separately reviewable.
 
-**1. Repin correctness — `version:patch`.** Correct the Approvals and Allocation
-adoption documentation; pin approvals `0.1.0a5` and entitlement-allocation
-`0.1.0a6` (both tagged); add the `outbox_relay.v1` binding to
-`ASSEMBLY_PREREQUISITE_BINDINGS` — expected provider `0012_platform_outbox`, the
-descendant completing both planes of the effect, PROVEN by
-`test_migration_prerequisite_bindings` rather than asserted; regenerate the
-lock; verify `ap_0002`, `ea_0002` and `ea_0003` against the migrated database.
-Moves no authority and touches no slice below.
+**1. Repin correctness — `version:patch`. LANDED.** Approvals `0.1.0a5` and
+entitlement-allocation `0.1.0a6` are pinned, the `outbox_relay.v1` binding names
+`0012_platform_outbox`, the lock is regenerated, and the DDL-free `ap_0002`,
+`ea_0002` and `ea_0003` revisions run in the composed migration rehearsal. Moved
+no authority and touched no slice below.
 
 **2. Deployment Control composition — `version:minor`.** Pin `0.1.0a2`; compose
 its manifest and `versions_dir()` so `dc_0001` runs; leave

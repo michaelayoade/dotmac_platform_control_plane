@@ -33,8 +33,11 @@ it owns and — just as importantly — what it must never become.
     lineage, so `public.tenants`, `public.tenant_domains` and
     `public.app_current_tenant_id()` all exist here. Kernel
     `0018_idempotency_one_owner` and `0026_platform_audit_log` supply the two
-    request-time effects Commercial Agreements and Licensing declare; those
-    effects are bound explicitly rather than inferred from composition order.
+    request-time effects Commercial Agreements, Licensing and Entitlement
+    Allocation declare, and `0012_platform_outbox` supplies the relay Approvals
+    a5 declares; those effects are bound explicitly rather than inferred from
+    composition order. A multi-part effect binds the DESCENDANT that completes
+    it — 0012 rather than 0008, which creates only the tenant half.
   - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It
     selects `ModulePlane.PLATFORM` for `approvals`, the one selectable module
     composed here; Release Catalog, Entitlement Allocation, Commercial
@@ -56,7 +59,7 @@ it owns and — just as importantly — what it must never become.
   no module schema holds a tenant-scoped table — and says plainly that the full
   four-fact proof (platform tables built, tenant tables absent, *because of the
   selection*) lands with the first shadow composition.
-- `dotmac-approvals==0.1.0a4` is the **approval authority** (ADR-0005). Pinned,
+- `dotmac-approvals==0.1.0a5` is the **approval authority** (ADR-0005). Pinned,
   its public `versions_dir()` locator composed, `ModulePlane.PLATFORM` selected,
   and `platform_api` holding DML on `mod_approvals` — restored by vendor
   migration `v013`, which reverses v012's shadow revoke as a forward revision and
@@ -99,10 +102,17 @@ it owns and — just as importantly — what it must never become.
   **Lifecycle: adopted since 2026-08-17.** Production deploy `32022599873`
   runs `mod_approvals` live with the legacy `public` tables absent and
   `app_user` holding no module privilege; the extraction dossier records this
-  assembly as the contract consumer. One item survives adoption: the pin is
-  `0.1.0a4`, which writes the outbox relay without declaring
-  `outbox_relay.v1`. The repin to a5 and its binding are ADR-0005
-  § "Adoption plan".
+  assembly as the contract consumer.
+
+  **The a5 repin closed the one item that survived adoption.** Every release
+  through a4 called `emit_platform_events` and wrote
+  `public.platform_outbox_events` at request time while declaring no effect at
+  all. a5 declares `outbox_relay.v1`, `ap_0002_outbox_relay` verifies it at
+  deploy, and `ASSEMBLY_PREREQUISITE_BINDINGS` now names
+  `0012_platform_outbox` as its provider. Nothing about this database changed:
+  it always ran the whole kernel base lineage and always had both relay tables.
+  What changed is that the dependency is now DECLARED, bound and verified rather
+  than living inside a function body.
 - `dotmac-release-catalog==0.1.0a4` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration
@@ -115,9 +125,17 @@ it owns and — just as importantly — what it must never become.
   The declaration and the database disagreed, and nothing here looked because
   nothing audited the live catalogue. a4 moves them to `platform_tables`
   (ADR-0023), which is what makes the declaration true.
-- `dotmac-entitlement-allocation==0.1.0a4` is the allocation authority under
+- `dotmac-entitlement-allocation==0.1.0a6` is the allocation authority under
   ADR-0006. Its manifest and public lineage are composed, `v014` retired the
   empty legacy tables and local writer, and Vendor retains one typed adapter.
+
+  a6 for the same class of reason as approvals a5, with one difference worth
+  noting: `stage_allocation` writes the idempotency ledger and the platform
+  audit log at request time, and a6 declares both with the DDL-free `ea_0002`
+  and `ea_0003` verifying them. **No new binding was needed** — Commercial
+  Agreements and Licensing already required those two effects, so this repin
+  gave existing bindings a consumer that had been depending on them silently.
+  a5 was never published and must not be pinned.
 - `dotmac-commercial-agreements==0.1.0a1` is the commercial-agreement authority
   under ADR-0008. Its platform-only manifest and `cg_0001_agreements` lineage
   are composed. `v015` checks the greenfield premise under lock, drops the empty
