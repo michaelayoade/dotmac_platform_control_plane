@@ -105,9 +105,13 @@ disagree, fix the drift.
     Approvals and Entitlement Allocation cleared it on 2026-08-17 with
     production deploy `32022599873`; Commercial Agreements and Licensing
     switched after that deploy and are still below adopted. Each owner's
-    ADR § "Adoption plan" carries what it still owes — both adopted pins are
-    at `0.1.0a4` and owe a repin whose released version declares the
-    request-time effects a4 writes without naming.
+    ADR § "Adoption plan" carries what each owed. Both are discharged: approvals
+    is at `0.1.0a5` with the `outbox_relay.v1` binding, allocation at `0.1.0a6`
+    needing no new binding. **An effect a composed module declares must be
+    bound**, and the requirement is DERIVED from the composed manifests rather
+    than listed, because approvals wrote the relay from a1 and declared it only
+    at a5 — for three releases this assembly satisfied an effect no test could
+    see it needed.
 13. **A guard exemption dies with its premise.** The assembly-local waiver for
     the legacy allocation tables shadowing `mod_ealloc` was REMOVED when `v014`
     dropped those tables, not lowered and not left describing nothing: an

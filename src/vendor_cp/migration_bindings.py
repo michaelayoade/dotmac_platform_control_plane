@@ -24,9 +24,15 @@ control plane with no tenants to scope them to, and the only way to avoid that
 was to lie by withholding a binding whose effect the database plainly provides.
 
 The separation introduced in a61 remains the contract at the a77 pin: we bind
-what we HAVE, and we select what we INSTALL. Both bindings below are therefore
+what we HAVE, and we select what we INSTALL. Every binding below is therefore
 present and truthful, and the tenant plane of any dual-plane module stays out
 because it was never SELECTED — never because a binding was withheld.
+
+`outbox_relay.v1` joined the list at the approvals a5 repin rather than at
+composition, and that ordering is the interesting part: the module had written
+the relay tables since a1 without declaring the effect, so for three releases
+this assembly satisfied a dependency it had never been asked to name. Binding it
+is not new capability; it is the same database, finally described.
 
 `dotmac-approvals` is the one selectable module composed here, and the selection
 below installs its PLATFORM plane only. Note what that does NOT say: selecting a
@@ -49,6 +55,7 @@ from dotmac_kernel.planes import ModulePlane, ModulePlaneSelection
 from dotmac_kernel.prerequisites import (
     IDEMPOTENCY_LEDGER_V1,
     MODULE_DATABASE_ROLES_V1,
+    OUTBOX_RELAY_V1,
     PLATFORM_AUDIT_LOG_V1,
     TENANT_SCOPE_CATALOG_V1,
     PrerequisiteBinding,
@@ -69,6 +76,25 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
     PrerequisiteBinding(
         prerequisite=MODULE_DATABASE_ROLES_V1.name,
         provider_revision=KERNEL_ROOT_REVISION,
+        provider_owner="kernel",
+    ),
+    # Bound at the approvals a5 repin. The module always wrote both relay
+    # tables — `emit_platform_events` calls the kernel's `enqueue_platform_event`
+    # at request time — and through a4 declared nothing, so nothing here had to
+    # name a provider. a5 declares the effect and `ap_0002_outbox_relay` verifies
+    # it at deploy, which is what turns a dependency that lived inside a function
+    # body into one this assembly must answer for.
+    #
+    # `0012_platform_outbox` rather than `0008_outbox_inbox`, and the difference
+    # matters: the effect spans BOTH planes plus the lease/retry columns and the
+    # claim/settle pair. 0008 creates the tenant table, 0011 adds leasing, and
+    # 0012 is the descendant that completes it. Binding the root would name a
+    # revision that supplies part of an effect — the same class of error as
+    # binding a lineage root for the idempotency ledger instead of 0018. The
+    # starter reference assembly binds the same revision.
+    PrerequisiteBinding(
+        prerequisite=OUTBOX_RELAY_V1.name,
+        provider_revision="0012_platform_outbox",
         provider_owner="kernel",
     ),
     PrerequisiteBinding(

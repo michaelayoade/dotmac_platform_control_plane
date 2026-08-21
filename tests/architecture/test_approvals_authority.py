@@ -200,7 +200,7 @@ def test_every_declared_rejection_reason_is_reachable() -> None:
 def test_the_module_is_pinned_exactly() -> None:
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert config["tool"]["poetry"]["dependencies"]["dotmac-approvals"] == {
-        "version": "0.1.0a4",
+        "version": "0.1.0a5",
         "source": "forgejo",
     }
 
