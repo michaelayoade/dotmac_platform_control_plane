@@ -28,6 +28,7 @@ from dotmac_kernel.prerequisites import (
     BINDINGS_ENV_VAR,
     IDEMPOTENCY_LEDGER_V1,
     MODULE_DATABASE_ROLES_V1,
+    OUTBOX_RELAY_V1,
     PLATFORM_AUDIT_LOG_V1,
     TENANT_SCOPE_CATALOG_V1,
 )
@@ -49,6 +50,18 @@ def test_the_assembly_binds_the_required_kernel_effects() -> None:
 
     Commercial Agreements declares the idempotency and platform-audit effects;
     their bindings name the exact supplying kernel revisions.
+
+    `outbox_relay.v1` arrived with the `dotmac-approvals` a5 repin — a4 wrote
+    both relay tables at request time without declaring the effect, so nothing
+    consulted a binding for it. Its provider is `0012_platform_outbox` rather
+    than `0011_outbox_relay_leasing`: the effect spans BOTH planes, and 0011
+    completes only the tenant half, so a database stopped there would satisfy
+    the binding and still have no platform relay.
+
+    This assertion is an exact set in BOTH directions on purpose. A binding
+    added without a module requiring it is decoration CI must maintain; one
+    removed while a module still requires it fails `alembic upgrade` in a
+    deploy rather than here.
     """
     assert {
         (binding.prerequisite, binding.provider_revision, binding.provider_owner)
@@ -58,6 +71,7 @@ def test_the_assembly_binds_the_required_kernel_effects() -> None:
         (TENANT_SCOPE_CATALOG_V1.name, KERNEL_ROOT_REVISION, "kernel"),
         (IDEMPOTENCY_LEDGER_V1.name, "0018_idempotency_one_owner", "kernel"),
         (PLATFORM_AUDIT_LOG_V1.name, "0026_platform_audit_log", "kernel"),
+        (OUTBOX_RELAY_V1.name, "0012_platform_outbox", "kernel"),
     }
 
 
