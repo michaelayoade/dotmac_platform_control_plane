@@ -419,9 +419,9 @@ def test_no_foreign_key_reaches_the_module_or_the_dropped_estate(
     module's schema (ADR-0023): a module's tables are its own, and a constraint
     on them would make this assembly's DDL depend on the module's.
 
-    So the column stays as an OPAQUE reference. The rule that actually matters —
-    one issued version per staged allocation — is a unique constraint on
-    `licence_issuances` and is untouched, which this asserts too.
+    The local issuer later retires under `v016`, but the rule that actually
+    matters — one issued version per staged allocation — remains a unique
+    constraint on the module-owned `allocation_ref`, which this asserts too.
     """
     _upgrade(scratch_db)
     engine = create_engine(scratch_db)
@@ -453,7 +453,7 @@ def test_no_foreign_key_reaches_the_module_or_the_dropped_estate(
         not offending
     ), f"a foreign key still points at an allocations table: {offending}"
     assert (
-        "uq_licence_issuance_allocation" in uniques
+        "uq_issuance_allocation" in uniques
     ), "the one-issuance-per-allocation rule was lost with the foreign key"
 
 

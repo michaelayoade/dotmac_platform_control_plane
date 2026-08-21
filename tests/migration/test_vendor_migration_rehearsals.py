@@ -369,7 +369,7 @@ def test_platform_role_access_and_tenant_role_denial(
                         "VALUES (gen_random_uuid(), 'x', 'y')"
                     )
                 )
-        # The WS8 licence tables carried the same REVOKE, proven here by a
+        # The old WS8 licence tables carried the same REVOKE, proven here by a
         # ten-name literal list. That list is GONE: it covered the tables
         # someone remembered, so every later migration silently widened the gap
         # between what shipped and what was checked.
@@ -377,12 +377,15 @@ def test_platform_role_access_and_tenant_role_denial(
         # `test_composed_live_catalog.py` now sweeps EVERY vendor-owned table,
         # derived by diffing `public` across the two lineages, for all seven
         # PostgreSQL table privileges including the column-level ones. One
-        # licence table stays here as the live-connection counterpart: the
-        # sweep reads `has_table_privilege`, and this proves a real connection
-        # is refused, so a catalogue that lied would not pass both.
+        # module-owned licence table stays here as the live-connection
+        # counterpart: the sweep reads `has_table_privilege`, and this proves a
+        # real connection is refused, so a catalogue that lied would not pass
+        # both.
         with appu.connect() as conn:
             with pytest.raises(DBAPIError, match="permission denied"):
-                conn.execute(text("SELECT count(*) FROM licences")).scalar()
+                conn.execute(
+                    text("SELECT count(*) FROM mod_licensing.licences")
+                ).scalar()
         with appu.connect() as conn:
             with pytest.raises(DBAPIError, match="permission denied"):
                 conn.execute(
