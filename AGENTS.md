@@ -22,9 +22,13 @@ disagree, fix the drift.
    (**D3**). Runtime code implements the side-effect-free laboratory provider
    locally and never imports `dotmac_kernel.testing`; the kernel test kit is
    test-only. No **Vendor-owned** fleet tables and no Vendor
-   `DeploymentRunner`: a later contracted cutover may compose the independent
-   Deployment Control module's `mod_deploy` desired-state tables, while real
-   provider transport remains exclusively behind Dotmac Integrator (ADR-0007).
+   `DeploymentRunner`: ADR-0011 contracts the cutover that composes the
+   independent Deployment Control module's `mod_deploy` desired-state tables,
+   while real provider transport remains exclusively behind Dotmac Integrator
+   (ADR-0007). The prohibition is on a VENDOR-owned fleet owner; composing the
+   independent one is what makes it affordable. `src/vendor_cp/provisioning/`
+   and `src/vendor_cp/deployment_profile.py` are neither — a contract
+   laboratory that owns no table, and a surface selector.
 5. **Platform-admin auth through the kernel.** Vendor admin surfaces depend on
    `dotmac_kernel.platform_auth.require_platform_admin`; auth is never
    re-implemented (**D4**).
@@ -96,6 +100,14 @@ disagree, fix the drift.
     `tests/migration/test_commercial_agreements_authority_switch.py`,
     `tests/architecture/test_licensing_authority.py`,
     `tests/migration/test_licensing_authority_switch.py`).
+
+    **Adoption is per owner and is evidence, not a neighbour's milestone.**
+    Approvals and Entitlement Allocation cleared it on 2026-08-17 with
+    production deploy `32022599873`; Commercial Agreements and Licensing
+    switched after that deploy and are still below adopted. Each owner's
+    ADR § "Adoption plan" carries what it still owes — both adopted pins are
+    at `0.1.0a4` and owe a repin whose released version declares the
+    request-time effects a4 writes without naming.
 13. **A guard exemption dies with its premise.** The assembly-local waiver for
     the legacy allocation tables shadowing `mod_ealloc` was REMOVED when `v014`
     dropped those tables, not lowered and not left describing nothing: an
@@ -129,15 +141,56 @@ disagree, fix the drift.
     delivery attempts, retry, health and repair; Vendor retains only private-key
     custody plus thin immutable-artifact and acknowledgement adapters
     (`docs/external-connector-surface.md`; ADR-0010).
+17. **Repository-local transition claims must be derived from repository-local
+    facts. Release, registry and production-adoption claims require an
+    authoritative external oracle.** Fleet rule, approved 2026-08-21.
 
-## Validation before any commit
+    A test here proves what this repository contains — declared tables,
+    per-file symbol call sites, `pyproject.toml` contents, a decision an ADR
+    recorded. It cannot observe a registry tag, another product's cutover, or a
+    production row count. Claims of that second kind are permitted only with
+    the oracle named in the claim: a release run for "published and
+    installable", a `<distribution>-v<version>` tag for "pinnable", the owning
+    repository's `EXTRACTION.toml` `adoption_evidence` for "a product runs it",
+    a deploy run id plus immutable image digest for "it deployed". Where no
+    oracle exists, name the obligation and its owner instead of writing an
+    assertion whose shape implies a check it cannot perform — the estate
+    measurement in ADR-0011 § 4 is measured by an operator against a target
+    Michael names explicitly, never inferred, and no test discharges it.
 
-```
-make check   # ruff (lint+format) + mypy --strict
-make test    # pytest: boot, provisioning contract, D1–D5 deny cases
-```
+    **An absence describes a moment**, so it is never cited like a release. It
+    is either an as-of observation carrying its coordinates, its date and a
+    named refresh responsibility, or it is replaced by the repository-local
+    decision it was standing in for. Prefer the second: "this assembly is
+    deferred by ADR-0007 § 6" is derivable here and permanent until the ADR
+    changes, where "another product has no first adopter yet" is a claim about
+    a repository this one cannot see. The delivery-target estate is the first
+    form and its refresh point is ADR-0011 § 4; Brand Profiles is the second.
 
-The kernel resolves from the private Forgejo registry — set
-`POETRY_HTTP_BASIC_FORGEJO_USERNAME` / `_PASSWORD` from OpenBao (never commit a
-token). See `docs/ARCHITECTURE.md` for the boundary rationale and
-`docs/adr/0001-vendor-control-plane-foundation.md` for the founding decision.
+    The rule exists because a declaration called `AWAITING_RELEASE_TAG` asserted
+    a distribution was absent from `pyproject.toml`, was described as gating on
+    the release tag, and stayed green when the tag was published. It proved
+    intent, not availability. `DEFERRED_BY_LOCAL_DECISION` is the corrected
+    shape.
+
+    Proposed fleet-wide as `dotmac_governance` ADR 0013 (PR #22), which defines
+    the four oracle kinds and their required coordinates. That record is
+    `Proposed` and therefore not yet normative; this rule binds THIS repository
+    on its own authority in the meantime.
+
+18. **Composing an owner is not the same as retiring the writer that shares its
+    subject.** ADR-0011's Deployment Control slice is greenfield for plans,
+    rollouts, credentials and observations, and a narrow AUTHORITY CUTOVER for
+    deployment-target identity — `register_delivery_target` and
+    `licence_delivery_targets` own that subject today. Classify by SUBJECT and
+    WRITER, never by table name: the narrow name avoided the wrong owner
+    LABEL, not the ownership. A forward vendor revision is owed either way.
+
+    The inventory is at SYMBOL level with per-file call-site counts in
+    `src/vendor_cp/cutover_readiness.py`, ratcheted in both directions and split
+    between the write authority and the projection that outlives it. A
+    path-level ledger stays green when a function is deleted and its module
+    remains, which is the transition that matters. This technique is
+    assembly-local and is deliberately not claimed as a fleet standard
+    (`tests/architecture/test_cutover_readiness.py`;
+    `docs/cutover-readiness.md`).
