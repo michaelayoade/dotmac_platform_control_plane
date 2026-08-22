@@ -60,6 +60,7 @@ from vendor_cp.licensing import adapter as licensing
 from vendor_cp.licensing import projection, source_contract, source_ports
 from vendor_cp.licensing.delivery_models import (
     AckDisposition,
+    AckStatus,
     DeliveryState,
     LicenceAckRecord,
     LicenceDelivery,
@@ -985,7 +986,7 @@ def _ack(intent, **overrides) -> source_ports.AcknowledgeIntentCommand:
         "artifact_digest": intent.artifact_digest,
         "integrator_receipt_ref": "receipt-1",
         "authenticated_deployment_ref": intent.deployment_target_ref,
-        "outcome": "active",
+        "outcome": AckStatus.APPLIED.value,
         "reported_at": NOW,
     }
     fields.update(overrides)
@@ -1155,6 +1156,20 @@ def test_a_mismatched_acknowledgement_leaves_no_lifecycle_consequence(
         source_ports.acknowledge_delivery_intent(
             db, _ack(intent, artifact_digest="0" * 64)
         )
+    assert (
+        source_ports.get_delivery_intent(db, intent.delivery_intent_id).status
+        == IntentStatus.OPEN.value
+    )
+
+
+def test_an_outcome_outside_the_shared_vocabulary_is_refused(db, signer) -> None:
+    """The outcome is a passthrough to `dotmac-licensing`, which owns the
+    vocabulary. Vendor does not re-validate it — it lets the lifecycle owner
+    refuse, which is the same fail-closed answer without a second copy of the
+    enum to drift."""
+    intent = _intent(db, _issue(db, signer))
+    with pytest.raises(ConflictError, match="vocabulary"):
+        source_ports.acknowledge_delivery_intent(db, _ack(intent, outcome="active"))
     assert (
         source_ports.get_delivery_intent(db, intent.delivery_intent_id).status
         == IntentStatus.OPEN.value

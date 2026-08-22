@@ -42,9 +42,11 @@ from vendor_cp.deployment import adapter as deployment_adapter
 from vendor_cp.licensing import adapter as licensing
 from vendor_cp.licensing.intent_models import IntentStatus, LicenceDeliveryIntent
 
-AUDIT_INTENT_OPENED = "vendor.licence.delivery_intent_opened"
-AUDIT_ARTIFACT_READ = "vendor.licence.source_artifact_read"
-AUDIT_INTENT_ACKNOWLEDGED = "vendor.licence.delivery_intent_acknowledged"
+# Action literals are written INLINE at each `write_platform_audit_event` call,
+# not through constants. `tests/architecture/test_platform_audit_actions.py`
+# sweeps the vocabulary by walking the AST for `action=` keyword LITERALS, so a
+# constant is invisible to it and the declaration would read as an orphan. The
+# repo's other services do the same; matching them keeps the sweep honest.
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,7 +178,7 @@ def open_delivery_intent(
     write_platform_audit_event(
         db,
         actor_admin_id=actor_admin_id,
-        action=AUDIT_INTENT_OPENED,
+        action="vendor.licence.delivery_intent_opened",
         entity_type="licence_delivery_intent",
         entity_id=str(row.id),
         details={
@@ -220,7 +222,7 @@ def read_exact_artifact(
     write_platform_audit_event(
         db,
         actor_admin_id=actor_admin_id,
-        action=AUDIT_ARTIFACT_READ,
+        action="vendor.licence.source_artifact_read",
         entity_type="licence_delivery_intent",
         entity_id=str(row.id),
         details={
@@ -315,7 +317,7 @@ def acknowledge_delivery_intent(
     write_platform_audit_event(
         db,
         actor_admin_id=command.actor_admin_id,
-        action=AUDIT_INTENT_ACKNOWLEDGED,
+        action="vendor.licence.delivery_intent_acknowledged",
         entity_type="licence_delivery_intent",
         entity_id=str(row.id),
         details={
@@ -333,9 +335,6 @@ def get_delivery_intent(db: Session, delivery_intent_id: UUID) -> DeliveryIntent
 
 
 __all__ = [
-    "AUDIT_ARTIFACT_READ",
-    "AUDIT_INTENT_ACKNOWLEDGED",
-    "AUDIT_INTENT_OPENED",
     "AcknowledgeIntentCommand",
     "DeliveryIntentView",
     "ExactArtifact",
