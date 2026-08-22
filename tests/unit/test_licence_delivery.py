@@ -1098,10 +1098,22 @@ def test_a_correlated_acknowledgement_completes_the_intent(db, signer) -> None:
 
 
 def test_the_same_receipt_replays_rather_than_completing_twice(db, signer) -> None:
+    """A replay returns the ORIGINAL completion and moves nothing.
+
+    Both sides are read back from the database rather than comparing the first
+    call's return value to the second's. That is not a workaround: the first
+    return carries an in-memory `acknowledged_at` that has not been through the
+    column yet, so comparing it to a stored value asserts a datetime round-trip
+    property instead of the idempotency property. Reading both back tests the
+    thing that matters — a retry does not bump the completion time.
+    """
     intent = _intent(db, _issue(db, signer))
-    assert source_ports.acknowledge_delivery_intent(
-        db, _ack(intent)
-    ) == source_ports.acknowledge_delivery_intent(db, _ack(intent))
+    source_ports.acknowledge_delivery_intent(db, _ack(intent))
+    recorded = source_ports.get_delivery_intent(db, intent.delivery_intent_id)
+
+    replayed = source_ports.acknowledge_delivery_intent(db, _ack(intent))
+    assert replayed == recorded
+    assert source_ports.get_delivery_intent(db, intent.delivery_intent_id) == recorded
 
 
 def test_a_second_receipt_cannot_complete_the_same_obligation(db, signer) -> None:
