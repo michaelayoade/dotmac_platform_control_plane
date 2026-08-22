@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
@@ -214,7 +215,60 @@ class PipelineHealthResponse(BaseModel):
     revocation_application_lag_measurable: bool
 
 
+class OpenDeliveryIntentRequest(BaseModel):
+    """Two ids and nothing else (ADR-0010 § 3.1).
+
+    Not the digest, version or target ref: those are the CORRELATION values, and
+    a caller able to supply them could correlate an acknowledgement to an
+    artifact that was never issued. They are derived from their owners.
+    """
+
+    issuance_id: UUID
+    deployment_target_id: UUID
+
+
+class DeliveryIntentResponse(BaseModel):
+    delivery_intent_id: UUID
+    issuance_id: UUID
+    deployment_target_ref: str
+    licence_version: int
+    artifact_digest: str
+    status: str
+    integrator_receipt_ref: str | None = None
+    acknowledged_at: datetime | None = None
+
+
+class ExactArtifactResponse(BaseModel):
+    """The signed envelope, for dispatch. Never copied into an event or log."""
+
+    delivery_intent_id: UUID
+    artifact_digest: str
+    envelope: dict[str, Any]
+
+
+class AcknowledgeIntentRequest(BaseModel):
+    """All three remaining correlation fields, plus both identities.
+
+    `deployment_target_ref`, `licence_version` and `artifact_digest` are
+    required and checked; the fourth correlation field is the intent id in the
+    path. Every mismatch fails closed.
+    """
+
+    deployment_target_ref: str = Field(min_length=1, max_length=200)
+    licence_version: int = Field(ge=1)
+    artifact_digest: str = Field(min_length=1, max_length=128)
+    integrator_receipt_ref: str = Field(min_length=1, max_length=200)
+    authenticated_deployment_ref: str = Field(min_length=1, max_length=200)
+    outcome: str = Field(min_length=1, max_length=20)
+    reason: str | None = Field(default=None, max_length=200)
+    reported_at: datetime | None = None
+
+
 __all__ = [
+    "AcknowledgeIntentRequest",
+    "ExactArtifactResponse",
+    "DeliveryIntentResponse",
+    "OpenDeliveryIntentRequest",
     "IssueLicenceRequest",
     "LicenceIssuanceResponse",
     "SigningKeyResponse",

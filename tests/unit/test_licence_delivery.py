@@ -22,16 +22,21 @@ vendor's ack handling is right.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from uuid import uuid4
 
+import dotmac_deployment_control as deployment_control
 import pytest
 from dotmac_kernel import (
     BadRequestError,
     CapabilityCatalogue,
+    ConflictError,
     FeatureManifest,
+    NotFoundError,
     Tenant,
     grant_entitlement,
     is_entitled,
@@ -52,7 +57,7 @@ from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import adapter as contracts
 from vendor_cp.deployment.adapter import DeploymentTargetFacts
 from vendor_cp.licensing import adapter as licensing
-from vendor_cp.licensing import projection
+from vendor_cp.licensing import projection, source_contract, source_ports
 from vendor_cp.licensing.delivery_models import (
     AckDisposition,
     DeliveryState,
@@ -62,6 +67,7 @@ from vendor_cp.licensing.delivery_models import (
     LicenceDeliveryTarget,
     TargetStatus,
 )
+from vendor_cp.licensing.intent_models import IntentStatus
 from vendor_cp.licensing.signing_adapter import EphemeralLicenceSigner
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
@@ -932,3 +938,224 @@ def test_dispatch_refuses_a_transport_that_hands_off_nothing(db, signer) -> None
         transport_module.dispatch_pending(
             db, transport=transport_module.LoggingTransport()
         )
+
+
+# ── ADR-0010 § 3 source ports (gate 2a) ─────────────────────────────────────
+#
+# These live here rather than in a file of their own because the issuance chain
+# above — agreement, approval, activation, allocation, issue — is what makes a
+# real artifact to correlate against, and duplicating it would be ~80 lines of
+# setup that could drift from the thing it mirrors.
+#
+# The happy path is the least interesting part. An acknowledgement claims that
+# one exact signed document was applied at one exact destination, and almost
+# everything worth testing is a way that claim can be wrong.
+
+
+def _intent(db, issued, *, target_ref: str = TARGET, customer_ref: str = "cust-a"):
+    facts_target = deployment_control.register_target(
+        db,
+        deployment_control.RegisterTargetCommand(
+            command_id=f"src-reg-{target_ref}",
+            target_ref=target_ref,
+            subject_ref=customer_ref,
+            product_code="vendor-cp",
+            environment="test",
+        ),
+    )
+    deployment_control.set_desired_state(
+        db,
+        deployment_control.SetDesiredStateCommand(
+            command_id=f"src-desire-{target_ref}",
+            target_id=facts_target.id,
+            desired=deployment_control.DesiredDeployment(release_ref="rel-1"),
+        ),
+    )
+    db.flush()
+    return source_ports.open_delivery_intent(
+        db, issuance_id=issued.id, deployment_target_id=facts_target.id
+    )
+
+
+def _ack(intent, **overrides) -> source_ports.AcknowledgeIntentCommand:
+    fields = {
+        "delivery_intent_id": intent.delivery_intent_id,
+        "deployment_target_ref": intent.deployment_target_ref,
+        "licence_version": intent.licence_version,
+        "artifact_digest": intent.artifact_digest,
+        "integrator_receipt_ref": "receipt-1",
+        "authenticated_deployment_ref": intent.deployment_target_ref,
+        "outcome": "active",
+        "reported_at": NOW,
+    }
+    fields.update(overrides)
+    return source_ports.AcknowledgeIntentCommand(**fields)
+
+
+def test_the_contract_declares_exactly_the_three_ports() -> None:
+    """ADR-0010 § 3 says three. A fourth is a contract change with a new
+    digest, not an implementation detail somebody slipped in."""
+    assert [operation.name for operation in source_contract.OPERATIONS] == [
+        "open_delivery_intent",
+        "read_exact_artifact",
+        "acknowledge_delivery_intent",
+    ]
+
+
+def test_the_contract_is_not_a_destination_descriptor() -> None:
+    """The reason this contract exists separately.
+
+    `ProductPortDescriptorV1` answers "where does this land?" and is
+    destination-owned. Vendor is the SOURCE; the destination is the deployment,
+    whose descriptor and binding to the Deployment Control `target_ref` are gate
+    2b elsewhere. These names appearing here would mean two answers to the
+    routing question.
+    """
+    body = json.dumps(source_contract.declaration())
+    for forbidden in (
+        "delivery_path",
+        "mirror_path",
+        "destination_binding_id",
+        "destination_scope",
+        "product-port-descriptor",
+    ):
+        assert forbidden not in body, forbidden
+    assert source_contract.CONTRACT_SCHEMA == "dotmac.io/licence-source-contract/v1"
+
+
+def test_the_contract_digest_is_stable_and_moves_with_the_surface() -> None:
+    """A pin that churned on a docstring edit would be re-pinned reflexively
+    and stop meaning anything; one that never moved would pin nothing."""
+    first = source_contract.contract_digest()
+    assert first == source_contract.contract_digest()
+    widened = source_contract.declaration()
+    widened["operations"].append({"name": "smuggled"})
+    canonical = json.dumps(
+        widened, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    assert first != f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+
+
+def test_opening_an_intent_derives_every_correlation_value(db, signer) -> None:
+    """The caller names an issuance and a target id — never the digest, version
+    or target ref. A caller that could supply the digest could correlate an
+    acknowledgement to an artifact that was never issued."""
+    issued = _issue(db, signer)
+    intent = _intent(db, issued)
+    assert intent.artifact_digest == issued.digest
+    assert intent.licence_version == issued.version
+    assert intent.deployment_target_ref == TARGET
+    assert intent.status == IntentStatus.OPEN.value
+
+
+def test_opening_the_same_hand_off_twice_is_one_obligation(db, signer) -> None:
+    """Two correlation ids for one delivery is how a duplicate acknowledgement
+    stops being distinguishable from a second delivery."""
+    issued = _issue(db, signer)
+    assert (
+        _intent(db, issued).delivery_intent_id == _intent(db, issued).delivery_intent_id
+    )
+
+
+def test_an_unknown_deployment_target_cannot_receive_an_intent(db, signer) -> None:
+    issued = _issue(db, signer)
+    with pytest.raises(NotFoundError, match="mod_deploy"):
+        source_ports.open_delivery_intent(
+            db, issuance_id=issued.id, deployment_target_id=uuid.uuid4()
+        )
+
+
+def test_a_cross_customer_intent_is_refused(db, signer) -> None:
+    """The frozen path makes this check in `_authorised_target`; this port does
+    not go through it, so it makes the check again rather than assuming it."""
+    issued = _issue(db, signer)
+    with pytest.raises(BadRequestError, match="cross-customer"):
+        _intent(db, issued, target_ref="dep-other", customer_ref="cust-z")
+
+
+def test_the_artifact_read_returns_the_envelope_for_the_intent(db, signer) -> None:
+    issued = _issue(db, signer)
+    intent = _intent(db, issued)
+    artifact = source_ports.read_exact_artifact(
+        db, delivery_intent_id=intent.delivery_intent_id
+    )
+    assert artifact.artifact_digest == issued.digest
+    assert artifact.envelope
+
+
+def test_reading_an_unknown_intent_is_refused(db) -> None:
+    with pytest.raises(NotFoundError):
+        source_ports.read_exact_artifact(db, delivery_intent_id=uuid.uuid4())
+
+
+def test_a_correlated_acknowledgement_completes_the_intent(db, signer) -> None:
+    intent = _intent(db, _issue(db, signer))
+    done = source_ports.acknowledge_delivery_intent(db, _ack(intent))
+    assert done.status == IntentStatus.ACKNOWLEDGED.value
+    assert done.integrator_receipt_ref == "receipt-1"
+    assert done.acknowledged_at is not None
+
+
+def test_the_same_receipt_replays_rather_than_completing_twice(db, signer) -> None:
+    intent = _intent(db, _issue(db, signer))
+    assert source_ports.acknowledge_delivery_intent(
+        db, _ack(intent)
+    ) == source_ports.acknowledge_delivery_intent(db, _ack(intent))
+
+
+def test_a_second_receipt_cannot_complete_the_same_obligation(db, signer) -> None:
+    intent = _intent(db, _issue(db, signer))
+    source_ports.acknowledge_delivery_intent(db, _ack(intent))
+    with pytest.raises(ConflictError, match="second completion"):
+        source_ports.acknowledge_delivery_intent(
+            db, _ack(intent, integrator_receipt_ref="receipt-2")
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("deployment_target_ref", "dep-somewhere-else"),
+        ("licence_version", 99),
+        ("artifact_digest", "0" * 64),
+    ],
+)
+def test_every_correlation_mismatch_fails_closed(db, signer, field, value) -> None:
+    """One case per correlation field: "all mismatches fail closed" is a claim
+    about EACH of them, and a single case would prove it for one."""
+    intent = _intent(db, _issue(db, signer))
+    overrides = {field: value}
+    # A wrong target ref would also fail corroboration; keep the authenticated
+    # identity aligned with the CLAIM so this isolates the correlation failure.
+    if field == "deployment_target_ref":
+        overrides["authenticated_deployment_ref"] = value
+    with pytest.raises(BadRequestError, match="does not correlate"):
+        source_ports.acknowledge_delivery_intent(db, _ack(intent, **overrides))
+
+
+def test_provider_identity_may_corroborate_but_never_select(db, signer) -> None:
+    """The authenticated identity and the chosen destination are separate
+    fields on purpose. Folding them into one would delete the distinction that
+    makes corroboration checkable."""
+    intent = _intent(db, _issue(db, signer))
+    with pytest.raises(BadRequestError, match="may never select"):
+        source_ports.acknowledge_delivery_intent(
+            db, _ack(intent, authenticated_deployment_ref="dep-impostor")
+        )
+
+
+def test_a_mismatched_acknowledgement_leaves_no_lifecycle_consequence(
+    db, signer
+) -> None:
+    """Correlation is checked BEFORE the lifecycle owner is told anything, so a
+    bad acknowledgement produces no licensing consequence — not an
+    accepted-then-corrected one."""
+    intent = _intent(db, _issue(db, signer))
+    with pytest.raises(BadRequestError):
+        source_ports.acknowledge_delivery_intent(
+            db, _ack(intent, artifact_digest="0" * 64)
+        )
+    assert (
+        source_ports.get_delivery_intent(db, intent.delivery_intent_id).status
+        == IntentStatus.OPEN.value
+    )

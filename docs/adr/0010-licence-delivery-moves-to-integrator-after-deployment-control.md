@@ -159,3 +159,84 @@ absent.
 - The current zero Governance connector baseline is not evidence that Vendor
   owns retry. It only says the detector found no direct external connector
   spelling; the semantic owner remains Integrator.
+
+## Amendment — 2026-08-22 (the destination is the DEPLOYMENT; gate 2 splits)
+
+§ 3 said "Vendor publishes ... a digest-pinned descriptor" without saying which
+descriptor. Building it surfaced the ambiguity, and Michael ruled.
+
+### Vendor is a source, not a destination
+
+`ProductPortDescriptorV1` answers *"where does this land?"*. It is
+destination-owned by construction — `DestinationBinding`, `delivery_path`,
+`mirror_path`, and a `LocalScope` documented as "the DESTINATION's own name for
+the stream". Vendor's role here is the reverse: the Integrator READS an intent
+and an artifact out of Vendor, and only writes an acknowledgement back.
+
+Reusing that contract would have made Vendor a routing destination for its own
+outbound artifacts, putting a second answer to the routing question in the
+fleet.
+
+```
+Vendor ── intent + exact artifact ──> Integrator ── delivery ──> Deployment
+Vendor <── correlated acknowledgement ── Integrator <── applied ack ── Deployment
+                                              │
+                                 bound to Deployment Control target_ref
+```
+
+**The boundary:**
+
+| Concern | Owner |
+| --- | --- |
+| Durable delivery intent, immutable licence artifact, acknowledgement lifecycle | Vendor |
+| The authenticated, digest-pinned DESTINATION descriptor | the deployment |
+| The immutable `target_ref` the descriptor binds to | `dotmac-deployment-control` |
+| Reconciling the descriptor and binding it to that `target_ref` BEFORE connector I/O | `dotmac-integration` |
+
+Provider or plugin input may corroborate destination identity. It may never
+select or override it.
+
+Vendor still publishes a versioned, digest-pinned contract — a **licence-source
+API contract**. It is deliberately not called `ProductPortDescriptorV1` and
+carries no `DestinationBinding`, `delivery_path`, `mirror_path` or destination
+scope. A test asserts those names are absent, because the failure mode is
+someone adding one back "for symmetry".
+
+### The acknowledgement is a completion, not a routable delivery
+
+It completes an already-correlated intent. If acknowledgements ever need
+independent routing, Vendor becomes the destination for that SEPARATE capability
+and gets its own destination descriptor then — under the existing contract,
+rather than by widening this one.
+
+### Gate 2 splits
+
+- **2a — Vendor, now.** The three authenticated ports, the exact schema digest,
+  immutable artifact identity, and an idempotent correlated acknowledgement. **No
+  activation:** no `dotmac-integration` pin, no connector, no mirror mode. The
+  frozen logging and offline-bundle paths remain the only things that move bytes.
+- **2b — later, elsewhere.** The deployment-owned destination descriptor, its
+  digest pin, reconciliation, and pre-I/O binding to Deployment Control. Focused
+  changes in the Deployment and Integrator repositories, not this one.
+
+### Required correlation fields
+
+The intent and the acknowledgement each carry `delivery_intent_id`,
+`deployment_target_ref`, `licence_version` and `artifact_digest`. **All
+mismatches fail closed.** An acknowledgement is a claim that one exact signed
+document was applied at one exact destination; if any of the four disagree with
+what Vendor recorded, the claim is about a different delivery than the one it
+names, and accepting it would let a real acknowledgement for artifact A close the
+obligation for artifact B. That is a routing fault to investigate, never a
+completion to record.
+
+Correlation is checked before the lifecycle owner is told anything, so a
+mismatched acknowledgement produces no licensing consequence at all.
+
+### "Connector accepted" is not "applied"
+
+The two must remain distinct, and Vendor's intent record holds exactly two
+states — `open` and `acknowledged` — for that reason. Connector acceptance is the
+Integrator's ledger. Vendor knows the obligation is open, or that a correlated
+authenticated acknowledgement completed it; what happened in between belongs to
+the transport that owns retries, checkpoints and health.

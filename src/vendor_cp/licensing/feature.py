@@ -23,6 +23,12 @@ feature = FeatureManifest(
         # decided, so splitting it would name a difference that no longer means
         # anything.
         "vendor.licence.delivery_target_reconciled",
+        # ADR-0010 s3 source ports (gate 2a). Declared with their writers in the
+        # same change, because ADR-0008 fails the boot on a declared code with
+        # no consumer and fails the write on an undeclared one.
+        "vendor.licence.delivery_intent_opened",
+        "vendor.licence.source_artifact_read",
+        "vendor.licence.delivery_intent_acknowledged",
         "vendor.licence.delivery_mapped",
         "vendor.licence.delivered",
         "vendor.licence.ack_received",

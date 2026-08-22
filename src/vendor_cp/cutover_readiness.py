@@ -90,6 +90,11 @@ VENDOR_OWNED_TABLES: Final[frozenset[str]] = frozenset(
         "licence_delivery_targets",
         "licence_delivery_attempts",
         "licence_ack_records",
+        # ADR-0010 gate 2a. Deliberately NOT in `DELIVERY_ESTATE` below: the
+        # five retire because they are a transport ledger Vendor should not
+        # own, and this is the correlation record that SURVIVES the cutover
+        # alongside the immutable artifact read.
+        "licence_delivery_intents",
     }
 )
 

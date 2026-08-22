@@ -8,6 +8,7 @@ there is no route that can expose private key material, by construction.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
@@ -20,15 +21,25 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.deployment import adapter as deployment_adapter
 from vendor_cp.licensing import adapter as licensing
-from vendor_cp.licensing import delivery_ops, projection, transport
+from vendor_cp.licensing import (
+    delivery_ops,
+    projection,
+    source_contract,
+    source_ports,
+    transport,
+)
 from vendor_cp.licensing.schemas import (
+    AcknowledgeIntentRequest,
     AcknowledgementRequest,
     AckOutcomeResponse,
+    DeliveryIntentResponse,
     DeliveryResponse,
     DeliveryTargetResponse,
+    ExactArtifactResponse,
     IssueLicenceRequest,
     LicenceIssuanceResponse,
     MapLegacyDeliveryRequest,
+    OpenDeliveryIntentRequest,
     PipelineHealthResponse,
     ReconcileTargetRequest,
     RevocationEntryResponse,
@@ -313,3 +324,87 @@ def _delivery_response(view: projection.DeliveryView) -> DeliveryResponse:
 
 
 __all__ = ["router"]
+
+
+# ── ADR-0010 § 3 source ports (gate 2a) ─────────────────────────────────────
+#
+# Checked in and authenticated, driving nothing. There is no `dotmac-integration`
+# pin, no connector and no mirror mode in this change, and the frozen
+# logging/offline-bundle paths above remain the only thing that moves bytes.
+#
+# Thin, like every route here: each one validates, authorises and delegates. The
+# correlation rules that make an acknowledgement safe live in
+# `vendor_cp.licensing.source_ports`, not in these handlers.
+
+
+@router.get("/source/contract", response_model=dict)
+def licence_source_contract(_admin: Admin) -> dict[str, object]:
+    """The digest-pinned contract an Integrator pins and refuses drift against.
+
+    Deliberately NOT a `ProductPortDescriptorV1`: that answers "where does this
+    land?", and the destination here is the DEPLOYMENT, whose own descriptor and
+    binding to the Deployment Control `target_ref` are gate 2b in another
+    repository. This says only what Vendor offers.
+    """
+    return {
+        **source_contract.declaration(),
+        "digest": source_contract.contract_digest(),
+    }
+
+
+@router.post("/source/intents", response_model=DeliveryIntentResponse)
+def open_delivery_intent(
+    payload: OpenDeliveryIntentRequest, admin: Admin, db: Db
+) -> DeliveryIntentResponse:
+    intent = source_ports.open_delivery_intent(
+        db,
+        issuance_id=payload.issuance_id,
+        deployment_target_id=payload.deployment_target_id,
+        actor_admin_id=admin.id,
+    )
+    return DeliveryIntentResponse(**asdict(intent))
+
+
+@router.get(
+    "/source/intents/{delivery_intent_id}/artifact",
+    response_model=ExactArtifactResponse,
+)
+def read_exact_artifact(
+    delivery_intent_id: UUID, admin: Admin, db: Db
+) -> ExactArtifactResponse:
+    artifact = source_ports.read_exact_artifact(
+        db, delivery_intent_id=delivery_intent_id, actor_admin_id=admin.id
+    )
+    return ExactArtifactResponse(
+        delivery_intent_id=artifact.delivery_intent_id,
+        artifact_digest=artifact.artifact_digest,
+        envelope=dict(artifact.envelope),
+    )
+
+
+@router.post(
+    "/source/intents/{delivery_intent_id}/acknowledgement",
+    response_model=DeliveryIntentResponse,
+)
+def acknowledge_delivery_intent(
+    delivery_intent_id: UUID,
+    payload: AcknowledgeIntentRequest,
+    admin: Admin,
+    db: Db,
+) -> DeliveryIntentResponse:
+    intent = source_ports.acknowledge_delivery_intent(
+        db,
+        source_ports.AcknowledgeIntentCommand(
+            delivery_intent_id=delivery_intent_id,
+            deployment_target_ref=payload.deployment_target_ref,
+            licence_version=payload.licence_version,
+            artifact_digest=payload.artifact_digest,
+            integrator_receipt_ref=payload.integrator_receipt_ref,
+            authenticated_deployment_ref=payload.authenticated_deployment_ref,
+            outcome=payload.outcome,
+            reason=payload.reason,
+            reported_at=payload.reported_at,
+            actor_admin_id=admin.id,
+        ),
+    )
+    return DeliveryIntentResponse(**asdict(intent))
