@@ -90,6 +90,11 @@ VENDOR_OWNED_TABLES: Final[frozenset[str]] = frozenset(
         "licence_delivery_targets",
         "licence_delivery_attempts",
         "licence_ack_records",
+        # ADR-0010 gate 2a. Deliberately NOT in `DELIVERY_ESTATE` below: the
+        # five retire because they are a transport ledger Vendor should not
+        # own, and this is the correlation record that SURVIVES the cutover
+        # alongside the immutable artifact read.
+        "licence_delivery_intents",
     }
 )
 
@@ -161,6 +166,9 @@ TARGET_RECONCILIATION_SYMBOLS: Final[dict[str, dict[str, int]]] = {
     "resolve_target": {
         "src/vendor_cp/deployment/adapter.py": 3,
         "src/vendor_cp/licensing/router.py": 1,
+        # ADR-0010 gate 2a: the source ports resolve the destination through the
+        # same seam rather than accepting a target ref from a caller.
+        "src/vendor_cp/licensing/source_ports.py": 1,
         "tests/unit/test_licence_delivery.py": 2,
     },
     "reconcile_delivery_target": {
@@ -187,6 +195,12 @@ TARGET_PROJECTION_SYMBOLS: Final[dict[str, dict[str, int]]] = {
     "_authorised_target": {
         "src/vendor_cp/deployment/adapter.py": 1,
         "src/vendor_cp/licensing/projection.py": 4,
+        # Named in the source ports' prose: that path does NOT go through this
+        # check, so it makes the cross-customer and bound-deployment refusals
+        # again rather than assuming them. ADR-0010 collapses the duplication
+        # when it retires the frozen path.
+        "src/vendor_cp/licensing/source_ports.py": 1,
+        "tests/unit/test_licence_delivery.py": 1,
         "tests/unit/test_licence_routes.py": 1,
     },
     "DeliveryTargetResponse": {
