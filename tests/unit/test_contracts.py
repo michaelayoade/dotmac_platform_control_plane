@@ -25,6 +25,10 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import adapter as agreements
+from vendor_cp.contracts.terms import (
+    TermEndNotRepresentable,
+    end_exclusive_from_inclusive,
+)
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
@@ -166,12 +170,20 @@ def test_draft_resolves_and_freezes_vendor_offer_terms(db: Session) -> None:
     assert draft.lines[0].unit_amount == "19.99"
     assert draft.lines[0].unit_currency_code == "USD"
     assert draft.lines[0].offer_ref is not None
+    assert draft.term_start == date(2026, 1, 1)
+    assert draft.term_end_exclusive == date(2027, 1, 1)
 
     proposed = _propose(db, draft.id)
     assert proposed.status == AgreementStatus.PROPOSED.value
     assert proposed.content_hash is not None
     assert proposed.approval_request_id is not None
     assert _events(db, AGREEMENT_PROPOSED_V1) == 1
+
+
+def test_inclusive_term_end_has_one_end_exclusive_translation() -> None:
+    assert end_exclusive_from_inclusive(date(2026, 12, 31)) == date(2027, 1, 1)
+    with pytest.raises(TermEndNotRepresentable):
+        end_exclusive_from_inclusive(date.max)
 
 
 def test_draft_rejects_an_undeclared_capability(db: Session) -> None:

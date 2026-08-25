@@ -79,6 +79,8 @@ class ContractResponse(BaseModel):
     product_code: str
     counterparty_ref: str
     agreement_type: str
+    term_start: date
+    term_end_exclusive: date
     status: str
     content_hash: str | None
     record_version: int
@@ -96,6 +98,8 @@ class ContractResponse(BaseModel):
             product_code=value.product_code,
             counterparty_ref=value.counterparty_ref,
             agreement_type=value.agreement_type,
+            term_start=value.term_start,
+            term_end_exclusive=value.term_end_exclusive,
             status=value.status,
             content_hash=value.content_hash,
             record_version=value.record_version,
