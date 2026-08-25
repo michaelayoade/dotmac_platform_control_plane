@@ -1,4 +1,4 @@
-"""The five transformations, the cohort rules, and the two parity claims.
+"""The commercial backfill transformations, cohort rules, and parity claims.
 
 Pure Python throughout — no session, no database, no clock. Every function under
 test is deterministic, which is the property that makes a plan comparable across
