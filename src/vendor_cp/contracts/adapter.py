@@ -88,6 +88,10 @@ from dotmac_kernel import BadRequestError, ConflictError, DomainError, NotFoundE
 from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import adapter as approvals
+from vendor_cp.contracts.terms import (
+    TermEndNotRepresentable,
+    end_exclusive_from_inclusive,
+)
 from vendor_cp.contracts_authority import APPROVAL_SUBJECT_TYPE
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.service import get_offer_version
@@ -202,6 +206,8 @@ class ContractView:
     product_code: str
     counterparty_ref: str
     agreement_type: str
+    term_start: date
+    term_end_exclusive: date
     status: str
     content_hash: str | None
     record_version: int
@@ -248,6 +254,13 @@ def _single_product(view: AgreementView) -> str:
 def _view(
     value: AgreementView, *, approval_request_id: UUID | None = None
 ) -> ContractView:
+    try:
+        term_end_exclusive = end_exclusive_from_inclusive(value.expiry_date)
+    except TermEndNotRepresentable as exc:
+        raise ConflictError(
+            "the agreement expiry cannot be represented by Vendor's "
+            "end-exclusive commercial contract"
+        ) from exc
     return ContractView(
         id=value.id,
         reference=value.reference,
@@ -256,6 +269,8 @@ def _view(
         product_code=_single_product(value),
         counterparty_ref=value.counterparty_ref,
         agreement_type=value.agreement_type,
+        term_start=value.effective_date,
+        term_end_exclusive=term_end_exclusive,
         status=str(value.status),
         content_hash=value.content_hash,
         record_version=value.record_version,

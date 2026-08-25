@@ -181,10 +181,9 @@ disagree, fix the drift.
     intent, not availability. `DEFERRED_BY_LOCAL_DECISION` is the corrected
     shape.
 
-    Proposed fleet-wide as `dotmac_governance` ADR 0013 (PR #22), which defines
-    the four oracle kinds and their required coordinates. That record is
-    `Proposed` and therefore not yet normative; this rule binds THIS repository
-    on its own authority in the meantime.
+    Accepted fleet-wide as `dotmac_governance` ADR 0013 (merge
+    `2d711cd594979ba0bc368382b7f5ea69bf21eaa4`, effective 2026-08-22), which
+    defines the four oracle kinds and their required immutable coordinates.
 
 18. **Composing an owner is not the same as retiring the writer that shares its
     subject.** ADR-0011's Deployment Control slice is greenfield for plans,
@@ -210,3 +209,50 @@ disagree, fix the drift.
     assembly-local and is deliberately not claimed as a fleet standard
     (`tests/architecture/test_cutover_readiness.py`;
     `docs/cutover-readiness.md`).
+19. **A backfill is contracted before it moves anything, and its reports carry
+    counts, categories and blocker reasons ONLY.** ADR-0012 contracts the
+    commercial backfill: the cohort is stated exactly, every enumerated source
+    row lands in exactly one of `MAPPED` / `EXCLUDED` with a stated reason /
+    `BLOCKED` with a named dimension, and coverage — whether a source could be
+    enumerated at all — is a SEPARATE claim, because an unenumerable source is
+    an unknown number of rows and not zero.
+
+    **No report emits an identifier, an amount, a label or a timestamp**, and
+    that is structural rather than a convention: a report holds a cardinality or
+    a member of a closed enum, report enum members carry `auto()` so a member
+    value is never text, `Report` has no free-text field, `Count(` is ratcheted
+    to one module, and `render()` checks every line against a grammar and the
+    declared vocabulary. Stated as WEAKER than it sounds — the alphabet is
+    closed, the meaning of each integer is not guaranteed.
+
+    **Row-count parity and target semantic parity are different claims and are
+    never collapsed.** There is no combined verdict; an unobserved dimension is
+    `NOT_COMPARABLE`, never a quiet `MATCHED`. A transformation returns a
+    CATEGORY, never a converted value, and refuses rather than repairs: an
+    over-precise amount is not quantized, a differently-cased product code is not
+    folded, a 24-month term is not called annual.
+
+    The rehearsal reconciler emits SQL and never connects (deny case D1's
+    allowlist stays empty), emits no `GRANT` at all, and its shadow schema is
+    declared by no model and created by no revision — so it never reaches
+    production. Its replay shape has no timestamp column or surrogate key; the
+    PostgreSQL canary owns verification of that shape, while this rule records
+    no transient test result.
+
+    **Commercial term translation happens once at the typed Vendor boundary.**
+    Commercial Agreements' `expiry_date` is inclusive; `ContractView` exposes
+    the first uncovered day as `term_end_exclusive`, and the backfill source
+    contract accepts only that named end-exclusive field. There is no
+    caller-selectable convention. Full-cohort enumeration must come from an
+    exactly pinned, upstream typed paginated agreement reader through the Vendor
+    adapter — never a local replacement, a raw module-table query, or direct
+    cross-application database access.
+
+    Gate definitions state enforceable conditions, not their current status. A
+    gate condition whose evidence is a release run, peeled tag, deploy run or
+    adoption citation cannot be recorded as discharged from repository-local
+    evidence — rule 17, made structural
+    (`tests/architecture/test_commercial_backfill.py`,
+    `tests/migration/test_commercial_backfill_replay.py`;
+    `docs/commercial-backfill-dossier.md`; ADR-0012). Current evidence and state
+    belong in the dossier or the named external oracle, never in this rule.

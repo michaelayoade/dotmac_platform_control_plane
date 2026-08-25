@@ -339,6 +339,29 @@ ADR-0010 § 1 requires preserved. See ADR-0011's 2026-08-21 amendment.
 **3. Brand Profiles — separate and blocked** until the extraction dossier's
 first-adopter evidence changes. Not a Vendor decision to make.
 
+## The commercial backfill has its own dossier
+
+This document is an AGGREGATE readiness statement — what the remaining slices
+need. A backfill needs a different instrument: which rows, transformed how, and
+what would have to be true before anything moves. ADR-0012 contracts it and
+`docs/commercial-backfill-dossier.md` carries the cohort, the field-by-field
+source projection, the five transformations with their edge cases, and the two
+gate contracts. Current gate state is derived from evidence rather than recorded
+as a durable rule.
+
+Nothing there moves an authority or chooses a billing owner. Two facts from it
+are worth carrying here, because they change what a reader of this document
+should expect:
+
+- **The agreement half of the commercial estate is not enumerable from this
+  assembly.** The current exact pin publishes no typed paginated agreement
+  reader. An upstream release with `release_run` evidence, followed by an exact
+  Vendor pin and typed adapter mapping, is required; a local reader or direct
+  module-table access is not an admissible substitute.
+- **The incumbent commercial writer is still
+  `vendor_cp.offers.service.publish_offer_version`**, and it keeps its
+  authority. ADR-0012 retires nothing.
+
 ## What this document is not
 
 It is not an authority to compose, and it takes no decision that belongs in an

@@ -127,6 +127,19 @@ select = ["E", "F", "I", "UP", "B", "S"]
 # itself (uuid4 hex) — table identifiers cannot be bound as parameters, and no
 # external input reaches these statements.
 "tests/migration/test_replay_concurrency.py" = ["S101", "S105", "S106", "S608"]
+# The rehearsal repair EMITS SQL text rather than executing it, and every value
+# that reaches a statement is first proven to be a declared upper-case member
+# name or a 64-character lowercase hex fingerprint (`shadow._literal`, which
+# REFUSES rather than escapes). Nothing that could need escaping can reach the
+# statement, so S608's premise — a value of unknown provenance interpolated into
+# a query — does not hold. `tests/architecture/test_commercial_backfill.py`
+# proves the refusal, so this ignore rests on a check rather than on a comment.
+"src/vendor_cp/commercial_backfill/shadow.py" = ["S608"]
+# The rehearsal replay reads the shadow back through the SAME declared schema and
+# table constants the repair wrote, interpolated as identifiers — which cannot be
+# bound as parameters. No external input reaches these statements; the only
+# non-constant values are bound (`:role`, `:schema`).
+"tests/migration/test_commercial_backfill_replay.py" = ["S101", "S105", "S106", "S608"]
 
 [tool.mypy]
 python_version = "3.12"
