@@ -185,6 +185,10 @@ def counted_tally(subject: TallySubject, counts: Mapping[ReportEnum, int]) -> Ta
     See the module docstring for what this does and does not guarantee.
     """
     domain = TALLY_DOMAIN[subject]
+    if any(not isinstance(member, domain) for member in counts):
+        raise UnsafeReportValue(
+            f"{subject.name} tallies {domain.__name__} members only"
+        )
     return Tally(
         subject=subject,
         counts=tuple(
