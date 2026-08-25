@@ -48,7 +48,8 @@ from dotmac_kernel.messaging import enqueue_platform_event
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from vendor_cp.allocations.models import Allocation, AllocationStatus
+from vendor_cp.allocations import adapter as allocations
+from vendor_cp.allocations.adapter import AllocationView
 from vendor_cp.licensing.models import (
     IssuanceStatus,
     Licence,
@@ -237,7 +238,7 @@ def _build_payload(
     *,
     licence: Licence,
     version: int,
-    allocation: Allocation,
+    allocation: AllocationView,
     issued_at: datetime,
 ) -> bytes:
     """The `dotmac-licence/1` payload, serialized ONCE — these exact bytes are
@@ -323,10 +324,10 @@ def issue_licence(
     if existing is not None:
         return _view(existing)
 
-    allocation = db.get(Allocation, command.allocation_id)
+    allocation = allocations.read_allocation(db, command.allocation_id)
     if allocation is None:
         raise NotFoundError(f"allocation {command.allocation_id} not found")
-    if allocation.status != AllocationStatus.STAGED.value:
+    if allocation.status != str(allocations.STAGED_STATUS):
         raise BadRequestError(
             f"allocation {command.allocation_id} is {allocation.status!r}, "
             "not staged — nothing to issue"

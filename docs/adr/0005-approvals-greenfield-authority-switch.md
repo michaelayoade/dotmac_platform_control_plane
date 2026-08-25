@@ -15,21 +15,28 @@ assumed — a running control plane with approval history worth preserving.
 
 That assumption was never checked, and it was wrong.
 
-Rather than infer it, the question was settled by measurement. PR #50 added a
-read-only inventory that takes an explicitly named DSN, refuses to discover one
-from configuration, opens a `READ ONLY` transaction and emits deterministic
-evidence. Its CI proof included a seeded estate, so "reports empty" was a reading
-it could have contradicted.
+Rather than infer it, the question was settled by looking.
 
-Michael ran the check himself against the designated sole target. The observation
-was **`TARGET_ABSENT | db_service_absent | volume_absent`**: neither the Compose
-`db` service nor its data volume exists. No Vendor CP database has been
-provisioned, so there is no approval history anywhere.
+Michael ran a direct, authorized Docker-boundary check against the designated
+sole target. The observation was
+**`TARGET_ABSENT | db_service_absent | volume_absent`**: neither the Compose `db`
+service nor its data volume exists. No Vendor CP database has been provisioned,
+so there is no approval history anywhere.
 
-An earlier attempt to run that inventory was refused because the authorization
-reached the agent only as a relay, and inability to run a tool is not evidence
-about the thing it measures. That refusal is part of this record: the greenfield
-path is valid because of an observation, not because of a failure to observe.
+**The read-only inventory tool (PR #50) never ran.** It is worth being exact
+about this, because the obvious summary inverts the lesson. The tool's
+contribution was not the measurement — it was enforcing the EVIDENCE BOUNDARY.
+Asked to run against production through a relayed authorization, the agent
+refused, on the grounds that an agent relay is not the user's consent; and when
+no mechanism existed to run the merged revision inside the private network
+without publishing an image, it reported that and stopped rather than reporting
+`TARGET_ABSENT`. Inability to run a tool is not an observation about the thing
+the tool measures, and letting the first quietly become the second would have
+manufactured the exact false evidence the tool existed to prevent — on the most
+consequential decision in the programme.
+
+So: the greenfield path is valid because someone looked, not because looking
+proved difficult.
 
 ## Decision
 
@@ -78,6 +85,51 @@ information, and every one of them would have to be maintained and believed:
 - **sealed legacy evidence** — ADR-0031 is the standard for a cutover with data.
   This is not one, and sealing an empty set would produce a digest of nothing
   that later reads as proof of something.
+
+## Retired artifacts, and why deletion rather than retention
+
+Two things are removed by this change beyond the legacy runtime writer
+(`vendor_cp/approvals/service.py` and `models.py`, which point 6 above covers).
+Neither is obvious from the diff, so both are recorded here.
+
+**The sealed-cutover implementation.** `src/vendor_cp/approvals_cutover.py` — the
+seal transaction's declarations, the canonical evidence encoder, the five shared
+safety properties, the disposition rule, the privilege matrix — together with its
+architecture test. The file survives in name only: it is now
+`approvals_authority.py`, holding the parts that were about MAPPING rather than
+migration (the eligibility mapping and the digest translation), which the adapter
+uses unchanged.
+
+**The read-only inventory.** `src/vendor_cp/approvals_inventory.py`,
+`scripts/approvals_inventory.py` and their tests.
+
+Four reasons, and they apply to both:
+
+1. **The switch removes their schema AND their consumers.** Both query
+   `public.approval_policies` and `public.approval_records`, which `v013` drops.
+   Retained, they would not be a reference implementation; they would be the
+   appearance of one — code that cannot run, against tables that do not exist,
+   for a writer that no longer has callers. The next reader would have to
+   discover that by trying it.
+2. **`c3a0d1b` preserves them as immutable historical reference evidence.** Both
+   artifacts, their tests and their review history remain readable at that
+   revision. Retirement removes them from the working tree, not from the record —
+   and a working tree is a claim about what runs, while a revision is a record of
+   what was.
+3. **A later cutover implements locally.** From ADR-0031's protocol and that
+   product's own CURRENT inventory — not by resurrecting code whose shape was
+   determined by a schema and a set of consumers that no longer exist. Code
+   carried forward for reuse arrives with assumptions nobody re-examines, which
+   is precisely how a sealed cutover would end up designed around Vendor's
+   vanished tables.
+4. **The extraction bar is unchanged: TWO CURRENT CONSUMERS.** That Vendor once
+   had an implementation is not one of them, and "we already wrote it" is not a
+   consumer. Nothing here promotes this work toward a shared module.
+
+The inventory earns a separate note. Its contribution was never the measurement —
+it never ran. It was enforcing the evidence boundary: refusing a relayed
+authorization, and refusing to convert "no mechanism to run" into "the target is
+absent". That lesson belongs in the record above, not in a retained tool.
 
 ## Consequences
 

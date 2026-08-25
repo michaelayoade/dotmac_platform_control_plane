@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vendor_cp import config as vendor_config
-from vendor_cp.allocations import service as allocations
+from vendor_cp.allocations import adapter as allocations
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import service as contracts
 from vendor_cp.contracts.models import Contract
@@ -167,6 +167,7 @@ def _staged(db: Session, *, suffix: str, customer_ref: str) -> uuid.UUID:
             content_hash=submitted.content_hash or "",
             customer_ref=customer_ref,
         ),
+        catalogues=_catalogue("cap.a"),
     ).id
 
 

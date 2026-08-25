@@ -1,6 +1,6 @@
 """One import scanner, because three guards were each half-blind on their own.
 
-`test_shadow_overlaps.py` and `test_deployment_profile.py` both asked "does any
+`test_allocations_authority.py` and `test_deployment_profile.py` both ask "does any
 source file reach for X?" and both answered it with a walk that matched only
 `from <exact.module> import <name>`. Every other import form was invisible:
 
