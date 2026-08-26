@@ -1,8 +1,8 @@
 """Vendor platform-audit actions are manifest-owned vocabulary.
 
 Kernel a68 made the platform writer enforce the same manifest registry as the
-tenant writer. Vendor moves from kernel a61 to a77 in one jump, so every
-Vendor-owned action must be declared before that pin can move safely.
+tenant writer. Vendor first crossed that boundary in the a61→a77 jump and the
+a94 pin remains behind it, so every Vendor-owned action stays declared.
 """
 
 from __future__ import annotations

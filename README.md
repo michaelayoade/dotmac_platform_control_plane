@@ -27,6 +27,15 @@ lifecycle — never a product's tenants, subscribers, or customer data.
   platform-only and the agreement authority under ADR-0008. Vendor retains one
   typed offer/catalogue/approval-evidence adapter; the local lifecycle writer
   and tables are absent.
+- **Billing + Subscriptions shadows:** exact-pinned at `0.1.0a1` and
+  `0.1.0a3`, with PLATFORM storage only. Vendor `v019` keeps both schemas
+  read-only to the online role; no runtime adapter, commercial-authority
+  binding, backfill or writer switch is part of this composition.
+- **Commercial readiness observation:**
+  `scripts/report_commercial_shadow_readiness.py` prints aggregate-only source
+  completeness/mapping and target-population counts from a repeatable-read,
+  database-enforced read-only transaction. It is planning input, never parity,
+  a sealed watermark or a cutover verdict.
 - **Product capability evidence:** Vendor config pins exact product OCI and
   manifest digests; the adapter verifies their Release Catalog association and
   derives capabilities only from held kernel-canonical document bytes.
@@ -82,8 +91,10 @@ release-evidence ingestion, and rollback boundary.
 
 The assembly owns vendor accounts, immutable offers, licence delivery and key
 custody, and the provisioning laboratory. It composes Release Catalog,
-Entitlement Allocation, Approvals, Commercial Agreements and Licensing as their
-authoritative owners. ADR-0007 keeps this repository and database while
+Entitlement Allocation, Approvals, Commercial Agreements, Licensing and
+Deployment Control as their authoritative owners, while Billing and
+Subscriptions are read-only PLATFORM schema shadows. ADR-0007 keeps this
+repository and database while
 Deployment Control replaces the next local owner, ADR-0010 moves the temporary
 licence delivery/retry path to Dotmac Integrator, and Brand Profiles follows its
 Sub-first adoption. External connector execution remains in Dotmac Integrator.

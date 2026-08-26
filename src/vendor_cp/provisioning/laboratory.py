@@ -2,7 +2,8 @@
 
 This is shipped runtime behaviour, not a test helper. It implements the
 kernel's public ``ProvisioningProvider`` contract while deliberately touching no
-infrastructure: the laboratory exists to exercise plan/apply/observe/cancel
+infrastructure: the laboratory exists to exercise plan/apply/observe/cancel/
+compensate
 semantics before a real runner or provider is admitted by design.
 """
 
@@ -13,6 +14,8 @@ import json
 
 from dotmac_kernel.providers.provisioning import (
     ApplyResult,
+    CompensationDisposition,
+    CompensationResult,
     ObserveResult,
     PlanResult,
     ProvisioningPlanError,
@@ -45,7 +48,12 @@ class LaboratoryProvisioningProvider:
     @staticmethod
     def _plan_hash(request: ProvisioningRequest) -> str:
         canonical = json.dumps(
-            {"intent_id": request.intent_id, "spec": dict(request.spec)},
+            {
+                "participant": request.participant_code,
+                "scope": str(request.scope),
+                "intent_id": request.intent_id,
+                "spec": dict(request.spec),
+            },
             separators=(",", ":"),
             sort_keys=True,
         )
@@ -141,6 +149,16 @@ class LaboratoryProvisioningProvider:
             status=ProvisioningStatus.CANCELLED,
             steps=steps,
             plan_hash=result.plan_hash if result is not None else None,
+        )
+
+    def compensate(self, operation_id: str, reason: str) -> CompensationResult:
+        """Acknowledge the lab's explicit, side-effect-free reversal request."""
+        if not reason.strip():
+            raise ValueError("compensation reason must not be blank")
+        return CompensationResult(
+            operation_id=operation_id,
+            disposition=CompensationDisposition.SUCCEEDED,
+            snapshot=self.observe(operation_id),
         )
 
 

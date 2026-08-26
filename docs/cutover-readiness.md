@@ -1,8 +1,10 @@
 # Cutover readiness — Deployment Control, delivery, Brand Profiles
 
-**Dated 2026-08-21.** What the remaining ADR-0007 slices need before anyone
-writes them, and what is already true. Nothing here takes a pin, composes a
-module or moves a writer. The machine-readable half is
+**Dated 2026-08-21; kernel compatibility and commercial schema-shadow state
+updated 2026-08-25.** What the remaining ADR-0007 slices need before anyone
+writes them, and what is already true. The composition decision for the Billing
+and Subscriptions shadows lives in ADR-0012; this document does not authorise a
+runtime or writer cutover. The machine-readable half is
 `src/vendor_cp/cutover_readiness.py`, held by
 `tests/architecture/test_cutover_readiness.py`; where the two disagree, the test
 is the one that fails.
@@ -30,6 +32,7 @@ not a coordinate and is not used below.
 
 | Claim | Kind | Oracle |
 | --- | --- | --- |
+| `dotmac-kernel` `0.1.0a94` was published, installed back, verified and tagged | `release_run` + `peeled_tag` | `dotmac_starter_mt` run `32660929576`, commit `9e717eb88603f6ef61bded23b2aa468fe4533a95`: publish and install/verify/tag steps succeeded before the later post-release-record step failed; tag `dotmac-kernel-v0.1.0a94` peels to the same commit |
 | `dotmac-deployment-control` `0.1.0a2` is published and installable | `release_run` | `dotmac_starter_mt` release run `32471956734` — published, installed the wheel back from the private index, registered the manifest, then tagged |
 | a2 is pinnable | `peeled_tag` | tag `dotmac-deployment-control-v0.1.0a2`, peeled commit `5c87272a632096850a80e5e9dc1f625a97c3e5d6` (PR #308) |
 | `dotmac-brand-profiles` `0.1.0a1` is pinnable | `peeled_tag` | tag `dotmac-brand-profiles-v0.1.0a1`, peeled commit `ed69f9dfdeea493dab7d7ba25c04e940f0870545` |
@@ -72,7 +75,7 @@ and it is ADR 0013's required known-bad case.
 ## The programme, and where it stands
 
 ADR-0007 fixes the order and says plainly that reordering it requires an
-amendment at the owning source. Six slices, three landed.
+amendment at the owning source. Six slices, four landed.
 
 | # | Slice | Owner after | State |
 | --- | --- | --- | --- |
@@ -80,25 +83,50 @@ amendment at the owning source. Six slices, three landed.
 | 2 | Commercial Agreements | `dotmac-commercial-agreements` | landed (#64), ADR-0008, `v015` |
 | 3 | Licensing issuer | `dotmac-licensing` | landed (#65), ADR-0009, `v016` |
 | 4 | **Deployment Control** | `dotmac-deployment-control` | **LANDED** — a2 composed, `v017` sealed the target registrar (ADR-0011 + its 2026-08-21 amendment) |
-| 5 | Licence delivery | `dotmac-integration` in Dotmac Integrator | contracted (ADR-0010), blocked on 4 |
+| 5 | Licence delivery | `dotmac-integration` in Dotmac Integrator | contracted (ADR-0010); next hand-off slice after 4 |
 | 6 | Brand Profiles, platform plane | `dotmac-brand-profiles` | released; **deferred by local decision** behind another product |
 
 ## Pin state
 
 | Distribution | Pinned here | Released | Position |
 | --- | --- | --- | --- |
-| `dotmac-kernel` | `0.1.0a77` | a85 | current pin satisfies every composed floor |
+| `dotmac-kernel` | `0.1.0a94` | a94 | current compatibility floor |
 | `dotmac-approvals` | `0.1.0a5` | a5 | current |
 | `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current (a5 unpublished; never pin it) |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
 | `dotmac-commercial-agreements` | `0.1.0a1` | a1 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
 | `dotmac-deployment-control` | `0.1.0a2` | a2 | current |
+| `dotmac-billing` | `0.1.0a1` | a1 | PLATFORM schema shadow only; no runtime authority (ADR-0012) |
+| `dotmac-subscriptions` | `0.1.0a3` | a3 | PLATFORM schema shadow only; legacy writer unchanged (ADR-0012) |
 | `dotmac-brand-profiles` | not pinned | a1, tagged | deferred by local decision (ADR-0007 § 6) |
 
 ADR-0007's rule is that a package enters with the coherent slice that consumes
-it, so "not pinned" for Deployment Control is sequencing, not a blocker: the
-release exists and the slice may be written now.
+it. Deployment Control therefore entered at exact a2 with its authority slice;
+the Billing and Subscriptions pins enter only as the separately bounded
+read-only schema shadows in ADR-0012.
+
+## Billing and Subscriptions — aggregate readiness observation
+
+The incumbent inventory is asymmetric. Vendor has one local immutable priced
+offer writer, `vendor_cp.offers.service.publish_offer_version`, whose rows live
+in `public.offer_versions`. Commercial contract lifecycle already belongs to
+`dotmac-commercial-agreements`; Vendor reaches it through the typed
+`vendor_cp.contracts.adapter`, and its lines hold the frozen offer reference and
+money terms that a future Subscriptions mapping must reconcile. There is no
+Vendor-owned invoice, receivable, settlement, cadence, proration or recurring-
+occurrence table in the ratcheted `VENDOR_OWNED_TABLES` inventory and Billing
+has no runtime import. That establishes which writers this repository contains;
+it is **not** evidence that a named deployed estate has no other Billing
+authority.
+
+Run `scripts/report_commercial_shadow_readiness.py` only against the one Vendor
+control-plane database. It uses the kernel session boundary and immediately
+sets a repeatable-read, read-only transaction. Its aggregate-only JSON separates
+source completeness/mapping blockers from target table population and contains
+no identifiers, money values, labels or timestamps. It neither selects a
+Subscriptions cohort nor claims semantic parity, a sealed watermark, adoption
+or cutover readiness. Those remain explicit later gates in ADR-0012.
 
 **a2 rather than a1**, because a1 returns the raw unique-constraint error
 instead of the canonical verdict when two genuinely concurrent first
@@ -263,8 +291,8 @@ pin.
 **What the slice looks like when the deferral lifts.** Thin, for the same reason
 as Deployment Control's greenfield half:
 
-- Genuinely dual-plane, and this assembly selects `PLATFORM` alone — the second
-  entry `ASSEMBLY_MODULE_PLANES` will have ever held. A real choice, not an
+- Genuinely dual-plane, and this assembly will add another explicit
+  `PLATFORM`-only entry to `ASSEMBLY_MODULE_PLANES`. A real choice, not an
   inference; the kernel fails the composition if it is missing.
 - The platform plane is where host bindings live, because a control plane must
   resolve a brand before any tenant exists. This assembly has no tenants at

@@ -1,19 +1,21 @@
 """Typed request/response models for the provisioning-lab API (no bare dicts).
 
 Map the kernel's frozen provisioning results (`PlanResult`/`ApplyResult`/
-`ObserveResult`) to JSON. The status vocabularies (`ProvisioningStatus`,
-`StepStatus`) are `(str, Enum)`; responses carry their string value.
+`ObserveResult`/`CompensationResult`) to JSON. The status vocabularies
+(`ProvisioningStatus`, `StepStatus`) are `(str, Enum)`; responses carry their
+string value.
 """
 
 from __future__ import annotations
 
 from dotmac_kernel.providers.provisioning import (
     ApplyResult,
+    CompensationResult,
     ObserveResult,
     PlanResult,
     ProvisioningStep,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StepSchema(BaseModel):
@@ -36,6 +38,12 @@ class ApplyRequest(BaseModel):
     spec: dict[str, object] = Field(default_factory=dict)
     # An existing operation to RESUME (idempotent re-apply); omit to start a new one.
     operation_id: str | None = None
+
+
+class CompensationRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class PlanResponse(BaseModel):
@@ -88,11 +96,29 @@ class ObserveResponse(BaseModel):
         )
 
 
+class CompensationResponse(BaseModel):
+    operation_id: str
+    disposition: str
+    snapshot: ObserveResponse
+    reason_code: str | None
+
+    @classmethod
+    def of(cls, r: CompensationResult) -> CompensationResponse:
+        return cls(
+            operation_id=r.operation_id,
+            disposition=r.disposition.value,
+            snapshot=ObserveResponse.of(r.snapshot),
+            reason_code=r.reason_code,
+        )
+
+
 __all__ = [
     "StepSchema",
     "PlanRequest",
     "ApplyRequest",
+    "CompensationRequest",
     "PlanResponse",
     "ApplyResponse",
     "ObserveResponse",
+    "CompensationResponse",
 ]

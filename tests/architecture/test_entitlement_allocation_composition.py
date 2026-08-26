@@ -65,9 +65,8 @@ def test_module_manifest_and_public_lineage_are_composed() -> None:
     assert allocation_module in build_spec().modules
     locations = composed_version_locations().split()
     assert str(allocation_versions_dir()) in locations
-    # kernel + release catalog + allocation + approvals + agreements
-    # + licensing + vendor
-    assert len(locations) == 8
+    # kernel + eight independent modules + vendor
+    assert len(locations) == 10
 
 
 def test_the_module_mappers_load_in_this_process() -> None:

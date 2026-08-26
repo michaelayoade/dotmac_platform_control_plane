@@ -2,10 +2,11 @@
 
 Holds ONE shared Vendor-owned simulation provider for the process so an
 operation's state (keyed by `operation_id`) survives across the plan → apply →
-observe → cancel HTTP calls that exercise it. The provider keeps that state in
-memory, which is the whole extent of the lab's "persistence" (no fleet tables,
-no runner). It comes from `vendor_cp.providers.build_provisioning_provider`,
-which FAILS for any non-fake mode (deny-case D3).
+observe → cancel/compensate HTTP calls that exercise it. The provider keeps that
+state in memory, which is the whole extent of the lab's "persistence" (no fleet
+tables, no runner). It comes from
+`vendor_cp.providers.build_provisioning_provider`, which FAILS for any non-fake
+mode (deny-case D3).
 
 These are deliberately thin: each function is one contract invocation. There is
 no orchestration loop here — driving apply→observe to convergence is the caller's
@@ -15,9 +16,12 @@ job (a human in the lab, or the kernel's conformance suite).
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Final
 
+from dotmac_kernel import PlatformScope
 from dotmac_kernel.providers.provisioning import (
     ApplyResult,
+    CompensationResult,
     ObserveResult,
     PlanResult,
     ProvisioningProvider,
@@ -25,6 +29,9 @@ from dotmac_kernel.providers.provisioning import (
 )
 
 from vendor_cp.providers import build_provisioning_provider
+
+LAB_PARTICIPANT_CODE: Final[str] = "vendor.provisioning.laboratory"
+LAB_SCOPE: Final[PlatformScope] = PlatformScope()
 
 _provider: ProvisioningProvider | None = None
 
@@ -45,7 +52,12 @@ def reset_lab_provider() -> None:
 
 def plan(intent_id: str, spec: Mapping[str, object]) -> PlanResult:
     return get_lab_provider().plan(
-        ProvisioningRequest(intent_id=intent_id, spec=dict(spec))
+        ProvisioningRequest(
+            participant_code=LAB_PARTICIPANT_CODE,
+            scope=LAB_SCOPE,
+            intent_id=intent_id,
+            spec=dict(spec),
+        )
     )
 
 
@@ -54,7 +66,11 @@ def apply(
 ) -> ApplyResult:
     return get_lab_provider().apply(
         ProvisioningRequest(
-            intent_id=intent_id, spec=dict(spec), operation_id=operation_id
+            participant_code=LAB_PARTICIPANT_CODE,
+            scope=LAB_SCOPE,
+            intent_id=intent_id,
+            spec=dict(spec),
+            operation_id=operation_id,
         )
     )
 
@@ -67,11 +83,18 @@ def cancel(operation_id: str) -> ObserveResult:
     return get_lab_provider().cancel(operation_id)
 
 
+def compensate(operation_id: str, reason: str) -> CompensationResult:
+    return get_lab_provider().compensate(operation_id, reason)
+
+
 __all__ = [
     "get_lab_provider",
     "reset_lab_provider",
+    "LAB_PARTICIPANT_CODE",
+    "LAB_SCOPE",
     "plan",
     "apply",
     "observe",
     "cancel",
+    "compensate",
 ]

@@ -13,7 +13,8 @@ lineage — deriving its table set from the live catalogue rather than a literal
 list. Two halves, because the composed database has two namespaces:
 
 1. **Module schemas** (`mod_rel`, `mod_ealloc`, `mod_approvals`,
-   `mod_agreements`, `mod_licensing`) go through the
+   `mod_agreements`, `mod_licensing`, `mod_deploy`, `mod_billing`,
+   `mod_subscriptions`) go through the
    kernel's own
    canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. That
    is the contract every registered module schema is held to fleet-wide, and
@@ -80,17 +81,19 @@ from vendor_cp.migrations import make_alembic_config
 # migrations for an explicit REVOKE.
 APP_ROLE = "app_user"
 
-# The five schemas the kernel's module gate must find. Asserted because
+# The eight schemas the kernel's module gate must find. Asserted because
 # `audit_live_schemas` over zero schemas returns zero violations — the exact
 # shape of a gate that has silently stopped running.
 EXPECTED_MODULE_SCHEMAS = frozenset(
     {
         "mod_agreements",
         "mod_approvals",
+        "mod_billing",
         "mod_deploy",
         "mod_ealloc",
         "mod_licensing",
         "mod_rel",
+        "mod_subscriptions",
     }
 )
 

@@ -3,8 +3,9 @@
 The vendor control-plane database runs the KERNEL base migrations (shipped as
 `dotmac_kernel` package data, located via the public `versions_dir()`), the
 installed Release Catalog, Entitlement Allocation, Approvals, Commercial
-Agreements, Licensing and Deployment Control module lineages, PLUS this repo's
-own `alembic/versions` — one revision graph, eight separately-owned lineages.
+Agreements, Licensing, Deployment Control, Billing and Subscriptions module
+lineages, PLUS this repo's own `alembic/versions` — one revision graph, ten
+separately-owned lineages.
 Because all shared packages are installed dependencies (not fixed repo paths),
 `version_locations` is composed programmatically rather than hard-coded in
 `alembic.ini`.
@@ -21,6 +22,7 @@ from typing import Final
 
 from alembic.config import Config
 from dotmac_approvals.migrations import versions_dir as approvals_versions_dir
+from dotmac_billing import versions_dir as billing_versions_dir
 from dotmac_commercial_agreements import (
     versions_dir as commercial_agreements_versions_dir,
 )
@@ -33,6 +35,7 @@ from dotmac_kernel.planes import MODULE_PLANES_ENV_VAR
 from dotmac_kernel.prerequisites import BINDINGS_ENV_VAR
 from dotmac_licensing import versions_dir as licensing_versions_dir
 from dotmac_release_catalog import versions_dir as release_catalog_versions_dir
+from dotmac_subscriptions import versions_dir as subscriptions_versions_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_DIR = REPO_ROOT / "alembic"
@@ -40,7 +43,7 @@ VENDOR_VERSIONS = ALEMBIC_DIR / "versions"
 
 
 def composed_version_locations() -> str:
-    """Kernel, six independent modules and Vendor migration lineages."""
+    """Kernel, eight independent modules and Vendor migration lineages."""
     return (
         f"{kernel_versions_dir()} "
         f"{release_catalog_versions_dir()} "
@@ -49,6 +52,8 @@ def composed_version_locations() -> str:
         f"{commercial_agreements_versions_dir()} "
         f"{licensing_versions_dir()} "
         f"{deployment_control_versions_dir()} "
+        f"{billing_versions_dir()} "
+        f"{subscriptions_versions_dir()} "
         f"{VENDOR_VERSIONS}"
     )
 

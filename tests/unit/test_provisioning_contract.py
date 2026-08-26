@@ -9,7 +9,10 @@ tables, no DeploymentRunner — a contract laboratory only.
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
+from dotmac_kernel import PlatformScope, TenantScope
 from dotmac_kernel.messaging import (
     CommandEnvelope,  # noqa: F401  (typed-contract smoke)
 )
@@ -23,6 +26,17 @@ from vendor_cp.providers import (
     build_provisioning_provider,
 )
 from vendor_cp.provisioning.laboratory import LaboratoryProvisioningProvider
+from vendor_cp.provisioning.service import LAB_PARTICIPANT_CODE
+
+
+def _request(*, operation_id: str | None = None) -> ProvisioningRequest:
+    return ProvisioningRequest(
+        participant_code=LAB_PARTICIPANT_CODE,
+        scope=PlatformScope(),
+        intent_id="i-1",
+        spec={"size": 1},
+        operation_id=operation_id,
+    )
 
 
 def test_vendor_provider_factory_satisfies_kernel_contract() -> None:
@@ -40,7 +54,7 @@ def test_runtime_laboratory_provider_is_vendor_owned() -> None:
 
 
 def test_failure_injection_resume_and_operation_id_idempotency() -> None:
-    req = ProvisioningRequest(intent_id="i-1", spec={"size": 1})
+    req = _request()
 
     # Failure injection -> terminal FAILED.
     failing = build_provisioning_provider(fail_apply=True)
@@ -50,11 +64,7 @@ def test_failure_injection_resume_and_operation_id_idempotency() -> None:
     p = build_provisioning_provider(partial_first_apply=True)
     first = p.apply(req)
     assert first.is_partial
-    resumed = p.apply(
-        ProvisioningRequest(
-            intent_id="i-1", spec={"size": 1}, operation_id=first.operation_id
-        )
-    )
+    resumed = p.apply(_request(operation_id=first.operation_id))
     assert resumed.status is ProvisioningStatus.SUCCEEDED
 
     # Idempotency: re-applying a terminal operation returns the prior result.
@@ -62,6 +72,38 @@ def test_failure_injection_resume_and_operation_id_idempotency() -> None:
     a = done.apply(req)
     b = done.apply(req)
     assert a.operation_id == b.operation_id and b.status is a.status
+
+
+def test_plan_hash_binds_participant_and_scope() -> None:
+    provider = build_provisioning_provider()
+    base = provider.plan(_request()).plan_hash
+    other_participant = ProvisioningRequest(
+        participant_code="vendor.provisioning.other",
+        scope=PlatformScope(),
+        intent_id="i-1",
+        spec={"size": 1},
+    )
+    assert provider.plan(other_participant).plan_hash != base
+    other_scope = ProvisioningRequest(
+        participant_code=LAB_PARTICIPANT_CODE,
+        scope=TenantScope(uuid4()),
+        intent_id="i-1",
+        spec={"size": 1},
+    )
+    assert provider.plan(other_scope).plan_hash != base
+
+
+def test_compensation_is_explicit_and_requires_a_reason() -> None:
+    provider = build_provisioning_provider()
+    operation_id = provider.apply(_request()).operation_id
+
+    compensated = provider.compensate(operation_id, "operator requested rollback")
+
+    assert compensated.succeeded
+    assert compensated.operation_id == operation_id
+    assert compensated.snapshot.operation_id == operation_id
+    with pytest.raises(ValueError, match="reason must not be blank"):
+        provider.compensate(operation_id, "   ")
 
 
 def test_real_provider_mode_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:

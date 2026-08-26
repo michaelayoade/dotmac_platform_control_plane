@@ -50,9 +50,10 @@ disagree, fix the drift.
    including `tenant_scope_catalog.v1`, because
    kernel `0001` really does create `public.tenants` here. A
    `ModulePlaneSelection` says what this product installs, and it selects
-   `PLATFORM` alone for `approvals` — never as a side effect of a version bump,
-   and only behind the cutover contract that authorised it. Never reintroduce
-   the a60
+   `PLATFORM` alone for `approvals`, `billing` and `subscriptions`. Approvals'
+   selection sits behind the cutover contract that authorised its writer;
+   Billing and Subscriptions are schema-only read-only shadows under ADR-0012
+   and grant no runtime or commercial authority. Never reintroduce the a60
    model in which an absent binding selected a plane, and never create a tenants
    table, a sentinel tenant, or a nullable tenant column to satisfy a module
    (ADR-0028; `tests/architecture/test_migration_prerequisite_bindings.py`,
@@ -132,8 +133,8 @@ disagree, fix the drift.
 15. **Platform audit actions are declared vocabulary.** Every `vendor.*` action
     passed to `write_platform_audit_event` is declared by exactly one installed
     Vendor feature manifest, and every declaration has a real caller. Kernel
-    a68 made the platform writer enforce the manifest registry; the a77 pin may
-    not cross that boundary with undeclared actions
+    a68 made the platform writer enforce the manifest registry; every later
+    exact pin remains behind that boundary and may not run undeclared actions
     (`tests/architecture/test_platform_audit_actions.py`; ADR-0007).
 16. **Vendor licence delivery is transitional and frozen.** ADR-0010 schedules
     its transfer after Deployment Control and before Brand Profiles. Until that

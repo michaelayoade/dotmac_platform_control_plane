@@ -1,8 +1,9 @@
 """Provisioning-lab JSON API — a thin, platform-admin-only adapter.
 
-Exposes the four kernel `ProvisioningProvider` contract operations so a platform
+Exposes the five kernel `ProvisioningProvider` contract operations so a platform
 admin can drive plan → apply → observe → cancel against the Vendor-owned
-laboratory simulation. Every route depends on `require_platform_admin`
+laboratory simulation, with compensation as a separate explicit request. Every
+route depends on `require_platform_admin`
 (deny-case D4). NO database (there is no persistence — the only state is the
 simulation's in-memory ledger, deny-case D1/D3). The route builds no
 infrastructure; it invokes one contract method and maps the typed result.
@@ -20,6 +21,8 @@ from vendor_cp.provisioning import service
 from vendor_cp.provisioning.schemas import (
     ApplyRequest,
     ApplyResponse,
+    CompensationRequest,
+    CompensationResponse,
     ObserveResponse,
     PlanRequest,
     PlanResponse,
@@ -50,6 +53,15 @@ def observe(operation_id: str, _admin: Admin) -> ObserveResponse:
 @router.post("/operations/{operation_id}/cancel", response_model=ObserveResponse)
 def cancel(operation_id: str, _admin: Admin) -> ObserveResponse:
     return ObserveResponse.of(service.cancel(operation_id))
+
+
+@router.post(
+    "/operations/{operation_id}/compensate", response_model=CompensationResponse
+)
+def compensate(
+    operation_id: str, body: CompensationRequest, _admin: Admin
+) -> CompensationResponse:
+    return CompensationResponse.of(service.compensate(operation_id, body.reason))
 
 
 __all__ = ["router"]

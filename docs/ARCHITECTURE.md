@@ -11,17 +11,42 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a77` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a94` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source.
-- The a61 → a77 compatibility uplift moves no domain writer and composes no new
+- The historical a61 → a77 compatibility uplift moved no domain writer and
+  composed no new
   module. It does cross kernel a68's platform-audit registry enforcement, so
   every Vendor-owned platform audit action is now declared on exactly one
   installed feature manifest and swept by
   `tests/architecture/test_platform_audit_actions.py`. The a74–a77 releases
-  themselves add only the four published module namespace allocations used by
+  themselves added only the four published module namespace allocations used by
   the cutovers sequenced in ADR-0007.
+- The a77 → a94 compatibility uplift also moves no domain writer and composes
+  no additional module. It adopts the kernel's complete provisioning-provider
+  contract: the existing simulation laboratory declares
+  `vendor.provisioning.laboratory`, supplies an explicit `PlatformScope`, binds
+  both values into its deterministic plan hash, and exposes the contract's
+  separate compensation request. The API does not let callers select a
+  participant or scope. Kernel migration `0027_machine_credential` also advances
+  the indivisible kernel lineage by one tenant-scoped table; its own migration
+  supplies `tenant_id NOT NULL`, FORCE+ENABLE RLS and the canonical
+  `app_current_tenant_id()` policy. The composed PostgreSQL rehearsal proves an
+  a77-shaped Vendor database upgrades in place, tenant isolation holds, and the
+  tenant application role remains revoked from Vendor's platform catalogue.
+  None of this activates Billing, Subscriptions or Collections, selects a new
+  module plane, or changes money authority.
+- The commercial shadow slice separately exact-pins
+  `dotmac-billing==0.1.0a1` and `dotmac-subscriptions==0.1.0a3`, composes their
+  released lineages and explicitly selects only `ModulePlane.PLATFORM` for
+  both. Vendor `v019` depends on both released heads and removes every effective
+  online write/DDL privilege while retaining `SELECT`; the module grant and the
+  assembly revoke run in one composed transaction. No Billing authority is
+  bound, no service adapter calls either module, no row is backfilled, and the
+  existing offer/contract writers are unchanged. This is schema and read-only
+  shadow readiness, not adoption, runtime activation or a money-authority
+  cutover (ADR-0012).
 - **Two composition declarations, deliberately separate** (ADR-0028). Both are
   checked in at `src/vendor_cp/migration_bindings.py` and both are installed
   from `alembic/env.py` before Alembic builds the revision map:
@@ -39,10 +64,11 @@ it owns and — just as importantly — what it must never become.
     composition order. A multi-part effect binds the DESCENDANT that completes
     it — 0012 rather than 0008, which creates only the tenant half.
   - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It
-    selects `ModulePlane.PLATFORM` for `approvals`, the one selectable module
-    composed here; Release Catalog, Entitlement Allocation, Commercial
-    Agreements and Licensing each declare a single supported plane set, so
-    their contract is atomic and the kernel refuses a selection for them.
+    selects `ModulePlane.PLATFORM` for each selectable module composed here:
+    Approvals, Billing and Subscriptions. Release Catalog, Entitlement
+    Allocation, Commercial Agreements, Licensing and Deployment Control each
+    declare a single supported plane set, so their contract is atomic and the
+    kernel refuses a selection for them.
 
   Kernel `0.1.0a60` briefly let the first imply the second, and this assembly is
   the case that broke it: binding the tenant catalogue truthfully would have
@@ -54,11 +80,11 @@ it owns and — just as importantly — what it must never become.
   `DOTMAC_MODULE_PLANE_SELECTIONS`, so `alembic heads|history|show` — which
   never run `env.py` — inspect the same graph an upgrade applies.
 
-  `tests/migration/test_selected_planes.py` proves the half of ADR-0028 that is
-  assertable without a selectable module — the catalogue exists, is bound, and
-  no module schema holds a tenant-scoped table — and says plainly that the full
-  four-fact proof (platform tables built, tenant tables absent, *because of the
-  selection*) lands with the first shadow composition.
+  `tests/migration/test_selected_planes.py` and
+  `tests/migration/test_commercial_shadow.py` prove the full ADR-0028 boundary:
+  the tenant catalogue exists and is bound, each selected platform plane is
+  built, and each unselected tenant plane is absent because of the explicit
+  assembly selection.
 - `dotmac-approvals==0.1.0a5` is the **approval authority** (ADR-0005). Pinned,
   its public `versions_dir()` locator composed, `ModulePlane.PLATFORM` selected,
   and `platform_api` holding DML on `mod_approvals` — restored by vendor
@@ -174,15 +200,30 @@ it owns and — just as importantly — what it must never become.
   custody. Its delivery projection/transport tables are a temporary owner under
   ADR-0009, frozen pending ADR-0010's post-Deployment-Control Integrator
   cutover.
+- `dotmac-billing==0.1.0a1` and `dotmac-subscriptions==0.1.0a3` are composed as
+  PLATFORM-only read-only shadows under ADR-0012. Billing owns operational
+  receivables when a later authority cutover selects internal invoicing;
+  Subscriptions owns stable commercial offers, immutable offer/price and
+  subscription-contract versions, cadence, proration and recurrence after its
+  separate writer cutover. Today `platform_api` can inspect all 26 selected
+  tables and cannot write any of them; `app_user` has no table privilege and no
+  tenant table was created. The modules are peers and this slice wires no
+  runtime flow between them. The standalone
+  `report_commercial_shadow_readiness.py` command is the sole runtime reader in
+  this phase: it observes the Vendor offer/agreement sources and aggregate
+  target population in one repeatable-read, database-enforced read-only
+  transaction, emits counts only, and makes no cohort, parity, watermark or
+  authority decision.
 
 ## The composed database is audited whole
 
 `tests/migration/test_composed_live_catalog.py` audits the database this
-assembly actually produces — all eight lineages: kernel, the six module owners,
+assembly actually produces — all ten lineages: kernel, the eight module owners,
 and Vendor — rather than the tables someone remembered to name.
 
 - The module schemas (`mod_rel`, `mod_ealloc`, `mod_approvals`,
-  `mod_agreements`, `mod_licensing`) go through the kernel's own
+  `mod_agreements`, `mod_licensing`, `mod_deploy`, `mod_billing`,
+  `mod_subscriptions`) go through the kernel's own
   canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. A rule
   the kernel tightens tightens here in the release that ships it, and the
   expected table set derives from this assembly's plane selection rather than
@@ -276,8 +317,9 @@ That same run is the a5/a6 pins' proof: `ap_0002` and `ea_0003` are DDL-free
 revisions whose entire bodies verify their declared prerequisites, so they were
 checked against the real database at deploy rather than only in rehearsal.
 
-So all five composed owners are now adopted. What remains below adopted is
-Vendor's own retained delivery path, which ADR-0010 retires rather than adopts.
+Those five authority owners are adopted. Billing and Subscriptions are only
+schema shadows and remain below adopted; Vendor's retained delivery path is a
+separate owner that ADR-0010 retires rather than adopts.
 
 ## In-place module recomposition (ADR-0007)
 
@@ -293,7 +335,7 @@ requires an explicit amendment at the owning source.
 Each authority-moving slice must pin and compose one released module, install
 its lineage and platform-plane intent, migrate or prove the absence of rows,
 switch one writer, and retire the replaced local owner in the same coherent
-change. Merely pinning kernel a77 does none of those things. External provider
+change. Merely pinning kernel a94 does none of those things. External provider
 I/O, credentials, retries and connector scheduling remain owned by the separate
 Dotmac Integrator; module-owned desired state in `mod_deploy` is not permission
 to build a second Vendor-local fleet or connector engine.
@@ -311,7 +353,7 @@ and `offers` routers. Licensing's issuer is composed; Vendor still owns its
 route adapter, key custody and delivery. A withheld surface is not a disabled
 subsystem: licence key custody still loads at boot, and a test asserts it.
 
-A profile may never withhold a persistence owner. All five stateful module
+A profile may never withhold a persistence owner. All eight stateful module
 manifests carry a migration lineage and own schemas the database already
 contains, so an assembly missing one would no longer describe its own tables.
 
@@ -358,7 +400,7 @@ Compose project and from every product data plane:
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration
-backup, runs the eight-lineage `scripts/migrate.py`, and only then replaces the
+backup, runs the ten-lineage `scripts/migrate.py`, and only then replaces the
 application. The complete operator contract and rollback boundary are in
 `docs/operations/production-deployment.md`.
 

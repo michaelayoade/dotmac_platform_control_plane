@@ -10,8 +10,12 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+from dotmac_billing import module as billing_module
+from dotmac_billing import versions_dir as billing_versions_dir
 from dotmac_release_catalog import module as release_catalog_module
 from dotmac_release_catalog import versions_dir as release_catalog_versions_dir
+from dotmac_subscriptions import module as subscriptions_module
+from dotmac_subscriptions import versions_dir as subscriptions_versions_dir
 
 from vendor_cp.assembly import build_spec
 from vendor_cp.migrations import composed_version_locations
@@ -23,11 +27,12 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
     dependencies = config["tool"]["poetry"]["dependencies"]
 
-    assert dependencies["dotmac-kernel"]["version"] == "0.1.0a77"
+    assert dependencies["dotmac-kernel"]["version"] == "0.1.0a94"
     assert dependencies["dotmac-kernel"]["source"] == "forgejo"
-    # Every authority module pin is asserted. Only the release catalogue was, which is
-    # how the entitlement-allocation pin could have drifted to a range or to a
-    # path dependency without a single test noticing.
+    # Every shared module pin is asserted. Only the release catalogue was, which
+    # is how the entitlement-allocation pin could have drifted to a range or to
+    # a path dependency without a single test noticing. Composition does not by
+    # itself claim that every pinned module has runtime authority.
     assert dependencies["dotmac-release-catalog"] == {
         "version": "0.1.0a4",
         "source": "forgejo",
@@ -48,10 +53,24 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
         "version": "0.1.0a1",
         "source": "forgejo",
     }
+    assert dependencies["dotmac-billing"] == {
+        "version": "0.1.0a1",
+        "source": "forgejo",
+    }
+    assert dependencies["dotmac-subscriptions"] == {
+        "version": "0.1.0a3",
+        "source": "forgejo",
+    }
 
 
 def test_release_catalog_manifest_is_composed() -> None:
     assert release_catalog_module in build_spec().modules
+
+
+def test_commercial_shadow_manifests_are_composed() -> None:
+    modules = build_spec().modules
+    assert billing_module in modules
+    assert subscriptions_module in modules
 
 
 def test_vendor_ingestion_adapter_owns_its_audit_vocabulary() -> None:
@@ -64,6 +83,7 @@ def test_vendor_ingestion_adapter_owns_its_audit_vocabulary() -> None:
 def test_release_catalog_public_migration_lineage_is_composed() -> None:
     locations = composed_version_locations().split()
     assert str(release_catalog_versions_dir()) in locations
-    # kernel + release catalog + allocation + approvals + agreements
-    # + licensing + vendor
-    assert len(locations) == 8
+    assert str(billing_versions_dir()) in locations
+    assert str(subscriptions_versions_dir()) in locations
+    # kernel + eight independent modules + vendor
+    assert len(locations) == 10

@@ -1,6 +1,7 @@
 [tool.poetry]
 name = "dotmac-vendor-control-plane"
 version = "0.1.0"
+requires-poetry = "2.4.1"
 description = "DotMac Vendor Control Plane — a vendor/product-lifecycle assembly composed from the pinned dotmac-kernel. It is NOT a product data plane; it owns vendor-side accounts, provisioning contracts, and (later) deployment lifecycle."
 authors = ["DotMac"]
 readme = "README.md"
@@ -15,7 +16,7 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a77", extras = [
+dotmac-kernel = { version = "0.1.0a94", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
@@ -91,6 +92,16 @@ dotmac-commercial-agreements = { version = "0.1.0a1", source = "forgejo" }
 # greenfield premise under lock, drops the empty local issuer tables and keeps
 # only key custody plus the separately owned delivery projection.
 dotmac-licensing = { version = "0.1.0a1", source = "forgejo" }
+# The dual-plane operational-receivables owner, composed on PLATFORM only as a
+# read-only shadow. Vendor v019 revokes every online write/DDL privilege after
+# bi_0001 creates the selected tables; no Billing runtime adapter or commercial
+# authority binding lands in this slice.
+dotmac-billing = { version = "0.1.0a1", source = "forgejo" }
+# Stable offers, immutable offer/price and subscription-contract versions,
+# cadence, proration and recurrence. PLATFORM storage is composed read-only in
+# the same v019 shadow boundary. The module remains a peer of Billing: neither
+# distribution imports the other, and this assembly wires no runtime flow yet.
+dotmac-subscriptions = { version = "0.1.0a3", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).

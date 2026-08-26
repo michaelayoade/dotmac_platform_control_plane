@@ -32,11 +32,12 @@ that is expensive to take back.
 ## What a profile may never do
 
 A profile selects SURFACES. It may not drop a persistence owner: Release
-Catalog, Entitlement Allocation, Approvals, Commercial Agreements and Licensing
-carry migration lineages and schema ownership, so withholding one would mean an
-assembly whose database is no longer described by its composition.
+Catalog, Entitlement Allocation, Approvals, Commercial Agreements, Licensing,
+Deployment Control, Billing and Subscriptions carry migration lineages and
+schema ownership, so withholding one would mean an assembly whose database is
+no longer described by its composition.
 `withheld_surfaces` is validated against the surface-only feature names for
-that reason, and the assembly test asserts all five stateful modules survive
+that reason, and the assembly test asserts all eight stateful modules survive
 every profile.
 """
 

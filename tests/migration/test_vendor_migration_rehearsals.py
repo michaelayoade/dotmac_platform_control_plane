@@ -26,7 +26,8 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0026_platform_audit_log"  # current pin (0.1.0a77)
+KERNEL_HEAD = "0027_machine_credential"  # current pin (0.1.0a94)
+A77_KERNEL_HEAD = "0026_platform_audit_log"  # previous composed pin (0.1.0a77)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 
@@ -59,9 +60,11 @@ LICENSING_HEAD = "li_0001_licensing"
 # is an ancestor and NOT a version row, the same shape `ap_0001` had before
 # a5 moved that lineage past it.
 DEPLOYMENT_CONTROL_HEAD = "dc_0001_deployment_control"
+BILLING_HEAD = "bi_0001_billing"
+SUBSCRIPTIONS_HEAD = "su_0003_billing_treatments"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v018_licence_delivery_intents"
+VENDOR_HEAD = "v019_commercial_shadow"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:
@@ -165,6 +168,7 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # Kernel platform tables the AccountService depends on are present too.
     assert _table_exists(scratch_db, "platform_audit_events")
     assert _table_exists(scratch_db, "platform_idempotency_records")
+    assert _table_exists(scratch_db, "machine_credentials")
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_rel.artifact_attestations")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
@@ -178,6 +182,8 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     assert _qualified_table_exists(scratch_db, "mod_licensing.licence_acknowledgements")
     assert _qualified_table_exists(scratch_db, "mod_licensing.revocations")
     assert _qualified_table_exists(scratch_db, "mod_licensing.revocation_lists")
+    assert _qualified_table_exists(scratch_db, "mod_billing.platform_billing_accounts")
+    assert _qualified_table_exists(scratch_db, "mod_subscriptions.platform_offers")
     cols = _column_names(scratch_db, "vendor_accounts")
     assert {
         "id",
@@ -200,11 +206,12 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # own right. `v012` depends on `ap_0001_approvals`, `v014` on
     # `ea_0001_allocations`, `v015` on `cg_0001_agreements`, and `v016` on
     # `li_0001_licensing`. Commercial
-    # Agreements in turn depends on kernel `0018` and `0026`, so the current
-    # kernel head is an ancestor too. All four revisions are genuinely applied;
-    # none remains a version ROW once the Vendor lineage reaches v016.
+    # Agreements in turn depends on kernel `0018` and `0026`. Kernel `0027` is
+    # newer than those module prerequisites, so it remains its own version row;
+    # the four depended-on revisions are genuinely applied but no longer rows
+    # once the Vendor lineage reaches v016.
     #
-    # They are still static heads, and `test_eight_head_topology` asserts all eight
+    # They are still static heads, and `test_ten_head_topology` asserts all ten
     # through `script.get_heads()`. Listing them here as well would report them
     # missing on a perfectly complete database.
     #
@@ -212,6 +219,7 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # repin: the vendor edges depend on those lineages' ROOTS, so their new
     # DDL-free tips are depended on by nothing and remain version rows.
     assert _versions(scratch_db) == {
+        KERNEL_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
         APPROVALS_HEAD,
@@ -280,9 +288,9 @@ def test_alembic_env_installs_the_vendor_prerequisite_bindings(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rehearsal 2 — eight-head topology
+# Rehearsal 2 — ten-head topology
 # ─────────────────────────────────────────────────────────────────────────────
-def test_eight_head_topology(scratch_db: str) -> None:
+def test_ten_head_topology(scratch_db: str) -> None:
     script = ScriptDirectory.from_config(make_alembic_config(scratch_db))
     assert set(script.get_heads()) == {
         KERNEL_HEAD,
@@ -292,6 +300,8 @@ def test_eight_head_topology(scratch_db: str) -> None:
         COMMERCIAL_AGREEMENTS_HEAD,
         LICENSING_HEAD,
         DEPLOYMENT_CONTROL_HEAD,
+        BILLING_HEAD,
+        SUBSCRIPTIONS_HEAD,
         VENDOR_HEAD,
     }
     kernel_head = script.get_revision("kernel@head")
@@ -301,6 +311,8 @@ def test_eight_head_topology(scratch_db: str) -> None:
     agreement_head = script.get_revision("commercial_agreements@head")
     licensing_head = script.get_revision("licensing@head")
     deployment_head = script.get_revision("deployment_control@head")
+    billing_head = script.get_revision("billing@head")
+    subscriptions_head = script.get_revision("subscriptions@head")
     assert kernel_head.revision == KERNEL_HEAD
     assert vendor_head.revision == VENDOR_HEAD
     assert release_catalog_head.revision == RELEASE_CATALOG_HEAD
@@ -308,6 +320,8 @@ def test_eight_head_topology(scratch_db: str) -> None:
     assert agreement_head.revision == COMMERCIAL_AGREEMENTS_HEAD
     assert licensing_head.revision == LICENSING_HEAD
     assert deployment_head.revision == DEPLOYMENT_CONTROL_HEAD
+    assert billing_head.revision == BILLING_HEAD
+    assert subscriptions_head.revision == SUBSCRIPTIONS_HEAD
     # The vendor head is the tip of a single-parent chain that walks back to the
     # vendor ROOT; the ROOT is its own branch that DEPENDS ON (is not a child of)
     # a kernel head, so the lineages advance independently.
@@ -459,7 +473,10 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     assert _qualified_table_exists(scratch_db, "mod_agreements.agreements")
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    assert _qualified_table_exists(scratch_db, "mod_billing.platform_billing_accounts")
+    assert _qualified_table_exists(scratch_db, "mod_subscriptions.platform_offers")
     assert _versions(scratch_db) == {
+        KERNEL_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
         APPROVALS_HEAD,
@@ -478,6 +495,10 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     assert not _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert not _qualified_table_exists(scratch_db, "mod_agreements.agreements")
     assert not _qualified_table_exists(scratch_db, "mod_licensing.licences")
+    assert not _qualified_table_exists(
+        scratch_db, "mod_billing.platform_billing_accounts"
+    )
+    assert not _qualified_table_exists(scratch_db, "mod_subscriptions.platform_offers")
 
     account_id = str(uuid.uuid4())
     eng = create_engine(scratch_db)
@@ -500,6 +521,8 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _qualified_table_exists(scratch_db, "mod_agreements.agreements")
     assert _qualified_table_exists(scratch_db, "mod_licensing.licences")
+    assert _qualified_table_exists(scratch_db, "mod_billing.platform_billing_accounts")
+    assert _qualified_table_exists(scratch_db, "mod_subscriptions.platform_offers")
     assert (
         _q(
             scratch_db,
@@ -509,11 +532,131 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
         == 1
     )
     assert _versions(scratch_db) == {
+        KERNEL_HEAD,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
     }
+
+
+def test_a77_to_a94_upgrade_adds_rls_credentials_and_preserves_platform_denial(
+    scratch_db: str, url_for: Callable[..., str]
+) -> None:
+    """Rehearse the exact kernel-only delta without reclassifying Vendor state."""
+    # Build the current Vendor composition at its former kernel pin. Targeting
+    # the named heads applies every existing Vendor/module revision but stops
+    # the independent kernel lineage at the highest prerequisite, 0026.
+    for target in (
+        A77_KERNEL_HEAD,
+        VENDOR_HEAD,
+        RELEASE_CATALOG_HEAD,
+        APPROVALS_HEAD,
+        ENTITLEMENT_ALLOCATION_HEAD,
+    ):
+        _upgrade(scratch_db, target)
+    assert not _table_exists(scratch_db, "machine_credentials")
+
+    account_id = str(uuid.uuid4())
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO vendor_accounts "
+                    "(id, external_ref, display_name, status) "
+                    "VALUES (:id, 'before-a94', 'Preserved Vendor', 'active')"
+                ),
+                {"id": account_id},
+            )
+    finally:
+        eng.dispose()
+
+    _upgrade(scratch_db, "kernel@head")
+
+    assert _table_exists(scratch_db, "machine_credentials")
+    assert (
+        _q(
+            scratch_db,
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='machine_credentials' "
+            "AND column_name='tenant_id'",
+        )
+        == "NO"
+    )
+    expected_policy_expression = "(tenant_id = app_current_tenant_id())"
+    assert _q(
+        scratch_db,
+        "SELECT relrowsecurity AND relforcerowsecurity FROM pg_class "
+        "WHERE oid='machine_credentials'::regclass",
+    )
+    assert (
+        _q(
+            scratch_db,
+            "SELECT qual || '|' || with_check FROM pg_policies "
+            "WHERE schemaname='public' AND tablename='machine_credentials' "
+            "AND policyname='machine_credentials_tenant_isolation'",
+        )
+        == f"{expected_policy_expression}|{expected_policy_expression}"
+    )
+    # This is tenant data: app_user gets DML, and FORCE RLS is its isolation.
+    assert _q(
+        scratch_db,
+        "SELECT has_table_privilege('app_user', 'machine_credentials', 'SELECT')",
+    )
+
+    tenant_a, tenant_b = str(uuid.uuid4()), str(uuid.uuid4())
+    eng = create_engine(scratch_db)
+    try:
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO tenants (id, slug, name) VALUES "
+                    "(:a, 'a94-a', 'A94 tenant A'), (:b, 'a94-b', 'A94 tenant B')"
+                ),
+                {"a": tenant_a, "b": tenant_b},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO machine_credentials "
+                    "(id, tenant_id, label, key_hash, scopes) VALUES "
+                    "(gen_random_uuid(), :a, 'agent-a', 'hmac-sha256:a', '[]'), "
+                    "(gen_random_uuid(), :b, 'agent-b', 'hmac-sha256:b', '[]')"
+                ),
+                {"a": tenant_a, "b": tenant_b},
+            )
+    finally:
+        eng.dispose()
+
+    db_name = scratch_db.rsplit("/", 1)[1]
+    appu = create_engine(url_for(scratch_db, db_name, user="app_user"))
+    try:
+        with appu.begin() as conn:
+            conn.execute(
+                text("SELECT set_config('app.current_tenant', :tenant_id, true)"),
+                {"tenant_id": tenant_a},
+            )
+            assert (
+                conn.execute(text("SELECT count(*) FROM machine_credentials")).scalar()
+                == 1
+            )
+
+        # The new tenant table must not weaken the existing platform boundary:
+        # app_user remains REVOKEd from Vendor's authoritative catalogue.
+        with appu.connect() as conn:
+            with pytest.raises(DBAPIError, match="permission denied"):
+                conn.execute(text("SELECT count(*) FROM vendor_accounts")).scalar()
+    finally:
+        appu.dispose()
+
+    assert (
+        _q(
+            scratch_db,
+            "SELECT count(*) FROM vendor_accounts WHERE id = CAST(:id AS uuid)",
+            id=account_id,
+        )
+        == 1
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -524,7 +667,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
 ) -> None:
     """Simulate a FUTURE kernel migration (a child of the kernel head). The
     vendor and module heads must remain separate heads — and a composed upgrade
-    must still apply all seven lineages."""
+    must still apply all ten lineages."""
     synth_rev = "9999_synthetic_kernel_advance"
     (tmp_path / f"{synth_rev}.py").write_text(
         "revision = '9999_synthetic_kernel_advance'\n"
@@ -548,6 +691,8 @@ def test_kernel_advance_keeps_vendor_head_independent(
         COMMERCIAL_AGREEMENTS_HEAD,
         LICENSING_HEAD,
         DEPLOYMENT_CONTROL_HEAD,
+        BILLING_HEAD,
+        SUBSCRIPTIONS_HEAD,
         VENDOR_HEAD,
     }
 

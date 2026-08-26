@@ -23,7 +23,7 @@ that truthful binding would have switched on tenant approval tables in a
 control plane with no tenants to scope them to, and the only way to avoid that
 was to lie by withholding a binding whose effect the database plainly provides.
 
-The separation introduced in a61 remains the contract at the a77 pin: we bind
+The separation introduced in a61 remains the contract at the a94 pin: we bind
 what we HAVE, and we select what we INSTALL. Every binding below is therefore
 present and truthful, and the tenant plane of any dual-plane module stays out
 because it was never SELECTED — never because a binding was withheld.
@@ -34,11 +34,13 @@ the relay tables since a1 without declaring the effect, so for three releases
 this assembly satisfied a dependency it had never been asked to name. Binding it
 is not new capability; it is the same database, finally described.
 
-`dotmac-approvals` is the one selectable module composed here, and the selection
-below installs its PLATFORM plane only. Note what that does NOT say: selecting a
-plane chooses STORAGE SHAPE, never WRITE AUTHORITY. Vendor `v012` imposed the
-bounded shadow restriction; `v013` later restored DML and transferred authority
-under ADR-0005.
+`dotmac-approvals`, `dotmac-billing` and `dotmac-subscriptions` are the selectable
+modules composed here, and every selection below installs its PLATFORM plane
+only. Note what that does NOT say: selecting a plane chooses STORAGE SHAPE,
+never WRITE AUTHORITY. Vendor `v012` imposed the bounded Approvals shadow
+restriction; `v013` later restored DML and transferred that authority under
+ADR-0005. Vendor `v019` keeps Billing and Subscriptions read-only while their
+separate cutover gates remain open.
 
 Both declarations are installed from `alembic/env.py` before Alembic builds the
 revision map, and both are mirrored into the graph-command environment
@@ -113,7 +115,7 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
     ),
 )
 
-#: The assembly's INSTALLATION INTENT, now that a selectable module is composed.
+#: The assembly's INSTALLATION INTENT for every selectable module it composes.
 #:
 #: `dotmac-approvals` ships tenant AND platform planes. This assembly installs
 #: only the platform one: vendor approvals are control-plane state, and there is
@@ -128,6 +130,8 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
 #: and `v013`.
 ASSEMBLY_MODULE_PLANES: Final[tuple[ModulePlaneSelection, ...]] = (
     ModulePlaneSelection(module="approvals", planes=(ModulePlane.PLATFORM,)),
+    ModulePlaneSelection(module="billing", planes=(ModulePlane.PLATFORM,)),
+    ModulePlaneSelection(module="subscriptions", planes=(ModulePlane.PLATFORM,)),
 )
 
 

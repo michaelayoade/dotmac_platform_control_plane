@@ -13,12 +13,14 @@ import os
 from dataclasses import replace
 
 from dotmac_approvals import module as approvals_module
+from dotmac_billing import module as billing_module
 from dotmac_commercial_agreements import module as commercial_agreements_module
 from dotmac_deployment_control import module as deployment_control_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import FeatureManifest, ProductAssemblySpec
 from dotmac_licensing import module as licensing_module
 from dotmac_release_catalog import module as release_catalog_module
+from dotmac_subscriptions import module as subscriptions_module
 
 from vendor_cp.accounts.feature import feature as accounts_feature
 from vendor_cp.allocations.feature import feature as allocations_feature
@@ -67,6 +69,11 @@ STATEFUL_MODULES = (
     # independent registration path, and `vendor_cp.deployment.adapter` is the
     # only seam (ADR-0011).
     deployment_control_module,
+    # Selectable dual-plane commercial owners, composed on PLATFORM only as
+    # schema shadows. Vendor v019 removes platform_api write/DDL privileges;
+    # no adapter binds Billing authority or invokes either module at runtime.
+    billing_module,
+    subscriptions_module,
 )
 
 # The vendor's own features, in mount order. A profile may strip a feature's

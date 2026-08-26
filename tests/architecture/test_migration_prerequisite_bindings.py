@@ -7,11 +7,12 @@ binding that truth was itself the instruction to build a module's tenant plane,
 and the only way to keep tenant tables out of a control plane with no tenants was
 to withhold a binding whose effect the database plainly provides.
 
-The separation introduced in a61 remains at a77, so this assembly binds every
+The separation introduced in a61 remains at a94, so this assembly binds every
 kernel effect its currently composed modules require and states installation
 intent separately. The tests below assert the two halves apart, so a future edit
-cannot quietly re-merge them. Approvals is selectable and its platform plane is
-declared explicitly; its tenant plane remains absent.
+cannot quietly re-merge them. Approvals, Billing and Subscriptions are
+selectable; their platform planes are declared explicitly and their tenant
+planes remain absent.
 """
 
 from __future__ import annotations
@@ -129,18 +130,21 @@ def test_every_selectable_composed_module_has_a_selection() -> None:
     }
     declared = {selection.module for selection in ASSEMBLY_MODULE_PLANES}
 
-    assert selectable == {"approvals"}, sorted(selectable)
+    assert selectable == {"approvals", "billing", "subscriptions"}, sorted(selectable)
     assert declared == selectable, sorted(declared ^ selectable)
 
 
-def test_the_approvals_plane_selection_is_platform_only() -> None:
-    """Vendor approvals are control-plane state; there is no tenant here whose
-    approvals could be scoped."""
+def test_every_selected_plane_is_platform_only() -> None:
+    """Vendor installs no tenant persistence plane and creates no fake tenant."""
     planes = {
         selection.module: {ModulePlane(p) for p in selection.planes}
         for selection in ASSEMBLY_MODULE_PLANES
     }
-    assert planes == {"approvals": {ModulePlane.PLATFORM}}
+    assert planes == {
+        "approvals": {ModulePlane.PLATFORM},
+        "billing": {ModulePlane.PLATFORM},
+        "subscriptions": {ModulePlane.PLATFORM},
+    }
 
 
 def test_the_assembly_spec_carries_the_selection_for_validation() -> None:
