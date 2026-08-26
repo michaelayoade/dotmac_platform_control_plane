@@ -37,7 +37,6 @@ from dotmac_kernel import (
 from dotmac_kernel import UndeclaredCapabilityError as KernelUndeclaredCapabilityError
 from dotmac_release_catalog import (
     ArtifactAttestation,
-    ArtifactKind,
     AttestationKind,
     ReleaseArtifact,
 )
@@ -143,7 +142,7 @@ def catalogued_product_capability_catalogues(
         artifact = db.scalar(
             select(ReleaseArtifact).where(
                 ReleaseArtifact.product_code == product_code,
-                ReleaseArtifact.artifact_kind == ArtifactKind.CONTAINER_IMAGE.value,
+                ReleaseArtifact.artifact_kind == pin.artifact_kind.value,
                 ReleaseArtifact.digest == pin.artifact_digest,
             )
         )

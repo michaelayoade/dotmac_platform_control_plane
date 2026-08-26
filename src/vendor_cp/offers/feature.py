@@ -15,4 +15,5 @@ feature = FeatureManifest(
     routers=[router],
     core=True,
     enabled_by_default=True,
+    audit_actions=("vendor.offer_version.published",),
 )

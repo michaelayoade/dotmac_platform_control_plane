@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotmac_release_catalog import ArtifactKind
+
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -26,10 +28,13 @@ class ProductionConfigurationError(RuntimeError):
 class ProductReleasePin:
     """Exact artifact and product-manifest identities selected by an operator."""
 
+    artifact_kind: ArtifactKind
     artifact_digest: str
     product_manifest_digest: str
 
     def __post_init__(self) -> None:
+        if not isinstance(self.artifact_kind, ArtifactKind):
+            raise ValueError("artifact_kind must be a closed Release Catalog kind")
         if _SHA256_RE.fullmatch(self.artifact_digest) is None:
             raise ValueError(
                 "artifact_digest must be 'sha256:' plus 64 lowercase hex digits"
@@ -112,12 +117,13 @@ def load_vendor_settings() -> VendorSettings:
         ):
             raise ValueError("product release pin keys must be non-blank strings")
         if not isinstance(document, dict) or set(document) != {
+            "artifact_kind",
             "artifact_digest",
             "product_manifest_digest",
         }:
             raise ValueError(
                 f"release pin for product {product_code!r} must contain exactly "
-                "artifact_digest and product_manifest_digest"
+                "artifact_kind, artifact_digest and product_manifest_digest"
             )
         if not all(isinstance(value, str) for value in document.values()):
             raise ValueError(
@@ -127,6 +133,7 @@ def load_vendor_settings() -> VendorSettings:
             (
                 product_code,
                 ProductReleasePin(
+                    artifact_kind=ArtifactKind(document["artifact_kind"]),
                     artifact_digest=document["artifact_digest"],
                     product_manifest_digest=document["product_manifest_digest"],
                 ),

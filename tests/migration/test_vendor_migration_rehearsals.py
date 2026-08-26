@@ -26,9 +26,9 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0023_audit_actor_and_forensics"  # current pin (0.1.0a61)
+KERNEL_HEAD = "0026_platform_audit_log"  # current composed Starter source
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
-RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
+RELEASE_CATALOG_HEAD = "rl_0002_artifact_origin"  # current composed Starter source
 ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 # A STATIC head of its own lineage — but not a version ROW once `v012` depends
 # on it, because a `depends_on` edge makes its target an ancestor of the
@@ -37,7 +37,7 @@ ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 APPROVALS_HEAD = "ap_0001_approvals"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v014_allocations_authority"
+VENDOR_HEAD = "v017_integrator_evidence"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:
@@ -126,6 +126,17 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # empty legacy tables went with the writer that owned them.
     assert not _table_exists(scratch_db, "allocations")
     assert not _table_exists(scratch_db, "allocation_entries")
+    assert _table_exists(scratch_db, "managed_service_profile_versions")
+    assert _table_exists(scratch_db, "deployment_targets")
+    assert _table_exists(scratch_db, "deployments")
+    assert _table_exists(scratch_db, "deployment_capability_instances")
+    assert _table_exists(scratch_db, "deployment_desired_state_versions")
+    assert _table_exists(scratch_db, "deployment_bundle_manifest_versions")
+    assert _table_exists(scratch_db, "deployment_plans")
+    assert _table_exists(scratch_db, "deployment_plan_approval_requests")
+    assert _table_exists(scratch_db, "deployment_plan_approval_grants")
+    assert _table_exists(scratch_db, "integrator_command_dispatches")
+    assert _table_exists(scratch_db, "integrator_execution_receipts")
     assert "product_code" in _column_names(scratch_db, "offer_versions")
     assert "product_code" in _column_names(scratch_db, "contracts")
     # Kernel platform tables the AccountService depends on are present too.
@@ -150,6 +161,25 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         scratch_db,
         "SELECT relrowsecurity FROM pg_class WHERE oid='vendor_accounts'::regclass",
     )
+    for table in (
+        "managed_service_profile_versions",
+        "deployment_targets",
+        "deployments",
+        "deployment_capability_instances",
+        "deployment_desired_state_versions",
+        "deployment_bundle_manifest_versions",
+        "deployment_plans",
+        "deployment_plan_approval_requests",
+        "deployment_plan_approval_grants",
+        "integrator_command_dispatches",
+        "integrator_execution_receipts",
+    ):
+        assert "tenant_id" not in _column_names(scratch_db, table)
+        assert not _q(
+            scratch_db,
+            "SELECT relrowsecurity FROM pg_class " "WHERE oid=CAST(:table AS regclass)",
+            table=f"public.{table}",
+        )
     # VERSION ROWS, which are not the same set as the static heads.
     #
     # `alembic_version` holds current heads only, and a `depends_on` edge makes
@@ -312,8 +342,432 @@ def test_platform_role_access_and_tenant_role_denial(
                 conn.execute(
                     text("SELECT count(*) FROM mod_ealloc.allocations")
                 ).scalar()
+        with appu.connect() as conn:
+            with pytest.raises(DBAPIError, match="permission denied"):
+                conn.execute(text("SELECT count(*) FROM deployments")).scalar()
     finally:
         appu.dispose()
+
+
+def test_v015_profile_and_desired_state_are_database_immutable(
+    scratch_db: str,
+) -> None:
+    _upgrade(scratch_db, "heads")
+    ids = {
+        name: str(uuid.uuid4())
+        for name in (
+            "account",
+            "profile",
+            "target",
+            "deployment",
+            "instance",
+            "desired",
+        )
+    }
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO vendor_accounts "
+                    "(id, external_ref, display_name, status) "
+                    "VALUES (:id, 'immutable-canary', 'Immutable', 'active')"
+                ),
+                {"id": ids["account"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO managed_service_profile_versions "
+                    "(id, profile_code, version, schema_version, "
+                    "commercial_product_code, content_hash, document) VALUES "
+                    "(:id, 'immutable', 1, 1, 'managed-collaboration', "
+                    ":hash, CAST('{}' AS jsonb))"
+                ),
+                {"id": ids["profile"], "hash": "sha256:" + "a" * 64},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_targets "
+                    "(id, account_id, target_ref, display_name, region_code) "
+                    "VALUES (:id, :account, 'immutable', 'Immutable', 'ng-abuja')"
+                ),
+                {"id": ids["target"], "account": ids["account"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployments "
+                    "(id, account_id, target_id, deployment_ref, "
+                    "commercial_product_code, internal_source_code) VALUES "
+                    "(:id, :account, :target, 'immutable', "
+                    "'managed-collaboration', 'dotmac.canary')"
+                ),
+                {
+                    "id": ids["deployment"],
+                    "account": ids["account"],
+                    "target": ids["target"],
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_desired_state_versions "
+                    "(id, deployment_id, revision, profile_version_id, profile_code, "
+                    "profile_version, profile_content_hash, commercial_product_code, "
+                    "update_authority, selected_components, selected_capabilities, "
+                    "selected_operations, selected_verification_checks, "
+                    "configuration_snapshot, desired_operation_inputs, "
+                    "selected_composition_edges, "
+                    "configuration_snapshot_ref, "
+                    "configuration_schema_version, configuration_hash, "
+                    "desired_state_hash) VALUES "
+                    "(:id, :deployment, 1, :profile, 'immutable', 1, :profile_hash, "
+                    "'managed-collaboration', 'customer_approved', "
+                    "CAST('[]' AS jsonb), CAST('[]' AS jsonb), CAST('[]' AS jsonb), "
+                    "CAST('[]' AS jsonb), CAST('{}' AS jsonb), CAST('{}' AS jsonb), "
+                    "CAST('[]' AS jsonb), "
+                    "'config:canary@v1', "
+                    "1, :configuration_hash, :desired_hash)"
+                ),
+                {
+                    "id": ids["desired"],
+                    "deployment": ids["deployment"],
+                    "profile": ids["profile"],
+                    "profile_hash": "sha256:" + "a" * 64,
+                    "configuration_hash": "sha256:" + "b" * 64,
+                    "desired_hash": "sha256:" + "c" * 64,
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_capability_instances "
+                    "(id, deployment_id, capability_instance_ref) VALUES "
+                    "(:id, :deployment, 'identity.realm')"
+                ),
+                {"id": ids["instance"], "deployment": ids["deployment"]},
+            )
+
+        with engine.connect() as conn:
+            with pytest.raises(DBAPIError, match="profile versions are immutable"):
+                conn.execute(
+                    text(
+                        "UPDATE managed_service_profile_versions "
+                        "SET profile_code='mutated' WHERE id=CAST(:id AS uuid)"
+                    ),
+                    {"id": ids["profile"]},
+                )
+        with engine.connect() as conn:
+            with pytest.raises(
+                DBAPIError, match="desired-state versions are immutable"
+            ):
+                conn.execute(
+                    text(
+                        "UPDATE deployment_desired_state_versions SET revision=2 "
+                        "WHERE id=CAST(:id AS uuid)"
+                    ),
+                    {"id": ids["desired"]},
+                )
+        with engine.connect() as conn:
+            with pytest.raises(DBAPIError, match="capability instances are immutable"):
+                conn.execute(
+                    text(
+                        "UPDATE deployment_capability_instances "
+                        "SET capability_instance_ref='identity.other' "
+                        "WHERE id=CAST(:id AS uuid)"
+                    ),
+                    {"id": ids["instance"]},
+                )
+        with engine.connect() as conn:
+            with pytest.raises(DBAPIError, match="uq_deployment_capability"):
+                conn.execute(
+                    text(
+                        "INSERT INTO deployment_capability_instances "
+                        "(id, deployment_id, capability_instance_ref) VALUES "
+                        "(:id, :deployment, 'identity.realm')"
+                    ),
+                    {"id": str(uuid.uuid4()), "deployment": ids["deployment"]},
+                )
+        with engine.connect() as conn:
+            with pytest.raises(DBAPIError, match="ck_deployment_capability"):
+                conn.execute(
+                    text(
+                        "INSERT INTO deployment_capability_instances "
+                        "(id, deployment_id, capability_instance_ref) VALUES "
+                        "(:id, :deployment, 'Identity__Realm')"
+                    ),
+                    {"id": str(uuid.uuid4()), "deployment": ids["deployment"]},
+                )
+    finally:
+        engine.dispose()
+
+
+def test_v016_v017_plan_approval_and_integrator_evidence_are_database_immutable(
+    scratch_db: str,
+) -> None:
+    _upgrade(scratch_db, "heads")
+    ids = {
+        name: str(uuid.uuid4())
+        for name in (
+            "account",
+            "profile",
+            "target",
+            "deployment",
+            "instance",
+            "desired",
+            "bundle",
+            "plan",
+            "request",
+            "authority_request",
+            "grant",
+            "dispatch",
+            "receipt",
+            "operation",
+        )
+    }
+    hashes = {
+        name: "sha256:" + fill * 64
+        for name, fill in zip(
+            (
+                "profile",
+                "desired",
+                "configuration",
+                "bundle",
+                "plan",
+                "request",
+                "grant",
+                "dispatch",
+                "receipt",
+                "module_receipt",
+                "module_plan",
+            ),
+            "abcdef12345",
+            strict=True,
+        )
+    }
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO vendor_accounts "
+                    "(id, external_ref, display_name, status) VALUES "
+                    "(:id, 'plan-immutable', 'Plan immutable', 'active')"
+                ),
+                {"id": ids["account"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO managed_service_profile_versions "
+                    "(id, profile_code, version, schema_version, "
+                    "commercial_product_code, content_hash, document) VALUES "
+                    "(:id, 'plan-immutable', 1, 1, 'managed-sso', :hash, '{}'::jsonb)"
+                ),
+                {"id": ids["profile"], "hash": hashes["profile"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_targets "
+                    "(id, account_id, target_ref, display_name, region_code) VALUES "
+                    "(:id, :account, 'plan-immutable', 'Plan immutable', 'ng-abuja')"
+                ),
+                {"id": ids["target"], "account": ids["account"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployments "
+                    "(id, account_id, target_id, deployment_ref, "
+                    "commercial_product_code, internal_source_code) VALUES "
+                    "(:id, :account, :target, 'plan-immutable', "
+                    "'managed-sso', 'dotmac.canary')"
+                ),
+                {
+                    "id": ids["deployment"],
+                    "account": ids["account"],
+                    "target": ids["target"],
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_capability_instances "
+                    "(id, deployment_id, capability_instance_ref) VALUES "
+                    "(:id, :deployment, 'identity.realm')"
+                ),
+                {"id": ids["instance"], "deployment": ids["deployment"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_desired_state_versions "
+                    "(id, deployment_id, revision, profile_version_id, profile_code, "
+                    "profile_version, profile_content_hash, commercial_product_code, "
+                    "update_authority, selected_components, selected_capabilities, "
+                    "selected_operations, selected_verification_checks, "
+                    "configuration_snapshot, desired_operation_inputs, "
+                    "selected_composition_edges, "
+                    "configuration_snapshot_ref, "
+                    "configuration_schema_version, configuration_hash, "
+                    "desired_state_hash) VALUES "
+                    "(:id, :deployment, 1, :profile, 'plan-immutable', 1, "
+                    ":profile_hash, 'managed-sso', 'customer_approved', '[]'::jsonb, "
+                    "'[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, "
+                    "'{}'::jsonb, '[]'::jsonb, "
+                    "'config:canary@v1', 1, :configuration_hash, :desired_hash)"
+                ),
+                {
+                    "id": ids["desired"],
+                    "deployment": ids["deployment"],
+                    "profile": ids["profile"],
+                    "profile_hash": hashes["profile"],
+                    "configuration_hash": hashes["configuration"],
+                    "desired_hash": hashes["desired"],
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_bundle_manifest_versions "
+                    "(id, profile_version_id, bundle_code, version, "
+                    "profile_content_hash, content_hash, document) VALUES "
+                    "(:id, :profile, 'canary', 1, :profile_hash, :hash, '{}'::jsonb)"
+                ),
+                {
+                    "id": ids["bundle"],
+                    "profile": ids["profile"],
+                    "profile_hash": hashes["profile"],
+                    "hash": hashes["bundle"],
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_plans "
+                    "(id, deployment_id, revision, desired_state_version_id, "
+                    "bundle_manifest_version_id, plan_hash, document) VALUES "
+                    "(:id, :deployment, 1, :desired, :bundle, :hash, '{}'::jsonb)"
+                ),
+                {
+                    "id": ids["plan"],
+                    "deployment": ids["deployment"],
+                    "desired": ids["desired"],
+                    "bundle": ids["bundle"],
+                    "hash": hashes["plan"],
+                },
+            )
+            conn.execute(
+                text(
+                    "UPDATE deployments SET current_plan_id=:plan, "
+                    "latest_plan_revision=1 WHERE id=:deployment"
+                ),
+                {"plan": ids["plan"], "deployment": ids["deployment"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO integrator_command_dispatches "
+                    "(id, plan_id, deployment_id, capability_instance_ref, "
+                    "capability_binding_id, operation, command_id, "
+                    "request_body_digest, envelope_digest, document) "
+                    "VALUES (:id, :plan, :deployment, 'identity.realm', "
+                    ":binding, 'apply', "
+                    "'immutable-dispatch', :body_hash, :envelope_hash, '{}'::jsonb)"
+                ),
+                {
+                    "id": ids["dispatch"],
+                    "plan": ids["plan"],
+                    "deployment": ids["deployment"],
+                    "binding": ids["operation"],
+                    "body_hash": hashes["dispatch"],
+                    "envelope_hash": hashes["receipt"],
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO integrator_execution_receipts "
+                    "(id, dispatch_id, plan_id, deployment_id, "
+                    "capability_instance_ref, capability_binding_id, operation, "
+                    "command_id, "
+                    "request_body_digest, receipt_digest, outcome, operation_id, "
+                    "latest_module_receipt_sequence, latest_module_receipt_hash, "
+                    "occurred_at, document) VALUES "
+                    "(:id, :dispatch, :plan, :deployment, 'identity.realm', "
+                    ":binding, 'apply', "
+                    "'immutable-dispatch', :body_hash, :receipt_hash, 'succeeded', "
+                    ":operation_id, 1, :module_hash, now(), '{}'::jsonb)"
+                ),
+                {
+                    "id": ids["receipt"],
+                    "dispatch": ids["dispatch"],
+                    "plan": ids["plan"],
+                    "deployment": ids["deployment"],
+                    "binding": ids["operation"],
+                    "body_hash": hashes["dispatch"],
+                    "receipt_hash": hashes["receipt"],
+                    "operation_id": ids["operation"],
+                    "module_hash": hashes["module_receipt"],
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_plan_approval_requests "
+                    "(id, plan_id, approval_request_id, policy_code, policy_version, "
+                    "expires_at, request_binding_hash, document) VALUES "
+                    "(:id, :plan, :authority, 'canary', 1, now() + interval '1 hour', "
+                    ":hash, '{}'::jsonb)"
+                ),
+                {
+                    "id": ids["request"],
+                    "plan": ids["plan"],
+                    "authority": ids["authority_request"],
+                    "hash": hashes["request"],
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_plan_approval_grants "
+                    "(id, plan_id, approval_request_binding_id, approval_request_id, "
+                    "expires_at, grant_digest, document) VALUES "
+                    "(:id, :plan, :request, :authority, now() + interval '1 hour', "
+                    ":hash, '{}'::jsonb)"
+                ),
+                {
+                    "id": ids["grant"],
+                    "plan": ids["plan"],
+                    "request": ids["request"],
+                    "authority": ids["authority_request"],
+                    "hash": hashes["grant"],
+                },
+            )
+
+        for statement, row_id in (
+            (
+                "UPDATE deployment_bundle_manifest_versions "
+                "SET updated_at=now() WHERE id=:id",
+                ids["bundle"],
+            ),
+            (
+                "UPDATE deployment_plans SET updated_at=now() WHERE id=:id",
+                ids["plan"],
+            ),
+            (
+                "UPDATE deployment_plan_approval_requests "
+                "SET updated_at=now() WHERE id=:id",
+                ids["request"],
+            ),
+            (
+                "UPDATE deployment_plan_approval_grants "
+                "SET updated_at=now() WHERE id=:id",
+                ids["grant"],
+            ),
+            (
+                "UPDATE integrator_command_dispatches SET updated_at=now() "
+                "WHERE id=:id",
+                ids["dispatch"],
+            ),
+            (
+                "UPDATE integrator_execution_receipts SET updated_at=now() "
+                "WHERE id=:id",
+                ids["receipt"],
+            ),
+        ):
+            with engine.connect() as conn:
+                with pytest.raises(DBAPIError, match="rows are immutable"):
+                    conn.execute(text(statement), {"id": row_id})
+    finally:
+        engine.dispose()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -341,6 +795,9 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     # by v005 and dropped again within the same composed upgrade.
     assert not _table_exists(scratch_db, "allocations")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    assert _table_exists(scratch_db, "managed_service_profile_versions")
+    assert _table_exists(scratch_db, "deployment_targets")
+    assert _table_exists(scratch_db, "deployment_capability_instances")
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _versions(scratch_db) == {

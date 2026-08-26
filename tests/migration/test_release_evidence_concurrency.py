@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import threading
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
 from dotmac_kernel import PlatformAuditEvent, ProductManifestSnapshot
+from dotmac_kernel.audit_actions import (
+    AuditActionRegistry,
+    AuditActionsNotInstalledError,
+    active_audit_actions,
+    install_audit_actions,
+)
 from dotmac_kernel.idempotency_models import PlatformIdempotencyRecord
 from dotmac_release_catalog import (
     ArtifactAttestation,
     ArtifactKind,
+    ArtifactOrigin,
     ReleaseArtifact,
     publish_artifact,
 )
@@ -18,6 +27,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
+from vendor_cp.release_evidence.feature import feature
 from vendor_cp.release_evidence.service import (
     DirectoryProductManifestStore,
     ProductManifestStore,
@@ -26,6 +36,26 @@ from vendor_cp.release_evidence.service import (
     ReleaseEvidenceConflict,
     ingest_product_release_evidence,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _declared_audit_actions() -> Iterator[None]:
+    """Mirror assembly wiring so this two-session canary is independent."""
+
+    import dotmac_kernel.audit_actions as registry_module
+
+    try:
+        previous = active_audit_actions()
+    except AuditActionsNotInstalledError:
+        previous = None
+    install_audit_actions(AuditActionRegistry.from_manifests((feature,)))
+    try:
+        yield
+    finally:
+        if previous is None:
+            registry_module._active_registry = None
+        else:
+            install_audit_actions(previous)
 
 
 class RendezvousStore(ProductManifestStore):
@@ -193,6 +223,7 @@ def test_competing_manifests_for_one_artifact_cannot_both_land(
             product_code=product_code,
             version=version,
             artifact_kind=ArtifactKind.CONTAINER_IMAGE,
+            origin=ArtifactOrigin.DOTMAC_PRODUCT,
             digest=artifact_digest,
             artifact_ref=artifact_ref,
             source_revision="a" * 40,

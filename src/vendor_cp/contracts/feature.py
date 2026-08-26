@@ -15,4 +15,16 @@ feature = FeatureManifest(
     routers=[router],
     core=True,
     enabled_by_default=True,
+    audit_actions=(
+        "vendor.contract.activated",
+        "vendor.contract.approved",
+        "vendor.contract.cancelled",
+        "vendor.contract.drafted",
+        "vendor.contract.expired",
+        "vendor.contract.reinstated",
+        "vendor.contract.rejected",
+        "vendor.contract.submitted",
+        "vendor.contract.suspended",
+        "vendor.contract.terminated",
+    ),
 )

@@ -14,6 +14,7 @@ from dotmac_kernel import ProductManifestSnapshot
 from dotmac_kernel.testing import create_test_engine, isolated_session
 from dotmac_release_catalog import (
     ArtifactKind,
+    ArtifactOrigin,
     AttestationKind,
     attest_artifact,
     publish_artifact,
@@ -78,6 +79,7 @@ def _catalogue_rows(
         product_code=_PRODUCT,
         version=_VERSION,
         artifact_kind=ArtifactKind.CONTAINER_IMAGE,
+        origin=ArtifactOrigin.DOTMAC_PRODUCT,
         digest=_ARTIFACT_DIGEST,
         artifact_ref=_ARTIFACT_REF,
     )
@@ -89,6 +91,7 @@ def _catalogue_rows(
         digest=snapshot.digest,
     )
     return ProductReleasePin(
+        artifact_kind=ArtifactKind.CONTAINER_IMAGE,
         artifact_digest=_ARTIFACT_DIGEST,
         product_manifest_digest=snapshot.digest,
     )
@@ -155,6 +158,7 @@ def test_a_pin_cannot_fall_through_to_different_catalogue_evidence(
     with isolated_session(engine) as db:
         pin = _catalogue_rows(db, snapshot, uri=uri)
         values = {
+            "artifact_kind": pin.artifact_kind,
             "artifact_digest": pin.artifact_digest,
             "product_manifest_digest": pin.product_manifest_digest,
         }

@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "dotmac-vendor-control-plane"
 version = "0.1.0"
-description = "DotMac Vendor Control Plane — a vendor/product-lifecycle assembly composed from the pinned dotmac-kernel. It is NOT a product data plane; it owns vendor-side accounts, provisioning contracts, and (later) deployment lifecycle."
+description = "DotMac Vendor Control Plane — vendor/product lifecycle and provider-neutral fleet intent composed from the pinned dotmac-kernel; never a product data plane or external execution owner."
 authors = ["DotMac"]
 readme = "README.md"
 packages = [{ include = "vendor_cp", from = "src" }]
@@ -32,23 +32,18 @@ dotmac-kernel = { version = "0.1.0a61", extras = [
 # disagree. a4 moves both tables to `platform_tables`, which is what makes the
 # declaration true (ADR-0023).
 dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
-# Installed in shadow mode: the independent owner and its migration lineage are
-# composed now, while the vendor-local allocation writer remains authoritative
-# until historical commercial rows have evidence-backed product mappings and
-# the data preflight in docs/ARCHITECTURE.md passes. New writes are
-# product-qualified; that does not by itself authorize a writer cutover.
-# Exact-pinned from the private index; never a path dependency and never a
-# silent dual-write.
+# The authoritative allocation owner after ADR-0006/v014. Exact-pinned from the
+# private index, composed through its public manifest/lineage, and reached only
+# through ``vendor_cp.allocations.adapter``. The retired Vendor tables and
+# writer are gone; there is no shadow or dual-write.
 #
 # a4 for the same reason as the release catalogue above: its `allocations` /
 # `allocation_entries` become declared `platform_tables`, so the composed
 # live-catalogue audit can hold them to the plane they are actually built on.
 dotmac-entitlement-allocation = { version = "0.1.0a4", source = "forgejo" }
-# The dual-plane approval-state owner (ADR-0026/ADR-0028), composed in SHADOW
-# under the cutover contract in `docs/adr/0004-approvals-authority-cutover.md`.
-# READ-ONLY here: `vendor_cp.approvals` remains the sole authoritative writer,
-# and vendor migration `v012` takes away the write grants this module's own
-# migration issues. See that migration for why Vendor owns that restriction.
+# The dual-plane approval-state authority after ADR-0005/v013. This assembly
+# selects its platform plane and reaches it only through the typed Vendor
+# adapter; the legacy Vendor tables/writer and the v012 shadow phase are gone.
 dotmac-approvals = { version = "0.1.0a4", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
@@ -57,6 +52,10 @@ psycopg = { version = "^3.2", extras = ["binary"] }
 # Migrations: the vendor lineage is composed with the kernel's shipped base
 # lineage (dotmac_kernel.migrations.versions_dir) at deploy time.
 alembic = "^1.13"
+# Vendor validates immutable provider-neutral desired-operation documents
+# against the exact product-owner JSON Schema before a plan can be approved.
+# Integrator repeats this validation after approved evidence injection.
+jsonschema = ">=4.23,<5"
 
 # Public Dotmac packages resolve from Forgejo; everything else from PyPI. Marked
 # `explicit` so ONLY named Dotmac packages are pulled from here (no
@@ -91,6 +90,10 @@ select = ["E", "F", "I", "UP", "B", "S"]
 python_version = "3.12"
 strict = true
 files = ["src/vendor_cp"]
+
+[[tool.mypy.overrides]]
+module = ["jsonschema", "jsonschema.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

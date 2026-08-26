@@ -33,6 +33,7 @@ from dotmac_kernel.idempotency import (
 from dotmac_release_catalog import (
     ArtifactAttestation,
     ArtifactKind,
+    ArtifactOrigin,
     AttestationKind,
     Digest,
     ReleaseArtifact,
@@ -265,6 +266,7 @@ def _publish_or_replay(
                 product_code=command.product_code,
                 version=command.product_version,
                 artifact_kind=ArtifactKind.CONTAINER_IMAGE,
+                origin=ArtifactOrigin.DOTMAC_PRODUCT,
                 digest=artifact_digest,
                 artifact_ref=artifact_ref,
                 source_revision=command.source_revision,

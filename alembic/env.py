@@ -35,7 +35,10 @@ from sqlalchemy import engine_from_config, pool
 # are registered by importing those packages (via `vendor_cp.migrations`).
 import vendor_cp.accounts.models  # noqa: F401
 import vendor_cp.contracts.models  # noqa: F401
+import vendor_cp.fleet.models  # noqa: F401
+import vendor_cp.managed_profiles.models  # noqa: F401
 import vendor_cp.offers.models  # noqa: F401
+import vendor_cp.planning.models  # noqa: F401
 from vendor_cp.migration_bindings import (
     ASSEMBLY_MODULE_PLANES,
     ASSEMBLY_PREREQUISITE_BINDINGS,
