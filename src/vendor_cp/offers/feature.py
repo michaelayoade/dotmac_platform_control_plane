@@ -13,6 +13,7 @@ from vendor_cp.offers.router import router
 feature = FeatureManifest(
     name="offers",
     routers=[router],
+    audit_actions=("vendor.offer_version.published",),
     core=True,
     enabled_by_default=True,
 )

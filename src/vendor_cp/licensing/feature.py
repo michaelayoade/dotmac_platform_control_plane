@@ -13,6 +13,21 @@ from vendor_cp.licensing.router import router
 feature = FeatureManifest(
     name="licensing",
     routers=[router],
+    audit_actions=(
+        "vendor.licence.ack_quarantined",
+        "vendor.licence.ack_received",
+        "vendor.licence.bundle_exported",
+        "vendor.licence.delivered",
+        "vendor.licence.delivery_attempt_failed",
+        "vendor.licence.delivery_mapped",
+        "vendor.licence.delivery_parked",
+        "vendor.licence.delivery_resumed",
+        "vendor.licence.delivery_target_registered",
+        "vendor.licence.delivery_target_updated",
+        "vendor.licence.issued",
+        "vendor.licence.revocation_list_published",
+        "vendor.licence.revoked",
+    ),
     core=True,
     enabled_by_default=True,
 )

@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 
 from dotmac_approvals import module as approvals_module
+from dotmac_billing import module as billing_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import ProductAssemblySpec
 from dotmac_release_catalog import module as release_catalog_module
@@ -19,6 +20,7 @@ from dotmac_release_catalog import module as release_catalog_module
 from vendor_cp.accounts.feature import feature as accounts_feature
 from vendor_cp.allocations.feature import feature as allocations_feature
 from vendor_cp.approvals.feature import feature as approvals_feature
+from vendor_cp.billing.authority import install_billing_authority
 from vendor_cp.config import validate_runtime_configuration, vendor_settings
 from vendor_cp.console.feature import feature as console_feature
 from vendor_cp.contracts.feature import feature as contracts_feature
@@ -47,6 +49,9 @@ STATEFUL_MODULES = (
     # SHADOW under ADR-0004 — read-only, with vendor migration `v012` removing
     # the write grants its own migration issues.
     approvals_module,
+    # Billing has no legacy Vendor writer to shadow.  It is prepared on the
+    # platform plane only; no route invokes its money services in this change.
+    billing_module,
 )
 
 # The vendor's own features, in mount order. A profile may withhold a SURFACE
@@ -80,6 +85,7 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
         vendor_settings,
         environment=os.getenv("ENVIRONMENT", "development"),
     )
+    install_billing_authority()
     # Key custody is a boot dependency, not a first-issuance surprise. The
     # installed signer objects hold their key material for this process — and
     # deliberately still do under a profile that withholds the licensing

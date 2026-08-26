@@ -26,7 +26,7 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0023_audit_actor_and_forensics"  # current pin (0.1.0a61)
+KERNEL_HEAD = "0026_platform_audit_log"  # current pin (0.1.0a69)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
@@ -35,11 +35,12 @@ ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 # depending revision. `alembic_version` holds current heads, not every applied
 # revision, so this appears in `script.get_heads()` and not in `_versions()`.
 APPROVALS_HEAD = "ap_0001_approvals"
+BILLING_HEAD = "bi_0001_billing"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v014_allocations_authority"
+VENDOR_HEAD = "v015_billing_platform_prep"
 
-#: The vendor head as it stood BEFORE allocation authority moved.
+#: The vendor head before Billing platform preparation was added.
 #:
 #: A rehearsal of "an existing deployment we are upgrading FROM" must name the
 #: revision it means. `vendor@head` is an alias, and using it here silently
@@ -47,7 +48,7 @@ VENDOR_HEAD = "v014_allocations_authority"
 #: `depends_on = ea_0001_allocations`, upgrading to `vendor@head` installed the
 #: module lineage, so the "before modules" state the test set up was no longer
 #: that state at all.
-PREVIOUS_VENDOR_HEAD = "v013_approvals_authority_switch"
+PREVIOUS_VENDOR_HEAD = "v014_allocations_authority"
 
 
 # `scratch_db` and the DSN rewriter MOVED to `tests/migration/conftest.py`.
@@ -155,10 +156,11 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # `alembic_version` holds current heads only, and a `depends_on` edge makes
     # its target an ANCESTOR of the depending revision rather than a head in its
     # own right. `v012` depends on `ap_0001_approvals` and `v014` on
-    # `ea_0001_allocations`, so both module revisions — while genuinely applied —
+    # `ea_0001_allocations`, and `v015` on `bi_0001_billing`; those module
+    # revisions — while genuinely applied —
     # stop being version ROWS once the vendor lineage reaches them.
     #
-    # They are still static heads, and `test_five_head_topology` asserts all five
+    # They are still static heads, and `test_six_head_topology` asserts all six
     # through `script.get_heads()`. Listing them here as well would report them
     # missing on a perfectly complete database.
     assert _versions(scratch_db) == {
@@ -225,29 +227,37 @@ def test_alembic_env_installs_the_vendor_prerequisite_bindings(
 ) -> None:
     _upgrade(scratch_db, "heads")
 
-    assert installed_bindings() == ASSEMBLY_PREREQUISITE_BINDINGS
+    assert installed_bindings() == tuple(
+        sorted(
+            ASSEMBLY_PREREQUISITE_BINDINGS,
+            key=lambda binding: binding.prerequisite,
+        )
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rehearsal 2 — five-head topology
+# Rehearsal 2 — six-head topology
 # ─────────────────────────────────────────────────────────────────────────────
-def test_five_head_topology(scratch_db: str) -> None:
+def test_six_head_topology(scratch_db: str) -> None:
     script = ScriptDirectory.from_config(make_alembic_config(scratch_db))
     assert set(script.get_heads()) == {
         KERNEL_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         APPROVALS_HEAD,
+        BILLING_HEAD,
         VENDOR_HEAD,
     }
     kernel_head = script.get_revision("kernel@head")
     vendor_head = script.get_revision("vendor@head")
     release_catalog_head = script.get_revision("release_catalog@head")
     allocation_head = script.get_revision("entitlement_allocation@head")
+    billing_head = script.get_revision("billing@head")
     assert kernel_head.revision == KERNEL_HEAD
     assert vendor_head.revision == VENDOR_HEAD
     assert release_catalog_head.revision == RELEASE_CATALOG_HEAD
     assert allocation_head.revision == ENTITLEMENT_ALLOCATION_HEAD
+    assert billing_head.revision == BILLING_HEAD
     # The vendor head is the tip of a single-parent chain that walks back to the
     # vendor ROOT; the ROOT is its own branch that DEPENDS ON (is not a child of)
     # a kernel head, so the lineages advance independently.
@@ -405,12 +415,18 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
 def test_upgrade_from_previous_vendor_deployment_preserves_data(
     scratch_db: str,
 ) -> None:
-    """Rehearse a9 + vendor v010 to a45 + both installed module lineages."""
+    """Rehearse the exact pre-Billing Vendor head into platform preparation."""
     _upgrade(scratch_db, PREVIOUS_VENDOR_HEAD)
     _upgrade(scratch_db, PREVIOUS_KERNEL_HEAD)
     assert _versions(scratch_db) == {PREVIOUS_KERNEL_HEAD, PREVIOUS_VENDOR_HEAD}
     assert not _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
-    assert not _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    assert _qualified_table_exists(
+        scratch_db, "mod_approvals.platform_approval_requests"
+    )
+    assert not _qualified_table_exists(
+        scratch_db, "mod_billing.platform_billing_accounts"
+    )
 
     account_id = str(uuid.uuid4())
     eng = create_engine(scratch_db)
@@ -431,6 +447,7 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
 
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    assert _qualified_table_exists(scratch_db, "mod_billing.platform_billing_accounts")
     assert (
         _q(
             scratch_db,
@@ -454,7 +471,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
 ) -> None:
     """Simulate a FUTURE kernel migration (a child of the kernel head). The
     vendor and module heads must remain separate heads — and a composed upgrade
-    must still apply all four lineages."""
+    must still apply all six lineages."""
     synth_rev = "9999_synthetic_kernel_advance"
     (tmp_path / f"{synth_rev}.py").write_text(
         "revision = '9999_synthetic_kernel_advance'\n"
@@ -475,6 +492,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
         ENTITLEMENT_ALLOCATION_HEAD,
         RELEASE_CATALOG_HEAD,
         APPROVALS_HEAD,
+        BILLING_HEAD,
         VENDOR_HEAD,
     }
 

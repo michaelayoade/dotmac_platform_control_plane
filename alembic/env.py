@@ -3,7 +3,7 @@
 Connects as `app_admin` (the RLS-bypass migration role) — set
 `MIGRATION_DATABASE_URL` or `DATABASE_URL`. `target_metadata` is the kernel
 `Base` (all kernel models), the installed modules and the vendor's own models,
-so autogenerate sees the whole composed schema. The five lineages' directories
+so autogenerate sees the whole composed schema. The six lineages' directories
 are composed programmatically (`vendor_cp.migrations`), not in `alembic.ini`,
 because the shared owners are installed packages with environment-specific
 paths.

@@ -7,9 +7,9 @@ binding that truth was itself the instruction to build a module's tenant plane,
 and the only way to keep tenant tables out of a control plane with no tenants was
 to withhold a binding whose effect the database plainly provides.
 
-a61 separates the two, so this assembly binds both kernel effects and states its
-installation intent separately. The tests below assert the two halves apart, so a
-future edit cannot quietly re-merge them.
+a61 separates the two, so this assembly binds every required kernel effect and
+states its installation intent separately. The tests below assert the two
+halves apart, so a future edit cannot quietly re-merge them.
 
 The selection tuple is EMPTY today because no selectable module is composed —
 `dotmac-approvals` arrives with its cutover contract. `tests/migration/
@@ -29,7 +29,9 @@ from dotmac_kernel.planes import (
 )
 from dotmac_kernel.prerequisites import (
     BINDINGS_ENV_VAR,
+    IDEMPOTENCY_LEDGER_V1,
     MODULE_DATABASE_ROLES_V1,
+    OUTBOX_RELAY_V1,
     TENANT_SCOPE_CATALOG_V1,
 )
 
@@ -53,6 +55,8 @@ def test_the_assembly_binds_every_effect_the_kernel_lineage_supplies() -> None:
     } == {
         (MODULE_DATABASE_ROLES_V1.name, KERNEL_ROOT_REVISION, "kernel"),
         (TENANT_SCOPE_CATALOG_V1.name, KERNEL_ROOT_REVISION, "kernel"),
+        (IDEMPOTENCY_LEDGER_V1.name, "0018_idempotency_one_owner", "kernel"),
+        (OUTBOX_RELAY_V1.name, "0012_platform_outbox", "kernel"),
     }
 
 
@@ -97,18 +101,20 @@ def test_every_selectable_composed_module_has_a_selection() -> None:
     }
     declared = {selection.module for selection in ASSEMBLY_MODULE_PLANES}
 
-    assert selectable == {"approvals"}, sorted(selectable)
+    assert selectable == {"approvals", "billing"}, sorted(selectable)
     assert declared == selectable, sorted(declared ^ selectable)
 
 
-def test_the_approvals_plane_selection_is_platform_only() -> None:
-    """Vendor approvals are control-plane state; there is no tenant here whose
-    approvals could be scoped."""
+def test_every_selectable_module_is_platform_only() -> None:
+    """Vendor commercial state has no tenant context to populate or scope."""
     planes = {
         selection.module: {ModulePlane(p) for p in selection.planes}
         for selection in ASSEMBLY_MODULE_PLANES
     }
-    assert planes == {"approvals": {ModulePlane.PLATFORM}}
+    assert planes == {
+        "approvals": {ModulePlane.PLATFORM},
+        "billing": {ModulePlane.PLATFORM},
+    }
 
 
 def test_the_assembly_spec_carries_the_selection_for_validation() -> None:

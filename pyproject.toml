@@ -8,14 +8,17 @@ packages = [{ include = "vendor_cp", from = "src" }]
 
 [tool.poetry.dependencies]
 python = ">=3.12,<3.14"
-# The kernel is PINNED EXACTLY to the published alpha and resolved ONLY from the
-# private Forgejo index (ADR-0005). The `testing` extra ships the kernel's
+# The kernel is PINNED EXACTLY and resolves ONLY from the private Forgejo index
+# (ADR-0005). a69 is the Billing namespace release candidate and is intentionally
+# unpublished until the three draft PRs are reviewable; clean installation is a
+# release blocker, never a reason to substitute a path dependency. The `testing`
+# extra ships the kernel's
 # supported test kit (harness + fakes + provisioning contract + the WS8
 # FakeLicenceSigner) this assembly's tests consume; `licensing` adds the Ed25519
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a61", extras = [
+dotmac-kernel = { version = "0.1.0a69", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
@@ -50,6 +53,12 @@ dotmac-entitlement-allocation = { version = "0.1.0a4", source = "forgejo" }
 # and vendor migration `v012` takes away the write grants this module's own
 # migration issues. See that migration for why Vendor owns that restriction.
 dotmac-approvals = { version = "0.1.0a4", source = "forgejo" }
+# The one operational-receivables owner, prepared on its platform plane only.
+# Exact-pinned like every stateful Dotmac module.  a1 is intentionally not
+# published until the Starter and adopter-preparation draft PRs are reviewable;
+# this branch therefore remains release-blocked without pretending a path
+# dependency is a deployable package.
+dotmac-billing = { version = "0.1.0a1", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).

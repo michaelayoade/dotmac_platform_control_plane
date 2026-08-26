@@ -3,9 +3,9 @@
 The vendor control-plane database runs the KERNEL base migrations (shipped as
 `dotmac_kernel` package data, located via the public `versions_dir()`), the
 installed Release Catalog module lineage, the installed Entitlement Allocation
-module lineage, PLUS this repo's own `alembic/versions` — one revision graph,
-five separately-owned lineages. Because all shared packages are installed
-dependencies (not fixed repo paths),
+module lineage, the Billing lineage, PLUS this repo's own `alembic/versions` —
+one revision graph, six separately-owned lineages. Because all shared packages
+are installed dependencies (not fixed repo paths),
 `version_locations` is composed programmatically rather than hard-coded in
 `alembic.ini`.
 
@@ -21,6 +21,7 @@ from typing import Final
 
 from alembic.config import Config
 from dotmac_approvals.migrations import versions_dir as approvals_versions_dir
+from dotmac_billing import versions_dir as billing_versions_dir
 from dotmac_entitlement_allocation import (
     versions_dir as entitlement_allocation_versions_dir,
 )
@@ -35,12 +36,13 @@ VENDOR_VERSIONS = ALEMBIC_DIR / "versions"
 
 
 def composed_version_locations() -> str:
-    """Kernel, three independent modules and vendor migration lineages."""
+    """Kernel, four independent modules and vendor migration lineages."""
     return (
         f"{kernel_versions_dir()} "
         f"{release_catalog_versions_dir()} "
         f"{entitlement_allocation_versions_dir()} "
         f"{approvals_versions_dir()} "
+        f"{billing_versions_dir()} "
         f"{VENDOR_VERSIONS}"
     )
 

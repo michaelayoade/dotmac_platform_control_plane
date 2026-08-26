@@ -39,8 +39,10 @@ disagree, fix the drift.
    exactly how this line came to say `a8` while the pin said `a9`.
 9. **Bindings state facts; plane selections state intent.** A
    `PrerequisiteBinding` says where an effect comes from, and this assembly
-   binds BOTH kernel effects — including `tenant_scope_catalog.v1`, because
-   kernel `0001` really does create `public.tenants` here. A
+   binds every required kernel effect — database roles and the tenant catalogue
+   from kernel `0001`, the outbox relay from `0012`, and the idempotency ledger
+   from `0018`. The tenant catalogue remains bound because kernel `0001` really
+   does create `public.tenants` here. A
    `ModulePlaneSelection` says what this product installs, and it selects
    `PLATFORM` alone for `approvals` — never as a side effect of a version bump,
    and only behind the cutover contract that authorised it. Never reintroduce

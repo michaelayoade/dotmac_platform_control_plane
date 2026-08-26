@@ -11,7 +11,7 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a61` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a69` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source.
@@ -20,16 +20,16 @@ it owns and — just as importantly — what it must never become.
   from `alembic/env.py` before Alembic builds the revision map:
 
   - `ASSEMBLY_PREREQUISITE_BINDINGS` answers *where does an effect come from*.
-    Kernel `0001_initial_tenant_schema` supplies **both**
-    `module_database_roles.v1` and `tenant_scope_catalog.v1`, and both are
-    bound, because that is simply true: this assembly runs the whole kernel base
-    lineage, so `public.tenants`, `public.tenant_domains` and
-    `public.app_current_tenant_id()` all exist here.
+    Kernel `0001_initial_tenant_schema` supplies
+    `module_database_roles.v1` and `tenant_scope_catalog.v1`; kernel `0018`
+    supplies `idempotency_ledger.v1`, and `0012` supplies `outbox_relay.v1`.
+    All four are bound because they are observable effects of the lineage this
+    assembly runs, independent of which module planes it selects.
   - `ASSEMBLY_MODULE_PLANES` answers *what does this product install*. It
-    selects `ModulePlane.PLATFORM` for `approvals`, the one selectable module
-    composed here; Release Catalog and Entitlement Allocation each declare a
-    single supported plane set, so their contract is atomic and the kernel
-    refuses a selection for them.
+    selects `ModulePlane.PLATFORM` for both selectable modules, `approvals` and
+    `billing`; Release Catalog and Entitlement Allocation each declare a single
+    supported plane set, so their contract is atomic and the kernel refuses a
+    selection for them.
 
   Kernel `0.1.0a60` briefly let the first imply the second, and this assembly is
   the case that broke it: binding the tenant catalogue truthfully would have
@@ -41,11 +41,10 @@ it owns and — just as importantly — what it must never become.
   `DOTMAC_MODULE_PLANE_SELECTIONS`, so `alembic heads|history|show` — which
   never run `env.py` — inspect the same graph an upgrade applies.
 
-  `tests/migration/test_selected_planes.py` proves the half of ADR-0028 that is
-  assertable without a selectable module — the catalogue exists, is bound, and
-  no module schema holds a tenant-scoped table — and says plainly that the full
-  four-fact proof (platform tables built, tenant tables absent, *because of the
-  selection*) lands with the first shadow composition.
+  `tests/migration/test_selected_planes.py` and
+  `test_billing_platform_prep.py` prove the full four-fact ADR-0028 contract:
+  the tenant catalogue exists and is truthfully bound, each selected platform
+  plane is built, and each unselected tenant plane is absent.
 - `dotmac-approvals==0.1.0a4` is the **approval authority** (ADR-0005). Pinned,
   its public `versions_dir()` locator composed, `ModulePlane.PLATFORM` selected,
   and `platform_api` holding DML on `mod_approvals` — restored by vendor
@@ -88,6 +87,20 @@ it owns and — just as importantly — what it must never become.
 
   **Lifecycle: below adopted.** Composed and authoritative in code is not
   adopted; the new owner has not run in production, because nothing has.
+- `dotmac-billing==0.1.0a1` is the prepared operational-receivables owner. It is
+  selected on the PLATFORM plane only and its `bi` lineage is composed. Vendor
+  `v015` uses Billing's public platform link helper to create Vendor-owned links
+  from Billing accounts to `vendor_accounts` and `contracts`; those links have
+  no tenant column or RLS, are usable by `platform_api`, and carry complete
+  table/column revokes for `app_user`.
+
+  `vendor_cp.billing.authority` binds the one `internal` authority to a typed
+  platform repository descriptor. There is no tenant repository, sentinel
+  tenant, Billing route, local invoice writer, payment provider, numbering
+  implementation, renderer, file store, or ERP posting path in this change.
+  This is adoption preparation, not a production financial cutover: a1 is not
+  published under the current authorization, the lockfile cannot truthfully be
+  refreshed until it is, and no production issuance is enabled.
 - `dotmac-release-catalog==0.1.0a4` is the permanent owner of immutable release
   artifacts and attestations. The assembly composes its `ModuleManifest` and
   its public `versions_dir()` alongside the kernel and vendor migration
@@ -100,22 +113,18 @@ it owns and — just as importantly — what it must never become.
   The declaration and the database disagreed, and nothing here looked because
   nothing audited the live catalogue. a4 moves them to `platform_tables`
   (ADR-0023), which is what makes the declaration true.
-- `dotmac-entitlement-allocation==0.1.0a4` is installed and its manifest and
-  public migration lineage are composed. This is deliberately a **shadow
-  installation**, not adoption: `vendor_cp.allocations` remains the sole
-  authoritative writer and there is no dual-write. Vendor migration v011 makes
-  new immutable offers and contracts product-qualified, binds that identity into
-  the contract content hash, and emits it on contract events. Historical rows
-  remain explicitly unclassified until an operator supplies evidence; the
-  independent module therefore still receives no `ContractSnapshot`.
+- `dotmac-entitlement-allocation==0.1.0a4` is installed and authoritative under
+  ADR-0006. Its manifest and public migration lineage are composed; `v014`
+  removed the empty legacy estate and local writer, and the typed Vendor adapter
+  is the only seam.
 
 ## The composed database is audited whole
 
 `tests/migration/test_composed_live_catalog.py` audits the database this
-assembly actually produces — kernel lineage, both module lineages, vendor
+assembly actually produces — kernel lineage, every installed module lineage, vendor
 lineage — rather than the tables someone remembered to name.
 
-- The module schemas (`mod_rel`, `mod_ealloc`) go through the kernel's own
+- The module schemas (`mod_rel`, `mod_ealloc`, `mod_approvals`, `mod_billing`) go through the kernel's own
   canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. A rule
   the kernel tightens tightens here in the release that ships it, and the
   expected table set derives from this assembly's plane selection rather than
@@ -249,7 +258,7 @@ Compose project and from every product data plane:
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration
-backup, runs the five-lineage `scripts/migrate.py`, and only then replaces the
+backup, runs the six-lineage `scripts/migrate.py`, and only then replaces the
 application. The complete operator contract and rollback boundary are in
 `docs/operations/production-deployment.md`.
 
@@ -277,7 +286,7 @@ The deployment path never creates or repairs the marker itself.
   commands + outcomes, atomic transaction ownership, idempotency, audit,
   platform-admin-only adapters.
 - **Commercial lifecycle (as-built)** — immutable product-qualified offers,
-  versioned approvals, product-qualified contracts, the legacy allocation
+  versioned approvals, product-qualified contracts, module-owned allocation
   projection, and signed licence issuance and delivery. Offer and contract
   services consume `dotmac-entitlement-allocation`'s product-scoped
   `CapabilityCatalogueReader` port. The assembly config names only exact

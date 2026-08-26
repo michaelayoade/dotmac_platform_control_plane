@@ -28,10 +28,11 @@ Both bindings below are therefore present and truthful, and the tenant plane of
 any dual-plane module stays out because it was never SELECTED — never because a
 binding was withheld.
 
-`dotmac-approvals` is the one selectable module composed here, and the selection
-below installs its PLATFORM plane only. Note what that does NOT say: selecting a
-plane chooses STORAGE SHAPE, never WRITE AUTHORITY. Vendor `v012` is what keeps
-the module read-only while the legacy writer is still authoritative.
+`dotmac-approvals` and `dotmac-billing` are selectable modules composed here;
+both selections install the PLATFORM plane only. Note what that does NOT say:
+selecting a plane chooses STORAGE SHAPE. Vendor `v012` separately transferred
+approval authority, while Billing is greenfield and has no money route in this
+preparation change.
 
 Both declarations are installed from `alembic/env.py` before Alembic builds the
 revision map, and both are mirrored into the graph-command environment
@@ -46,7 +47,9 @@ from typing import Final
 
 from dotmac_kernel.planes import ModulePlane, ModulePlaneSelection
 from dotmac_kernel.prerequisites import (
+    IDEMPOTENCY_LEDGER_V1,
     MODULE_DATABASE_ROLES_V1,
+    OUTBOX_RELAY_V1,
     TENANT_SCOPE_CATALOG_V1,
     PrerequisiteBinding,
 )
@@ -69,6 +72,16 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
         provider_revision=KERNEL_ROOT_REVISION,
         provider_owner="kernel",
     ),
+    PrerequisiteBinding(
+        prerequisite=IDEMPOTENCY_LEDGER_V1.name,
+        provider_revision="0018_idempotency_one_owner",
+        provider_owner="kernel",
+    ),
+    PrerequisiteBinding(
+        prerequisite=OUTBOX_RELAY_V1.name,
+        provider_revision="0012_platform_outbox",
+        provider_owner="kernel",
+    ),
 )
 
 #: The assembly's INSTALLATION INTENT, now that a selectable module is composed.
@@ -85,6 +98,7 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
 #: migration-state question, and Vendor owns it. See vendor migration `v012`.
 ASSEMBLY_MODULE_PLANES: Final[tuple[ModulePlaneSelection, ...]] = (
     ModulePlaneSelection(module="approvals", planes=(ModulePlane.PLATFORM,)),
+    ModulePlaneSelection(module="billing", planes=(ModulePlane.PLATFORM,)),
 )
 
 
