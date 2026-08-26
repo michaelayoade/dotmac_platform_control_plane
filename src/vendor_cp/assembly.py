@@ -26,8 +26,10 @@ from vendor_cp.deployment_profile import (
     VendorDeploymentProfile,
     load_deployment_profile,
 )
+from vendor_cp.fleet.feature import feature as fleet_feature
 from vendor_cp.licensing.feature import feature as licensing_feature
 from vendor_cp.licensing.signer import install_runtime_licence_signers
+from vendor_cp.managed_profiles.feature import feature as managed_profiles_feature
 from vendor_cp.migration_bindings import ASSEMBLY_MODULE_PLANES
 from vendor_cp.offers.feature import feature as offers_feature
 from vendor_cp.provisioning.feature import feature as provisioning_feature
@@ -44,8 +46,8 @@ STATEFUL_MODULES = (
     entitlement_allocation_module,
     # Dual-plane and therefore SELECTABLE: composing it without an explicit
     # `module_planes` entry fails `ProductAssemblySpec` construction. Composed in
-    # SHADOW under ADR-0004 — read-only, with vendor migration `v012` removing
-    # the write grants its own migration issues.
+    # under ADR-0005. Vendor migration `v013` completed the greenfield authority
+    # switch and restored the platform writer grants after `v012`'s shadow.
     approvals_module,
 )
 
@@ -55,6 +57,8 @@ VENDOR_SURFACES = (
     release_evidence_feature,
     console_feature,
     accounts_feature,
+    managed_profiles_feature,
+    fleet_feature,
     offers_feature,
     approvals_feature,
     contracts_feature,
@@ -69,7 +73,9 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
 
     Slice 2: the platform-admin surface + the console shell. Slice 3 adds the
     vendor `accounts` feature (platform-level, option A). Slice 4 adds the
-    `provisioning` contract laboratory (fake-only).
+    `provisioning` contract laboratory (fake-only). ADR-0007 adds the managed
+    profile and fleet desired-state surfaces; they persist provider-neutral
+    intent and never execute a provider operation.
 
     `profile` is the ONE place a deployment profile is read (see
     `vendor_cp.deployment_profile`). It selects which vendor surfaces are

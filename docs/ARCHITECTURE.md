@@ -100,23 +100,22 @@ it owns and — just as importantly — what it must never become.
   The declaration and the database disagreed, and nothing here looked because
   nothing audited the live catalogue. a4 moves them to `platform_tables`
   (ADR-0023), which is what makes the declaration true.
-- `dotmac-entitlement-allocation==0.1.0a4` is installed and its manifest and
-  public migration lineage are composed. This is deliberately a **shadow
-  installation**, not adoption: `vendor_cp.allocations` remains the sole
-  authoritative writer and there is no dual-write. Vendor migration v011 makes
-  new immutable offers and contracts product-qualified, binds that identity into
-  the contract content hash, and emits it on contract events. Historical rows
-  remain explicitly unclassified until an operator supplies evidence; the
-  independent module therefore still receives no `ContractSnapshot`.
+- `dotmac-entitlement-allocation==0.1.0a4` is the **allocation authority**
+  (ADR-0006). Its manifest and public migration lineage are composed, `v014`
+  grants the platform writer and removes the empty legacy tables/writer, and
+  Vendor reaches it only through `vendor_cp.allocations.adapter`. There is no
+  shadow or dual-write. Offers/contracts remain product-qualified, and the
+  module owns what constitutes a valid allocation.
 
 ## The composed database is audited whole
 
 `tests/migration/test_composed_live_catalog.py` audits the database this
-assembly actually produces — kernel lineage, both module lineages, vendor
+assembly actually produces — kernel lineage, every module lineage, vendor
 lineage — rather than the tables someone remembered to name.
 
-- The module schemas (`mod_rel`, `mod_ealloc`) go through the kernel's own
-  canonical gate, `dotmac_kernel.migrations.catalog.audit_live_schemas`. A rule
+- The module schemas (`mod_rel`, `mod_ealloc`, `mod_approvals`) go through the
+  kernel's own canonical gate,
+  `dotmac_kernel.migrations.catalog.audit_live_schemas`. A rule
   the kernel tightens tightens here in the release that ships it, and the
   expected table set derives from this assembly's plane selection rather than
   from prerequisite availability.
@@ -188,6 +187,52 @@ artifacts, approvals or allocations — but adoption is earned by running in
 production with the local writer proven absent, not by landing code, and nothing
 has run.
 
+## Managed profiles and fleet desired state (ADR-0007)
+
+Vendor owns provider-neutral managed-service intent. The owner is split by
+domain rather than by transport:
+
+- `vendor_cp.managed_profiles` owns immutable profile versions: required and
+  allowed-optional component policy, dependency graph, provider-neutral
+  capability requirements, typed configuration schema and exact verification
+  checks. It owns no customer values or deployment-specific optional choice;
+- `vendor_cp.fleet` owns account-qualified deployment targets, stable
+  deployments, each deployment's allowed optional selection/dependency closure,
+  immutable configuration snapshots and content-addressed desired state tied to
+  exactly one active product-qualified contract or named internal source. The
+  latter represents Dotmac-owned non-commercial estate, not a customer
+  entitlement.
+
+The initial suite includes Identity, Mailcow, Nextcloud, ERP and Academy, with
+Workspace optional. Composition does not create a suite entitlement: every
+offer, contract and allocation remains qualified by one product. Profiles close
+operational dependencies across those authoritative facts and never invent a
+capability the product/source evidence does not declare.
+
+Desired state is deliberately **not an execution plan or artifact bundle**. It
+contains required capabilities, configuration and verification contracts, but
+no provider enum, connector distribution, installation id, binding id,
+credential, remote command, receipt or observed-state decision. Configuration
+contains typed public values or named versioned secret references; Vendor never
+holds secret material.
+
+`tests/architecture/test_fleet_intent_boundary.py` walks transitive local imports
+from both domains and every script/job/worker that imports them. It refuses
+network/process/provider I/O in the reachable graph, including delegated and
+relative-import escapes. All mounted routers use the kernel platform-admin
+guard. Integrator alone selects connector bindings, materialises secrets and
+performs external I/O through versioned connector plugins.
+
+Source evidence becomes explicit in ADR-0008's immutable bundle manifest:
+Dotmac products use exact Release Catalog artifact and manifest associations;
+pinned third-party components use exact upstream digests plus Dotmac-authored
+admission/compatibility evidence. Stack 1 records the verification requirement,
+not an artifact selection. Evidence reports a fact and cannot decide desired
+state.
+
+The complete ownership/acceptance contract and five-stack roadmap are in
+`docs/design/managed-email-collaboration-ecosystem.md`.
+
 ## Deployment profiles
 
 `src/vendor_cp/deployment_profile.py` declares which vendor SURFACES a
@@ -202,7 +247,7 @@ and reusable-looking; publishing their routes would make an external caller a
 constraint on deciding the owner. A withheld surface is not a disabled
 subsystem: licence key custody still loads at boot, and a test asserts it.
 
-A profile may never withhold a persistence owner. Both module manifests carry a
+A profile may never withhold a persistence owner. All three module manifests carry a
 migration lineage and own schemas the database already contains, so an assembly
 missing one would no longer describe its own tables.
 
@@ -251,45 +296,23 @@ application. The complete operator contract and rollback boundary are in
   commands + outcomes, atomic transaction ownership, idempotency, audit,
   platform-admin-only adapters.
 - **Commercial lifecycle (as-built)** — immutable product-qualified offers,
-  versioned approvals, product-qualified contracts, the legacy allocation
-  projection, and signed licence issuance and delivery. Offer and contract
-  services consume `dotmac-entitlement-allocation`'s product-scoped
+  authoritative module approvals, product-qualified contracts, authoritative
+  module allocations, and signed licence issuance and delivery. Offer and
+  contract services consume `dotmac-entitlement-allocation`'s product-scoped
   `CapabilityCatalogueReader` port. The assembly config names only exact
   artifact and product-manifest digests per product. The adapter requires the
   digest-addressed container row and its matching `product_manifest`
   attestation, reads the held canonical bytes through a local document-reader
   port, and delegates digest/canonical/product/version verification to kernel
   a50 before deriving capabilities. The old raw capability-list configuration
-  is rejected. These commercial features remain vendor-local owners until each
-  approved independent-module cutover explicitly retires its corresponding
-  local writer.
-- **Allocation cutover gate** — Entitlement Allocation can become authoritative
-  only after one coherent change proves all of the following:
-
-  1. **expand delivered for new writes:** the commercial-contract owner persists,
-     hashes, and emits an explicit product identity; historical offers and
-     contracts must still be mapped from evidence before the v011 checks can be
-     validated;
-  2. **typed boundary delivered:** commercial services and the cutover preflight
-     consume the allocation module's product-scoped catalogue port rather than
-     owning a duplicate protocol. Release-bound, digest-verified product-manifest
-     snapshots now supply that port;
-  3. every live legacy allocation entry validates against its product's
-     manifest and duplicate capability codes are normalized before switching;
-  4. the activation adapter constructs the module's `ContractSnapshot`, the
-     consumer switches once, licence issuance reads `allocation_product()`, and
-     the legacy models, service, FK and writer path are retired after parity.
-
-  `preflight_allocation_cutover` is the read-only proof for steps 1–3. It scans
-  offers, contracts, allocations, and entries; reports every known divergence;
-  and accepts only immutable, evidence-referenced mapping proposals. It never
-  changes a legacy row. Separate canonical digests bind the exact operator
-  classification set and every relevant persisted fact the report observed;
-  neither digest makes a proposal authoritative. Shadow runs may observe normal
-  traffic, but the final cutover proof must run after the legacy writer is
-  quiesced, so a passing observation cannot move before the writer switch.
-  Until all four gates pass, the module tables are empty and non-authoritative.
-  A partial switch would either invent product identity or create two writers.
+  is rejected. Approvals and allocations have completed their greenfield module
+  authority switches; offers, contracts and licensing remain Vendor-owned until
+  separately approved cutovers retire their local writers.
+- **Fleet desired state** — managed profiles and fleet services are the sole
+  owners of the provider-neutral intent entities authorised by ADR-0007. They
+  reference commercial/allocation evidence and never duplicate it. They perform
+  no provider I/O; immutable plan/approval and Integrator execution are later
+  stacks with distinct owners.
 - **Release artifacts and attestations** — owned by the independently published
   `dotmac-release-catalog`, not by a vendor-local feature or table. Vendor's
   `release_evidence` service is the thin ingestion adapter: it holds exact
@@ -305,10 +328,11 @@ application. The complete operator contract and rollback boundary are in
   kernel's `ProvisioningProvider` contract (plan → apply → observe → cancel)
   against the Vendor-owned `LaboratoryProvisioningProvider`, plus test-only
   conformance via the kernel's `check_provisioning_provider_contract`. A
-  **laboratory** — simulation only, no fleet tables, no runner, no real
+  **laboratory** — simulation only, no fleet execution, no runner, no real
   infrastructure, no SSH; the only state is the provider's in-memory operation
-  ledger. Runtime code never imports `dotmac_kernel.testing`. The real runner +
-  activation contracts are a later, design-gated slice.
+  ledger. Runtime code never imports `dotmac_kernel.testing`. The
+  approval-bound runner is Integrator-owned; this laboratory will never become
+  its production implementation.
 - **Administration shell** — a platform-admin-only console surface
   (`src/vendor_cp/console/`). The initial identity is created or rotated by the
   assembly's `vendor_cp.platform_admin` service. The prompt-only
@@ -325,17 +349,19 @@ a build-failing architecture test (`tests/architecture/test_deny_cases.py`):
 |---|---|---|
 | **D1** | One control-plane database; the kernel owns the engine. No `create_engine`/`sessionmaker`, no product DSNs. | A cache or a product DB must never become a parallel authority; the vendor CP has exactly one datastore. |
 | **D2** | No product data-plane imports (`dotmac_sub`/`crm`/`erp`/`app`). | ERP/ISP/CRM remain separate data planes; collaboration is API/webhook only. An ISP operator is a *tenant*, its subscribers are the product's parties — never the vendor CP's. |
-| **D3** | Vendor-owned simulation provider only; real config fails startup; no real-provider SDKs or runtime testing-kit imports. | A request-time access check never calls a payment/cloud provider; the runner + activation contracts are a later, design-gated slice. |
+| **D3** | Vendor owns provider-neutral intent and never external execution; no real-provider SDKs/network/process clients in the transitive fleet/profile graph. The local provider remains fake-only. | Integrator connector plugins are the one owner of external I/O, secrets, retry and repair; Vendor cannot become a parallel runner. |
 | **D4** | Platform-admin auth through the kernel (`require_platform_admin`). | One authority for platform-actor identity; no re-implemented auth to drift. |
 | **D5** | Only the kernel's public surface; no private/internal/copied code. | Products compose a pinned kernel and improve it via declared extension points — never fork or copy it. |
 
-## Still design-only (do NOT implement yet)
+## Delivery state beyond Stack 1
 
-Fleet desired state, update authority, support access, the full provisioning
-runner, and observed fleet health. Independent-module extraction of the
-existing approvals, contracts, allocation and licensing implementations follows
-their adjudication/cutover dossiers; their existing vendor-local code is not
-evidence that those extractions already happened.
+ADR-0007 authorises and this assembly implements fleet desired state and update
+authority as intent. Deterministic plan hashing and exact approval (Stack 2) are
+specified by ADR-0008. Approval-bound Integrator execution and receipts (Stack
+3), real connector and
+product adoption (Stack 4), and operational acceptance/restore/drift evidence
+(Stack 5) remain separate changes. Nothing in Stack 1 authorises Vendor to act
+as the runner while those stacks are incomplete.
 
 ## Migrating existing products
 
@@ -350,8 +376,8 @@ big-bang rewrite, and never by this control plane reaching into their databases.
 licence may be delivered, written only by
 `EntitlementProjectionService.register_delivery_target`. It is deliberately NOT
 the authoritative `Deployment` entity: `docs/design/domain-foundation.md`
-assigns that to `FleetDesiredStateService`, and deployment intent remains
-design-only. Naming the licensing table `deployments` would have made licensing
+assigns that to the fleet service, which now owns the deployment entity. Naming
+the licensing table `deployments` would have made licensing
 the de-facto owner of an entity another service is specified to own — a
-source-of-truth violation dressed as a convenience. When the fleet slice lands,
-this projection is rebuilt from it rather than competing with it.
+source-of-truth violation dressed as a convenience. The licensing projection is
+reconciled from fleet intent rather than competing with it.

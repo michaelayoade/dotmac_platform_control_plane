@@ -37,7 +37,7 @@ ENTITLEMENT_ALLOCATION_HEAD = "ea_0001_allocations"
 APPROVALS_HEAD = "ap_0001_approvals"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v014_allocations_authority"
+VENDOR_HEAD = "v015_fleet_desired_state"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:
@@ -126,6 +126,10 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
     # empty legacy tables went with the writer that owned them.
     assert not _table_exists(scratch_db, "allocations")
     assert not _table_exists(scratch_db, "allocation_entries")
+    assert _table_exists(scratch_db, "managed_service_profile_versions")
+    assert _table_exists(scratch_db, "deployment_targets")
+    assert _table_exists(scratch_db, "deployments")
+    assert _table_exists(scratch_db, "deployment_desired_state_versions")
     assert "product_code" in _column_names(scratch_db, "offer_versions")
     assert "product_code" in _column_names(scratch_db, "contracts")
     # Kernel platform tables the AccountService depends on are present too.
@@ -150,6 +154,18 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         scratch_db,
         "SELECT relrowsecurity FROM pg_class WHERE oid='vendor_accounts'::regclass",
     )
+    for table in (
+        "managed_service_profile_versions",
+        "deployment_targets",
+        "deployments",
+        "deployment_desired_state_versions",
+    ):
+        assert "tenant_id" not in _column_names(scratch_db, table)
+        assert not _q(
+            scratch_db,
+            "SELECT relrowsecurity FROM pg_class " "WHERE oid=CAST(:table AS regclass)",
+            table=f"public.{table}",
+        )
     # VERSION ROWS, which are not the same set as the static heads.
     #
     # `alembic_version` holds current heads only, and a `depends_on` edge makes
@@ -312,8 +328,112 @@ def test_platform_role_access_and_tenant_role_denial(
                 conn.execute(
                     text("SELECT count(*) FROM mod_ealloc.allocations")
                 ).scalar()
+        with appu.connect() as conn:
+            with pytest.raises(DBAPIError, match="permission denied"):
+                conn.execute(text("SELECT count(*) FROM deployments")).scalar()
     finally:
         appu.dispose()
+
+
+def test_v015_profile_and_desired_state_are_database_immutable(
+    scratch_db: str,
+) -> None:
+    _upgrade(scratch_db, "heads")
+    ids = {
+        name: str(uuid.uuid4())
+        for name in ("account", "profile", "target", "deployment", "desired")
+    }
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO vendor_accounts "
+                    "(id, external_ref, display_name, status) "
+                    "VALUES (:id, 'immutable-canary', 'Immutable', 'active')"
+                ),
+                {"id": ids["account"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO managed_service_profile_versions "
+                    "(id, profile_code, version, schema_version, "
+                    "commercial_product_code, content_hash, document) VALUES "
+                    "(:id, 'immutable', 1, 1, 'managed-collaboration', "
+                    ":hash, CAST('{}' AS jsonb))"
+                ),
+                {"id": ids["profile"], "hash": "sha256:" + "a" * 64},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_targets "
+                    "(id, account_id, target_ref, display_name, region_code) "
+                    "VALUES (:id, :account, 'immutable', 'Immutable', 'ng-abuja')"
+                ),
+                {"id": ids["target"], "account": ids["account"]},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployments "
+                    "(id, account_id, target_id, deployment_ref, "
+                    "commercial_product_code, internal_source_code) VALUES "
+                    "(:id, :account, :target, 'immutable', "
+                    "'managed-collaboration', 'dotmac.canary')"
+                ),
+                {
+                    "id": ids["deployment"],
+                    "account": ids["account"],
+                    "target": ids["target"],
+                },
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO deployment_desired_state_versions "
+                    "(id, deployment_id, revision, profile_version_id, profile_code, "
+                    "profile_version, profile_content_hash, commercial_product_code, "
+                    "update_authority, selected_components, selected_capabilities, "
+                    "selected_endpoints, selected_verification_checks, "
+                    "configuration_snapshot, configuration_snapshot_ref, "
+                    "configuration_schema_version, configuration_hash, "
+                    "desired_state_hash) VALUES "
+                    "(:id, :deployment, 1, :profile, 'immutable', 1, :profile_hash, "
+                    "'managed-collaboration', 'customer_approved', "
+                    "CAST('[]' AS jsonb), CAST('[]' AS jsonb), CAST('[]' AS jsonb), "
+                    "CAST('[]' AS jsonb), CAST('{}' AS jsonb), 'config:canary@v1', "
+                    "1, :configuration_hash, :desired_hash)"
+                ),
+                {
+                    "id": ids["desired"],
+                    "deployment": ids["deployment"],
+                    "profile": ids["profile"],
+                    "profile_hash": "sha256:" + "a" * 64,
+                    "configuration_hash": "sha256:" + "b" * 64,
+                    "desired_hash": "sha256:" + "c" * 64,
+                },
+            )
+
+        with engine.connect() as conn:
+            with pytest.raises(DBAPIError, match="profile versions are immutable"):
+                conn.execute(
+                    text(
+                        "UPDATE managed_service_profile_versions "
+                        "SET profile_code='mutated' WHERE id=CAST(:id AS uuid)"
+                    ),
+                    {"id": ids["profile"]},
+                )
+        with engine.connect() as conn:
+            with pytest.raises(
+                DBAPIError, match="desired-state versions are immutable"
+            ):
+                conn.execute(
+                    text(
+                        "UPDATE deployment_desired_state_versions SET revision=2 "
+                        "WHERE id=CAST(:id AS uuid)"
+                    ),
+                    {"id": ids["desired"]},
+                )
+    finally:
+        engine.dispose()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -341,6 +461,8 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
     # by v005 and dropped again within the same composed upgrade.
     assert not _table_exists(scratch_db, "allocations")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
+    assert _table_exists(scratch_db, "managed_service_profile_versions")
+    assert _table_exists(scratch_db, "deployment_targets")
     assert _qualified_table_exists(scratch_db, "mod_rel.release_artifacts")
     assert _qualified_table_exists(scratch_db, "mod_ealloc.allocations")
     assert _versions(scratch_db) == {

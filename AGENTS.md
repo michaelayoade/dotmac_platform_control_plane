@@ -17,11 +17,18 @@ disagree, fix the drift.
 3. **No product data-plane imports.** Never import `dotmac_sub`/`crm`/`erp`/`app`
    (**D2**). Cross-system collaboration is via APIs/webhooks only, per the
    Dotmac app-independence standard.
-4. **Vendor-owned simulation provider only, this phase.** A non-`fake`
-   `VENDOR_PROVIDER_MODE` FAILS STARTUP; no real-provider SDKs are imported
-   (**D3**). Runtime code implements the side-effect-free laboratory provider
-   locally and never imports `dotmac_kernel.testing`; the kernel test kit is
-   test-only. No fleet tables, no `DeploymentRunner` yet.
+4. **Vendor owns fleet intent; Integrator alone performs external I/O.** Vendor
+   may persist the provider-neutral managed profile, deployment target,
+   deployment and desired-state snapshot authorised by ADR-0007. It never
+   imports a provider SDK, opens a network client, shells out, resolves a secret,
+   selects a connector implementation or applies infrastructure. The separately
+   deployed Dotmac Integrator is the sole external connector control plane; it
+   executes an immutable, approved plan and returns typed receipts/evidence.
+   Vendor's existing `LaboratoryProvisioningProvider` remains a side-effect-free
+   contract simulator only: a non-`fake` `VENDOR_PROVIDER_MODE` still fails
+   startup, runtime never imports `dotmac_kernel.testing`, and no production
+   execution path may delegate to the laboratory (**D3**; ADR-0007;
+   `tests/architecture/test_fleet_intent_boundary.py`).
 5. **Platform-admin auth through the kernel.** Vendor admin surfaces depend on
    `dotmac_kernel.platform_auth.require_platform_admin`; auth is never
    re-implemented (**D4**).
@@ -93,6 +100,15 @@ disagree, fix the drift.
     The `Dotmac engineering standards` CI job must execute that same immutable
     revision. Mutable tags/branches, copied rules, candidate mode, or a missing
     required check are not substitutes.
+15. **A managed-suite contract is still one product contract.** A profile may
+    close dependencies across Identity, Mailcow, Nextcloud, ERP, Academy and
+    Workspace, but the immutable commercial offer/contract/allocation remains
+    product-qualified. Fleet intent references an active product-qualified
+    commercial source (or an explicitly named internal source); it must not
+    invent a second multi-product entitlement vocabulary or make product
+    capability decisions. Third-party product facts are observations backed by
+    exact release/configuration evidence, never declarations Vendor may invent
+    (ADR-0007).
 
 ## Validation before any commit
 

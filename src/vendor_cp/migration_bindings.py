@@ -30,8 +30,8 @@ binding was withheld.
 
 `dotmac-approvals` is the one selectable module composed here, and the selection
 below installs its PLATFORM plane only. Note what that does NOT say: selecting a
-plane chooses STORAGE SHAPE, never WRITE AUTHORITY. Vendor `v012` is what keeps
-the module read-only while the legacy writer is still authoritative.
+plane chooses STORAGE SHAPE, never WRITE AUTHORITY. Vendor `v013`, authorised by
+ADR-0005, is the completed authority switch; `v012` is historical shadow state.
 
 Both declarations are installed from `alembic/env.py` before Alembic builds the
 revision map, and both are mirrored into the graph-command environment
@@ -82,7 +82,7 @@ ASSEMBLY_PREREQUISITE_BINDINGS: Final[tuple[PrerequisiteBinding, ...]] = (
 #:
 #: `ModulePlane.PLATFORM` selects STORAGE SHAPE. It says nothing about whether
 #: this assembly has acquired WRITE AUTHORITY over those tables — that is a
-#: migration-state question, and Vendor owns it. See vendor migration `v012`.
+#: migration-state question, and Vendor owns it. See vendor migration `v013`.
 ASSEMBLY_MODULE_PLANES: Final[tuple[ModulePlaneSelection, ...]] = (
     ModulePlaneSelection(module="approvals", planes=(ModulePlane.PLATFORM,)),
 )

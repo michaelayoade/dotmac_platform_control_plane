@@ -1,3 +1,6 @@
-"""The `allocations` domain — AllocationService, which stages an immutable
-allocation from `contract.activated`. Writes NO product WS2 grants; delivery/ack is
-WS8/C4 (design-only). See `docs/design/contract-service.md`."""
+"""Vendor adapters over authoritative entitlement-allocation state.
+
+ADR-0006 and migration ``v014`` retired the local allocation writer. Contract
+activation stages an immutable module allocation through the typed adapter;
+licensing reads the same authority. No product data-plane grant is written here.
+"""

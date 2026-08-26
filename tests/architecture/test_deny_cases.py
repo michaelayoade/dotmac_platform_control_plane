@@ -1,8 +1,9 @@
 """D1–D5 deny-case architecture tests — the vendor control plane's boundaries.
 
 These fail the build if the control plane drifts across a boundary the design
-forbids: a second/product database (D1), product data-plane code (D2), a real
-provider (D3), non-kernel auth (D4), or private/copied kernel code (D5).
+forbids: a second/product database (D1), product data-plane code (D2), Vendor
+external-provider execution (D3), non-kernel auth (D4), or private/copied kernel
+code (D5).
 """
 
 from __future__ import annotations
@@ -166,7 +167,7 @@ def test_d2_no_product_domain_imports() -> None:
     assert not bad, f"vendor CP must not import product data-plane code: {bad}"
 
 
-# ── D3 — fake providers only; no real-provider SDKs ──────────────────────────
+# ── D3 — Integrator alone owns provider I/O; no provider SDKs in Vendor ─────
 _REAL_PROVIDER_SDKS = {
     "boto3",
     "botocore",
@@ -189,7 +190,10 @@ def test_d3_no_real_provider_sdk_imports() -> None:
         for mod, _ in _imports(p)
         if mod.split(".")[0] in _REAL_PROVIDER_SDKS
     ]
-    assert not bad, f"no real-provider SDKs — fake providers only this phase: {bad}"
+    assert not bad, (
+        "Vendor records provider-neutral intent; provider SDKs belong only to "
+        f"Integrator connector plugins (ADR-0007): {bad}"
+    )
 
 
 # ── D4 — platform-admin auth THROUGH the kernel ──────────────────────────────
