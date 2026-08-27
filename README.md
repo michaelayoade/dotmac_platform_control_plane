@@ -23,7 +23,7 @@ lifecycle — never a product's tenants, subscribers, or customer data.
 - **Approvals:** `dotmac-approvals==0.1.0a4`, platform-plane only and the
   authority under ADR-0005. Vendor retains the typed route/identity adapter,
   not a second policy engine.
-- **Commercial Agreements:** `dotmac-commercial-agreements==0.1.0a1`,
+- **Commercial Agreements:** `dotmac-commercial-agreements==0.1.0a2`,
   platform-only and the agreement authority under ADR-0008. Vendor retains one
   typed offer/catalogue/approval-evidence adapter; the local lifecycle writer
   and tables are absent.

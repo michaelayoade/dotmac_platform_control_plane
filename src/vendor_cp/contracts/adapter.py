@@ -14,6 +14,7 @@ from uuid import UUID
 
 from dotmac_commercial_agreements import (
     AGREEMENT_ACTIVATED_V1,
+    DEFAULT_AGREEMENT_PAGE_SIZE,
     ActivationEvidence,
     AgreementError,
     AgreementPeriod,
@@ -59,6 +60,9 @@ from dotmac_commercial_agreements import (
 )
 from dotmac_commercial_agreements import (
     get as module_get,
+)
+from dotmac_commercial_agreements import (
+    list_agreements as module_list_agreements,
 )
 from dotmac_commercial_agreements import (
     open_draft as module_open_draft,
@@ -214,6 +218,18 @@ class ContractView:
     activation_rule: str | None
     approval_request_id: UUID | None = None
     lines: tuple[LineView, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class ContractPage:
+    """One bounded page from the agreement owner's complete estate reader.
+
+    ``next_after`` is opaque to Vendor. Callers pass it back unchanged; the
+    Commercial Agreements owner defines and validates the UUID keyset.
+    """
+
+    items: tuple[ContractView, ...]
+    next_after: UUID | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,6 +529,25 @@ def get(db: Session, agreement_id: UUID) -> ContractView | None:
     return None if value is None else _view(value)
 
 
+def list_agreements(
+    db: Session,
+    *,
+    after: UUID | None = None,
+    limit: int = DEFAULT_AGREEMENT_PAGE_SIZE,
+) -> ContractPage:
+    """Translate one owner-bounded agreement page into Vendor values.
+
+    Pagination, ordering, cursor validation and materialization stay with the
+    Commercial Agreements owner. This adapter only applies Vendor's existing
+    typed projection, including its one inclusive-to-exclusive term boundary.
+    """
+    page = module_list_agreements(db, after=after, limit=limit)
+    return ContractPage(
+        items=tuple(_view(value) for value in page.items),
+        next_after=page.next_after,
+    )
+
+
 def active_snapshot(
     db: Session, agreement_id: UUID, *, expected_content_hash: str
 ) -> ActiveAgreementSnapshot:
@@ -544,6 +579,7 @@ __all__ = [
     "ActivateCommand",
     "ActiveAgreementSnapshot",
     "ApprovalCommand",
+    "ContractPage",
     "ContractView",
     "CreateDraftCommand",
     "LineInput",
@@ -558,6 +594,7 @@ __all__ = [
     "cancel",
     "create_draft",
     "get",
+    "list_agreements",
     "propose",
     "reinstate",
     "reject",

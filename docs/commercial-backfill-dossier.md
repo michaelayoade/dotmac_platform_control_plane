@@ -1,8 +1,8 @@
 # Commercial backfill — cohort and mapping dossier
 
-**Dated 2026-08-25.** The exact cohort a commercial backfill would move, the
-five transformations each row must survive, and the two gates that would have to
-open before anything moves. The machine-readable half is
+**Dated 2026-08-25; updated 2026-08-26.** The exact cohort a commercial backfill
+would move, the five transformations each row must survive, and the two gates
+that would have to open before anything moves. The machine-readable half is
 `src/vendor_cp/commercial_backfill/`, held by
 `tests/architecture/test_commercial_backfill.py`; where the two disagree, the
 test is the one that fails.
@@ -101,18 +101,19 @@ of rows, and the two must never render the same. `SourceCoverage` carries it:
 `OFFER_VERSION_ENUMERATED`, `OFFER_VERSION_NOT_ENUMERABLE`,
 `AGREEMENT_LINE_ENUMERATED`, `AGREEMENT_LINE_NOT_ENUMERABLE`.
 
-The exactly pinned `dotmac-commercial-agreements==0.1.0a1` public surface has
-typed `get` and `family` reads but no typed paginated estate reader, and
-`vendor_cp.contracts.adapter` consequently has no listing surface. The planner
-must therefore report `AGREEMENT_LINE_NOT_ENUMERABLE` for a run that lacks that
-source; an unknown estate is never rendered as zero rows.
+The selected `dotmac-commercial-agreements==0.1.0a2` public contract adds a
+bounded UUID-keyset estate reader, and `vendor_cp.contracts.adapter` maps each
+owner page into Vendor's existing typed view. This repository adds no local
+reader, does not query the module schema directly, and does not read another
+application’s database. Source inspection proves that adapter relationship;
+`docs/cutover-readiness.md` is the oracle-bearing source for the a2 release and
+pin, and the adoption guard refuses merge unless it records both the exact
+`release_run` and the 40-character peeled-tag commit.
 
-The missing dependency is explicit: an upstream release must publish and verify
-a typed paginated agreement reader, with immutable `release_run` evidence;
-Vendor must then exact-pin it and map each page through its typed adapter. This
-repository must not invent a local reader, query the module schema directly, or
-read another application's database. Until that release and pin exist, the
-agreement cohort cannot be fully enumerated.
+Reader availability and run coverage remain separate. The planner must report
+`AGREEMENT_LINE_NOT_ENUMERABLE` when the export did not reach the final owner
+page; the presence of a method never renders an unknown remainder as zero. Only
+a completed page walk may report `AGREEMENT_LINE_ENUMERATED`.
 
 ### Exclusions, and why they are decided first
 

@@ -15,9 +15,9 @@ sum to the number of rows — asserted, not assumed.
 It does not claim the rows it was given are the whole estate. `SourceCoverage`
 carries that separately, and a source recorded as `NOT_ENUMERABLE` makes the
 difference between "zero rows" and "an unknown number of rows" visible in the
-report itself. This assembly is in exactly that position today: the contracts
-adapter publishes `get` and no listing surface, so nothing here can walk the
-agreement estate at all.
+report itself. Vendor's contracts adapter now exposes the owner's bounded
+paginated reader, but coverage becomes `ENUMERATED` only for a run that actually
+walked every page; the presence of a method is not evidence that a run used it.
 
 ## Deliberately absent
 

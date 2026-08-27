@@ -203,10 +203,10 @@ def repair_statements(
 #: A read-only projection of the half of the cohort this assembly can actually
 #: enumerate. `public.offer_versions` is a real table with a real model here.
 #:
-#: There is no counterpart for agreement lines, and that absence is the point:
-#: the agreements module owns its own schema and this assembly holds no listing
-#: surface over it, so inventing a SELECT against tables nobody here can name
-#: would be guessing. It is reported as `AGREEMENT_LINE_NOT_ENUMERABLE` instead.
+#: There is deliberately no SQL counterpart for agreement lines. The agreement
+#: owner now publishes a typed bounded reader and Vendor consumes it through
+#: `vendor_cp.contracts.adapter`; raw SQL against the module schema would be a
+#: second, locally owned read contract.
 OFFER_VERSION_EXPORT_SQL: Final[str] = """SELECT
     encode(sha256(convert_to(
         coalesce(product_code, '') || '/' || offer_code || '/' || version::text,

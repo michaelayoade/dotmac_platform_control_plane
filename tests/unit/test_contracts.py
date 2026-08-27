@@ -180,6 +180,24 @@ def test_draft_resolves_and_freezes_vendor_offer_terms(db: Session) -> None:
     assert _events(db, AGREEMENT_PROPOSED_V1) == 1
 
 
+def test_list_agreements_translates_owner_pages_without_local_queries(
+    db: Session,
+) -> None:
+    _offer(db)
+    created = (_draft(db), _draft(db))
+    expected = tuple(sorted(value.id for value in created))
+
+    first = agreements.list_agreements(db, limit=1)
+    assert tuple(value.id for value in first.items) == expected[:1]
+    assert first.next_after == expected[0]
+    assert first.items[0].term_end_exclusive == date(2027, 1, 1)
+    assert first.items[0].lines[0].unit_amount == "19.99"
+
+    second = agreements.list_agreements(db, after=first.next_after, limit=1)
+    assert tuple(value.id for value in second.items) == expected[1:]
+    assert second.next_after is None
+
+
 def test_inclusive_term_end_has_one_end_exclusive_translation() -> None:
     assert end_exclusive_from_inclusive(date(2026, 12, 31)) == date(2027, 1, 1)
     with pytest.raises(TermEndNotRepresentable):

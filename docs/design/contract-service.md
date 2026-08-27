@@ -1,7 +1,7 @@
 # ContractService — design (state machine + acceptance cases)
 
 > **SUPERSEDED by ADR-0008 (2026-08-20).** This records the retired local
-> design. `dotmac-commercial-agreements==0.1.0a1` now owns the lifecycle and
+> design. `dotmac-commercial-agreements==0.1.0a2` now owns the lifecycle and
 > emits `agreement.*.v1` facts; Vendor retains only its typed adapter. The
 > as-built contract is `docs/ARCHITECTURE.md`.
 

@@ -32,14 +32,15 @@ is honest; inferring it from a DSN this command does not have would not be.
 
 ## Why the source arrives as a file
 
-Half the cohort is not enumerable from this assembly at all. `public.offer_versions`
+This command deliberately owns no session or connection. `public.offer_versions`
 is a real table with a real model here, and `vendor_cp.commercial_backfill.shadow
-.OFFER_VERSION_EXPORT_SQL` is its read-only projection. Agreement lines are owned
-by an independently released module whose current exact pin has no typed
-paginated reader. Until such a reader is released, exact-pinned and mapped
-through Vendor's adapter, the plan reports `AGREEMENT_LINE_NOT_ENUMERABLE`.
-This command does not invent a local reader or query the module's tables. A plan
-over half an estate must never read as a plan over all of it.
+.OFFER_VERSION_EXPORT_SQL` is its read-only projection. Agreement lines are read
+through the exactly pinned Commercial Agreements owner's bounded UUID-keyset
+reader and translated by `vendor_cp.contracts.adapter`; no raw module-table query
+or locally invented reader exists. The separate export boundary records which
+sources actually reached their final page. A partial export reports
+`NOT_ENUMERABLE`; the mere presence of a reader never turns unknown rows into
+zero.
 
 ## Replay-safety
 

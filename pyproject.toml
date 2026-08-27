@@ -86,7 +86,7 @@ dotmac-deployment-control = { version = "0.1.0a2", source = "forgejo" }
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor
 # retains only typed offer, catalogue and approval-evidence adapters.
-dotmac-commercial-agreements = { version = "0.1.0a1", source = "forgejo" }
+dotmac-commercial-agreements = { version = "0.1.0a2", source = "forgejo" }
 # The platform-only Licensing issuer authority. Vendor v016 checks the
 # greenfield premise under lock, drops the empty local issuer tables and keeps
 # only key custody plus the separately owned delivery projection.
