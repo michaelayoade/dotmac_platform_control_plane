@@ -191,6 +191,8 @@ def test_list_agreements_translates_owner_pages_without_local_queries(
     assert tuple(value.id for value in first.items) == expected[:1]
     assert first.next_after == expected[0]
     assert first.items[0].term_end_exclusive == date(2027, 1, 1)
+    assert first.items[0].superseded_by_id is None
+    assert first.items[0].lines[0].line_no == 1
     assert first.items[0].lines[0].unit_amount == "19.99"
 
     second = agreements.list_agreements(db, after=first.next_after, limit=1)

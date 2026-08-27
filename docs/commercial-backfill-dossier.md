@@ -1,6 +1,6 @@
 # Commercial backfill — cohort and mapping dossier
 
-**Dated 2026-08-25; updated 2026-08-26.** The exact cohort a commercial backfill
+**Dated 2026-08-25; updated 2026-08-27.** The exact cohort a commercial backfill
 would move, the five transformations each row must survive, and the two gates
 that would have to open before anything moves. The machine-readable half is
 `src/vendor_cp/commercial_backfill/`, held by
@@ -115,6 +115,18 @@ Reader availability and run coverage remain separate. The planner must report
 page; the presence of a method never renders an unknown remainder as zero. Only
 a completed page walk may report `AGREEMENT_LINE_ENUMERATED`.
 
+`commercial_backfill.enumeration.walk_agreement_lines` is that assembly walk.
+It is bounded by page size and page count, passes the owner's opaque cursor back
+unchanged, and issues no domain query of its own. Its first statement makes the
+PostgreSQL transaction `REPEATABLE READ, READ ONLY`; an already-used session is
+refused by the database, so page-to-page completion is judged inside one stable,
+write-protected snapshot. `next_after=None` is the only completion proof.
+Exhausting the page budget returns the rows already observed with
+`AGREEMENT_LINE_NOT_ENUMERABLE`; a repeating cursor, duplicate agreement,
+over-sized page or empty page with a successor fails the run instead of
+returning evidence. `plan_sources` derives agreement coverage from this result,
+so a caller cannot label a partial tuple complete independently.
+
 ### Exclusions, and why they are decided first
 
 `ExclusionReason`, in declared order:
@@ -123,8 +135,8 @@ a completed page walk may report `AGREEMENT_LINE_ENUMERATED`.
 | --- | --- |
 | `OFFER_VERSION_NEVER_REFERENCED` | an offer version nothing references is CATALOGUE, not commercial state |
 | `NOT_COMMERCIAL_STATE_YET` | `DRAFT`, `PROPOSED`, `APPROVED` — not yet a commercial relationship |
-| `TERMINATED_BEFORE_COHORT_START` | `REJECTED`, `CANCELLED`, `TERMINATED`, `EXPIRED` |
-| `SUPERSEDED_AGREEMENT_VERSION` | a newer version of the same agreement family carries the truth |
+| `TERMINATED_BEFORE_COHORT_START` | `CANCELLED`, `TERMINATED`, `EXPIRED` |
+| `SUPERSEDED_AGREEMENT_VERSION` | owner status `SUPERSEDED` or a populated `superseded_by_id`; a newer version of the same agreement family carries the truth |
 | `ZERO_QUANTITY_LINE` | a line for nothing produces no target price |
 
 `ACTIVE` and `SUSPENDED` are IN. A suspended agreement is a contract that exists
@@ -156,12 +168,13 @@ did not.
 | `quantity` | `LineView.quantity` |
 | `content_hash` | `ContractView.content_hash` (frozen at propose) |
 | `activation_content_hash` | the activation event's bound digest |
-| `agreement_status` | `ContractView.status` |
+| `agreement_status` | `ContractView.status`, validated against exact-pinned `AgreementStatus` and normalized from its lowercase value to its enum name |
+| `is_superseded` | `ContractView.superseded_by_id` / owner status `SUPERSEDED` |
 | `term_start` | `ContractView.term_start`, mapped from `AgreementView.effective_date` |
 | `term_end_exclusive` | `ContractView.term_end_exclusive`, normalized once from inclusive `AgreementView.expiry_date` |
 | `sibling_product_codes`, `sibling_currency_codes` | the other lines of the same agreement |
 | `referenced_by_cohort_line` | whether any cohort line names this `offer_ref` |
-| `fingerprint` | a digest of the row's natural key — used ONLY by the rehearsal shadow, never by a report |
+| `fingerprint` | SHA-256 of the owner agreement id plus `LineView.line_no` — used ONLY by the rehearsal shadow, never by a report |
 
 ## The five transformations
 
@@ -317,6 +330,11 @@ dimension the observation does not cover is `NOT_COMPARABLE`, never a quiet
 parity over four of five dimensions is not parity, and rounding it up is how a
 blind spot becomes a sign-off. The `PARITY` tally carries the per-dimension
 verdicts so a reader sees which diverged without the report naming a row.
+
+Source coverage is a premise of BOTH claims. If either source kind is incomplete,
+row-count and target-semantic parity are both `NOT_COMPARABLE`, even when the
+partial mapped count and every observed category happen to match. Otherwise a
+page-budget truncation would turn an unknown remainder into a green zero.
 
 **The target never sends rows here.** `TargetObservation` carries cardinalities
 by category, read by an operator from the target's own versioned API and reduced

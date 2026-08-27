@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from typing import Final
 from uuid import UUID
 
 from dotmac_commercial_agreements import (
@@ -102,6 +103,14 @@ from vendor_cp.offers.service import get_offer_version
 
 ACTIVATED_EVENT_TYPE = AGREEMENT_ACTIVATED_V1
 
+#: Explicit adapter-owned aliases for assembly readers. Code outside this
+#: adapter never imports the authority package directly (ADR-0008).
+AGREEMENT_PAGE_SIZE: Final[int] = DEFAULT_AGREEMENT_PAGE_SIZE
+AGREEMENT_STATUS_NAMES: Final[dict[str, str]] = {
+    status.value: status.name for status in AgreementStatus
+}
+SUPERSEDED_AGREEMENT_STATUS: Final[str] = AgreementStatus.SUPERSEDED.name
+
 
 def agreement_domain_error(error: AgreementError) -> DomainError:
     """Translate the module's refusal vocabulary at Vendor's HTTP boundary."""
@@ -192,6 +201,7 @@ class TerminateCommand:
 
 @dataclass(frozen=True, slots=True)
 class LineView:
+    line_no: int
     product_code: str
     capability_code: str
     quantity: int
@@ -216,6 +226,7 @@ class ContractView:
     content_hash: str | None
     record_version: int
     activation_rule: str | None
+    superseded_by_id: UUID | None = None
     approval_request_id: UUID | None = None
     lines: tuple[LineView, ...] = field(default_factory=tuple)
 
@@ -291,9 +302,11 @@ def _view(
         content_hash=value.content_hash,
         record_version=value.record_version,
         activation_rule=value.activation_rule,
+        superseded_by_id=value.superseded_by_id,
         approval_request_id=approval_request_id,
         lines=tuple(
             LineView(
+                line_no=line.line_no,
                 product_code=line.product_code,
                 capability_code=line.capability_code,
                 quantity=line.quantity,

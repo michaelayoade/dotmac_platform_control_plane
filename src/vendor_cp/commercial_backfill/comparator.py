@@ -35,13 +35,17 @@ this work introducing shared persistence or a second writer.
 Never a quiet `MATCHED`. An unobserved dimension has not been compared, and a
 comparator that reported its own blind spot as agreement would be the most
 expensive kind of green.
+
+The same is true of SOURCE coverage. A bounded walk that stopped before the
+owner's final page may contain rows and even happen to match a target count;
+both parity claims remain `NOT_COMPARABLE` until every source kind is complete.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from vendor_cp.commercial_backfill.planner import PlanOutcome
+from vendor_cp.commercial_backfill.planner import PlanOutcome, is_complete_cohort
 from vendor_cp.commercial_backfill.report import (
     Count,
     ParityLine,
@@ -110,6 +114,8 @@ def row_count_verdict(
     make a correct backfill look short by exactly the number of rows it was
     right to leave behind.
     """
+    if not is_complete_cohort(plan.report):
+        return ParityVerdict.NOT_COMPARABLE
     mapped = plan.report.tally_for(TallySubject.BUCKET).of(Bucket.MAPPED)
     if mapped == observation.row_count:
         return ParityVerdict.MATCHED
@@ -120,6 +126,8 @@ def dimension_verdict(
     plan: PlanOutcome, observation: TargetObservation, dimension: Dimension
 ) -> ParityVerdict:
     """One dimension's semantic parity, or `NOT_COMPARABLE`."""
+    if not is_complete_cohort(plan.report):
+        return ParityVerdict.NOT_COMPARABLE
     observed = observation.tally_for(dimension)
     if observed is None:
         return ParityVerdict.NOT_COMPARABLE
