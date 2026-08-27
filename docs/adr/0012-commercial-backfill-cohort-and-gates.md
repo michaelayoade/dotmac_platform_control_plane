@@ -169,3 +169,22 @@ having the method does not turn an unknown remainder into zero.
 
 No authority moves under this amendment. The incumbent commercial writer and
 both gate definitions remain unchanged.
+
+## Amendment — 2026-08-27: coverage is derived from the bounded page walk
+
+The a2 method is now joined to the planner by one read-only assembly walker. It
+opens a database-enforced `REPEATABLE READ, READ ONLY` snapshot before the first
+owner call, passes the owner cursor back unchanged and marks agreement-line
+coverage complete only when the owner returns its final-page sentinel
+(`next_after=None`). An already-used session is refused. A page-budget stop
+keeps the observed rows but reports the source as not enumerable; malformed or
+repeating page streams fail closed.
+Agreement line number and supersession identity are preserved through the typed
+adapter, and Vendor's once-only inclusive-to-end-exclusive term translation is
+unchanged.
+
+Parity now has source completeness as a premise. An incomplete source makes
+both row-count and target-semantic claims `NOT_COMPARABLE`; matching truncated
+counts cannot discharge semantic parity. Reports remain counts and closed
+categories only. This amendment adds no DML, target access, authority decision,
+backfill execution or deployment.

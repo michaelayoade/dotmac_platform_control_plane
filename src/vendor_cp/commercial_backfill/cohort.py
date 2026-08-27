@@ -70,8 +70,13 @@ PRE_COMMERCIAL_STATUSES: Final[frozenset[str]] = frozenset(
 #: are the target's history to hold or not; backfilling them would create live
 #: contracts for relationships that are over.
 ENDED_STATUSES: Final[frozenset[str]] = frozenset(
-    {"REJECTED", "CANCELLED", "TERMINATED", "EXPIRED"}
+    {"CANCELLED", "TERMINATED", "EXPIRED"}
 )
+
+#: Commercial Agreements represents a replaced version explicitly. It is kept
+#: apart from the other ended states because the cohort reports that fate as
+#: `SUPERSEDED_AGREEMENT_VERSION`, not as a generic ended relationship.
+SUPERSEDED_STATUSES: Final[frozenset[str]] = frozenset({"SUPERSEDED"})
 
 #: Live commercial state. `SUSPENDED` is IN: a suspended agreement is a contract
 #: that exists and is not billing, which is a state the target has and must be
@@ -88,7 +93,7 @@ LIVE_STATUSES: Final[frozenset[str]] = frozenset({"ACTIVE", "SUSPENDED"})
 #: that backfills them. A broken projection contract is an integration bug, and
 #: it is reported as one.
 KNOWN_AGREEMENT_STATUSES: Final[frozenset[str]] = (
-    PRE_COMMERCIAL_STATUSES | ENDED_STATUSES | LIVE_STATUSES
+    PRE_COMMERCIAL_STATUSES | ENDED_STATUSES | LIVE_STATUSES | SUPERSEDED_STATUSES
 )
 
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
@@ -210,7 +215,7 @@ def exclusion_of(row: SourceRow) -> ExclusionReason | None:
         return ExclusionReason.NOT_COMMERCIAL_STATE_YET
     if status is not None and status in ENDED_STATUSES:
         return ExclusionReason.TERMINATED_BEFORE_COHORT_START
-    if row.is_superseded:
+    if row.is_superseded or status in SUPERSEDED_STATUSES:
         return ExclusionReason.SUPERSEDED_AGREEMENT_VERSION
     if row.kind is SourceKind.AGREEMENT_LINE and row.quantity == 0:
         return ExclusionReason.ZERO_QUANTITY_LINE

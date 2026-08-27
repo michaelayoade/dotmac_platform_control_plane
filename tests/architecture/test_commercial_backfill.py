@@ -391,11 +391,22 @@ def test_the_digest_vocabulary_is_imported_and_not_restated() -> None:
 
 
 def test_the_agreement_status_sets_partition_the_vocabulary() -> None:
-    """The three sets must not overlap, or a status's fate depends on which
+    """The four sets must not overlap, or a status's fate depends on which
     branch is written first."""
-    assert not cohort.PRE_COMMERCIAL_STATUSES & cohort.ENDED_STATUSES
-    assert not cohort.PRE_COMMERCIAL_STATUSES & cohort.LIVE_STATUSES
-    assert not cohort.ENDED_STATUSES & cohort.LIVE_STATUSES
+    from dotmac_commercial_agreements import AgreementStatus
+
+    sets = (
+        cohort.PRE_COMMERCIAL_STATUSES,
+        cohort.ENDED_STATUSES,
+        cohort.LIVE_STATUSES,
+        cohort.SUPERSEDED_STATUSES,
+    )
+    for index, left in enumerate(sets):
+        for right in sets[index + 1 :]:
+            assert not left & right
+    assert cohort.KNOWN_AGREEMENT_STATUSES == frozenset(
+        status.name for status in AgreementStatus
+    )
 
 
 # ── The source projection names attributes that exist ──────────────────────
@@ -418,6 +429,8 @@ SOURCE_PROJECTION = {
         "content_hash",
         "status",
         "offer_ref",
+        "line_no",
+        "superseded_by_id",
         "term_start",
         "term_end_exclusive",
     ),
@@ -477,6 +490,33 @@ def test_agreement_enumeration_is_the_exact_pinned_owner_reader() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in {"execute", "query", "scalars"}
         for node in ast.walk(listing)
+    )
+
+    walker_path = PACKAGE / "enumeration.py"
+    walker = _module(walker_path)
+    walk = next(
+        node
+        for node in walker.body
+        if isinstance(node, ast.FunctionDef) and node.name == "walk_agreement_lines"
+    )
+    calls = {
+        ast.unparse(node.func) for node in ast.walk(walk) if isinstance(node, ast.Call)
+    }
+    assert "list_agreements" in calls
+    execute_calls = [
+        node
+        for node in ast.walk(walk)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "execute"
+    ]
+    assert len(execute_calls) == 1
+    assert ast.unparse(execute_calls[0]) == "db.execute(text(_READ_ONLY_SNAPSHOT))"
+    assert not any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"query", "scalars"}
+        for node in ast.walk(walk)
     )
 
 

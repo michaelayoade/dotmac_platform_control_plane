@@ -248,6 +248,13 @@ disagree, fix the drift.
     adapter — never a local replacement, a raw module-table query, or direct
     cross-application database access.
 
+    The bounded assembly page walker derives run coverage from the owner's
+    final-page sentinel inside one database-enforced `REPEATABLE READ, READ
+    ONLY` snapshot; page-budget exhaustion stays NOT ENUMERABLE even when some
+    rows were observed. Incomplete source coverage makes row-count AND
+    target-semantic parity `NOT_COMPARABLE`, so a truncated count can never
+    become green evidence.
+
     Gate definitions state enforceable conditions, not their current status. A
     gate condition whose evidence is a release run, peeled tag, deploy run or
     adoption citation cannot be recorded as discharged from repository-local

@@ -26,6 +26,7 @@ report type they can return is `Report`.
 * `transforms` — the five transformations, each returning a category not a value.
 * `cohort` — the cohort definition, the source projection, and the total
   classifier that puts every row in exactly one of three buckets.
+* `enumeration` — the bounded Agreements a2 page walk and source projection.
 * `planner` — the dry-run planner. No session, no clock, no output path.
 * `comparator` — row-count parity and target semantic parity, kept apart.
 * `shadow` — idempotent, grant-free repair SQL for a rehearsal database.
@@ -45,6 +46,13 @@ from vendor_cp.commercial_backfill.comparator import (
     TargetObservation,
     compare,
     observe,
+)
+from vendor_cp.commercial_backfill.enumeration import (
+    DEFAULT_MAX_AGREEMENT_PAGES,
+    AgreementEnumerationError,
+    AgreementLineEnumeration,
+    plan_sources,
+    walk_agreement_lines,
 )
 from vendor_cp.commercial_backfill.gates import (
     FINAL_DML_GRANT_GATE,
@@ -87,6 +95,9 @@ __all__ = [
     "FINAL_DML_GRANT_GATE",
     "GATES",
     "INCUMBENT_WRITER_RETIREMENT_GATE",
+    "DEFAULT_MAX_AGREEMENT_PAGES",
+    "AgreementEnumerationError",
+    "AgreementLineEnumeration",
     "Bucket",
     "CadenceOutcome",
     "CohortRules",
@@ -118,6 +129,8 @@ __all__ = [
     "is_complete_cohort",
     "observe",
     "plan",
+    "plan_sources",
     "render",
     "repair_statements",
+    "walk_agreement_lines",
 ]
