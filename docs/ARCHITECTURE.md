@@ -136,14 +136,15 @@ it owns and — just as importantly — what it must never become.
   Agreements and Licensing already required those two effects, so this repin
   gave existing bindings a consumer that had been depending on them silently.
   a5 was never published and must not be pinned.
-- `dotmac-commercial-agreements==0.1.0a1` is the commercial-agreement authority
+- `dotmac-commercial-agreements==0.1.0a2` is the commercial-agreement authority
   under ADR-0008. Its platform-only manifest and `cg_0001_agreements` lineage
   are composed. `v015` checks the greenfield premise under lock, drops the empty
   `public.contracts` / `public.contract_lines` estate, and leaves
   `mod_agreements` as the sole lifecycle, history, audit and outbox writer.
   Vendor retains one typed adapter that resolves immutable offers, supplies the
-  product capability catalogue, and converts the authoritative Approvals
-  request into content-bound evidence.
+  product capability catalogue, converts the authoritative Approvals request
+  into content-bound evidence, and exposes the owner's bounded UUID-keyset
+  agreement reader for complete commercial-cohort enumeration.
 - `dotmac-deployment-control==0.1.0a2` is the owner of deployment identity,
   desired state, immutable plans, rollouts and authenticated observations under
   ADR-0011. Platform-only and atomic — one supported plane set, so no

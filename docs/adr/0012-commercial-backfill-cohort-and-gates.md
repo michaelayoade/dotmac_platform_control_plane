@@ -150,3 +150,22 @@ the durable conditions and does not snapshot their transient state.
 See `docs/commercial-backfill-dossier.md` for the cohort, the field-by-field
 source projection, every transformation edge case, and both gates' full condition
 tables.
+
+## Amendment — 2026-08-26: the owner reader closes the capability gap
+
+Decision 2 records the a1 boundary at the time this ADR was accepted; it remains
+history and is not rewritten. Commercial Agreements a2 adds the bounded,
+UUID-keyset `list_agreements` reader to the owner’s top-level public contract.
+Vendor exact-pins that version and maps each page through its existing typed
+adapter. It still owns no local estate reader and issues no raw query against
+the module schema.
+
+This closes only the repository-local CAPABILITY gap. Publication and
+pinnability remain external claims: `docs/cutover-readiness.md` must record the
+exact a2 `release_run` and 40-character peeled-tag commit before the adoption can
+merge. Per-run coverage remains separate too. A caller may report
+`AGREEMENT_LINE_ENUMERATED` only after it reaches the final owner page; merely
+having the method does not turn an unknown remainder into zero.
+
+No authority moves under this amendment. The incumbent commercial writer and
+both gate definitions remain unchanged.

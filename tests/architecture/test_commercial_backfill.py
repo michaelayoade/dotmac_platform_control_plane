@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import re
+import tomllib
 from datetime import date
 from pathlib import Path
 
@@ -63,6 +64,12 @@ ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "src" / "vendor_cp" / "commercial_backfill"
 COMMAND = ROOT / "scripts" / "reconcile_backfill_shadow.py"
 DOSSIER = ROOT / "docs" / "commercial-backfill-dossier.md"
+READINESS = ROOT / "docs" / "cutover-readiness.md"
+
+_A2_ORACLE_MARKERS = (
+    "COMMERCIAL_AGREEMENTS_A2_RELEASE_RUN_REQUIRED_BEFORE_MERGE",
+    "COMMERCIAL_AGREEMENTS_A2_PEELED_TAG_REQUIRED_BEFORE_MERGE",
+)
 
 #: The report surface. These are the modules a value could escape through, and
 #: they are named rather than globbed so adding a module to the package is a
@@ -431,27 +438,79 @@ def test_the_source_projection_reads_attributes_that_exist() -> None:
     assert missing == [], missing
 
 
-def test_the_agreement_line_source_is_not_enumerable_from_this_assembly() -> None:
-    """The local fact behind `COHORT_FULLY_ENUMERABLE`, and behind the plan's
-    `AGREEMENT_LINE_NOT_ENUMERABLE` coverage.
+def test_agreement_enumeration_is_the_exact_pinned_owner_reader() -> None:
+    """The local fact behind `COHORT_FULLY_ENUMERABLE`.
 
-    The current exact dependency pin has no typed paginated agreement reader,
-    and the contracts adapter therefore publishes no listing surface. A future
-    upstream release and exact pin must provide it; this test deliberately does
-    not bless a locally invented reader or raw table scan.
+    Vendor exposes one bounded page adapter over the a2 top-level public API.
+    It neither queries the module schema nor invents a second estate reader.
     """
-    adapter = (ROOT / "src" / "vendor_cp" / "contracts" / "adapter.py").read_text()
-    listing = sorted(
-        name
-        for name in (
-            "list_agreements",
-            "list_contracts",
-            "iter_agreements",
-            "all_agreements",
-        )
-        if re.search(rf"def\s+{name}\b", adapter)
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    dependency = project["tool"]["poetry"]["dependencies"][
+        "dotmac-commercial-agreements"
+    ]
+    assert dependency["version"] == "0.1.0a2"
+
+    adapter_path = ROOT / "src" / "vendor_cp" / "contracts" / "adapter.py"
+    tree = _module(adapter_path)
+    public_aliases = {
+        (alias.name, alias.asname)
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "dotmac_commercial_agreements"
+        for alias in node.names
+    }
+    assert ("list_agreements", "module_list_agreements") in public_aliases
+
+    listing = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "list_agreements"
     )
-    assert listing == [], listing
+    calls = {
+        node.func.id
+        for node in ast.walk(listing)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "module_list_agreements" in calls
+    assert not any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"execute", "query", "scalars"}
+        for node in ast.walk(listing)
+    )
+
+
+def test_agreements_a2_pin_has_immutable_release_oracles() -> None:
+    """A source pin does not prove a release or a pinnable tag.
+
+    This intentionally blocks the adoption until the release captain replaces
+    the preparation markers with both exact external coordinates.
+    """
+    text = READINESS.read_text()
+    assert not any(marker in text for marker in _A2_ORACLE_MARKERS)
+    assert "Commercial Agreements a2 is deliberately absent" not in text
+    assert "release oracle pending" not in text
+    assert "| `dotmac-commercial-agreements` | `0.1.0a2` | a2 | current |" in text
+    assert re.search(
+        r"dotmac-commercial-agreements` `0\.1\.0a2` is published and "
+        r"installable \| `release_run` \| `dotmac_starter_mt` release run "
+        r"`[0-9]+`",
+        text,
+    )
+    assert re.search(
+        r"dotmac-commercial-agreements-v0\.1\.0a2`, peeled commit " r"`[0-9a-f]{40}`",
+        text,
+    )
+
+
+def test_full_enumeration_local_fact_is_discharged() -> None:
+    condition = next(
+        condition
+        for condition in gates.INCUMBENT_WRITER_RETIREMENT_GATE.conditions
+        if condition.code == "COHORT_FULLY_ENUMERABLE"
+    )
+    assert condition.evidence is gates.EvidenceKind.LOCAL_FACT
+    assert condition.discharged is True
 
 
 def test_enumeration_gate_keeps_the_upstream_reader_release_explicit() -> None:
@@ -623,17 +682,23 @@ def test_every_gate_condition_is_reviewable() -> None:
     assert len(codes) == len(set(codes)), "a condition code repeats"
 
 
-def test_the_only_discharged_condition_is_the_one_this_change_earned() -> None:
-    """Exactly one condition is settled today — that this work grants Vendor's
-    runtime role nothing — and a test above proves it. Ratcheted so a later
-    change cannot mark a second one settled without moving this line."""
+def test_the_discharged_conditions_are_exactly_the_local_facts_earned() -> None:
+    """Two local conditions are settled: the owner reader makes the cohort
+    enumerable, and this work still grants Vendor's runtime role nothing.
+
+    Ratcheted so a later change cannot mark another one settled without moving
+    this line.
+    """
     discharged = sorted(
         condition.code
         for gate in gates.GATES
         for condition in gate.conditions
         if condition.discharged
     )
-    assert discharged == ["NO_VENDOR_RUNTIME_DML_ADDED"], discharged
+    assert discharged == [
+        "COHORT_FULLY_ENUMERABLE",
+        "NO_VENDOR_RUNTIME_DML_ADDED",
+    ], discharged
 
 
 # ── The dossier says what the declarations say ─────────────────────────────

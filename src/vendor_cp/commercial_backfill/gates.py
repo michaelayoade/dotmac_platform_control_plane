@@ -136,6 +136,7 @@ INCUMBENT_WRITER_RETIREMENT_GATE: Final[Gate] = Gate(
                 "an exactly pinned typed paginated owner reader, without raw "
                 "module-table access or a locally invented reader."
             ),
+            discharged=True,
         ),
         GateCondition(
             code="ZERO_BLOCKED_ROWS",

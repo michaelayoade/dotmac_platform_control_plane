@@ -1,8 +1,8 @@
 # Cutover readiness — Deployment Control, delivery, Brand Profiles
 
-**Dated 2026-08-21.** What the remaining ADR-0007 slices need before anyone
-writes them, and what is already true. Nothing here takes a pin, composes a
-module or moves a writer. The machine-readable half is
+**Dated 2026-08-21; updated 2026-08-26.** What the remaining ADR-0007 slices
+need before anyone writes them, and what is already true. Nothing here takes a
+pin, composes a module or moves a writer. The machine-readable half is
 `src/vendor_cp/cutover_readiness.py`, held by
 `tests/architecture/test_cutover_readiness.py`; where the two disagree, the test
 is the one that fails.
@@ -32,6 +32,8 @@ not a coordinate and is not used below.
 | --- | --- | --- |
 | `dotmac-deployment-control` `0.1.0a2` is published and installable | `release_run` | `dotmac_starter_mt` release run `32471956734` — published, installed the wheel back from the private index, registered the manifest, then tagged |
 | a2 is pinnable | `peeled_tag` | tag `dotmac-deployment-control-v0.1.0a2`, peeled commit `5c87272a632096850a80e5e9dc1f625a97c3e5d6` (PR #308) |
+| `dotmac-commercial-agreements` `0.1.0a2` is published and installable | `release_run` | `dotmac_starter_mt` release run `33010902146` — published, installed the wheel back from the private index, registered the manifest, then tagged |
+| Commercial Agreements a2 is pinnable | `peeled_tag` | tag `dotmac-commercial-agreements-v0.1.0a2`, peeled commit `42acc8b30f1bcaed1580d312fd33d7b5ef358817` (release-record PR #470, contained by `dotmac_starter_mt@2cab76b442e6cc6c8ed81a409d943ba250351c3d`) |
 | `dotmac-brand-profiles` `0.1.0a1` is pinnable | `peeled_tag` | tag `dotmac-brand-profiles-v0.1.0a1`, peeled commit `ed69f9dfdeea493dab7d7ba25c04e940f0870545` |
 | `dotmac-approvals` is adopted, this assembly its contract consumer | `adoption_evidence` | `dotmac_starter_mt@20d24703e70e4d361de2f406165df4b36cbee507`, path `packages/dotmac-approvals/EXTRACTION.toml`, fields `status` (`adopted`) and `contract_consumers` |
 | `dotmac-entitlement-allocation` is adopted, this assembly its contract consumer | `adoption_evidence` | `dotmac_starter_mt@20d24703e70e4d361de2f406165df4b36cbee507`, path `packages/dotmac-entitlement-allocation/EXTRACTION.toml`, same two fields |
@@ -91,7 +93,7 @@ amendment at the owning source. Six slices, three landed.
 | `dotmac-approvals` | `0.1.0a5` | a5 | current |
 | `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current (a5 unpublished; never pin it) |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
-| `dotmac-commercial-agreements` | `0.1.0a1` | a1 | current |
+| `dotmac-commercial-agreements` | `0.1.0a2` | a2 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
 | `dotmac-deployment-control` | `0.1.0a2` | a2 | current |
 | `dotmac-brand-profiles` | not pinned | a1, tagged | deferred by local decision (ADR-0007 § 6) |
@@ -353,11 +355,14 @@ Nothing there moves an authority or chooses a billing owner. Two facts from it
 are worth carrying here, because they change what a reader of this document
 should expect:
 
-- **The agreement half of the commercial estate is not enumerable from this
-  assembly.** The current exact pin publishes no typed paginated agreement
-  reader. An upstream release with `release_run` evidence, followed by an exact
-  Vendor pin and typed adapter mapping, is required; a local reader or direct
-  module-table access is not an admissible substitute.
+- **The agreement half of the commercial estate is enumerable through its owner
+  once the selected a2 pin has the two release oracles above.** The a2 public
+  contract exposes the bounded UUID-keyset reader through Vendor's typed
+  adapter. Pagination, ordering and materialization stay with Commercial
+  Agreements; Vendor adds no local reader and performs no raw module-table
+  access. A run may report `AGREEMENT_LINE_ENUMERATED` only after it actually
+  reaches the final page. Repository source proves the adapter shape; it does
+  not prove the wheel is published or pinnable.
 - **The incumbent commercial writer is still
   `vendor_cp.offers.service.publish_offer_version`**, and it keeps its
   authority. ADR-0012 retires nothing.

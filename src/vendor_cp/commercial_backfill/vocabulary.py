@@ -61,9 +61,9 @@ class SourceCoverage(ReportEnum):
 
     A plan over a source that could not be enumerated is not a plan with zero
     rows — it is a plan with an unknown number of rows, and the two must never
-    render the same. `AGREEMENT_LINE_NOT_ENUMERABLE` is the state this assembly
-    is in today: `vendor_cp.contracts.adapter` exposes `get` and no listing
-    surface, so nothing here can walk the agreement estate.
+    render the same. Vendor's contracts adapter now exposes the owner's bounded
+    page reader, but a run still reports `AGREEMENT_LINE_NOT_ENUMERABLE` unless
+    it actually reaches the final page.
     """
 
     OFFER_VERSION_ENUMERATED = auto()
