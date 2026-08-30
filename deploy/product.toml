@@ -1,0 +1,282 @@
+# Platform Control Plane — ProductDeploymentSpec.v1.
+#
+# This exists so `PostgresRecoveryBundleV1` has a product declaration to check a
+# recovery AGAINST. Without it PROVED is not merely unreached, it is unreachable
+# by construction: the facility carries no product names, roles, schemas or
+# invariants of its own, and refuses a bundle it cannot compare to a contract.
+#
+# Every value below was READ FROM THE LIVE CATALOGUE on 2026-08-30, on the host
+# whose `/etc/dotmac-host-id` reads `vendor-cp-prod`. None of it is copied from
+# a runbook. That distinction earned its place: the recovery lane found that
+# products document three database roles while their clusters hold five, and a
+# descriptor written from documentation would have declared a role closure the
+# database does not have.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# THIS FILE HAS TWO STATES, AND ONLY THE FIRST IS TRUE TODAY
+#
+# The recovery is proved BEFORE the pending deploy, so this describes the
+# database as it is NOW. Two declarations are deliberately absent, and both
+# arrive in the SAME change that deploys:
+#
+#   1. `mod_deploy` is missing from `expected_schemas`. Deployment Control's
+#      lineage root has never run here — production is at `v016`, and `v017`,
+#      `v018` and `dc_0001` are all unapplied.
+#   2. There is no invariant denying `platform_api` DELETE on
+#      `public.licence_delivery_targets`. ADR-0011 § 4 revokes it; `v017` is the
+#      revision that does so, and it has not run.
+#
+# Both are ABSENCES OF FACT, not oversights. Declaring either now would make
+# this file a wish rather than a contract, and would fail the recovery proof for
+# a reason that has nothing to do with recovery — a reader would be sent to
+# investigate a restore that worked perfectly.
+#
+# Equally: leaving them absent AFTER the deploy breaks the first post-deploy
+# recovery run, and it will read as a recovery defect rather than a stale
+# declaration. Whoever runs that deploy updates both lines in the same commit.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema = "ProductDeploymentSpec.v1"
+
+# The frozen coordinate, not the new repository name. The repository is
+# `dotmac_platform_control_plane`; the distribution, import package, image,
+# Compose project and database all still say `vendor`, deliberately, and this
+# identifier has to match the deployment it describes rather than the
+# repository that describes it.
+product = "dotmac_vendor_control_plane"
+environment = "production"
+
+[assembly]
+manifest_path = "deploy/product-manifest.json"
+# Shape-checked here, value-checked by the drift command against a running
+# deployment. `dotmac-deploy` does not yet generate the manifest from the real
+# ProductAssemblySpec, and a fabricated digest would be worse than a declared
+# placeholder: it would compare equal to nothing and look like it had.
+manifest_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+[image]
+# The digest RUNNING on the target, read from the container rather than from a
+# deploy log. A tag here is how a deployment silently goes backwards.
+reference = "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d"
+# Read from the image's own `org.opencontainers.image.revision` label.
+source_revision = "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e"
+
+[runtime_materials]
+names = [
+  "DATABASE_URL",
+  "PLATFORM_DATABASE_URL",
+  "MIGRATION_DATABASE_URL",
+]
+
+[[roles]]
+code = "app"
+command = ["uvicorn", "vendor_cp.main:app", "--host", "0.0.0.0", "--port", "8000"]
+replicas = 1
+stop_grace_seconds = 30
+materials = ["DATABASE_URL", "PLATFORM_DATABASE_URL"]
+
+[roles.resources]
+cpus = "2.0"
+memory = "768m"
+pids = 256
+
+[roles.security]
+user = "10001:10001"
+read_only_root = true
+no_new_privileges = true
+cap_drop = ["ALL"]
+tmpfs = ["/tmp"]
+
+# The probe is DECLARED rather than defaulted, because the default one fails
+# against a perfectly healthy process here.
+#
+# This application serves one endpoint, `/health`, and the kernel's platform
+# guard is host-exact. Measured on the running container: with
+# `Host: vendor.dotmac.io` it answers 200; without it, 400. The facility's
+# default probe sends no Host header, so it would report unhealthy forever —
+# the same failure mode as the `wget` probe emitted into an image that had no
+# `wget`, and worse than no probe because it reports "unhealthy" rather than
+# "unknown".
+#
+# `probe` overrides the default with an explicit argument array, which is where
+# the header goes.
+#
+# LIVENESS ONLY, and no readiness probe is declared. `/health` is the kernel's
+# liveness route and its docstring says so — "does not touch DB" — so calling
+# it readiness would be a lie the facility would happily render: a readiness
+# gate that passes while the database is unreachable turns the warm-candidate
+# switch into a timer. This application has no dependency-aware endpoint yet.
+# When it grows one, declare it as `ready`; do not point both at this path,
+# which the facility refuses anyway.
+[roles.health.live]
+path = "/health"
+port = 8000
+interval_seconds = 10
+timeout_seconds = 5
+retries = 10
+start_period_seconds = 15
+probe = [
+  "python",
+  "-c",
+  "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health', headers={'Host': 'vendor.dotmac.io'}); urllib.request.urlopen(r, timeout=3)",
+]
+
+[migration]
+# One composed migration owner: kernel, Vendor and every module lineage advance
+# together before the application is replaced.
+command = ["python", "scripts/migrate.py"]
+heads_command = ["python", "scripts/migrate.py", "current"]
+owner_material = "MIGRATION_DATABASE_URL"
+# The four heads APPLIED on the target, read from `alembic_version`. Not the
+# repository's heads — `v017` and `v018` exist in the tree and have never run.
+expected_heads = [
+  "v016_licensing_authority",
+  "ap_0002_outbox_relay",
+  "ea_0003_platform_audit_log",
+  "rl_0001_release_artifacts",
+]
+compatibility = "maintenance_required"
+lock_timeout_seconds = 300
+lock_retries = 4
+
+[backup]
+[[backup.datasets]]
+code = "primary"
+kind = "postgres"
+material = "MIGRATION_DATABASE_URL"
+retention_days = 14
+checksum = "sha256"
+encryption = "none"
+restore_proof_max_age_days = 30
+verify = ["schema", "row_counts", "migration_heads"]
+
+# ── The database contract ────────────────────────────────────────────────────
+#
+# What a recovery is checked against. Roles first, because a restore that lost
+# the roles lost the grants, the ownership and the policies with them — this
+# database's isolation is enforced by grants and revocations, so a role layer
+# that does not come back is an isolation layer that does not come back, and it
+# comes back looking fine.
+
+[database]
+postgres_major = 16
+# `public` plus the five module schemas that EXIST. `mod_deploy` is absent —
+# see the header.
+expected_schemas = [
+  "public",
+  "mod_agreements",
+  "mod_approvals",
+  "mod_ealloc",
+  "mod_licensing",
+  "mod_rel",
+]
+tablespaces = "none"
+
+# Five roles, measured. Everything documents three.
+#
+# `inherit` is declared on every one because losing it is invisible: a role that
+# silently becomes INHERIT acquires everything its groups hold and nothing about
+# the database looks different afterwards. The closure here is flat — no role
+# holds any membership — which is itself the fact worth freezing, because a
+# membership appearing later is a privilege change no grant audit would show.
+
+[[database.roles]]
+name = "app_admin"
+kind = "migration_owner"
+inherit = true
+login = true
+# The one role that bypasses RLS. It owns every table and runs migrations, so
+# this is correct and is exactly the attribute a bad restore hands to the wrong
+# role.
+bypassrls = true
+member_of = []
+
+[[database.roles]]
+name = "app_user"
+kind = "tenant_app"
+inherit = true
+login = true
+bypassrls = false
+member_of = []
+
+[[database.roles]]
+name = "platform_api"
+kind = "platform_app"
+inherit = true
+login = true
+bypassrls = false
+member_of = []
+
+[[database.roles]]
+name = "outbox_dispatcher"
+kind = "dispatcher"
+inherit = true
+login = true
+bypassrls = false
+member_of = []
+
+[[database.roles]]
+name = "platform_outbox_dispatcher"
+kind = "dispatcher"
+inherit = true
+login = true
+bypassrls = false
+member_of = []
+
+# Isolation, in BOTH directions.
+#
+# Only the denial half is the classic mistake: a control-plane role revoked from
+# everything passes every "cannot reach" assertion and cannot run the product.
+# So the permission half is declared too, and a recovery that over-revokes fails
+# here rather than in production.
+#
+# Both are checked with `has_table_privilege` / `has_schema_privilege`
+# semantics — EFFECTIVE privilege. `information_schema` sees only DIRECT grants,
+# so a role reaching an object through a membership reads as having none, and an
+# isolation gate built on that view passes over a real privilege.
+#
+# Schema USAGE rather than a list of table names: revoking USAGE makes every
+# object in the schema unreachable regardless of table grants, and it does not
+# go stale the moment a module adds a table. A 16-table list would have been
+# accurate on the day it was written.
+
+[[database.isolation]]
+code = "app-user-cannot-reach-platform-schemas"
+role = "app_user"
+scope = "schema"
+objects = ["mod_agreements", "mod_approvals", "mod_ealloc", "mod_licensing", "mod_rel"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "platform-api-can-reach-platform-schemas"
+role = "platform_api"
+scope = "schema"
+objects = ["mod_agreements", "mod_approvals", "mod_ealloc", "mod_licensing", "mod_rel"]
+privileges = ["USAGE"]
+denied = false
+
+[[database.isolation]]
+code = "app-user-keeps-the-tenant-schema"
+role = "app_user"
+scope = "schema"
+objects = ["public"]
+privileges = ["USAGE"]
+denied = false
+
+[telemetry]
+logs = true
+metrics = false
+traces = false
+app_direct_shipping = false
+deployment_annotations = false
+
+[[external_dependencies]]
+code = "postgres"
+kind = "postgres"
+required_for = ["ready", "migrate", "backup"]
+material = "DATABASE_URL"
+
+[rollout]
+stability_window_seconds = 120
+rollback_images_retained = 2
