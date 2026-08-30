@@ -430,10 +430,16 @@ def test_the_brand_scan_can_see_a_planted_record(tmp_path: Path) -> None:
 def test_the_one_brand_adjacent_literal_is_a_literal_and_not_a_record() -> None:
     """The dossier claims this assembly displays a product name without storing
     one. That is only honest while the name really is a literal in a template
-    string — so the file is named, and checked to hold no column."""
+    string — so the file is named, and checked to hold no column.
+
+    The literal reads "Platform" since the repository rename, which is a
+    DISPLAY change and the only kind the rename made here. The frozen
+    coordinates it must not be confused with — `ASSEMBLY_NAME`, the
+    distribution, the import package, the image, the database and the
+    migration lineage — all still say `vendor`, deliberately."""
     for literal in BRAND_ADJACENT_LITERALS:
         text = (ROOT / literal).read_text()
-        assert "DotMac Vendor Control Plane" in text, literal
+        assert "DotMac Platform Control Plane" in text, literal
         assert not any(marker in text for marker in BRAND_WRITER_MARKERS), literal
 
 

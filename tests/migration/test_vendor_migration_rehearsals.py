@@ -216,6 +216,17 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        # Two more became version ROWS with the a98 / Control-a6 repin, by the
+        # same rule the approvals and allocation tips already follow: a head
+        # nothing depends on is a row, a head something depends on is an
+        # ancestor.
+        #
+        # Commercial Agreements depends on kernel `0026`, which kept the kernel
+        # tip an ancestor while `0026` WAS the tip. At `0028` it no longer is.
+        # `v017` names `dc_0001` rather than its lineage's tip, so `dc_0002` is
+        # likewise depended on by nothing.
+        KERNEL_HEAD,
+        DEPLOYMENT_CONTROL_HEAD,
     }
 
 
@@ -464,6 +475,8 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        KERNEL_HEAD,
+        DEPLOYMENT_CONTROL_HEAD,
     }
 
 
@@ -513,6 +526,8 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        KERNEL_HEAD,
+        DEPLOYMENT_CONTROL_HEAD,
     }
 
 
@@ -554,11 +569,15 @@ def test_kernel_advance_keeps_vendor_head_independent(
     command.upgrade(cfg, "heads")
     assert _table_exists(scratch_db, "vendor_accounts")
     assert _versions(scratch_db) == {
+        # `synth_rev` stands in for the kernel tip here, so KERNEL_HEAD is its
+        # ancestor and not a row — unlike the deployment-control tip, which
+        # nothing depends on in any rehearsal.
         synth_rev,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        DEPLOYMENT_CONTROL_HEAD,
     }
 
 
