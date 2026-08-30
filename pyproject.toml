@@ -15,7 +15,7 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a77", extras = [
+dotmac-kernel = { version = "0.1.0a98", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
@@ -75,35 +75,48 @@ dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # one supported plane set, so no `ModulePlaneSelection` is possible and none is
 # made. Its two declared prerequisites were already bound here.
 #
-# a5, and the versions below it are refused rather than merely superseded.
+# a6. Three published versions below it are refused, and they failed three
+# DIFFERENT questions — deliberately not collapsed into one "use the latest".
 #
-# a1 returns the raw unique-constraint error instead of the canonical verdict
-# when two genuinely concurrent FIRST observations race, and this is the
-# assembly that receives arrivals from deployments it does not control over an
-# at-least-once transport — the exact shape that produces the race. a2 fixed
-# that with a savepointed receipt insert.
+#   a3  its evidence chain: published by a defective internal verifier.
+#   a4  its BEHAVIOUR: `snapshot_digest` returned bare hex while its sibling
+#       `spec_digest` returned `sha256:`-prefixed, ten lines apart in one file,
+#       compared with a raw `!=` in `approve_plan`. A caller using the module's
+#       own canonical form was refused with a message about the plan having
+#       changed — a formatting bug wearing a tampering refusal.
+#   a5  its DECLARATION: it imported `dotmac_kernel.transactions`, first shipped
+#       in kernel a98, while declaring `dotmac-kernel >=0.1.0a77`. This assembly
+#       found that the expensive way — resolution succeeded, the lock wrote
+#       cleanly, the artifact hashes matched the release evidence, and the
+#       container died at boot on `ModuleNotFoundError`. A hash comparison
+#       proves you got the published bytes; it cannot prove they import.
 #
-# a4 is IMMUTABLE AND UNADOPTABLE, and is refused BY NAME rather than by being
-# below a floor — "publish something higher" would say the same thing about a4
-# as about a3, and they failed different questions. a4 shipped two digest
-# encodings ten lines apart in one file (`snapshot_digest` bare hex,
-# `spec_digest` prefixed) compared with a raw `!=` in `approve_plan`, so a
-# caller using the module's own canonical form was refused with a message about
-# the plan having changed — a formatting bug wearing a tampering refusal. It
-# also reported `__version__ = "0.1.0a2"`.
+# a5's artifact identity and behaviour both passed; only its declared floor was
+# wrong. It remains published and is refused BY NAME by the release guard.
 #
-# a5 fixes both: `PlanDigestV1` is a typed value rather than a string, and
-# `__version__` derives from distribution metadata, so an authorization records
-# the version it was actually issued under. This assembly is the first caller
-# positioned to hit either defect, which is why the pin moves straight to a5.
+# a6 carries `Requires-Dist: dotmac-kernel (>=0.1.0a98)` — read out of the
+# PUBLISHED WHEEL rather than from a source tree — and a canary that installs
+# the wheel against exactly that declared minimum and drives a real collision
+# through `conflict_savepoint`, with a paired mutation forcing a97 and
+# requiring both a resolver conflict and a behavioural failure. The floor can
+# now fail in both directions, which is what makes it a contract rather than a
+# claim.
 #
-# Oracles for this pin (AGENTS.md rule 17). Pinnable — `peeled_tag`
-# `dotmac-deployment-control-v0.1.0a5`, peeled commit
-# `b182a99892067f26c0c1d03d958c5fcdc97c5869`. Published and installable —
-# `release_run` 33318227812, independently re-verified by run 33318433336. The
-# resolved artifacts in `poetry.lock` were compared against that evidence
-# before this pin was accepted: wheel `c02804b1…6e0aec`, sdist `5883f8ea…41ef8`.
-dotmac-deployment-control = { version = "0.1.0a5", source = "forgejo" }
+# Oracles (AGENTS.md rule 17). Pinnable — `peeled_tag`
+# `dotmac-deployment-control-v0.1.0a6`, peeled commit
+# `518711c36e9e5774e11b02c6ab35ec0c9c7b75b9`, tag object
+# `553c2bb014a9c2a3d8ebecafa06c4166bc94be1b`. Published and installable —
+# `release_run` 33322980430, verified by run 33323067886 (VERIFIED 7/7), which
+# wrote the tag. The resolved artifacts were compared against that evidence
+# before this pin was accepted: wheel `9b02cf33…7b8fc0`, sdist `68871c24…1adad0`.
+#
+# The kernel pin moves a77 -> a98 BECAUSE a6 requires it, and it is pinned
+# EXACTLY here rather than left to the resolver. Twenty-one alphas of kernel is
+# not a bump whose consequences are discovered at boot — which is the lesson a5
+# just taught at lower cost. This pin is not deployment authorization: the
+# a77->a98 migration still owes a rehearsal against a RESTORED isolated
+# database before it reaches the running deployment.
+dotmac-deployment-control = { version = "0.1.0a6", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor
