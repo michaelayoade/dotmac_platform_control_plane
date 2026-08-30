@@ -1,0 +1,255 @@
+{
+  "schema": "dotmac.pre-rename-ghcr-package-state.v1",
+  "captured_before_rename": true,
+  "observed_at": "2026-08-30T14:21:11Z",
+  "observed_by": {
+    "login": "michaelayoade",
+    "id": 32591929,
+    "type": "User"
+  },
+  "observed_with_scopes": [
+    "delete_repo",
+    "gist",
+    "read:org",
+    "read:packages",
+    "repo",
+    "workflow"
+  ],
+  "package": {
+    "name": "dotmac_vendor_control_plane",
+    "id": 14422486,
+    "package_type": "container",
+    "visibility": "private",
+    "created_at": "2026-08-14T09:59:41Z",
+    "updated_at": "2026-08-30T14:05:58Z",
+    "version_count": 23,
+    "owner": {
+      "login": "michaelayoade",
+      "id": 32591929,
+      "type": "User"
+    }
+  },
+  "linked_repository": {
+    "full_name": "michaelayoade/dotmac_vendor_control_plane",
+    "id": 1317527604,
+    "private": false,
+    "node_id": "R_kgDOTofgNA"
+  },
+  "not_observable_via_rest": [
+    "permission inheritance setting",
+    "Actions access setting"
+  ],
+  "image_coordinate_literals": [
+    ".github/workflows/production-image.yml:18",
+    ".github/workflows/production-deploy.yml:75"
+  ],
+  "versions": [
+    {
+      "digest": "sha256:514daef2d89b3bb1d208527b84a4aef4387943060e7e860452a66fa2c12e0ae0",
+      "id": 1132554126,
+      "created_at": "2026-08-14T09:59:41Z",
+      "updated_at": "2026-08-14T09:59:41Z",
+      "tags": [
+        "76ccd39c83ddb83bc64888c85b936558fb428670"
+      ]
+    },
+    {
+      "digest": "sha256:84594b64c93affe7823ebafbc3291fd060cf249eb722be4d375ea46acc58e722",
+      "id": 1132798836,
+      "created_at": "2026-08-14T11:25:34Z",
+      "updated_at": "2026-08-14T11:25:34Z",
+      "tags": [
+        "7cd553e6a8b406439ed08c108a251817ba0ba2ec"
+      ]
+    },
+    {
+      "digest": "sha256:0f797557aafd65fd0a53efe19c7b009ddfe7089bcb73b449e27dc591cded2812",
+      "id": 1139470763,
+      "created_at": "2026-08-17T02:03:47Z",
+      "updated_at": "2026-08-17T02:03:47Z",
+      "tags": [
+        "52f502782f007a8a6a8a4edb072cc2d1464670ef"
+      ]
+    },
+    {
+      "digest": "sha256:bb42171c771e3642769815e9144b0a7e524eed7af44068fc9ccb8023e683974b",
+      "id": 1139658110,
+      "created_at": "2026-08-17T03:47:55Z",
+      "updated_at": "2026-08-17T03:47:55Z",
+      "tags": [
+        "8ad9d301b9d87a5fdc66053bbf7c83c65351482b"
+      ]
+    },
+    {
+      "digest": "sha256:9e5e15fb80720265a2bceb2e535d284838a7d15b09c30a36c658d5d714000ba3",
+      "id": 1139738142,
+      "created_at": "2026-08-17T04:35:54Z",
+      "updated_at": "2026-08-17T04:35:54Z",
+      "tags": [
+        "1d79152a5e0f62f8ea64ed2aa8623906e6da4e88"
+      ]
+    },
+    {
+      "digest": "sha256:44fe9ad89e88a8c332383a6b0945ebb1f97a07e22ef298132100753b5f6cc1db",
+      "id": 1139775079,
+      "created_at": "2026-08-17T04:56:41Z",
+      "updated_at": "2026-08-17T04:56:41Z",
+      "tags": [
+        "c6b79576785cfeed2e7b694243eba517491025ee"
+      ]
+    },
+    {
+      "digest": "sha256:f83aca511d3c016bb57fea1909d888e3823651a8e460ba9a1ec4674470baecde",
+      "id": 1139934171,
+      "created_at": "2026-08-17T06:05:44Z",
+      "updated_at": "2026-08-17T06:05:44Z",
+      "tags": [
+        "794395e85cb6f20d56c27a295a212589c560534d"
+      ]
+    },
+    {
+      "digest": "sha256:1a752ed5f332f961c7fc4c32961c86be0d918bfa865448266445c7bd472a040e",
+      "id": 1140340800,
+      "created_at": "2026-08-17T08:25:46Z",
+      "updated_at": "2026-08-17T08:25:46Z",
+      "tags": [
+        "b890e82d5e8a6b8a654bf15a6179085ce6ccc540"
+      ]
+    },
+    {
+      "digest": "sha256:7ec30149437a13bd64918c984028204e845a1e3fa3fdf28b9509d8b1227c7fe7",
+      "id": 1140491857,
+      "created_at": "2026-08-17T09:09:28Z",
+      "updated_at": "2026-08-17T09:09:28Z",
+      "tags": [
+        "c3fa11b8b718b8b6f7fdb89734371793ac0c9399"
+      ]
+    },
+    {
+      "digest": "sha256:56ec553139c449dc7da46a8873b3c03e95a61e43c970cd1675e28a202b2991cc",
+      "id": 1140780088,
+      "created_at": "2026-08-17T10:32:29Z",
+      "updated_at": "2026-08-17T10:32:29Z",
+      "tags": [
+        "f8f8c3fd636e663e4a17275c19e82fc1667aa52a"
+      ]
+    },
+    {
+      "digest": "sha256:062808ce016cf9981fe6b24c920291e3de37d65f700e53478a6b6238c1890a94",
+      "id": 1145381687,
+      "created_at": "2026-08-18T14:29:02Z",
+      "updated_at": "2026-08-18T14:29:02Z",
+      "tags": [
+        "2c4d88ab877aeae1c8d5aef0637bc013edf07aa9"
+      ]
+    },
+    {
+      "digest": "sha256:733aa67c53a0fc854950467b3666e625a1b1abdb056419330a880ecfc12e9cce",
+      "id": 1152650472,
+      "created_at": "2026-08-20T10:05:03Z",
+      "updated_at": "2026-08-20T10:05:03Z",
+      "tags": [
+        "dd0b387689f5e1b2358d7fdf972988c4417cc3fc"
+      ]
+    },
+    {
+      "digest": "sha256:2c128946d733df7d929a447c86f221eb016f6613d689159dc0a2ce7d2ab0b93e",
+      "id": 1152848765,
+      "created_at": "2026-08-20T11:04:50Z",
+      "updated_at": "2026-08-20T11:04:50Z",
+      "tags": [
+        "d1cd910474272793150954d47259a4f212cb835f"
+      ]
+    },
+    {
+      "digest": "sha256:419d03b91f8a89047a165002503a9db641c88edfb799a22f3bf27e2a22d89ee9",
+      "id": 1156396858,
+      "created_at": "2026-08-21T08:04:47Z",
+      "updated_at": "2026-08-21T08:04:47Z",
+      "tags": [
+        "26042b23dad2f45849e46e159d0683d5ea903220"
+      ]
+    },
+    {
+      "digest": "sha256:be721fed45c8ffafa7602584bd186a1504bb47d9c3fc14f685d7d048e62b7503",
+      "id": 1157244757,
+      "created_at": "2026-08-21T12:33:55Z",
+      "updated_at": "2026-08-21T12:33:55Z",
+      "tags": [
+        "8992f4fb3ff28254e1acff5da8ba4c8d41588d93"
+      ]
+    },
+    {
+      "digest": "sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
+      "id": 1157263845,
+      "created_at": "2026-08-21T12:39:43Z",
+      "updated_at": "2026-08-21T12:39:43Z",
+      "tags": [
+        "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e"
+      ]
+    },
+    {
+      "digest": "sha256:5c3a5223715183f21de5724a6f302450f5252476b7f0e956a1faf7e49b03f403",
+      "id": 1157669953,
+      "created_at": "2026-08-21T14:31:57Z",
+      "updated_at": "2026-08-21T14:31:57Z",
+      "tags": [
+        "55cb4db70a2d4686061d8e90d86012033aeffb16"
+      ]
+    },
+    {
+      "digest": "sha256:ede6df596f226859301fb488bdccb0aacf224e3dbe2ca76dc07196264680a8c2",
+      "id": 1157878961,
+      "created_at": "2026-08-21T15:31:49Z",
+      "updated_at": "2026-08-21T15:31:49Z",
+      "tags": [
+        "69a877d6f0c6886e300f5433020f7f25421e111c"
+      ]
+    },
+    {
+      "digest": "sha256:d5f6cc79f029cc39e28f774d46099a4dab67ae738cba7a1b8d3e160460c6e271",
+      "id": 1159715823,
+      "created_at": "2026-08-22T05:45:20Z",
+      "updated_at": "2026-08-22T05:45:20Z",
+      "tags": [
+        "0c77e85c7f54538e69061614c8de42ad0f6d2332"
+      ]
+    },
+    {
+      "digest": "sha256:01af98350ca08319149730717cb3f1c9d6caefef03f660b40334c49291eba558",
+      "id": 1171655407,
+      "created_at": "2026-08-25T20:46:04Z",
+      "updated_at": "2026-08-25T20:46:04Z",
+      "tags": [
+        "e56becc81d6d7ae6ce97ca0b8636d105ab902106"
+      ]
+    },
+    {
+      "digest": "sha256:13b7493a8acb99e09efcca9ac6b3fdbb0d5b21abb697f15fed7467d4d93d0f9e",
+      "id": 1176963969,
+      "created_at": "2026-08-27T05:50:08Z",
+      "updated_at": "2026-08-27T05:50:08Z",
+      "tags": [
+        "3a9215e0c4c295059e27973edbf541830c295b66"
+      ]
+    },
+    {
+      "digest": "sha256:c0b2857b6904a126a31a7d4ad9f695114c067fcd1e6261413c53ed592fe19fcb",
+      "id": 1177270055,
+      "created_at": "2026-08-27T07:47:31Z",
+      "updated_at": "2026-08-27T07:47:31Z",
+      "tags": [
+        "94c0b736262b35b22ce74538507108a5715e5a49"
+      ]
+    },
+    {
+      "digest": "sha256:e77323f09c0a7d94bd4d27e53ddc9f3a030edc90b6d237a0c71e393e20e3ca2e",
+      "id": 1188080556,
+      "created_at": "2026-08-30T14:05:58Z",
+      "updated_at": "2026-08-30T14:05:58Z",
+      "tags": [
+        "36ff215be5a80bd84d31b6642b68f52097e9aeec"
+      ]
+    }
+  ]
+}
