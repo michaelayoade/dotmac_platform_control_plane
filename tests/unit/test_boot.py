@@ -36,11 +36,31 @@ def test_platform_auth_surface_is_mounted() -> None:
     assert any(p.startswith("/platform/auth") for p in paths), paths
 
 
-def test_console_admin_route_is_mounted() -> None:
-    """The vendor console shell is mounted at /admin. That it is platform-admin
-    guarded (kernel auth, deny-case D4) is proven statically in
-    `test_deny_cases.py`; a live unauthenticated request is an integration
-    concern (the kernel tenant-resolver middleware needs a real DB for a
-    tenant-scoped route), out of scope for this unit boot check."""
+def test_console_is_mounted_under_the_platform_facet() -> None:
+    """The console shell now answers under the facet's `/platform` prefix.
+
+    `/admin` was a coordinate this module chose for itself; under facet
+    composition the facet owns the prefix. The assertion is on the FACET prefix
+    rather than the exact string the module used to author, so a module that
+    starts spelling its own prefix again fails here.
+    """
     app = create_app(build_spec())
-    assert "/admin" in {getattr(r, "path", "") for r in app.routes}
+    paths = {getattr(r, "path", "") for r in app.routes}
+    console = {p for p in paths if p.endswith("/console")}
+    assert console, paths
+    assert all(p.startswith("/platform") for p in console), console
+
+
+def test_the_retired_admin_coordinate_is_gone() -> None:
+    """`/admin` is RETIRED, not redirected.
+
+    The inventory was small enough to retire outright: one test, no nginx
+    location (the vhost proxies `/` wholesale), no deploy script and no
+    external consumer. The alternative — widening the platform cookie path to
+    keep `/admin` reachable — would have traded a routing convenience for a
+    real authentication-scope change, which is not a trade worth making for a
+    coordinate nothing depends on.
+    """
+    app = create_app(build_spec())
+    paths = {getattr(r, "path", "") for r in app.routes}
+    assert "/admin" not in paths, paths

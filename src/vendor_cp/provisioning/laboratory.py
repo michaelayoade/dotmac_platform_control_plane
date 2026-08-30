@@ -13,6 +13,8 @@ import json
 
 from dotmac_kernel.providers.provisioning import (
     ApplyResult,
+    CompensationDisposition,
+    CompensationResult,
     ObserveResult,
     PlanResult,
     ProvisioningPlanError,
@@ -141,6 +143,46 @@ class LaboratoryProvisioningProvider:
             status=ProvisioningStatus.CANCELLED,
             steps=steps,
             plan_hash=result.plan_hash if result is not None else None,
+        )
+
+    def compensate(self, operation_id: str, reason: str) -> CompensationResult:
+        """Reverse a settled operation, in the only place it exists.
+
+        A first version of this returned `NOT_SUPPORTED` on the reasoning that a
+        laboratory touching no infrastructure has nothing to undo. That was
+        wrong, and the kernel's conformance suite is right to reject it: this
+        provider DOES hold state — the operation record every `observe` reads —
+        and that record is the whole of the effect it ever produced. Reversing
+        it is a faithful compensation rather than a courtesy `SUCCEEDED`.
+
+        The distinction that matters is against `cancel`, which stops work in
+        flight and leaves a CANCELLED operation behind. This runs after
+        settlement and drives every step it can still reach to CANCELLED,
+        including the ones that had SUCCEEDED — undoing a converged step is
+        precisely what compensation means and what cancellation does not.
+
+        Idempotent by `operation_id`: compensating an already-compensated
+        operation recomputes the same terminal record. An unknown id
+        compensates nothing and says so with an empty snapshot rather than
+        inventing an operation to reverse.
+        """
+        result = self._operations.get(operation_id)
+        if result is not None:
+            self._operations[operation_id] = ApplyResult(
+                intent_id=result.intent_id,
+                operation_id=operation_id,
+                plan_hash=result.plan_hash,
+                status=ProvisioningStatus.CANCELLED,
+                steps=tuple(
+                    ProvisioningStep(step.step_id, StepStatus.CANCELLED)
+                    for step in result.steps
+                ),
+            )
+        return CompensationResult(
+            operation_id=operation_id,
+            disposition=CompensationDisposition.SUCCEEDED,
+            snapshot=self.observe(operation_id),
+            reason_code=None,
         )
 
 

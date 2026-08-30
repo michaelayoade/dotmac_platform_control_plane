@@ -1,7 +1,8 @@
 # ADR-0013: The operator authorization issuer, and the one-time bootstrap that starts it
 
 - **Status:** ACCEPTED 2026-08-30 by Michael Ayoade, the owner and only
-  approver, with `0.1.0a5` replacing `0.1.0a4` in § 5's bootstrap evidence.
+  approver, with the Control release replacing `0.1.0a4` in § 5's bootstrap evidence —
+  now `0.1.0a6`, a5 having been refused in turn (§ 4).
   **Acceptance is not deployment.** Nothing in §§ 5–6 has been executed; § 8
   records what remains and is kept current rather than deleted on acceptance.
 - **Date:** 2026-08-30 proposed, 2026-08-30 accepted
@@ -116,10 +117,23 @@ unknown algorithms, uppercase drift, wrong length and malformed values.
 
 **It is not repaired in this assembly, deliberately.** A normalizer here would
 be this assembly deciding when two plan digests are the same digest, which is
-the § 2 design error exactly. `a4` is immutable and stays immutable; the fix is
-`a5`, which carries a Control-owned `PlanDigestV1`.
+the § 2 design error exactly. `a4` is immutable and stays immutable; the fix
+arrived in `a5`, which carries a Control-owned `PlanDigestV1`.
 
-**Both defects were accepted on 2026-08-30 and a4 is therefore UNADOPTABLE.**
+**a5 was then refused for a third, different reason, and this assembly found
+it.** a5 imported `dotmac_kernel.transactions` — first shipped in kernel a98 —
+while declaring `dotmac-kernel >=0.1.0a77`. Resolution succeeded, the lock
+wrote cleanly, the artifact hashes matched the release evidence, and the
+container died at boot on `ModuleNotFoundError`. A hash comparison proves you
+got the published bytes; it cannot prove they import. **`a6` is the pinned
+release**, carrying `Requires-Dist: dotmac-kernel (>=0.1.0a98)` read out of the
+published wheel, and a canary that makes the floor fail in both directions.
+
+Three published Control versions are now refused for three different reasons —
+a3 its evidence chain, a4 its behaviour, a5 its declaration — and they are
+deliberately not collapsed into "use the latest".
+
+**Both a4 defects were accepted on 2026-08-30 and a4 is UNADOPTABLE.**
 It keeps its tag, its artifact and its independently verified identity, and
 nothing pins it. This assembly pins `a5`. The exact a5 coordinates are recorded
 when that release carries its own `peeled_tag` and `release_run` oracles — not
@@ -130,9 +144,9 @@ commit, `pyproject.toml` line 3 reads `version = "0.1.0a4"` while
 `src/dotmac_deployment_control/__init__.py` line 172 reads
 `__version__ = "0.1.0a2"`. Any controller identity fingerprint that reads
 `dotmac_deployment_control.__version__` at runtime records the wrong version
-into an authorization it is supposed to make auditable. Until `a5`, the
+into an authorization it is supposed to make auditable. Until `a6`, the
 fingerprint must be taken from installed distribution metadata, never from the
-module attribute. `a5` derives `__version__` from distribution metadata, which
+module attribute. The fix derives `__version__` from distribution metadata, which
 removes the second copy rather than keeping two and correcting one.
 
 ## 5. The bootstrap, and why there has to be one
@@ -157,11 +171,11 @@ discharged once, explicitly, by a human.
   not as an ordinary authorization.
 
 Bootstrap evidence binds nine coordinates, and all nine are immutable: Platform
-CP source revision; exact image digest; **the Control `0.1.0a5` wheel hash**;
+CP source revision; exact image digest; **the Control `0.1.0a6` wheel hash**;
 product descriptor digest; database migration heads; launcher hash; workflow
 revision; bootstrap authorizer; target `platform-cp-01`.
 
-`a5`, never `a4`. The bootstrap receipt is the first artifact in the fleet to
+`a6`, never a refused release. The bootstrap receipt is the first artifact in the fleet to
 bind a Control version, so binding an immutable-and-unadoptable release would
 put a known-defective digest comparison at the root of the evidence chain.
 
@@ -236,7 +250,9 @@ design and a running issuer, and they are updated rather than deleted.
   empty rather than pre-populated: an allowlist naming destinations that cannot
   be reached would assert a policy nobody has exercised.
 - *PostgreSQL, backups and their restore rehearsal.* Blocked behind egress.
-- *The Control `a5` pin.* Waiting on that release's own oracles.
+- *The Control `a6` pin.* Landed with verified hashes; it forces kernel
+  a77 -> a98, which still owes a migration rehearsal against a RESTORED
+  isolated database before it reaches the running deployment.
 - *The rename itself*, and the equality checks that follow it.
 
 Nothing above is worked around, and none of it is restated as satisfied

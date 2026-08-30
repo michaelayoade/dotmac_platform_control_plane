@@ -16,7 +16,7 @@ from dotmac_approvals import module as approvals_module
 from dotmac_commercial_agreements import module as commercial_agreements_module
 from dotmac_deployment_control import module as deployment_control_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
-from dotmac_kernel import FeatureManifest, ProductAssemblySpec
+from dotmac_kernel import FeatureManifest, ModuleManifest, ProductAssemblySpec
 from dotmac_licensing import module as licensing_module
 from dotmac_release_catalog import module as release_catalog_module
 
@@ -86,11 +86,24 @@ VENDOR_SURFACES = (
 
 
 def _profiled_surface(
-    feature: FeatureManifest, profile: VendorDeploymentProfile
-) -> FeatureManifest:
-    """Keep a feature's declarations installed while withholding its routes."""
+    feature: FeatureManifest | ModuleManifest, profile: VendorDeploymentProfile
+) -> FeatureManifest | ModuleManifest:
+    """Keep a feature's declarations installed while withholding its routes.
+
+    Two manifest shapes now travel through here. A legacy `FeatureManifest`
+    withholds `routers`/`web_routers`/`nav`; a contract-v2 `ModuleManifest`
+    withholds `api_routers`/`web_surfaces`. The distinction is not cosmetic —
+    clearing the wrong field names would leave the routes MOUNTED under a
+    profile that withholds them, which is a surface appearing where the profile
+    says it does not exist.
+
+    Declarations are untouched in both shapes, which is the invariant a profile
+    is allowed to rely on: it selects surfaces and nothing else (ADR-0003).
+    """
     if profile.exposes(feature.name):
         return feature
+    if isinstance(feature, ModuleManifest):
+        return replace(feature, api_routers=(), web_surfaces=())
     return replace(feature, routers=(), web_routers=(), nav=())
 
 

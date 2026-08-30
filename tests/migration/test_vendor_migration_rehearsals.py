@@ -26,7 +26,7 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0026_platform_audit_log"  # current pin (0.1.0a77)
+KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a98)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 
@@ -58,7 +58,7 @@ LICENSING_HEAD = "li_0001_licensing"
 # module head IS depended on by a vendor revision — `v017` names it — so it
 # is an ancestor and NOT a version row, the same shape `ap_0001` had before
 # a5 moved that lineage past it.
-DEPLOYMENT_CONTROL_HEAD = "dc_0001_deployment_control"
+DEPLOYMENT_CONTROL_HEAD = "dc_0002_canonical_plan_digest"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v018_licence_delivery_intents"
@@ -216,6 +216,17 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        # Two more became version ROWS with the a98 / Control-a6 repin, by the
+        # same rule the approvals and allocation tips already follow: a head
+        # nothing depends on is a row, a head something depends on is an
+        # ancestor.
+        #
+        # Commercial Agreements depends on kernel `0026`, which kept the kernel
+        # tip an ancestor while `0026` WAS the tip. At `0028` it no longer is.
+        # `v017` names `dc_0001` rather than its lineage's tip, so `dc_0002` is
+        # likewise depended on by nothing.
+        KERNEL_HEAD,
+        DEPLOYMENT_CONTROL_HEAD,
     }
 
 
@@ -464,6 +475,8 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        KERNEL_HEAD,
+        DEPLOYMENT_CONTROL_HEAD,
     }
 
 
@@ -513,6 +526,8 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        KERNEL_HEAD,
+        DEPLOYMENT_CONTROL_HEAD,
     }
 
 
@@ -554,11 +569,15 @@ def test_kernel_advance_keeps_vendor_head_independent(
     command.upgrade(cfg, "heads")
     assert _table_exists(scratch_db, "vendor_accounts")
     assert _versions(scratch_db) == {
+        # `synth_rev` stands in for the kernel tip here, so KERNEL_HEAD is its
+        # ancestor and not a row — unlike the deployment-control tip, which
+        # nothing depends on in any rehearsal.
         synth_rev,
         RELEASE_CATALOG_HEAD,
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        DEPLOYMENT_CONTROL_HEAD,
     }
 
 
