@@ -33,7 +33,22 @@
 #
 # Equally: leaving them absent AFTER the deploy breaks the first post-deploy
 # recovery run, and it will read as a recovery defect rather than a stale
-# declaration. Whoever runs that deploy updates both lines in the same commit.
+# declaration.
+#
+# So the deployment carries BOTH deltas ATOMICALLY — the migrations that create
+# `mod_deploy` and apply `v017`'s revocation, and the two declarations above
+# that describe them, in one change. Not a follow-up. Atomicity is what removes
+# the window in which the database and its declaration disagree; a descriptor
+# update scheduled "right after" the deploy is that window with a promise
+# attached.
+#
+# AND IT HAS TO HOLD IN THE OTHER DIRECTION, which is the easier one to break by
+# accident. A migration that FAILS must leave this file unchanged. A descriptor
+# that advanced while the migration rolled back is the same inconsistency
+# mirrored: the declaration claims a schema and a revocation the database does
+# not have, and the next recovery run fails against a database that is fine.
+# Whatever applies the deploy must not write these lines before the migration
+# has committed, and must revert them if it does not.
 # ─────────────────────────────────────────────────────────────────────────────
 
 schema = "ProductDeploymentSpec.v1"
