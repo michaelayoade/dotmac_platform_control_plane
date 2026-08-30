@@ -13,6 +13,8 @@ import json
 
 from dotmac_kernel.providers.provisioning import (
     ApplyResult,
+    CompensationDisposition,
+    CompensationResult,
     ObserveResult,
     PlanResult,
     ProvisioningPlanError,
@@ -141,6 +143,26 @@ class LaboratoryProvisioningProvider:
             status=ProvisioningStatus.CANCELLED,
             steps=steps,
             plan_hash=result.plan_hash if result is not None else None,
+        )
+
+    def compensate(self, operation_id: str, reason: str) -> CompensationResult:
+        """Refuse compensation, in the vocabulary the contract provides.
+
+        The laboratory touches no infrastructure, so it has produced no effect
+        to undo. `NOT_SUPPORTED` is the truthful disposition, and the contract
+        names it precisely so a participant that cannot compensate can say so
+        without failing.
+
+        `SUCCEEDED` would be the dangerous answer: a caller would record that a
+        settled effect had been reversed when nothing was ever done and nothing
+        undone. `cancel` stops work in flight; this addresses an
+        already-settled effect, and this participant has none.
+        """
+        return CompensationResult(
+            operation_id=operation_id,
+            disposition=CompensationDisposition.NOT_SUPPORTED,
+            snapshot=self.observe(operation_id),
+            reason_code="laboratory_has_no_external_effect",
         )
 
 

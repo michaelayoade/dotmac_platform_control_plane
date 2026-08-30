@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from dotmac_kernel.cache import PlatformScope
 from dotmac_kernel.providers.provisioning import (
     ApplyResult,
     ObserveResult,
@@ -25,6 +26,18 @@ from dotmac_kernel.providers.provisioning import (
 )
 
 from vendor_cp.providers import build_provisioning_provider
+
+#: The participant this laboratory speaks as. Kernel a98 made
+#: `participant_code` and `scope` REQUIRED on `ProvisioningRequest`, and the
+#: contract's own words are that scope is "explicit tenant or platform scope;
+#: never ambient/nullable". Both are therefore named here, once.
+#:
+#: The scope is PLATFORM, and that is a fact about this assembly rather than a
+#: default: the Vendor control plane holds no tenants, so there is no tenant to
+#: be scoped to. Reaching for a `TenantScope` here would mean inventing a
+#: sentinel tenant, which the dual-plane rule refuses outright.
+PARTICIPANT_CODE = "dotmac-vendor-control-plane"
+LABORATORY_SCOPE = PlatformScope()
 
 _provider: ProvisioningProvider | None = None
 
@@ -45,7 +58,12 @@ def reset_lab_provider() -> None:
 
 def plan(intent_id: str, spec: Mapping[str, object]) -> PlanResult:
     return get_lab_provider().plan(
-        ProvisioningRequest(intent_id=intent_id, spec=dict(spec))
+        ProvisioningRequest(
+            participant_code=PARTICIPANT_CODE,
+            scope=LABORATORY_SCOPE,
+            intent_id=intent_id,
+            spec=dict(spec),
+        )
     )
 
 
@@ -54,7 +72,11 @@ def apply(
 ) -> ApplyResult:
     return get_lab_provider().apply(
         ProvisioningRequest(
-            intent_id=intent_id, spec=dict(spec), operation_id=operation_id
+            participant_code=PARTICIPANT_CODE,
+            scope=LABORATORY_SCOPE,
+            intent_id=intent_id,
+            spec=dict(spec),
+            operation_id=operation_id,
         )
     )
 
