@@ -1,0 +1,220 @@
+# ADR-0013: The operator authorization issuer, and the one-time bootstrap that starts it
+
+- **Status:** PROPOSED. Michael Ayoade is the owner and the only approver; this
+  record is not accepted until he says so. Two of its preconditions were
+  measured as unmet on 2026-08-30 and are named in § 8 rather than assumed away.
+- **Date:** 2026-08-30
+- **Owner:** Michael Ayoade
+- **Follows:** ADR-0011, which composed `dotmac-deployment-control` and cut
+  deployment-target authority over to it
+- **Relates to:** `dotmac_governance` ADR 0016 (Accepted 2026-08-30), which
+  renames this repository's public identity and states, in its own words, that
+  the assembly is "not the owner of every capability it presents"
+
+## 1. Context
+
+ADR-0011 composed `dotmac-deployment-control` and said plainly that "Vendor has
+no operator surface for them yet" — `register_target`, `set_desired_state`,
+`propose_plan`, `approve_plan` and `request_rollout` are the module's own
+commands, and `src/vendor_cp/deployment/adapter.py` is read-only.
+
+The consequence is the thing this ADR exists to fix. The module that owns
+deployment authorization is a *library*. A library issues nothing. Until some
+deployed assembly presents its commands to an operator, no authorization
+receipt can be produced anywhere in the fleet, and every consumer that was told
+to bind one is waiting on a record that cannot yet exist.
+
+This assembly is where that surface belongs, because it is already the composed
+consumer of the owner. What it must not become is a second owner.
+
+## 2. Decision — the issuer is an operator workflow, and nothing else
+
+This assembly exposes the EXISTING owner. It implements no planner, no approval
+model, no deployment engine and no health authority.
+
+Concretely, the issuer is permitted to do exactly four things:
+
+1. call `propose_plan`, which freezes a snapshot and computes its digest;
+2. carry an `ApprovalEvidence` produced by `dotmac-approvals` into
+   `approve_plan`;
+3. call `request_rollout`, and hand the resulting `DeliveryIntent` to the
+   Integrator;
+4. read `get_plan` / `get_rollout` / `get_target` / `plan_snapshot` for display.
+
+Everything else — what the plan contains, whether the transition is legal,
+what the receipt says, how drift is judged — stays in the module. The seam
+stays `src/vendor_cp/deployment/adapter.py`, and the ratchet in
+`src/vendor_cp/cutover_readiness.py` keeps counting it.
+
+**The test of a design error.** If a change here would require this assembly to
+decide *how a target is changed*, the change is wrong and belongs upstream.
+That is not a style preference: the module's own docstring says a plan is
+frozen precisely so that "editing the desired state mid-rollout would silently
+change what is being deployed, and the approval would be for something else". A
+second decision-maker on this side reintroduces exactly that.
+
+## 3. What an authorization binds
+
+Ten axes. Six are already columns or command fields upstream; four are the
+assembly's own responsibility to supply and are named as such, because a
+binding whose source is unnamed is a binding nobody maintains.
+
+| Axis | Where it comes from |
+| --- | --- |
+| Target identity | `DeploymentPlan.target_id`, resolved through `resolve_target` |
+| Canonical descriptor digest | supplied by the assembly, from the product's `DeploymentDescriptorDocumentV1` |
+| Exact artifact / image digest | supplied by the assembly, inside the frozen `spec` |
+| Normalized plan digest | `snapshot_digest`, upstream — see § 4 |
+| Controller identity fingerprint | supplied by the assembly — see § 4's second defect |
+| Authorization policy code and version | `ApprovalEvidence.policy_code` / `.policy_version` |
+| Immutable approval-decision reference | `ApprovalEvidence.decision_ref` |
+| Issued time and expiry | `ApprovalEvidence.decided_at`, plus an assembly-supplied expiry |
+| Nonce / replay identity | the rollout's own idempotency key |
+| Rollback boundary | the previously-observed spec digest on the target |
+
+**No `approved_by`, and no equivalent.** `ApprovalEvidence` already carries
+`approver_refs: tuple[str, ...] = ()`, and it stays empty. Approver identity
+lives once, in `dotmac-approvals`, reachable through `decision_ref`. A name
+copied alongside a reference is a second copy of an identity that can drift
+from the decision it claims to describe, and the module deliberately has no
+column for one.
+
+Michael Ayoade is the sole human administrator and approver. A workflow that
+appears to need two approvers is reporting a design error, not a staffing gap:
+report it. Do not create a placeholder, a service identity, an agent-held
+identity or a shared admin account to satisfy a two-reviewer rule.
+
+## 4. Two defects measured in the pinned release, and where they must be fixed
+
+Both were read at the peeled commit of `dotmac-deployment-control-v0.1.0a4`,
+`2c61540f74018b7e19d7c5add893e0653cfcdb17`. Neither is repaired here, and the
+reason they are recorded here at all is that this assembly is the first caller
+positioned to hit them.
+
+**Defect 1 — two sibling functions emit two digest encodings, and one raw `!=`
+compares across them.** In `src/dotmac_deployment_control/service.py`:
+
+- `snapshot_digest` (line 305) returns BARE hex — `…hexdigest()`;
+- `spec_digest` (line 311) returns PREFIXED — `f"sha256:{…hexdigest()}"`;
+- `propose_plan` stores `plan_digest=snapshot_digest(snapshot)` (line 889);
+- `approve_plan` compares `command.evidence.content_digest != row.plan_digest`
+  (line 974) and, on mismatch, refuses with "the plan changed after approval,
+  so a new approval is required".
+
+An approver supplying the canonical `sha256:<hex>` form — the form this same
+module uses for `spec_digest`, for the credential fingerprint
+(`models.py:328`) and for the raw body digest (`models.py:564`) — is therefore
+refused, and the refusal *reads as tamper detection*. That is the worst
+available failure mode for a security control: a formatting bug wearing a
+security refusal's message.
+
+The repair is a typed parser owned by the module: accept bare 64-hex and
+`sha256:<64-hex>` only where compatibility requires it, normalize internally to
+algorithm plus bytes, serialize canonically as `sha256:<64-hex>`, and reject
+unknown algorithms, uppercase drift, wrong length and malformed values.
+
+**It is not repaired in this assembly, deliberately.** A normalizer here would
+be this assembly deciding when two plan digests are the same digest, which is
+the § 2 design error exactly. `a4` is immutable and stays immutable; the fix is
+`a5`.
+
+**Defect 2 — the published `a4` reports itself as `a2`.** At the same peeled
+commit, `pyproject.toml` line 3 reads `version = "0.1.0a4"` while
+`src/dotmac_deployment_control/__init__.py` line 172 reads
+`__version__ = "0.1.0a2"`. Any controller identity fingerprint that reads
+`dotmac_deployment_control.__version__` at runtime records the wrong version
+into an authorization it is supposed to make auditable. Until `a5`, the
+fingerprint must be taken from installed distribution metadata, never from the
+module attribute.
+
+## 5. The bootstrap, and why there has to be one
+
+The thing that authorizes deployments cannot authorize its own first
+deployment. That is a genuine circularity, not an inconvenience, and it is
+discharged once, explicitly, by a human.
+
+- **Issued by Michael**, bound to `platform-cp-01`, bound to the exact artifact
+  and descriptor digests, non-reusable, recorded separately from ordinary
+  Deployment Control authorizations, and invalid after the first success.
+- **Root-owned standalone launcher**, from exact release assets addressed by
+  digest. No mutable tag — not `latest`, not a branch name, not a floating
+  major.
+- **No OpenBao call on the controller path.** The controller applies a signed
+  envelope it was handed; it does not resolve secrets to decide anything.
+- **Create-only.** The launcher creates the deployment; it has no update, no
+  restart and no reconfigure verb.
+- **The application does not authorize itself.** Nothing in the deployed
+  Platform CP participates in authorizing the deployment that created it.
+- It produces a **first-deployment receipt**, marked as a bootstrap receipt and
+  not as an ordinary authorization.
+
+Bootstrap evidence binds nine coordinates, and all nine are immutable: Platform
+CP source revision; exact image digest; Control wheel hash; product descriptor
+digest; database migration heads; launcher hash; workflow revision; bootstrap
+authorizer; target `platform-cp-01`.
+
+## 6. Retirement, built in from the start
+
+A temporary path with no retirement mechanism becomes permanent. So retirement
+is three interlocking parts, and the load-bearing one is the first, because it
+does not depend on anyone remembering.
+
+**6.1 The launcher is structurally single-use.** It refuses to run when the
+target already holds any deployment receipt, and its own success creates the
+first one. There is no flag to skip the check. A second bootstrap is not a
+policy violation to be caught in review; it is a refusal.
+
+**6.2 The bootstrap receipt names its own successor condition.** It is written
+with an explicit bootstrap marker and a field naming what retires it: a
+second-deployment receipt for `platform-cp-01` whose authorization was issued
+by Platform CP itself. Until that receipt exists the bootstrap receipt is a
+live compatibility state; once it exists the bootstrap receipt is history.
+
+**6.3 The mutation path is deleted, and the deletion is ratcheted.** The
+launcher's call sites are counted in `src/vendor_cp/cutover_readiness.py` at
+SYMBOL level, in both directions, alongside the existing entries. The count
+goes to zero in the same change that records the second deployment. A
+path-level ledger would stay green when the function is deleted and its module
+remains — which, per hard rule 18, is exactly the transition that matters.
+
+**The premise check that 6.2 needs, stated honestly.** "A second receipt
+exists, self-authorized" is not a repository-local fact. Under AGENTS.md rule
+17 it requires an oracle: a `deployment_run` id plus the immutable image digest
+that run activated. No test in this repository discharges it, and none will be
+written that pretends to. The gate states the condition; the dossier records
+the evidence when it exists.
+
+The bootstrap receipt is a one-time compatibility state, not a permanent second
+deployment path.
+
+## 7. Ownership, restated because the rename is when it gets blurred
+
+| Owner | Owns |
+| --- | --- |
+| `dotmac-deployment-control` | plans, approvals, attempts, receipts — authorization STATE |
+| Deployment Foundation | target-side rendering and EXECUTION |
+| this assembly | the operator WORKFLOW only |
+| ERP, Sub | their own runtimes and business decisions |
+
+Do not create another deployment engine.
+
+## 8. Preconditions measured as unmet on 2026-08-30
+
+Recorded so that a later reader does not mistake this design for something that
+was merely never started.
+
+- **The pre-rename GHCR evidence capture has not happened.** It needs a
+  short-lived `read:packages` token, which is a human-only action. Measured
+  from this workstation: the active credential holds
+  `delete_repo, gist, read:org, repo, workflow`, and
+  `GET /user/packages/container/…` answers `403 — You need at least
+  read:packages scope`. Repository id `1317527604` was confirmed unchanged and
+  the repository was still named `dotmac_vendor_control_plane`.
+- **`platform-cp-01` does not exist.** A working management path to the
+  hypervisor was established and capacity was measured as sufficient, but
+  creating the guest was refused by the workstation's permission classifier, so
+  no guest, storage, database, firewall or backup was created. Nothing in §§
+  5–6 has been executed.
+
+Neither precondition is worked around, and neither is restated as satisfied
+anywhere in this document.
