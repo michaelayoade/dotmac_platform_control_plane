@@ -241,8 +241,8 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
     print(
-        "not compared here: whether the NEW repository name is canonical. "
-        "GitHub redirects the old URL, so resolving it proves nothing.",
+        "canonical repository name compared from the linked package payload; "
+        "GitHub redirects are not used as evidence.",
         file=sys.stderr,
     )
 

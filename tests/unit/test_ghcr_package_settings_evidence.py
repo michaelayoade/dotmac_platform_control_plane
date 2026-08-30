@@ -31,7 +31,10 @@ def test_authenticated_pre_rename_settings_are_complete() -> None:
 
 
 def test_post_rename_settings_cannot_pass_before_the_second_observation() -> None:
-    frozen = _capture()
+    frozen = copy.deepcopy(_capture())
+    required = frozen["required_settings"]
+    required["permission_inheritance_enabled"]["post_rename_observation"] = None
+    required["actions_access_repositories"]["post_rename_observation"] = None
 
     failures = _settings_verdicts(
         frozen,
@@ -44,15 +47,7 @@ def test_post_rename_settings_cannot_pass_before_the_second_observation() -> Non
 
 
 def test_post_rename_settings_accept_only_the_renamed_source_repository() -> None:
-    frozen = copy.deepcopy(_capture())
-    required = frozen["required_settings"]
-    required["permission_inheritance_enabled"]["post_rename_observation"] = {
-        "observed": True
-    }
-    required["actions_access_repositories"]["post_rename_observation"] = {
-        "observed": ["michaelayoade/dotmac_platform_control_plane"],
-        "roles": {"michaelayoade/dotmac_platform_control_plane": "Admin"},
-    }
+    frozen = _capture()
 
     assert (
         _settings_verdicts(
