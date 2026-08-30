@@ -146,23 +146,43 @@ class LaboratoryProvisioningProvider:
         )
 
     def compensate(self, operation_id: str, reason: str) -> CompensationResult:
-        """Refuse compensation, in the vocabulary the contract provides.
+        """Reverse a settled operation, in the only place it exists.
 
-        The laboratory touches no infrastructure, so it has produced no effect
-        to undo. `NOT_SUPPORTED` is the truthful disposition, and the contract
-        names it precisely so a participant that cannot compensate can say so
-        without failing.
+        A first version of this returned `NOT_SUPPORTED` on the reasoning that a
+        laboratory touching no infrastructure has nothing to undo. That was
+        wrong, and the kernel's conformance suite is right to reject it: this
+        provider DOES hold state — the operation record every `observe` reads —
+        and that record is the whole of the effect it ever produced. Reversing
+        it is a faithful compensation rather than a courtesy `SUCCEEDED`.
 
-        `SUCCEEDED` would be the dangerous answer: a caller would record that a
-        settled effect had been reversed when nothing was ever done and nothing
-        undone. `cancel` stops work in flight; this addresses an
-        already-settled effect, and this participant has none.
+        The distinction that matters is against `cancel`, which stops work in
+        flight and leaves a CANCELLED operation behind. This runs after
+        settlement and drives every step it can still reach to CANCELLED,
+        including the ones that had SUCCEEDED — undoing a converged step is
+        precisely what compensation means and what cancellation does not.
+
+        Idempotent by `operation_id`: compensating an already-compensated
+        operation recomputes the same terminal record. An unknown id
+        compensates nothing and says so with an empty snapshot rather than
+        inventing an operation to reverse.
         """
+        result = self._operations.get(operation_id)
+        if result is not None:
+            self._operations[operation_id] = ApplyResult(
+                intent_id=result.intent_id,
+                operation_id=operation_id,
+                plan_hash=result.plan_hash,
+                status=ProvisioningStatus.CANCELLED,
+                steps=tuple(
+                    ProvisioningStep(step.step_id, StepStatus.CANCELLED)
+                    for step in result.steps
+                ),
+            )
         return CompensationResult(
             operation_id=operation_id,
-            disposition=CompensationDisposition.NOT_SUPPORTED,
+            disposition=CompensationDisposition.SUCCEEDED,
             snapshot=self.observe(operation_id),
-            reason_code="laboratory_has_no_external_effect",
+            reason_code=None,
         )
 
 

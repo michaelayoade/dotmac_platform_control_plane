@@ -23,6 +23,7 @@ from vendor_cp.providers import (
     build_provisioning_provider,
 )
 from vendor_cp.provisioning.laboratory import LaboratoryProvisioningProvider
+from vendor_cp.provisioning.service import LABORATORY_SCOPE, PARTICIPANT_CODE
 
 
 def test_vendor_provider_factory_satisfies_kernel_contract() -> None:
@@ -40,7 +41,12 @@ def test_runtime_laboratory_provider_is_vendor_owned() -> None:
 
 
 def test_failure_injection_resume_and_operation_id_idempotency() -> None:
-    req = ProvisioningRequest(intent_id="i-1", spec={"size": 1})
+    req = ProvisioningRequest(
+        participant_code=PARTICIPANT_CODE,
+        scope=LABORATORY_SCOPE,
+        intent_id="i-1",
+        spec={"size": 1},
+    )
 
     # Failure injection -> terminal FAILED.
     failing = build_provisioning_provider(fail_apply=True)
@@ -52,7 +58,11 @@ def test_failure_injection_resume_and_operation_id_idempotency() -> None:
     assert first.is_partial
     resumed = p.apply(
         ProvisioningRequest(
-            intent_id="i-1", spec={"size": 1}, operation_id=first.operation_id
+            participant_code=PARTICIPANT_CODE,
+            scope=LABORATORY_SCOPE,
+            intent_id="i-1",
+            spec={"size": 1},
+            operation_id=first.operation_id,
         )
     )
     assert resumed.status is ProvisioningStatus.SUCCEEDED
