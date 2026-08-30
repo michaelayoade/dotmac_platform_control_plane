@@ -26,7 +26,7 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0026_platform_audit_log"  # current pin (0.1.0a77)
+KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a98)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 
@@ -58,7 +58,7 @@ LICENSING_HEAD = "li_0001_licensing"
 # module head IS depended on by a vendor revision — `v017` names it — so it
 # is an ancestor and NOT a version row, the same shape `ap_0001` had before
 # a5 moved that lineage past it.
-DEPLOYMENT_CONTROL_HEAD = "dc_0001_deployment_control"
+DEPLOYMENT_CONTROL_HEAD = "dc_0002_canonical_plan_digest"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v018_licence_delivery_intents"

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from dotmac_kernel.cache import PlatformScope
+from dotmac_kernel import PlatformScope
 from dotmac_kernel.providers.provisioning import (
     ApplyResult,
     ObserveResult,
