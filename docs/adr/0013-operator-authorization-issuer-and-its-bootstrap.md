@@ -1,9 +1,10 @@
 # ADR-0013: The operator authorization issuer, and the one-time bootstrap that starts it
 
-- **Status:** PROPOSED. Michael Ayoade is the owner and the only approver; this
-  record is not accepted until he says so. Two of its preconditions were
-  measured as unmet on 2026-08-30 and are named in § 8 rather than assumed away.
-- **Date:** 2026-08-30
+- **Status:** ACCEPTED 2026-08-30 by Michael Ayoade, the owner and only
+  approver, with `0.1.0a5` replacing `0.1.0a4` in § 5's bootstrap evidence.
+  **Acceptance is not deployment.** Nothing in §§ 5–6 has been executed; § 8
+  records what remains and is kept current rather than deleted on acceptance.
+- **Date:** 2026-08-30 proposed, 2026-08-30 accepted
 - **Owner:** Michael Ayoade
 - **Follows:** ADR-0011, which composed `dotmac-deployment-control` and cut
   deployment-target authority over to it
@@ -116,7 +117,13 @@ unknown algorithms, uppercase drift, wrong length and malformed values.
 **It is not repaired in this assembly, deliberately.** A normalizer here would
 be this assembly deciding when two plan digests are the same digest, which is
 the § 2 design error exactly. `a4` is immutable and stays immutable; the fix is
-`a5`.
+`a5`, which carries a Control-owned `PlanDigestV1`.
+
+**Both defects were accepted on 2026-08-30 and a4 is therefore UNADOPTABLE.**
+It keeps its tag, its artifact and its independently verified identity, and
+nothing pins it. This assembly pins `a5`. The exact a5 coordinates are recorded
+when that release carries its own `peeled_tag` and `release_run` oracles — not
+from this document, which cannot observe a registry.
 
 **Defect 2 — the published `a4` reports itself as `a2`.** At the same peeled
 commit, `pyproject.toml` line 3 reads `version = "0.1.0a4"` while
@@ -125,7 +132,8 @@ commit, `pyproject.toml` line 3 reads `version = "0.1.0a4"` while
 `dotmac_deployment_control.__version__` at runtime records the wrong version
 into an authorization it is supposed to make auditable. Until `a5`, the
 fingerprint must be taken from installed distribution metadata, never from the
-module attribute.
+module attribute. `a5` derives `__version__` from distribution metadata, which
+removes the second copy rather than keeping two and correcting one.
 
 ## 5. The bootstrap, and why there has to be one
 
@@ -149,9 +157,13 @@ discharged once, explicitly, by a human.
   not as an ordinary authorization.
 
 Bootstrap evidence binds nine coordinates, and all nine are immutable: Platform
-CP source revision; exact image digest; Control wheel hash; product descriptor
-digest; database migration heads; launcher hash; workflow revision; bootstrap
-authorizer; target `platform-cp-01`.
+CP source revision; exact image digest; **the Control `0.1.0a5` wheel hash**;
+product descriptor digest; database migration heads; launcher hash; workflow
+revision; bootstrap authorizer; target `platform-cp-01`.
+
+`a5`, never `a4`. The bootstrap receipt is the first artifact in the fleet to
+bind a Control version, so binding an immutable-and-unadoptable release would
+put a known-defective digest comparison at the root of the evidence chain.
 
 ## 6. Retirement, built in from the start
 
@@ -198,23 +210,34 @@ deployment path.
 
 Do not create another deployment engine.
 
-## 8. Preconditions measured as unmet on 2026-08-30
+## 8. Precondition state, kept current
 
-Recorded so that a later reader does not mistake this design for something that
-was merely never started.
+Acceptance did not discharge these; they are the difference between an accepted
+design and a running issuer, and they are updated rather than deleted.
 
-- **The pre-rename GHCR evidence capture has not happened.** It needs a
-  short-lived `read:packages` token, which is a human-only action. Measured
-  from this workstation: the active credential holds
-  `delete_repo, gist, read:org, repo, workflow`, and
-  `GET /user/packages/container/…` answers `403 — You need at least
-  read:packages scope`. Repository id `1317527604` was confirmed unchanged and
-  the repository was still named `dotmac_vendor_control_plane`.
-- **`platform-cp-01` does not exist.** A working management path to the
-  hypervisor was established and capacity was measured as sufficient, but
-  creating the guest was refused by the workstation's permission classifier, so
-  no guest, storage, database, firewall or backup was created. Nothing in §§
-  5–6 has been executed.
+**Discharged 2026-08-30.**
 
-Neither precondition is worked around, and neither is restated as satisfied
-anywhere in this document.
+- *Pre-rename GHCR evidence.* Captured and committed —
+  `docs/operations/pre-rename-ghcr-package-state.json`, with
+  `scripts/verify_ghcr_package_state.py` as the post-rename comparison. 23
+  versions, 23 distinct digests, package private under a public repository,
+  linked to repository id `1317527604`.
+- *`platform-cp-01` exists.* Ubuntu 24.04.4 LTS, 4 vCPU, 8 GiB, 80 GiB, private
+  address only, no public address and no destination-NAT to it, key-only SSH
+  reachable solely through the management jump path. nftables is default-deny on
+  input, forward and output, loaded at boot, and its egress allowlist has been
+  observed refusing an unapproved destination while permitting an approved one.
+
+**Outstanding.**
+
+- *Egress.* The guest has no outbound path. There is no blanket masquerade for
+  its subnet, so it needs one per-host source-NAT rule on the core router. Until
+  that exists the approved-destination sets stay empty, which is why they are
+  empty rather than pre-populated: an allowlist naming destinations that cannot
+  be reached would assert a policy nobody has exercised.
+- *PostgreSQL, backups and their restore rehearsal.* Blocked behind egress.
+- *The Control `a5` pin.* Waiting on that release's own oracles.
+- *The rename itself*, and the equality checks that follow it.
+
+Nothing above is worked around, and none of it is restated as satisfied
+elsewhere in this document.
