@@ -1,0 +1,31 @@
+{
+  "bundle_digest": "sha256:f282bbc900d52e06297569687cface987c247c0ed63deac96a08d10ed8b71246",
+  "component_digests": {
+    "database_dump": "sha256:635e25b6752b6789272c1aa2a15999c72b64c430dcf5f16c91a7e6fa74cfc48a",
+    "default_privileges": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "extensions": "sha256:4063873f3fe1ac2ac64679fbabfd6d983725747badfa8d1f2b71835a8d426a87",
+    "fine_grained_acls": "sha256:b4e519586101247cd591c3ddbc482a2c0b9b05c8d779a72cacff287b5e1d5eef",
+    "memberships": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "migration_heads": "sha256:715732557e0146dfddcbb5364d3d762bcda839eae72818ebb9910bbaa61f7d8a",
+    "object_ownership": "sha256:c1545d0296765ee4f580764fdd41f54da3d919a9ef63e320e055b587cc40caf1",
+    "object_privileges": "sha256:32676c70b55dd0a75d654d7f3ee82c2885322ecb647d25cc65ddca0f65073719",
+    "role_attributes": "sha256:5bbbd44777ae43e9fa22353d0518c9257bf730aea06f98ca0f2c9a62b244862c",
+    "role_closure": "sha256:05dfbfba044964de115d6aaa1d0e10e1e02b16cfff19c384c9cd2130f0caa85f",
+    "row_security": "sha256:4b9c5444d8d5829919f45a4cde61d30c477ade5a5cc6a7e691b1d8845469a8e8",
+    "schema_privileges": "sha256:9813a2f770ba6119c547da30c6e35b493885596cdcfe6bf4345d2e9b896320d7",
+    "tablespaces": "sha256:2ff9cdff091aef6faf5f29ea2e9d90021c8046bb62ad5a5591d615403ad52203"
+  },
+  "disposition": "proceed",
+  "findings": [],
+  "foundation_version": "0.3.0a1",
+  "image_digest": "sha256:056b54f00419b49289227ab12d09df508543883f407fe9935a2cec430ef8aa8d",
+  "postgres_major": 16,
+  "product": "dotmac_vendor_control_plane",
+  "proved": true,
+  "proved_at_epoch": 1788126547,
+  "readiness_passed": true,
+  "readiness_role": "platform_api",
+  "restore_duration_seconds": 4,
+  "roles_restored": 5,
+  "schema": "RecoveryReceipt.v1"
+}
