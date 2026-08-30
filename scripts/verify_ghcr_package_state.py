@@ -31,6 +31,7 @@ over a comparison it never made.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -44,11 +45,30 @@ CAPTURE = (
 )
 
 
+#: A package name that could not be a shell metacharacter, an option, or a path
+#: traversal. Checked rather than trusted: the name is read out of the capture
+#: file, and a capture file is data on disk like any other.
+SAFE_NAME = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
+
+
+def _require_safe_name(name: str) -> str:
+    if not SAFE_NAME.fullmatch(name):
+        raise SystemExit(
+            f"refusing to build a request from package name {name!r}: it is "
+            "not a plain package identifier"
+        )
+    return name
+
+
 def _gh_json(path: str, paginate: bool = False) -> Any:
     argv = ["gh", "api"]
     if paginate:
         argv.append("--paginate")
     argv.append(path)
+    # S603 is ignored for this file in pyproject.toml. The premise it warns
+    # about — an argument of unknown provenance reaching an executed command —
+    # is removed by `_require_safe_name` above, which REFUSES rather than
+    # escapes. argv is also a list, so no shell parses any of it.
     done = subprocess.run(argv, capture_output=True, text=True)
     if done.returncode != 0:
         stderr = done.stderr.strip()
@@ -63,7 +83,7 @@ def _gh_json(path: str, paginate: bool = False) -> Any:
 
 def main() -> int:
     frozen = json.loads(CAPTURE.read_text())
-    package_name = frozen["package"]["name"]
+    package_name = _require_safe_name(frozen["package"]["name"])
     expected_repo_id = frozen["linked_repository"]["id"]
 
     live = _gh_json(f"user/packages/container/{package_name}")

@@ -135,6 +135,14 @@ select = ["E", "F", "I", "UP", "B", "S"]
 # a query — does not hold. `tests/architecture/test_commercial_backfill.py`
 # proves the refusal, so this ignore rests on a check rather than on a comment.
 "src/vendor_cp/commercial_backfill/shadow.py" = ["S608"]
+# The post-rename GHCR checker shells out to `gh api`. S603's premise is an
+# argument of unknown provenance reaching an executed command; the only
+# non-constant part of the argument vector is the package name, and
+# `_require_safe_name` REFUSES anything that is not a plain package identifier
+# rather than escaping it. The vector is a list, so no shell parses it, and the
+# module is an operator tool that CI never runs — it needs a `read:packages`
+# credential CI deliberately does not have.
+"scripts/verify_ghcr_package_state.py" = ["S603"]
 # The rehearsal replay reads the shadow back through the SAME declared schema and
 # table constants the repair wrote, interpolated as identifiers — which cannot be
 # bound as parameters. No external input reaches these statements; the only
