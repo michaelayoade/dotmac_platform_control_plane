@@ -1,0 +1,55 @@
+# Named inventory for hosts this assembly operates on.
+#
+# An address appears HERE and nowhere else. Firewall rulesets and router rules
+# are RENDERED from this file by `deploy/render_host_policy.py`; nothing
+# downstream embeds a literal address, so re-addressing a host is a change to
+# one line rather than a search across scripts and policies.
+#
+# This file holds no credential and no secret. It is routing and policy data.
+
+[hosts.platform-cp-01]
+description = "Platform Control Plane authorization issuer"
+vmid = 125
+node = "dotmacproxmox"
+address = "10.120.120.53"
+prefix_length = 24
+gateway = "10.120.120.1"
+bridge = "vmbr0"
+
+# The public address outbound traffic is translated to on the core router.
+#
+# 160.119.127.241 is REUSED rather than newly allocated, and the reason is
+# empirical rather than architectural. It is not an interface address on the
+# router — the router's own addresses are a loopback /32, one vlan33 /32 and
+# several /30s — so "the router owns it" would be the wrong justification. What
+# is true is that it is the active source-NAT target for 10.120.120.20, a host
+# on this same bridge, which means its return path is PROVEN to work. Sharing
+# it is port address translation, and it is the established outbound-only
+# pattern in this estate.
+#
+# The alternative, allocating a fresh public /32, needs certainty about which
+# public addresses are free. A source-NAT rule whose target is not routed back
+# produces the "rules present, no traffic" failure, so guessing is worse than
+# sharing a proven address.
+egress_nat_address = "160.119.127.241"
+
+# Sources permitted to open a new SSH session to this host.
+#
+# The jump host's PUBLIC address is here because it is what the packets carry:
+# it reaches this guest across the router, so its source address is not inside
+# the guest's own subnet. A ruleset admitting only the private prefix locked
+# this host out while being perfectly correct about a network it is not
+# actually reached from.
+management_sources = ["10.120.120.0/24", "160.119.127.195/32"]
+
+# Approved DNS resolvers.
+dns_servers = ["10.120.120.21", "1.1.1.1"]
+
+# Approved time sources. Empty until named.
+ntp_servers = []
+
+# Approved TLS egress destinations: GitHub, GHCR, the package index and the
+# OpenBao endpoint over its approved private transport. Empty until each is
+# named, so every outbound TLS connection is refused. An allowlist naming
+# destinations nobody has reached asserts a policy nobody has exercised.
+tls_destinations = []
