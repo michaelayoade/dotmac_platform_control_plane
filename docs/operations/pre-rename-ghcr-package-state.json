@@ -251,5 +251,34 @@
         "36ff215be5a80bd84d31b6642b68f52097e9aeec"
       ]
     }
-  ]
+  ],
+  "required_settings": {
+    "_comment": "Two settings the desired post-rename state SPECIFIES. Neither is observable through any REST endpoint available here, so each carries observed=null. A null is a MEASUREMENT THAT WAS NOT TAKEN, and the checker treats it as unverified rather than passing over it.",
+    "permission_inheritance_enabled": {
+      "desired": true,
+      "observed": null,
+      "observed_at": null,
+      "source": "web UI only: package settings page"
+    },
+    "actions_access_repositories": {
+      "desired": [
+        "michaelayoade/dotmac_platform_control_plane"
+      ],
+      "desired_note": "The source repository ALONE. If the observed set is broader, the desired state is a CHANGE, not a preservation \u2014 narrow it and say so; do not report it as having survived the rename.",
+      "observed": null,
+      "observed_at": null,
+      "source": "web UI only: package settings page"
+    },
+    "rest_endpoints_probed": {
+      "user/packages/container/dotmac_vendor_control_plane/permissions": "404 Not Found",
+      "user/packages/container/dotmac_vendor_control_plane/actions-access": "404 Not Found",
+      "user/packages/container/dotmac_vendor_control_plane/repositories": "404 Not Found"
+    }
+  },
+  "desired_post_rename": {
+    "linked_repository_full_name": "michaelayoade/dotmac_platform_control_plane",
+    "linked_repository_id": 1317527604,
+    "package_visibility": "private",
+    "version_digests": "unchanged as a SET; digests published later are additions, not drift"
+  }
 }

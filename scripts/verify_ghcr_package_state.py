@@ -23,9 +23,27 @@ It does not check the old repository URL. GitHub redirects it after a rename,
 so resolving the old coordinate proves nothing; the canonical `full_name`
 reported for the NEW coordinate is the thing that must have changed.
 
-It cannot see the permission-inheritance or Actions-access settings, because
-the REST payload does not carry them. It says so rather than passing silently
-over a comparison it never made.
+## The two settings it cannot see, and why that is a FAILURE
+
+Permission inheritance and Actions access are part of the desired post-rename
+state, and no REST endpoint exposes either for a user-owned container package —
+`/permissions`, `/actions-access` and `/repositories` all answer 404. They are
+web-UI-only settings.
+
+The tempting shape is to note that and move on. This tool does the opposite:
+an unmeasured required setting is a FAILURE, not a footnote. A snapshot-and-
+compare that certifies "unchanged" across two fields neither side ever measured
+would be the wrong outcome dressed as evidence — and for Actions access
+specifically, silence would quietly bless an organization-wide grant.
+
+Note also that Actions access is a SPECIFICATION, not a preservation: the
+desired state is the source repository alone. If the observed set is broader,
+the correct action is to narrow it and say so, not to record that it survived.
+
+Pass `--settings-unobservable` to acknowledge that both were checked and are
+genuinely unreadable through tooling. That still does not make them verified —
+it downgrades them to a loud, dated, human-owed obligation and prints what a
+person must read off the settings page.
 """
 
 from __future__ import annotations
@@ -81,7 +99,41 @@ def _gh_json(path: str, paginate: bool = False) -> Any:
     return json.loads(done.stdout)
 
 
-def main() -> int:
+def _settings_verdicts(frozen: dict[str, Any], acknowledged: bool) -> list[str]:
+    """Required settings that were never measured are reported, never skipped."""
+    required = frozen.get("required_settings") or {}
+    unmeasured = [
+        name
+        for name, spec in required.items()
+        if isinstance(spec, dict) and "desired" in spec and spec.get("observed") is None
+    ]
+    if not unmeasured:
+        return []
+    if acknowledged:
+        print(
+            "UNVERIFIED (acknowledged): "
+            + ", ".join(sorted(unmeasured))
+            + " — no REST endpoint exposes these; a person must read them off "
+            "the package settings page, before and after. Desired state: "
+            "permission inheritance ENABLED, Actions access restricted to the "
+            "source repository ALONE. If the observed grant is broader, narrow "
+            "it and record the change — it did not 'survive the rename'.",
+            file=sys.stderr,
+        )
+        return []
+    return [
+        "REQUIRED SETTINGS NEVER MEASURED: "
+        + ", ".join(sorted(unmeasured))
+        + ". These are part of the desired post-rename state, so passing over "
+        "them would certify fields neither side observed. Measure them from the "
+        "package settings page, or re-run with --settings-unobservable to "
+        "record them as a human-owed obligation."
+    ]
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    acknowledged = "--settings-unobservable" in args
     frozen = json.loads(CAPTURE.read_text())
     package_name = _require_safe_name(frozen["package"]["name"])
     expected_repo_id = frozen["linked_repository"]["id"]
@@ -125,6 +177,8 @@ def main() -> int:
             f"observed private={repository.get('private')}."
         )
 
+    failures.extend(_settings_verdicts(frozen, acknowledged))
+
     frozen_digests = {version["digest"] for version in frozen["versions"]}
     live_digests = {version["name"] for version in live_versions}
 
@@ -159,6 +213,17 @@ def main() -> int:
         for failure in failures:
             print(f"FAIL: {failure}")
         return 1
+
+    desired = frozen.get("desired_post_rename") or {}
+    wanted_name = desired.get("linked_repository_full_name")
+    live_name = repository.get("full_name") if repository else None
+    if wanted_name and live_name and wanted_name != live_name:
+        print(
+            f"note: linkage still reads {live_name!r}; the desired post-rename "
+            f"coordinate is {wanted_name!r}. GitHub redirects the old URL, so "
+            "resolving it is not evidence the rename happened.",
+            file=sys.stderr,
+        )
 
     print(
         f"PASS: package {package_name!r} still {live.get('visibility')}, "
