@@ -75,12 +75,19 @@ package settings UI on 2026-08-30:
 - **2026-08-30T16:30:30Z — Actions access is exactly one repository.** The
   only row is `michaelayoade/dotmac_vendor_control_plane`, role `Admin`.
 
-The structured record keeps a distinct `post_rename_observation` slot for each
-setting. Both are deliberately `null` before the rename. The checker validates
-the before values while the old canonical repository name is live, then fails
-after the rename until the settings page has been read again and the renamed
-repository alone is observed. Acknowledging that REST cannot see the settings
-is not a passing substitute.
+The structured record keeps a distinct `post_rename_observation` for each
+setting. Both were deliberately `null` before the rename, keeping the checker
+red until the settings page was read again. The after observation was completed
+by `michaelayoade` in the authenticated package settings UI on 2026-08-30:
+
+- **2026-08-30T16:44:55Z — Actions access is exactly one repository.** The
+  only row is `michaelayoade/dotmac_platform_control_plane`, role `Admin`.
+- **2026-08-30T16:45:09Z — permission inheritance ENABLED.** The checked
+  control names `michaelayoade/dotmac_platform_control_plane` as the source.
+
+The before and after observations therefore match the desired access while
+naming the canonical repository on their respective side of the rename.
+Acknowledging that REST cannot see the settings is not a passing substitute.
 
 ## The image coordinate is a literal, and nothing enforces it
 

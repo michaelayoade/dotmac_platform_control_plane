@@ -253,7 +253,7 @@
     }
   ],
   "required_settings": {
-    "_comment": "Two settings the desired post-rename state SPECIFIES. Neither is observable through REST. The authenticated web-UI observations before the rename are recorded here; the explicit null post-rename slots keep the checker red until a second human observation proves the renamed repository has the desired access.",
+    "_comment": "Two settings the desired post-rename state SPECIFIES. Neither is observable through REST. The authenticated web-UI observations before and after the rename are recorded separately so the comparison does not infer preservation from the repository redirect.",
     "permission_inheritance_enabled": {
       "desired": true,
       "pre_rename_observation": {
@@ -262,7 +262,12 @@
         "observed_by": "michaelayoade",
         "source": "authenticated GitHub package settings UI"
       },
-      "post_rename_observation": null,
+      "post_rename_observation": {
+        "observed": true,
+        "observed_at": "2026-08-30T16:45:09Z",
+        "observed_by": "michaelayoade",
+        "source": "authenticated GitHub package settings UI"
+      },
       "source": "web UI only: package settings page"
     },
     "actions_access_repositories": {
@@ -282,7 +287,17 @@
         "observed_by": "michaelayoade",
         "source": "authenticated GitHub package settings UI"
       },
-      "post_rename_observation": null,
+      "post_rename_observation": {
+        "observed": [
+          "michaelayoade/dotmac_platform_control_plane"
+        ],
+        "roles": {
+          "michaelayoade/dotmac_platform_control_plane": "Admin"
+        },
+        "observed_at": "2026-08-30T16:44:55Z",
+        "observed_by": "michaelayoade",
+        "source": "authenticated GitHub package settings UI"
+      },
       "source": "web UI only: package settings page"
     },
     "rest_endpoints_probed": {

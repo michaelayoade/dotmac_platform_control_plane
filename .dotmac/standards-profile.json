@@ -2,7 +2,7 @@
   "schema_version": 9,
   "profile_id": "dotmac-vendor-control-plane-engineering-standards",
   "repository": {
-    "canonical_url": "https://github.com/michaelayoade/dotmac_vendor_control_plane",
+    "canonical_url": "https://github.com/michaelayoade/dotmac_platform_control_plane",
     "default_branch": "main"
   },
   "governance_model": {
