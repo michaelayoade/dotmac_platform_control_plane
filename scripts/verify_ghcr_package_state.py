@@ -40,10 +40,12 @@ Note also that Actions access is a SPECIFICATION, not a preservation: the
 desired state is the source repository alone. If the observed set is broader,
 the correct action is to narrow it and say so, not to record that it survived.
 
-Pass `--settings-unobservable` to acknowledge that both were checked and are
-genuinely unreadable through tooling. That still does not make them verified —
-it downgrades them to a loud, dated, human-owed obligation and prints what a
-person must read off the settings page.
+The frozen evidence carries separate before- and after-rename observations.
+The checker validates the before observation while the old canonical repository
+name is live and refuses the post-rename state until a second authenticated UI
+observation has been recorded. An acknowledgement flag is deliberately not an
+alternative: knowing why a required setting is unobservable does not establish
+its value.
 """
 
 from __future__ import annotations
@@ -99,41 +101,57 @@ def _gh_json(path: str, paginate: bool = False) -> Any:
     return json.loads(done.stdout)
 
 
-def _settings_verdicts(frozen: dict[str, Any], acknowledged: bool) -> list[str]:
-    """Required settings that were never measured are reported, never skipped."""
+def _settings_verdicts(
+    frozen: dict[str, Any], *, observation_name: str, expected_repository: str
+) -> list[str]:
+    """Validate the human observation for one side of the rename."""
     required = frozen.get("required_settings") or {}
-    unmeasured = [
-        name
-        for name, spec in required.items()
-        if isinstance(spec, dict) and "desired" in spec and spec.get("observed") is None
-    ]
-    if not unmeasured:
-        return []
-    if acknowledged:
-        print(
-            "UNVERIFIED (acknowledged): "
-            + ", ".join(sorted(unmeasured))
-            + " — no REST endpoint exposes these; a person must read them off "
-            "the package settings page, before and after. Desired state: "
-            "permission inheritance ENABLED, Actions access restricted to the "
-            "source repository ALONE. If the observed grant is broader, narrow "
-            "it and record the change — it did not 'survive the rename'.",
-            file=sys.stderr,
+    failures: list[str] = []
+
+    inheritance = required.get("permission_inheritance_enabled") or {}
+    inheritance_observation = inheritance.get(observation_name)
+    if not isinstance(inheritance_observation, dict):
+        failures.append(
+            f"PERMISSION INHERITANCE UNMEASURED: {observation_name} is absent. "
+            "Read the authenticated package settings page and record the value; "
+            "an acknowledgement is not evidence."
         )
-        return []
-    return [
-        "REQUIRED SETTINGS NEVER MEASURED: "
-        + ", ".join(sorted(unmeasured))
-        + ". These are part of the desired post-rename state, so passing over "
-        "them would certify fields neither side observed. Measure them from the "
-        "package settings page, or re-run with --settings-unobservable to "
-        "record them as a human-owed obligation."
-    ]
+    elif inheritance_observation.get("observed") is not inheritance.get("desired"):
+        failures.append(
+            "PERMISSION INHERITANCE: expected enabled, observed "
+            f"{inheritance_observation.get('observed')!r}."
+        )
+
+    actions = required.get("actions_access_repositories") or {}
+    actions_observation = actions.get(observation_name)
+    if not isinstance(actions_observation, dict):
+        failures.append(
+            f"ACTIONS ACCESS UNMEASURED: {observation_name} is absent. Read the "
+            "authenticated package settings page and record every repository "
+            "and role; an acknowledgement is not evidence."
+        )
+    else:
+        observed_repositories = actions_observation.get("observed")
+        if observed_repositories != [expected_repository]:
+            failures.append(
+                "ACTIONS ACCESS: expected the source repository alone "
+                f"({expected_repository!r}), observed {observed_repositories!r}."
+            )
+        observed_roles = actions_observation.get("roles")
+        expected_roles = {expected_repository: actions.get("desired_role")}
+        if observed_roles != expected_roles:
+            failures.append(
+                f"ACTIONS ACCESS ROLE: expected {expected_roles!r}, observed "
+                f"{observed_roles!r}."
+            )
+
+    return failures
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    acknowledged = "--settings-unobservable" in args
+    if args:
+        raise SystemExit(f"unexpected arguments: {args!r}")
     frozen = json.loads(CAPTURE.read_text())
     package_name = _require_safe_name(frozen["package"]["name"])
     expected_repo_id = frozen["linked_repository"]["id"]
@@ -177,7 +195,27 @@ def main(argv: list[str] | None = None) -> int:
             f"observed private={repository.get('private')}."
         )
 
-    failures.extend(_settings_verdicts(frozen, acknowledged))
+    old_repository_name = frozen["linked_repository"]["full_name"]
+    desired_repository_name = frozen["desired_post_rename"][
+        "linked_repository_full_name"
+    ]
+    live_repository_name = repository.get("full_name") if repository else None
+    if live_repository_name == old_repository_name:
+        observation_name = "pre_rename_observation"
+        expected_actions_repository = old_repository_name
+    elif live_repository_name == desired_repository_name:
+        observation_name = "post_rename_observation"
+        expected_actions_repository = desired_repository_name
+    else:
+        observation_name = "post_rename_observation"
+        expected_actions_repository = desired_repository_name
+    failures.extend(
+        _settings_verdicts(
+            frozen,
+            observation_name=observation_name,
+            expected_repository=expected_actions_repository,
+        )
+    )
 
     frozen_digests = {version["digest"] for version in frozen["versions"]}
     live_digests = {version["name"] for version in live_versions}
@@ -198,9 +236,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     print(
-        "not compared (absent from the REST payload): "
-        + ", ".join(frozen["not_observable_via_rest"])
-        + " — read these from the package settings page if they must match.",
+        "compared from authenticated human observations (absent from REST): "
+        + ", ".join(frozen["not_observable_via_rest"]),
         file=sys.stderr,
     )
     print(
@@ -209,21 +246,20 @@ def main(argv: list[str] | None = None) -> int:
         file=sys.stderr,
     )
 
+    desired = frozen.get("desired_post_rename") or {}
+    wanted_name = desired.get("linked_repository_full_name")
+    live_name = repository.get("full_name") if repository else None
+    if wanted_name and live_name != wanted_name:
+        failures.append(
+            f"CANONICAL REPOSITORY NAME: expected {wanted_name!r}, observed "
+            f"{live_name!r}. GitHub redirects the old URL, so resolving it is "
+            "not evidence the rename happened."
+        )
+
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}")
         return 1
-
-    desired = frozen.get("desired_post_rename") or {}
-    wanted_name = desired.get("linked_repository_full_name")
-    live_name = repository.get("full_name") if repository else None
-    if wanted_name and live_name and wanted_name != live_name:
-        print(
-            f"note: linkage still reads {live_name!r}; the desired post-rename "
-            f"coordinate is {wanted_name!r}. GitHub redirects the old URL, so "
-            "resolving it is not evidence the rename happened.",
-            file=sys.stderr,
-        )
 
     print(
         f"PASS: package {package_name!r} still {live.get('visibility')}, "

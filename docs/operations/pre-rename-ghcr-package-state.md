@@ -66,6 +66,22 @@ measurement that came back empty. If those two settings must be part of the
 comparison, they have to be read from the package's web settings page by a
 package administrator, before and after.
 
+The before observation was completed by `michaelayoade` in the authenticated
+package settings UI on 2026-08-30:
+
+- **2026-08-30T16:30:17Z — permission inheritance ENABLED.** The checked
+  control reads “Inherit access from source repository” and names
+  `michaelayoade/dotmac_vendor_control_plane` as the source.
+- **2026-08-30T16:30:30Z — Actions access is exactly one repository.** The
+  only row is `michaelayoade/dotmac_vendor_control_plane`, role `Admin`.
+
+The structured record keeps a distinct `post_rename_observation` slot for each
+setting. Both are deliberately `null` before the rename. The checker validates
+the before values while the old canonical repository name is live, then fails
+after the rename until the settings page has been read again and the renamed
+repository alone is observed. Acknowledging that REST cannot see the settings
+is not a passing substitute.
+
 ## The image coordinate is a literal, and nothing enforces it
 
 `ghcr.io/michaelayoade/dotmac_vendor_control_plane` appears at
@@ -90,14 +106,18 @@ Run `scripts/verify_ghcr_package_state.py` after the rename. It fails on any of:
    count. A count alone would pass if one version were replaced by another.
 4. **Visibility** changed on either side of the split: the package must still
    be `private` and the repository must still be public.
+5. **Permission inheritance** is not observed enabled on both sides of the
+   rename.
+6. **Actions access** is not observed as the source repository alone, role
+   `Admin`, on both sides of the rename.
 
-And one the script cannot make for you:
+And one whose API half is easy to get wrong:
 
-5. **A redirect is not a canonical URL.** GitHub redirects the old repository
+7. **A redirect is not a canonical URL.** GitHub redirects the old repository
    URL after a rename, so any check that merely *resolves* the old coordinate
-   passes while the canonical name is stale. Prove the NEW name is what
-   `GET /repos/...` reports as `full_name`, rather than proving the old one
-   still answers.
+   passes while the canonical name is stale. The checker requires the NEW name
+   from the linked package payload; proving the old coordinate still answers
+   is refused.
 
 If linkage is lost, reconnect it **without renaming or republishing the
 package**. The first post-rename image workflow must prove package access
