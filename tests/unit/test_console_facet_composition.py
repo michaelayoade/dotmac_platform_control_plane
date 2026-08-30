@@ -30,7 +30,8 @@ from dotmac_kernel import (
 from dotmac_kernel.web_surfaces import WebSurfaceError, WebSurfaceRegistry
 
 from vendor_cp.assembly import build_spec
-from vendor_cp.console.feature import CONSOLE_SURFACE, feature as console_manifest
+from vendor_cp.console.feature import CONSOLE_SURFACE
+from vendor_cp.console.feature import feature as console_manifest
 
 
 def test_the_console_contributes_a_v2_surface_not_legacy_routers() -> None:
