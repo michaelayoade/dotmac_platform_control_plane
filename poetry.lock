@@ -385,14 +385,14 @@ reference = "forgejo"
 
 [[package]]
 name = "dotmac-deployment-control"
-version = "0.1.0a2"
-description = "DotMac Deployment Control — desired deployment intent, immutable plans, approval-gated rollouts, authenticated target acknowledgements and drift reconciliation for licensed deployments (ADR-0033 § 3)"
+version = "0.1.0a5"
+description = "DotMac Deployment Control — desired deployment intent, immutable plans, approval-gated rollouts, authenticated target acknowledgements and drift reconciliation for licensed deployments (ADR-0057 § 3)"
 optional = false
 python-versions = ">=3.11,<3.14"
 groups = ["main"]
 files = [
-    {file = "dotmac_deployment_control-0.1.0a2-py3-none-any.whl", hash = "sha256:eea89322e0828fd827df59913092bf22874431343738b6794ed31e6c4501c852"},
-    {file = "dotmac_deployment_control-0.1.0a2.tar.gz", hash = "sha256:ca896144462a36e7d74375728abc04c745480b3789a5b83540d4de82c0c3318b"},
+    {file = "dotmac_deployment_control-0.1.0a5-py3-none-any.whl", hash = "sha256:c02804b1b9f6dab7becc21696efccdf3820de06dba50903568e2db4c966e0aec"},
+    {file = "dotmac_deployment_control-0.1.0a5.tar.gz", hash = "sha256:5883f8ead3caab1a5d93977e6f086ad0f9f2b9df3e5828b5380ea0c41d841ef8"},
 ]
 
 [package.dependencies]
@@ -1635,4 +1635,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "b2011a34ba8f3617a6ce28eab2859b83f1f3b4c0c92f3e629ba6d9a84102b74a"
+content-hash = "3a32a2c2212920100e2c5f4495070a5594fa9c1d862e4c91f3c4340b8f40481c"

@@ -75,13 +75,35 @@ dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # one supported plane set, so no `ModulePlaneSelection` is possible and none is
 # made. Its two declared prerequisites were already bound here.
 #
-# a2, not the tagged a1. a1 returns the raw unique-constraint error instead of
-# the canonical verdict when two genuinely concurrent FIRST observations race,
-# and this is the assembly that receives arrivals from deployments it does not
-# control over an at-least-once transport — the exact shape that produces the
-# race. a2 runs the receipt insert in a savepoint, keeps the loser's append-only
-# attempt and replays the winner's verdict.
-dotmac-deployment-control = { version = "0.1.0a2", source = "forgejo" }
+# a5, and the versions below it are refused rather than merely superseded.
+#
+# a1 returns the raw unique-constraint error instead of the canonical verdict
+# when two genuinely concurrent FIRST observations race, and this is the
+# assembly that receives arrivals from deployments it does not control over an
+# at-least-once transport — the exact shape that produces the race. a2 fixed
+# that with a savepointed receipt insert.
+#
+# a4 is IMMUTABLE AND UNADOPTABLE, and is refused BY NAME rather than by being
+# below a floor — "publish something higher" would say the same thing about a4
+# as about a3, and they failed different questions. a4 shipped two digest
+# encodings ten lines apart in one file (`snapshot_digest` bare hex,
+# `spec_digest` prefixed) compared with a raw `!=` in `approve_plan`, so a
+# caller using the module's own canonical form was refused with a message about
+# the plan having changed — a formatting bug wearing a tampering refusal. It
+# also reported `__version__ = "0.1.0a2"`.
+#
+# a5 fixes both: `PlanDigestV1` is a typed value rather than a string, and
+# `__version__` derives from distribution metadata, so an authorization records
+# the version it was actually issued under. This assembly is the first caller
+# positioned to hit either defect, which is why the pin moves straight to a5.
+#
+# Oracles for this pin (AGENTS.md rule 17). Pinnable — `peeled_tag`
+# `dotmac-deployment-control-v0.1.0a5`, peeled commit
+# `b182a99892067f26c0c1d03d958c5fcdc97c5869`. Published and installable —
+# `release_run` 33318227812, independently re-verified by run 33318433336. The
+# resolved artifacts in `poetry.lock` were compared against that evidence
+# before this pin was accepted: wheel `c02804b1…6e0aec`, sdist `5883f8ea…41ef8`.
+dotmac-deployment-control = { version = "0.1.0a5", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor
