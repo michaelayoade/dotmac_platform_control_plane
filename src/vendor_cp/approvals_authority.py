@@ -133,6 +133,65 @@ def digest_rejection_reason(vendor_content_hash: str) -> str | None:
     return None
 
 
+#: The reverse direction, added when the deployment issuer arrived.
+#:
+#: `translate_digest` above exists because VENDOR computes bare hex and the
+#: approvals module requires the prefixed form. Deployment Control computes the
+#: PREFIXED form already — `plan_digest_of(snapshot).canonical` — so a plan
+#: digest reaching the approvals seam is `already_prefixed`, which
+#: `digest_rejection_reason` correctly refuses.
+#:
+#: That refusal is right and stays. What was missing is the declared way IN for
+#: a value that is already canonical, and this is it. It is not a relaxation of
+#: the rule: it is the same fail-closed shape running the other way, and it is
+#: the ONLY place in this assembly that removes a `sha256:` prefix.
+#:
+#: It is emphatically not a normalizer. Deployment Control's own docstring warns
+#: that "a consumer that normalizes has forked this parser, and the fork
+#: surfaces as a false 'the plan changed'" — so the value handed BACK to that
+#: module is always the untouched original. This function's output goes only to
+#: the approvals seam.
+#: The reverse direction's vocabulary, declared SEPARATELY rather than bolted
+#: onto the tuple above. `DIGEST_REJECTION_REASONS` is the vendor -> module
+#: alphabet, and `dotmac-commercial-agreements`' backfill imports it verbatim as
+#: its own outcome set — so widening it to carry a reason only this direction
+#: can produce would have silently widened a vocabulary two other owners hold
+#: themselves to. Two directions, two alphabets, each reachable in full.
+#:
+#: `not_prefixed` is this direction's own. The remaining five are whatever the
+#: shared checker returns on the stripped remainder, and all of them are
+#: genuinely reachable: `sha256:sha256:...` produces `already_prefixed`, and a
+#: bare `sha256:` produces `empty`.
+MODULE_DIGEST_REJECTION_REASONS: Final[tuple[str, ...]] = (
+    "not_prefixed",
+    *DIGEST_REJECTION_REASONS,
+)
+
+
+def module_digest_rejection_reason(module_digest: str) -> str | None:
+    """Why this canonical digest cannot be read, or `None` when it can."""
+    if not module_digest:
+        return "empty"
+    if not module_digest.startswith(MODULE_DIGEST_PREFIX):
+        return "not_prefixed"
+    return digest_rejection_reason(module_digest[len(MODULE_DIGEST_PREFIX) :])
+
+
+def bare_content_hash(module_digest: str) -> str:
+    """`sha256:<64 lowercase hex>` -> `<64 lowercase hex>`, or raise.
+
+    Fail-closed in exactly the way `translate_digest` is: an uppercase, short or
+    unprefixed value is refused rather than repaired, because a digest that
+    needed repairing is a digest whose provenance is unknown.
+    """
+    reason = module_digest_rejection_reason(module_digest)
+    if reason is not None:
+        raise ValueError(
+            f"module digest is not translatable to a vendor content hash ({reason})"
+        )
+    return module_digest[len(MODULE_DIGEST_PREFIX) :]
+
+
 def translate_digest(vendor_content_hash: str) -> str:
     """`<64 lowercase hex>` -> `sha256:<64 lowercase hex>`, or raise.
 
@@ -169,12 +228,15 @@ __all__ = [
     "AUTHORITY",
     "COARSE_ELIGIBILITY_RULE",
     "DIGEST_REJECTION_REASONS",
+    "MODULE_DIGEST_REJECTION_REASONS",
     "EFFECTIVE_PRIVILEGE_QUERY",
     "MODULE_DIGEST_PREFIX",
     "PLATFORM_ADMIN_ROLE_ID",
     "RETIRED_LOCAL_WRITER",
     "RETIRED_WRITER_CALL_SITES",
     "VENDOR_DIGEST_LENGTH",
+    "bare_content_hash",
     "digest_rejection_reason",
+    "module_digest_rejection_reason",
     "translate_digest",
 ]

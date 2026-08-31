@@ -30,7 +30,7 @@ lifecycle — never a product's tenants, subscribers, or customer data.
 - **Product capability evidence:** Vendor config pins exact product OCI and
   manifest digests; the adapter verifies their Release Catalog association and
   derives capabilities only from held kernel-canonical document bytes.
-- **Release-evidence ingestion:** `scripts/catalogue_product_release.py` accepts
+- **Release-evidence ingestion:** `dotmac-platform release record` accepts
   one product build's exact OCI digest, source revision, canonical manifest and
   manifest digest. It holds the document content-addressably and writes through
   Release Catalog's immutable service seam using kernel-owned idempotency.

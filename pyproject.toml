@@ -6,6 +6,19 @@ authors = ["DotMac"]
 readme = "README.md"
 packages = [{ include = "vendor_cp", from = "src" }]
 
+# The installed operator surface. `dotmac-platform` is a CONSOLE SCRIPT with
+# distribution metadata behind it, not a path into a checkout: production usage
+# is `docker compose run --rm --no-deps ops dotmac-platform ...`, and
+# `dotmac-platform diagnose self --strict` proves at runtime that every module
+# it reached resolves under the interpreter's purelib/platlib.
+#
+# Nothing reads this name back out of this file. The checks that need to know
+# which console scripts are sanctioned read them from installed metadata — see
+# `vendor_cp.installed_surface.sanctioned_entry_points` — because a literal
+# would restore exactly the substring matching those checks exist to replace.
+[tool.poetry.scripts]
+dotmac-platform = "vendor_cp.cli:run"
+
 [tool.poetry.dependencies]
 python = ">=3.12,<3.14"
 # The kernel is PINNED EXACTLY to the published alpha and resolved ONLY from the
@@ -181,6 +194,14 @@ select = ["E", "F", "I", "UP", "B", "S"]
 # a query — does not hold. `tests/architecture/test_commercial_backfill.py`
 # proves the refusal, so this ignore rests on a check rather than on a comment.
 "src/vendor_cp/commercial_backfill/shadow.py" = ["S608"]
+# The Foundation passthrough executes a console script it resolved from PATH.
+# S603's premise is an argument of unknown provenance reaching an executed
+# command: the executable is a fixed console-script name (or an explicitly
+# configured override), the vector is a list so no shell parses it, and the
+# forwarded arguments are the operator's own — this command's entire purpose is
+# to hand them across UNINTERPRETED, because interpreting them would be the
+# reimplementation the delegation exists to avoid.
+"src/vendor_cp/cli/delegate.py" = ["S603", "S404"]
 # The post-rename GHCR checker shells out to `gh api`. S603's premise is an
 # argument of unknown provenance reaching an executed command; the only
 # non-constant part of the argument vector is the package name, and
@@ -199,6 +220,16 @@ select = ["E", "F", "I", "UP", "B", "S"]
 python_version = "3.12"
 strict = true
 files = ["src/vendor_cp"]
+
+# `dotmac-deployment-foundation` is deliberately NOT a dependency of this
+# assembly: pinning it would be a composition decision this repository has not
+# taken, and `vendor_cp.recovery.bundle` imports it INSIDE the function so its
+# absence is a runtime answer (`evidence.tool_absent`, exit 4) rather than a
+# collection error. The facility owns every recovery decision; nothing here
+# re-implements one.
+[[tool.mypy.overrides]]
+module = "dotmac_deployment_foundation.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

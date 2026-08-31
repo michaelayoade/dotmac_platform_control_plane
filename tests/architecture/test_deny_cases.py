@@ -130,6 +130,17 @@ def test_d1_allowlist_is_the_only_connecting_entrypoint() -> None:
     )
 
 
+#: The entry-point families a session could be opened from. `scripts/` was the
+#: only one when this guard was written; the operator surface is an INSTALLED
+#: CONSOLE SCRIPT now, so `vendor_cp/cli` is a second family and is probed as
+#: one. A guard that enumerates one directory stops covering the estate the
+#: moment the estate moves (ADR-0018).
+_ENTRYPOINT_FAMILIES = (
+    pytest.param(ENTRYPOINTS, id="scripts"),
+    pytest.param(SRC / "cli", id="console-script"),
+)
+
+
 @pytest.mark.parametrize(
     ("source", "constructor"),
     [
@@ -142,13 +153,15 @@ def test_d1_allowlist_is_the_only_connecting_entrypoint() -> None:
         ),
     ],
 )
+@pytest.mark.parametrize("family", _ENTRYPOINT_FAMILIES)
 def test_d1_session_authority_guard_covers_every_entrypoint_family(
-    source: str, constructor: str
+    source: str, constructor: str, family: Path
 ) -> None:
-    """SENSITIVITY: each forbidden constructor, in a scripts/ file, must trip
-    the guard — including the one a determined author would reach for after
-    finding `create_engine` blocked."""
-    probe = ENTRYPOINTS / "_session_authority_sensitivity.py"
+    """SENSITIVITY: each forbidden constructor, in each entry-point family, must
+    trip the guard — including the one a determined author would reach for after
+    finding `create_engine` blocked, and including the family the operator
+    surface moved into when it became an installed console script."""
+    probe = family / "_session_authority_sensitivity.py"
     probe.write_text(source, encoding="utf-8")
     try:
         bad = [

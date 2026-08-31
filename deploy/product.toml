@@ -169,8 +169,8 @@ probe = [
 [migration]
 # One composed migration owner: kernel, Vendor and every module lineage advance
 # together before the application is replaced.
-command = ["python", "scripts/migrate.py"]
-heads_command = ["python", "scripts/migrate.py", "current"]
+command = ["dotmac-platform", "admin", "migrate"]
+heads_command = ["dotmac-platform", "admin", "migrate", "--target", "current"]
 owner_material = "MIGRATION_DATABASE_URL"
 # The four heads APPLIED on the target, read from `alembic_version`. Not the
 # repository's heads — `v017` and `v018` exist in the tree and have never run.

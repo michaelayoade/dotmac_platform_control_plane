@@ -82,7 +82,7 @@ jobs:
         run: |
           docker compose -f docker-compose.test.yml up -d --wait
           MIGRATION_DATABASE_URL=postgresql+psycopg://app_admin@localhost:5439/vendor_cp_test \
-            poetry run python scripts/migrate.py
+            poetry run dotmac-platform admin migrate
       - name: Migration rehearsals + replay concurrency
         env:
           TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test
@@ -119,6 +119,63 @@ jobs:
                 assert not paths & {'/docs', '/docs/oauth2-redirect', '/redoc'}, paths; \
                 assert not policy.audit_api_documentation( \
                     app, policy.api_documentation_policy(policy.PRODUCTION))"
+      # ── Clean-install acceptance ────────────────────────────────────────
+      # Six steps, and step 3 is the one that cannot be faked. The runtime stage
+      # installs a WHEEL and copies no `src` and no `scripts`, so the repository
+      # root is not merely off the import path — it is not in the image. A
+      # canary run against a checkout passes for the wrong reason, which is
+      # exactly how `dotmac-deployment-control 0.1.0a4` shipped correct bytes
+      # with a wrong self-report and nothing noticed.
+      #
+      # The dummy DSNs are so the kernel can BUILD its engine at import; the
+      # container has no network at all, so nothing connects. Every command run
+      # here is a documented help or safe diagnostic path.
+      - name: Clean-install acceptance — no repository root, nothing from a checkout
+        run: |
+          set -euo pipefail
+          image=dotmac-vendor-control-plane:ci
+          platform() {
+            docker run --rm --network none --entrypoint dotmac-platform \
+              --env DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+              --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+              "$image" "$@"
+          }
+
+          # 3. Remove access to the repository root — structurally, by never
+          #    putting it there. Asserted rather than assumed.
+          docker run --rm --network none --entrypoint sh "$image" -c \
+            'test ! -e /app/src && test ! -e /app/scripts && test ! -e /app/pyproject.toml'
+
+          # 1 + 2. The wheel was built and installed into an empty environment:
+          #        the console script exists, and its version came from the
+          #        installer rather than from a literal in a source file.
+          platform --version
+
+          # 5 + 6. Nothing resolves outside purelib/platlib, and no mutating
+          #        owner is claimed by two commands. --strict exits 6 on either.
+          platform --format json diagnose self --strict
+          platform --format json diagnose version
+          platform --format json diagnose owners
+          platform --format json diagnose composition
+          platform --format json recovery capture-sql
+
+          # 4. Every documented command's help path, driven from the owner table
+          #    the installed artifact itself reports.
+          platform --format json diagnose owners \
+            | python3 -c 'import json,sys; [print(o["command"]) for o in json.load(sys.stdin)["data"]["owners"]]' \
+            > /tmp/commands.txt
+          test -s /tmp/commands.txt
+          while read -r group name; do
+            platform "$group" "$name" --help > /dev/null
+          done < /tmp/commands.txt
+
+          # The 3-versus-4 split has to survive the container boundary, because
+          # that is where an operator reads it. `docker run` and
+          # `docker compose run` both propagate the container's status unchanged.
+          status=0
+          platform --format json deployment foundation -- render > /dev/null || status=$?
+          test "$status" -eq 4
+
       - name: Rehearse production manifest-volume ownership
         env:
           VENDOR_APP_IMAGE: dotmac-vendor-control-plane:ci

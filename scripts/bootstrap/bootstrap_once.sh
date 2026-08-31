@@ -137,7 +137,8 @@ DUMP_SHA="sha256:$(sha256sum "${BACKUP_DIR}/bootstrap-${STAMP}.dump" | cut -d' '
 #    is NOT named here, NOT restarted, and NOT repinned. That absence is the
 #    create-only property.
 #
-docker compose -f "$COMPOSE" --profile ops run --rm --no-deps ops scripts/migrate.py
+docker compose -f "$COMPOSE" --profile ops run --rm --no-deps ops \
+    dotmac-platform admin migrate
 
 # 8. Prove the authority now exists and the application was left alone.
 HEADS="$(docker compose -f "$COMPOSE" exec -T db \
