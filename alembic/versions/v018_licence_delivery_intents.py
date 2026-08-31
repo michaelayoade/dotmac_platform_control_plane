@@ -13,8 +13,9 @@ surface that SURVIVES the cutover, alongside the immutable artifact read. Adding
 it is the replacement landing, not the estate growing.
 
 Nothing here counts attempts, holds a lease, records a checkpoint or names a
-connection. Those are `dotmac-integration`'s (ADR-0024, hard rule 28), and
-rebuilding one here under a newer name is the specific mistake this table's
+connection. Those are `dotmac-integration`'s (`dotmac_starter_mt` ADR-0024,
+hard rule 28), and rebuilding one here under a newer name is the specific
+mistake this table's
 shape is designed to make obvious.
 
 Revision ID: v018_licence_delivery_intents

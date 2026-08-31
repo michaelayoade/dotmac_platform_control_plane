@@ -19,7 +19,7 @@ is elaborate work producing no information.
 A commercial backfill is the other case. Vendor's commercial estate is offer
 versions and agreement lines, and moving them to a Subscriptions/Billing target
 is a cutover WITH data — the shape ADR-0006 § "What is deliberately NOT built"
-names as somebody else's problem, and `AGENTS.md` rule 12 points at ADR-0031's
+names as somebody else's problem, and `AGENTS.md` rule 12 points at `dotmac_starter_mt` ADR-0031's
 protocol for.
 
 `docs/cutover-readiness.md` is an aggregate readiness statement: what the
@@ -122,7 +122,7 @@ kind, because this repository cannot observe it.
 composes a target module or moves a writer. The incumbent writer keeps its
 authority.
 
-**It does not build sealed legacy evidence or synthesized records.** ADR-0031
+**It does not build sealed legacy evidence or synthesized records.** `dotmac_starter_mt` ADR-0031
 governs a cutover with data and this is the contracting step before one, not the
 execution of one.
 
@@ -138,8 +138,8 @@ so it needs privileges, an owner and a retirement plan of its own — a cutover
 that acquires an extra authority on the way to moving one. And it makes the dry
 run **not dry**: a plan that has already reserved identifiers is a partial
 backfill wearing a report's clothes, and the first failure leaves state nobody
-planned for. Nothing is reserved before the effect (ADR-0014's shape, applied to
-a planner).
+planned for. Nothing is reserved before the effect — `dotmac_starter_mt` ADR-0014's
+shape, at-most-once execution, applied to a planner.
 
 ## Lifecycle
 

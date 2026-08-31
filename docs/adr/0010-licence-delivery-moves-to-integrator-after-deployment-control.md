@@ -11,11 +11,12 @@ database cutover with a cross-application transport migration. It therefore
 retains five Vendor delivery/evidence tables and the local logging/offline
 delivery paths temporarily.
 
-That retention is not the final owner assignment. Fleet ADR-0024 gives
-`dotmac-integration` the installation, binding, secret-reference, inbox/outbox,
-delivery-attempt, retry, checkpoint, health and repair engine, run by the
-independently deployed `dotmac_integrator` thin assembly. Connector plugins own
-wire translation and I/O. Products do not maintain a second transport ledger.
+That retention is not the final owner assignment. `dotmac_starter_mt` ADR-0024
+gives `dotmac-integration` the installation, binding, secret-reference,
+inbox/outbox, delivery-attempt, retry, checkpoint, health and repair engine, run
+by the independently deployed `dotmac_integrator` thin assembly. Connector
+plugins own wire translation and I/O. Products do not maintain a second
+transport ledger.
 
 Licence delivery also needs an authoritative destination. The local
 `licence_delivery_targets` table is deliberately only a narrow projection; it

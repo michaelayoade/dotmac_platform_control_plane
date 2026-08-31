@@ -29,7 +29,7 @@ Move the authority in one forward migration
 
 1. **Empty is the premise, and it is CHECKED.** The migration locks both legacy
    tables, counts them, and raises if either holds a row — in which case nothing
-   happens: no grant, no drop. The error names ADR-0031's protocol as what a
+   happens: no grant, no drop. The error names `dotmac_starter_mt` ADR-0031's protocol as what a
    populated estate would need instead.
 2. **`ACCESS EXCLUSIVE`, taken once and up front**, because the same migration
    DROPs those tables and `DROP TABLE` takes that lock. Escalating from `SHARE`
@@ -80,7 +80,7 @@ Move the authority in one forward migration
 Against an empty estate, each is machinery producing no information that would
 still have to be maintained and believed: **parity comparison** (nothing to
 compare), **backfill** (nothing to migrate), **synthetic records** (no history to
-represent), **sealed legacy evidence** (ADR-0031 is the standard for a cutover
+represent), **sealed legacy evidence** (`dotmac_starter_mt` ADR-0031 is the standard for a cutover
 WITH data; this is not one, and sealing an empty set produces a digest of nothing
 that later reads as proof of something).
 
@@ -108,7 +108,7 @@ Four reasons, applying to both:
 2. **`b76f5fa` preserves them** — artifacts, tests and review history — as
    immutable historical reference evidence. Retirement removes them from the
    working tree, not from the record.
-3. **A later cutover implements locally**, from ADR-0031's protocol and that
+3. **A later cutover implements locally**, from `dotmac_starter_mt` ADR-0031's protocol and that
    product's own CURRENT inventory, rather than resurrecting code whose shape was
    determined by a schema and consumers that no longer exist.
 4. **The extraction bar is unchanged: two CURRENT consumers.** That Vendor once
@@ -116,7 +116,7 @@ Four reasons, applying to both:
 
 The exemption earns an extra sentence. It was REMOVED rather than lowered,
 because an exemption whose premise has evaporated is worse than none: it keeps
-widening a gate for facts nobody has examined (ADR-0018). The composed audit now
+widening a gate for facts nobody has examined (`dotmac_starter_mt` ADR-0018). The composed audit now
 consumes the kernel gate raw, which is strictly stronger than subtracting two
 declared waivers, and a guard fails the build if a subtraction helper returns.
 `test_stale_claims.py` gained matching coverage — it now fails if a document

@@ -1,4 +1,4 @@
-"""The ADR-0028 proof, now that a selectable module is actually composed.
+"""The `dotmac_starter_mt` ADR-0028 proof, with a selectable module composed.
 
 The contract PR could assert only half of this and said so: the four-fact proof
 needs a SELECTABLE module, and none was composed then. `dotmac-approvals` is, so

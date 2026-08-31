@@ -22,7 +22,7 @@ it owns and — just as importantly — what it must never become.
   `tests/architecture/test_platform_audit_actions.py`. The a74–a77 releases
   themselves add only the four published module namespace allocations used by
   the cutovers sequenced in ADR-0007.
-- **Two composition declarations, deliberately separate** (ADR-0028). Both are
+- **Two composition declarations, deliberately separate** (`dotmac_starter_mt` ADR-0028). Both are
   checked in at `src/vendor_cp/migration_bindings.py` and both are installed
   from `alembic/env.py` before Alembic builds the revision map:
 
@@ -54,7 +54,7 @@ it owns and — just as importantly — what it must never become.
   `DOTMAC_MODULE_PLANE_SELECTIONS`, so `alembic heads|history|show` — which
   never run `env.py` — inspect the same graph an upgrade applies.
 
-  `tests/migration/test_selected_planes.py` proves the half of ADR-0028 that is
+  `tests/migration/test_selected_planes.py` proves the half of `dotmac_starter_mt` ADR-0028 that is
   assertable without a selectable module — the catalogue exists, is bound, and
   no module schema holds a tenant-scoped table — and says plainly that the full
   four-fact proof (platform tables built, tenant tables absent, *because of the
@@ -95,7 +95,7 @@ it owns and — just as importantly — what it must never become.
   queried `approval_policies` / `approval_records`, which `v013` drops, so
   retaining them would preserve the appearance of a reference implementation
   rather than one. They remain readable at `c3a0d1b`; a later cutover implements
-  locally from ADR-0031's protocol and its own current inventory, and the
+  locally from `dotmac_starter_mt` ADR-0031's protocol and its own current inventory, and the
   extraction bar is unchanged at two CURRENT consumers. See ADR-0005 § "Retired
   artifacts".
 
@@ -124,7 +124,7 @@ it owns and — just as importantly — what it must never become.
   NOT NULL` plus FORCEd RLS — while its migration built platform-shaped tables.
   The declaration and the database disagreed, and nothing here looked because
   nothing audited the live catalogue. a4 moves them to `platform_tables`
-  (ADR-0023), which is what makes the declaration true.
+  (`dotmac_starter_mt` ADR-0023), which is what makes the declaration true.
 - `dotmac-entitlement-allocation==0.1.0a6` is the allocation authority under
   ADR-0006. Its manifest and public lineage are composed, `v014` retired the
   empty legacy tables and local writer, and Vendor retains one typed adapter.
@@ -239,7 +239,7 @@ outbox event.
 **The shadow-overlap exemption is gone.** It waived two host-squatter violations
 while the legacy tables shadowed `mod_ealloc`; `v014` dropped those tables, so
 its premise evaporated and it was REMOVED rather than lowered — an exemption
-describing nothing silently widens what the gate permits (ADR-0018). The composed
+describing nothing silently widens what the gate permits (`dotmac_starter_mt` ADR-0018). The composed
 audit now consumes the kernel gate with no subtraction, which is strictly
 stronger, and a guard fails the build if a subtraction helper returns.
 
@@ -247,7 +247,7 @@ stronger, and a guard fails the build if a subtraction helper returns.
 preflight (`allocations/preflight.py` and its test), which audited legacy rows
 for a sealed cutover that is not happening and read tables that no longer exist;
 and `shadow_overlaps.py` with its architecture test. Both remain readable at
-`b76f5fa`. A later cutover implements locally from ADR-0031's protocol and its
+`b76f5fa`. A later cutover implements locally from `dotmac_starter_mt` ADR-0031's protocol and its
 own current inventory, and the extraction bar is unchanged at two CURRENT
 consumers.
 

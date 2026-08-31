@@ -355,7 +355,7 @@ and this census does not upgrade them by repeating them.
 `platform_approval_decisions`, and no tenant-plane approval table exists.
 
 The other four are ATOMIC. Their manifests declare `tables=()` and a populated
-`platform_tables`, which is the ADR-0023 declaration; a `ModulePlaneSelection`
+`platform_tables`, which is the `dotmac_starter_mt` ADR-0023 declaration; a `ModulePlaneSelection`
 is not merely unnecessary for them, it is refused, because
 `validate_module_plane_selections` rejects a selection for a module supporting
 one plane set. So "explicit `ModulePlaneSelection.PLATFORM`" is satisfied for

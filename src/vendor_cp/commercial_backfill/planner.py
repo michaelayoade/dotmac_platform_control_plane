@@ -26,9 +26,10 @@ backfill that had already run, and its output could not honour the no-emission
 constraint without stripping the values it had just computed.
 
 **No writes, no staging table, no reserved identifiers.** Nothing is reserved
-before the effect (ADR-0014's shape, applied to a planner): a plan that had
-already claimed target identifiers would be a partial backfill wearing a report's
-clothes.
+before the effect (`dotmac_starter_mt` ADR-0014's shape — at-most-once
+execution, not this repository's ADR-0014 — applied to a planner): a plan that
+had already claimed target identifiers would be a partial backfill wearing a
+report's clothes.
 """
 
 from __future__ import annotations

@@ -134,7 +134,7 @@ def test_d1_allowlist_is_the_only_connecting_entrypoint() -> None:
 #: only one when this guard was written; the operator surface is an INSTALLED
 #: CONSOLE SCRIPT now, so `vendor_cp/cli` is a second family and is probed as
 #: one. A guard that enumerates one directory stops covering the estate the
-#: moment the estate moves (ADR-0018).
+#: moment the estate moves (`dotmac_starter_mt` ADR-0018).
 _ENTRYPOINT_FAMILIES = (
     pytest.param(ENTRYPOINTS, id="scripts"),
     pytest.param(SRC / "cli", id="console-script"),
