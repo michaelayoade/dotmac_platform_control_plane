@@ -9,8 +9,8 @@ not against production and not by CI's fresh-database run.
 
 ## What was actually applied
 
-Three lineages and the kernel jump, in one composed run, onto populated
-production data:
+Six revisions advanced across three of the eight composed lineages, plus the
+kernel jump, in one run onto populated production data:
 
 ```
                        -> dc_0001_deployment_control      (creates mod_deploy)
