@@ -173,6 +173,15 @@ of the surface, and it is one of the two features production withholds.
 
 ### Profile-to-surface matrix
 
+> **Measured state, since acted on.** This section records the profiles as they
+> stood at the revision this census pins. ADR-0015 read the `provisioning` row
+> below — a production profile publishing four routes whose only implementation
+> is a simulation — and corrected it: `production-bootstrap` became version 3
+> and withholds `provisioning`, `full` became version 2 and declares itself a
+> laboratory, `production-composed-v1` was added, and `WITHHOLDABLE_SURFACES`
+> grew to cover the operator write surfaces. The measurement below is not
+> amended; it is what prompted the change.
+
 Two profiles are declared, four surfaces are withholdable, and one profile
 withholds anything. `WITHHOLDABLE_SURFACES` is
 `{licence_delivery, offers, provisioning, console}`; a profile naming anything

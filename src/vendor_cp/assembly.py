@@ -29,6 +29,7 @@ from vendor_cp.contracts.feature import feature as contracts_feature
 from vendor_cp.deployment_profile import (
     VendorDeploymentProfile,
     load_deployment_profile,
+    validate_profile_for_environment,
 )
 from vendor_cp.licensing.feature import feature as licensing_feature
 from vendor_cp.licensing.signing_adapter import install_runtime_licence_signers
@@ -43,6 +44,9 @@ ASSEMBLY_NAME = "dotmac-vendor-control-plane"
 # a migration lineage and a schema this database already contains: withholding
 # one would leave the assembly no longer describing its own tables, and the
 # composed live-catalogue audit would be walking schemas nobody declared.
+# `test_deployment_profile.py` derives its assertion from this tuple and proves
+# both halves per profile: the manifest is still registered, and the lineage's
+# head revision is still reachable in the composed revision graph.
 STATEFUL_MODULES = (
     release_catalog_module,
     entitlement_allocation_module,
@@ -118,18 +122,33 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
     `vendor_cp.deployment_profile`). It selects which vendor surfaces are
     mounted and nothing else — no behaviour, no persistence, no decision. Tests
     pass one explicitly; the process reads it from the environment.
+
+    Two refusals guard the production boot and they are separate checks:
+    `validate_runtime_configuration` rejects a production-unsafe MODE, and
+    `validate_profile_for_environment` rejects a production-unsafe SURFACE SET
+    — chiefly a profile mounting the simulated provisioning laboratory, and an
+    absent profile that would otherwise inherit the `full` fallback (ADR-0015).
     """
-    validate_runtime_configuration(
-        vendor_settings,
-        environment=os.getenv("ENVIRONMENT", "development"),
+    environment = os.getenv("ENVIRONMENT", "development")
+    validate_runtime_configuration(vendor_settings, environment=environment)
+
+    effective = (
+        profile
+        if profile is not None
+        else load_deployment_profile(environment=environment)
     )
+    # The surface half of the boot refusal, and it runs BEFORE key custody is
+    # installed: a production process composing the provisioning laboratory
+    # must not get as far as holding a signing key. ADR-0015.
+    validate_profile_for_environment(
+        effective, environment=environment, provider_mode=vendor_settings.provider_mode
+    )
+
     # Key custody is a boot dependency, not a first-issuance surprise. The
     # installed signer objects hold their key material for this process — and
     # deliberately still do under a profile that withholds the licensing
     # ROUTES, because a withheld surface is not a disabled subsystem.
     install_runtime_licence_signers(vendor_settings)
-
-    effective = profile if profile is not None else load_deployment_profile()
 
     return ProductAssemblySpec(
         name=ASSEMBLY_NAME,

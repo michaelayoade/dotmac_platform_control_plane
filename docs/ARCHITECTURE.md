@@ -307,14 +307,36 @@ test fails the build if a second module imports the loader, because ADR-0003
 forbids feature code branching on a profile name.
 
 `production-bootstrap` (required by `scripts/deploy_production.sh` in the host
-env file) composes and runs everything and simply does not mount the `licensing`
-and `offers` routers. Licensing's issuer is composed; Vendor still owns its
-route adapter, key custody and delivery. A withheld surface is not a disabled
-subsystem: licence key custody still loads at boot, and a test asserts it.
+env file) composes and runs everything and does not mount the `licence_delivery`,
+`offers` or `provisioning` routers. Licensing's issuer is composed; Vendor still
+owns its route adapter, key custody and delivery. A withheld surface is not a
+disabled subsystem: licence key custody still loads at boot, and a test asserts
+it.
 
-A profile may never withhold a persistence owner. All five stateful module
-manifests carry a migration lineage and own schemas the database already
-contains, so an assembly missing one would no longer describe its own tables.
+`production-composed-v1` is the target composition (ADR-0015): the platform-admin
+console, the read-only allocation view and the declarations-only release-evidence
+feature, and nothing else. It is DECLARED but not adopted — the deploy script
+still pins `production-bootstrap`. The console is listed as an ACCEPTED surface
+because ADR-0014 gave it a single browser authentication owner; it is not yet a
+USABLE one, since the assembly declares no form-parsing library and
+`POST /platform/login` cannot read its own form. Adoption additionally requires
+that login path and an explicit operator action (ADR-0015 § 6).
+
+Two production refusals live in the profile module and are separate checks. A
+profile that mounts `provisioning` while `VENDOR_PROVIDER_MODE=fake` is refused
+at boot, because the laboratory is the only provisioning implementation that
+exists and it answers operators with fabricated plans and applies. And a
+production environment with no configured profile is refused rather than
+inheriting `full`, which would publish every withheld surface including that
+laboratory.
+
+A profile may never withhold a persistence owner. Every stateful module manifest
+carries a migration lineage and owns schemas the database already contains, so
+an assembly missing one would no longer describe its own tables. The guard is
+derived from `assembly.STATEFUL_MODULES` and proves both halves per profile: the
+manifest is still registered in a `ModuleRegistry` built from that profile's
+spec, and the lineage's head revision still resolves in the composed Alembic
+graph under the branch label the surviving manifest declares.
 
 ## Production topology
 

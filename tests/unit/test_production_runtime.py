@@ -1,4 +1,13 @@
-"""Production boot refuses disposable identity and unreadable key custody."""
+"""Production boot refuses disposable identity and unreadable key custody.
+
+Every test here now declares `VENDOR_DEPLOYMENT_PROFILE` explicitly, because
+production no longer has a default. `load_deployment_profile` used to fall back
+to `full` everywhere, so these tests reached key custody without ever naming a
+profile; ADR-0015 made an absent profile a production refusal, and a test that
+kept relying on the fallback would be asserting against a boot that cannot
+happen. The refusal itself is proved in
+`tests/architecture/test_deployment_profile.py`.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from vendor_cp import assembly
 from vendor_cp.config import ProductionConfigurationError, VendorSettings
+from vendor_cp.deployment_profile import PRODUCTION_BOOTSTRAP, PROFILE_ENV_VAR
 from vendor_cp.licensing import signing_adapter as signer_module
 
 
@@ -45,6 +55,7 @@ def test_production_refuses_an_ephemeral_issuer_before_composition(
 def test_production_loads_the_configured_key_during_boot(tmp_path, monkeypatch) -> None:
     missing = str(tmp_path / "missing.key")
     monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv(PROFILE_ENV_VAR, PRODUCTION_BOOTSTRAP)
     monkeypatch.setattr(assembly, "vendor_settings", _configured_settings(missing))
 
     with pytest.raises(signer_module.SigningKeyUnavailableError, match=missing):
@@ -55,9 +66,14 @@ def test_runtime_holds_the_key_loaded_at_boot(tmp_path, monkeypatch) -> None:
     key_file = _write_key(tmp_path)
     settings = _configured_settings(key_file)
     monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv(PROFILE_ENV_VAR, PRODUCTION_BOOTSTRAP)
     monkeypatch.setattr(assembly, "vendor_settings", settings)
 
-    assembly.build_spec()
+    # The ACCEPTED direction of the production surface policy at the real boot
+    # entry point: a declared, production-accepted profile that withholds the
+    # provisioning laboratory composes without a refusal.
+    spec = assembly.build_spec()
+    assert spec.name == assembly.ASSEMBLY_NAME
     boot_signer = signer_module.runtime_licence_signers()[0]
     (tmp_path / "primary.key").unlink()
 
