@@ -113,7 +113,8 @@ cd "$DEPLOY_DIR"
 #    database ownership, so nothing upstream catches it.
 OWNER="$(docker compose -f "$COMPOSE" exec -T db \
   psql -U app_admin -d vendor_control_plane -tAc \
-  'select pg_get_userbyid(datdba)' | tr -d '[:space:]')"
+  'select pg_get_userbyid(datdba) from pg_database where datname = current_database()' \
+  | tr -d '[:space:]')"
 [ "$OWNER" = "app_admin" ] || die "database owner is ${OWNER}, expected app_admin"
 
 # 6. Backup WITH cluster globals. A database-only dump restores into something
