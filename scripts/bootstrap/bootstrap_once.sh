@@ -70,6 +70,21 @@ done
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RECEIPT"; } 2>/dev/null \
   || die "could not claim ${RECEIPT} - it already exists and this bootstrap is single-use"
 
+# 3a. Compose interpolation, before the FIRST `docker compose` call.
+#
+#     Every compose invocation below — including the read-only ownership check —
+#     parses the whole file, and the `db` service interpolates a bootstrap
+#     password at parse time even though the already-running database never
+#     consumes it. Exporting this later than the first compose call is exactly
+#     the bug that aborted the first authorized attempt: the launcher died on
+#     the ownership gate having mutated nothing, but having already taken its
+#     single-use claim.
+#
+#     The value is ephemeral, generated per run, never stored and never read by
+#     anything: the database it nominally belongs to was initialised long ago.
+VENDOR_DB_BOOTSTRAP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export VENDOR_DB_BOOTSTRAP_PASSWORD
+
 # 4. Image identity: BOTH the transferred id and the layer chain, plus the
 #    revision label. `docker save`/`load` does not preserve the manifest digest,
 #    so the chain is what survives the transfer and the registry digest is what
@@ -113,11 +128,6 @@ DUMP_SHA="sha256:$(sha256sum "${BACKUP_DIR}/bootstrap-${STAMP}.dump" | cut -d' '
 #    is NOT named here, NOT restarted, and NOT repinned. That absence is the
 #    create-only property.
 #
-#    The compose file interpolates a bootstrap password for the `db` service at
-#    parse time even though the already-running database never consumes it, so
-#    an ephemeral value is generated per run and never stored.
-VENDOR_DB_BOOTSTRAP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
-export VENDOR_DB_BOOTSTRAP_PASSWORD
 export VENDOR_APP_IMAGE="$IMAGE_ID"
 
 docker compose -f "$COMPOSE" --profile ops run --rm --no-deps ops scripts/migrate.py
