@@ -209,6 +209,27 @@ def test_image_smokes_use_the_production_database_dialect() -> None:
         assert "PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@" in workflow
 
 
+def test_image_smokes_prove_the_built_bytes_publish_no_api_documentation() -> None:
+    """The route inventory is checked on the ARTIFACT, not only in the suite.
+
+    The smoke passes no `ENVIRONMENT`, which is exactly the point:
+    `classify_environment` fails closed, so an image with no declared
+    environment resolves the PRODUCTION policy — and the assertion below then
+    proves the image it just built serves neither browser documentation page and
+    satisfies the production gate. A unit test proves the source is right; this
+    proves the thing that gets deployed is (ADR-0014).
+    """
+    for path in (
+        ".github/workflows/ci.yml",
+        ".github/workflows/production-image.yml",
+    ):
+        workflow = _text(path)
+        assert "import vendor_cp.api_documentation as policy" in workflow
+        assert "policy.classify_environment(None) == policy.PRODUCTION" in workflow
+        assert "'/docs', '/docs/oauth2-redirect', '/redoc'" in workflow
+        assert "policy.audit_api_documentation(" in workflow
+
+
 def test_every_test_job_runs_on_a_github_hosted_runner() -> None:
     workflow = _text(".github/workflows/ci.yml")
 
