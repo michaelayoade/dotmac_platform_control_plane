@@ -64,9 +64,20 @@ differs, and both differences run the same way — towards withholding a surface
   without the exact `ENVIRONMENT=production` line and the Makefile has no
   run-the-server target — so the strict reading costs nothing today and holds if
   that changes.
-* `Settings.is_production` treats anything outside `{"prod", "production"}` as
-  non-production, so it calls `staging` a development host. This module does
-  not.
+* `deployment_profile.is_production_environment` (ADR-0015) is exact equality
+  with `"production"`, and `Settings.is_production` accepts `{"prod",
+  "production"}`. Both call `staging` and an unset value non-production.
+
+**Do not unify these into one function.** They answer different questions and
+each fails safe for its OWN question. ADR-0015 asks "is this the production
+host?" in order to REFUSE a composition — answering yes too eagerly would break
+a developer's boot, so it is opt-in to production by exact name. This module
+asks "may this host publish its API?" — answering yes too eagerly leaks the API,
+so it is opt-in to PUBLISHING by exact name and everything else is production.
+Collapsing them would take whichever answer the caller happened to write first
+and silently loosen the other. `test_the_two_environment_readings_disagree_only
+_towards_withholding` holds the two side by side and requires the disagreement
+to run that way.
 
 ## Kernel obligation
 

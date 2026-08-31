@@ -47,6 +47,15 @@ from vendor_cp.api_documentation import (
     install_api_documentation_policy,
 )
 from vendor_cp.assembly import build_spec
+from vendor_cp.deployment_profile import is_production_environment
+
+#: Every raw `ENVIRONMENT` spelling that is allowed to publish documentation,
+#: written out HERE rather than imported from the module under test. Importing
+#: the module's own sets would make the assertion agree with whatever they say;
+#: this way, adding `staging` to them fails the build.
+PUBLISHING_SPELLINGS = frozenset(
+    {"dev", "development", "local", "test", "testing", "ci"}
+)
 
 #: The three paths named in the defect, plus the Swagger OAuth2 redirect FastAPI
 #: mounts alongside `/docs` — omitting it would leave a documentation route the
@@ -337,6 +346,42 @@ def test_the_strict_reading_of_environment_diverges_only_towards_withholding() -
         assert policy.environment == PRODUCTION
         assert policy.interactive is DocumentationExposure.DISABLED
         assert policy.document is not DocumentationExposure.PUBLIC
+
+
+def test_the_two_environment_readings_disagree_only_towards_withholding() -> None:
+    """This assembly now has TWO environment readings. Keep them apart, on purpose.
+
+    `deployment_profile.is_production_environment` (ADR-0015) is exact equality
+    with `"production"`: opt-in to production by name, so it calls `staging`,
+    `prod` and an unset value NON-production. This module is the mirror image:
+    opt-in to PUBLISHING by name, so it calls all three production.
+
+    Each fails safe for its own question — ADR-0015 refuses a composition and
+    must not break a developer's boot; this one publishes an API and must not
+    leak it. Unifying them would take whichever answer was written first and
+    silently loosen the other, so the disagreement is asserted rather than left
+    to be noticed and "cleaned up".
+    """
+    candidates = ("", "   ", "staging", "prod", "Production", "prodction", "ci")
+
+    # Non-vacuity: the two must genuinely differ somewhere, or one of them has
+    # been quietly redefined and everything below is asserting nothing.
+    assert [
+        raw
+        for raw in candidates
+        if is_production_environment(raw)
+        is not (classify_environment(raw) == PRODUCTION)
+    ]
+
+    # The direction, stated over EVERY candidate rather than only the ones that
+    # currently disagree: anything this module lets publish must be a DECLARED
+    # publishing spelling. A future edit that made `staging` or a blank value
+    # publish would fail here even if it removed the disagreement entirely.
+    for raw in candidates:
+        resolved = classify_environment(raw)
+        if resolved != PRODUCTION:
+            assert resolved in (DEVELOPMENT, TEST), raw
+            assert raw.strip().lower() in PUBLISHING_SPELLINGS, raw
 
 
 def test_every_declared_environment_has_a_policy() -> None:

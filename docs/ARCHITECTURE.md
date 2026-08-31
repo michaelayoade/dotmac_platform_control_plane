@@ -347,6 +347,12 @@ Compose project and from every product data plane:
 - a GitHub-hosted workflow builds the application once, publishes it to GHCR,
   and emits the immutable registry digest; the production host only pulls;
 - nginx terminates TLS and proxies to the loopback-only application port;
+- the APPLICATION, not the vhost, decides which API-documentation paths are
+  served. `/docs` and `/redoc` do not exist under the production policy and
+  `/openapi.json` answers only a platform-admin bearer token. The vhost still
+  proxies `/` wholesale on purpose: a deployment artifact cannot be the
+  authority for an application's route inventory, and the loopback port above
+  is reachable with no vhost in front of it at all (ADR-0016);
 - container and deploy health probes call the loopback endpoint with the
   canonical `vendor.dotmac.io` host identity; trusted-host rejection remains
   active for raw IP host headers;
