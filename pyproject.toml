@@ -134,6 +134,17 @@ psycopg = { version = "^3.2", extras = ["binary"] }
 # lineage (dotmac_kernel.migrations.versions_dir) at deploy time.
 alembic = "^1.13"
 
+# Starlette's form parser. NOT optional and not a convenience: `request.form()`
+# asserts this library is installed BEFORE it inspects the content type, so
+# without it `platform_web.login_submit` and `require_csrf`'s header-absent
+# fallback both raise unconditionally — the platform console is reachable BY a
+# session and there is no way to obtain one. The kernel ships no form parser
+# deliberately; parsing a form is an assembly concern.
+#
+# Pinned EXACTLY, like every other dependency here. A mutable version reference
+# in a control plane is the same defect as a mutable image tag.
+python-multipart = "0.0.20"
+
 # Public Dotmac packages resolve from Forgejo; everything else from PyPI. Marked
 # `explicit` so ONLY named Dotmac packages are pulled from here (no
 # dependency-confusion aggregation of public names).
