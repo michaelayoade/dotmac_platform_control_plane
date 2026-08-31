@@ -96,9 +96,9 @@ def test_the_launcher_reaches_no_secret_store() -> None:
         if not line.strip().startswith("#")
     )
     for forbidden in ("bao ", "vault ", "openbao"):
-        assert forbidden not in executable, (
-            f"the launcher reaches a secret store: {forbidden!r}"
-        )
+        assert (
+            forbidden not in executable
+        ), f"the launcher reaches a secret store: {forbidden!r}"
 
 
 def test_the_retirement_condition_is_recorded_and_not_self_certified() -> None:
