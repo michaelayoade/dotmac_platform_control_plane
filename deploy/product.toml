@@ -63,11 +63,16 @@ environment = "production"
 
 [assembly]
 manifest_path = "deploy/product-manifest.json"
-# Shape-checked here, value-checked by the drift command against a running
-# deployment. `dotmac-deploy` does not yet generate the manifest from the real
-# ProductAssemblySpec, and a fabricated digest would be worse than a declared
-# placeholder: it would compare equal to nothing and look like it had.
-manifest_digest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+# The REAL digest of the committed manifest, generated from the composed
+# ProductAssemblySpec by `scripts/generate_product_manifest.py` and kept in sync
+# by `tests/architecture/test_product_manifest.py`.
+#
+# It was the all-zero placeholder until 2026-08-31. That value is a
+# syntactically perfect digest naming nothing, so the descriptor parsed and any
+# gate checking only parsing reported green — while `dotmac-deploy drift` could
+# not tell an approved module set from any other. A production descriptor may
+# carry no placeholder.
+manifest_digest = "sha256:e7c997c46903db23ab27976942a91e3e47b494907484377d8eceb1855886ac32"
 
 [image]
 # The digest RUNNING on the target, read from the container rather than from a
