@@ -331,6 +331,6 @@ disagree, fix the drift.
     The gate reads the LIVE route inventory rather than the source, and its
     sensitivity case is the one that matters: FastAPI's default configuration,
     planted on a bare app AND on this assembly's own `create_app(build_spec())`,
-    must FAIL the production gate (ADR-0014;
+    must FAIL the production gate (ADR-0016;
     `tests/unit/test_api_documentation_policy.py`,
     `tests/architecture/test_api_documentation_ingress.py`).

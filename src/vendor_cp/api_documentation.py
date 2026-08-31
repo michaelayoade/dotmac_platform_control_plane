@@ -72,7 +72,7 @@ differs, and both differences run the same way — towards withholding a surface
 
 This module is the CONSUMER half of a contract the kernel should own. Every
 assembly over `dotmac_kernel.create_app` inherits the same default and would have
-to write this file again. `docs/adr/0014-api-documentation-exposure-policy.md`
+to write this file again. `docs/adr/0016-api-documentation-exposure-policy.md`
 records the exact `ProductAssemblySpec` surface requested from the kernel, and
 the deletion this module becomes once it exists. Until then the policy is applied
 by `vendor_cp.main` immediately after `create_app`, which is the "deleting

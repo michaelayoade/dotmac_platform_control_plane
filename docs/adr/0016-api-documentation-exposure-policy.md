@@ -1,4 +1,4 @@
-# ADR-0014: API documentation exposure is a declared assembly policy, not a FastAPI default
+# ADR-0016: API documentation exposure is a declared assembly policy, not a FastAPI default
 
 - **Status:** ACCEPTED 2026-08-31 by Michael Ayoade, the owner and only approver.
   **Acceptance is not deployment.** The application half is merged here; § 6
@@ -6,8 +6,10 @@
 - **Date:** 2026-08-31 proposed, 2026-08-31 accepted
 - **Owner:** Michael Ayoade
 - **Relates to:** ADR-0003 (a deployment profile selects surfaces and nothing
-  else), ADR-0018 in `dotmac_governance` (a guard exemption states an enforceable
-  premise)
+  else), ADR-0014 (the console has one browser authentication owner — the plane
+  rule in § 3 is the same rule, applied to a surface FastAPI mounts for free),
+  ADR-0015 (a production profile publishes no simulation), ADR-0018 in
+  `dotmac_governance` (a guard exemption states an enforceable premise)
 
 ## 1. Context — the defect
 
@@ -134,25 +136,72 @@ establishes the precedent: the kernel's own comment says a product surface
 decision "must not require deleting FastAPI routes after the factory has
 validated them", which is precisely what `vendor_cp.main` now does.
 
-The requested kernel surface, stated exactly:
+The requested kernel surface, stated exactly. The defect in the kernel is one
+line — `dotmac_kernel/app_factory.py` builds `FastAPI(title=spec.name,
+lifespan=lifespan)` and passes none of the four suppression arguments.
 
-1. `dotmac_kernel.api_documentation` (a new supported module, importable without
-   a database) exporting `DocumentationPlane`, `DocumentationExposure`,
-   `ApiDocumentationPolicy`, `documentation_routes` and
-   `audit_api_documentation` with the semantics above.
-2. `ProductAssemblySpec.api_documentation: ApiDocumentationPolicy | None = None`.
-   `None` must NOT mean "FastAPI's default" — that is the defect. It means the
-   assembly has not declared one, and `create_app` refuses to build in that case
-   the same way an unbound prerequisite refuses.
-3. `create_app` passes the resolved paths to the `FastAPI(...)` constructor
-   rather than removing routes afterwards, so the documentation routes are never
-   mounted at all under `DISABLED`, and mounts the `PLATFORM_BEARER` document
-   behind `require_platform_admin`.
-4. The environment an assembly declares is `Settings.environment`, already read
-   from `ENVIRONMENT`. The kernel classifies it fail-closed — publishing is
-   opt-in by name — which is a narrowing of `Settings.is_production` and must be
-   introduced as such rather than by changing that property.
-5. The kernel's own architecture suite carries the planted-default case from § 5.
+**1. A new supported module `dotmac_kernel.api_documentation`** — pure
+configuration, importable without `DATABASE_URL` (the same class as
+`web_surfaces`), added to `SUPPORTED_MODULES` and the top-level `__all__`:
+
+```python
+class DocumentationPlane(StrEnum):
+    INTERACTIVE = "interactive"   # /docs, /docs/oauth2-redirect, /redoc
+    DOCUMENT = "document"         # /openapi.json
+
+class DocumentationExposure(StrEnum):
+    DISABLED = "disabled"                # the route does not exist
+    PUBLIC = "public"
+    PLATFORM_BEARER = "platform-bearer"  # behind require_platform_admin
+
+@dataclass(frozen=True, slots=True)
+class ApiDocumentationPolicy:
+    environment: str
+    interactive: DocumentationExposure
+    document: DocumentationExposure
+    rationale: str
+    def exposure(self, plane: DocumentationPlane) -> DocumentationExposure: ...
+
+def documentation_routes(app) -> tuple[DocumentationRoute, ...]: ...
+def audit_api_documentation(app, policy) -> tuple[str, ...]: ...  # () == satisfied
+```
+
+Four construction refusals, all load-bearing: `interactive is PLATFORM_BEARER`
+(§ 3 — this is the plane rule and the reason the type exists at all);
+`production` with any `PUBLIC`; `interactive is PUBLIC` without
+`document is PUBLIC`; an empty rationale.
+
+`documentation_routes` must locate routes by PATH — the union of FastAPI's four
+defaults and the app's current attribute values — never by reading
+`app.docs_url`. Clearing an attribute must not be able to hide a route that is
+still mounted. `audit_api_documentation` must additionally fail, under ANY
+exposure, on a documentation route depending on `require_platform_web_auth` or
+`require_web_auth`.
+
+**2. `ProductAssemblySpec.api_documentation: ApiDocumentationPolicy | None = None`.**
+`None` must NOT mean "FastAPI's default" — that is the defect. It means the
+assembly has not declared one, and `create_app` refuses to build, the way an
+unbound migration prerequisite refuses. A permissive fallback would reproduce
+this bug with extra ceremony.
+
+**3. `create_app` passes the resolved paths to the `FastAPI(...)` CONSTRUCTOR**
+rather than removing routes afterwards, and mounts the `PLATFORM_BEARER`
+document itself with `dependencies=[Depends(require_platform_admin)],
+include_in_schema=False`. Not mounting is the point; post-hoc surgery is what
+this assembly is doing in the meantime and what the field exists to retire.
+
+**4. The knob is the existing `Settings.environment`, already read from
+`ENVIRONMENT`** — no new variable. It is classified fail-closed, as a NARROWING
+introduced under its own name rather than by changing `Settings.is_production`:
+`{"dev", "development", "local"}` and `{"test", "testing", "ci"}` select the
+publishing policies, and everything else, INCLUDING UNSET AND BLANK, is
+production. The assembly declares a policy per environment; the kernel resolves
+which one applies.
+
+**5. The kernel's own architecture suite carries the planted-default case from
+§ 5**, in both directions: FastAPI's default configuration on a bare app AND on
+the reference assembly's own `create_app(build_spec())` must FAIL the production
+gate, and an app serving no documentation must FAIL the development gate.
 
 Ownership: `dotmac_starter_mt` has a single integration owner working a
 serialized queue; the specification above was routed there rather than

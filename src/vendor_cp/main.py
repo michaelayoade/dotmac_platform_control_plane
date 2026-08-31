@@ -13,7 +13,7 @@ start rather than serving documentation it declared it would not serve.
 
 It sits here rather than in `build_spec()` because a spec has no application to
 correct. That is the shape the kernel should own instead
-(`docs/adr/0014-api-documentation-exposure-policy.md`); when it does, this line
+(`docs/adr/0016-api-documentation-exposure-policy.md`); when it does, this line
 becomes a field on `ProductAssemblySpec` and `vendor_cp.api_documentation` is
 deleted rather than rewritten.
 """

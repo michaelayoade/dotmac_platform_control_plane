@@ -217,7 +217,7 @@ def test_image_smokes_prove_the_built_bytes_publish_no_api_documentation() -> No
     environment resolves the PRODUCTION policy — and the assertion below then
     proves the image it just built serves neither browser documentation page and
     satisfies the production gate. A unit test proves the source is right; this
-    proves the thing that gets deployed is (ADR-0014).
+    proves the thing that gets deployed is (ADR-0016).
     """
     for path in (
         ".github/workflows/ci.yml",
