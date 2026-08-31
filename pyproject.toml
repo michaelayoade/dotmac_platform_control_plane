@@ -22,8 +22,9 @@ dotmac-platform = "vendor_cp.cli:run"
 [tool.poetry.dependencies]
 python = ">=3.12,<3.14"
 # The kernel is PINNED EXACTLY to the published alpha and resolved ONLY from the
-# private Forgejo index (ADR-0005). The `testing` extra ships the kernel's
-# supported test kit (harness + fakes + provisioning contract + the WS8
+# private Forgejo index (`dotmac_starter_mt` ADR-0005 — the Forgejo private
+# artifact registry, not this repository's ADR-0005). The `testing` extra ships
+# the kernel's supported test kit (harness + fakes + provisioning contract + WS8
 # FakeLicenceSigner) this assembly's tests consume; `licensing` adds the Ed25519
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.

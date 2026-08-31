@@ -6,8 +6,8 @@
   kept current rather than deleted on acceptance.
 - **Date:** 2026-08-31 proposed, 2026-08-31 accepted
 - **Owner:** Michael Ayoade
-- **Follows:** ADR-0003, which made a deployment profile a surface selector and
-  forbade feature code branching on a profile name
+- **Follows:** `dotmac_starter_mt` ADR-0003, which made a deployment profile a
+  surface selector and forbade feature code branching on a profile name
 - **Depends on:** ADR-0014, which made the `platform_admin` facet the console's
   only browser authentication owner. `production-composed-v1` names the console
   as its primary surface, so that repair is a precondition of this profile

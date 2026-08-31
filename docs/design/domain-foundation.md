@@ -27,7 +27,7 @@
 > domain foundation for Lane B of
 > [`2026-07-18-deployment-profiles-commercial-platform.md`](2026-07-18-deployment-profiles-commercial-platform.md)
 > (vendor control-plane product assembly), under the accepted decision
-> [`ADR-0003`](../../adr/0003-unified-deployment-profiles.md) and the program directive
+> `dotmac_starter_mt` [`ADR-0003`](../../adr/0003-unified-deployment-profiles.md) and the program directive
 > [`2026-07-18-kernel-program-directive.md`](../reviews/2026-07-18-kernel-program-directive.md).
 > Nothing here may be represented in README/ARCHITECTURE as current runtime behavior.
 > Scope recorded from Michael's directive of 2026-07-30.
@@ -82,7 +82,8 @@ Two further standing constraints inherited from the program:
 
 - **Transport, not authority.** Data planes are reached through their own versioned APIs,
   webhooks, signed licence documents, or offline bundles — never a shared table, ORM model,
-  or database credential (ADR-0003 § Cross-project reuse; adoption plan § Deployment topology).
+  or database credential (`dotmac_starter_mt` ADR-0003 § Cross-project reuse; adoption plan
+  § Deployment topology).
 - **Allocation is not evaluation.** The control plane decides *what a customer is entitled
   to*; the data plane's kernel entitlement evaluator decides *whether a request is allowed*.
   These are different decisions with different owners and must never merge.
@@ -257,7 +258,8 @@ built -> attested -> published -> pinned(channel) -> superseded | withdrawn
 
 Artifact selection itself is a **pure, explainable function**, not a state:
 `select(deployment) -> (digest, channel, pin_id, compatibility_window, reason)`. Where a
-deployment's update authority is `customer_approved` or `offline_bundle` (ADR-0003 axis), the
+deployment's update authority is `customer_approved` or `offline_bundle`
+(`dotmac_starter_mt` ADR-0003 axis), the
 selection result is an **offer** that cannot enter `plan_ready` without the customer approval
 record.
 
@@ -546,8 +548,8 @@ define a competing public contract.
 | `dotmac_kernel.testing` harness + fake providers + contract suites | kernel-boundary plan, Task 5 | every acceptance suite above | **blocked on kernel alpha** |
 | `ModuleManifest` / `ModuleRegistry` and declared capability codes | module control-plane directive steps 2–3; deployment plan WS1 | validating allocation lines against real capability codes | **blocked on kernel alpha** |
 | Entitlement evaluator, `tenant_entitlement_grants`, `EntitlementDecision`, `QuotaDecision` | deployment plan WS2 | the *data-plane* side of projection; the control plane allocates only | **blocked on kernel alpha** |
-| `DeploymentProfile` / `DeploymentProfileSpec` / `DeploymentProfileRegistry` | ADR-0003 § Profile contract; deployment plan WS1 | the profile code carried by desired state and the plan | **blocked on kernel alpha** |
-| Provider protocols: `ProvisioningProvider`/`ProvisioningAuthority`, `CommercialAuthority`, `TelemetryProvider`, `IngressProvider`, `DnsVerificationProvider`, `TlsProvider`, secret/identity provider | ADR-0003 § Provider interfaces; deployment plan WS1/WS10/WS11 | every outbound effect the runner performs | **blocked on kernel alpha** — see Conflict C6 |
+| `DeploymentProfile` / `DeploymentProfileSpec` / `DeploymentProfileRegistry` | `dotmac_starter_mt` ADR-0003 § Profile contract; deployment plan WS1 | the profile code carried by desired state and the plan | **blocked on kernel alpha** |
+| Provider protocols: `ProvisioningProvider`/`ProvisioningAuthority`, `CommercialAuthority`, `TelemetryProvider`, `IngressProvider`, `DnsVerificationProvider`, `TlsProvider`, secret/identity provider | `dotmac_starter_mt` ADR-0003 § Provider interfaces; deployment plan WS1/WS10/WS11 | every outbound effect the runner performs | **blocked on kernel alpha** — see Conflict C6 |
 | Signed licence issuer/verifier contract | deployment plan WS8 | `LicenceIssuanceService`, revocation list, offline bundles | **blocked on kernel alpha** |
 | Transactional outbox + idempotent inbox + idempotent command envelope + lifecycle history | deployment plan WS3; program workstream 4 | every event in the catalogue | **blocked on kernel alpha** |
 | Support-access grant contract + diagnostic bundle contract | program workstream 5; deployment plan WS11 | the enforcement seam in the data plane; the control plane owns the workflow | **blocked on kernel alpha** — see Conflict C2 |
@@ -618,7 +620,7 @@ implementation — designing them late is what produces backdoors.
 
 The seven ownership ambiguities this design surfaced were ruled on by Michael on
 2026-07-30. They are now **decisions**, not open assumptions; the design above is written to
-them. Each ruling also amends the checked-in document it touches (ADR-0003, the
+them. Each ruling also amends the checked-in document it touches (`dotmac_starter_mt` ADR-0003, the
 deployment-profiles plan, and kernel-boundary Tasks 3/5) — this section is the discovery
 record, those documents remain authoritative for their scope.
 
@@ -641,7 +643,8 @@ record, those documents remain authoritative for their scope.
   (Consistent with the Dotmac app-independence standard; a checked-in delivery contract is
   still required before implementation.)
 - **C5 — Separate repository.** Lane B lives in its **own maintained repository —
-  `dotmac_vendor_control_plane`** (recommended name). ADR-0003's topology diagram expresses
+  `dotmac_vendor_control_plane`** (recommended name). `dotmac_starter_mt` ADR-0003's topology
+  diagram expresses
   **logical composition, not a monorepo requirement**. This resolves the step-0 blocker.
 - **C6 — `ProvisioningProvider` → kernel alpha (approved with correction).** Pull a
   **product-neutral `ProvisioningProvider` protocol, typed plan/apply/observe results, stable
@@ -672,7 +675,8 @@ record, those documents remain authoritative for their scope.
 > [`../reviews/2026-07-30-vendor-dependency-reconciliation.md`](../reviews/2026-07-30-vendor-dependency-reconciliation.md).
 
 1. Finish and merge the control-plane security work (v0.8.0).
-2. Amend ADR-0003, the deployment-profiles plan, kernel-boundary Tasks 3/5, and this design
+2. Amend `dotmac_starter_mt` ADR-0003, the deployment-profiles plan, kernel-boundary
+   Tasks 3/5, and this design
    with the C1–C7 rulings.
 3. Build and publish the kernel alpha containing `ProductAssemblySpec` AND `ProvisioningProvider`
    (protocol + typed results + stable errors + fake + contract suite).
