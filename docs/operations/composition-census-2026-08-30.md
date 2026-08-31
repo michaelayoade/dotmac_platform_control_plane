@@ -121,7 +121,7 @@ every composition point in this document and still have never run.
 
 | Surface | Manifest kind | Mount | Routes | Guard | DB dep | Reaches |
 | --- | --- | --- | --- | --- | --- | --- |
-| `console` | `ModuleManifest`, contract v2 | facet `platform_admin` → `/platform` | 1 (`GET /console`) | `require_platform_admin` | none | nothing — an inline HTML constant |
+| `console` | `ModuleManifest`, contract v2 | facet `platform_admin` → `/platform` | 1 (`GET /console`) | `require_platform_admin` **(superseded — see the note below)** | none | nothing — an inline HTML constant |
 | `accounts` | `FeatureManifest` | `/platform/vendor/accounts` | 3 | `require_platform_admin` | `get_platform_db` ×3 | `public.vendor_accounts`, Vendor-local |
 | `offers` | `FeatureManifest` | `/platform/vendor/offer-versions` | 3 | `require_platform_admin` | ×3 | `public.offer_versions`, Vendor-local |
 | `vendor_approvals` | `FeatureManifest` | `/platform/vendor/approvals` | 3 | `require_platform_admin` | ×3 | `approvals/adapter.py` → `dotmac_approvals` → `mod_approvals` |
@@ -140,6 +140,19 @@ identical in all seven; the single web route takes
 `Depends(require_platform_admin)` directly. A sweep of every `@router.*`
 handler at `539f0ee` finds zero without it. There is no second authentication
 path and no route-local re-implementation.
+
+> **Superseded for the web route (ADR-0014, 2026-08-31).** This measurement
+> stands as taken at `539f0ee` and is not rewritten. What it could not see is
+> why it mattered: the sweep read handler signatures, so it counted the
+> console's `Depends(require_platform_admin)` and did not count the
+> `platform_admin` facet's own cookie authentication, which the kernel attaches
+> at the router and reaches through a nested dependency. The console therefore
+> had TWO authentication owners at `539f0ee`, not one, and was unreachable with
+> a valid browser session. `require_platform_admin` has since been removed from
+> that route; the facet's `require_platform_web_auth` is the browser surface's
+> sole owner, and the 43 JSON routes are unchanged. Read this paragraph as a
+> statement about the JSON plane, and section 6's reachability finding is
+> unaffected — a facet with no `platform_admins` row admits nobody either.
 
 That uniformity is exactly why `public.platform_admins` holding zero rows is
 sufficient on its own to make four modules unreachable, as section 6 records.

@@ -54,7 +54,7 @@ lifecycle — never a product's tenants, subscribers, or customer data.
 | D1 | One control-plane database; the kernel owns the engine (no `create_engine`, no product DSNs). |
 | D2 | No product data-plane imports (`dotmac_sub`/`crm`/`erp`/`app`). |
 | D3 | Vendor-owned simulation provider only; real config **fails startup**; no real-provider SDKs or runtime testing-kit imports. |
-| D4 | Platform-admin auth **through the kernel** (`require_platform_admin`), never re-implemented. |
+| D4 | Platform-actor auth **through the kernel** — `require_platform_admin` for the JSON API, the `platform_admin` facet's declared cookie profile for the browser surface — never re-implemented, and never two owners on one route. |
 | D5 | Only the kernel's **public** surface (`SUPPORTED_MODULES` + top-level `__all__`); no private/internal/copied code. |
 
 ## Develop

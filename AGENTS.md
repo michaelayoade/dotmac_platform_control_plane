@@ -29,9 +29,24 @@ disagree, fix the drift.
    independent one is what makes it affordable. `src/vendor_cp/provisioning/`
    and `src/vendor_cp/deployment_profile.py` are neither — a contract
    laboratory that owns no table, and a surface selector.
-5. **Platform-admin auth through the kernel.** Vendor admin surfaces depend on
-   `dotmac_kernel.platform_auth.require_platform_admin`; auth is never
-   re-implemented (**D4**).
+5. **Platform-actor auth through the kernel, and ONE owner per route.** One
+   authority, two kernel-owned transports: the JSON API depends on
+   `dotmac_kernel.platform_auth.require_platform_admin` (bearer), and the
+   composed `platform_admin` facet authenticates every non-entry browser route
+   through its declared `kernel_platform_session` profile, whose provider is
+   `require_platform_web_auth` (session cookie). Vendor code re-implements
+   neither and DECLARES neither on a browser route: a route answering to two
+   authentication owners has no single authority over who may reach it, and the
+   console proved it — a valid browser session passed the facet and was then
+   refused by a bearer-only handler guard, making `/platform/console`
+   unreachable with exactly the credential it accepts. Browser cookies never
+   authenticate API routes and API bearer credentials never become browser
+   sessions. Every unsafe browser route keeps `require_csrf`. Checked on the
+   CONSTRUCTED dependency graph, never on source text — a signature scan cannot
+   see a router-attached or nested dependency, which is how the two-owner shape
+   survived (**D4**; ADR-0014;
+   `tests/architecture/test_browser_authentication_ownership.py`,
+   `tests/unit/test_console_browser_authentication.py`).
 6. **Vendor logic lives in services; routes/web are thin adapters.** Business
    decisions have one named owner; adapters validate-authorise-delegate.
 7. **Atomic, idempotent, audited mutations.** Account/lifecycle commands are
