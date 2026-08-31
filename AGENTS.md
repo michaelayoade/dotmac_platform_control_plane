@@ -306,3 +306,31 @@ disagree, fix the drift.
     `tests/migration/test_commercial_backfill_replay.py`;
     `docs/commercial-backfill-dossier.md`; ADR-0012). Current evidence and state
     belong in the dossier or the named external oracle, never in this rule.
+20. **A surface a framework enables by DEFAULT is still a declared decision, and
+    the application is its authority.** FastAPI mounts `/docs`,
+    `/docs/oauth2-redirect`, `/redoc` and `/openapi.json` unless told otherwise,
+    and `create_app` tells it nothing — so "forgot to think about it" and
+    "decided to publish it" are the same bytes. `ApiDocumentationPolicy` makes
+    the decision typed and per-environment, split into the two planes that
+    authenticate differently and always will: browser pages, which are DISABLED
+    in production, and the OpenAPI document, which is served only behind the
+    bearer guard `require_platform_admin`. `PLATFORM_BEARER` is not expressible
+    for the interactive plane — a browser navigating to `/docs` sends no
+    `Authorization` header, so the only way to make that "work" is a session
+    cookie, and no documentation route may depend on a cookie-transport guard
+    under any exposure. Environment resolution FAILS CLOSED: publishing is
+    opt-in by name, and unset, blank, `staging` or a typo takes the production
+    policy.
+
+    **The ingress is not the control.** The vhost proxies `/` wholesale ON
+    PURPOSE and names no documentation path; the application refuses. An nginx
+    `location` is removed by a second ingress, by the loopback container port
+    the compose file publishes, or by a block that matches first, and it is not
+    reviewed with the application whose surface it claims to define.
+
+    The gate reads the LIVE route inventory rather than the source, and its
+    sensitivity case is the one that matters: FastAPI's default configuration,
+    planted on a bare app AND on this assembly's own `create_app(build_spec())`,
+    must FAIL the production gate (ADR-0016;
+    `tests/unit/test_api_documentation_policy.py`,
+    `tests/architecture/test_api_documentation_ingress.py`).

@@ -111,7 +111,14 @@ jobs:
             --env DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
             --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
             dotmac-vendor-control-plane:ci \
-            -c "from vendor_cp.main import app; assert app is not None"
+            -c "from vendor_cp.main import app; \
+                import vendor_cp.api_documentation as policy; \
+                assert app is not None; \
+                assert policy.classify_environment(None) == policy.PRODUCTION; \
+                paths = {getattr(route, 'path', '') for route in app.routes}; \
+                assert not paths & {'/docs', '/docs/oauth2-redirect', '/redoc'}, paths; \
+                assert not policy.audit_api_documentation( \
+                    app, policy.api_documentation_policy(policy.PRODUCTION))"
       - name: Rehearse production manifest-volume ownership
         env:
           VENDOR_APP_IMAGE: dotmac-vendor-control-plane:ci
