@@ -38,11 +38,14 @@ from vendor_cp.approvals_authority import (
     COARSE_ELIGIBILITY_RULE,
     DIGEST_REJECTION_REASONS,
     MODULE_DIGEST_PREFIX,
+    MODULE_DIGEST_REJECTION_REASONS,
     PLATFORM_ADMIN_ROLE_ID,
     RETIRED_LOCAL_WRITER,
     RETIRED_WRITER_CALL_SITES,
     VENDOR_DIGEST_LENGTH,
+    bare_content_hash,
     digest_rejection_reason,
+    module_digest_rejection_reason,
     translate_digest,
 )
 
@@ -192,6 +195,39 @@ def test_every_declared_rejection_reason_is_reachable() -> None:
         for value in ("", f"sha256:{'a' * 64}", "a" * 63, "A" * 64, "g" * 64)
     }
     assert produced == set(DIGEST_REJECTION_REASONS)
+
+
+def test_every_declared_reverse_rejection_reason_is_reachable() -> None:
+    """The reverse direction has its OWN alphabet, and all of it is reachable.
+
+    It is declared separately rather than bolted onto the tuple above because
+    `dotmac-commercial-agreements`' backfill imports that tuple verbatim as its
+    own outcome set — widening it to carry a reason only this direction can
+    produce would silently widen a vocabulary two other owners hold themselves
+    to. CI caught exactly that when the two were briefly one.
+    """
+    produced = {
+        module_digest_rejection_reason(value)
+        for value in (
+            "",
+            "a" * 64,
+            f"sha256:sha256:{'a' * 64}",
+            "sha256:",
+            f"sha256:{'a' * 63}",
+            f"sha256:{'A' * 64}",
+            f"sha256:{'g' * 64}",
+        )
+    }
+    assert produced == set(MODULE_DIGEST_REJECTION_REASONS)
+
+
+def test_the_reverse_translation_refuses_rather_than_repairs() -> None:
+    """Same fail-closed shape as `translate_digest`, running the other way: an
+    unprefixed or malformed value is not padded or lowercased into validity."""
+    assert bare_content_hash(f"sha256:{'a' * 64}") == "a" * 64
+    for value in ("a" * 64, f"sha256:{'A' * 64}", "sha256:", ""):
+        with pytest.raises(ValueError, match="not translatable"):
+            bare_content_hash(value)
 
 
 # ── Pin and lifecycle ───────────────────────────────────────────────────────

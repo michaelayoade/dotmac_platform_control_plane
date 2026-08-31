@@ -160,7 +160,8 @@ The finding is not "most routes are guarded so most things are unreachable" —
 it is that there is a single admission point and nobody can pass it.
 
 **Two composed modules have no route at all.** `dotmac-release-catalog` is
-reached only from `scripts/catalogue_product_release.py` →
+reached only from the operator entry point (`scripts/catalogue_product_release.py`
+at the censused revision, `dotmac-platform release record` since) →
 `vendor_cp.release_evidence.service.ingest_product_release_evidence`, and
 `dotmac-deployment-control` only through `vendor_cp.deployment.adapter`, whose
 one in-tree consumer is `vendor_cp.licensing.projection`. So the single module
@@ -430,7 +431,8 @@ attestation `db269812-d99b-4529-9270-9435a8249124` against it, both written
 2026-08-17T09:23:04Z, with the matching `platform_idempotency_records` row
 (`vendor.release_evidence.ingest` / `vendor.release_evidence.catalogue`) and the
 single `platform_audit_events` row (`vendor.release_evidence.catalogued`). The
-writer is the operator entry point `scripts/catalogue_product_release.py` →
+writer is the operator entry point — `scripts/catalogue_product_release.py` at
+the censused revision, `dotmac-platform release record` since — →
 `vendor_cp.release_evidence.service.ingest_product_release_evidence`; the reader
 is `vendor_cp.offers.catalog.configured_product_capability_catalogues`. A real
 production act, verifiable against the row.

@@ -34,9 +34,64 @@ from dotmac_kernel.prerequisites import BINDINGS_ENV_VAR
 from dotmac_licensing import versions_dir as licensing_versions_dir
 from dotmac_release_catalog import versions_dir as release_catalog_versions_dir
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ALEMBIC_DIR = REPO_ROOT / "alembic"
-VENDOR_VERSIONS = ALEMBIC_DIR / "versions"
+#: Where the Vendor lineage and `alembic.ini` live, when they are not beside a
+#: checkout. An overridable knob with a documented default, per the repository's
+#: "everything by config" rule.
+#:
+#: This exists because the assembly is INSTALLED AS A WHEEL now. The three paths
+#: below used to be derived from `__file__` with `parents[2]`, which silently
+#: assumed `src/vendor_cp/migrations.py` inside a source tree; from
+#: `site-packages/vendor_cp/migrations.py` that expression resolves to the
+#: interpreter's library directory and the lineage is simply not there.
+#:
+#: The migration lineage is deliberately NOT packaged into the wheel. Poetry
+#: would place a top-level `alembic` directory at the wheel root, colliding with
+#: the Alembic distribution's own import name — a name collision is a worse
+#: failure than a configured path. So the image copies the lineage as DATA and
+#: names where it put it.
+MIGRATION_ROOT_ENV_VAR: Final[str] = "VENDOR_MIGRATION_ROOT"
+
+
+class MigrationRootNotFound(RuntimeError):
+    """The migration lineage is not where this process was told to look."""
+
+
+#: The checkout layout, used when the environment says nothing. Correct for
+#: development, tests and CI, all of which run from a source tree.
+_CHECKOUT_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
+
+
+def migration_root() -> Path:
+    """The directory holding `alembic.ini` and `alembic/versions`.
+
+    Resolved on every call rather than frozen at import, so a process that sets
+    the variable before running a migration gets the directory it named — and so
+    a test can point it somewhere without reloading the module.
+
+    Refuses rather than guessing: a root with no `alembic.ini` in it is reported
+    with the variable to set, because the alternative is Alembic failing later
+    with a message about a missing revision that says nothing about the cause.
+    """
+    configured = os.environ.get(MIGRATION_ROOT_ENV_VAR, "").strip()
+    root = Path(configured).resolve() if configured else _CHECKOUT_ROOT
+    if not (root / "alembic.ini").is_file():
+        raise MigrationRootNotFound(
+            f"no alembic.ini under {root}. This assembly is installed as a "
+            "wheel and the migration lineage travels beside the deployment as "
+            f"data, so set {MIGRATION_ROOT_ENV_VAR} to the directory holding "
+            "`alembic.ini` and `alembic/versions`."
+        )
+    return root
+
+
+def alembic_dir() -> Path:
+    """The Alembic script location."""
+    return migration_root() / "alembic"
+
+
+def vendor_versions_dir() -> Path:
+    """This assembly's own revision directory."""
+    return alembic_dir() / "versions"
 
 
 def composed_version_locations() -> str:
@@ -49,7 +104,7 @@ def composed_version_locations() -> str:
         f"{commercial_agreements_versions_dir()} "
         f"{licensing_versions_dir()} "
         f"{deployment_control_versions_dir()} "
-        f"{VENDOR_VERSIONS}"
+        f"{vendor_versions_dir()}"
     )
 
 
@@ -100,11 +155,12 @@ def deploy_config(url: str) -> Config:
 def make_alembic_config(url: str) -> Config:
     """An Alembic `Config` wired to all lineages and the given database URL.
 
-    Used by both the deploy entrypoint (`scripts/migrate.py`) and the migration
-    rehearsals, so CLI-vs-test composition can never diverge.
+    Used by both the deploy entrypoint (`dotmac-platform admin migrate`) and the
+    migration rehearsals, so CLI-vs-test composition can never diverge.
     """
-    cfg = Config(str(REPO_ROOT / "alembic.ini"))
-    cfg.set_main_option("script_location", str(ALEMBIC_DIR))
+    root = migration_root()
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "alembic"))
     cfg.set_main_option("version_locations", composed_version_locations())
     # env.py reads the migration URL from the environment. DATABASE_URL is set too
     # because env.py imports `dotmac_kernel.messaging`, which eagerly constructs the
@@ -140,11 +196,13 @@ def make_alembic_config(url: str) -> Config:
 
 __all__ = [
     "COMPOSED_TARGET",
+    "MIGRATION_ROOT_ENV_VAR",
+    "MigrationRootNotFound",
+    "alembic_dir",
+    "composed_version_locations",
     "deploy_config",
     "deploy_target_refusal",
-    "REPO_ROOT",
-    "ALEMBIC_DIR",
-    "VENDOR_VERSIONS",
-    "composed_version_locations",
     "make_alembic_config",
+    "migration_root",
+    "vendor_versions_dir",
 ]

@@ -77,7 +77,13 @@ mv "$BACKUP_TMP" "$BACKUP_PATH"
 
 # This is the one composed migration owner: kernel, Vendor, Release Catalog,
 # Entitlement Allocation, and Approvals advance before the app is replaced.
-compose --profile ops run --rm --no-deps ops scripts/migrate.py
+#
+# The INSTALLED console script, not a path into the image. `scripts/` is no
+# longer copied into the runtime stage at all, so this cannot silently become a
+# stale file somebody rsynced; and the command's exit status is the CLI's own —
+# 3 if the migration owner refused the target, 4 if the evidence it needed was
+# absent — which `set -e` propagates to the deploy as a whole.
+compose --profile ops run --rm --no-deps ops dotmac-platform admin migrate
 
 compose up -d app --wait
 curl --fail --silent --show-error --max-time 10 \

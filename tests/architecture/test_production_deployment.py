@@ -39,6 +39,85 @@ def test_runtime_image_uses_a_build_secret_and_runs_unprivileged() -> None:
     assert "alembic" not in cmd.lower()
 
 
+def test_the_runtime_image_installs_the_wheel_and_carries_no_source_tree() -> None:
+    """The assembly is INSTALLED, and the runtime stage has nothing else to run.
+
+    Three properties, and the third is what makes the first two provable. The
+    wheel is built and installed, so `vendor_cp` has distribution metadata and
+    `dotmac-platform` is a console script. There is no `PYTHONPATH`, so nothing
+    is imported from a directory somebody copied. And the runtime stage copies
+    no `src` and no `scripts` AT ALL, so a checkout-relative invocation has
+    nothing to resolve against — it fails loudly instead of quietly running
+    whichever bytes were last written there.
+
+    The builder stage runs `dotmac-platform --version` against the freshly
+    installed wheel, which fails the BUILD if the entry point is not wired.
+    """
+    dockerfile = _text("Dockerfile")
+    runtime = dockerfile.split("AS runtime", 1)[1]
+    builder = dockerfile.split("AS runtime", 1)[0]
+
+    assert "poetry build --format wheel" in builder
+    assert '/bin/pip" install --no-deps --no-index dist/*.whl' in builder
+    assert "/bin/dotmac-platform" in builder
+    assert "--version" in builder
+
+    # The property is that nothing SETS an import path, not that the word is
+    # unmentionable. A blunt substring test failed on the comment explaining the
+    # absence — which is the documentation this rule most wants written, and is
+    # the same mistake as a ledger checking a name instead of an identity.
+    assignments = [
+        line
+        for line in dockerfile.splitlines()
+        if not line.lstrip().startswith("#") and "PYTHONPATH=" in line
+    ]
+    assert assignments == [], assignments
+    assert "COPY --chown=10001:10001 src" not in runtime
+    assert "COPY --chown=10001:10001 scripts" not in runtime
+    assert "VENDOR_MIGRATION_ROOT=/app" in runtime
+    assert "COPY --chown=10001:10001 alembic ./alembic" in runtime
+
+
+def test_the_import_path_guard_can_still_see_an_assignment() -> None:
+    """SENSITIVITY. An empty offender list is also what a broken check returns,
+    and this one has already been wrong once in the permissive direction.
+
+    The planted value is deliberately NOT the production shape. The guard's
+    property is "something assigns an import path", which any path proves, and
+    `vendor_cp.installed_surface` is the owner of production-shape detection —
+    with its own two-directional sensitivity proof. Planting the real string
+    here would put a production-shaped occurrence into a file the ratchet
+    scans, which would then have to be declared as debt it is not.
+    """
+    planted = [
+        "# There is deliberately no PYTHONPATH here.",
+        "ENV PYTHONPATH=/opt/elsewhere \\",
+    ]
+    assignments = [
+        line
+        for line in planted
+        if not line.lstrip().startswith("#") and "PYTHONPATH=" in line
+    ]
+    assert assignments == ["ENV PYTHONPATH=/opt/elsewhere \\"]
+
+
+def test_the_ops_container_runs_the_console_script_not_an_interpreter() -> None:
+    """`run ... ops dotmac-platform ...` must reach the CLI, not `python <path>`.
+
+    The ops service used to declare `entrypoint: ["python"]`, which turned the
+    first argument of every `docker compose run` into a FILE PATH resolved
+    against `/app`. That worked only because the image copied `scripts/` in.
+    With no entrypoint the command is executed directly, so what runs is the
+    installed console script and a path would resolve against nothing.
+    """
+    compose = _text("docker-compose.production.yml")
+    ops = compose.split("  ops:" + chr(10), 1)[1]
+
+    assert "entrypoint:" not in ops
+    assert 'command: ["dotmac-platform", "diagnose", "self"]' in ops
+    assert "scripts/" not in ops
+
+
 def test_production_compose_pulls_only_and_keeps_state_private() -> None:
     compose = _text("docker-compose.production.yml")
 
@@ -107,13 +186,24 @@ def test_database_initialization_never_embeds_passwords() -> None:
 
 
 def test_platform_admin_bootstrap_uses_kernel_transaction_authority() -> None:
-    bootstrap = _text("scripts/create_platform_admin.py")
+    """The bootstrap moved from a script into the installed CLI; the rules did not.
 
-    assert "platform_session" in bootstrap
-    assert "getpass.getpass" in bootstrap
+    It reads the same three properties out of `vendor_cp.cli.commands` that it
+    used to read out of `scripts/create_platform_admin.py`: the kernel owns the
+    transaction, no second engine is built, and the password never appears as
+    the value of a flag. The secret rule is now checked in its strongest form —
+    the parser is built and every option name inspected — in
+    `tests/architecture/test_installed_cli.py`.
+    """
+    bootstrap = _text("src/vendor_cp/cli/commands.py")
+    runtime = _text("src/vendor_cp/cli/runtime.py")
+
+    assert "platform_session" in runtime
+    assert "upsert_platform_admin" in bootstrap
+    assert "read_secret" in bootstrap
     assert "create_engine" not in bootstrap
     assert "sessionmaker" not in bootstrap
-    assert "--password" not in bootstrap
+    assert '"--password"' not in bootstrap
 
 
 def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> None:
@@ -122,7 +212,11 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
 
     assert "docker compose" in deploy
     assert "docker compose build" not in deploy
-    assert "scripts/migrate.py" in deploy
+    # The INSTALLED console script, not a path into the image. `scripts/` is
+    # not copied into the runtime stage at all any more, so a path here would
+    # resolve against nothing.
+    assert "ops dotmac-platform admin migrate" in deploy
+    assert "scripts/migrate.py" not in deploy
     assert "alembic upgrade" not in deploy
     assert "ghcr.io/michaelayoade/dotmac_vendor_control_plane@${DIGEST}" in deploy
     assert "APP_ENV=production" in deploy
@@ -133,7 +227,7 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     start_db = deploy.index("up -d --wait db")
     initialize_manifests = deploy.index("run --rm --no-deps manifest-init")
     verify_roles = deploy.index("module database role contract is not satisfied")
-    migrate = deploy.index("scripts/migrate.py")
+    migrate = deploy.index("dotmac-platform admin migrate")
     replace = deploy.index("up -d app")
     assert (
         bootstrap_password

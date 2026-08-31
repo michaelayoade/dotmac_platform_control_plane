@@ -334,3 +334,64 @@ disagree, fix the drift.
     must FAIL the production gate (ADR-0016;
     `tests/unit/test_api_documentation_policy.py`,
     `tests/architecture/test_api_documentation_ingress.py`).
+21. **The operator surface is an INSTALLED console script, and its exit codes
+    are a contract.** The production image installs the wheel; it sets no
+    `PYTHONPATH` and copies no `src` and no `scripts`, so production usage is
+    `docker compose run --rm --no-deps ops dotmac-platform ...` and a
+    checkout-relative invocation has nothing to resolve against. Every version
+    the process reports comes from installed distribution metadata, never from a
+    literal — `dotmac-deployment-control 0.1.0a4` shipped correct bytes while
+    reporting itself as `0.1.0a2`, and the fix is removing the second copy
+    rather than keeping two and correcting one.
+
+    **The CLI is an adapter and owns no decision.** Every command names one
+    service or query owner in `vendor_cp.cli.owners`; the table is compared
+    against the parser in both directions, no mutating owner may live inside
+    `vendor_cp.cli`, and no mutating symbol may be claimed by two commands. A
+    policy that existed only in the CLI would be a second authority, and an
+    operator at a shell would get a different answer from one at a screen.
+    Render, apply, observe and rollback are **the published Foundation CLI's**,
+    reached through one verbatim passthrough that returns the delegate's own
+    status; re-growing any of them here is a second deployment engine.
+
+    **`3` and `4` are different numbers and stay different**, including through
+    `docker compose run`, which propagates the container's status unchanged. An
+    owner refused and there is no evidence look identical from outside and mean
+    opposite things about whether to retry. `6` is separate from `3` for the
+    same reason one level down: `0.1.0a4` reported a digest ENCODING difference
+    as "the plan changed after approval" — a formatting bug wearing a tampering
+    refusal, which looks like the system working.
+
+    **A secret arrives through a held file or stdin, never argv.**
+    `/proc/<pid>/cmdline` is world-readable for as long as a process lives, and
+    a registration token leaked into a transcript on this fleet exactly that
+    way. The guard builds the real parser and inspects every option name; a flag
+    added tomorrow in a module nobody thought to grep is the one that would
+    leak. No secret value is ever printed.
+
+    **The production shapes are ratcheted SET-shaped and two-directionally.**
+    `src/vendor_cp/installed_surface.py` records the matched TEXT of every
+    surviving occurrence of a `PYTHONPATH` pointing at `src`, an interpreter
+    handed a path under
+    `scripts/`, an `ops` container handed a script path, rsync of executable
+    deployment assets, and checkout-relative production commands — each with why
+    it is still there and what retires it. Text rather than a count, because a
+    count survives a SWAP (one path retired while another gains the same
+    ability), and the swap is the move worth catching. The sanctioned side is
+    checked by IDENTITY: `sanctioned_entry_points()` reads the console-script
+    names the installer recorded and never writes one down, an unresolvable
+    distribution is UNMONITORED rather than a pass, and installed-or-not is
+    deliberately absent from the baseline. Both directions of sensitivity are
+    proven — a planted violation fires, and the conforming replacement form
+    stays silent (`tests/architecture/test_installed_cli.py`;
+    `docs/operations/installed-cli.md`).
+
+    **The clean-install acceptance runs against the built image, and step 3 is
+    the load-bearing one.** Build the wheel, install into an empty environment,
+    remove access to the repository root, run every documented command's help
+    and safe diagnostic path, prove nothing imports from a checkout, prove no
+    duplicate mutation owner exists. "Remove access to the repository root" is
+    satisfied structurally rather than by a flag, and the proof resolves each
+    module's `__file__` against `sysconfig`'s `purelib`/`platlib` — a canary run
+    against a checkout passes for the wrong reason, which is exactly how the
+    `a4` defect survived.

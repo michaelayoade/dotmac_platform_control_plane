@@ -28,7 +28,8 @@ The host then performs one ordered operation:
 5. verify that initialization created `app_admin` as a non-superuser,
    `BYPASSRLS` database/schema owner and removed the bootstrap verifier;
 6. take a host-local `pg_dump` backup;
-7. run `scripts/migrate.py`, the owner that composes all eight lineages;
+7. run `dotmac-platform admin migrate`, the owner that composes all eight
+   lineages, as an installed console script inside the `ops` container;
 8. replace the app and prove `/health` on the loopback port while declaring
    `Host: vendor.dotmac.io`, so the probe passes through the same trusted-host
    boundary as production traffic rather than weakening it for an IP-only probe.
@@ -174,8 +175,19 @@ the password is prompted and never accepted on argv:
 ```bash
 cd /opt/dotmac/vendor-control-plane
 docker compose --env-file .env -f docker-compose.production.yml \
-  --profile ops run --rm ops scripts/create_platform_admin.py <operator-email>
+  --profile ops run --rm --no-deps ops \
+  dotmac-platform admin create <operator-email> --password-stdin
 ```
+
+The password arrives on **stdin**, never as the value of a flag: `/proc`
+exposes another process's command line for as long as it runs, and a
+registration token leaked into a transcript on this fleet exactly that way.
+`--password-file` takes a path this host already holds if you would rather not
+pipe it.
+
+The `cd` above is the Compose project directory, which is where the compose
+file and `.env` live — not an import root. Nothing in the image resolves code
+relative to it.
 
 ## Adopt the current Sub release evidence
 
@@ -194,7 +206,7 @@ The current production evidence to ingest is:
 Download the exact canonical manifest artifact from that run. Do not recreate
 JSON from remembered capability codes. Verify its digest before mounting it
 read-only into a one-off `ops` container and invoke
-`scripts/catalogue_product_release.py` with the identities above. Only after
+`dotmac-platform release record` with the identities above. Only after
 ingestion succeeds, use the versioned operator seam rather than editing the
 secret-bearing file:
 

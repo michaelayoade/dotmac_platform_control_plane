@@ -28,7 +28,7 @@ test-db-up:  ## Start disposable test Postgres and migrate (creates roles + sche
 	# The init script creates the permanent production-shaped migrator before
 	# any kernel or module DDL. The cluster bootstrap role never runs migrations.
 	MIGRATION_DATABASE_URL=postgresql+psycopg://$(TEST_DB_MIGRATOR_USER)@$(TEST_DB_HOST):$(TEST_DB_PORT)/$(TEST_DB_NAME) \
-	poetry run python scripts/migrate.py
+	poetry run dotmac-platform admin migrate
 
 test-db-down:  ## Stop + remove the test Postgres
 	TEST_DB_PORT=$(TEST_DB_PORT) docker compose -f docker-compose.test.yml down -v
@@ -38,4 +38,4 @@ test-migration:  ## Vendor migration rehearsals (needs test-db-up)
 	poetry run pytest tests/migration -q
 
 migrate:  ## Apply migrations (uses MIGRATION_DATABASE_URL/DATABASE_URL from env)
-	poetry run python scripts/migrate.py
+	poetry run dotmac-platform admin migrate

@@ -387,7 +387,8 @@ Compose project and from every product data plane:
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration
-backup, runs the eight-lineage `scripts/migrate.py`, and only then replaces the
+backup, runs the eight-lineage `dotmac-platform admin migrate`, and only then
+replaces the
 application. The complete operator contract and rollback boundary are in
 `docs/operations/production-deployment.md`.
 
@@ -397,6 +398,48 @@ hostname-valid certificate, final nginx configuration, and host environment
 have all been verified. An existing Certbot account may be reused without
 restating its contact; a new registration still requires an explicit contact.
 The deployment path never creates or repairs the marker itself.
+
+## The installed operator CLI
+
+The operator surface is a console script on an installed wheel:
+`dotmac-platform`, declared in `pyproject.toml` and entered as
+
+```
+docker compose run --rm --no-deps ops dotmac-platform <group> <command>
+```
+
+The production image installs the wheel and copies **no** `src` and **no**
+`scripts`, and sets no `PYTHONPATH`. That is what makes `vendor_cp` carry
+distribution metadata — so every version the process reports comes from the
+installer rather than from a literal a source file remembers — and it is what
+makes a checkout-relative invocation fail loudly instead of quietly running
+whichever bytes were last copied into `/app`.
+
+The CLI is an adapter family, held to hard rule 6 exactly as `router.py` and
+`web.py` are. `vendor_cp.cli.owners` declares, as data, which single service or
+query owner each command delegates to; the table is checked against the parser
+in both directions, no mutating owner may live inside `vendor_cp.cli`, and no
+mutating symbol may be claimed by two commands. `dotmac-platform diagnose
+owners` prints the same table at runtime.
+
+Its deployment group is ADR-0013's operator workflow and nothing more: it
+proposes a plan, carries an `ApprovalEvidence` the approvals module produced
+into `approve_plan`, requests a rollout, and reads. **`deployment authorize`
+prints the `authorization_ref`** — the rollout id, which is the authorization
+run identity a deployment foundation binds between the canonical descriptor and
+its own execution report. Rendering, applying, observing and rolling back are
+the published Foundation CLI's; `deployment foundation -- …` forwards to
+`dotmac-deploy` verbatim and returns its status unchanged.
+
+Exit codes, the secret-intake rule, the production-shape ratchet and the
+clean-install acceptance are in `docs/operations/installed-cli.md` and are
+pinned by `AGENTS.md` rule 20.
+
+The migration lineage travels beside the deployment as data rather than inside
+the wheel — packaging it would place a top-level `alembic` directory at the
+wheel root, colliding with the Alembic distribution's own import name — and
+`VENDOR_MIGRATION_ROOT` names where it landed, defaulting to the checkout
+layout.
 
 ## Ownership (what this control plane owns)
 
@@ -440,7 +483,7 @@ The deployment path never creates or repairs the marker itself.
   product-emitted manifest bytes by digest, calls the module's public write
   seam, spends every delivery key through kernel idempotency, and emits one
   platform audit event per new association. It owns no table or capability
-  vocabulary. `scripts/catalogue_product_release.py` is the operator boundary;
+  vocabulary. `dotmac-platform release record` is the operator boundary;
   no publish HTTP surface exists. Product identity and capability declarations
   originate in each product assembly; the catalogue binds their snapshot
   attestation to exact artifact bytes, while Vendor only consumes that evidence.
@@ -459,10 +502,11 @@ The deployment path never creates or repairs the marker itself.
   its authentication. The module declares routes and navigation and no guard:
   the facet's `kernel_platform_session` profile is the single browser
   authentication owner, while `require_platform_admin` stays the JSON API's.
-  The initial identity is created or rotated by the
-  assembly's `vendor_cp.platform_admin` service. The prompt-only
-  `scripts/create_platform_admin.py` adapter supplies the kernel's
-  `platform_session`; there is no HTTP self-registration path and no second
+  The initial identity is created or rotated by the assembly's
+  `vendor_cp.platform_admin` service. The installed `dotmac-platform admin
+  create` adapter supplies the kernel's `platform_session` and takes the
+  password from a held file or stdin, never from argv; there is no HTTP
+  self-registration path and no second
   engine/session owner.
 
 ## Boundaries (deny-cases D1–D5)

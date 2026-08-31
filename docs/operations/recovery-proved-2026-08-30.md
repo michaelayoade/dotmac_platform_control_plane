@@ -75,7 +75,7 @@ Both halves are checked on purpose. A role revoked from everything passes every
 
 ## Where the capture lives, and why here
 
-`scripts/recovery/capture_catalog.sql` and `scripts/recovery/build_bundle.py`.
+`scripts/recovery/capture_catalog.sql` and `scripts/recovery/build_bundle.py (now `dotmac-platform recovery bundle`)`.
 
 The facility owns the fact types, the role closure, the completeness refusals
 and the comparison — and **connects to nothing**. A validator able to read the

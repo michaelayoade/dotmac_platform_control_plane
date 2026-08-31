@@ -35,7 +35,7 @@ directly from "no module tables" to "module tables that `platform_api` may only
 read".
 
 Anything that could break that ordering breaks the guarantee, which is why
-`scripts/migrate.py` refuses to upgrade to anything but composed heads: an
+``dotmac-platform admin migrate`` refuses to upgrade to anything but composed heads: an
 ordinary `alembic upgrade ap_0001_approvals` would otherwise stop after the
 module's own migration and commit the DML grant.
 

@@ -99,8 +99,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    entrypoint: ["python"]
-    command: ["--version"]
+    # No entrypoint. The image has none either, so
+    # `docker compose run --rm --no-deps ops dotmac-platform ...` executes the
+    # INSTALLED console script directly — there is no interpreter in front of it
+    # turning the first argument into a path, and no `src` in this image for
+    # such a path to resolve against.
+    #
+    # `docker compose run` propagates the container's exit status unchanged,
+    # which is what keeps the CLI's 3 (an owner refused) and 4 (no evidence)
+    # distinguishable from outside the container.
+    command: ["dotmac-platform", "diagnose", "self"]
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
