@@ -86,10 +86,38 @@ disagree, fix the drift.
     EXCEPTIONS, each justified and dated, is the contract
     (`tests/migration/test_composed_live_catalog.py`,
     `tests/architecture/test_shadow_overlaps.py`).
-11. **A deployment profile selects surfaces and nothing else.** Read it once, in
-    `build_spec()`. It may not withhold a persistence owner and may not change
-    behaviour; feature code never branches on a profile name (ADR-0003, deny
-    case D6; `tests/architecture/test_deployment_profile.py`).
+11. **A deployment profile selects surfaces and nothing else, and production
+    accepts only a profile that says so.** Read it once, in `build_spec()`. It
+    may not withhold a persistence owner and may not change behaviour; feature
+    code never branches on a profile name (ADR-0003, deny case D6).
+
+    ADR-0015 adds the production half. A profile that publishes the
+    `provisioning` surface must declare `laboratory=True` and can never be
+    `production_accepted`, because that surface's only implementation is a
+    side-effect-free simulation — publishing it in production answers an
+    operator with a fabricated plan through an authenticated API. A production
+    environment refuses such a profile at boot, keyed on
+    `VENDOR_PROVIDER_MODE` rather than on the flag, and refuses an ABSENT
+    profile rather than inheriting the `full` fallback that publishes every
+    withheld surface. The deploy-script grep is the cheap early check, not the
+    only one: it never runs on a restart.
+
+    Every profile carries a `version` and an explicit `surface_inventory`
+    checked for COMPLETENESS against the composed vendor surface roster, so a
+    new feature cannot join a production profile by simply existing, and a
+    profile whose effective surface set changes is a version bump rather than
+    a silent redefinition of a name already on a host.
+
+    **Withholding a route and dropping a manifest are different acts.** A
+    withheld surface keeps its declarations, its behaviour, its schema and its
+    migration lineage; only the routes go. The guard is derived from
+    `assembly.STATEFUL_MODULES` rather than listing modules by hand — the
+    earlier version named five while the assembly composed six — and proves
+    both halves per profile: the manifest is still registered in a
+    `ModuleRegistry` built from that profile's own spec, and the lineage's head
+    revision still resolves in the composed Alembic graph under the branch
+    label the surviving manifest declares
+    (`tests/architecture/test_deployment_profile.py`).
 12. **An authority cutover is contracted before it is composed, and its premise
     is checked.** ADR-0005 records the Approvals switch: the estate was MEASURED
     (`TARGET_ABSENT`), not assumed, and `v013` re-checks emptiness under

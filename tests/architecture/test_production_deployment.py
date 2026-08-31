@@ -175,9 +175,11 @@ def test_production_environment_has_no_secret_defaults() -> None:
     assert values["PLATFORM_ROOT_DOMAIN"] == "vendor.dotmac.io"
     assert values["VENDOR_LICENCE_SIGNING_MODE"] == "configured"
     assert values["VENDOR_PRODUCT_RELEASE_PINS_JSON"] == "{}"
-    # The profile is required on the host, not defaulted in the image: the
-    # in-process fallback is `full`, which publishes exactly the two surfaces
-    # the bootstrap profile withholds.
+    # The profile is required on the host, not defaulted in the image. Since
+    # ADR-0015 the loader ALSO refuses an absent profile in a production
+    # environment, so this line is the cheap early check rather than the only
+    # thing between the host and `full` — which would publish every withheld
+    # surface, the provisioning laboratory included.
     assert values["VENDOR_DEPLOYMENT_PROFILE"] == "production-bootstrap"
     assert "grep -Fqx 'VENDOR_DEPLOYMENT_PROFILE=production-bootstrap'" in _text(
         "scripts/deploy_production.sh"
