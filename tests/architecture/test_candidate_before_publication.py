@@ -131,7 +131,7 @@ def test_the_read_back_actually_leaves_the_runner() -> None:
     remove = workflow.index("docker image rm -f")
     inspect_guard = workflow.index("the candidate is still resident locally")
     pull = workflow.index('docker pull "$reference"')
-    compare = workflow.index("registry config $pulled_config != accepted")
+    compare = workflow.index("registry RootFS chain $pulled_chain != accepted")
     assert remove < inspect_guard < pull < compare
 
 
