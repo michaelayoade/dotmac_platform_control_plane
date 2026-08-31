@@ -71,6 +71,13 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "apply the composed migration lineage to its declared heads",
     ),
     Owner(
+        "admin descriptor-drift",
+        "vendor_cp.descriptor.drift",
+        "compare",
+        False,
+        "compare the accepted descriptor with a catalogue capture, both ways",
+    ),
+    Owner(
         "admin accounts",
         "vendor_cp.accounts.service",
         "list_accounts",

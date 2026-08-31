@@ -42,8 +42,24 @@ ROOT = Path(__file__).resolve().parents[2]
 #: Where canonical claims live. Prose elsewhere is UNMONITORED rather than
 #: exempt (`dotmac_starter_mt` ADR-0018): these are the files a reader treats
 #: as authoritative.
-PROSE_ROOTS = ("AGENTS.md", "README.md", "docs", "src", "alembic", "scripts")
-PROSE_SUFFIXES = frozenset({".md", ".py"})
+#:
+#: `deploy` and `.toml` joined on 2026-08-31, and the reason is a measured
+#: failure rather than tidiness. `deploy/product.toml` is a long prose document
+#: — it argues at length for what it declares — and it sat outside every prose
+#: guard because it is neither `.md` nor `.py` nor under one of the six roots.
+#: Its header stated an atomicity rule and a list of unapplied revisions that a
+#: create-only bootstrap falsified, and no check could see the claim at all. A
+#: descriptor is exactly the kind of file a reader treats as authoritative.
+PROSE_ROOTS = (
+    "AGENTS.md",
+    "README.md",
+    "docs",
+    "src",
+    "alembic",
+    "scripts",
+    "deploy",
+)
+PROSE_SUFFIXES = frozenset({".md", ".py", ".toml"})
 
 NUMBER_WORDS = {
     "one": 1,

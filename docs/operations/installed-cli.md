@@ -34,7 +34,7 @@ data every check reads, so it cannot drift from what the CLI actually does.
 
 | group | what it covers |
 | --- | --- |
-| `admin` | platform administrators, vendor accounts, the composed migration |
+| `admin` | platform administrators, vendor accounts, the composed migration, descriptor drift |
 | `release` | product release evidence, pins, capability catalogues |
 | `agreement` | commercial agreements |
 | `approval` | approval policies, requests and decisions |
@@ -197,6 +197,46 @@ packaging it would put a top-level `alembic` directory at the wheel root,
 colliding with the Alembic distribution's own import name.
 `VENDOR_MIGRATION_ROOT` names where it landed (`/app` in the image) and defaults
 to the checkout layout everywhere else.
+
+## Descriptor drift, in both directions
+
+`dotmac-platform admin descriptor-drift` compares the accepted descriptor
+(`deploy/product.toml`) with a catalogue capture from a target, and reports
+**declared-but-absent** AND **present-but-undeclared**. The second is the one
+that sees an operation nobody declared: on 2026-08-30 a create-only bootstrap
+created `mod_deploy` and applied two revisions, every declared object still
+existed, and a check asking only "does everything declared exist?" was green on
+a database that had moved out from under its contract
+(`docs/operations/descriptor-reconciliation-2026-08-31.md`).
+
+It is two steps, because **this command connects to nothing**. A checker that
+could read the database it validates could also arrange for its own check to
+pass, and deny case D1's connecting-entrypoint allowlist is empty.
+
+```
+# 1. on the target, as an operator, a deployment run or a recovery run.
+#    `--format` is a global flag and goes before the group.
+dotmac-platform --format json recovery capture-sql \
+  | jq -r .data.sql \
+  | psql -tA -d "$TARGET_DSN" -f - > capture.json
+
+# 2. anywhere the descriptor is
+dotmac-platform admin descriptor-drift \
+  --descriptor deploy/product.toml --capture capture.json
+```
+
+Exit `0` when the two agree, `6` when they do not — a mismatch, not a refusal:
+nobody decided anything, something is simply not what it claimed to be. `4` when
+the capture is absent or missing a key it needs; an absent key is never read as
+an empty one, because that would turn a truncated capture into a clean report.
+
+A clean report carries how many subjects it compared. An empty findings list is
+also what a check that examined nothing produces, and the counts are what tell
+those apart.
+
+Scope, stated rather than implied: the **database half** only. `[image]` and
+`[assembly]` describe the running application, and a catalogue capture is not
+evidence about either — those halves advance on different events (ADR-0017 § 8).
 
 ## What was migrated, and what deliberately was not
 

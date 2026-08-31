@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import tomllib
 from dataclasses import asdict, is_dataclass
 from uuid import UUID
 
@@ -111,6 +112,64 @@ def admin_migrate(args: argparse.Namespace) -> Result:
         command="admin migrate",
         data={"target": COMPOSED_TARGET},
         message="composed lineages advanced to heads",
+    )
+
+
+def admin_descriptor_drift(args: argparse.Namespace) -> Result:
+    """Compare the accepted descriptor with a catalogue capture from a target.
+
+    THIS COMMAND CONNECTS TO NOTHING, and that is a property rather than a
+    limitation. The target-side read is `dotmac-platform recovery capture-sql`
+    fed to `psql`; a checker that could read the database it validates could
+    also arrange for its own check to pass, and deny case D1 keeps the
+    connecting-entrypoint allowlist empty for exactly that reason.
+
+    Exit `6`, not `3`: a disagreement between a declaration and a database is
+    something not matching what it claimed to be, and nobody refused anything.
+    """
+    from vendor_cp.descriptor import IncompleteCapture, compare
+
+    descriptor_bytes = read_bytes(args.descriptor, what="product descriptor")
+    capture_bytes = read_bytes(args.capture, what="catalogue capture", limit=64_000_000)
+    try:
+        descriptor = tomllib.loads(descriptor_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise refuse(
+            "usage.invalid_argument",
+            f"{args.descriptor} is not readable TOML ({error})",
+        ) from error
+    try:
+        capture = json.loads(capture_bytes)
+    except json.JSONDecodeError as error:
+        raise refuse(
+            "evidence.not_found",
+            f"{args.capture} is not a readable catalogue capture ({error})",
+        ) from error
+    if not isinstance(capture, dict):
+        raise refuse(
+            "evidence.not_found",
+            f"{args.capture} is not a catalogue capture: it holds no object",
+        )
+    try:
+        report = compare(descriptor, capture)
+    except IncompleteCapture as error:
+        raise refuse("evidence.capability_absent", str(error)) from error
+
+    data = report.as_dict()
+    if report.clean:
+        return Result(
+            command="admin descriptor-drift",
+            data=data,
+            message="the descriptor and the capture agree in both directions",
+        )
+    raise refuse(
+        "integrity.declaration_mismatch",
+        f"{len(report.findings)} disagreement(s) between the descriptor and the "
+        "target: "
+        + "; ".join(
+            f"{finding.direction} {finding.subject} {finding.identity}"
+            for finding in sorted(report.findings)
+        ),
     )
 
 
@@ -626,6 +685,7 @@ __all__ = [
     "admin_account_create",
     "admin_accounts",
     "admin_create",
+    "admin_descriptor_drift",
     "admin_migrate",
     "agreement_list",
     "agreement_show",

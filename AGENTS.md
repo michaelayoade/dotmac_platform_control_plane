@@ -441,3 +441,47 @@ disagree, fix the drift.
     (this repository's ADR-0018 — not `dotmac_starter_mt` ADR-0018, which
     rule 13 cites; `tests/architecture/test_candidate_before_publication.py`,
     `tests/unit/test_readiness.py`; `.github/candidate/`).
+
+23. **The accepted descriptor is a promoted candidate, never a hand edit — and
+    it has two halves that advance on different events.** ADR-0017 § 2 and its
+    2026-08-31 amendment (§ 8). `deploy/product.toml` holds the exact bytes of a
+    candidate under `deploy/candidates/` that `deploy/descriptor-promotions.json`
+    records as promoted; the comparison is byte for byte, a promoted candidate is
+    immutable, and a change means a NEW candidate plus a promotion entry. Editing
+    the accepted descriptor to agree with a database makes the database the
+    authority and the descriptor a transcript of it, and once that is ordinary
+    the next DRIFT is indistinguishable from the next CORRECTION.
+
+    **A candidate's database declarations are DERIVED from the migrations that
+    produce them**, never transcribed from a catalogue read: the composed
+    revision graph's effective heads (graph heads minus every `depends_on`
+    target, because Alembic prunes a subsumed dependency from `alembic_version`),
+    the schemas the composed lineages create, and the privilege changes the
+    revisions perform. A descriptor copied from a database can only ever agree
+    with that database, including where it is wrong. Agreement with a measurement
+    is the confirmation, not the method.
+
+    **The image half must not run ahead; the database half must not fall
+    behind.** A create-only operation advanced the database on 2026-08-31 and
+    promoted nothing, and the descriptor spent a day declaring five module
+    schemas against a database holding seven. A promotion records which sections
+    it changed and which application values it carried forward, so one that
+    advances the image cannot arrive disguised as a database repair.
+
+    **Drift is checked in BOTH directions or it is not checked.**
+    `dotmac-platform admin descriptor-drift` reports declared-but-absent AND
+    present-but-undeclared over schemas, migration heads, roles and effective
+    privileges. The second is the one that sees an operation nobody declared:
+    every declared object still existed the day this happened. It connects to
+    nothing — the target-side read is the existing catalogue capture, and deny
+    case D1's allowlist stays empty — and both directions are planted and
+    observed, alongside a matching pair that must PASS and a compared-subject
+    count that makes a vacuous run visible
+    **And the descriptor's PROSE is monitored too.** `deploy/product.toml`
+    argues at length for what it declares and sat outside every prose guard,
+    because `test_stale_claims.py` scanned `.md` and `.py` under six roots that
+    did not include `deploy`. Its header stated an atomicity rule and a list of
+    unapplied revisions that the bootstrap falsified, and no check could see the
+    claim (`tests/architecture/test_descriptor_promotion.py`,
+    `tests/unit/test_descriptor_drift.py`, `tests/architecture/test_stale_claims.py`;
+    `docs/operations/descriptor-reconciliation-2026-08-31.md`).

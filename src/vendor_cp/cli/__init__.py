@@ -131,6 +131,22 @@ def build_parser() -> _Parser:
     migrate.add_argument("--target", default="heads")
     migrate.set_defaults(handler=commands.admin_migrate)
 
+    descriptor_drift = _command(
+        admin_sub,
+        "admin",
+        "descriptor-drift",
+        "compare the accepted descriptor with a catalogue capture, both ways",
+    )
+    descriptor_drift.add_argument(
+        "--descriptor", required=True, help="path to the accepted product.toml"
+    )
+    descriptor_drift.add_argument(
+        "--capture",
+        required=True,
+        help="path to the JSON `recovery capture-sql` emitted from the target",
+    )
+    descriptor_drift.set_defaults(handler=commands.admin_descriptor_drift)
+
     accounts = _command(admin_sub, "admin", "accounts", "list vendor accounts")
     accounts.set_defaults(handler=commands.admin_accounts)
 
