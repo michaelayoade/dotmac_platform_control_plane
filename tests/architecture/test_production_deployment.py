@@ -293,14 +293,24 @@ def test_image_workflow_builds_on_github_hosted_runner_and_publishes_a_digest() 
 
 
 def test_image_smokes_use_the_production_database_dialect() -> None:
-    for path in (
-        ".github/workflows/ci.yml",
-        ".github/workflows/production-image.yml",
-    ):
-        workflow = _text(path)
-        assert "sqlite+pysqlite" not in workflow
-        assert "DATABASE_URL=postgresql+psycopg://app_user@" in workflow
-        assert "PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@" in workflow
+    """No artifact check may run against a dialect production does not use.
+
+    The candidate battery moved out of the workflow and into
+    `.github/candidate/acceptance.sh`, which builds its DSNs through one `dsn`
+    helper rather than repeating a literal — so the assertion is on the scheme
+    and the roles, which is the property, rather than on a string that happened
+    to be spelled out when the checks lived inline.
+    """
+    workflow = _text(".github/workflows/ci.yml")
+    assert "sqlite+pysqlite" not in workflow
+    assert "DATABASE_URL=postgresql+psycopg://app_user@" in workflow
+    assert "PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@" in workflow
+
+    acceptance = _text(".github/candidate/acceptance.sh")
+    assert "sqlite+pysqlite" not in acceptance
+    assert "postgresql+psycopg://%s@127.0.0.1" in acceptance
+    for role in ("app_admin", "app_user", "platform_api"):
+        assert f"dsn {role}" in acceptance
 
 
 def test_image_smokes_prove_the_built_bytes_publish_no_api_documentation() -> None:
@@ -315,13 +325,13 @@ def test_image_smokes_prove_the_built_bytes_publish_no_api_documentation() -> No
     """
     for path in (
         ".github/workflows/ci.yml",
-        ".github/workflows/production-image.yml",
+        ".github/candidate/acceptance.sh",
     ):
-        workflow = _text(path)
-        assert "import vendor_cp.api_documentation as policy" in workflow
-        assert "policy.classify_environment(None) == policy.PRODUCTION" in workflow
-        assert "'/docs', '/docs/oauth2-redirect', '/redoc'" in workflow
-        assert "policy.audit_api_documentation(" in workflow
+        source = _text(path)
+        assert "import vendor_cp.api_documentation as policy" in source
+        assert "policy.classify_environment(None) == policy.PRODUCTION" in source
+        assert "'/docs', '/docs/oauth2-redirect', '/redoc'" in source
+        assert "policy.audit_api_documentation(" in source
 
 
 def test_every_test_job_runs_on_a_github_hosted_runner() -> None:
@@ -356,6 +366,12 @@ def test_deploy_workflow_requires_the_named_target_and_an_immutable_digest() -> 
     assert "environment: production" in workflow
     assert '"$TARGET_SERVER_NAME" != "vendor-cp-prod"' in workflow
     assert "sha256:[0-9a-f]{64}" in workflow
+    # A digest an operator pasted is not evidence. The deploy verifies the CI
+    # run that produced the revision, then requires the release receipt that
+    # binds these exact bytes to it.
+    assert "verify_source_revision.py" in workflow
+    assert "release-receipt-${SOURCE_SHA}" in workflow
+    assert "dotmac-candidate-release-receipt/1" in workflow
     assert "VENDOR_PRODUCTION_KNOWN_HOSTS" in workflow
     assert "VENDOR_PRODUCTION_SSH_KEY" in workflow
     reconcile = workflow.index("Reconcile assembly-owned host declarations")

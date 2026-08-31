@@ -71,6 +71,10 @@
       "source": "assembly"
     },
     {
+      "code": "readiness",
+      "source": "assembly"
+    },
+    {
       "code": "release_catalog",
       "contract_version": 2,
       "distribution": "dotmac-release-catalog",

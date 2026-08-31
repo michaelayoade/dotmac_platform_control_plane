@@ -195,6 +195,14 @@ select = ["E", "F", "I", "UP", "B", "S"]
 # a query — does not hold. `tests/architecture/test_commercial_backfill.py`
 # proves the refusal, so this ignore rests on a check rather than on a comment.
 "src/vendor_cp/commercial_backfill/shadow.py" = ["S608"]
+# The candidate verifier reads the GitHub REST API over https. S310's premise is
+# a URL of unknown provenance reaching a URL opener: the host is a module
+# constant (`API`), the scheme is fixed in it, and the only caller-supplied part
+# is a path built from a run id and a repository name that the workflow already
+# constrains. Nothing here can be redirected to `file:` by an input, because no
+# input reaches the scheme. It is a CI-only operator tool that never runs in the
+# application.
+".github/candidate/verify_source_revision.py" = ["S310"]
 # The Foundation passthrough executes a console script it resolved from PATH.
 # S603's premise is an argument of unknown provenance reaching an executed
 # command: the executable is a fixed console-script name (or an explicitly

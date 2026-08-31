@@ -72,13 +72,19 @@ services:
     pids_limit: ${VENDOR_APP_PIDS_LIMIT:-256}
     mem_limit: ${VENDOR_APP_MEM_LIMIT:-768m}
     stop_grace_period: 30s
+    # `/health/ready`, not `/health`. The kernel's `/health` is liveness and says so
+    # in its own docstring — it does not touch the database — so this wait used
+    # to be satisfied by a container that could not serve a single request, and
+    # `deploy_production.sh` would then declare the deploy successful. The
+    # readiness route asks the one dependency this assembly has and answers 503
+    # when it cannot reach it, which is what makes `--wait` mean something.
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health', headers={'Host': 'vendor.dotmac.io'}); urllib.request.urlopen(r, timeout=3)",
+          "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health/ready', headers={'Host': 'vendor.dotmac.io'}); urllib.request.urlopen(r, timeout=3)",
         ]
       interval: 10s
       timeout: 5s

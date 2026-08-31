@@ -210,12 +210,18 @@ def test_production_composed_v1_publishes_exactly_its_declared_inventory() -> No
     assert set(profile.surface_inventory) == {
         "console",
         "allocations",
+        # Declarations only, no router.
         "release_evidence",
+        # Published here for the same reason it is published everywhere: a
+        # deployment that cannot say whether it is ready is one an orchestrator
+        # assumes is. No profile may withhold it.
+        "readiness",
     }
     # Exposed: the platform-admin console shell and the read-only allocation
     # view. `release_evidence` contributes declarations only and no router.
     assert "/platform/console" in paths, paths
     assert _under(paths, ALLOCATIONS_PREFIX), paths
+    assert "/health/ready" in paths, paths
     # Withheld: every operator WRITE surface, and the laboratory.
     for prefix in (
         LICENSING_PREFIX,

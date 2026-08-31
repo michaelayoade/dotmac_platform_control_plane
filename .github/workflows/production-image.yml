@@ -1,7 +1,38 @@
+# Build a candidate, ACCEPT it, and only then publish it.
+#
+# The previous pipeline pushed and then smoked. A failing smoke therefore left
+# published bytes that nothing had accepted, and the registry became a record of
+# what was BUILT rather than of what PASSED — with no mechanism for removing the
+# rejected tag, and every downstream consumer free to pin it.
+#
+# The order below is the whole point, and each step exists because the one
+# before it cannot be trusted on its own:
+#
+#   1  select an exact protected-main revision
+#   2  verify required CI actually succeeded on it — including that no required
+#      gate SKIPPED, which a run-level success hides
+#   3  build ONE local candidate, never pushed
+#   4  record its identity: config digest, layers, RootFS chain, source
+#      revision, lock digest, Dockerfile digest
+#   5  test THOSE EXACT BYTES
+#   6  publish the same config and layers
+#   7  read the immutable registry digest back
+#   8  prove what the registry holds equals what was accepted
+#   9  emit a release receipt
+#
+# The registry can therefore only ever hold something that already passed.
 name: Build immutable production image
 
 on:
   workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: >-
+          Exact successful CI run id for the revision to publish. Verified
+          against repository, workflow, conclusion, branch, SHA, current main
+          and every required gate — a pasted id is not evidence on its own.
+        required: true
+        type: string
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -9,6 +40,8 @@ on:
 permissions:
   contents: read
   packages: write
+  checks: read
+  actions: read
 
 concurrency:
   group: vendor-control-plane-production-image
@@ -16,48 +49,102 @@ concurrency:
 
 env:
   IMAGE_REPOSITORY: ghcr.io/michaelayoade/dotmac_vendor_control_plane
-  SOURCE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
-  SOURCE_BRANCH: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
+  CANDIDATE_TAG: candidate-local
+  CI_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.ci_run_id }}
 
 jobs:
-  build:
-    # A PR run and a failed main run may emit workflow_run events too. Neither
-    # may publish production bytes.
+  candidate:
+    # A pull-request run and a failed main run emit workflow_run events too.
+    # Neither may reach the publication path; the verifier below re-checks all
+    # of this against the API rather than trusting the event payload.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
       reference: ${{ steps.publish.outputs.reference }}
+      source_sha: ${{ steps.select.outputs.source_sha }}
     steps:
-      - name: Require a successful main event
-        run: |
-          set -euo pipefail
-          test "$SOURCE_BRANCH" = "main" || {
-            echo "Production images may only be built from main." >&2
-            exit 1
-          }
-          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-
-      - name: Check out exact source
+      # ── 1. Select an exact protected-main revision ──────────────────────
+      - name: Check out main to resolve its current head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.SOURCE_SHA }}
+          ref: main
           fetch-depth: 1
 
-      - name: Re-assert that the successful SHA is still current main
+      - name: Resolve current main
+        id: select
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          git fetch --no-tags --depth=1 origin main
-          current_main="$(git rev-parse FETCH_HEAD)"
-          test "$current_main" = "$SOURCE_SHA" || {
-            echo "Refusing stale image build: $SOURCE_SHA is not current main." >&2
-            exit 1
-          }
+          current_main="$(git rev-parse HEAD)"
+          [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
+          echo "current_main=$current_main" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$current_main" >> "$GITHUB_OUTPUT"
 
+      # ── 2. Verify required CI succeeded on exactly that revision ────────
+      - name: Verify the source revision earned its way here
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 .github/candidate/verify_source_revision.py \
+            --run-id "${CI_RUN_ID}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-path .github/workflows/ci.yml \
+            --branch main \
+            --current-main "${{ steps.select.outputs.current_main }}"
+
+      # ── 3. Build ONE local candidate. Nothing is pushed by this step. ───
+      - name: Build the candidate
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
+            --build-arg "SOURCE_REVISION=${{ steps.select.outputs.source_sha }}" \
+            --tag "${CANDIDATE_TAG}" .
+
+      # ── 4. Record what was built, before anything is done to it ─────────
+      - name: Record the candidate's identity
+        id: identity
+        run: |
+          set -euo pipefail
+          config_digest="$(docker image inspect --format '{{.Id}}' "${CANDIDATE_TAG}")"
+          layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "${CANDIDATE_TAG}")"
+          # The RootFS chain digest is over the ORDERED layer list: two images
+          # can share every layer and stack them differently, and that is a
+          # different filesystem.
+          rootfs_chain="$(printf '%s' "$layers" | sha256sum | cut -d' ' -f1)"
+          lock_digest="$(sha256sum poetry.lock | cut -d' ' -f1)"
+          dockerfile_digest="$(sha256sum Dockerfile | cut -d' ' -f1)"
+          {
+            echo "config_digest=$config_digest"
+            echo "rootfs_chain=sha256:$rootfs_chain"
+            echo "lock_digest=sha256:$lock_digest"
+            echo "dockerfile_digest=sha256:$dockerfile_digest"
+          } >> "$GITHUB_OUTPUT"
+          jq -n \
+            --arg source_revision "${{ steps.select.outputs.source_sha }}" \
+            --arg config_digest "$config_digest" \
+            --argjson layers "$layers" \
+            --arg rootfs_chain "sha256:$rootfs_chain" \
+            --arg lock_digest "sha256:$lock_digest" \
+            --arg dockerfile_digest "sha256:$dockerfile_digest" \
+            '{source_revision:$source_revision, config_digest:$config_digest,
+              layers:$layers, rootfs_chain:$rootfs_chain,
+              lock_digest:$lock_digest, dockerfile_digest:$dockerfile_digest}' \
+            > candidate-identity.json
+          cat candidate-identity.json
+
+      # ── 5. Test those exact bytes ───────────────────────────────────────
+      - name: Accept the candidate, or refuse it
+        run: .github/candidate/acceptance.sh "${CANDIDATE_TAG}"
+
+      # ── 6. Publish the SAME config and layers ───────────────────────────
       - name: Authenticate to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -66,47 +153,83 @@ jobs:
           printf '%s' "$GHCR_TOKEN" \
             | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
 
-      - name: Build, publish, and resolve the registry digest
+      - name: Publish the accepted candidate
         id: publish
-        env:
-          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: |
           set -euo pipefail
-          tag="${IMAGE_REPOSITORY}:${SOURCE_SHA}"
-          DOCKER_BUILDKIT=1 docker build \
-            --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
-            --build-arg "SOURCE_REVISION=${SOURCE_SHA}" \
-            --tag "$tag" .
+          tag="${IMAGE_REPOSITORY}:${{ steps.select.outputs.source_sha }}"
+          # `docker tag` renames; it does not rebuild. The config digest and the
+          # layer chain recorded in step 4 are the ones that travel.
+          docker tag "${CANDIDATE_TAG}" "$tag"
           docker push "$tag"
-          docker pull "$tag"
           reference="$(docker image inspect --format '{{index .RepoDigests 0}}' "$tag")"
           digest="${reference#*@}"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "reference=$reference" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Smoke the published bytes
+      # ── 7 + 8. Read back, and prove equality with what was accepted ─────
+      - name: Prove the registry holds the accepted candidate
         run: |
           set -euo pipefail
-          docker run --rm --entrypoint python \
-            --env DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
-            --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
-            "${{ steps.publish.outputs.reference }}" \
-            -c "from vendor_cp.main import app; \
-                import vendor_cp.api_documentation as policy; \
-                assert app is not None; \
-                assert policy.classify_environment(None) == policy.PRODUCTION; \
-                paths = {getattr(route, 'path', '') for route in app.routes}; \
-                assert not paths & {'/docs', '/docs/oauth2-redirect', '/redoc'}, paths; \
-                assert not policy.audit_api_documentation( \
-                    app, policy.api_documentation_policy(policy.PRODUCTION))"
+          reference='${{ steps.publish.outputs.reference }}'
+          # Remove every local reference first. Inspecting a tag that never left
+          # the runner would compare the candidate with itself and pass without
+          # the registry having been consulted at all.
+          docker image rm -f "${CANDIDATE_TAG}" >/dev/null 2>&1 || true
+          docker image rm -f "${IMAGE_REPOSITORY}:${{ steps.select.outputs.source_sha }}" >/dev/null 2>&1 || true
+          docker image rm -f "$reference" >/dev/null 2>&1 || true
+          docker image inspect "$reference" >/dev/null 2>&1 \
+            && { echo "the candidate is still resident locally; the read-back would be a no-op" >&2; exit 1; }
 
-      - name: Record deployment input
+          docker pull "$reference" >/dev/null
+          pulled_config="$(docker image inspect --format '{{.Id}}' "$reference")"
+          pulled_layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "$reference")"
+          pulled_chain="sha256:$(printf '%s' "$pulled_layers" | sha256sum | cut -d' ' -f1)"
+
+          accepted_config='${{ steps.identity.outputs.config_digest }}'
+          accepted_chain='${{ steps.identity.outputs.rootfs_chain }}'
+          test "$pulled_config" = "$accepted_config" \
+            || { echo "registry config $pulled_config != accepted $accepted_config" >&2; exit 1; }
+          test "$pulled_chain" = "$accepted_chain" \
+            || { echo "registry RootFS chain $pulled_chain != accepted $accepted_chain" >&2; exit 1; }
+          echo "registry bytes equal the accepted candidate"
+
+      # ── 9. The receipt ──────────────────────────────────────────────────
+      - name: Emit the release receipt
         run: |
+          set -euo pipefail
+          jq -n \
+            --arg source_revision "${{ steps.select.outputs.source_sha }}" \
+            --arg ci_run_id "${CI_RUN_ID}" \
+            --arg release_run_id "${GITHUB_RUN_ID}" \
+            --arg registry_digest "${{ steps.publish.outputs.digest }}" \
+            --arg reference "${{ steps.publish.outputs.reference }}" \
+            --arg config_digest "${{ steps.identity.outputs.config_digest }}" \
+            --arg rootfs_chain "${{ steps.identity.outputs.rootfs_chain }}" \
+            --arg lock_digest "${{ steps.identity.outputs.lock_digest }}" \
+            --arg dockerfile_digest "${{ steps.identity.outputs.dockerfile_digest }}" \
+            --arg accepted "candidate accepted before publication" \
+            '{contract:"dotmac-candidate-release-receipt/1", accepted:$accepted,
+              source_revision:$source_revision, ci_run_id:$ci_run_id,
+              release_run_id:$release_run_id, registry_digest:$registry_digest,
+              reference:$reference, config_digest:$config_digest,
+              rootfs_chain:$rootfs_chain, lock_digest:$lock_digest,
+              dockerfile_digest:$dockerfile_digest}' \
+            > release-receipt.json
+          cat release-receipt.json
           {
-            echo '### Immutable Vendor CP image'
-            echo '```text'
-            echo '${{ steps.publish.outputs.reference }}'
+            echo '### Accepted before publication'
+            echo '```json'
+            cat release-receipt.json
             echo '```'
-            echo "Source: \`$SOURCE_SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the receipt and the candidate identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-receipt-${{ steps.select.outputs.source_sha }}
+          path: |
+            release-receipt.json
+            candidate-identity.json
+          retention-days: 90
