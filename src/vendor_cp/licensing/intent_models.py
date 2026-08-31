@@ -8,8 +8,9 @@ to correlate against something Vendor wrote down at hand-off time.
 ## Deliberately NOT a transport ledger
 
 No attempt count, no retry state, no backoff, no checkpoint, no lease, no
-`connection_ref`. Every one of those belongs to `dotmac-integration` (ADR-0024,
-hard rule 28), and the five tables that hold Vendor's versions of them are the
+`connection_ref`. Every one of those belongs to `dotmac-integration`
+(`dotmac_starter_mt` ADR-0024, hard rule 28), and the five tables that hold
+Vendor's versions of them are the
 estate ADR-0010 retires. Adding one here would rebuild the thing this cutover
 exists to remove, under a newer name.
 

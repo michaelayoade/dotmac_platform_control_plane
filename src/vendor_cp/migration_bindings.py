@@ -8,7 +8,7 @@ They answer different questions and must never be collapsed into one:
 - **`ASSEMBLY_MODULE_PLANES`** — *which part of a module do we intend to
   install?* A selection is a statement of intent about this product.
 
-## Why they are separate (ADR-0028)
+## Why they are separate (`dotmac_starter_mt` ADR-0028)
 
 Kernel `0.1.0a60` briefly let the first answer imply the second: a dual-plane
 module built its tenant plane if, and only if, the assembly happened to bind

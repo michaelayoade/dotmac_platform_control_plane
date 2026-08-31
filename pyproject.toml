@@ -43,7 +43,7 @@ dotmac-kernel = { version = "0.1.0a98", extras = [
 # The composed audit added in `tests/migration/test_composed_live_catalog.py`
 # does, and an a3 module fails it correctly: the declaration and the database
 # disagree. a4 moves both tables to `platform_tables`, which is what makes the
-# declaration true (ADR-0023).
+# declaration true (`dotmac_starter_mt` ADR-0023).
 dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
 # The allocation authority under ADR-0006. Vendor migration `v014` checked the
 # greenfield premise, dropped the empty local tables and retired their writer;
@@ -64,8 +64,9 @@ dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
 # a5 is skipped deliberately and must never be pinned: it carried only the first
 # half of that repair and was never published to the index.
 dotmac-entitlement-allocation = { version = "0.1.0a6", source = "forgejo" }
-# The dual-plane approval-state authority (ADR-0005/ADR-0028), composed on its
-# PLATFORM plane only. Vendor migration `v013` restored the module's online DML,
+# The dual-plane approval-state authority (ADR-0005 and
+# `dotmac_starter_mt` ADR-0028), composed on its PLATFORM plane only. Vendor
+# migration `v013` restored the module's online DML,
 # dropped the empty legacy tables and retired the local writer; Vendor retains
 # only its typed adapter.
 #

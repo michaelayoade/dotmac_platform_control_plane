@@ -51,7 +51,7 @@ from vendor_cp.migrations import composed_version_locations
 # They are two declarations because they answer two questions. The bindings say
 # where an effect comes from; the plane selection says what this product
 # installs. See `vendor_cp/migration_bindings.py` for why conflating them
-# breaks precisely this assembly (ADR-0028).
+# breaks precisely this assembly (`dotmac_starter_mt` ADR-0028).
 install_prerequisite_bindings(ASSEMBLY_PREREQUISITE_BINDINGS)
 install_module_plane_selections(ASSEMBLY_MODULE_PLANES)
 

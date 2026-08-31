@@ -40,7 +40,8 @@ from vendor_cp.migrations import composed_version_locations
 ROOT = Path(__file__).resolve().parents[2]
 
 #: Where canonical claims live. Prose elsewhere is UNMONITORED rather than
-#: exempt (ADR-0018): these are the files a reader treats as authoritative.
+#: exempt (`dotmac_starter_mt` ADR-0018): these are the files a reader treats
+#: as authoritative.
 PROSE_ROOTS = ("AGENTS.md", "README.md", "docs", "src", "alembic", "scripts")
 PROSE_SUFFIXES = frozenset({".md", ".py"})
 
@@ -143,8 +144,9 @@ SUPERSEDED_DESIGNS: Final = (
 
 #: Guard EXEMPTIONS that have been retired, and the claims that may not outlive
 #: them. An exemption whose premise has evaporated is worse than no exemption: it
-#: keeps widening a gate for facts nobody has examined (ADR-0018). Removing the
-#: code is half the job; removing the prose that still promises it is the rest.
+#: keeps widening a gate for facts nobody has examined
+#: (`dotmac_starter_mt` ADR-0018). Removing the code is half the job; removing
+#: the prose that still promises it is the rest.
 #:
 #: Keyed on the module whose absence retires the claim, so this stays a GATE on a
 #: fact rather than a list of sentences to grep for.

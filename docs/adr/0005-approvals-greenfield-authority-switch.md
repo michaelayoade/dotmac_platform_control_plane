@@ -82,7 +82,7 @@ information, and every one of them would have to be maintained and believed:
 - **backfill** — there is nothing to migrate;
 - **synthesized requests** — there is no history to represent, and ADR-0004's
   Ruling 2 refused inventing request identity even when there WAS;
-- **sealed legacy evidence** — ADR-0031 is the standard for a cutover with data.
+- **sealed legacy evidence** — `dotmac_starter_mt` ADR-0031 is the standard for a cutover with data.
   This is not one, and sealing an empty set would produce a digest of nothing
   that later reads as proof of something.
 
@@ -116,7 +116,7 @@ Four reasons, and they apply to both:
    revision. Retirement removes them from the working tree, not from the record —
    and a working tree is a claim about what runs, while a revision is a record of
    what was.
-3. **A later cutover implements locally.** From ADR-0031's protocol and that
+3. **A later cutover implements locally.** From `dotmac_starter_mt` ADR-0031's protocol and that
    product's own CURRENT inventory — not by resurrecting code whose shape was
    determined by a schema and a set of consumers that no longer exist. Code
    carried forward for reuse arrives with assumptions nobody re-examines, which

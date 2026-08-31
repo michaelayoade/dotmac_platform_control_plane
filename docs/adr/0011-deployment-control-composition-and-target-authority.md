@@ -151,7 +151,7 @@ established. The write path is removed, its routes and audit codes with it.
 backfilled rows against the source, switch the writer, and retain the Vendor
 table as a module-derived projection with no independent write path until
 ADR-0010. Immutable identities, the customer binding and the audit history are
-preserved; synthetic evidence and cross-database SQL are forbidden. ADR-0031
+preserved; synthetic evidence and cross-database SQL are forbidden. `dotmac_starter_mt` ADR-0031
 governs a cutover with data.
 
 Either way a forward vendor revision is owed. The earlier draft's claim that
@@ -268,7 +268,7 @@ second licenses a seal.
 
 No backfill, no comparison, no writer-switch ceremony: there is nothing to
 migrate, and building parity machinery against an empty estate is the defect
-ADR-0031 seals against and that ADR-0005 already refused once.
+`dotmac_starter_mt` ADR-0031 seals against and that ADR-0005 already refused once.
 
 ### 5. Retired with this slice
 

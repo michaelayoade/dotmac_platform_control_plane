@@ -89,7 +89,7 @@ def test_every_effect_a_composed_module_declares_is_bound() -> None:
 
 
 def test_a_bound_tenant_catalogue_selects_nothing_by_itself() -> None:
-    """The half of ADR-0028 that is assertable with no selectable module.
+    """The half of `dotmac_starter_mt` ADR-0028 assertable with no such module.
 
     The prerequisite is bound AND the assembly installs no tenant plane. Under
     the a60 model those two facts could not both hold.

@@ -59,7 +59,7 @@ policies and conclude the isolation model came back.
 
 It did not. This assembly's tenant/platform separation is not the policies
 alone — it is the policies **plus** the `platform_api` grant/revoke matrix
-(ADR-0023, `AGENTS.md` rule 24), where the revocation IS the isolation. A
+(`dotmac_starter_mt` ADR-0023, `AGENTS.md` rule 24), where the revocation IS the isolation. A
 restore that silently drops the role layer produces a control-plane database
 with no plane separation at all, and the application cannot start against it
 anyway, because the roles it connects as do not exist.

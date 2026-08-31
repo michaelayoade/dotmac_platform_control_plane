@@ -422,8 +422,9 @@ def test_no_foreign_key_reaches_the_module_or_the_dropped_estate(
     refuses to drop a table a foreign key still depends on, so it BLOCKED the
     switch — the unit suite found it before CI did. And it must not simply be
     re-pointed at `mod_ealloc.allocations`, because no FK may cross into a
-    module's schema (ADR-0023): a module's tables are its own, and a constraint
-    on them would make this assembly's DDL depend on the module's.
+    module's schema (`dotmac_starter_mt` ADR-0023): a module's tables are its
+    own, and a constraint on them would make this assembly's DDL depend on the
+    module's.
 
     The local issuer later retires under `v016`, but the rule that actually
     matters — one issued version per staged allocation — remains a unique

@@ -275,7 +275,7 @@ as Deployment Control's greenfield half:
   COMMON and already bound here; `platform_audit_log.v1` is the platform-plane
   requirement and is also already bound. The TENANT-plane requirement,
   `tenant_scope_catalog.v1`, is bound here as a fact about the database and is
-  irrelevant to the selection — the ADR-0028 separation this assembly is the
+  irrelevant to the selection — the `dotmac_starter_mt` ADR-0028 separation this assembly is the
   reference case for.
 - **No migration and no writer retirement**, per the section above. The
   dossier's own next action says the same from the other side.

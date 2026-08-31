@@ -45,8 +45,9 @@ list. Two halves, because the composed database has two namespaces:
      kernel deliberately leaves open — CI caught exactly that. Excluded from
      both planes and held to its own contract instead.
    * nullable `tenant_id` → NEITHER plane, and therefore **unmonitored** rather
-     than exempt (ADR-0018). The kernel has exactly three such tables and they
-     are named below; a fourth appearing fails, because an unmonitored region
+     than exempt (`dotmac_starter_mt` ADR-0018). The kernel has exactly three
+     such tables and they are named below; a fourth appearing fails, because
+     an unmonitored region
      that grows silently is how a real tenant table ends up governed by nothing.
 
 The vendor-owned subset is derived by diffing `public` after `kernel@head`
@@ -255,15 +256,17 @@ def test_composed_module_schemas_pass_the_kernel_live_catalog_gate(
     shadow overlaps — the legacy `public.allocations` / `public.allocation_entries`
     tables shadowing `mod_ealloc` — and that exemption retired with the tables
     themselves in `v014`. An exemption whose premise has evaporated does not
-    become harmless; it silently widens what the gate permits (ADR-0018), so it
-    is removed rather than left describing nothing.
+    become harmless; it silently widens what the gate permits
+    (`dotmac_starter_mt` ADR-0018), so it is removed rather than left
+    describing nothing.
     """
     spec = build_spec()
     # `module_planes` is REQUIRED here, not optional decoration: without it the
     # registry falls back to the atomic "every declared plane is installed"
     # view, expects the module's TENANT tables, and reports them missing on a
     # correct platform-only install. The expected set is a function of the
-    # assembly's SELECTION (ADR-0028), so the selection has to be supplied.
+    # assembly's SELECTION (`dotmac_starter_mt` ADR-0028), so the selection
+    # has to be supplied.
     registry = NamespaceRegistry.from_manifests(
         spec.modules, module_planes=spec.module_planes
     )

@@ -70,7 +70,7 @@ disagree, fix the drift.
    the a60
    model in which an absent binding selected a plane, and never create a tenants
    table, a sentinel tenant, or a nullable tenant column to satisfy a module
-   (ADR-0028; `tests/architecture/test_migration_prerequisite_bindings.py`,
+   (`dotmac_starter_mt` ADR-0028; `tests/architecture/test_migration_prerequisite_bindings.py`,
    `tests/migration/test_selected_planes.py`).
 10. **Coverage is catalogue-derived; exceptions are named and ratcheted.** Two
     halves, and the distinction between them is the rule. WHICH tables get
@@ -135,7 +135,7 @@ disagree, fix the drift.
     product-held signing custody and delivery; and all six retired or
     ownership-ambiguous module paths stay at zero. Do not build
     parity, backfill, synthesized requests or sealed evidence against an empty
-    estate — ADR-0031 governs a cutover WITH data, and this was not one. Composed
+    estate — `dotmac_starter_mt` ADR-0031 governs a cutover WITH data, and this was not one. Composed
     and authoritative in code is NOT adopted
     (`tests/architecture/test_approvals_authority.py`,
     `tests/migration/test_authority_switch.py`,
@@ -159,7 +159,7 @@ disagree, fix the drift.
     the legacy allocation tables shadowing `mod_ealloc` was REMOVED when `v014`
     dropped those tables, not lowered and not left describing nothing: an
     exemption whose premise has evaporated keeps widening a gate for facts nobody
-    has examined (ADR-0018). The composed live-catalogue audit now consumes the
+    has examined (`dotmac_starter_mt` ADR-0018). The composed live-catalogue audit now consumes the
     kernel gate raw, with no subtraction at all. When you retire an exemption,
     delete its prose in the same change — `test_stale_claims.py` fails if a
     document still describes a retired exemption as live.

@@ -36,7 +36,7 @@ frozen content has met its quorum before performing the contract's own
 transition.
 
 `dotmac-approvals` is the published module that will own that decision. It is not
-composed here, not pinned, and has no plane selection (ADR-0028 separates
+composed here, not pinned, and has no plane selection (`dotmac_starter_mt` ADR-0028 separates
 binding from selection; the assembly's selection tuple is empty). Composing it
 first and designing the migration afterwards is how two writers end up live at
 once, so this contract comes first.
@@ -378,10 +378,11 @@ are not the same property and are not compared as one.
 
 #### The at-most-once wrapping is a NEW-ADAPTER OBLIGATION
 
-At-most-once execution is kernel-owned (`dotmac_kernel.idempotency`, ADR-0014),
-not module-owned. The cutover adapter that replaces `vendor_cp.approvals.service`
-therefore **must** wrap the module's decision call in the same platform
-at-most-once primitive Vendor uses today, so that:
+At-most-once execution is kernel-owned (`dotmac_kernel.idempotency`,
+`dotmac_starter_mt` ADR-0014), not module-owned. The cutover adapter that
+replaces `vendor_cp.approvals.service` therefore **must** wrap the module's
+decision call in the same platform at-most-once primitive Vendor uses today,
+so that:
 
 - a retried command still succeeds and returns the original outcome, rather than
   surfacing the module's `DuplicateDecision` to a caller who did nothing wrong;

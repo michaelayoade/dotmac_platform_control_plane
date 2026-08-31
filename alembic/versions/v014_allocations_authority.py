@@ -131,8 +131,9 @@ def upgrade() -> None:
     #     outside it. `licence_issuances.allocation_id` pointed at
     #     `public.allocations`; the allocation it names now lives in
     #     `mod_ealloc`, and no foreign key may cross into a module's schema
-    #     (ADR-0023) — a module's tables are its own, and a constraint pointing
-    #     at them would make this assembly's DDL depend on the module's. The
+    #     (`dotmac_starter_mt` ADR-0023) — a module's tables are its own, and
+    #     a constraint pointing at them would make this assembly's DDL depend
+    #     on the module's. The
     #     column stays as an OPAQUE reference, and the rule that actually
     #     matters — one issued version per staged allocation — is a unique
     #     constraint on `licence_issuances` and is untouched.
@@ -201,7 +202,7 @@ def _require_empty(connection: object) -> None:
             "the greenfield allocation authority switch requires an EMPTY legacy "
             f"estate, and these tables hold rows: {', '.join(populated)}. Nothing "
             "has been changed. A populated estate needs a sealed cutover with "
-            "parity (ADR-0031's protocol), not this migration."
+            "parity (`dotmac_starter_mt` ADR-0031's protocol), not this migration."
         )
 
 

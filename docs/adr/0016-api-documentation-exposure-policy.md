@@ -8,8 +8,9 @@
 - **Relates to:** ADR-0003 (a deployment profile selects surfaces and nothing
   else), ADR-0014 (the console has one browser authentication owner — the plane
   rule in § 3 is the same rule, applied to a surface FastAPI mounts for free),
-  ADR-0015 (a production profile publishes no simulation), ADR-0018 in
-  `dotmac_governance` (a guard exemption states an enforceable premise)
+  ADR-0015 (a production profile publishes no simulation),
+  `dotmac_starter_mt` ADR-0018 (a guard exemption states an enforceable
+  premise)
 
 ## 1. Context — the defect
 

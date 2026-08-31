@@ -152,8 +152,9 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
 
     return ProductAssemblySpec(
         name=ASSEMBLY_NAME,
-        # The INTENT half of the composition (ADR-0028): which plane of a
-        # selectable module this product installs. Not implied by the
+        # The INTENT half of the composition (`dotmac_starter_mt` ADR-0028):
+        # which plane of a selectable module this product installs. Not
+        # implied by the
         # prerequisite bindings, which truthfully record that kernel 0001
         # supplies a tenant catalogue this assembly declines to build on.
         module_planes=ASSEMBLY_MODULE_PLANES,
