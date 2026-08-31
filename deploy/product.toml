@@ -90,7 +90,32 @@ names = [
 
 [[roles]]
 code = "app"
-command = ["uvicorn", "vendor_cp.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# The bind address is NOT in this file, and that is the point.
+#
+# This descriptor is a reusable artifact: its canonical bytes have to be the
+# same in every environment, so that one reviewed artifact can be deployed to
+# several without being rebuilt. A literal address makes it
+# environment-specific, and the literal that was here — `0.0.0.0` — is the
+# worst kind, because it reads as "no opinion" while being the most permissive
+# bind there is.
+#
+# What the descriptor states is EXPOSURE INTENT: this role listens on a port,
+# and the compose publication binds it to loopback only. WHERE it binds inside
+# the container is supplied by the host's private inventory through
+# VENDOR_BIND_ADDRESS, and `:?` makes an inventory that forgets it fail closed
+# rather than silently defaulting to something permissive.
+#
+# Verified against the published foundation 0.2.0a2 rather than assumed: the
+# parameterised form validates, survives `render` into the compose `command:`
+# intact, and leaves no literal address anywhere in the rendered output.
+command = [
+  "uvicorn",
+  "vendor_cp.main:app",
+  "--host",
+  "${VENDOR_BIND_ADDRESS:?Set VENDOR_BIND_ADDRESS in the host inventory}",
+  "--port",
+  "8000",
+]
 replicas = 1
 stop_grace_seconds = 30
 materials = ["DATABASE_URL", "PLATFORM_DATABASE_URL"]
