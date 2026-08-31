@@ -50,6 +50,31 @@ exactly like a proof is worse than no proof.
 publish the accepted bytes rather than equivalent ones, and what makes step 8's
 comparison meaningful rather than a re-measurement of a second build.
 
+**Step 8 compares the RootFS layer chain, and deliberately not `.Id`.** The
+first draft compared the recorded config digest against the pulled image's
+`.Id`, which reads as obviously correct and is not. `.Id` means two different
+things on the two sides of a push: for a locally built image it is the CONFIG
+digest, and for an image pulled BY DIGEST docker reports the MANIFEST digest in
+the same field. Measured on a real published artifact, three distinct values:
+
+| value | digest |
+| --- | --- |
+| manifest (what you pull by) | `sha256:b45d81c6…` |
+| `docker image inspect .Id` after that pull | `sha256:b45d81c6…` |
+| the config blob the registry stores | `sha256:8a7ac23b…` |
+
+So the original comparison put a config digest against a manifest digest — two
+different KINDS of value, never equal — and would have refused every correct
+publication, *after* the push had already happened. The equality now rests on
+`.RootFS.Layers`, the ordered diffIDs, which are computed from uncompressed
+layer content and carried inside the config blob: the same object on both sides,
+so a difference there is a real difference in the filesystem. The registry's own
+config digest is READ from the manifest and recorded, rather than inferred from
+a field that changes meaning.
+
+This is the half of the design that could not be tested before merge, and it was
+wrong. That is the argument for running it rather than reasoning about it.
+
 ## 3. What a candidate must demonstrate
 
 Twelve properties, each tested against the artifact rather than the checkout,
@@ -82,6 +107,22 @@ requires the upgrade to succeed. Lane B plants the exact defect and requires the
 failure — **and requires it to be the right failure**, by matching the message
 rather than accepting any non-zero exit. Lane A alone is compatible with a world
 where the trap has silently stopped being detectable.
+
+**The lanes must differ in exactly one variable, and the first construction did
+not.** It left `public` owned by `postgres` in lane B as well, so `app_admin`
+could create nothing, the restore landed zero tables, and the "upgrade" would
+have been a fresh install. The non-empty guard caught it on the first real
+run — but had that guard not existed, lane B would have failed with precisely
+the expected message for entirely the wrong reason, and the battery would have
+gone on reporting a trap it was no longer testing. A two-variable experiment
+cannot attribute its own result.
+
+Both copies therefore carry `public` owned by `app_admin` and their objects
+restored as `app_admin`, exactly as production has them; only `datdba` differs.
+The script asserts both halves — `app_admin|app_admin` against
+`postgres|app_admin` — and additionally refuses a lane-B failure that mentions
+TABLE privileges, because that is the failure mode the single-variable setup
+exists to exclude.
 
 ### 3.2 Readiness, and why liveness was not enough
 

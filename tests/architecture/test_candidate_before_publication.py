@@ -84,6 +84,42 @@ def test_the_identity_recorded_is_the_identity_compared() -> None:
     assert "source_revision" in workflow
 
 
+def test_the_read_back_compares_like_for_like() -> None:
+    """`.Id` means two different things on the two sides of a push.
+
+    For a locally built image it is the CONFIG digest; for an image pulled by
+    digest, docker reports the MANIFEST digest in the same field. Measured on a
+    real published artifact those are distinct values, so comparing the recorded
+    config digest against the pulled `.Id` compares two different KINDS of value
+    and can never hold — a false refusal on every correct publication, arriving
+    after the push had already happened.
+
+    The equality therefore rests on the RootFS layer chain, which is the same
+    object on both sides, and the registry's own config digest is READ from the
+    manifest rather than inferred from a field that changes meaning.
+    """
+    workflow = _text(IMAGE_WORKFLOW)
+    readback = workflow[
+        workflow.index("Prove the registry holds the accepted candidate") :
+    ]
+    compare = readback[: readback.index("Emit the release receipt")]
+    assert "registry RootFS chain" in compare
+    assert "docker manifest inspect" in compare
+    assert '["config"]["digest"]' in compare
+    # The retired comparison must stay retired.
+    assert "pulled_config" not in compare
+    assert "!= accepted $accepted_config" not in compare
+    assert "deliberately NOT compared" in compare
+
+
+def test_the_receipt_records_the_registrys_own_config_digest() -> None:
+    """Recorded, not guessed: it is the value the registry stores, and it is not
+    the digest the image is pulled by."""
+    workflow = _text(IMAGE_WORKFLOW)
+    assert "registry_config_digest" in workflow
+    assert "steps.readback.outputs.registry_config" in workflow
+
+
 def test_the_read_back_actually_leaves_the_runner() -> None:
     """Comparing a local tag with itself passes without consulting the registry.
 
@@ -95,7 +131,7 @@ def test_the_read_back_actually_leaves_the_runner() -> None:
     remove = workflow.index("docker image rm -f")
     inspect_guard = workflow.index("the candidate is still resident locally")
     pull = workflow.index('docker pull "$reference"')
-    compare = workflow.index("registry config $pulled_config != accepted")
+    compare = workflow.index("registry RootFS chain $pulled_chain != accepted")
     assert remove < inspect_guard < pull < compare
 
 
@@ -223,6 +259,10 @@ REQUIRED_CHECKS: dict[str, str] = {
         "restored copy owned by postgres migrated successfully"
     ),
     "restored-production reason": "permission denied for database",
+    "restored-production single variable": (
+        "the lanes must differ only in DATABASE ownership"
+    ),
+    "restored-production not a table fault": "failed on TABLE privileges",
     "database ownership": "app_admin|app_admin",
     "role contract": "false|false|true|true",
     "grant isolation": "the plane boundary is open",
@@ -262,6 +302,27 @@ def test_the_restored_migration_test_has_both_lanes() -> None:
     assert lane_a < lane_b
     assert "CREATE DATABASE restored_wrong_owner OWNER postgres" in acceptance
     assert "failed for some OTHER reason" in acceptance
+
+
+def test_the_two_restore_lanes_differ_in_exactly_one_variable() -> None:
+    """A two-variable experiment cannot attribute its own result.
+
+    The first construction left `public` owned by `postgres` in lane B as well,
+    so `app_admin` could create nothing and the restore landed zero tables. The
+    non-empty guard caught it — but had it not, lane B would have failed with
+    the right message for entirely the wrong reason, and the battery would have
+    reported a trap it was no longer testing.
+
+    Both copies now carry `public` owned by `app_admin`; only `datdba` differs,
+    and the script asserts both halves of that rather than assuming them.
+    """
+    acceptance = _text(ACCEPTANCE)
+    assert "ALTER SCHEMA public OWNER TO app_admin" in acceptance
+    assert 'test "$ok_owners" = "app_admin|app_admin"' in acceptance
+    assert 'test "$bad_owners" = "postgres|app_admin"' in acceptance
+    setup = acceptance.index("the lanes must differ only in DATABASE ownership")
+    migrate = acceptance.index("lane B: a wrongly-owned restored copy is refused")
+    assert setup < migrate
 
 
 def test_the_readiness_check_runs_its_negative_case_first() -> None:
