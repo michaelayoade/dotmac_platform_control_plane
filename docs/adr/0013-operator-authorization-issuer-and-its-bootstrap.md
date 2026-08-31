@@ -257,3 +257,91 @@ design and a running issuer, and they are updated rather than deleted.
 
 Nothing above is worked around, and none of it is restated as satisfied
 elsewhere in this document.
+
+---
+
+## Amendment, 2026-08-31 — the bootstrap is IN-PLACE, and create-only means an authority
+
+Accepted 2026-08-31 by Michael Ayoade, on review of the first launcher written
+against this record. **Nothing above is edited.** The original text stands as
+what was accepted on 2026-08-30, and this section states what changed and why —
+a record that was quietly rewritten to look as though it always said the right
+thing teaches nobody what the mistake was.
+
+### A1. The target is `vendor-cp-prod`, not `platform-cp-01`
+
+§ 5 and § 8 name `platform-cp-01`. That host was cancelled: VMID 125 was
+created, proven, and then destroyed, and Platform CP replaces Vendor CP **in
+place** on the existing deployment instead. The approved physical target is the
+host whose `/etc/dotmac-host-id` reads **`vendor-cp-prod`**, at
+`149.102.158.144`, and the marker is what identifies it — an address can be
+reassigned, a marker cannot be arrived at by accident.
+
+The repository and product identity is Platform CP. The distribution, import
+package, image coordinate, database and migration lineage remain `vendor`, and
+that is deliberate rather than debt.
+
+### A2. "Create-only" means creating the AUTHORITY once, not deploying
+
+This is the correction that matters, and the first launcher got it wrong.
+
+That launcher ran `docker compose up -d app` and rewrote `VENDOR_APP_IMAGE` in
+`.env` — it **replaced the running application**. That is a general deployment
+capability, which is precisely the thing the issuer is supposed to become the
+sole owner of. Written to bootstrap an authority, it was a second executor.
+
+So the property is stated exactly:
+
+> The bootstrap CREATES the issuer's authority once, inside the existing
+> deployment. It does not replace, restart, update or reconfigure the running
+> application, and it exposes no interface that could.
+
+Concretely, the bootstrap may create the issuer's persistence — the module's
+schema and tables, through a one-shot migration container — and nothing else.
+The running application is replaced for the first time by a deployment
+**Platform CP itself authorizes**, and that self-authorized deployment is the
+proof the issuer works. A bootstrap that had already replaced the application
+would have removed the very thing the proof depends on.
+
+No second issuer, and no general deployment or update interface, at any point.
+
+### A3. The receipt binds all nine coordinates
+
+§ 5's list stands, with the image half made precise. The receipt binds:
+
+1. Platform CP source revision
+2. registry image digest
+3. transferred image ID
+4. RootFS layer-chain digest
+5. Control `0.1.0a6` wheel hash
+6. product descriptor digest
+7. migration heads
+8. launcher hash
+9. authorizer (Michael Ayoade) and target (`vendor-cp-prod`)
+
+Three and four are both required and neither substitutes for the other.
+`docker save`/`load` does not preserve the manifest digest, so an artifact
+transferred without a registry credential cannot be identified by digest alone;
+the layer chain is what survives the transfer, and the registry digest is what
+ties it back to what was verified off-host.
+
+Workflow revision is carried alongside as the tenth field where a workflow
+performed the run; a hand-run bootstrap records the operator instead of
+inventing one.
+
+### A4. The receipt condition is the ADR's, not the launcher's own
+
+The first launcher checked only for its own dedicated receipt file. A receipt
+that exists under another name, or an incompatible receipt from an earlier
+attempt, would not have stopped it. The condition is the one this record
+describes — **any** receipt asserting the bootstrap has occurred — and an
+existing receipt that cannot be parsed or does not match this contract is a
+refusal, never an invitation to proceed.
+
+### A5. What remains true from the original
+
+§ 6's retirement mechanism is unchanged and is now load-bearing: the claim is
+taken with `O_EXCL` before any work; the receipt names its successor condition;
+the launcher's call sites are ratcheted and go to zero when Platform CP
+authorizes its own second deployment. § 8's precondition list is superseded
+only where A1 replaces the host.

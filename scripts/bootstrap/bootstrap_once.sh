@@ -1,72 +1,99 @@
 #!/bin/bash
-# ADR-0013 single-use bootstrap launcher — Platform Control Plane.
+# ADR-0013 (as amended 2026-08-31) — the single-use, CREATE-ONLY issuer bootstrap.
 #
 # The thing that authorizes deployments cannot authorize its own first
-# deployment. This discharges that circularity ONCE, and is built so that it
-# cannot discharge it twice.
+# deployment. This discharges that circularity ONCE.
 #
-# Reuse is prevented STRUCTURALLY rather than by a check somebody could skip:
-# the receipt path is claimed with `set -C` (O_EXCL) as the FIRST action, before
-# any work happens. A second invocation fails on that create and never reaches
-# the deployment. A crashed first invocation also leaves the claim behind, and
-# that is deliberate — a partial bootstrap must be investigated, never silently
-# retried. A receipt written at the end records that a bootstrap happened; a
-# claim taken at the start is what makes a second one impossible.
+# WHAT CREATE-ONLY MEANS HERE, because the first version of this file got it
+# wrong: this creates the issuer's AUTHORITY inside the existing deployment and
+# nothing else. It does not replace, restart, update or reconfigure the running
+# application, it does not rewrite VENDOR_APP_IMAGE, and it exposes no interface
+# that could. The earlier version ran `docker compose up -d app` — a general
+# deployment capability, which is exactly what the issuer is supposed to become
+# the sole owner of. Written to bootstrap an authority, it was a second
+# executor.
 #
-# It calls no secret store. Every credential is already installed in the host's
-# `.env`, which is the same held-secret seam the application itself reads. There
-# is no OpenBao call on this path at any point.
+# The running application is replaced for the first time by a deployment
+# Platform CP ITSELF authorizes, and that self-authorized deployment is the
+# proof the issuer works. A bootstrap that had already replaced the application
+# would have destroyed the thing that proof depends on.
 #
-# RETIREMENT: this file is deleted once Platform CP has authorized its own
-# second deployment. Until then it is the only bootstrap path and its call
-# sites must stay at exactly one.
+# Reuse is prevented STRUCTURALLY: the receipt path is claimed with `set -C`
+# (O_EXCL) as the FIRST action, before any work. A second invocation dies on
+# that create. A crashed first run leaves the claim standing, deliberately — a
+# partial bootstrap is investigated, never silently retried.
 #
-# Usage: bootstrap_once.sh <image-id> <expected-revision> <expected-layer-chain>
+# It calls no secret store. Credentials are already installed in the host `.env`,
+# the same held-secret seam the application reads (ADR-0009).
+#
+# RETIREMENT: this file, and the classifier rule that permits it, are removed
+# once Platform CP authorizes its own second deployment.
+#
+# Usage:
+#   bootstrap_once.sh <transferred-image-id> <source-revision> <layer-chain>
 set -Cueo pipefail
 
-RECEIPT=/opt/dotmac/vendor-control-plane/BOOTSTRAP_RECEIPT.json
 DEPLOY_DIR=/opt/dotmac/vendor-control-plane
 COMPOSE=docker-compose.production.yml
-IMAGE_ID="${1:?image id required}"
+RECEIPT="${DEPLOY_DIR}/BOOTSTRAP_RECEIPT.json"
+
+IMAGE_ID="${1:?transferred image id required}"
 EXPECT_REVISION="${2:?expected source revision required}"
 EXPECT_LAYER_CHAIN="${3:?expected rootfs layer chain required}"
 
+# Coordinates fixed at authorship. They are literals rather than arguments so
+# that the argv vector a permission rule pins cannot vary them.
+REGISTRY_DIGEST="sha256:3e35aeb837ed6c109b4fab44171de7490c402d6dce2e6eccaa316e192ca48efc"
+CONTROL_WHEEL_SHA256="sha256:9b02cf33f954b6562858af320b518c10f9e93aa92fbc3873e4a83fdf117b8fc0"
+DESCRIPTOR_SHA256="sha256:99eef0cc82bc73065c17c543e7a3d8824e825d3c97da22bd4e73f648e0b2daeb"
+AUTHORIZER="Michael Ayoade"
+TARGET_MARKER="vendor-cp-prod"
+
 die() { echo "BOOTSTRAP REFUSED: $*" >&2; exit 1; }
 
-# 1. The target must identify itself. An address can be reassigned; a marker
-#    cannot be arrived at by accident.
-[ "$(cat /etc/dotmac-host-id 2>/dev/null)" = "vendor-cp-prod" ] \
-  || die "host marker is not vendor-cp-prod"
+# 1. The target identifies itself by MARKER. An address can be reassigned.
+[ "$(cat /etc/dotmac-host-id 2>/dev/null)" = "$TARGET_MARKER" ] \
+  || die "host marker is not ${TARGET_MARKER}"
 
-# 2. Claim the receipt path ATOMICALLY. This is the single-use gate and it is
-#    first on purpose: nothing below it can ever run a second time.
+# 2. The receipt CONDITION is the ADR's, not this file's own bookkeeping. Any
+#    receipt asserting the bootstrap has occurred stops this, and one that
+#    cannot be parsed or does not match this contract is a refusal rather than
+#    an invitation to proceed.
+for candidate in "$RECEIPT" "${DEPLOY_DIR}"/*BOOTSTRAP*RECEIPT*.json; do
+  [ -e "$candidate" ] || continue
+  die "a bootstrap receipt already exists at ${candidate} - the issuer authority is created once"
+done
+
+# 3. Claim the receipt path ATOMICALLY, before any work. This is the single-use
+#    gate; everything below it is unreachable on a second invocation.
 { printf '{"state":"claimed","claimed_at":"%s"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RECEIPT"; } 2>/dev/null \
-  || die "receipt already exists at $RECEIPT - this bootstrap is single-use and has already run"
+  || die "could not claim ${RECEIPT} - it already exists and this bootstrap is single-use"
 
-# 3. The image must be the bytes verified off-host. A manifest digest does not
-#    survive docker save/load, so identity is proven by the RootFS layer chain,
-#    which does, together with the source revision label.
+# 4. Image identity: BOTH the transferred id and the layer chain, plus the
+#    revision label. `docker save`/`load` does not preserve the manifest digest,
+#    so the chain is what survives the transfer and the registry digest is what
+#    ties it back to what was verified off-host. Neither substitutes.
 ACTUAL_REVISION="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_ID")"
 [ "$ACTUAL_REVISION" = "$EXPECT_REVISION" ] \
-  || die "image revision $ACTUAL_REVISION != expected $EXPECT_REVISION"
+  || die "image revision ${ACTUAL_REVISION} != expected ${EXPECT_REVISION}"
 ACTUAL_CHAIN="$(docker image inspect "$IMAGE_ID" \
   --format '{{range .RootFS.Layers}}{{println .}}{{end}}' \
   | sed '/^$/d' | sha256sum | cut -d' ' -f1)"
 [ "$ACTUAL_CHAIN" = "$EXPECT_LAYER_CHAIN" ] \
-  || die "image layer chain $ACTUAL_CHAIN != verified $EXPECT_LAYER_CHAIN"
+  || die "image layer chain ${ACTUAL_CHAIN} != verified ${EXPECT_LAYER_CHAIN}"
 
 cd "$DEPLOY_DIR"
 
-# 4. Ownership gate, BEFORE the migrations run. A database whose owner differs
-#    fails partway through at CREATE SCHEMA, and the recovery bundle does not
-#    carry database ownership, so nothing upstream catches it first.
+# 5. Ownership gate BEFORE migrations. A database whose owner differs fails
+#    partway through at CREATE SCHEMA, and the recovery bundle does not carry
+#    database ownership, so nothing upstream catches it.
 OWNER="$(docker compose -f "$COMPOSE" exec -T db \
   psql -U app_admin -d vendor_control_plane -tAc \
   'select pg_get_userbyid(datdba)' | tr -d '[:space:]')"
-[ "$OWNER" = "app_admin" ] || die "database owner is $OWNER, expected app_admin"
+[ "$OWNER" = "app_admin" ] || die "database owner is ${OWNER}, expected app_admin"
 
-# 5. Backup, WITH cluster globals. A database-only dump restores into something
+# 6. Backup WITH cluster globals. A database-only dump restores into something
 #    that looks recovered and has no roles, no grants and no isolation.
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP_DIR=/opt/backups/dotmac-vendor-control-plane
@@ -78,45 +105,68 @@ docker compose -f "$COMPOSE" exec -T db \
 docker compose -f "$COMPOSE" exec -T db \
   sh -c 'exec pg_dumpall --username app_admin --globals-only --no-role-passwords' \
   > "${BACKUP_DIR}/bootstrap-${STAMP}.globals.sql"
-DUMP_SHA="$(sha256sum "${BACKUP_DIR}/bootstrap-${STAMP}.dump" | cut -d' ' -f1)"
+DUMP_SHA="sha256:$(sha256sum "${BACKUP_DIR}/bootstrap-${STAMP}.dump" | cut -d' ' -f1)"
 
-# 6. Pin the image, migrate, start. One composed migration owner - every
-#    lineage advances before the application is replaced.
-sed -i "s|^VENDOR_APP_IMAGE=.*|VENDOR_APP_IMAGE=${IMAGE_ID}|" .env
+# 7. CREATE the issuer authority. One short-lived `ops` container on the new
+#    image runs the composed migrations; `--no-deps` keeps it from touching any
+#    other service, and `--rm` leaves nothing behind. The running `app` service
+#    is NOT named here, NOT restarted, and NOT repinned. That absence is the
+#    create-only property.
+#
+#    The compose file interpolates a bootstrap password for the `db` service at
+#    parse time even though the already-running database never consumes it, so
+#    an ephemeral value is generated per run and never stored.
+VENDOR_DB_BOOTSTRAP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export VENDOR_DB_BOOTSTRAP_PASSWORD
 export VENDOR_APP_IMAGE="$IMAGE_ID"
 
 docker compose -f "$COMPOSE" --profile ops run --rm --no-deps ops scripts/migrate.py
-docker compose -f "$COMPOSE" up -d app --wait
 
+# 8. Prove the authority now exists and the application was left alone.
 HEADS="$(docker compose -f "$COMPOSE" exec -T db \
   psql -U app_admin -d vendor_control_plane -tAc \
   'select version_num from alembic_version order by 1' | tr -d '\r' | paste -sd, -)"
+MOD_DEPLOY="$(docker compose -f "$COMPOSE" exec -T db \
+  psql -U app_admin -d vendor_control_plane -tAc \
+  "select count(*) from pg_namespace where nspname = 'mod_deploy'" | tr -d '[:space:]')"
+[ "$MOD_DEPLOY" = "1" ] || die "mod_deploy was not created; the issuer has no authority"
+
+RUNNING_REVISION="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+  dotmac_vendor_control_plane-app-1)"
+[ "$RUNNING_REVISION" != "$EXPECT_REVISION" ] \
+  || die "the running application was replaced; this bootstrap is create-only"
 
 curl --fail --silent --show-error --max-time 10 \
   --header 'Host: vendor.dotmac.io' \
-  "http://127.0.0.1:8100/health" >/dev/null || die "health check failed"
+  'http://127.0.0.1:8100/health' >/dev/null || die "health check failed after bootstrap"
 
-# 7. Finalise. The claim in step 2 already prevents reuse; this records what the
-#    single use actually bound.
+LAUNCHER_SHA="sha256:$(sha256sum "$0" | cut -d' ' -f1)"
+
+# 9. Finalise, binding all nine coordinates. The claim in step 3 already
+#    prevents reuse; this records what the single use bound.
 cat > "${RECEIPT}.tmp" <<RECEIPT_JSON
 {
   "schema": "PlatformCpBootstrapReceipt.v1",
   "state": "completed",
   "single_use": "the receipt path is claimed with O_EXCL before any work; a second run cannot start",
-  "target": "vendor-cp-prod",
+  "create_only": "created the issuer authority (mod_deploy) inside the existing deployment; the running application was not replaced, restarted or repinned",
   "completed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "image_id": "${IMAGE_ID}",
   "source_revision": "${EXPECT_REVISION}",
-  "image_layer_chain_sha256": "${EXPECT_LAYER_CHAIN}",
-  "pre_bootstrap_image_digest": "sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
-  "pre_bootstrap_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
+  "registry_image_digest": "${REGISTRY_DIGEST}",
+  "transferred_image_id": "${IMAGE_ID}",
+  "rootfs_layer_chain_sha256": "${EXPECT_LAYER_CHAIN}",
+  "control_wheel_sha256": "${CONTROL_WHEEL_SHA256}",
+  "product_descriptor_sha256": "${DESCRIPTOR_SHA256}",
+  "migration_heads": "${HEADS}",
+  "launcher_sha256": "${LAUNCHER_SHA}",
+  "authorizer": "${AUTHORIZER}",
+  "target": "${TARGET_MARKER}",
+  "workflow_revision": "hand-run by the authorizer; no workflow performed this bootstrap",
+  "pre_bootstrap_revision": "${RUNNING_REVISION}",
   "backup_dump_sha256": "${DUMP_SHA}",
-  "backup_stamp": "${STAMP}",
-  "migration_heads_after": "${HEADS}",
-  "database_owner_verified": "app_admin",
-  "retires_when": "Platform CP authorizes its own second deployment; this receipt is then history and this launcher is deleted"
+  "retires_when": "Platform CP authorizes its own second deployment; this receipt becomes history, this launcher is deleted, and the classifier rule permitting it is removed"
 }
 RECEIPT_JSON
 mv "${RECEIPT}.tmp" "$RECEIPT"
-echo "BOOTSTRAP COMPLETE"
+echo "BOOTSTRAP COMPLETE - issuer authority created, application untouched"
 echo "heads: ${HEADS}"
