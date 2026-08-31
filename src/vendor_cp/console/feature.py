@@ -26,8 +26,16 @@ already used. Manufacturing a tenant and a Party to satisfy the type would have
 produced a sentinel tenant — the exact shape the dual-plane rule refuses, and
 the same one already declined when scoping the provisioning laboratory.
 
-**The authorization is unchanged.** Every route still depends on
-`require_platform_admin`. What moved is how the surface is mounted.
+**The audience is unchanged, and the facet now owns the guard.** The
+contribution targets the platform-admin identity boundary the console always
+sat behind; what moved is that the FACET authenticates the request, through the
+`kernel_platform_session` profile whose provider is the kernel's
+`require_platform_web_auth`. The routes stopped declaring
+`require_platform_admin` — the kernel's BEARER guard — because carrying it as
+well made a valid browser session fail the handler after passing the facet, and
+because two authentication owners on one route is a boundary with no single
+authority. The JSON API keeps `require_platform_admin`; the browser surface
+keeps the cookie; neither credential population reaches the other.
 """
 
 from __future__ import annotations

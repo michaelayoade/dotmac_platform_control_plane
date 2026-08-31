@@ -426,7 +426,12 @@ The deployment path never creates or repairs the marker itself.
   ledger. Runtime code never imports `dotmac_kernel.testing`. The real runner +
   activation contracts are a later, design-gated slice.
 - **Administration shell** — a platform-admin-only console surface
-  (`src/vendor_cp/console/`). The initial identity is created or rotated by the
+  (`src/vendor_cp/console/`), contributed to the kernel's `platform_admin`
+  facet, which owns its `/platform` prefix, its shell and — since ADR-0014 —
+  its authentication. The module declares routes and navigation and no guard:
+  the facet's `kernel_platform_session` profile is the single browser
+  authentication owner, while `require_platform_admin` stays the JSON API's.
+  The initial identity is created or rotated by the
   assembly's `vendor_cp.platform_admin` service. The prompt-only
   `scripts/create_platform_admin.py` adapter supplies the kernel's
   `platform_session`; there is no HTTP self-registration path and no second
@@ -442,7 +447,7 @@ a build-failing architecture test (`tests/architecture/test_deny_cases.py`):
 | **D1** | One control-plane database; the kernel owns the engine. No `create_engine`/`sessionmaker`, no product DSNs. | A cache or a product DB must never become a parallel authority; the vendor CP has exactly one datastore. |
 | **D2** | No product data-plane imports (`dotmac_sub`/`crm`/`erp`/`app`). | ERP/ISP/CRM remain separate data planes; collaboration is API/webhook only. An ISP operator is a *tenant*, its subscribers are the product's parties — never the vendor CP's. |
 | **D3** | Vendor-owned simulation provider only; real config fails startup; no real-provider SDKs or runtime testing-kit imports. | A request-time access check never calls a payment/cloud provider; future module-owned desired state still leaves connector execution in Integrator. |
-| **D4** | Platform-admin auth through the kernel (`require_platform_admin`). | One authority for platform-actor identity; no re-implemented auth to drift. |
+| **D4** | Platform-actor auth through the kernel, one owner per route: `require_platform_admin` (bearer) for the JSON API, the `platform_admin` facet's declared cookie profile for the browser surface (ADR-0014). | One authority for platform-actor identity; no re-implemented auth to drift, and no route answering to two owners that can disagree. |
 | **D5** | Only the kernel's public surface; no private/internal/copied code. | Products compose a pinned kernel and improve it via declared extension points — never fork or copy it. |
 
 ## Still design-only (do NOT implement outside its contracted slice)

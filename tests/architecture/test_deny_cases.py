@@ -8,12 +8,23 @@ provider (D3), non-kernel auth (D4), or private/copied kernel code (D5).
 from __future__ import annotations
 
 import ast
-import inspect
 import re
 from pathlib import Path
 
 import dotmac_kernel
 import pytest
+from dotmac_kernel import create_app
+from dotmac_kernel.platform_auth import require_platform_admin
+from route_dependency_graph import (
+    api_routes,
+    bearer_authentication_owners,
+    composed_browser_routes,
+    describe,
+    distinct_authentication_owners,
+)
+
+from vendor_cp.assembly import build_spec
+from vendor_cp.deployment_profile import FULL, deployment_profile
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "vendor_cp"
@@ -27,6 +38,17 @@ def _py_files() -> list[Path]:
         for p in root.rglob("*.py")
         if "__pycache__" not in p.parts
     ]
+
+
+#: A vendor-defined function whose NAME claims to authenticate a platform actor.
+#: Names, not bodies: the enforceable premise is that this repository composes
+#: the kernel's owners and defines none, so any local definition of one is the
+#: violation regardless of what it does.
+_AUTHENTICATION_DEFINITION = re.compile(
+    r"^\s*(?:async\s+)?def\s+((?:require|authenticate|verify)_[a-z_]*"
+    r"(?:platform|admin|web|session|auth)[a-z_]*)\s*\(",
+    re.MULTILINE,
+)
 
 
 def _imports(path: Path) -> list[tuple[str, str | None]]:
@@ -192,28 +214,93 @@ def test_d3_no_real_provider_sdk_imports() -> None:
     assert not bad, f"no real-provider SDKs — fake providers only this phase: {bad}"
 
 
-# ── D4 — platform-admin auth THROUGH the kernel ──────────────────────────────
-def test_d4_console_web_routes_are_platform_admin_guarded() -> None:
-    from dotmac_kernel.platform_auth import require_platform_admin
-
-    from vendor_cp.console.web import router
-
-    unguarded = []
-    for route in router.routes:
-        endpoint = getattr(route, "endpoint", None)
-        if endpoint is None:
-            continue
-        deps = [
-            p.default.dependency
-            for p in inspect.signature(endpoint).parameters.values()
-            if hasattr(p.default, "dependency")
-        ]
-        if require_platform_admin not in deps:
-            unguarded.append(getattr(route, "path", "?"))
+# ── D4 — platform-actor auth THROUGH the kernel ──────────────────────────────
+#
+# D4 is ONE authority for platform-actor identity, reached through TWO
+# transports the kernel owns: `require_platform_admin` reads the API bearer
+# header, and the composed `platform_admin` facet's declared profile reads the
+# browser session cookie via `require_platform_web_auth`. The rule is that
+# nothing here re-implements either, and that no single route answers to both —
+# a route with two authentication owners has no authority at all, which is
+# exactly the defect that made `/platform/console` unreachable with a valid
+# session.
+#
+# This used to be checked with `inspect.signature(endpoint)`, which sees only
+# what a handler spells in its own parameters. It could not see the facet's
+# authentication (attached by the router, and nested inside a composed context
+# dependency), so it reported a correctly authenticated browser surface as
+# unguarded and demanded the bearer guard be added back. The check is now on the
+# CONSTRUCTED dependency graph; the console's half, its sensitivity proof and
+# the CSRF invariants live in `test_browser_authentication_ownership.py`.
+def test_d4_vendor_api_routes_are_guarded_by_the_kernel_bearer_owner() -> None:
+    app = create_app(build_spec(deployment_profile(FULL)))
+    vendor = [
+        route for route in api_routes(app) if route.path.startswith("/platform/vendor/")
+    ]
+    assert vendor, "no vendor API route was examined"
+    unguarded = [
+        describe(route)
+        for route in vendor
+        if require_platform_admin not in bearer_authentication_owners(route)
+    ]
     assert not unguarded, (
-        "every vendor web route must depend on the kernel's require_platform_admin "
-        f"(no local auth): {unguarded}"
+        "every vendor API route must depend on the kernel's "
+        f"require_platform_admin (no local auth): {unguarded}"
     )
+
+
+def test_d4_no_vendor_route_answers_to_two_authentication_owners() -> None:
+    app = create_app(build_spec(deployment_profile(FULL)))
+    conflicted = [
+        f"{describe(route)} -> {sorted(map(repr, owners))}"
+        for route, owners in (
+            (route, distinct_authentication_owners(route))
+            for route in (*api_routes(app), *composed_browser_routes(app))
+        )
+        if len(owners) > 1
+    ]
+    assert not conflicted, (
+        "a route answering to two authentication owners has no single authority "
+        f"over who may reach it: {conflicted}"
+    )
+
+
+def test_d4_the_vendor_re_implements_no_authentication() -> None:
+    """No vendor source file defines its own credential-to-principal function.
+
+    The graph tests above prove the kernel's owners ARE reached. This is the
+    other half of D4 and is deliberately a source check: a second, unmounted
+    authentication implementation sitting in `src/` is a re-implementation
+    waiting to be wired, and no dependency graph can see one that nothing has
+    imported yet.
+    """
+    planted = [
+        f"{path.relative_to(ROOT)}: {name}"
+        for path in _py_files()
+        for name in _AUTHENTICATION_DEFINITION.findall(path.read_text())
+    ]
+    assert not planted, (
+        "platform-actor authentication is the kernel's; the vendor composes it "
+        f"and never defines its own: {planted}"
+    )
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        "def require_platform_admin(request):\n    return None\n",
+        "async def authenticate_web_session(request):\n    return None\n",
+        "    def verify_admin_cookie(self, token):\n        return None\n",
+    ],
+)
+def test_d4_the_re_implementation_detector_sees_a_planted_definition(
+    planted: str,
+) -> None:
+    """SENSITIVITY. The check above currently matches NOTHING, and a scan over
+    an empty result set passes for the wrong reason — it would keep passing if
+    the pattern stopped matching anything at all. Each form the detector claims
+    to see gets a probe: module-level, `async`, and nested in a class."""
+    assert _AUTHENTICATION_DEFINITION.findall(planted)
 
 
 # ── D5 — only the kernel's PUBLIC surface; no private/internal/copied code ────
