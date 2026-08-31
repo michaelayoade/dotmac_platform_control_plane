@@ -86,9 +86,18 @@ mv "$BACKUP_TMP" "$BACKUP_PATH"
 compose --profile ops run --rm --no-deps ops dotmac-platform admin migrate
 
 compose up -d app --wait
+# Both probes, and they answer different questions. `/health` is the kernel's
+# liveness route and does not touch the database; `/health/ready` asks the one
+# dependency this assembly has. Checking only the first is how a deploy could
+# report success while the application could not serve — so the readiness check
+# is the one that gates the printed result, and liveness is kept as the
+# positive control that distinguishes "not ready" from "not answering at all".
 curl --fail --silent --show-error --max-time 10 \
     --header "Host: vendor.dotmac.io" \
     "http://127.0.0.1:${VENDOR_APP_PORT:-8100}/health" >/dev/null
+curl --fail --silent --show-error --max-time 10 \
+    --header "Host: vendor.dotmac.io" \
+    "http://127.0.0.1:${VENDOR_APP_PORT:-8100}/health/ready" >/dev/null
 
 printf 'Deployed %s; pre-migration backup: %s\n' \
     "$VENDOR_APP_IMAGE" "$BACKUP_PATH"

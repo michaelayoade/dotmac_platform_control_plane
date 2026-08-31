@@ -106,6 +106,7 @@ PRODUCTION_COMPOSED_V1: Final[str] = "production-composed-v1"
 VENDOR_SURFACE_CODES: Final[frozenset[str]] = frozenset(
     {
         "release_evidence",
+        "readiness",
         "console",
         "accounts",
         "offers",
@@ -121,6 +122,13 @@ VENDOR_SURFACE_CODES: Final[frozenset[str]] = frozenset(
 #: deliberately absent: see the module docstring. `release_evidence` is absent
 #: for the opposite reason — it contributes no router at all, so "withholding"
 #: it would be a declaration that changes nothing.
+#:
+#: `readiness` is absent for a third reason, and it is the interesting one. It
+#: IS a route-bearing surface, so it could be withheld — and must not be. A
+#: deployment whose readiness probe can be switched off is a deployment that
+#: reports healthy while unable to serve, which is exactly the state
+#: `docker compose up -d app --wait` used to accept. A probe with an off switch
+#: is not a probe.
 WITHHOLDABLE_SURFACES: Final[frozenset[str]] = frozenset(
     {
         "accounts",
@@ -227,7 +235,7 @@ class VendorDeploymentProfile:
 PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     VendorDeploymentProfile(
         code=FULL,
-        version="2",
+        version="3",
         withheld_surfaces=frozenset(),
         surface_inventory=(
             "accounts",
@@ -237,6 +245,7 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "licence_delivery",
             "offers",
             "provisioning",
+            "readiness",
             "release_evidence",
             "vendor_approvals",
         ),
@@ -246,18 +255,21 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "Development, CI and the migration rehearsals compose every surface "
             "so the tests exercise what the code actually offers. That includes "
             "the fake provisioning laboratory, which is why this profile is "
-            "declared a laboratory and can never be production-accepted."
+            "declared a laboratory and can never be production-accepted. "
+            "Version 3 adds the readiness surface, which every profile "
+            "publishes and none may withhold."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_BOOTSTRAP,
-        version="3",
+        version="4",
         withheld_surfaces=frozenset({"licence_delivery", "offers", "provisioning"}),
         surface_inventory=(
             "accounts",
             "allocations",
             "console",
             "contracts",
+            "readiness",
             "release_evidence",
             "vendor_approvals",
         ),
@@ -272,12 +284,16 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "withholds the provisioning laboratory, which versions 1 and 2 "
             "published on the production host: its only implementation "
             "simulates, so every plan and apply an operator ran there returned "
-            "a fabricated result (ADR-0015)."
+            "a fabricated result (ADR-0015). Version 4 adds the readiness "
+            "surface: until it existed, `docker compose up -d app --wait` was "
+            "satisfied by a liveness route that does not touch the database, "
+            "so a deploy could be declared successful while the application "
+            "could not serve a single request."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_COMPOSED_V1,
-        version="1",
+        version="2",
         withheld_surfaces=frozenset(
             {
                 "accounts",
@@ -291,6 +307,7 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
         surface_inventory=(
             "console",
             "allocations",
+            "readiness",
             "release_evidence",
         ),
         laboratory=False,
@@ -314,7 +331,10 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "adopted: `scripts/deploy_production.sh` still pins "
             "`production-bootstrap`, and adoption additionally requires a "
             "working login path and an explicit operator action "
-            "(ADR-0015 § 6)."
+            "(ADR-0015 § 6). Version 2 adds the readiness surface, published "
+            "here for the same reason it is published everywhere: a "
+            "dependency-aware probe is what makes a successful deploy mean the "
+            "application can serve."
         ),
     ),
 )

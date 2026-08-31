@@ -1,0 +1,22 @@
+{
+  "comment": [
+    "The check-run names a source revision must carry, every one of them",
+    "completed/success, before a candidate image may be built from it.",
+    "",
+    "Held in both directions against the workflow files by",
+    "tests/architecture/test_candidate_before_publication.py: a job added to CI",
+    "and forgotten here fails, and a name listed here whose job no longer exists",
+    "fails too. A list that could only shrink silently is not an admission rule.",
+    "",
+    "'skipped' is refused by name in the verifier. A workflow reports success at",
+    "the run level when one of its jobs skipped, so a required gate that never",
+    "ran looks identical to one that passed unless something asks."
+  ],
+  "gates": [
+    "check",
+    "postgres",
+    "image",
+    "Governance pin is a real approved revision",
+    "Dotmac engineering standards"
+  ]
+}

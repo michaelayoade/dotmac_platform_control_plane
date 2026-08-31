@@ -72,7 +72,7 @@ manifest_path = "deploy/product-manifest.json"
 # gate checking only parsing reported green — while `dotmac-deploy drift` could
 # not tell an approved module set from any other. A production descriptor may
 # carry no placeholder.
-manifest_digest = "sha256:e7c997c46903db23ab27976942a91e3e47b494907484377d8eceb1855886ac32"
+manifest_digest = "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
 
 [image]
 # The digest RUNNING on the target, read from the container rather than from a

@@ -3,8 +3,19 @@ name: Deploy immutable image to production
 on:
   workflow_dispatch:
     inputs:
+      ci_run_id:
+        description: >-
+          Exact successful CI run id for the revision being deployed. Verified
+          against repository, workflow, terminal conclusion, protected main,
+          SHA shape, current main, and every required gate — including that
+          none of them SKIPPED, which a run-level success hides.
+        required: true
+        type: string
       image_digest:
-        description: Exact digest emitted by Build immutable production image
+        description: >-
+          Exact digest to deploy. Checked against the release receipt of the
+          accepted candidate built from that revision — a pasted digest proves
+          only that somebody could paste it.
         required: true
         type: string
       target_server_name:
@@ -15,6 +26,8 @@ on:
 permissions:
   contents: read
   packages: read
+  checks: read
+  actions: read
 
 concurrency:
   group: vendor-control-plane-production
@@ -26,6 +39,7 @@ jobs:
     environment: production
     timeout-minutes: 30
     env:
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
       IMAGE_DIGEST: ${{ inputs.image_digest }}
       TARGET_SERVER_NAME: ${{ inputs.target_server_name }}
       TARGET_HOST: ${{ vars.VENDOR_PRODUCTION_HOST }}
@@ -52,6 +66,63 @@ jobs:
 
       - name: Check out the deployment adapter
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ── The digest is not the evidence; the receipt is ─────────────────
+      - name: Verify the source revision earned its way here
+        id: revision
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin main
+          current_main="$(git rev-parse FETCH_HEAD)"
+          python3 .github/candidate/verify_source_revision.py \
+            --run-id "${CI_RUN_ID}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-path .github/workflows/ci.yml \
+            --branch main \
+            --current-main "$current_main"
+          echo "source_sha=$current_main" >> "$GITHUB_OUTPUT"
+
+      - name: Require a release receipt binding this digest to that revision
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.revision.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          # A digest an operator pasted proves only that it could be pasted.
+          # The receipt is what says these exact bytes were ACCEPTED before
+          # they were published, and it names the revision they came from — so
+          # deploying requires finding it, not retyping its conclusion.
+          mkdir -p receipt
+          gh run download --repo "$GITHUB_REPOSITORY" \
+            --name "release-receipt-${SOURCE_SHA}" --dir receipt \
+            || { echo "no release receipt exists for ${SOURCE_SHA}; that revision has no accepted candidate" >&2; exit 1; }
+          test -s receipt/release-receipt.json \
+            || { echo "the release receipt for ${SOURCE_SHA} is empty" >&2; exit 1; }
+          python3 - <<'PYCHECK'
+          import json, os, sys
+          receipt = json.load(open("receipt/release-receipt.json"))
+          problems = []
+          if receipt.get("contract") != "dotmac-candidate-release-receipt/1":
+              problems.append(f"unknown receipt contract {receipt.get('contract')!r}")
+          if receipt.get("source_revision") != os.environ["SOURCE_SHA"]:
+              problems.append(
+                  f"receipt names revision {receipt.get('source_revision')!r}, "
+                  f"not {os.environ['SOURCE_SHA']!r}"
+              )
+          if receipt.get("registry_digest") != os.environ["IMAGE_DIGEST"]:
+              problems.append(
+                  f"receipt records digest {receipt.get('registry_digest')!r}, "
+                  f"but this deploy was asked for {os.environ['IMAGE_DIGEST']!r}"
+              )
+          if problems:
+              print("REFUSED:", file=sys.stderr)
+              for problem in problems:
+                  print(f"  - {problem}", file=sys.stderr)
+              raise SystemExit(1)
+          print(f"receipt binds {receipt['registry_digest']} to {receipt['source_revision']}")
+          PYCHECK
 
       - name: Install the production SSH identity
         env:

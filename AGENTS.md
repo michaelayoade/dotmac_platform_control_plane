@@ -159,8 +159,9 @@ disagree, fix the drift.
     the legacy allocation tables shadowing `mod_ealloc` was REMOVED when `v014`
     dropped those tables, not lowered and not left describing nothing: an
     exemption whose premise has evaporated keeps widening a gate for facts nobody
-    has examined (`dotmac_starter_mt` ADR-0018). The composed live-catalogue audit now consumes the
-    kernel gate raw, with no subtraction at all. When you retire an exemption,
+    has examined (`dotmac_starter_mt` ADR-0018 — distinct from this
+    repository's ADR-0018, which rule 22 cites). The composed live-catalogue
+    audit now consumes the kernel gate raw, with no subtraction at all. When you retire an exemption,
     delete its prose in the same change — `test_stale_claims.py` fails if a
     document still describes a retired exemption as live.
 14. **Cross-repository engineering governance is pinned and required.**
@@ -395,3 +396,48 @@ disagree, fix the drift.
     module's `__file__` against `sysconfig`'s `purelib`/`platlib` — a canary run
     against a checkout passes for the wrong reason, which is exactly how the
     `a4` defect survived.
+
+22. **A candidate is accepted before it is published, and the ORDER is the
+    contract.** Select an exact protected-main revision; verify required CI
+    succeeded on it; build ONE local candidate; record its config digest, layer
+    digests, RootFS chain, source revision, lock digest and Dockerfile digest;
+    test THOSE EXACT BYTES; publish the same config and layers; read the
+    immutable registry digest back; prove the registry holds what was accepted;
+    emit a receipt. The previous pipeline pushed and then smoked, so a failing
+    smoke left published bytes nobody had accepted, with no way to unpublish
+    them and every consumer free to pin them. The read-back must LEAVE the
+    runner — comparing a local tag with itself is a tautology that reads exactly
+    like a proof — and no `docker push`, nor even a registry login, may appear
+    before acceptance.
+
+    **A pasted identifier is not evidence.** Manual dispatch verifies seven
+    properties of a named CI run: repository, workflow, terminal conclusion,
+    protected main and not a fork, 40-character SHA, still current main, and
+    every required gate completed and passing. The last is the one that matters
+    most — **a workflow reports success at the run level when one of its jobs
+    SKIPPED**, so a gate that never ran looks identical to one that passed.
+    `skipped` is refused by name alongside the other non-passing conclusions,
+    enumerated rather than written as "anything but success". Gates are read as
+    CHECK-RUNS at the SHA, because the required set spans several workflows. And
+    a pasted image digest is refused too: the deploy path requires the release
+    receipt binding those exact bytes to that exact revision.
+
+    **The candidate battery tests the artifact, not the checkout**, because the
+    defect class is an artifact that disagrees with its source. Twelve
+    properties, and two of them carry their own sensitivity: the restored
+    -production migration runs BOTH lanes — a correctly-owned copy that must
+    upgrade, and a `postgres`-owned copy that must fail with `permission denied
+    for database` — because a bundle can be PROVED and still restore into a
+    differently-owned database (`CatalogEvidence` covers schema, table and
+    sequence ownership, not DATABASE ownership); and readiness runs its NEGATIVE
+    case first, with liveness as a positive control, because a probe returning
+    200 unconditionally passes a positive-only test.
+
+    **Readiness is the assembly's, liveness is the kernel's.** `/health` does
+    not touch the database by design, and `up -d app --wait` was satisfied by
+    it — so a container that could not reach its database reported healthy and
+    the deploy was declared successful. `/health/ready` is published under every
+    profile and withheld by none: a probe with an off switch is not a probe
+    (this repository's ADR-0018 — not `dotmac_starter_mt` ADR-0018, which
+    rule 13 cites; `tests/architecture/test_candidate_before_publication.py`,
+    `tests/unit/test_readiness.py`; `.github/candidate/`).

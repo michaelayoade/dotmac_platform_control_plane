@@ -36,6 +36,7 @@ from vendor_cp.licensing.signing_adapter import install_runtime_licence_signers
 from vendor_cp.migration_bindings import ASSEMBLY_MODULE_PLANES
 from vendor_cp.offers.feature import feature as offers_feature
 from vendor_cp.provisioning.feature import feature as provisioning_feature
+from vendor_cp.readiness.feature import feature as readiness_feature
 from vendor_cp.release_evidence.feature import feature as release_evidence_feature
 
 ASSEMBLY_NAME = "dotmac-vendor-control-plane"
@@ -78,6 +79,11 @@ STATEFUL_MODULES = (
 # features or add one.
 VENDOR_SURFACES = (
     release_evidence_feature,
+    # Composed first among the route-bearing surfaces and withheld by none. A
+    # deployment that cannot say whether it is ready is one an orchestrator will
+    # assume is — which is the failure `/health/ready` exists to end, so the ability
+    # to turn it off would reintroduce it.
+    readiness_feature,
     console_feature,
     accounts_feature,
     offers_feature,
