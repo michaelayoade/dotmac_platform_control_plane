@@ -50,6 +50,31 @@ exactly like a proof is worse than no proof.
 publish the accepted bytes rather than equivalent ones, and what makes step 8's
 comparison meaningful rather than a re-measurement of a second build.
 
+**Step 8 compares the RootFS layer chain, and deliberately not `.Id`.** The
+first draft compared the recorded config digest against the pulled image's
+`.Id`, which reads as obviously correct and is not. `.Id` means two different
+things on the two sides of a push: for a locally built image it is the CONFIG
+digest, and for an image pulled BY DIGEST docker reports the MANIFEST digest in
+the same field. Measured on a real published artifact, three distinct values:
+
+| value | digest |
+| --- | --- |
+| manifest (what you pull by) | `sha256:b45d81c6…` |
+| `docker image inspect .Id` after that pull | `sha256:b45d81c6…` |
+| the config blob the registry stores | `sha256:8a7ac23b…` |
+
+So the original comparison put a config digest against a manifest digest — two
+different KINDS of value, never equal — and would have refused every correct
+publication, *after* the push had already happened. The equality now rests on
+`.RootFS.Layers`, the ordered diffIDs, which are computed from uncompressed
+layer content and carried inside the config blob: the same object on both sides,
+so a difference there is a real difference in the filesystem. The registry's own
+config digest is READ from the manifest and recorded, rather than inferred from
+a field that changes meaning.
+
+This is the half of the design that could not be tested before merge, and it was
+wrong. That is the argument for running it rather than reasoning about it.
+
 ## 3. What a candidate must demonstrate
 
 Twelve properties, each tested against the artifact rather than the checkout,

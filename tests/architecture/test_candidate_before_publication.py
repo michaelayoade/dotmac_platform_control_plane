@@ -84,6 +84,42 @@ def test_the_identity_recorded_is_the_identity_compared() -> None:
     assert "source_revision" in workflow
 
 
+def test_the_read_back_compares_like_for_like() -> None:
+    """`.Id` means two different things on the two sides of a push.
+
+    For a locally built image it is the CONFIG digest; for an image pulled by
+    digest, docker reports the MANIFEST digest in the same field. Measured on a
+    real published artifact those are distinct values, so comparing the recorded
+    config digest against the pulled `.Id` compares two different KINDS of value
+    and can never hold — a false refusal on every correct publication, arriving
+    after the push had already happened.
+
+    The equality therefore rests on the RootFS layer chain, which is the same
+    object on both sides, and the registry's own config digest is READ from the
+    manifest rather than inferred from a field that changes meaning.
+    """
+    workflow = _text(IMAGE_WORKFLOW)
+    readback = workflow[
+        workflow.index("Prove the registry holds the accepted candidate") :
+    ]
+    compare = readback[: readback.index("Emit the release receipt")]
+    assert "registry RootFS chain" in compare
+    assert "docker manifest inspect" in compare
+    assert '["config"]["digest"]' in compare
+    # The retired comparison must stay retired.
+    assert "pulled_config" not in compare
+    assert "!= accepted $accepted_config" not in compare
+    assert "deliberately NOT compared" in compare
+
+
+def test_the_receipt_records_the_registrys_own_config_digest() -> None:
+    """Recorded, not guessed: it is the value the registry stores, and it is not
+    the digest the image is pulled by."""
+    workflow = _text(IMAGE_WORKFLOW)
+    assert "registry_config_digest" in workflow
+    assert "steps.readback.outputs.registry_config" in workflow
+
+
 def test_the_read_back_actually_leaves_the_runner() -> None:
     """Comparing a local tag with itself passes without consulting the registry.
 

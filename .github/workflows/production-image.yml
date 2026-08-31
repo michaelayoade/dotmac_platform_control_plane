@@ -170,6 +170,7 @@ jobs:
 
       # ── 7 + 8. Read back, and prove equality with what was accepted ─────
       - name: Prove the registry holds the accepted candidate
+        id: readback
         run: |
           set -euo pipefail
           reference='${{ steps.publish.outputs.reference }}'
@@ -183,16 +184,45 @@ jobs:
             && { echo "the candidate is still resident locally; the read-back would be a no-op" >&2; exit 1; }
 
           docker pull "$reference" >/dev/null
-          pulled_config="$(docker image inspect --format '{{.Id}}' "$reference")"
           pulled_layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "$reference")"
           pulled_chain="sha256:$(printf '%s' "$pulled_layers" | sha256sum | cut -d' ' -f1)"
-
-          accepted_config='${{ steps.identity.outputs.config_digest }}'
           accepted_chain='${{ steps.identity.outputs.rootfs_chain }}'
-          test "$pulled_config" = "$accepted_config" \
-            || { echo "registry config $pulled_config != accepted $accepted_config" >&2; exit 1; }
+
+          # THE equality. `.RootFS.Layers` is the ordered list of layer diffIDs,
+          # computed from uncompressed layer content and carried inside the
+          # config blob — so it is the same object on both sides of a push, and
+          # a difference here is a real difference in the filesystem.
           test "$pulled_chain" = "$accepted_chain" \
             || { echo "registry RootFS chain $pulled_chain != accepted $accepted_chain" >&2; exit 1; }
+
+          # `.Id` is deliberately NOT compared across the push boundary, and
+          # this is a correction rather than an omission. For a locally built
+          # image `.Id` is the CONFIG digest; for an image pulled BY DIGEST
+          # docker reports the MANIFEST digest in the same field. Measured on
+          # a real published artifact, those are three different values:
+          #
+          #   manifest        sha256:b45d81c6…   (what you pull by)
+          #   docker .Id      sha256:b45d81c6…   (the manifest digest again)
+          #   config.digest   sha256:8a7ac23b…   (what the registry stores)
+          #
+          # Comparing the local config digest with the pulled `.Id` therefore
+          # compares two different KINDS of value and can never hold — a false
+          # refusal on every correct publication, arriving after the push. The
+          # registry's own config digest is read from the manifest instead, and
+          # recorded rather than guessed at.
+          registry_config="$(docker manifest inspect "$reference" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["digest"])')"
+          [[ "$registry_config" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "the registry returned no usable config digest" >&2; exit 1; }
+          echo "registry_config=$registry_config" >> "$GITHUB_OUTPUT"
+
+          # The candidate's own config digest, recorded before publication, must
+          # still describe the image we just pulled: same revision label, same
+          # layer count. Cheap, and it catches a reference that resolved to a
+          # different image entirely.
+          pulled_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$reference")"
+          test "$pulled_revision" = "${{ steps.select.outputs.source_sha }}" \
+            || { echo "registry image is labelled $pulled_revision, not ${{ steps.select.outputs.source_sha }}" >&2; exit 1; }
           echo "registry bytes equal the accepted candidate"
 
       # ── 9. The receipt ──────────────────────────────────────────────────
@@ -209,11 +239,13 @@ jobs:
             --arg rootfs_chain "${{ steps.identity.outputs.rootfs_chain }}" \
             --arg lock_digest "${{ steps.identity.outputs.lock_digest }}" \
             --arg dockerfile_digest "${{ steps.identity.outputs.dockerfile_digest }}" \
+            --arg registry_config_digest "${{ steps.readback.outputs.registry_config }}" \
             --arg accepted "candidate accepted before publication" \
             '{contract:"dotmac-candidate-release-receipt/1", accepted:$accepted,
               source_revision:$source_revision, ci_run_id:$ci_run_id,
               release_run_id:$release_run_id, registry_digest:$registry_digest,
               reference:$reference, config_digest:$config_digest,
+              registry_config_digest:$registry_config_digest,
               rootfs_chain:$rootfs_chain, lock_digest:$lock_digest,
               dockerfile_digest:$dockerfile_digest}' \
             > release-receipt.json
