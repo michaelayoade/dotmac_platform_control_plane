@@ -34,13 +34,20 @@ From which everything else follows:
 - a successful deployment promotes candidate to accepted **atomically**;
 - a **failed migration leaves the accepted descriptor unchanged**.
 
-This is not theoretical here. `deploy/product.toml` currently describes a
-deployment that exists — pre-bootstrap image `sha256:45715e42…`, revision
-`af9fcf6d…` — while a bootstrap receipt on the same host records that
-`mod_deploy` was created and six migration heads applied. The descriptor must
-not advance to describe the application that will exist until that application
-is the one running. A descriptor that ran ahead would make every drift check
-report a deployment nobody performed.
+This is not theoretical here. `deploy/product.toml` describes a deployment that
+exists — pre-bootstrap image `sha256:45715e42…`, revision `af9fcf6d…` — while a
+bootstrap receipt on the same host records that `mod_deploy` was created and six
+migration heads applied. The descriptor must not advance to describe the
+application that will exist until that application is the one running. A
+descriptor that ran ahead would make every drift check report a deployment
+nobody performed.
+
+> **Amended 2026-08-31 — see § 8.** Read literally, the paragraph above treats
+> the descriptor as one unit, and that reading is wrong in the half it does not
+> mention. The bootstrap advanced the DATABASE without deploying anything, so
+> holding the whole descriptor still left it declaring a database that no longer
+> existed. The image half must not run ahead; the database half must not fall
+> behind.
 
 The reverse ordering is the one that breaks by accident, because writing a file
 succeeds more reliably than a migration does. A descriptor advanced while
@@ -163,3 +170,61 @@ copied here.
 
 Stating the condition is what makes this a monitored absence rather than an
 oversight. Until then nothing checks the descriptor, and that is the gap.
+
+## 8. One file, two halves, two different events — amendment, 2026-08-31
+
+§ 2 says the accepted descriptor always describes the deployment that currently
+exists, and then reasons about that deployment as a single thing that advances
+at a single moment. It does not. `deploy/product.toml` describes two things:
+
+* the **application half** — `[image]`, `[assembly]`, `[roles]` — which advances
+  when a deployment replaces the running container;
+* the **database half** — `[migration]`, `[database]` — which advances when
+  migrations commit.
+
+A normal deployment moves both in one step, which is why the distinction stayed
+invisible. The create-only issuer bootstrap moved exactly one: it ran the
+composed lineage in a short-lived `ops` container and deliberately did not
+replace, restart or repin the application. § 2's refusal was therefore correct
+for the image half and wrong for the database half, and the descriptor spent a
+day declaring five module schemas and four heads against a database holding
+seven and six.
+
+**The rule, restated per half.** The accepted descriptor's image half must never
+describe an application that is not running. Its database half must never
+describe a database that is not there — in EITHER direction: not ahead of a
+migration that has not committed, and not behind one that has.
+
+**A promotion may move one half.** The 2026-08-31 reconciliation
+(`docs/operations/descriptor-reconciliation-2026-08-31.md`) advances the
+database half and carries the application half across unchanged, and
+`deploy/descriptor-promotions.json` records which sections moved and which
+values were carried, so a promotion that quietly advances the image fails rather
+than passing as a database repair.
+
+**What this amendment does NOT claim to fix.** § 2's atomicity — migrations and
+declarations landing together — was violated by the bootstrap before this record
+existed, and no promotion made afterwards restores it. The reconciliation is a
+repair of a state that already broke the rule. The contract that would prevent
+the next one — an operation that advances the database carries a candidate and
+promotes it atomically, or refuses to run, and its receipt binds BOTH descriptors
+— is being ratified in `dotmac_governance` and is not implemented here; the
+`DatabaseContract` that would express it lives in the Foundation `0.3.0a2`
+candidate this record holds unpublished (§ 6).
+
+**And the reason none of it was noticed**, stated narrowly because the broad
+version is false. `classify_invariant_breaches` in the Foundation does compare a
+descriptor's declared `[[database.isolation]]` invariants against a catalogue
+captured from live production. It could not have caught this: it runs inside a
+recovery rehearsal, and it is scoped to the invariants the descriptor DECLARES,
+and this descriptor declared no DELETE invariant. What had no live comparison at
+all was `expected_schemas` and `expected_heads` — parsed, consumed by nothing,
+so being wrong about them cost nothing.
+
+§ 3's lesson applies twice over. A comparison scoped to what was declared cannot
+report what was never declared, which is the present-but-undeclared problem
+living in the checker rather than in the database. Every declared schema still
+existed that day, so a declared-but-absent check was green on a database that
+had moved. `dotmac-platform admin descriptor-drift` reports both directions,
+against a catalogue capture from the target, connects to nothing, and is the
+first live consumer those two declarations have ever had.

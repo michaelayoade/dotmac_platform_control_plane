@@ -117,6 +117,11 @@ REFUSAL_CODES: Final[dict[str, ExitCode]] = {
     "integrity.digest_mismatch": ExitCode.MISMATCH,
     "integrity.source_not_installed": ExitCode.MISMATCH,
     "integrity.duplicate_owner": ExitCode.MISMATCH,
+    # A declaration and a database disagree. `6` rather than `3`, on the same
+    # argument that separates them everywhere else: nobody refused anything and
+    # nothing is unreachable — something is not what it claimed to be, and a
+    # caller that treated it as a refusal would retry it forever.
+    "integrity.declaration_mismatch": ExitCode.MISMATCH,
 }
 
 

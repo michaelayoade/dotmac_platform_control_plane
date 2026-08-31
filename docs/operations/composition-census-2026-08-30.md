@@ -95,6 +95,12 @@ Sixteen of the 23 exist in the production database; the seven in `mod_deploy` do
 not, because the lineage root has never run there. That is the same pending
 deploy recorded in section 1, seen from the schema side.
 
+> **Superseded as of 2026-08-31.** The create-only issuer bootstrap ran
+> `dc_0001_deployment_control`, so all 23 exist now. This census is a dated
+> as-of observation and is left as it was taken; what the descriptor declares
+> today is in `deploy/product.toml`, and the repair is recorded in
+> `descriptor-reconciliation-2026-08-31.md`.
+
 Two readings the version column invites and both are wrong.
 `dotmac-deployment-control`'s manifest `version` is `0.1.0a2` while the pinned
 DISTRIBUTION is `0.1.0a6`; the manifest field is the module CONTRACT version and
