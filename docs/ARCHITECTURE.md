@@ -303,8 +303,8 @@ to build a second Vendor-local fleet or connector engine.
 
 `src/vendor_cp/deployment_profile.py` declares which vendor SURFACES a
 deployment publishes. It is read in exactly one place — `build_spec()` — and a
-test fails the build if a second module imports the loader, because ADR-0003
-forbids feature code branching on a profile name.
+test fails the build if a second module imports the loader, because
+`dotmac_starter_mt` ADR-0003 forbids feature code branching on a profile name.
 
 `production-bootstrap` (required by `scripts/deploy_production.sh` in the host
 env file) composes and runs everything and does not mount the `licence_delivery`,
