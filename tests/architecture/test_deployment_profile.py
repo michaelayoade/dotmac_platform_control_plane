@@ -17,7 +17,7 @@ Five properties are worth failing the build over:
    custody is still loaded at boot under a profile that withholds the licensing
    routes. If withholding the routes also silently stopped the issuer from
    being configured, the profile would have changed behaviour, which is exactly
-   what ADR-0003 forbids.
+   what `dotmac_starter_mt` ADR-0003 forbids.
 4. **Production refuses the fake provisioning laboratory** (ADR-0015), and
    refuses to reach `full` by default when no profile is configured.
 5. **Withholding a route leaves the owner and the lineage.** This is the one
@@ -478,12 +478,13 @@ def test_an_unknown_profile_fails_closed(monkeypatch) -> None:
         load_deployment_profile(environment="development")
 
 
-# ── ADR-0003: exactly one reader ────────────────────────────────────────────
+# ── `dotmac_starter_mt` ADR-0003: exactly one reader ──────────────────────────
 
 
 def test_the_profile_is_read_in_exactly_one_place() -> None:
-    """ADR-0003: profile names are conveniences over independent axes, and no
-    feature may branch on one. The composition module is the single reader.
+    """`dotmac_starter_mt` ADR-0003: profile names are conveniences over
+    independent axes, and no feature may branch on one. The composition module
+    is the single reader.
 
     Scanned through `import_scanner`, because the earlier ImportFrom-only walk
     could not see `import vendor_cp.deployment_profile as p` followed by

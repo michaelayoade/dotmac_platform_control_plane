@@ -5,10 +5,10 @@ read exactly once, in `assembly.build_spec()`, to decide which routers and
 navigation entries each feature manifest contributes to the
 `ProductAssemblySpec`. The manifest itself remains installed so declarations
 and hooks do not disappear with a surface. Nothing downstream may read the
-profile: ADR-0003 is explicit that profile names are conveniences over
-independent axes and that feature code must never branch on one, and deny-case
-D6 already fails the build if a commercial decision compares a mode or plan
-string.
+profile: `dotmac_starter_mt` ADR-0003 is explicit that profile names are
+conveniences over independent axes and that feature code must never branch on
+one, and deny-case D6 already fails the build if a commercial decision compares
+a mode or plan string.
 
 ## Why a profile at all, and why now
 

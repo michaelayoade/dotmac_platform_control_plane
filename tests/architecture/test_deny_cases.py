@@ -339,9 +339,10 @@ def test_d5_only_public_kernel_surface_is_imported() -> None:
 
 
 # ── D6 — no deployment-mode / plan-name branching in commercial logic ────────
-# ADR-0003 ban (design case 10): a contract/commercial decision reads explainable
-# local values (status, capability codes, quorum), never a profile/plan/mode
-# string. Scan the contracts domain for `if <mode/plan/tier/profile> == "..."`.
+# `dotmac_starter_mt` ADR-0003 ban (design case 10): a contract/commercial
+# decision reads explainable local values (status, capability codes, quorum),
+# never a profile/plan/mode string. Scan the contracts domain for
+# `if <mode/plan/tier/profile> == "..."`.
 _BANNED_BRANCH = re.compile(
     r"\b(deployment_mode|plan_name|plan|tier|profile_code|mode)\b\s*(==|!=|in)\s*",
 )
@@ -358,5 +359,5 @@ def test_d6_no_plan_or_mode_string_branching_in_contracts() -> None:
                 bad.append(f"{p.name}:{i}: {line.strip()}")
     assert not bad, (
         "commercial logic must not branch on a plan/mode/profile string "
-        f"(ADR-0003): {bad}"
+        f"(dotmac_starter_mt ADR-0003): {bad}"
     )

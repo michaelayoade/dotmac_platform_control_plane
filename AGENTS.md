@@ -89,7 +89,7 @@ disagree, fix the drift.
 11. **A deployment profile selects surfaces and nothing else, and production
     accepts only a profile that says so.** Read it once, in `build_spec()`. It
     may not withhold a persistence owner and may not change behaviour; feature
-    code never branches on a profile name (ADR-0003, deny case D6).
+    code never branches on a profile name (`dotmac_starter_mt` ADR-0003, deny case D6).
 
     ADR-0015 adds the production half. A profile that publishes the
     `provisioning` surface must declare `laboratory=True` and can never be

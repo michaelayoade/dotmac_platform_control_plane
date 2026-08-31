@@ -108,7 +108,8 @@ def _profiled_surface(
     says it does not exist.
 
     Declarations are untouched in both shapes, which is the invariant a profile
-    is allowed to rely on: it selects surfaces and nothing else (ADR-0003).
+    is allowed to rely on: it selects surfaces and nothing else
+    (`dotmac_starter_mt` ADR-0003).
     """
     if profile.exposes(feature.name):
         return feature

@@ -240,7 +240,7 @@ planted record rather than passing because it matched nothing.
 The Brand Profiles extraction dossier reached the same conclusion independently
 and recorded the interesting part: it inventoried this repository, compared
 `deployment_profile.py` against a brand record because of its name, and rejected
-it as ADR-0003 composition rather than presentation.
+it as `dotmac_starter_mt` ADR-0003 composition rather than presentation.
 
 The only brand-adjacent thing here is a product name in a `<title>` literal in
 `console/web.py`. A displayed name is not a stored one, and the test asserts
