@@ -83,6 +83,22 @@ failure — **and requires it to be the right failure**, by matching the message
 rather than accepting any non-zero exit. Lane A alone is compatible with a world
 where the trap has silently stopped being detectable.
 
+**The lanes must differ in exactly one variable, and the first construction did
+not.** It left `public` owned by `postgres` in lane B as well, so `app_admin`
+could create nothing, the restore landed zero tables, and the "upgrade" would
+have been a fresh install. The non-empty guard caught it on the first real
+run — but had that guard not existed, lane B would have failed with precisely
+the expected message for entirely the wrong reason, and the battery would have
+gone on reporting a trap it was no longer testing. A two-variable experiment
+cannot attribute its own result.
+
+Both copies therefore carry `public` owned by `app_admin` and their objects
+restored as `app_admin`, exactly as production has them; only `datdba` differs.
+The script asserts both halves — `app_admin|app_admin` against
+`postgres|app_admin` — and additionally refuses a lane-B failure that mentions
+TABLE privileges, because that is the failure mode the single-variable setup
+exists to exclude.
+
 ### 3.2 Readiness, and why liveness was not enough
 
 The kernel owns `/health` and its docstring is explicit: *liveness — does not

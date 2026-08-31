@@ -223,6 +223,10 @@ REQUIRED_CHECKS: dict[str, str] = {
         "restored copy owned by postgres migrated successfully"
     ),
     "restored-production reason": "permission denied for database",
+    "restored-production single variable": (
+        "the lanes must differ only in DATABASE ownership"
+    ),
+    "restored-production not a table fault": "failed on TABLE privileges",
     "database ownership": "app_admin|app_admin",
     "role contract": "false|false|true|true",
     "grant isolation": "the plane boundary is open",
@@ -262,6 +266,27 @@ def test_the_restored_migration_test_has_both_lanes() -> None:
     assert lane_a < lane_b
     assert "CREATE DATABASE restored_wrong_owner OWNER postgres" in acceptance
     assert "failed for some OTHER reason" in acceptance
+
+
+def test_the_two_restore_lanes_differ_in_exactly_one_variable() -> None:
+    """A two-variable experiment cannot attribute its own result.
+
+    The first construction left `public` owned by `postgres` in lane B as well,
+    so `app_admin` could create nothing and the restore landed zero tables. The
+    non-empty guard caught it — but had it not, lane B would have failed with
+    the right message for entirely the wrong reason, and the battery would have
+    reported a trap it was no longer testing.
+
+    Both copies now carry `public` owned by `app_admin`; only `datdba` differs,
+    and the script asserts both halves of that rather than assuming them.
+    """
+    acceptance = _text(ACCEPTANCE)
+    assert "ALTER SCHEMA public OWNER TO app_admin" in acceptance
+    assert 'test "$ok_owners" = "app_admin|app_admin"' in acceptance
+    assert 'test "$bad_owners" = "postgres|app_admin"' in acceptance
+    setup = acceptance.index("the lanes must differ only in DATABASE ownership")
+    migrate = acceptance.index("lane B: a wrongly-owned restored copy is refused")
+    assert setup < migrate
 
 
 def test_the_readiness_check_runs_its_negative_case_first() -> None:

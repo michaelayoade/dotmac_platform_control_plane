@@ -199,8 +199,20 @@ docker exec "$DB_CONTAINER" pg_dump -U postgres --format custom --dbname prodsha
     > "$WORKDIR/prodshape.dump"
 test -s "$WORKDIR/prodshape.dump" || fail "the production-shaped dump is empty"
 
+# The two lanes must differ in EXACTLY ONE thing: who owns the DATABASE. An
+# earlier construction also left the `public` schema owned by `postgres` in lane
+# B, so `app_admin` could not create anything and the restore landed zero tables
+# — the guard below caught it, and it would have "failed for the right message"
+# for entirely the wrong reason. A two-variable experiment cannot attribute its
+# own result.
+#
+# So both copies get `public` owned by `app_admin` and their objects restored as
+# `app_admin`, exactly as production has them. Only `datdba` differs.
 psql_admin -c "CREATE DATABASE restored_ok OWNER app_admin;" >/dev/null
 psql_admin -c "CREATE DATABASE restored_wrong_owner OWNER postgres;" >/dev/null
+for target in restored_ok restored_wrong_owner; do
+    psql_admin --dbname "$target" -c "ALTER SCHEMA public OWNER TO app_admin;" >/dev/null
+done
 # `|| true` because pg_restore reports ACL warnings on a cluster whose roles
 # were created by the init script rather than by the dump — the RESULT is
 # asserted below instead of the exit code, which is the honest way round.
@@ -214,7 +226,20 @@ for target in restored_ok restored_wrong_owner; do
     test "$restored_tables" -gt 0 \
         || fail "$target restored zero tables, so the upgrade below would be a fresh install"
 done
-pass "restored two copies of the same production-shaped state, both non-empty"
+
+# The single-variable proof, asserted rather than assumed. Both copies must
+# agree on schema ownership and disagree on database ownership; if they ever
+# agree on both, lane B stops being a trap and starts being a duplicate of
+# lane A that happens to pass.
+ok_owners="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT pg_get_userbyid(datdba) || '|' || (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public') FROM pg_database WHERE datname=current_database();")"
+bad_owners="$(psql_admin --tuples-only --no-align --dbname restored_wrong_owner -c \
+  "SELECT pg_get_userbyid(datdba) || '|' || (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public') FROM pg_database WHERE datname=current_database();")"
+test "$ok_owners" = "app_admin|app_admin" \
+    || fail "lane A ownership is $ok_owners, expected app_admin|app_admin"
+test "$bad_owners" = "postgres|app_admin" \
+    || fail "lane B ownership is $bad_owners, expected postgres|app_admin — the lanes must differ only in DATABASE ownership"
+pass "two copies of one production-shaped state, differing only in database ownership"
 
 docker run --rm --network host \
     --env "MIGRATION_DATABASE_URL=$(dsn app_admin restored_ok)" \
@@ -236,6 +261,12 @@ test "$wrong_owner_status" -ne 0 \
 grep -qi "permission denied for database" "$WORKDIR/wrong-owner.log" \
     || fail "the wrong-owner restore failed for some OTHER reason: $(tail -5 "$WORKDIR/wrong-owner.log")"
 pass "lane B: a wrongly-owned restored copy is refused, and for the right reason"
+# And the refusal must be about the DATABASE, not about a table the restore
+# happened to leave unreachable — the failure mode the single-variable setup
+# above exists to exclude.
+grep -qi "permission denied for table\|permission denied for relation" "$WORKDIR/wrong-owner.log" \
+    && fail "lane B failed on TABLE privileges, so it was not testing database ownership"
+pass "lane B failed on database ownership specifically, not on object privileges"
 
 step "5  database ownership, roles, grants and isolation"
 SQL="
