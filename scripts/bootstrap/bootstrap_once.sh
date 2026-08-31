@@ -84,6 +84,14 @@ done
 #     anything: the database it nominally belongs to was initialised long ago.
 VENDOR_DB_BOOTSTRAP_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 export VENDOR_DB_BOOTSTRAP_PASSWORD
+#
+#     VENDOR_APP_IMAGE is the SECOND parse-time variable and belongs here for
+#     the identical reason. Exporting it beside the ops container it feeds read
+#     naturally and was wrong: `services.app.image` interpolates whenever the
+#     file is parsed, so the ownership gate needed it too. Setting it here does
+#     NOT deploy anything — it only lets compose parse, and the `app` service is
+#     never named in a command below.
+export VENDOR_APP_IMAGE="$IMAGE_ID"
 
 # 4. Image identity: BOTH the transferred id and the layer chain, plus the
 #    revision label. `docker save`/`load` does not preserve the manifest digest,
@@ -128,8 +136,6 @@ DUMP_SHA="sha256:$(sha256sum "${BACKUP_DIR}/bootstrap-${STAMP}.dump" | cut -d' '
 #    is NOT named here, NOT restarted, and NOT repinned. That absence is the
 #    create-only property.
 #
-export VENDOR_APP_IMAGE="$IMAGE_ID"
-
 docker compose -f "$COMPOSE" --profile ops run --rm --no-deps ops scripts/migrate.py
 
 # 8. Prove the authority now exists and the application was left alone.
