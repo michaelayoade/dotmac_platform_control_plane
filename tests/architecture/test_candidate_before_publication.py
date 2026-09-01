@@ -177,9 +177,9 @@ def test_the_distribution_digests_are_read_from_the_candidate_not_remeasured() -
 def test_the_image_carries_the_distributions_the_receipt_describes() -> None:
     """The claim is re-derivable from a pulled image, not only from a run log."""
     dockerfile = _text(ROOT / "Dockerfile")
-    assert "--format wheel" not in dockerfile, (
-        "only a wheel is built, so the receipt cannot carry an sdist digest"
-    )
+    assert (
+        "--format wheel" not in dockerfile
+    ), "only a wheel is built, so the receipt cannot carry an sdist digest"
     assert "dotmac-distribution-digests/1" in dockerfile
     assert "no wheel was built" in dockerfile
     assert "no sdist was built" in dockerfile
