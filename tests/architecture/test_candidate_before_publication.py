@@ -180,6 +180,29 @@ def test_the_distribution_digests_are_read_from_the_candidate_not_remeasured() -
     assert 'endswith(".tar.gz")' in identity
 
 
+def test_the_manifest_the_receipt_reads_is_checked_before_publication() -> None:
+    """The read happens only on the publication path, so the battery holds it.
+
+    A malformed or silently narrowed `/app/distributions.json` would otherwise
+    first be discovered by the step that reads it — after the push, with the
+    receipt unemitted. That is the exact failure shape the ordering exists to
+    prevent, so the property belongs to acceptance rather than to publication.
+    """
+    acceptance = _text(ACCEPTANCE)
+    assert "/app/distributions.json" in acceptance
+    assert "dotmac-distribution-digests/1" in acceptance
+    # Tied to the installed distribution, not free-floating.
+    assert "importlib.metadata import version" in acceptance
+
+
+def test_the_registry_read_back_is_preflighted_before_the_push() -> None:
+    """A tool that is missing must not be discovered with bytes already published."""
+    workflow = _text(IMAGE_WORKFLOW)
+    preflight = workflow.index("docker manifest inspect --help")
+    push = workflow.index("docker push")
+    assert preflight < push
+
+
 def test_the_image_carries_the_distributions_the_receipt_describes() -> None:
     """The claim is re-derivable from a pulled image, not only from a run log."""
     dockerfile = _text(ROOT / "Dockerfile")
@@ -397,6 +420,13 @@ REQUIRED_CHECKS: dict[str, str] = {
     ),
     "liveness as control": "liveness should answer 200 even with no database",
     "browser journey": "form login yields a session that reaches the console",
+    # Replaying `Set-Cookie` is what lets a production `__Host-`/Secure cookie
+    # survive a plain-HTTP runner. The refusal case is what proves the
+    # protection is still on after doing it.
+    "csrf still refuses without proof": "a form POST with no CSRF proof is refused 403",
+    # The distribution manifest the receipt reads is produced on every path,
+    # but only READ on the publication path — so the candidate demonstrates it.
+    "distribution manifest": "dotmac-distribution-digests/1",
     "api journey": "the API did not issue a bearer token",
     # A refusal that names nothing costs a whole run to diagnose, and a refusal
     # that names too much echoes a credential. Both halves are required.

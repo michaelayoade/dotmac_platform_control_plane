@@ -140,6 +140,40 @@ docker run --rm --network none \
     || fail "diagnose self --strict found the candidate is not running installed"
 pass "dotmac-platform resolves, reports a metadata version, and is installed"
 
+step "13 the distribution manifest the release receipt will carry"
+# The receipt records a per-file digest for the wheel and the sdist, READ out of
+# this document rather than re-measured: a second `poetry build` produces a
+# different archive for identical source, because a zip carries timestamps.
+#
+# That makes the document one of the things a candidate must demonstrate. The
+# pipeline step that reads it runs on the publication path ONLY, so without this
+# a malformed or silently narrowed manifest would first be discovered after the
+# push — the precise failure shape this whole ordering exists to prevent.
+SCRIPT="
+import json, re
+from importlib.metadata import version
+
+document = json.load(open('/app/distributions.json'))
+assert document['contract'] == 'dotmac-distribution-digests/1', document.get('contract')
+files = document['files']
+wheels = [f for f in files if f['filename'].endswith('.whl')]
+sdists = [f for f in files if f['filename'].endswith('.tar.gz')]
+assert len(wheels) == 1, wheels
+assert len(sdists) == 1, sdists
+for entry in files:
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', entry['sha256']), entry
+    assert entry['size_bytes'] > 0, entry
+# Tied to the INSTALLED distribution rather than free-floating. A manifest that
+# described some other build would satisfy every check above.
+installed = version('dotmac-vendor-control-plane')
+assert wheels[0]['filename'].split('-')[1] == installed, (wheels[0]['filename'], installed)
+assert sdists[0]['filename'].endswith(installed + '.tar.gz'), (sdists[0]['filename'], installed)
+print(wheels[0]['filename'], '+', sdists[0]['filename'], 'at', installed)
+"
+distribution_report="$(in_image)" \
+    || fail "the candidate's distribution manifest is absent, malformed, or describes another build"
+pass "distribution manifest: $distribution_report"
+
 step "12 no checkout dependency — the counter-proof, run inside the candidate"
 # The positive case above passes from `site-packages`. It would ALSO pass from a
 # source tree if the check were weak, which is exactly how a package can report
@@ -524,13 +558,49 @@ test "$doc_code" = "200" \
     || fail "the bearer-protected document plane returned $doc_code to a platform admin"
 pass "API: /openapi.json answers 200 to a platform-admin bearer token"
 
-cookie_jar="$WORKDIR/cookies"
-login_page="$(curl --silent --max-time 10 --cookie-jar "$cookie_jar" \
+# Cookies are REPLAYED from the response headers rather than kept in curl's
+# cookie jar, and that is forced by a real property of the artifact rather than
+# by convenience. `CSRFMiddleware` names its cookie `__Host-csrf_token` when
+# `production` is set, and the `__Host-` prefix requires `Secure` — so curl,
+# which correctly refuses to return a Secure cookie over plain `http://`, sent
+# nothing back and the login was 403. Production terminates TLS at nginx; this
+# battery drives the container directly, so the transport differs and only the
+# transport does. Replaying `Set-Cookie` verbatim is what a browser over TLS
+# would do.
+#
+# It does not weaken the check: the token is still signed, still expiring, and
+# still bound to the very cookie set being replayed, and the non-vacuity case
+# below proves the refusal still fires.
+replay_cookies() {
+    tr -d '\r' < "$1" \
+        | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' \
+        | paste -sd ';' - \
+        | sed 's/;/; /g'
+}
+
+login_page="$(curl --silent --max-time 10 --dump-header "$WORKDIR/login.head" \
     --header "Host: ${HOSTNAME_HEADER}" "http://127.0.0.1:8000/platform/login")"
+issued_cookies="$(replay_cookies "$WORKDIR/login.head")"
+test -n "$issued_cookies" \
+    || fail "the login page issued no cookie at all, so the CSRF proof cannot be bound to one"
 csrf="$(printf '%s' "$login_page" | grep -o 'name="csrf_token" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')"
+test -n "$csrf" || fail "the login page carries no hidden csrf_token field"
+
+# NON-VACUITY, first: replaying cookies must not have turned the protection off.
+# The same request without the proof has to be refused, or "the login succeeded"
+# says nothing about whether anything was checked.
+unproven_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+    --header "Host: ${HOSTNAME_HEADER}" --header "Cookie: ${issued_cookies}" \
+    --data-urlencode "email=${admin_email}" \
+    --data-urlencode "password=${admin_password}" \
+    "http://127.0.0.1:8000/platform/login")"
+test "$unproven_code" = "403" \
+    || fail "a form POST with no CSRF proof returned $unproven_code, expected 403 — the check is not live"
+pass "browser: a form POST carrying no CSRF proof is refused 403"
+
 login_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
-    --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
-    --header "Host: ${HOSTNAME_HEADER}" \
+    --dump-header "$WORKDIR/session.head" \
+    --header "Host: ${HOSTNAME_HEADER}" --header "Cookie: ${issued_cookies}" \
     --data-urlencode "email=${admin_email}" \
     --data-urlencode "password=${admin_password}" \
     --data-urlencode "csrf_token=${csrf}" \
@@ -539,8 +609,14 @@ case "$login_code" in
     200|302|303) ;;
     *) fail "the browser login returned $login_code — no session can be obtained" ;;
 esac
+# Anything the login response set (the platform session, a rotated CSRF token)
+# comes LAST so it overrides the value issued by the page.
+session_cookies="$(replay_cookies "$WORKDIR/session.head")"
+test -n "$session_cookies" \
+    || fail "the browser login set no cookie, so it granted no session"
 console_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
-    --cookie "$cookie_jar" --header "Host: ${HOSTNAME_HEADER}" \
+    --header "Cookie: ${issued_cookies}; ${session_cookies}" \
+    --header "Host: ${HOSTNAME_HEADER}" \
     "http://127.0.0.1:8000/platform/console")"
 test "$console_code" = "200" \
     || fail "the console returned $console_code to a freshly logged-in admin"

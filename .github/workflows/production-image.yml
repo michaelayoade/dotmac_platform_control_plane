@@ -113,6 +113,15 @@ jobs:
         id: identity
         run: |
           set -euo pipefail
+          # Preflight, HERE and not after the push. Step 8 reads the registry's
+          # own config digest with `docker manifest inspect`, and a runner whose
+          # CLI cannot run that subcommand would fail the pipeline with the bytes
+          # already published and the receipt never emitted — the exact shape
+          # this ordering exists to prevent. Proving the subcommand resolves
+          # costs nothing and happens before anything is accepted, let alone
+          # pushed.
+          docker manifest inspect --help > /dev/null \
+            || { echo "docker manifest inspect is unavailable on this runner" >&2; exit 1; }
           config_digest="$(docker image inspect --format '{{.Id}}' "${CANDIDATE_TAG}")"
           layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "${CANDIDATE_TAG}")"
           # The RootFS chain digest is over the ORDERED layer list: two images
