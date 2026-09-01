@@ -135,6 +135,117 @@ def test_the_read_back_actually_leaves_the_runner() -> None:
     assert remove < inspect_guard < pull < compare
 
 
+def test_the_receipt_records_per_file_distribution_digests() -> None:
+    """Bundle granularity names the container, not what is inside it.
+
+    The config digest and the layer chain identify an image. Neither answers
+    "which wheel is installed in it?", so a receipt carrying only those cannot
+    be checked against a distribution artifact at all — which is the granularity
+    a prior release record called out as missing.
+    """
+    workflow = _text(IMAGE_WORKFLOW)
+    receipt = workflow[workflow.index("Emit the release receipt") :]
+    assert "distributions:$distributions" in receipt
+    assert "candidate-distributions.json" in receipt
+
+
+def test_the_distribution_digests_are_read_from_the_candidate_not_remeasured() -> None:
+    """A second `poetry build` describes different bytes.
+
+    A wheel is a zip and a zip carries timestamps, so rebuilding to measure
+    would produce a digest for an archive this image does not contain — a
+    receipt field that looks like evidence and is not. The image computes them
+    in the stage that installed them; the pipeline READS them out.
+    """
+    workflow = _text(IMAGE_WORKFLOW)
+    identity = workflow[
+        workflow.index("Record the candidate's identity") : workflow.index(
+            "Accept the candidate, or refuse it"
+        )
+    ]
+    assert "/app/distributions.json" in identity
+    assert "poetry build" not in identity, (
+        "the pipeline rebuilds the distributions instead of reading the ones "
+        "the candidate carries"
+    )
+    # And a receipt that recorded an empty list, or one format, would be a
+    # narrowing nobody would notice. Both are required where they are read.
+    assert 'endswith(".whl")' in identity
+    assert 'endswith(".tar.gz")' in identity
+
+
+def test_the_image_carries_the_distributions_the_receipt_describes() -> None:
+    """The claim is re-derivable from a pulled image, not only from a run log."""
+    dockerfile = _text(ROOT / "Dockerfile")
+    assert "--format wheel" not in dockerfile, (
+        "only a wheel is built, so the receipt cannot carry an sdist digest"
+    )
+    assert "dotmac-distribution-digests/1" in dockerfile
+    assert "no wheel was built" in dockerfile
+    assert "no sdist was built" in dockerfile
+    assert "/app/distributions.json ./distributions.json" in dockerfile
+
+
+def test_the_battery_is_reachable_from_the_pull_request_path() -> None:
+    """Every defect this battery has had was found by a publication run.
+
+    Three of them, each costing a merge to protected main to discover: a restore
+    lane that landed zero tables, a read-back that compared two different kinds
+    of digest, and a role-contract assertion that compared PostgreSQL's boolean
+    OUTPUT (`t`/`f`) against its boolean CAST (`true`/`false`) and could not
+    hold on any correct database. All three were defects in the CHECK, and all
+    three were unreachable from the pull-request path.
+
+    The rehearsal does not weaken the ordering: acceptance is still the run
+    against the exact candidate about to be published, asserted above. This only
+    makes the battery's own defects fail in review.
+    """
+    ci = _text(CI_WORKFLOW)
+    assert "Rehearse the acceptance battery" in ci
+    assert ".github/candidate/acceptance.sh" in ci
+    # One script, two callers. A rehearsal that had its own copy would drift,
+    # and a drifting rehearsal is worse than no rehearsal.
+    assert "acceptance.sh" in _text(IMAGE_WORKFLOW)
+    assert not (ROOT / ".github" / "candidate" / "acceptance-ci.sh").exists()
+
+
+def test_the_rehearsal_does_not_become_the_acceptance() -> None:
+    """CI proves the battery runs; it does not prove the published bytes.
+
+    The image CI builds is not the candidate — it is built from a pull-request
+    head, and nothing publishes it. If acceptance were ever deleted from the
+    publication path on the grounds that "CI already runs it", the registry
+    would again hold bytes nothing accepted.
+    """
+    workflow = _text(IMAGE_WORKFLOW)
+    accept = workflow.index("Accept the candidate, or refuse it")
+    assert ".github/candidate/acceptance.sh" in workflow[accept:]
+    assert workflow.index("docker push") > accept
+
+
+def test_the_role_contract_query_renders_the_form_it_declares() -> None:
+    """PostgreSQL renders a boolean two ways, and they do not agree.
+
+    `format('%s', ...)` calls the type's output function and emits `t`/`f`; the
+    boolean-to-text CAST emits `true`/`false`. Written without the casts this
+    assertion compared `f|f|t|t` against `false|false|true|true` — measured
+    failing in run 33407635872, at the FIRST assertion of step 5, which is why
+    nothing after it in the battery had ever executed.
+
+    The readable spelling is kept in the declaration, because it is what an
+    operator reads in the failure message, and the QUERY is the half corrected.
+    """
+    acceptance = _text(ACCEPTANCE)
+    contract = acceptance[acceptance.index('step "5  database ownership') :]
+    contract = contract[: contract.index("owner_contract=")]
+    for flag in ("rolsuper", "rolcreaterole", "rolbypassrls", "rolcanlogin"):
+        assert f"{flag}::text" in contract, (
+            f"{flag} is rendered by the boolean output function, which emits "
+            "t/f and can never equal the declared true/false"
+        )
+    assert 'test "$role_contract" = "false|false|true|true"' in acceptance
+
+
 def test_the_receipt_binds_the_revision_the_run_and_the_bytes() -> None:
     workflow = _text(IMAGE_WORKFLOW)
     receipt = workflow[workflow.index("Emit the release receipt") :]
@@ -147,6 +258,7 @@ def test_the_receipt_binds_the_revision_the_run_and_the_bytes() -> None:
         "rootfs_chain",
         "lock_digest",
         "dockerfile_digest",
+        "distributions",
     ):
         assert field in receipt, field
     assert "dotmac-candidate-release-receipt/1" in receipt

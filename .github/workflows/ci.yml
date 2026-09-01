@@ -197,3 +197,25 @@ jobs:
             --volume "$volume:/manifests:ro" \
             postgres:16 stat -c '%u:%g %a' /manifests)"
           test "$observed" = "10001:10001 750"
+
+      # ── The acceptance battery, REHEARSED ────────────────────────────────
+      # This is a rehearsal. It is NOT acceptance, and it does not weaken the
+      # ordering in `production-image.yml`: acceptance is the same script run
+      # against the exact candidate that is about to be published, and nothing
+      # here substitutes for it. What this step buys is REACHABILITY.
+      #
+      # Every defect this battery has had was invisible until a publication run
+      # executed it, because a publication run was the only thing that ever did.
+      # Three arrived that way — a restore lane that landed zero tables, a
+      # read-back comparing a config digest against a manifest digest, and a
+      # role-contract assertion comparing PostgreSQL's `t`/`f` boolean OUTPUT
+      # against a declared `true`/`false` CAST, which could never hold on any
+      # correct database. Each cost a merge to protected main to discover and
+      # another to fix, and each was a defect in the CHECK rather than in the
+      # artifact.
+      #
+      # The same script, invoked against the image this job already built, makes
+      # that whole class fail in review instead. One script, two callers: a copy
+      # would drift, and a drifting rehearsal is worse than none.
+      - name: Rehearse the acceptance battery against the built bytes
+        run: .github/candidate/acceptance.sh dotmac-vendor-control-plane:ci

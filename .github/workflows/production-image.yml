@@ -121,6 +121,23 @@ jobs:
           rootfs_chain="$(printf '%s' "$layers" | sha256sum | cut -d' ' -f1)"
           lock_digest="$(sha256sum poetry.lock | cut -d' ' -f1)"
           dockerfile_digest="$(sha256sum Dockerfile | cut -d' ' -f1)"
+          # Per-file digests of the wheel and the sdist, READ OUT of the
+          # candidate rather than measured beside it. The image computed them in
+          # the same build stage that installed the wheel; recomputing here
+          # would mean a second `poetry build`, and a zip carries timestamps, so
+          # that would describe bytes this image does not contain.
+          #
+          # Until now the receipt recorded bundle granularity only — the config
+          # digest and the layer chain name the container, not the artifacts
+          # inside it.
+          docker run --rm --network none --entrypoint cat \
+            "${CANDIDATE_TAG}" /app/distributions.json > candidate-distributions.json
+          jq -e '[.files[].filename | endswith(".whl")] | any' \
+            candidate-distributions.json > /dev/null
+          jq -e '[.files[].filename | endswith(".tar.gz")] | any' \
+            candidate-distributions.json > /dev/null
+          jq -e '.files | length >= 2 and all(.sha256 | test("^sha256:[0-9a-f]{64}$"))' \
+            candidate-distributions.json > /dev/null
           {
             echo "config_digest=$config_digest"
             echo "rootfs_chain=sha256:$rootfs_chain"
@@ -134,9 +151,11 @@ jobs:
             --arg rootfs_chain "sha256:$rootfs_chain" \
             --arg lock_digest "sha256:$lock_digest" \
             --arg dockerfile_digest "sha256:$dockerfile_digest" \
+            --argjson distributions "$(cat candidate-distributions.json)" \
             '{source_revision:$source_revision, config_digest:$config_digest,
               layers:$layers, rootfs_chain:$rootfs_chain,
-              lock_digest:$lock_digest, dockerfile_digest:$dockerfile_digest}' \
+              lock_digest:$lock_digest, dockerfile_digest:$dockerfile_digest,
+              distributions:$distributions}' \
             > candidate-identity.json
           cat candidate-identity.json
 
@@ -240,6 +259,7 @@ jobs:
             --arg lock_digest "${{ steps.identity.outputs.lock_digest }}" \
             --arg dockerfile_digest "${{ steps.identity.outputs.dockerfile_digest }}" \
             --arg registry_config_digest "${{ steps.readback.outputs.registry_config }}" \
+            --argjson distributions "$(cat candidate-distributions.json)" \
             --arg accepted "candidate accepted before publication" \
             '{contract:"dotmac-candidate-release-receipt/1", accepted:$accepted,
               source_revision:$source_revision, ci_run_id:$ci_run_id,
@@ -247,7 +267,8 @@ jobs:
               reference:$reference, config_digest:$config_digest,
               registry_config_digest:$registry_config_digest,
               rootfs_chain:$rootfs_chain, lock_digest:$lock_digest,
-              dockerfile_digest:$dockerfile_digest}' \
+              dockerfile_digest:$dockerfile_digest,
+              distributions:$distributions}' \
             > release-receipt.json
           cat release-receipt.json
           {
@@ -264,4 +285,5 @@ jobs:
           path: |
             release-receipt.json
             candidate-identity.json
+            candidate-distributions.json
           retention-days: 90

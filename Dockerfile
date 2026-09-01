@@ -34,10 +34,59 @@ RUN --mount=type=secret,id=forgejo_token \
 # `--no-deps` because the resolver already ran, against the lock, above. A
 # second resolution here could pick a different version from the one the lock
 # pinned, and the image would then contain something the lock does not describe.
+#
+# Both formats are built. The wheel is what gets installed; the sdist exists so
+# the release receipt can carry a digest for it, and so that "which source
+# archive corresponds to this image?" has an answer that is not a rebuild.
 COPY --chown=root:root src ./src
-RUN poetry build --format wheel --no-interaction --no-ansi \
+RUN poetry build --no-interaction --no-ansi \
     && "$VIRTUAL_ENV/bin/pip" install --no-deps --no-index dist/*.whl \
     && "$VIRTUAL_ENV/bin/dotmac-platform" --version
+
+# Per-file digests of the distributions this image was assembled from, computed
+# in the SAME stage that built and installed them, and carried into the image.
+#
+# The release receipt recorded identity at bundle granularity only — the image
+# config digest and the layer chain. Those name the container; they say nothing
+# about the artifacts inside it, so "which wheel is in this image?" had no
+# answer that did not involve rebuilding and hoping `poetry build` is
+# deterministic. It is not: a zip carries timestamps, so a wheel measured beside
+# the image describes bytes the image does not contain.
+#
+# Computing them here and shipping the result makes the receipt's claim
+# re-checkable by anyone who can pull the image, against the same bytes `pip`
+# installed one instruction earlier.
+RUN python3 <<'DIGESTS'
+import hashlib
+import json
+import pathlib
+
+files = sorted(p for p in pathlib.Path("/app/dist").iterdir() if p.is_file())
+names = [p.name for p in files]
+# The receipt promises a digest per distribution. If poetry ever stops emitting
+# one of the two formats the receipt would silently narrow instead of failing,
+# so the requirement is asserted where it is produced rather than where it is
+# read.
+if not any(n.endswith(".whl") for n in names):
+    raise SystemExit(f"no wheel was built: {names}")
+if not any(n.endswith(".tar.gz") for n in names):
+    raise SystemExit(f"no sdist was built: {names}")
+
+document = {
+    "contract": "dotmac-distribution-digests/1",
+    "files": [
+        {
+            "filename": path.name,
+            "size_bytes": path.stat().st_size,
+            "sha256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in files
+    ],
+}
+pathlib.Path("/app/distributions.json").write_text(
+    json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+)
+DIGESTS
 
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 
@@ -67,6 +116,10 @@ COPY --from=builder /opt/venv /opt/venv
 # names where it landed instead.
 COPY --chown=10001:10001 alembic ./alembic
 COPY --chown=10001:10001 alembic.ini ./alembic.ini
+# The per-file distribution digests travel WITH the artifact they describe, so
+# the receipt's claim about the wheel and the sdist can be re-derived from a
+# pulled image rather than trusted.
+COPY --from=builder --chown=10001:10001 /app/distributions.json ./distributions.json
 
 USER 10001:10001
 

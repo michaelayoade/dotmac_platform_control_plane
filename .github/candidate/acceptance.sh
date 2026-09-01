@@ -269,12 +269,24 @@ grep -qi "permission denied for table\|permission denied for relation" "$WORKDIR
 pass "lane B failed on database ownership specifically, not on object privileges"
 
 step "5  database ownership, roles, grants and isolation"
+# `::text` on every flag, and it is load-bearing rather than tidy. PostgreSQL
+# has TWO renderings of a boolean and they do not agree: the type's own output
+# function — which is what `format('%s', ...)` calls — emits `t`/`f`, while the
+# boolean-to-text CAST emits `true`/`false`. Written without the casts this
+# assertion compared `f|f|t|t` against a declared `false|false|true|true` and
+# could never hold, on any correct database. It was measured failing in run
+# 33407635872 on protected main, at the FIRST assertion of step 5, which is why
+# nothing after it in this battery had ever executed.
+#
+# The declared form is kept in the readable spelling and the QUERY is corrected,
+# rather than the other way round: `false|false|true|true` says what the role
+# contract IS to someone reading the failure message, and `f|f|t|t` does not.
 SQL="
 SELECT format('%s|%s|%s|%s',
-  (SELECT rolsuper FROM pg_roles WHERE rolname='app_admin'),
-  (SELECT rolcreaterole FROM pg_roles WHERE rolname='app_admin'),
-  (SELECT rolbypassrls FROM pg_roles WHERE rolname='app_admin'),
-  (SELECT rolcanlogin FROM pg_roles WHERE rolname='app_admin'));
+  (SELECT rolsuper::text FROM pg_roles WHERE rolname='app_admin'),
+  (SELECT rolcreaterole::text FROM pg_roles WHERE rolname='app_admin'),
+  (SELECT rolbypassrls::text FROM pg_roles WHERE rolname='app_admin'),
+  (SELECT rolcanlogin::text FROM pg_roles WHERE rolname='app_admin'));
 "
 role_contract="$(psql_admin --tuples-only --no-align --dbname restored_ok -c "$SQL" | tr -d ' ')"
 test "$role_contract" = "false|false|true|true" \
