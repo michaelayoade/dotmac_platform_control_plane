@@ -311,11 +311,23 @@ test "$reachable" = "$module_schemas" \
     || fail "platform_api reaches $reachable of $module_schemas module schemas; the online role cannot work"
 pass "$module_schemas module schemas: app_user reaches none, platform_api reaches all"
 
-forced="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
-  "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r' AND NOT (c.relrowsecurity AND c.relforcerowsecurity);" | tr -d ' ')"
-test "$forced" = "0" \
-    || fail "$forced tenant-scoped table(s) do not have RLS enabled AND forced"
-pass "every table carrying tenant_id has row security enabled and forced"
+# NAMED, not counted. The first version of this check reported a number, and a
+# number is not actionable: "1 tenant-scoped table does not have RLS forced" does
+# not say which table, in which schema, or whether the gap is enabled-but-not-
+# forced or no row security at all. An operator reading that failure has to
+# reproduce the whole battery to learn what it found.
+unforced="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT COALESCE(string_agg(DISTINCT n.nspname||'.'||c.relname||' (enabled='||c.relrowsecurity||',forced='||c.relforcerowsecurity||')', ', '), '') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r' AND NOT (c.relrowsecurity AND c.relforcerowsecurity);")"
+test -z "$unforced" \
+    || fail "tenant-scoped table(s) without RLS enabled AND forced: $unforced"
+# NON-VACUITY: the assertion above is satisfied by a database with no
+# tenant-scoped table at all, which is exactly what a wrong schema name or a
+# mis-joined catalogue query would produce.
+tenant_scoped="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r';" | tr -d ' ')"
+test "$tenant_scoped" -gt 0 \
+    || fail "no table carries tenant_id at all, so the RLS assertion is vacuous"
+pass "all $tenant_scoped tables carrying tenant_id have row security enabled and forced"
 
 step "9  the exact UI assets this artifact serves"
 SCRIPT="

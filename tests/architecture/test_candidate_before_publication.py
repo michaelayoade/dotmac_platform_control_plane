@@ -164,10 +164,16 @@ def test_the_distribution_digests_are_read_from_the_candidate_not_remeasured() -
         )
     ]
     assert "/app/distributions.json" in identity
-    assert "poetry build" not in identity, (
-        "the pipeline rebuilds the distributions instead of reading the ones "
-        "the candidate carries"
-    )
+    # The property is that nothing INVOKES a second build, not that the words
+    # are unmentionable — the comment explaining why it must not is the
+    # documentation this rule most wants written. Same mistake, and same
+    # correction, as the Dockerfile's PYTHONPATH guard.
+    invocations = [
+        line
+        for line in identity.splitlines()
+        if "poetry build" in line and not line.lstrip().startswith("#")
+    ]
+    assert invocations == [], invocations
     # And a receipt that recorded an empty list, or one format, would be a
     # narrowing nobody would notice. Both are required where they are read.
     assert 'endswith(".whl")' in identity
