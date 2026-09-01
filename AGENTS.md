@@ -503,6 +503,28 @@ disagree, fix the drift.
     owes the migration rehearsal a kernel upgrade owes. A hash comparison proves
     you got the published bytes; it cannot prove they import.
 
+    **The assembly's own imports join that maximum, and the premise is
+    executed.** Governance ADR 0021 § 10, as RULED 2026-09-01: the effective
+    floor is the maximum of (a) every composed distribution's installed
+    `Requires-Dist` and (b) this assembly's own declared direct kernel
+    constraint. The checked-in record does not yet say this — § 10 states that
+    an assembly's own imports are NOT an input, carries the question into open
+    decision 24, and names this repository's test as where the premise is
+    recorded for later; the governance revision pinned here predates § 10
+    entirely. The ruling runs ahead of the record, so this lane is deliberately
+    stricter than the text it cites and the record owes an amendment. Equality
+    with the composed maximum alone is correct only while
+    (b) sits at or below (a) — true today, and true by COINCIDENCE. That
+    coincidence may not remain an unstated premise: `assembly-satisfied`
+    requires every kernel module and every top-level name `src/vendor_cp`
+    imports to be provided by an installation of the composed maximum, and a
+    planted assembly import of a kernel name first shipped above it turns the
+    lane red. When the premise dies, the answer is to record the assembly as a
+    floor contributor and move the pin — never to loosen the equality. The
+    refusal distinguishes a missing kernel symbol from a missing ENVIRONMENT
+    dependency, because conflating those is how a boundary defect gets
+    attributed to the wrong artifact.
+
     **The mutation lane installs the newest version the pin excludes and
     requires this assembly to fail on it** — and to fail for the RIGHT reason:
     the traceback must name a `dotmac_kernel` module that installation was
@@ -515,6 +537,13 @@ disagree, fix the drift.
 
     **A kernel version stated in canonical prose is checked against the pin.**
     `docs/ARCHITECTURE.md` and the pin-state table said `0.1.0a77` for as long
-    as the pin had been `0.1.0a98`; nothing broke and nothing could see it
+    as the pin had been `0.1.0a98`; nothing broke and nothing could see it.
+
+    **A published version is not blamed for a boundary its predecessors share.**
+    Kernel a98, a99 and a100 reach a product-owned PostgreSQL driver on the
+    public `create_app` symbol identically; a100 regressed nothing, a98 is what
+    runs in production, and the repair is a101. Operational functionality and
+    independent artifact adoptability are different properties with different
+    oracles, and a pin may not name a version that has not been published
     (`scripts/kernel_floor.py`, `tests/architecture/test_kernel_floor.py`, CI job
     `kernel-pin`; `docs/operations/kernel-a100-assessment-2026-09-01.md`).

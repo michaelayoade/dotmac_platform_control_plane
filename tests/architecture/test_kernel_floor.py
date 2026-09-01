@@ -14,6 +14,11 @@ Two directions, and both have to be able to fail:
   rehearsal a kernel upgrade owes. `missing-from` refuses when every module the
   composition imports is already present in the excluded kernel, and the pin is
   held equal to the highest floor anything composed declares.
+* the EQUALITY ITSELF wrong — `pin == max(composed floors)` is only the whole
+  rule while the assembly's own imports are satisfied by that maximum. That was
+  a coincidence nothing checked. `assembly-satisfied` executes it, and a planted
+  assembly import of a kernel name first shipped above the maximum turns the
+  lane red.
 
 Every refusal path here is executed against a planted violation. A parser whose
 error branch has never run is prose.
@@ -36,6 +41,7 @@ from kernel_floor import (  # noqa: E402
     DEPENDENCY,
     FloorError,
     absent_from_kernel,
+    assembly_kernel_requirements,
     binding_distribution,
     composed_distributions,
     declared_kernel_floors,
@@ -44,6 +50,7 @@ from kernel_floor import (  # noqa: E402
     kernel_imports,
     newest_excluded,
     parse,
+    unsatisfied_kernel_requirements,
 )
 
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
@@ -72,10 +79,22 @@ def test_the_pin_is_exactly_the_highest_floor_anything_composed_declares() -> No
 
     Held as equality rather than as `>=`. A pin above every declared floor is
     not obviously safe: it is a kernel upgrade taken on nobody's behalf, and it
-    carries a migration rehearsal obligation somebody has to have discharged. If
-    this assembly's OWN imports ever require a kernel higher than any composed
-    module asks for, that becomes a second input to this assertion and must be
-    added here in the same change — not worked around by loosening it.
+    carries a migration rehearsal obligation somebody has to have discharged.
+
+    THE PREMISE THIS ASSERTION RESTS ON. Governance ADR 0021 § 10, as RULED on
+    2026-09-01, makes the effective floor the maximum of the composed
+    distributions' declared floors AND the assembly's own direct kernel
+    constraint. § 10 as written says the opposite and names THIS TEST as the
+    place the premise is "recorded ... as a condition to be added in the same
+    change that first breaks it"; the ruling adds it now instead, without
+    waiting to be broken. Equality with the composed maximum alone is therefore correct
+    only while the assembly's own imports are satisfied by that maximum — true
+    today, and true by coincidence. `assembly-satisfied` in the `kernel-pin` job
+    executes exactly that premise against the installed kernel, so an assembly
+    import of a kernel name first shipped above the maximum turns the lane red
+    instead of quietly making this assertion drag the pin down to a kernel this
+    assembly cannot run on. When that day comes the answer is to record the
+    assembly as a floor contributor and move the pin — never to loosen this.
     """
 
     pin = declared_pin()
@@ -257,6 +276,155 @@ def test_comparing_against_a_directory_that_is_not_a_kernel_is_refused(
         absent_from_kernel(tmp_path / "nowhere", ("dotmac_kernel.db",))
 
 
+# ── the assembly's own imports, the other half of the maximum ───────────────
+
+
+class _Surface:
+    """A stand-in for an installed kernel module, carrying exactly these names."""
+
+    def __init__(self, *names: str) -> None:
+        for name in names:
+            setattr(self, name, object())
+
+
+def test_the_assembly_declares_names_and_not_only_modules(tmp_path: Path) -> None:
+    """A new NAME in an existing module is how a kernel surface usually grows.
+
+    `kernel_imports` answers at module granularity, which is all the mutation
+    lane needs of the excluded kernel. The assembly's own floor needs finer:
+    `ProductAssemblySpec.api_documentation` — the field this repository is
+    waiting on — arrived in a module that already existed, and a
+    module-granularity check would have seen nothing.
+    """
+
+    package = tmp_path / "vendor_cp"
+    package.mkdir()
+    (package / "a.py").write_text(
+        "from dotmac_kernel import create_app, ProductAssemblySpec\n"
+        "from dotmac_kernel.db import conflict_savepoint\n"
+    )
+    (package / "b.py").write_text(
+        "import dotmac_kernel.audit\n"
+        "from dotmac_kernel.db import platform_session\n"
+        '"""prose naming dotmac_kernel.transactions, which is not an import"""\n'
+    )
+
+    assert assembly_kernel_requirements(package) == {
+        "dotmac_kernel": frozenset({"create_app", "ProductAssemblySpec"}),
+        "dotmac_kernel.audit": frozenset(),
+        "dotmac_kernel.db": frozenset({"conflict_savepoint", "platform_session"}),
+    }
+
+
+def test_a_source_root_that_is_not_there_is_refused(tmp_path: Path) -> None:
+    """No source reads as 'the assembly needs nothing', which is a pass."""
+
+    with pytest.raises(FloorError, match="absent-as-success"):
+        assembly_kernel_requirements(tmp_path / "nowhere")
+
+
+def test_an_assembly_import_above_the_installed_kernel_is_reported() -> None:
+    """The planted case, at unit scale, in both directions.
+
+    The lane-scale version of this is a real assembly import of a kernel module
+    first published above the composed maximum, observed red in CI. This is the
+    same statement without an install, so the reporting logic itself is not
+    taken on trust.
+    """
+
+    provided = {
+        "dotmac_kernel": _Surface("create_app"),
+        "dotmac_kernel.db": _Surface("conflict_savepoint"),
+    }
+
+    satisfied = {
+        "dotmac_kernel": frozenset({"create_app"}),
+        "dotmac_kernel.db": frozenset({"conflict_savepoint"}),
+    }
+    assert unsatisfied_kernel_requirements(satisfied, provided.__getitem__) == ()
+
+    def _import(module: str) -> object:
+        try:
+            return provided[module]
+        except KeyError:
+            raise ModuleNotFoundError(name=module) from None
+
+    # A module the installed kernel does not carry at all.
+    assert unsatisfied_kernel_requirements(
+        {**satisfied, "dotmac_kernel.api_documentation": frozenset({"POLICIES"})},
+        _import,
+    ) == ("dotmac_kernel.api_documentation",)
+
+    # A NAME the installed kernel does not carry, in a module it does.
+    assert unsatisfied_kernel_requirements(
+        {
+            **satisfied,
+            "dotmac_kernel": frozenset({"create_app", "ProductAssemblySpec"}),
+        },
+        _import,
+    ) == ("dotmac_kernel.ProductAssemblySpec",)
+
+
+def test_an_empty_requirement_set_is_refused() -> None:
+    """Satisfied by every kernel ever published, which is not a proof."""
+
+    with pytest.raises(FloorError, match="reads as a proof"):
+        unsatisfied_kernel_requirements({}, lambda module: object())
+
+
+def test_a_missing_driver_is_not_reported_as_a_missing_kernel_symbol() -> None:
+    """The confusion this whole programme turned on, refused in one place.
+
+    Kernel a98, a99 and a100 alike reach a product-owned PostgreSQL driver when
+    the public `create_app` symbol is imported with a DSN set, and answer
+    `ModuleNotFoundError: psycopg`. That is a property of the ENVIRONMENT the
+    kernel is installed into, not of the kernel's own surface — and counting it
+    as an unsatisfied kernel requirement is exactly how an artifact gets blamed
+    for a boundary its predecessors share.
+    """
+
+    def _import(module: str) -> object:
+        raise ModuleNotFoundError(name="psycopg")
+
+    with pytest.raises(FloorError, match="property of THIS ENVIRONMENT"):
+        unsatisfied_kernel_requirements(
+            {"dotmac_kernel": frozenset({"create_app"})}, _import
+        )
+
+
+def test_an_unimportable_kernel_module_is_refused_rather_than_counted() -> None:
+    """`create_app` with no DSN raises `ArgumentError`, not `ImportError`.
+
+    Recording that as an unsatisfied requirement would report a floor violation
+    on a run where the only thing that happened was an unset environment
+    variable.
+    """
+
+    def _import(module: str) -> object:
+        raise ValueError("Could not parse SQLAlchemy URL from given URL string")
+
+    with pytest.raises(FloorError, match="refusing"):
+        unsatisfied_kernel_requirements(
+            {"dotmac_kernel": frozenset({"create_app"})}, _import
+        )
+
+
+def test_the_assembly_really_does_import_the_kernel() -> None:
+    """The premise check is not vacuous on the real tree.
+
+    If this ever returns nothing, `assembly-satisfied` would be asking an empty
+    question and passing — so the emptiness is refused there too, and asserted
+    here against the actual source rather than against a fixture.
+    """
+
+    required = assembly_kernel_requirements()
+    assert required, "src/vendor_cp imports no kernel module at all"
+    assert any(names for names in required.values()), (
+        "the assembly imports kernel modules but binds no name out of any of "
+        "them, so the name half of the check would be inert"
+    )
+
+
 # ── the lane may not restate what it is supposed to derive ──────────────────
 
 
@@ -296,11 +464,12 @@ def test_the_mutation_lane_derives_its_versions_and_module_names() -> None:
 def test_the_mutation_lane_calls_every_verb_it_needs() -> None:
     executable = _executable_workflow()
 
-    for verb in ("pinned", "excluded", "missing-from"):
+    for verb in ("pinned", "excluded", "missing-from", "assembly-satisfied"):
         assert f"kernel_floor.py {verb}" in executable, (
-            f"the mutation lane never asks for `{verb}`. All three derived facts "
+            f"the mutation lane never asks for `{verb}`. All four derived facts "
             "are load-bearing: the pin it installs, the version it must be "
-            "refused against, and the name its failure has to carry."
+            "refused against, the name its failure has to carry, and the "
+            "premise that makes the equality rule the whole rule."
         )
 
 

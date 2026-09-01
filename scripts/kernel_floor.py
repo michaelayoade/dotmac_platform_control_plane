@@ -52,12 +52,63 @@ Both halves are derived, and neither is copied into a document:
   installation lacks. The mutation lane requires its failure to NAME one of
   those, so "the boot failed" cannot stand in for "the boot failed at the
   boundary the pin describes".
+* `assembly_kernel_requirements()` / `unsatisfied_kernel_requirements()` —
+  the OTHER half of that maximum, and the half nothing executed until now.
+  See "The assembly's own imports join the maximum" below.
 
 That last pair is deliberately NOT a hand-maintained version→module table. Such
 a table is incomplete by construction: an import added without a matching row is
 invisible, and the pin quietly goes under-constrained in exactly a5's shape.
 Comparing the composition's real imports against a real installation of the
 excluded kernel has no rows to forget.
+
+## The assembly's own imports join the maximum
+
+Governance ADR 0021 § 10, as RULED on 2026-09-01: the effective floor of an
+assembly is the maximum of (a) every composed distribution's installed
+`Requires-Dist` and (b) the assembly's own declared direct kernel constraint —
+its own imports join the maximum.
+
+Cite that carefully, because the checked-in record does not yet say it. § 10 as
+written states the opposite in as many words — "An assembly's OWN imports are
+not an input to the maximum as written above" — and carries the question into
+open decision 24, naming this repository's test as the place the premise is
+"recorded ... as a condition to be added in the same change that first breaks
+it". This repository's PINNED governance revision (`a19259b1`) predates § 10
+altogether. So the ruling runs ahead of the record: this lane is deliberately
+STRICTER than the governance text it cites, the premise is executed here rather
+than recorded for later, and the record owes an amendment.
+
+Today those two happen to agree, and the equality `pin == max(composed floors)`
+holds only because of a coincidence: nothing in `src/vendor_cp` imports a kernel
+symbol its composed modules do not already require. That coincidence was an
+UNSTATED PREMISE — the equality assertion was true for a reason nothing checked,
+and the day somebody imports `dotmac_kernel.<something first shipped above the
+pin>` here, the equality rule would drag the pin DOWN to a version this assembly
+cannot run on, and would do it silently. That is a5's defect wearing the
+assembly's clothes.
+
+`unsatisfied_kernel_requirements()` states that premise where a lane holds it:
+every kernel module and every top-level name `src/vendor_cp` imports must be
+provided by an installation of the composed maximum. An unsatisfied name means
+the assembly's own floor is ABOVE that maximum, and the answer is to record the
+assembly as a floor contributor and move the pin — never to loosen the equality.
+
+Two deliberate limits, stated rather than implied:
+
+* the check asks the INSTALLED kernel by importing it and reading the attribute,
+  because the kernel's package root resolves its public names through a module
+  `__getattr__`; a static read of the installed source would answer "absent" for
+  every lazily re-exported symbol. Importing means the environment must be able
+  to import kernel modules at all, which is a premise this module refuses on
+  rather than absorbs (see the `ModuleNotFoundError` branch below — a driver
+  missing from the ENVIRONMENT is not a symbol missing from the KERNEL, and
+  conflating the two is precisely the confusion that made a100 look like a
+  regression when it is not one).
+* it sees the imports of `src/vendor_cp` only. A kernel symbol reached from a
+  test, a script or a migration is UNMONITORED by this check rather than
+  exempt — those do not run in the deployed artifact, and saying so is cheaper
+  than implying a coverage this does not have.
 """
 
 from __future__ import annotations
@@ -373,11 +424,143 @@ def absent_from_kernel(kernel_root: Path, imported: Iterable[str]) -> tuple[str,
     return tuple(missing)
 
 
+def assembly_kernel_requirements(
+    root: Path = ASSEMBLY_PACKAGE,
+) -> dict[str, frozenset[str]]:
+    """Every kernel module THIS ASSEMBLY'S OWN source imports, and the top-level
+    names it binds out of each.
+
+    The second input to the effective floor (Governance ADR 0021 § 10 as
+    extended). `kernel_imports()` above answers "what does the COMPOSITION
+    import", which is the question the mutation lane asks of the excluded
+    kernel; this answers "what does the ASSEMBLY ITSELF import", which is the
+    question nobody was asking of the pinned one.
+
+    Names matter here and do not in `kernel_imports`. A module that exists is
+    enough to say the boot got past the import; it is not enough to say the
+    assembly's floor is satisfied, because the way a kernel surface grows is
+    usually a NEW NAME in an EXISTING module rather than a new module.
+
+    Parsed, never grepped, for the same reason as `kernel_imports`: a docstring
+    naming a module is not an import of it, and this file's own prose names
+    several.
+    """
+
+    required: dict[str, set[str]] = {}
+    if not root.is_dir():
+        raise FloorError(
+            f"{root} is not a directory, so the assembly's own kernel imports "
+            "cannot be read. An empty answer would read as 'the assembly needs "
+            "nothing', which is the absent-as-success shape this refuses."
+        )
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level == 0:
+                module = node.module or ""
+                if module == KERNEL_PACKAGE or module.startswith(f"{KERNEL_PACKAGE}."):
+                    required.setdefault(module, set()).update(
+                        alias.name for alias in node.names if alias.name != "*"
+                    )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == KERNEL_PACKAGE or alias.name.startswith(
+                        f"{KERNEL_PACKAGE}."
+                    ):
+                        required.setdefault(alias.name, set())
+    return {module: frozenset(names) for module, names in sorted(required.items())}
+
+
+def unsatisfied_kernel_requirements(
+    required: dict[str, frozenset[str]] | None = None,
+    import_module: Callable[[str], object] = importlib.import_module,
+) -> tuple[str, ...]:
+    """Which of the assembly's own kernel requirements an INSTALLED kernel lacks.
+
+    Non-empty means the assembly out-imports whatever kernel is installed. Run
+    against an installation of the composed maximum, that is the statement the
+    equality rule needs and has never had: the assembly's own floor is at or
+    below the composed maximum, so the maximum of the two IS the composed
+    maximum, so `pin == max(composed floors)` is the whole rule and not an
+    accident.
+
+    `import_module` is injectable because the interesting half is the failure
+    half, and an importer whose refusal has never run is prose.
+
+    A `ModuleNotFoundError` naming something OUTSIDE the kernel is re-raised as
+    a refusal rather than counted. A missing PostgreSQL driver is a fact about
+    the environment this runs in, not about the kernel's surface, and reporting
+    it as an unsatisfied kernel requirement is how a boundary defect gets
+    attributed to the wrong artifact.
+    """
+
+    needed = assembly_kernel_requirements() if required is None else required
+    if not needed:
+        raise FloorError(
+            f"the assembly imports no {KERNEL_PACKAGE} module at all. An empty "
+            "requirement set is satisfied by every kernel ever published, which "
+            "reads as a proof and is the absence of one."
+        )
+    unsatisfied: list[str] = []
+    for module, names in sorted(needed.items()):
+        try:
+            installed = import_module(module)
+        except ModuleNotFoundError as exc:
+            # `exc.name` is what makes this attributable. An unnamed
+            # ModuleNotFoundError is refused for the same reason a named
+            # non-kernel one is: this may not guess which artifact is missing.
+            if exc.name is None or not (
+                exc.name == KERNEL_PACKAGE or exc.name.startswith(f"{KERNEL_PACKAGE}.")
+            ):
+                raise FloorError(
+                    f"importing {module} failed because {exc.name!r} is not "
+                    "installed, which is a property of THIS ENVIRONMENT and not "
+                    "of the kernel's surface. Install it, or run this where the "
+                    "assembly's own dependencies are present; do not let an "
+                    "environment gap be recorded as a missing kernel symbol."
+                ) from exc
+            unsatisfied.append(module)
+            continue
+        except Exception as exc:  # reported, never absorbed
+            raise FloorError(
+                f"importing {module} raised {type(exc).__name__}: {exc}. This "
+                "check can only speak about a kernel it can import; refusing "
+                "rather than recording an unimportable module as an unsatisfied "
+                "requirement."
+            ) from exc
+        unsatisfied.extend(
+            f"{module}.{name}" for name in sorted(names) if not hasattr(installed, name)
+        )
+    return tuple(unsatisfied)
+
+
+def installed_kernel_version() -> str:
+    """The kernel version actually installed where this is running."""
+
+    try:
+        return importlib.metadata.version(DEPENDENCY)
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise FloorError(
+            f"{DEPENDENCY} is not installed here, so there is no kernel surface "
+            "to ask. An uninstalled kernel is an unmonitored check, not a "
+            "passed one."
+        ) from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="the kernel pin, derived")
     parser.add_argument(
         "what",
-        choices=("pinned", "binding", "floors", "excluded", "imports", "missing-from"),
+        choices=(
+            "pinned",
+            "binding",
+            "floors",
+            "excluded",
+            "imports",
+            "missing-from",
+            "assembly-needs",
+            "assembly-satisfied",
+        ),
     )
     parser.add_argument("--pyproject", type=Path, default=PYPROJECT)
     parser.add_argument(
@@ -411,6 +594,46 @@ def main(argv: list[str] | None = None) -> int:
         if args.what == "binding":
             name, floor = binding_distribution()
             print(f"{name} {floor}")
+            return 0
+        if args.what == "assembly-needs":
+            for module, names in assembly_kernel_requirements().items():
+                print(f"{module}: {' '.join(sorted(names)) or '(module only)'}")
+            return 0
+        if args.what == "assembly-satisfied":
+            # The premise, held where it can fail. This answers "is the
+            # assembly's own floor at or below the composed maximum", so it may
+            # only be asked of an installation OF that maximum — asking a
+            # different kernel answers a different question and would report
+            # the equality rule proven on a run that never tested it.
+            binding_name, composed_maximum = binding_distribution()
+            installed = installed_kernel_version()
+            if installed != composed_maximum:
+                raise FloorError(
+                    f"the installed {DEPENDENCY} is {installed} while the "
+                    f"highest floor anything composed declares is "
+                    f"{composed_maximum} (from {binding_name}). This check only "
+                    "means something against an installation of that maximum."
+                )
+            needed = assembly_kernel_requirements()
+            unsatisfied = unsatisfied_kernel_requirements(needed)
+            if unsatisfied:
+                raise FloorError(
+                    "this assembly's own source imports "
+                    f"{list(unsatisfied)}, which {DEPENDENCY} {installed} does "
+                    "not provide. The assembly's OWN floor is therefore ABOVE "
+                    f"the highest floor anything composed declares, so "
+                    "`pin == max(composed floors)` is no longer the rule: the "
+                    "effective floor is the maximum of the composed floors AND "
+                    "the assembly's own direct constraint (Governance ADR 0021 "
+                    "§ 10). Raise the pin to a kernel that provides these and "
+                    "record the assembly as a floor contributor. Do NOT loosen "
+                    "the equality assertion."
+                )
+            print(
+                f"{sum(len(names) for names in needed.values())} kernel names "
+                f"across {len(needed)} modules, all provided by {DEPENDENCY} "
+                f"{installed} — the composed maximum, from {binding_name}"
+            )
             return 0
         if args.what == "imports":
             for module in sorted(kernel_imports(composed_package_roots())):
