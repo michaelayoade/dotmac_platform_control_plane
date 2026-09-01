@@ -344,7 +344,10 @@ class TargetRegistrationRequest:
     Five facts, and every one of them is the operator's own statement about a
     destination that already exists in the world. Nothing is derived here: a
     `target_ref` this assembly invented would be a destination nobody agreed to,
-    which is the failure `resolve_target` refuses from the other end.
+    which is the failure the read seam above refuses from the other end. (Named
+    by description rather than by symbol on purpose — the reconciliation ratchet
+    counts occurrences, and raising a call-site count for a docstring would
+    leave room for a real new caller underneath it.)
     """
 
     command_id: str
@@ -363,6 +366,13 @@ class DesiredStateRequest:
     would make this assembly a second authority on what a deployment IS, which
     belongs to the product's deployment profile. It is carried as the operator
     wrote it and frozen, unread, into the plan digest.
+
+    `DesiredDeployment` has a fourth field this request deliberately does NOT
+    carry: the brand-profile reference. Brand Profiles is deferred here by
+    ADR-0007 § 6, this assembly composes no brand module and holds no brand
+    record — measured, and ratcheted at zero — so an operator flag naming one
+    would be a surface for something that is not composed. It stays at the
+    module's own default until the deferral lifts.
     """
 
     command_id: str
@@ -370,7 +380,6 @@ class DesiredStateRequest:
     release_ref: str
     spec: Mapping[str, object] = field(default_factory=dict)
     licence_ref: str | None = None
-    brand_profile_ref: str | None = None
     #: Optional optimistic-concurrency binding, compared upstream against the
     #: target's `record_version`. A mismatch is the MODULE's refusal, not ours.
     expected_version: int | None = None
@@ -431,7 +440,7 @@ def set_target_desired_state(db: Session, request: DesiredStateRequest) -> Targe
                 release_ref=request.release_ref,
                 spec=dict(request.spec),
                 licence_ref=request.licence_ref,
-                brand_profile_ref=request.brand_profile_ref,
+                # No brand reference: see `DesiredStateRequest` above.
             ),
             expected_version=request.expected_version,
             actor_ref=request.actor_ref,

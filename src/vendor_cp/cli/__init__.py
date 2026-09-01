@@ -331,7 +331,6 @@ def build_parser() -> _Parser:
         help="path to a file holding the desired specification as a JSON object",
     )
     desired.add_argument("--licence-ref")
-    desired.add_argument("--brand-profile-ref")
     desired.add_argument(
         "--expect-record-version",
         type=int,

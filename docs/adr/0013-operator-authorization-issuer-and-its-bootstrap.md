@@ -434,3 +434,19 @@ It does not add a suspend, decommission, credential-enrolment or
 observation-recording command; those remain module commands with no operator
 surface, and each is a separate decision when it is needed. It does not touch
 the bootstrap in § 5, the retirement mechanism in § 6, or the kernel pin.
+
+**And it does not carry a brand-profile reference.** `DesiredDeployment` has a
+`brand_profile_ref` field; `set-desired-state` has no flag for it and the
+adapter does not pass one, so it stays at the module's default. Brand Profiles
+is deferred here by ADR-0007 § 6, this assembly composes no brand module, and
+`test_this_assembly_holds_no_brand_record` measures the absence rather than
+assuming it. An operator flag naming a brand profile would be a surface for
+something that is not composed — the flag arrives in the change that composes
+the module, not before it.
+
+That ratchet caught the first draft of this lane, which passed the field
+through. So did the reconciliation-seam ratchet, on a docstring that merely
+NAMED `resolve_target`: the count is over occurrences, and raising a declared
+call-site count to accommodate prose would have left room underneath it for a
+real new caller. The prose was reworded instead. Both are recorded because the
+tempting repair in each case was to edit the ledger.

@@ -594,7 +594,6 @@ def deployment_set_desired_state(args: argparse.Namespace) -> Result:
                 release_ref=args.release_ref,
                 spec=spec,
                 licence_ref=args.licence_ref,
-                brand_profile_ref=args.brand_profile_ref,
                 expected_version=args.expect_record_version,
                 actor_ref=args.actor_ref,
             ),
