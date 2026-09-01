@@ -105,10 +105,14 @@ jobs:
   # import.
   #
   # Every version and every module name below is DERIVED. A literal in this
-  # file is how a lane keeps passing after it has stopped testing anything:
+  # file is how a lane keeps passing after it has stopped testing anything —
   # bump the pin and a hard-coded mutation target installs a version the pin no
   # longer excludes, while a hard-coded module name demands a failure that can
   # no longer happen. `test_kernel_floor.py` greps this file for both.
+  #
+  # (No comment line here may end in a colon: the required-gate parser reads a
+  # two-space-indented line ending in one as a job name, and would demand a gate
+  # named after a sentence.)
   kernel-pin:
     runs-on: ubuntu-latest
     steps:
