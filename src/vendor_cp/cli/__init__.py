@@ -302,6 +302,43 @@ def build_parser() -> _Parser:
     )
     deployment_sub = deployment.add_subparsers(dest="name", parser_class=_Parser)
 
+    register_target = _command(
+        deployment_sub,
+        "deployment",
+        "register-target",
+        "name a deployment this control plane is responsible for",
+    )
+    register_target.add_argument("--command-id", required=True)
+    register_target.add_argument("--target-ref", required=True)
+    register_target.add_argument("--subject-ref", required=True)
+    register_target.add_argument("--product-code", required=True)
+    register_target.add_argument("--environment", required=True)
+    register_target.add_argument("--actor-ref")
+    register_target.set_defaults(handler=commands.deployment_register_target)
+
+    desired = _command(
+        deployment_sub,
+        "deployment",
+        "set-desired-state",
+        "declare what a registered target should converge on",
+    )
+    desired.add_argument("--command-id", required=True)
+    desired.add_argument("--target-id", required=True)
+    desired.add_argument("--release-ref", required=True)
+    desired.add_argument(
+        "--spec",
+        required=True,
+        help="path to a file holding the desired specification as a JSON object",
+    )
+    desired.add_argument("--licence-ref")
+    desired.add_argument(
+        "--expect-record-version",
+        type=int,
+        help="refuse unless the target is still at exactly this record version",
+    )
+    desired.add_argument("--actor-ref")
+    desired.set_defaults(handler=commands.deployment_set_desired_state)
+
     targets = _command(deployment_sub, "deployment", "targets", "read one target")
     targets.add_argument("target_id")
     targets.set_defaults(handler=commands.deployment_targets)

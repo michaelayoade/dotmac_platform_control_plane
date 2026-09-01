@@ -8,6 +8,7 @@ all, and that a secret can only get in through a held file or stdin.
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 from pathlib import Path
@@ -238,3 +239,138 @@ def test_diagnose_owners_runs_without_a_database(
     assert main(["--format", "json", "diagnose", "owners"]) == int(ExitCode.OK)
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["data"]["count"] > 0
+
+
+# ── the deployment journey ──────────────────────────────────────────────────
+
+#: The sequence an operator runs to reach one authorization receipt, in order.
+#: `approval open` and `approval decide` sit between the third and the fourth
+#: and are deliberately absent: they belong to the approvals owner, and this
+#: tuple is about the steps the DEPLOYMENT group has to provide.
+DEPLOYMENT_JOURNEY = ("register-target", "set-desired-state", "propose", "authorize")
+
+
+def test_the_operator_journey_reaches_an_authorization_from_nothing(
+    tmp_path: Path,
+) -> None:
+    """Every step parses, in order, with no gap an operator bridges by hand.
+
+    Until `register-target` and `set-desired-state` existed, `propose` had
+    nothing to freeze: the group presented an authorization step whose SUBJECT
+    no command could bring into existence. A surface whose later steps are
+    unreachable reads as built and is not, so the sequence is driven rather than
+    described — a deleted step fails here instead of being discovered by an
+    operator halfway through a deployment.
+    """
+    spec = tmp_path / "spec.json"
+    spec.write_text('{"modules": []}', encoding="utf-8")
+    target = "8f3b0b52-3d0f-4a1a-9f1a-0e3f6a8f7c21"
+    plan = "3a1c4f6e-1f2b-4c3d-8e9f-0a1b2c3d4e5f"
+    parser = build_parser()
+    vectors = [
+        [
+            "deployment",
+            "register-target",
+            "--command-id",
+            "j1",
+            "--target-ref",
+            "vendor-cp-prod",
+            "--subject-ref",
+            "customer-0001",
+            "--product-code",
+            "vendor-control-plane",
+            "--environment",
+            "production",
+        ],
+        [
+            "deployment",
+            "set-desired-state",
+            "--command-id",
+            "j2",
+            "--target-id",
+            target,
+            "--release-ref",
+            "0.1.0",
+            "--spec",
+            str(spec),
+        ],
+        [
+            "deployment",
+            "propose",
+            "--command-id",
+            "j3",
+            "--target-id",
+            target,
+            "--policy-code",
+            "deployment.rollout",
+            "--policy-version",
+            "1",
+        ],
+        [
+            "deployment",
+            "authorize",
+            "--command-id",
+            "j4",
+            "--plan-id",
+            plan,
+            "--approval-request-id",
+            plan,
+            "--rollout-ref",
+            "rollout-0001",
+        ],
+    ]
+    parsed = [parser.parse_args(vector).command for vector in vectors]
+    assert parsed == [f"deployment {step}" for step in DEPLOYMENT_JOURNEY]
+
+
+def test_every_journey_step_delegates_to_an_owner_outside_the_cli() -> None:
+    """The journey grew two mutations; neither may have landed here.
+
+    A step that decided anything locally would be a second authority over
+    `mod_deploy`, and the operator at a shell would get an answer the API and
+    the browser never agreed to.
+    """
+    from vendor_cp.cli.owners import by_command
+
+    owners = by_command()
+    for step in DEPLOYMENT_JOURNEY:
+        owner = owners[f"deployment {step}"]
+        assert not owner.module.startswith("vendor_cp.cli"), owner
+        assert owner.mutates, owner
+
+
+def test_a_desired_state_spec_that_is_not_an_object_refuses_before_the_database(
+    tmp_path: Path,
+) -> None:
+    """The spec is read and shape-checked before a session is opened.
+
+    `usage.*`, not `owner.*`: nothing upstream was asked, and the operator's own
+    file is what is wrong. Refusing at the transport is also why this test needs
+    no database — a handler that reached one to discover a malformed argument
+    would be unable to say so without connecting.
+    """
+    from vendor_cp.cli import commands
+
+    spec = tmp_path / "spec.json"
+    spec.write_text("[]", encoding="utf-8")
+    args = argparse.Namespace(spec=str(spec))
+    with pytest.raises(Refusal) as caught:
+        commands.deployment_set_desired_state(args)
+    assert caught.value.exit_code is ExitCode.USAGE
+    assert caught.value.code == "usage.invalid_argument"
+
+    spec.write_text("{not json", encoding="utf-8")
+    with pytest.raises(Refusal) as caught:
+        commands.deployment_set_desired_state(argparse.Namespace(spec=str(spec)))
+    assert caught.value.code == "usage.invalid_argument"
+
+
+def test_an_absent_spec_file_is_an_absence_not_a_usage_fault(tmp_path: Path) -> None:
+    """`4`, not `2`: the path was named correctly and the thing it names is not
+    there, which is the difference between a typo and a missing artifact."""
+    from vendor_cp.cli import commands
+
+    args = argparse.Namespace(spec=str(tmp_path / "absent.json"))
+    with pytest.raises(Refusal) as caught:
+        commands.deployment_set_desired_state(args)
+    assert caught.value.exit_code is ExitCode.UNAVAILABLE

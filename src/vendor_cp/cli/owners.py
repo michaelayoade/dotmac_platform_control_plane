@@ -224,6 +224,20 @@ OWNERS: Final[tuple[Owner, ...]] = (
     ),
     # ── deployment ─────────────────────────────────────────────────────────
     Owner(
+        "deployment register-target",
+        "vendor_cp.deployment.adapter",
+        "register_deployment_target",
+        True,
+        "name a deployment this control plane is responsible for",
+    ),
+    Owner(
+        "deployment set-desired-state",
+        "vendor_cp.deployment.adapter",
+        "set_target_desired_state",
+        True,
+        "declare what a registered target should converge on",
+    ),
+    Owner(
         "deployment targets",
         "vendor_cp.deployment.adapter",
         "read_target",

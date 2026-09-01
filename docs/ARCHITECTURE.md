@@ -452,8 +452,12 @@ mutating symbol may be claimed by two commands. `dotmac-platform diagnose
 owners` prints the same table at runtime.
 
 Its deployment group is ADR-0013's operator workflow and nothing more: it
-proposes a plan, carries an `ApprovalEvidence` the approvals module produced
-into `approve_plan`, requests a rollout, and reads. **`deployment authorize`
+registers a target, declares that target's desired state, proposes a plan,
+carries an `ApprovalEvidence` the approvals module produced into `approve_plan`,
+requests a rollout, and reads. The first two are amendment A6's: § 2's original
+four could only act on a target something else had already created, and nothing
+else was ever going to, so `deployment propose` had nothing to freeze and the
+authorization step had no reachable path to a plan. **`deployment authorize`
 prints the `authorization_ref`** — the rollout id, which is the authorization
 run identity a deployment foundation binds between the canonical descriptor and
 its own execution report. Rendering, applying, observing and rolling back are
@@ -569,10 +573,20 @@ acts on. Vendor-owned fleet tables and a Vendor `DeploymentRunner` remain
 forbidden (hard rule 4) — the prohibition was always on a VENDOR-owned fleet
 owner, and composing the independent one is what makes it affordable.
 
-Vendor has no operator surface for the module's own commands yet: registering a
-target, setting desired state, proposing a plan and requesting a rollout are
-`mod_deploy`'s, and this assembly reads targets rather than writing them. That
-surface is a later, separately reviewed slice.
+Vendor DOES now present an operator surface over the module's own commands —
+`deployment register-target`, `set-desired-state`, `propose` and `authorize`,
+ADR-0013 as amended by A6 — and that is a surface, not an ownership move.
+Registering a target, setting desired state, proposing a plan and requesting a
+rollout remain `mod_deploy`'s commands; this assembly builds their arguments
+through the one seam and carries their answers back. Suspension,
+decommissioning, credential enrolment and observation recording still have NO
+operator surface here, and each is a separate decision when it is needed.
+
+This paragraph previously said the surface did not exist at all. It was already
+stale when `deployment propose` and `deployment authorize` landed, and the
+correction is recorded rather than quietly overwritten: an as-built document
+that describes the assembly as read-only is how a reader concludes a write path
+needs building somewhere else.
 
 ADR-0010's licence-delivery transfer is the next slice and must land before
 Brand Profiles. Until then the current logging/offline path is frozen and no

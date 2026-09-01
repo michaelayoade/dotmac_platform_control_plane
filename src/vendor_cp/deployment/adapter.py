@@ -1,10 +1,11 @@
 """The ONE seam between this assembly and `dotmac-deployment-control`.
 
-Typed, no `Any`, and read-only in this slice: it resolves a deployment target
-from the module and converts it into the narrow set of facts Vendor's delivery
-projection is allowed to hold. It writes nothing to `mod_deploy` — registering a
-target, setting desired state and requesting a rollout are the module's own
-commands, and Vendor has no operator surface for them yet.
+Typed, no `Any`. It resolves a deployment target from the module and converts
+it into the narrow set of facts Vendor's delivery projection is allowed to hold,
+and it presents the module's own commands to an operator. Registering a target,
+setting desired state, proposing, approving and requesting a rollout remain the
+MODULE's commands throughout: this file builds their arguments and carries their
+answers back, and decides none of them.
 
 ## Why this type exists at all
 
@@ -31,16 +32,36 @@ written to refuse.
 
 ## The operator workflow (ADR-0013), added below
 
-The docstring above said this seam was "read-only in this slice", and it names
+This seam was read-only until ADR-0013, and the docstring that said so named
 the reason: Vendor had no operator surface for the module's own commands, so no
 authorization receipt could be produced anywhere in the fleet. ADR-0013 fixes
-that here, and fixes it as a WORKFLOW rather than as an owner. The four things
-this file is now permitted to do are exactly the four that ADR § 2 enumerates:
+that here, and fixes it as a WORKFLOW rather than as an owner. What this file is
+permitted to do is ADR § 2's list, as amended by A6. The original items keep
+their numbers — a renumbering would make every citation of "§ 2 item 2" point
+somewhere else — and the two A6 added come first in the operator's order because
+they bring the SUBJECT of an authorization into existence:
 
-1. call `propose_plan`, which freezes a snapshot and computes its digest;
-2. carry an `ApprovalEvidence` produced by `dotmac-approvals` into `approve_plan`;
-3. call `request_rollout`;
-4. read `get_plan` / `get_rollout` / `get_target` / `drift` for display.
+- **A6 item 1** — call `register_target`, which names a destination this plane
+  is responsible for;
+- **A6 item 2** — call `set_desired_state`, which declares what that destination
+  should converge on;
+- **§ 2 item 1** — call `propose_plan`, which freezes a snapshot and computes
+  its digest;
+- **§ 2 item 2** — carry an `ApprovalEvidence` produced by `dotmac-approvals`
+  into `approve_plan`;
+- **§ 2 item 3** — call `request_rollout`;
+- **§ 2 item 4** — read `get_plan` / `get_rollout` / `get_target` / `drift` for
+  display.
+
+§ 2's four could only ever act on a target somebody else had already created,
+and nobody else was ever going to: `propose_plan` freezes A TARGET's desired
+state, so with no way to register one there was nothing to freeze and
+`authorize_deployment` had no reachable path to a plan.
+
+The A6 items mutate `mod_deploy` and are still not decisions taken here: the
+module owns idempotency on `target_ref`, the desired-revision bump, the
+`REGISTERED` -> `ACTIVE` promotion and the refusal to declare a desired state
+for a decommissioned target. This file re-implements none of the four.
 
 What a plan contains, whether a transition is legal, whether the evidence binds,
 what the receipt says and how drift is judged all stay upstream. **The test of a
@@ -65,7 +86,8 @@ from the decision it claims to describe.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Final
 from uuid import UUID
@@ -73,10 +95,13 @@ from uuid import UUID
 from dotmac_deployment_control import (
     ApprovalEvidence,
     ApprovePlanCommand,
+    DesiredDeployment,
     PlanView,
     ProposePlanCommand,
+    RegisterTargetCommand,
     RequestRolloutCommand,
     RolloutView,
+    SetDesiredStateCommand,
     TargetView,
     approve_plan,
     drift,
@@ -84,7 +109,9 @@ from dotmac_deployment_control import (
     get_rollout,
     get_target,
     propose_plan,
+    register_target,
     request_rollout,
+    set_desired_state,
 )
 from dotmac_deployment_control import DriftReport as ModuleDriftReport
 from dotmac_deployment_control import TargetStatus as ModuleTargetStatus
@@ -307,6 +334,120 @@ def read_drift(db: Session, target_id: UUID) -> ModuleDriftReport:
     return report
 
 
+# ── The target's own lifecycle (ADR-0013 amendment A6) ──────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class TargetRegistrationRequest:
+    """Name a deployment this control plane becomes responsible for.
+
+    Five facts, and every one of them is the operator's own statement about a
+    destination that already exists in the world. Nothing is derived here: a
+    `target_ref` this assembly invented would be a destination nobody agreed to,
+    which is the failure the read seam above refuses from the other end. (Named
+    by description rather than by symbol on purpose — the reconciliation ratchet
+    counts occurrences, and raising a call-site count for a docstring would
+    leave room for a real new caller underneath it.)
+    """
+
+    command_id: str
+    target_ref: str
+    subject_ref: str
+    product_code: str
+    environment: str
+    actor_ref: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DesiredStateRequest:
+    """Declare what an already-registered target should converge on.
+
+    `spec` is opaque here for the same reason it is opaque upstream: reading it
+    would make this assembly a second authority on what a deployment IS, which
+    belongs to the product's deployment profile. It is carried as the operator
+    wrote it and frozen, unread, into the plan digest.
+
+    `DesiredDeployment` has a fourth field this request deliberately does NOT
+    carry: the brand-profile reference. Brand Profiles is deferred here by
+    ADR-0007 § 6, this assembly composes no brand module and holds no brand
+    record — measured, and ratcheted at zero — so an operator flag naming one
+    would be a surface for something that is not composed. It stays at the
+    module's own default until the deferral lifts.
+    """
+
+    command_id: str
+    target_id: UUID
+    release_ref: str
+    spec: Mapping[str, object] = field(default_factory=dict)
+    licence_ref: str | None = None
+    #: Optional optimistic-concurrency binding, compared upstream against the
+    #: target's `record_version`. A mismatch is the MODULE's refusal, not ours.
+    expected_version: int | None = None
+    actor_ref: str | None = None
+
+
+def register_deployment_target(
+    db: Session, request: TargetRegistrationRequest
+) -> TargetView:
+    """Ask the module to record a target. ADR-0013 A6 item 1.
+
+    The module's own view is returned unchanged, and it deliberately carries no
+    created-versus-already-present flag. `register_target` is idempotent on
+    `target_ref`: a second call with the same reference returns the existing
+    target. This assembly could compare the returned id against something it
+    remembered and report "created", but that comparison would be a claim the
+    owner never made, and a retry of a command whose first attempt succeeded
+    would then print a different answer for an identical outcome.
+
+    A registered target is NOT an authorized one. It has no desired state yet,
+    which is why `_STATUS` above maps `REGISTERED` onto Vendor `SUSPENDED` —
+    registration-is-authorisation is the exact confusion that mapping refuses,
+    and the same refusal has to hold at the end that CREATES the registration.
+    """
+    return register_target(
+        db,
+        RegisterTargetCommand(
+            command_id=request.command_id,
+            target_ref=request.target_ref,
+            subject_ref=request.subject_ref,
+            product_code=request.product_code,
+            environment=request.environment,
+            actor_ref=request.actor_ref,
+        ),
+    )
+
+
+def set_target_desired_state(db: Session, request: DesiredStateRequest) -> TargetView:
+    """Declare what the target should converge on. ADR-0013 A6 item 2.
+
+    Every consequence of this call is the module's. It bumps `desired_revision`
+    unconditionally — even when the values are unchanged — because the revision
+    records that a DECISION was taken; it promotes a `REGISTERED` target to
+    `ACTIVE`; and it refuses a decommissioned one. None of those three is
+    re-implemented, re-checked or reported differently here, because a second
+    copy of any of them would eventually disagree with the first.
+
+    In particular there is no local "has anything actually changed?" comparison.
+    That is the seductive one — it looks like an optimisation and it is a
+    second answer to whether a plan is worth proposing, which is upstream's.
+    """
+    return set_desired_state(
+        db,
+        SetDesiredStateCommand(
+            command_id=request.command_id,
+            target_id=request.target_id,
+            desired=DesiredDeployment(
+                release_ref=request.release_ref,
+                spec=dict(request.spec),
+                licence_ref=request.licence_ref,
+                # No brand reference: see `DesiredStateRequest` above.
+            ),
+            expected_version=request.expected_version,
+            actor_ref=request.actor_ref,
+        ),
+    )
+
+
 def propose_deployment_plan(db: Session, request: ProposePlanRequest) -> ProposedPlan:
     """Ask the module to freeze the target's desired state. ADR-0013 § 2 item 1.
 
@@ -447,13 +588,17 @@ __all__ = [
     "AuthorizeRequest",
     "DeploymentIdentityMismatch",
     "DeploymentTargetFacts",
+    "DesiredStateRequest",
     "ProposePlanRequest",
     "ProposedPlan",
+    "TargetRegistrationRequest",
     "authorize_deployment",
     "propose_deployment_plan",
     "read_drift",
     "read_plan",
     "read_rollout",
     "read_target",
+    "register_deployment_target",
     "resolve_target",
+    "set_target_desired_state",
 ]

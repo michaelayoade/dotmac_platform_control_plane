@@ -345,3 +345,108 @@ taken with `O_EXCL` before any work; the receipt names its successor condition;
 the launcher's call sites are ratcheted and go to zero when Platform CP
 authorizes its own second deployment. § 8's precondition list is superseded
 only where A1 replaces the host.
+
+---
+
+## Amendment, 2026-09-01 — A6: the issuer must be able to create the SUBJECT it authorizes
+
+Proposed 2026-09-01, pending Michael Ayoade's acceptance. **Nothing above is
+edited**, for the reason A2 already gave: a record quietly rewritten to look as
+though it always said the right thing teaches nobody what the mistake was.
+
+### A6.1 The gap, stated as the document's own contradiction
+
+§ 1 names five module commands with no operator surface — `register_target`,
+`set_desired_state`, `propose_plan`, `approve_plan`, `request_rollout`. § 2 then
+permits the issuer to do "exactly four things", and the two it drops are the
+first two.
+
+The consequence is the same one § 1 was written to end, one step earlier in the
+chain. `propose_plan` freezes *a target's* desired state. With no command that
+registers a target and no command that declares a desired state, there is
+nothing to freeze, so `deployment authorize` — the command the whole record
+exists to produce — has no reachable path to a plan. A measurement census on
+2026-09-01 confirmed it: `cli/owners.py` declared six deployment commands and
+none of them wrote a target, and `register_target` / `set_desired_state` were
+called only in this repository's own tests. Zero authorization receipts have
+been produced anywhere in the fleet, and this was one of three code gaps
+blocking the first.
+
+§ 2's four were not wrong about authorization. They were scoped to it, and the
+subject of an authorization has to exist before it can be authorized.
+
+### A6.2 The decision
+
+The permitted list becomes six. `register_target` and `set_desired_state` join
+it, reached the same way as the other four: through
+`src/vendor_cp/deployment/adapter.py`, building the module's own command objects
+and returning the module's own `TargetView`.
+
+§ 2's four KEEP their numbers, and the additions are cited as **A6 item 1** and
+**A6 item 2**. Renumbering would make every existing citation of "§ 2 item 2"
+point at something else, in code comments and in a docstring nobody would think
+to re-read.
+
+`dotmac-platform deployment register-target` and `dotmac-platform deployment
+set-desired-state` are the operator surface. The complete journey is then
+register-target -> set-desired-state -> propose -> `approval open` /
+`approval decide` -> authorize.
+
+### A6.3 What is still upstream, named individually
+
+§ 2's test of a design error is unchanged: if a change here would require this
+assembly to decide *how a target is changed*, it belongs in the module. Four
+decisions sit exactly on that line and none of them is taken here.
+
+- **Idempotency on `target_ref`.** `register_target` returns the existing target
+  when the reference is already known. The assembly reports no
+  created-versus-already-present flag, because that comparison would be a claim
+  the owner never made and a retry of a succeeded command would print a
+  different answer for an identical outcome.
+- **The unconditional `desired_revision` bump.** The module bumps even when the
+  values are unchanged, deliberately, because the revision records that a
+  DECISION was taken. There is no local "has anything actually changed?" check —
+  the seductive one, which looks like an optimisation and is a second answer to
+  whether a plan is worth proposing.
+- **The `REGISTERED` -> `ACTIVE` promotion**, and the refusal to declare a
+  desired state for a decommissioned target. Both are read out of the returned
+  view, never re-derived.
+- **Optimistic concurrency.** `--expect-record-version` is carried to the
+  module's `expected_version` and compared there. A mismatch is the module's
+  refusal (exit `3`), not an assembly mismatch (exit `6`).
+
+**Registration is not authorisation**, and A6 does not weaken that. A registered
+target has no desired state, `_STATUS` maps `REGISTERED` onto delivery
+`SUSPENDED`, and the command that creates a registration says so in its output.
+
+### A6.4 The one decision the CLI does take, and why it is a transport one
+
+`--spec` is REQUIRED, although `DesiredDeployment.spec` defaults to an empty
+mapping upstream. An omitted spec would freeze an empty specification into an
+immutable plan digest and the approver would approve it without ever seeing that
+it was empty. Refusing to guess an argument is a decision about this surface;
+what a spec MEANS is read by nobody here and, deliberately, by nobody upstream
+either. An operator who wants an empty spec writes `{}` in a file.
+
+### A6.5 What this does not do
+
+It does not add a suspend, decommission, credential-enrolment or
+observation-recording command; those remain module commands with no operator
+surface, and each is a separate decision when it is needed. It does not touch
+the bootstrap in § 5, the retirement mechanism in § 6, or the kernel pin.
+
+**And it does not carry a brand-profile reference.** `DesiredDeployment` has a
+`brand_profile_ref` field; `set-desired-state` has no flag for it and the
+adapter does not pass one, so it stays at the module's default. Brand Profiles
+is deferred here by ADR-0007 § 6, this assembly composes no brand module, and
+`test_this_assembly_holds_no_brand_record` measures the absence rather than
+assuming it. An operator flag naming a brand profile would be a surface for
+something that is not composed — the flag arrives in the change that composes
+the module, not before it.
+
+That ratchet caught the first draft of this lane, which passed the field
+through. So did the reconciliation-seam ratchet, on a docstring that merely
+NAMED `resolve_target`: the count is over occurrences, and raising a declared
+call-site count to accommodate prose would have left room underneath it for a
+real new caller. The prose was reworded instead. Both are recorded because the
+tempting repair in each case was to edit the ledger.

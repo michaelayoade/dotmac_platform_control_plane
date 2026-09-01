@@ -515,6 +515,105 @@ def licence_health(args: argparse.Namespace) -> Result:
 # ── deployment ──────────────────────────────────────────────────────────────
 
 
+def deployment_register_target(args: argparse.Namespace) -> Result:
+    """Name a deployment this control plane becomes responsible for.
+
+    The first step of the operator journey, and until it existed the rest of
+    that journey had nothing to act on: `deployment propose` freezes a target's
+    desired state, and no command could bring a target into existence to have
+    one. A CLI whose later steps are unreachable reads as built and is not.
+    """
+    from vendor_cp.deployment.adapter import (
+        TargetRegistrationRequest,
+        register_deployment_target,
+    )
+
+    with platform_db() as db:
+        view = register_deployment_target(
+            db,
+            TargetRegistrationRequest(
+                command_id=args.command_id,
+                target_ref=args.target_ref,
+                subject_ref=args.subject_ref,
+                product_code=args.product_code,
+                environment=args.environment,
+                actor_ref=args.actor_ref,
+            ),
+        )
+        return Result(
+            command="deployment register-target",
+            data=_fields(view),
+            references={
+                "target_id": str(view.id),
+                "target_ref": view.target_ref,
+                "record_version": view.record_version,
+            },
+            message=(
+                "registered, and registration is not authorisation: a target "
+                "with no desired state converges on nothing. Declare one with "
+                "`deployment set-desired-state`, then `deployment propose`"
+            ),
+        )
+
+
+def deployment_set_desired_state(args: argparse.Namespace) -> Result:
+    """Declare what a registered target should converge on.
+
+    `--spec` names a file holding a JSON object. It is REQUIRED rather than
+    defaulted: an omitted spec would freeze an empty specification into an
+    immutable plan digest, and the operator would approve it without ever seeing
+    that it was empty. Refusing to guess is a transport decision about this
+    surface; what a spec MEANS is read by nobody here and nobody upstream.
+    """
+    from vendor_cp.deployment.adapter import (
+        DesiredStateRequest,
+        set_target_desired_state,
+    )
+
+    raw = read_bytes(args.spec, what="desired deployment spec")
+    try:
+        spec = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise refuse(
+            "usage.invalid_argument",
+            f"{args.spec} is not readable JSON ({error})",
+        ) from error
+    if not isinstance(spec, dict):
+        raise refuse(
+            "usage.invalid_argument",
+            f"{args.spec} does not hold a JSON object, so there is no spec to "
+            "declare",
+        )
+
+    with platform_db() as db:
+        view = set_target_desired_state(
+            db,
+            DesiredStateRequest(
+                command_id=args.command_id,
+                target_id=UUID(args.target_id),
+                release_ref=args.release_ref,
+                spec=spec,
+                licence_ref=args.licence_ref,
+                expected_version=args.expect_record_version,
+                actor_ref=args.actor_ref,
+            ),
+        )
+        return Result(
+            command="deployment set-desired-state",
+            data=_fields(view),
+            references={
+                "target_id": str(view.id),
+                "desired_revision": view.desired_revision,
+                "record_version": view.record_version,
+                "status": view.status,
+            },
+            message=(
+                "the desired state is declared; `deployment propose` freezes "
+                "this exact revision into a plan an approval can bind to"
+            ),
+        )
+
+
 def deployment_targets(args: argparse.Namespace) -> Result:
     from vendor_cp.deployment.adapter import read_target
 
@@ -699,7 +798,9 @@ __all__ = [
     "deployment_drift",
     "deployment_plan",
     "deployment_propose",
+    "deployment_register_target",
     "deployment_rollout",
+    "deployment_set_desired_state",
     "deployment_targets",
     "licence_dispatch",
     "licence_health",
