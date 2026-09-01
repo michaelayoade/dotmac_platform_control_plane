@@ -18,6 +18,23 @@ def _text(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
+def _commands(script: str) -> str:
+    """The script with its comment lines blanked, for ORDERING assertions.
+
+    `str.index` finds the first occurrence, and a comment that explains the
+    order necessarily quotes the same literals the probes search for — so a
+    paragraph beginning "`compose up -d app` is the SEVENTH action" makes the
+    ordering guard measure the prose instead of the script. Measured: it did.
+
+    This is the same correction as `test_the_import_path_guard_can_still_see_an
+    _assignment` below. The property is about what the script DOES, and writing
+    down why is exactly the documentation these rules most want to exist.
+    """
+    return "\n".join(
+        "" if line.lstrip().startswith("#") else line for line in script.splitlines()
+    )
+
+
 def test_runtime_image_uses_a_build_secret_and_runs_unprivileged() -> None:
     dockerfile = _text("Dockerfile")
 
@@ -230,13 +247,14 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     assert "APP_ENV=production" in deploy
     assert "SERVER_NAME=vendor-cp-prod" in deploy
 
-    backup = deploy.index("pg_dump")
-    bootstrap_password = deploy.index("secrets.token_urlsafe")
-    start_db = deploy.index("up -d --wait db")
-    initialize_manifests = deploy.index("run --rm --no-deps manifest-init")
-    verify_roles = deploy.index("module database role contract is not satisfied")
-    migrate = deploy.index("dotmac-platform admin migrate")
-    replace = deploy.index("up -d app")
+    commands = _commands(deploy)
+    backup = commands.index("pg_dump")
+    bootstrap_password = commands.index("secrets.token_urlsafe")
+    start_db = commands.index("up -d --wait db")
+    initialize_manifests = commands.index("run --rm --no-deps manifest-init")
+    verify_roles = commands.index("module database role contract is not satisfied")
+    migrate = commands.index("dotmac-platform admin migrate")
+    replace = commands.index("up -d app")
     assert (
         bootstrap_password
         < start_db
@@ -471,13 +489,14 @@ def test_the_deploy_refuses_a_fatal_environment_before_it_touches_anything() -> 
     drift from the kernel, because it IS the kernel's function.
     """
     deploy = _text("scripts/deploy_production.sh")
+    commands = _commands(deploy)
 
-    csrf_present = deploy.index("CSRF_SECRET is absent or empty")
-    csrf_length = deploy.index("CSRF_SECRET is shorter than 32 bytes")
-    csrf_distinct = deploy.index("CSRF_SECRET must differ from JWT_SECRET")
-    verdict = deploy.index("the image refuses this host environment")
-    start_db = deploy.index("up -d --wait db")
-    migrate = deploy.index("dotmac-platform admin migrate")
+    csrf_present = commands.index("CSRF_SECRET is absent or empty")
+    csrf_length = commands.index("CSRF_SECRET is shorter than 32 bytes")
+    csrf_distinct = commands.index("CSRF_SECRET must differ from JWT_SECRET")
+    verdict = commands.index("the image refuses this host environment")
+    start_db = commands.index("up -d --wait db")
+    migrate = commands.index("dotmac-platform admin migrate")
 
     assert csrf_present < csrf_length < csrf_distinct < verdict < start_db < migrate
     # The artifact's own function, not a re-implementation of its rules.
@@ -552,3 +571,19 @@ def test_the_console_login_claim_matches_the_measured_artifact() -> None:
         text = _text(relative)
         for claim in present_tense:
             assert claim not in text, f"{relative} still states: {claim}"
+
+
+def test_the_ordering_guard_reads_the_script_and_not_its_explanation() -> None:
+    """SENSITIVITY. A helper that stripped nothing would pass every test above.
+
+    `_commands` earns its place only if the unstripped text actually differs —
+    and it does: the preflight paragraph explains the order by quoting the very
+    command whose position the guard measures.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+
+    assert _commands(deploy) != deploy
+    assert deploy.index("up -d app") < _commands(deploy).index("up -d app"), (
+        "no comment mentions the command the ordering guard probes for, so this "
+        "helper is currently inert — keep it, but the sensitivity claim is stale"
+    )
