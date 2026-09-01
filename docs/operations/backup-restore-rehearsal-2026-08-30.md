@@ -83,3 +83,45 @@ nothing says so.
 
 Until then, **no production authorization should be admitted on the strength of
 these backups**, because the recovery path they imply does not exist.
+
+---
+
+## Disposition, 2026-09-01 — item 1 is implemented; items 2 and 3 are not
+
+**Nothing above is edited.** The rehearsal stands as what was measured on
+2026-08-30, and this section states what has changed since. A record quietly
+rewritten to read as though it always said the right thing teaches nobody what
+the mistake was.
+
+**Item 1 is implemented.** `scripts/deploy_production.sh` now captures
+`pg_dumpall --globals-only --no-role-passwords` alongside the custom-format
+dump, as `vendor-control-plane-<timestamp>.globals.sql` beside
+`vendor-control-plane-<timestamp>.dump`. The two share one timestamp and are
+published together: both are written to `.tmp` and moved only once the globals
+capture has been checked to create all five roles by name. A globals file
+carrying only tablespaces — the shape that produces 114 errors while looking
+like a capture — fails the deploy at that point, before the migration and
+before the application is replaced.
+
+`--no-role-passwords` is chosen because it is the configuration that was
+actually PROVED (`recovery-proved-2026-08-30.md`: same artefact, globals
+captured that way, `pg_restore` exit 0, zero findings). It also needs no
+superuser, which this cluster deliberately has no password for, and it keeps
+every SCRAM verifier out of a file at rest on the host. The consequence is
+explicit: a restored cluster has the five roles with no passwords, so an
+operator restoring for real sets them from the host's own `.env` or from
+OpenBao before the application can connect.
+
+**Item 2 is NOT implemented.** Restore rehearsal is still a procedure that is
+written down rather than a routine that runs. No rehearsal has been performed
+against a pair produced by the changed script — the change is repository-local
+and the only evidence that would discharge it is a restore from this host.
+
+**Item 3 is NOT implemented.** Nothing asserts the recovered SECURITY state
+after a restore. The facility's `verify_recovery` does exactly that and was the
+instrument on 2026-08-30, but it is not wired into this deploy path.
+
+So the sentence above — *"no production authorization should be admitted on the
+strength of these backups"* — is narrowed rather than lifted. What is fixed is
+that the artifact now CONTAINS the role layer. What remains unproved is that a
+restore of it succeeds, and only a rehearsal against a real pair can say so.

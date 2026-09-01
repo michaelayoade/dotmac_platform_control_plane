@@ -248,7 +248,13 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     assert "SERVER_NAME=vendor-cp-prod" in deploy
 
     commands = _commands(deploy)
-    backup = commands.index("pg_dump")
+    # Two DISTINCT literals, because "pg_dump" is a substring of "pg_dumpall"
+    # and `str.index` returns the first hit: after the globals capture landed,
+    # a probe for "pg_dump" resolved to the globals line and the dump itself
+    # was ordered by nothing. The dump is identified by `--format custom`,
+    # which only it carries.
+    globals_capture = commands.index("pg_dumpall")
+    backup = commands.index("--format custom")
     bootstrap_password = commands.index("secrets.token_urlsafe")
     start_db = commands.index("up -d --wait db")
     initialize_manifests = commands.index("run --rm --no-deps manifest-init")
@@ -260,6 +266,7 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
         < start_db
         < initialize_manifests
         < verify_roles
+        < globals_capture
         < backup
         < migrate
         < replace
