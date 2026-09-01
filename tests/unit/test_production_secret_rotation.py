@@ -631,6 +631,7 @@ class HostRunner:
         self.old_auth_succeeds = False
         self.db_rotated = False
         self.runtime_rotated = False
+        self.compose_bootstrap_values: list[str | None] = []
 
     def __call__(
         self, command: Sequence[str], **kwargs: object
@@ -640,6 +641,25 @@ class HostRunner:
         assert stdin is None or isinstance(stdin, str)
         self.calls.append((command, stdin))
         joined = " ".join(command)
+        if "compose" in command:
+            environment = kwargs.get("env")
+            assert environment is None or isinstance(environment, dict)
+            bootstrap_value = (
+                None
+                if environment is None
+                else environment.get("VENDOR_DB_BOOTSTRAP_PASSWORD")
+            )
+            assert bootstrap_value is None or isinstance(bootstrap_value, str)
+            self.compose_bootstrap_values.append(bootstrap_value)
+            if bootstrap_value != (
+                production_secrets._ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER
+            ):
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    "",
+                    "VENDOR_DB_BOOTSTRAP_PASSWORD is required for interpolation",
+                )
         if "compose" in command and command[-3:] == ("ps", "-q", "app"):
             return subprocess.CompletedProcess(command, 0, "a" * 64 + "\n", "")
         if command[:3] == ("docker", "inspect", "--format"):
@@ -776,6 +796,56 @@ def test_host_rotation_proves_atomic_db_env_recreate_and_unchanged_state(
             assert value not in rendered
         assert "docker inspect" not in rendered or ".Config.Env" not in rendered
     assert any("--force-recreate" in command for command, _ in runner.calls)
+
+
+def test_host_rotation_uses_only_an_inert_process_interpolation_for_compose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload, deploy_dir, host_id, runner = _host_fixture(tmp_path)
+    inherited_bootstrap = "caller_bootstrap_material_that_must_not_propagate"
+    monkeypatch.setenv("VENDOR_DB_BOOTSTRAP_PASSWORD", inherited_bootstrap)
+
+    proof = apply_secret_rotation_on_target(
+        payload,
+        deploy_dir=deploy_dir,
+        host_id_file=host_id,
+        runner=runner,
+    )
+
+    assert proof.operation_id == payload.operation_id
+    assert runner.compose_bootstrap_values
+    assert set(runner.compose_bootstrap_values) == {
+        production_secrets._ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER
+    }
+    recreate_commands = [
+        command for command, _stdin in runner.calls if "--force-recreate" in command
+    ]
+    assert len(recreate_commands) == 1
+    assert recreate_commands[0][-1] == "app"
+    assert "--no-deps" in recreate_commands[0]
+    service_mutations = [
+        command
+        for command, _stdin in runner.calls
+        if "compose" in command
+        and any(verb in command for verb in ("up", "create", "restart", "start", "run"))
+    ]
+    assert service_mutations == recreate_commands
+    rendered_argv = "\n".join(" ".join(command) for command, _stdin in runner.calls)
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in deploy_dir.rglob("*")
+        if path.is_file()
+    )
+    for forbidden in (
+        inherited_bootstrap,
+        production_secrets._ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER,
+    ):
+        assert forbidden not in rendered_argv
+        assert forbidden not in persisted
+    assert "VENDOR_DB_BOOTSTRAP_PASSWORD=" not in (deploy_dir / ".env").read_text(
+        encoding="utf-8"
+    )
 
 
 @pytest.mark.parametrize(

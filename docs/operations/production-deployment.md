@@ -213,6 +213,19 @@ byte-identical; it is never printed or hashed and is deleted on success. The
 names-only target receipt distinguishes a fresh proof from a historical replay
 after a lost response. It never reads Docker environment metadata.
 
+The database bootstrap credential is a first-cluster input and is deliberately
+absent from the established host. Docker Compose nevertheless expands the
+`db` service before it executes any command, including read-only `ps` and
+`exec`. Every adapter-owned Compose invocation therefore overrides
+`VENDOR_DB_BOOTSTRAP_PASSWORD` in the Compose process environment with one
+fixed, non-secret parse-only placeholder. The placeholder is not a credential:
+it is never written to `.env`, argv, custody, target state or either receipt,
+and it never reaches a container. Rotation has exactly one `compose up`: the
+`--no-deps --force-recreate app` step above. It may `exec` in the existing
+database to prove and atomically change role verifiers, but it never targets
+`db` with `up`, `create`, `run`, `restart` or `recreate`. An inherited real
+bootstrap value is overwritten rather than propagated.
+
 A retry classifies exactly four aggregate states: all-prior; database candidate
 with prior environment/app; database+environment candidate with prior app; or
 all-candidate. Every mixed state is refused. The target receipt and protected
