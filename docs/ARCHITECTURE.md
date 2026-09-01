@@ -452,8 +452,12 @@ mutating symbol may be claimed by two commands. `dotmac-platform diagnose
 owners` prints the same table at runtime.
 
 Its deployment group is ADR-0013's operator workflow and nothing more: it
-proposes a plan, carries an `ApprovalEvidence` the approvals module produced
-into `approve_plan`, requests a rollout, and reads. **`deployment authorize`
+registers a target, declares that target's desired state, proposes a plan,
+carries an `ApprovalEvidence` the approvals module produced into `approve_plan`,
+requests a rollout, and reads. The first two are amendment A6's: § 2's original
+four could only act on a target something else had already created, and nothing
+else was ever going to, so `deployment propose` had nothing to freeze and the
+authorization step had no reachable path to a plan. **`deployment authorize`
 prints the `authorization_ref`** — the rollout id, which is the authorization
 run identity a deployment foundation binds between the canonical descriptor and
 its own execution report. Rendering, applying, observing and rolling back are
