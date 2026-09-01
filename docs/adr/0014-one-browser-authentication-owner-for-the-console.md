@@ -142,6 +142,16 @@ reason.
 
 ## 6. A separate defect this work found, and did not fix
 
+> **Resolved 2026-09-01, by the lane that owns `pyproject.toml`.** `#97`
+> declared `python-multipart` as a main dependency, which is exactly the fix
+> this section says is not its own to make. Both consequences below are gone,
+> and were verified against the ARTIFACT rather than the declaration: the
+> candidate acceptance battery obtains a platform browser session through
+> `POST /platform/login` and reaches `/platform/console`, and the header-less
+> path is exercised by a proof-less `POST` that is still refused 403
+> (`.github/candidate/acceptance.sh` step 7; release run `33474406793` at
+> `2c9800d2`). Kept as written for the record.
+
 **This assembly declares no form parser, and the browser surface needs one.**
 The kernel's `platform_web.login_submit` reads its login form with
 `await request.form()`, and `middleware.csrf.require_csrf` falls back to the

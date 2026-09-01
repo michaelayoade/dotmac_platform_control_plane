@@ -174,6 +174,53 @@ distribution_report="$(in_image)" \
     || fail "the candidate's distribution manifest is absent, malformed, or describes another build"
 pass "distribution manifest: $distribution_report"
 
+step "14 the artifact refuses a production environment the deploy would reject"
+# `scripts/deploy_production.sh` asks the IMAGE whether this host environment is
+# bootable — running the kernel's own `validate_settings` after the pull and
+# before the database is started, so a fatal setting cannot be discovered at
+# lifespan with the migrations already applied.
+#
+# That check runs only at deploy time, which is exactly the unmonitored-region
+# shape this battery exists to close. So the PROPERTY it depends on is proved
+# here, against the same bytes: the artifact must refuse a production
+# environment whose CSRF_SECRET is absent, short, or reused, and its refusals
+# must name no value — the deploy PRINTS that verdict.
+SCRIPT="
+from dotmac_kernel.config import Settings, validate_settings
+
+base = dict(
+    environment='production',
+    database_url='postgresql+psycopg://x@127.0.0.1:5432/none',
+    platform_database_url='postgresql+psycopg://x@127.0.0.1:5432/none',
+    platform_root_domain='candidate.dotmac.io',
+    trusted_hosts='candidate.dotmac.io',
+    jwt_secret='jwt-' + 'j' * 40,
+    session_hash_secret='session-' + 's' * 40,
+    csrf_enabled=True,
+)
+conforming = 'csrf-' + 'c' * 40
+
+absent = validate_settings(Settings(**base))
+assert any('CSRF_SECRET' in error for error in absent), absent
+
+for rejected, why in ((conforming[:20], 'shorter than 32 bytes'), (base['jwt_secret'], 'reused')):
+    errors = validate_settings(Settings(csrf_secret=rejected, **base))
+    assert any('CSRF_SECRET' in error for error in errors), (why, errors)
+
+clean = validate_settings(Settings(csrf_secret=conforming, **base))
+assert not [error for error in clean if 'CSRF_SECRET' in error], clean
+
+# The deploy prints this verdict into an operator's terminal and its logs, so a
+# refusal that interpolated a value would put a production credential there.
+for message in absent:
+    for value in (base['jwt_secret'], base['session_hash_secret'], conforming):
+        assert value not in message, message
+print(len(absent), 'refusal(s) with CSRF_SECRET absent;', len(clean), 'remaining with it set')
+"
+verdict_report="$(in_image)" \
+    || fail "the artifact does not refuse a production environment the deploy preflight would reject"
+pass "validate_settings refuses an absent/short/reused CSRF_SECRET and names no value: $verdict_report"
+
 step "12 no checkout dependency — the counter-proof, run inside the candidate"
 # The positive case above passes from `site-packages`. It would ALSO pass from a
 # source tree if the check were weak, which is exactly how a package can report

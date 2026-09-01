@@ -317,10 +317,20 @@ it.
 console, the read-only allocation view and the declarations-only release-evidence
 feature, and nothing else. It is DECLARED but not adopted — the deploy script
 still pins `production-bootstrap`. The console is listed as an ACCEPTED surface
-because ADR-0014 gave it a single browser authentication owner; it is not yet a
-USABLE one, since the assembly declares no form-parsing library and
-`POST /platform/login` cannot read its own form. Adoption additionally requires
-that login path and an explicit operator action (ADR-0015 § 6).
+because ADR-0014 gave it a single browser authentication owner.
+
+**The login path works, corrected 2026-09-01.** This paragraph used to say the
+console was accepted but not USABLE, because the assembly declared no
+form-parsing library and `POST /platform/login` could not read its own form.
+`python-multipart` became a main dependency in #97, and the candidate acceptance
+battery now drives that exact form login inside the built artifact — a `GET` for
+the hidden `csrf_token`, a form `POST`, and a session that reaches
+`/platform/console` with 200 — alongside a non-vacuity case proving the same
+`POST` with no CSRF proof is still refused 403
+(`.github/candidate/acceptance.sh` step 7, first observed green in release run
+`33474406793` at `2c9800d2`). What remains for adoption is the explicit operator
+action switching the host profile (ADR-0015 § 6); the technical blocker that
+section describes no longer exists.
 
 Two production refusals live in the profile module and are separate checks. A
 profile that mounts `provisioning` while `VENDOR_PROVIDER_MODE=fake` is refused

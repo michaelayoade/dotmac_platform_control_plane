@@ -133,6 +133,11 @@ def test_the_read_back_actually_leaves_the_runner() -> None:
     pull = workflow.index('docker pull "$reference"')
     compare = workflow.index("registry RootFS chain $pulled_chain != accepted")
     assert remove < inspect_guard < pull < compare
+    # And the pull's own output is kept, so the run log carries the fetch as an
+    # OBSERVATION rather than leaving the whole proof resting on the guard.
+    # Measured need: release run 33474406793 passed this step with the output
+    # discarded, and the log therefore showed no evidence the bytes had moved.
+    assert 'docker pull "$reference" >/dev/null' not in workflow
 
 
 def test_the_receipt_records_per_file_distribution_digests() -> None:
@@ -427,6 +432,10 @@ REQUIRED_CHECKS: dict[str, str] = {
     # The distribution manifest the receipt reads is produced on every path,
     # but only READ on the publication path — so the candidate demonstrates it.
     "distribution manifest": "dotmac-distribution-digests/1",
+    # The deploy preflight asks the artifact whether a host environment boots.
+    # That call runs only at deploy time, so the property it depends on is
+    # proved here — including that a refusal never carries a value.
+    "deploy preflight property": "refuses an absent/short/reused CSRF_SECRET",
     "api journey": "the API did not issue a bearer token",
     # A refusal that names nothing costs a whole run to diagnose, and a refusal
     # that names too much echoes a credential. Both halves are required.

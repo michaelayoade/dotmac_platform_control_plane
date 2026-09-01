@@ -144,8 +144,20 @@ and was then refused by the handler's bearer-only guard, so the route was
 unreachable with exactly the credential it accepts. That is why the console can
 be listed as an accepted surface here at all.
 
-**Not done — no session can currently be obtained.** The assembly declares no
-form-parsing library, so `POST /platform/login` cannot read its own form. The
+> **Resolved 2026-09-01.** `python-multipart` became a main dependency in #97,
+> and the candidate acceptance battery drives this exact form login to a session
+> that reaches `/platform/console` inside the built artifact
+> (`.github/candidate/acceptance.sh` step 7; first observed green in release run
+> `33474406793` at `2c9800d2`), with a non-vacuity case proving a proof-less
+> `POST` is still refused 403. The paragraph below is kept as the record of what
+> was true when this ADR was accepted. **The adoption question it raises is
+> unchanged and still open**: the technical blocker is gone, the explicit
+> operator action switching the host profile is not, and whether removing the
+> blocker is sufficient to adopt `production-composed-v1` is not decided here.
+
+**Not done — no session could be obtained when this was written.** The assembly
+declared no form-parsing library, so `POST /platform/login` could not read its
+own form. The
 console is therefore reachable BY a valid session while no valid session can be
 created. That defect is not this profile's to fix — it is a dependency
 declaration in `pyproject.toml`, owned by the lane that owns that file — and

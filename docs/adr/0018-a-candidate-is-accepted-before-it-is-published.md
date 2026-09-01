@@ -153,7 +153,7 @@ exists, which is a deployment-window decision rather than this change's.
 
 ## 3. What a candidate must demonstrate
 
-Twelve properties, each tested against the artifact rather than the checkout,
+Fourteen properties, each tested against the artifact rather than the checkout,
 because the whole class of defect this exists to catch is an artifact that
 disagrees with its source:
 
@@ -163,6 +163,20 @@ isolation; **dependency-aware readiness** rather than liveness alone;
 a browser/API/CLI journey; wrong-credential and wrong-standing refusal; exact UI
 assets; production documentation routes absent or protected; no fake
 provisioning surface; no checkout dependency.
+
+Two more were added because something OUTSIDE this battery reads or trusts them,
+on a path that runs less often than this one — which is the same reachability
+argument as § 2.2:
+
+* the **distribution manifest** the release receipt carries (§ 2.1). The
+  pipeline step that reads it runs only on the publication path, so a malformed
+  or silently narrowed document would first be parsed after the push.
+* the **deploy preflight's premise**. `scripts/deploy_production.sh` asks this
+  artifact's own `validate_settings` whether a host environment is bootable,
+  before the database is started or a migration applied. That call runs only at
+  deploy time; the property it depends on — a production `CSRF_SECRET` that is
+  absent, short or reused is refused, and no refusal carries a value — is proved
+  here instead.
 
 Two are reused rather than rebuilt. `diagnose self --strict` already proves the
 no-checkout property in both directions, and ADR-0015's profile refusals are
