@@ -21,11 +21,30 @@ manifests without a database-catalogue contribution:
 
 `scripts/check_product_database_catalog_readiness.py` derives that set from
 `assembly.STATEFUL_MODULES`. Its test compares the result with the declared debt
-in both directions, so adding an owner or adopting a contribution cannot pass
+in both directions, so adding or removing a composed stateful owner cannot pass
 silently. The set names ownership gaps, not table structure, and therefore does
 not duplicate any module's schema contract. Presence is all this part proves: a
 non-null attribute is not proof that canonical bytes parse, cover the selected
 plane or agree with a live observation.
+
+**The other direction — a module adopting a contribution — is dormant, and this
+is the honest statement of it.** The probe reads a `database_catalog` attribute,
+and the exact-pinned kernel's `ModuleManifest` declares no such field, so no
+module release of this generation could publish one even in principle. Today the
+six therefore record a fact about the kernel generation, not about six module
+owners, and only the composition half of the ratchet can fail.
+`pinned_manifest_declares_contribution_field` states that premise and
+`test_the_module_probe_is_dormant_because_the_pinned_kernel_carries_no_field`
+holds it, so the premise dies with the pin that established it rather than
+outliving it in silence (`AGENTS.md` rule 13). Had the kernel named the field
+anything else, the set would have sat at six for ever and a repin would have
+passed over it without a word.
+
+The command itself is now executed by
+`test_the_commands_exit_code_is_observed_in_both_directions` rather than only
+described here. Nothing else calls it — not CI, not the `Makefile` — so its
+documented exit 2 had never been run and its zero branch had never been reached
+by anything at all.
 
 Deployment Control's candidate source contribution is not evidence available to
 this assembly. It becomes usable only after its kernel dependency exists in a
