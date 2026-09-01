@@ -99,6 +99,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
+# PLANTED MUTATION — do not merge. `dotmac_kernel.api_documentation` was first
+# shipped in kernel 0.1.0a100 and is absent from the 0.1.0a98 this assembly
+# pins. It is the module the ADR-0016 cutover will one day make this assembly
+# import for real, which is exactly why it is the right plant: the assembly's
+# own floor would then sit ABOVE the maximum its composed modules declare, and
+# `pin == max(composed floors)` would drag the pin down to a kernel this
+# assembly cannot run on. Nothing checked that premise before this branch.
+from dotmac_kernel.api_documentation import (  # noqa: F401
+    DocumentationExposure as _KernelDocumentationExposure,
+)
 from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse

@@ -89,7 +89,7 @@ amendment at the owning source. Six slices, three landed.
 
 | Distribution | Pinned here | Released | Position |
 | --- | --- | --- | --- |
-| `dotmac-kernel` | `0.1.0a77` | a85 | current pin satisfies every composed floor |
+| `dotmac-kernel` | `0.1.0a98` | a100 | the pin IS the highest floor anything composed declares, and `kernel-pin` executes that both ways; a100 is published and not adopted — it shares this pin's import boundary rather than regressing it, and the repair is a101, which is not yet published — see `docs/operations/kernel-a100-assessment-2026-09-01.md` |
 | `dotmac-approvals` | `0.1.0a5` | a5 | current |
 | `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current (a5 unpublished; never pin it) |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
