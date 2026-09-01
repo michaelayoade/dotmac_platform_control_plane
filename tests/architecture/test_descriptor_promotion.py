@@ -346,8 +346,29 @@ def test_the_application_half_was_carried_forward_unchanged(path: str) -> None:
     assert block[key] == carried[path]
 
 
-def test_the_promotion_names_the_sections_it_changed() -> None:
-    """A repair of the database half says so. A promotion that touched the
-    application half and called itself a database repair is the shape this
-    keeps from passing quietly."""
-    assert _ledger()[-1]["changed_sections"] == ["migration", "database"]
+def test_every_promotion_names_the_sections_it_changed() -> None:
+    """A promotion that touched the application half while calling itself
+    something else is the shape this keeps from passing quietly.
+
+    Two assertions, and the split is the point. The general one holds for every
+    promotion there will ever be; the specific one is about the RECONCILIATION,
+    found by kind.
+
+    This read `_ledger()[-1]` and compared it with the reconciliation's own
+    sections — which made it a claim about how many promotions have happened
+    since, not about the reconciliation, and the next legitimate promotion broke
+    it. That is the second guard in this file keyed on `[-1]`; the tempting
+    repair for both was to move the index.
+    """
+    for entry in _ledger():
+        if entry["kind"] == "pre_mechanism":
+            continue
+        sections = entry["changed_sections"]
+        assert isinstance(sections, list) and sections, (
+            f"the {entry['promoted_at']} promotion names no changed section, so "
+            "nothing states what it was allowed to touch"
+        )
+
+    reconciliation = [e for e in _ledger() if e["kind"] == "reconciliation"]
+    assert len(reconciliation) == 1
+    assert reconciliation[0]["changed_sections"] == ["migration", "database"]
