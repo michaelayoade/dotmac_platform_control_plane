@@ -11,10 +11,14 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a77` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a98` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
-  dependency, never vendored source.
+  dependency, never vendored source. That version is not transcribed here by
+  hand any more: `test_kernel_floor.py` fails if any `dotmac-kernel` version
+  stated in this document differs from the one `pyproject.toml` pins. It said
+  `0.1.0a77` for the three weeks after the pin moved to a98, and nothing could
+  see it.
 - The a61 → a77 compatibility uplift moves no domain writer and composes no new
   module. It does cross kernel a68's platform-audit registry enforcement, so
   every Vendor-owned platform audit action is now declared on exactly one

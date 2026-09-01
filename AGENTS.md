@@ -485,3 +485,36 @@ disagree, fix the drift.
     claim (`tests/architecture/test_descriptor_promotion.py`,
     `tests/unit/test_descriptor_drift.py`, `tests/architecture/test_stale_claims.py`;
     `docs/operations/descriptor-reconciliation-2026-08-31.md`).
+24. **The kernel pin is DERIVED and EXECUTED, never compared by eye.** The
+    census of 2026-08-30 recorded each composed module's declared kernel floor
+    and then declined to upgrade the numbers by repeating them; this is the
+    upgrade. Three facts are derived and none is written down twice: the exact
+    pin comes from `pyproject.toml` (any shape but an exact version is refused —
+    a range makes the running kernel a resolver outcome), each composed
+    distribution's floor comes from its INSTALLED artifact's `Requires-Dist`,
+    and the mutation target comes from the private index rather than from
+    arithmetic, because the index has gaps and a version that was never
+    published fails a lane while reporting it proven.
+
+    **The pin equals the highest floor anything composed declares.** Too LOW is
+    `dotmac-deployment-control 0.1.0a5` — byte-perfect artifacts that could not
+    boot, because it imported a kernel module its declared floor did not
+    require. Too HIGH is a kernel upgrade taken on nobody's behalf, which still
+    owes the migration rehearsal a kernel upgrade owes. A hash comparison proves
+    you got the published bytes; it cannot prove they import.
+
+    **The mutation lane installs the newest version the pin excludes and
+    requires this assembly to fail on it** — and to fail for the RIGHT reason:
+    the traceback must name a `dotmac_kernel` module that installation was
+    MEASURED to be missing, compared against the real files of a real install
+    rather than against a hand-kept version-to-module table whose missing row is
+    invisible. A lane satisfied by any non-zero exit is satisfied by a typo'd
+    index URL. Every version and module name in the workflow is derived; a
+    literal there is how a lane keeps passing after it has stopped testing
+    anything, and the architecture test greps for both.
+
+    **A kernel version stated in canonical prose is checked against the pin.**
+    `docs/ARCHITECTURE.md` and the pin-state table said `0.1.0a77` for as long
+    as the pin had been `0.1.0a98`; nothing broke and nothing could see it
+    (`scripts/kernel_floor.py`, `tests/architecture/test_kernel_floor.py`, CI job
+    `kernel-pin`; `docs/operations/kernel-a100-assessment-2026-09-01.md`).
