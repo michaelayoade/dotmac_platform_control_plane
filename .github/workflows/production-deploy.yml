@@ -18,6 +18,15 @@ on:
           only that somebody could paste it.
         required: true
         type: string
+      image_source_revision:
+        description: >-
+          The revision the image being deployed was BUILT from, as its release
+          receipt records it. Stated separately from the deployment adapter's
+          own revision on purpose: those are two identities, and while they were
+          one value the only deployable image was the one built from the tip of
+          main — so there was no way back to what is running.
+        required: true
+        type: string
       target_server_name:
         description: Explicit production target identity
         required: true
@@ -41,6 +50,7 @@ jobs:
     env:
       CI_RUN_ID: ${{ inputs.ci_run_id }}
       IMAGE_DIGEST: ${{ inputs.image_digest }}
+      IMAGE_SOURCE_REVISION: ${{ inputs.image_source_revision }}
       TARGET_SERVER_NAME: ${{ inputs.target_server_name }}
       TARGET_HOST: ${{ vars.VENDOR_PRODUCTION_HOST }}
       TARGET_USER: ${{ vars.VENDOR_PRODUCTION_USER }}
@@ -68,21 +78,41 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # ── The digest is not the evidence; the receipt is ─────────────────
+      # ── Two identities, deliberately not one ───────────────────────────
+      #
+      # The IMAGE SOURCE REVISION is a property of the artifact, fixed by its
+      # release receipt. The DEPLOYMENT-ADAPTER REVISION is the protected commit
+      # this workflow is running from — `github.sha`, already constrained to
+      # `main` by the first step.
+      #
+      # This step used to resolve the source revision as `origin/main`'s head
+      # and verify the CI run against that. It made the tip of main the only
+      # deployable revision, which is why nothing could be redeployed: the bytes
+      # that are running are never the tip. The protection is unchanged in
+      # substance — the CI run must be green FOR the revision being deployed,
+      # and that revision must be an ancestor of protected main, so it was
+      # merged rather than pushed from a fork.
       - name: Verify the source revision earned its way here
         id: revision
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin main
-          current_main="$(git rev-parse FETCH_HEAD)"
+          [[ "$IMAGE_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "image_source_revision must be a 40-character commit" >&2; exit 1; }
+          git fetch --no-tags origin main
+          git cat-file -e "${IMAGE_SOURCE_REVISION}^{commit}" 2>/dev/null \
+            || { echo "${IMAGE_SOURCE_REVISION} is not a commit in this repository" >&2; exit 1; }
+          git merge-base --is-ancestor "$IMAGE_SOURCE_REVISION" FETCH_HEAD \
+            || { echo "${IMAGE_SOURCE_REVISION} is not an ancestor of protected main" >&2; exit 1; }
           python3 .github/candidate/verify_source_revision.py \
             --run-id "${CI_RUN_ID}" \
             --repository "${GITHUB_REPOSITORY}" \
             --workflow-path .github/workflows/ci.yml \
             --branch main \
-            --current-main "$current_main"
-          echo "source_sha=$current_main" >> "$GITHUB_OUTPUT"
+            --expect-head "$IMAGE_SOURCE_REVISION"
+          echo "source_sha=$IMAGE_SOURCE_REVISION" >> "$GITHUB_OUTPUT"
+          echo "adapter_revision=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Require a release receipt binding this digest to that revision
         env:

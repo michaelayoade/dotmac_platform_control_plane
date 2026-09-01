@@ -353,7 +353,12 @@ def test_the_verifier_makes_all_seven_checks() -> None:
     assert "not success" in verifier  # 3 conclusion
     assert "head repository" in verifier  # 4 protected main, no fork
     assert "is not a 40-hex SHA" in verifier  # 5 SHA shape
-    assert "current {branch} is" in verifier  # 6 still current main
+    # 6 — the run describes the revision the CALLER named. The marker is the
+    #     property sentence rather than the subject of it: this read
+    #     "current {branch} is", which stopped matching the moment the check
+    #     was correctly generalised from "the tip" to "the revision named",
+    #     and a marker that breaks on a rewording was asserting the prose.
+    assert "describes a tree nobody is deploying" in verifier
     assert "produced no check-run" in verifier  # 7 gate absent
     assert "even when a required job skipped" in verifier  # 7 gate skipped
 
@@ -389,6 +394,45 @@ def test_the_deploy_requires_a_receipt_rather_than_a_pasted_digest() -> None:
     deploy = workflow.index("Deploy the approved digest")
     assert verify < receipt < deploy
     assert 'receipt.get("registry_digest") != os.environ["IMAGE_DIGEST"]' in workflow
+
+
+def test_the_deploy_names_the_image_revision_rather_than_assuming_the_tip() -> None:
+    """Two identities, and conflating them is what removed the reverse path.
+
+    The IMAGE SOURCE REVISION belongs to the artifact and is fixed by its
+    release receipt. The DEPLOYMENT-ADAPTER REVISION is the protected commit the
+    workflow runs from. While the deploy resolved the first as `origin/main`'s
+    head, the only deployable image was the one built from the tip — and the
+    bytes that are running are never the tip, so nothing could be redeployed.
+
+    Both halves are asserted. Dropping the ancestry check would let a revision
+    that was never merged be deployed, which is the protection the old
+    tip-equality gave for free.
+    """
+    workflow = _text(DEPLOY_WORKFLOW)
+
+    assert "image_source_revision:" in workflow
+    assert '--expect-head "$IMAGE_SOURCE_REVISION"' in workflow
+    assert 'merge-base --is-ancestor "$IMAGE_SOURCE_REVISION" FETCH_HEAD' in workflow
+    assert 'echo "source_sha=$IMAGE_SOURCE_REVISION"' in workflow
+
+    # The conflation, by name. `current_main` as the deploying revision is the
+    # exact line this change removed, and it must not come back.
+    assert 'current_main="$(git rev-parse FETCH_HEAD)"' not in workflow
+    assert "--current-main" not in workflow
+
+
+def test_the_candidate_build_still_requires_the_tip() -> None:
+    """The separation is not a weakening applied everywhere.
+
+    Building a candidate from a superseded commit really does describe a tree
+    nobody is deploying, so the IMAGE workflow keeps the tip-equality the deploy
+    workflow no longer needs. A change that relaxed both would have read as one
+    consistent decision and been wrong in half of it.
+    """
+    workflow = _text(IMAGE_WORKFLOW)
+    assert 'current_main="$(git rev-parse HEAD)"' in workflow
+    assert '--expect-head "${{ steps.select.outputs.current_main }}"' in workflow
 
 
 # ── the acceptance battery covers what it claims to ─────────────────────────
