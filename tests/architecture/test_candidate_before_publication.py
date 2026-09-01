@@ -384,6 +384,14 @@ REQUIRED_CHECKS: dict[str, str] = {
     "database ownership": "app_admin|app_admin",
     "role contract": "false|false|true|true",
     "grant isolation": "the plane boundary is open",
+    # A column named `tenant_id` is not the same as a tenant-SCOPED table, and
+    # the one exception is DECLARED as an equality so the ratchet fails when the
+    # set grows AND when it shrinks.
+    "rls declared, not assumed": "the declared resolver-input set is",
+    "rls non-vacuity": "so the equality above is satisfied by the declaration",
+    # Production-fatal under kernel a98 and absent from `.env.production.example`;
+    # the battery supplies its own so the rest of the run is reachable.
+    "production csrf secret": "CSRF_SECRET=candidate-csrf-secret",
     "dependency-aware readiness": (
         "readiness returned $ready_code with an unreachable database"
     ),

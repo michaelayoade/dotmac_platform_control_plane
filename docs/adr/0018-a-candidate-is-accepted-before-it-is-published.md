@@ -110,6 +110,8 @@ the only thing that had ever executed it:
 | wrong-owner restore lane landed zero tables | a fresh install, reported as an upgrade refusal |
 | read-back compared `.Id` across the push | a config digest against a manifest digest |
 | role contract compared `f\|f\|t\|t` against `false\|false\|true\|true` | PostgreSQL's boolean OUTPUT function against its boolean CAST |
+| RLS check treated a `tenant_id` COLUMN as tenant SCOPE | `public.tenant_domains`, the tenant resolver's own input, against a rule it is exempt from by design |
+| readiness lane never started the application | a production-shaped environment missing `CSRF_SECRET`, which kernel a98 makes production-fatal |
 
 All three were defects in the CHECK rather than in the artifact, and each cost a
 merge to protected `main` to discover and another to repair. The third is the
@@ -128,6 +130,24 @@ becomes visible — in review, rather than on protected `main`.
 One script, two callers. A rehearsal with its own copy would drift, and a
 drifting rehearsal is worse than none;
 `tests/architecture/test_candidate_before_publication.py` holds both halves.
+
+The last two rows were found by the rehearsal itself, in review, within minutes
+of it existing — which is the argument for it.
+
+### The `CSRF_SECRET` row is a finding this ADR does not close
+
+`dotmac_kernel.validate_settings` makes `CSRF_SECRET` production-fatal in three
+separate ways: still the dev default, shorter than 32 bytes, or equal to
+`JWT_SECRET`/`SESSION_HASH_SECRET`. `.env.production.example` declares
+`CSRF_ENABLED=true` and does not declare `CSRF_SECRET`, and
+`vendor_cp.production_secrets.SECRET_FIELDS` carries `jwt_secret` and
+`session_hash_secret` on the runtime record with no CSRF field. A host `.env`
+built from that template cannot boot this artifact.
+
+The battery supplies a throwaway so the remaining checks are reachable, and
+names the deviation. Repairing the contract itself changes what
+`materialize_production_secrets.py` requires of an OpenBao record that already
+exists, which is a deployment-window decision rather than this change's.
 
 ## 3. What a candidate must demonstrate
 

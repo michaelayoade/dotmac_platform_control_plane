@@ -41,9 +41,26 @@ trap cleanup EXIT
 
 # ── The production-shaped environment ───────────────────────────────────────
 # Taken from `.env.production.example` rather than invented, so the candidate is
-# exercised in the composition it will actually run in. The two differences are
-# named: the database points at a disposable container, and the signing key is
-# generated per run by the image itself and never leaves this runner.
+# exercised in the composition it will actually run in. The three differences are
+# named: the database points at a disposable container, the signing key is
+# generated per run by the image itself and never leaves this runner, and
+# `CSRF_SECRET` is a throwaway literal.
+#
+# That third one is not a convenience — it is a FINDING. `dotmac_kernel`
+# `validate_settings` treats `CSRF_SECRET` as production-fatal in three separate
+# ways: unset (still the dev default), shorter than 32 bytes, or equal to
+# `JWT_SECRET`/`SESSION_HASH_SECRET`. Any of them raises in the application
+# lifespan when `ENVIRONMENT=production`. `.env.production.example` declares
+# `CSRF_ENABLED=true` and does NOT declare `CSRF_SECRET` at all, and
+# `vendor_cp.production_secrets` does not materialize one: `SECRET_FIELDS`
+# carries `jwt_secret` and `session_hash_secret` on the runtime record and no
+# CSRF field. A host whose `.env` was built from that template therefore cannot
+# boot this artifact.
+#
+# The battery supplies its own so the remaining checks can run at all. It does
+# NOT repair the production secret contract — that changes what
+# `materialize_production_secrets.py` requires of an OpenBao record that already
+# exists, which is a deployment-window decision and not this file's to make.
 psql_admin() { docker exec -i "$DB_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres "$@"; }
 
 dsn() { printf 'postgresql+psycopg://%s@127.0.0.1:%s/%s' "$1" "$DB_PORT" "$2"; }
@@ -311,23 +328,41 @@ test "$reachable" = "$module_schemas" \
     || fail "platform_api reaches $reachable of $module_schemas module schemas; the online role cannot work"
 pass "$module_schemas module schemas: app_user reaches none, platform_api reaches all"
 
-# NAMED, not counted. The first version of this check reported a number, and a
-# number is not actionable: "1 tenant-scoped table does not have RLS forced" does
-# not say which table, in which schema, or whether the gap is enabled-but-not-
-# forced or no row security at all. An operator reading that failure has to
-# reproduce the whole battery to learn what it found.
+# NAMED, not counted, and declared as an EQUALITY rather than an emptiness.
+#
+# Two corrections live here, both measured. The first version reported a number:
+# "1 tenant-scoped table does not have RLS forced" does not say which table, in
+# which schema, or whether the gap is enabled-but-not-forced or no row security
+# at all, so an operator reading the failure has to reproduce the whole battery
+# to learn what it found.
+#
+# The second is the predicate itself. Carrying a column NAMED `tenant_id` is not
+# the same as being tenant-SCOPED. `public.tenant_domains` maps a hostname to a
+# tenant and is precisely what `dotmac_kernel.middleware.tenant` reads IN ORDER
+# TO DISCOVER which tenant a request belongs to — necessarily before any tenant
+# context exists. Row security there would make every request fail to resolve,
+# so the kernel declares it platform-level and grants `app_user` SELECT on it
+# explicitly (kernel migration `0001_initial_tenant_schema`: "`tenants` and
+# `tenant_domains` (NOT under RLS — platform-level)").
+#
+# So it is DECLARED, not exempted-by-silence, and declared as an equality so the
+# ratchet bites in both directions: a newly unprotected tenant-scoped table makes
+# the observed set grow and fails, and `tenant_domains` acquiring row security
+# makes it shrink and also fails — either way the declaration is revisited
+# rather than quietly satisfied.
+RESOLVER_INPUT_TABLES="public.tenant_domains"
 unforced="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
-  "SELECT COALESCE(string_agg(DISTINCT n.nspname||'.'||c.relname||' (enabled='||c.relrowsecurity||',forced='||c.relforcerowsecurity||')', ', '), '') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r' AND NOT (c.relrowsecurity AND c.relforcerowsecurity);")"
-test -z "$unforced" \
-    || fail "tenant-scoped table(s) without RLS enabled AND forced: $unforced"
+  "SELECT COALESCE(string_agg(DISTINCT n.nspname||'.'||c.relname, ', ' ORDER BY n.nspname||'.'||c.relname), '') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r' AND NOT (c.relrowsecurity AND c.relforcerowsecurity);")"
+test "$unforced" = "$RESOLVER_INPUT_TABLES" \
+    || fail "tables carrying tenant_id without RLS enabled AND forced are [$unforced]; the declared resolver-input set is [$RESOLVER_INPUT_TABLES]"
 # NON-VACUITY: the assertion above is satisfied by a database with no
 # tenant-scoped table at all, which is exactly what a wrong schema name or a
 # mis-joined catalogue query would produce.
 tenant_scoped="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
   "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r';" | tr -d ' ')"
-test "$tenant_scoped" -gt 0 \
-    || fail "no table carries tenant_id at all, so the RLS assertion is vacuous"
-pass "all $tenant_scoped tables carrying tenant_id have row security enabled and forced"
+test "$tenant_scoped" -gt 1 \
+    || fail "only $tenant_scoped table carries tenant_id, so the equality above is satisfied by the declaration alone"
+pass "$tenant_scoped tables carry tenant_id; all but the declared resolver input force row security"
 
 step "9  the exact UI assets this artifact serves"
 SCRIPT="
@@ -381,6 +416,7 @@ start_app() {
         --env JWT_SECRET=candidate-jwt-secret-not-a-real-one \
         --env SESSION_HASH_SECRET=candidate-session-secret-not-a-real-one \
         --env CSRF_ENABLED=true \
+        --env CSRF_SECRET=candidate-csrf-secret-not-a-real-one-0123456789 \
         --env RATE_LIMIT_ENABLED=false \
         --env VENDOR_PROVIDER_MODE=fake \
         --env 'VENDOR_PRODUCT_RELEASE_PINS_JSON={}' \
