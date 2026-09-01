@@ -74,16 +74,18 @@ The canonical production OpenBao locations are:
   `admin_password`, `app_user_password`, and `platform_api_password`;
 - kernel runtime secrets:
   `secret/dotmac/vendor-control-plane/production/runtime`, containing exactly
-  `jwt_secret` and `session_hash_secret`;
+  `jwt_secret`, `session_hash_secret`, and `csrf_secret`;
 - deploy SSH identity:
   `secret/dotmac/vendor-control-plane/production/deploy-ssh`, containing exactly
   `private_key_openssh`, `public_key_openssh`, and `username`.
 
 Never paste their values into a command, ticket, log, or tracked file. Use the
-checked-in `vendor_cp.production_secrets` operator service. Its OpenBao writes
-use KV v2 `cas=0`, so it creates an absent record but never overwrites an
-existing issuer key or password set. It validates all four complete schemas
-before materialization and atomically replaces each host-local file. Database
+checked-in `vendor_cp.production_secrets` operator service. Ordinary OpenBao
+writes use KV v2 `cas=0`, so `seed` creates an absent record but never
+overwrites an existing issuer key or password set. Incident rotation is a
+separate typed operation with expected-version CAS; it cannot rotate the
+signing or deploy records. It validates all four complete schemas before
+materialization and atomically replaces each host-local file. Database
 passwords are URL-safe because the composed runtime URLs hold them without
 logging or transformation.
 
@@ -123,6 +125,131 @@ stdin and excludes the deployment private key. `sync-github-deploy-key` passes
 that held private key to `gh secret set` only on stdin. Install this exact
 adapter and both versioned service modules on the target before `push`; never
 re-create the contract with shell substitutions.
+
+## Production credential incident rotation
+
+The first-authorization window on 2026-09-01 was cancelled after a read-only
+container inspection emitted the three database credentials plus JWT/session
+material. It made no issuer, plan, approval, rollout, deployment, database or
+OpenBao mutation. That window is never resumed. Rotation runs in a newly named
+window and must complete before another authorization window opens.
+
+Name the window before execution as
+`platform-cp-secret-rotation-YYYY-MM-DDTHH:MM-HH:MMWAT`. Its authorized target
+is fixed in code: `vendor-cp-prod`, `root@149.102.158.144`, deploy directory
+`/opt/dotmac/vendor-control-plane`, Compose service `app`, database service
+`db`, and roles `app_admin`, `app_user`, `platform_api`. The adapter accepts no
+target, directory, service, role, command, image or revision override.
+
+Preconditions, all mandatory:
+
+1. the rotation PR is merged with required CI green, and the exact merged
+   digest-bound adapter archive is installed at
+   `/usr/local/libexec/dotmac/platform-cp-secret-rotation-adapter.pyz` without
+   changing or importing the product checkout;
+2. `/etc/dotmac-host-id` is exactly `vendor-cp-prod`, the current application
+   image reference contains `@sha256:...`, and its OCI revision label is a
+   40-character commit;
+3. Platform CP authorization remains frozen: no plan, approval or rollout
+   writer is active during the window;
+4. the operator holds a short-lived OpenBao identity that can read historical
+   versions and expected-version update only the canonical database/runtime
+   records; it cannot update the signing/deploy records;
+5. the named host is reachable through the approved known-hosts file, the
+   adapter can run as root there, and PostgreSQL local administration plus
+   TCP/SCRAM authentication are available;
+6. the operator accepts that JWT and session rotation invalidates every current
+   API/browser session; CSRF stays byte-for-byte unchanged; and
+7. no one runs `docker inspect` on container environment data. Identity is
+   read only from the container image reference and OCI revision label.
+
+Create a private operator directory at mode `0700`. Keep it outside Git,
+synchronized storage, tickets and reports. The receipt is names-only; the
+custody file contains the old and candidate values and is mode `0600`. Run from
+the exact merged repository revision:
+
+```bash
+KNOWN_HOSTS=<approved-known-hosts-file>
+CUSTODY_DIR=<absolute-mode-0700-private-directory>
+EXPECTED_IMAGE=<exact-current-name@sha256:digest>
+EXPECTED_REVISION=<exact-current-40-character-oci-revision>
+PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
+  install-rotation-adapter --known-hosts "$KNOWN_HOSTS"
+PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
+  rotate-production \
+  --known-hosts "$KNOWN_HOSTS" \
+  --custody-file "$CUSTODY_DIR/platform-cp-rotation.custody.json" \
+  --receipt-file "$CUSTODY_DIR/platform-cp-rotation.receipt.json" \
+  --expected-image "$EXPECTED_IMAGE" \
+  --expected-revision "$EXPECTED_REVISION"
+```
+
+Installation refuses a missing/symlinked/foreign-owned/group-or-world-writable
+ancestor under `/usr/local`, installs the archive root:root mode `0555`, and
+verifies its SHA-256 before any payload is sent. The payload repeats that exact
+digest and the adapter verifies it from inside its own archive before applying
+anything. Rotation also refuses unless the running image and revision equal the
+two operator-supplied immutable coordinates.
+
+The first invocation generates one candidate set, writes protected custody,
+then CAS-updates the database and runtime records. The receipt records
+`prepared`, `openbao_database_written`, `openbao_committed`, then `proved`.
+If any step fails, run the **identical command with the same two file paths**.
+It reloads the same candidate; it never mints a replacement. A runtime-record
+CAS conflict after the database-record CAS cannot reach the host: projection,
+PostgreSQL and the app begin only after both record versions are committed.
+
+On the host the adapter first proves all three protected prior PostgreSQL
+credentials succeed and all three candidates fail over TCP/SCRAM. It likewise
+proves the running app accepts the prior JWT/session material, refuses the
+candidate, and holds the preserved CSRF value. Only then does it change all
+three role verifiers in one PostgreSQL transaction over stdin, atomically patch
+exactly five lines of the current `.env` while preserving every other byte,
+mode and owner, and force-recreate only `app` on the expected image. The inverse
+database/runtime proofs, readiness, preserved CSRF and unchanged image/revision
+must then hold. A mode-0600 transient host file holds the pre-operation
+`mod_deploy.deployment_plans`/`rollouts` bytes long enough to prove they remain
+byte-identical; it is never printed or hashed and is deleted on success. The
+names-only target receipt distinguishes a fresh proof from a historical replay
+after a lost response. It never reads Docker environment metadata.
+
+A retry classifies exactly four aggregate states: all-prior; database candidate
+with prior environment/app; database+environment candidate with prior app; or
+all-candidate. Every mixed state is refused. The target receipt and protected
+prestate bind the one operation, adapter, image and revision across process
+death. The operator receipt contains no value or value-derived hash; successful
+coordinator proof removes the extra candidate custody file because OpenBao's
+current/historical versions then hold the recovery boundary.
+
+Rollback re-enables the exposed values and is therefore outage containment,
+never routine recovery. Prefer rerunning the forward command. Only when the
+new credentials caused an outage that cannot be rolled forward in the window:
+
+```bash
+PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
+  rollback-production-incident \
+  --known-hosts "$KNOWN_HOSTS" \
+  --receipt-file "$CUSTODY_DIR/platform-cp-rotation.receipt.json" \
+  --confirm RESTORE-EXPOSED-MATERIAL-FOR-OUTAGE-CONTAINMENT
+```
+
+Rollback loads the exact prior/candidate KV versions named by the receipt,
+restores all three database roles in one transaction, rematerializes the old
+runtime values, and recreates the same app image. Authorization remains frozen
+and forward rotation resumes immediately. Do not destroy prior KV versions
+until the `proved` receipt has been reviewed. A later controlled recreation of
+the database container is a separate change that removes the no-longer-valid
+initial credential bytes from its creation metadata; PostgreSQL authentication
+does not require that recreation.
+
+After the `proved` receipt is reviewed (and after any incident-only rollback),
+retire the single-use surface. Retirement first re-verifies the exact archive
+digest, owner, mode and safe ancestry, then removes only its fixed path:
+
+```bash
+PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
+  retire-rotation-adapter --known-hosts "$KNOWN_HOSTS"
+```
 
 Prepare the GitHub `production` environment with:
 
