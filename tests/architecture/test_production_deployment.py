@@ -9,6 +9,7 @@ source code, or start the application before its backup and composed migrations.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -512,6 +513,85 @@ def test_the_deploy_refuses_a_fatal_environment_before_it_touches_anything() -> 
     # The artifact's own function, not a re-implementation of its rules.
     assert "validate_settings" in deploy
     assert "--network none" in deploy
+
+
+def test_the_recovery_bundle_is_atomic_and_gates_the_migration() -> None:
+    """A dump alone restored with 114 missing-role errors and looked recovered.
+
+    `pg_dump` of one database carries ACLs and policies but never roles,
+    memberships or tablespaces — those are CLUSTER objects. So the backup is a
+    bundle, it is published with one rename, and the migration does not start
+    without it.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+    commands = _commands(deploy)
+
+    # Stripping either of these by flag would reproduce, deliberately, the exact
+    # state the rehearsal found by accident.
+    assert "--no-owner" not in commands
+    assert "--no-privileges" not in commands
+
+    assert "pg_dumpall" in commands
+    assert "--globals-only" in commands
+    assert "--no-role-passwords" in commands
+    # The cluster dump runs as the container-local superuser: `app_admin` is
+    # NOSUPERUSER by contract and owns one database.
+    assert "--user postgres" in commands
+
+    # Published with a single rename, from a dot-prefixed temporary directory no
+    # reader will mistake for a bundle.
+    assert 'mktemp -d "${BACKUP_DIR}/.bundle-' in commands
+    assert 'mv "$BUNDLE_TMP" "$BUNDLE_PATH"' in commands
+
+    publish = commands.index('mv "$BUNDLE_TMP" "$BUNDLE_PATH"')
+    verify = commands.index("sha256sum --quiet --check SHA256SUMS")
+    migrate = commands.index("dotmac-platform admin migrate")
+    assert publish < verify < migrate, (
+        "the bundle must be published and re-verified from its published "
+        "location BEFORE the schema advances; a rollback discovered to be "
+        "absent afterwards is not a rollback"
+    )
+
+
+def test_the_bundle_refuses_a_globals_capture_that_carries_a_verifier() -> None:
+    """`--no-role-passwords` is a flag, and a flag can be dropped.
+
+    Both directions, on the detector the script actually uses rather than on a
+    paraphrase of it: a clean capture is admitted and a verifier-bearing one is
+    refused. A check only ever seen refusing might refuse everything.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+    pattern = re.compile(r"SCRAM-SHA-256\$|PASSWORD '(md5|SCRAM)")
+
+    assert "SCRAM-SHA-256" in deploy, "the script no longer looks for a verifier"
+
+    clean = "CREATE ROLE app_admin;\nALTER ROLE app_admin WITH LOGIN BYPASSRLS;\n"
+    scram = (
+        "CREATE ROLE app_admin;\n"
+        "ALTER ROLE app_admin WITH LOGIN PASSWORD 'SCRAM-SHA-256$4096:a$b:c';\n"
+    )
+    md5 = "CREATE ROLE app_admin;\nALTER ROLE app_admin WITH PASSWORD 'md5beef';\n"
+
+    assert not pattern.search(clean)
+    assert pattern.search(scram)
+    assert pattern.search(md5)
+
+
+def test_the_five_declared_roles_are_the_ones_the_bundle_checks_for() -> None:
+    """The script's role list is not a literal somebody kept in step by hand.
+
+    It is checked against `deploy/product.toml`'s own `[[database.roles]]`, so a
+    role added to the cluster contract and forgotten in the capture check fails
+    here rather than at a restore nobody runs.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+    declared = {
+        str(role["name"])
+        for role in tomllib.loads(_text("deploy/product.toml"))["database"]["roles"]
+    }
+    assert declared, "the descriptor declares no database roles"
+    for name in declared:
+        assert name in deploy, f"the bundle check does not name role {name}"
 
 
 def test_the_preflight_never_prints_a_secret_value() -> None:

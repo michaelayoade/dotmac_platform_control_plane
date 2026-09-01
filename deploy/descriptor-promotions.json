@@ -1,6 +1,6 @@
 {
   "schema": "DescriptorPromotionLedger.v1",
-  "note": "ADR-0017 s 2. The accepted descriptor (deploy/product.toml) is always the exact bytes of one candidate. This ledger says which, and why it was promoted. The last entry is the accepted one. Entries are append-only and a candidate file is immutable once it appears here; tests/architecture/test_descriptor_promotion.py enforces both, and compares the accepted descriptor with its candidate byte for byte so a hand edit cannot pass. Digests here are RAW-BYTES sha256 of the file, the same convention the bootstrap receipt's product_descriptor_sha256 uses \u2014 NOT the canonical-bytes convention assembly.manifest_digest uses.",
+  "note": "ADR-0017 s 2. The accepted descriptor (deploy/product.toml) is always the exact bytes of one candidate. This ledger says which, and why it was promoted. The last entry is the accepted one. Entries are append-only and a candidate file is immutable once it appears here; tests/architecture/test_descriptor_promotion.py enforces both, and compares the accepted descriptor with its candidate byte for byte so a hand edit cannot pass. Digests here are RAW-BYTES sha256 of the file, the same convention the bootstrap receipt's product_descriptor_sha256 uses — NOT the canonical-bytes convention assembly.manifest_digest uses.",
   "promotions": [
     {
       "promoted_at": "2026-08-30",
@@ -23,7 +23,7 @@
         "receipt_sha256": "sha256:ffce65ec6e755c83d8a1418d382fae3966b7ef2e7955f1d15f22af926451d272",
         "receipt_bound_descriptor_sha256": "sha256:99eef0cc82bc73065c17c543e7a3d8824e825d3c97da22bd4e73f648e0b2daeb",
         "receipt_bound_descriptor_source_revision": "e8d5b543",
-        "why_the_receipt_does_not_close_this": "The receipt is not silent about the end state \u2014 it records migration_heads, measured after the migrate. The defect is narrower: it carries exactly ONE descriptor field, product_descriptor_sha256, and that field is a literal fixed at authorship naming deploy/product.toml at the revision the run STARTED from. Every descriptor coordinate in the receipt points backwards, so no reader of it can tell that the descriptor it names stopped being true during the run that named it, and nothing diffs the recorded heads against a declaration.",
+        "why_the_receipt_does_not_close_this": "The receipt is not silent about the end state — it records migration_heads, measured after the migrate. The defect is narrower: it carries exactly ONE descriptor field, product_descriptor_sha256, and that field is a literal fixed at authorship naming deploy/product.toml at the revision the run STARTED from. Every descriptor coordinate in the receipt points backwards, so no reader of it can tell that the descriptor it names stopped being true during the run that named it, and nothing diffs the recorded heads against a declaration.",
         "record": "docs/operations/descriptor-reconciliation-2026-08-31.md",
         "adr_0011_citation": "The DELETE-only revoke is ADR-0011's Amendment of 2026-08-21, not its section 4 as written, which required revoking INSERT and UPDATE as well. v017's own docstring says so. The superseded descriptor cited section 4."
       },
@@ -33,6 +33,23 @@
       ],
       "carried_forward": {
         "why": "The bootstrap was create-only: it ran the composed migrations in a short-lived ops container and did not replace, restart or repin the running application. So the halves of the descriptor that describe the APPLICATION are carried across this promotion unchanged, and they are recorded here so a promotion that moved one of them silently fails tests/architecture/test_descriptor_promotion.py rather than passing as a database repair.",
+        "image.reference": "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
+        "image.source_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
+        "assembly.manifest_digest": "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
+      }
+    },
+    {
+      "promoted_at": "2026-09-01",
+      "kind": "contract_change",
+      "candidate": "deploy/candidates/2026-09-01-recovery-bundle-verification.toml",
+      "descriptor_sha256": "sha256:e355737b6d03f436aae9050b40f3c206dc6eee02edb6e16110ea4f4fd632b541",
+      "summary": "Widens the primary dataset's verification set from three checks to seven. The 2026-08-30 restore rehearsal FAILED with 114 missing-role errors and produced a database that satisfied schema and row_counts while carrying no roles, no grants and no ownership - so the declared checks could not have reported the one thing that was wrong. The four added names are the Foundation's own PRIVILEGE_VERIFICATIONS. No deployment is claimed: the image half is carried across unchanged.",
+      "supersedes": "sha256:dcc6ef7d990d65e47de26395845a79e360317802df948544364aaff96664b5ba",
+      "changed_sections": [
+        "backup"
+      ],
+      "carried_forward": {
+        "why": "This promotion changes what a recovery is checked FOR. It deploys nothing, so every half of the descriptor that describes the APPLICATION is carried across unchanged and recorded here, and a promotion that moved one of them silently fails tests/architecture/test_descriptor_promotion.py rather than passing as a contract change.",
         "image.reference": "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
         "image.source_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
         "assembly.manifest_digest": "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
