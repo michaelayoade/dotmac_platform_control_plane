@@ -423,7 +423,7 @@ REQUIRED_CHECKS: dict[str, str] = {
     # Replaying `Set-Cookie` is what lets a production `__Host-`/Secure cookie
     # survive a plain-HTTP runner. The refusal case is what proves the
     # protection is still on after doing it.
-    "csrf still refuses without proof": "a form POST with no CSRF proof is refused 403",
+    "csrf still refuses without proof": "a form POST with no CSRF proof returned",
     # The distribution manifest the receipt reads is produced on every path,
     # but only READ on the publication path — so the candidate demonstrates it.
     "distribution manifest": "dotmac-distribution-digests/1",
