@@ -261,7 +261,7 @@ because something OUTSIDE the kernel is missing from the environment, because a
 missing driver is not a missing kernel symbol.
 
 Its sensitivity is not argued, it is observed, in both directions on the same
-day. Unplanted, run **33516652998** job `kernel-pin`:
+day. Unplanted, run **33517569609** job `kernel-pin`:
 
 > 65 kernel names across 14 modules, all provided by dotmac-kernel 0.1.0a98 —
 > the composed maximum, from dotmac-deployment-control
@@ -269,15 +269,21 @@ day. Unplanted, run **33516652998** job `kernel-pin`:
 Planted — `src/vendor_cp/api_documentation.py` importing
 `dotmac_kernel.api_documentation`, a module first shipped at a100, absent at the
 a98 pin, and the exact module the ADR-0016 cutover will one day make this
-assembly import for real — run **33516674334**, branch
+assembly import for real — run **33517592057**, branch
 `verify/assembly-floor-plant` (PR #113, never merged), job `kernel-pin` RED:
 
 > error this assembly's own source imports `['dotmac_kernel.api_documentation']`,
 > which dotmac-kernel 0.1.0a98 does not provide. The assembly's OWN floor is
 > therefore ABOVE the highest floor anything composed declares …
 
-(That first planted run had the step placed before the composed-set
-conditions, so the job stopped at it. § 10.1 asks for the opposite — planted
-separately with the composed-set conditions LEFT INTACT — so the step was moved
-after them and the plant re-run; the composed-set halves pass and only the
-assembly half goes red, which is the separability the section requires.)
+That planted run executed and PASSED every composed-set condition first —
+`the pin is bound by: dotmac-deployment-control 0.1.0a98`, `the newest published
+kernel this pin excludes: 0.1.0a97`, `the composition imports these, and
+0.1.0a97 has none of them:`, `the resolver refuses the pair, as the pin
+requires` — and then went red on the assembly half alone. That separability is
+what § 10.1 asks for: the plant is separate from the composed-set plants, those
+are left intact, and the finding is distinct, because an assembly that
+out-imports its composition is repaired by a different person in a different
+repository than a composed module that raised its floor. (An earlier placement
+put the step before those conditions and stopped the job at itself; run
+33516674334 is that first shape, kept only for the record.)
