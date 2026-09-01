@@ -288,8 +288,11 @@ BASELINE_REASONS: Final[dict[str, str]] = {
         "also a hosted CI runner with a checkout by definition, not a "
         "production host: no operator runs it and no deployment depends on it. "
         "Retires if the pin derivation is ever needed at runtime rather than at "
-        "review time, at which point it becomes a `dotmac-platform diagnose` "
-        "command with a declared owner like every other operator surface."
+        "review time, at which point it becomes a diagnose command on the "
+        "installed console script, with a declared owner like every other "
+        "operator surface. (That script is deliberately not named here: this "
+        "module may not hold its name as a literal, because the checks that "
+        "need it read it from installed metadata.)"
     ),
     ".github/workflows/production-deploy.yml": (
         "The host-side leg runs on the TARGET, outside any container, against an "
