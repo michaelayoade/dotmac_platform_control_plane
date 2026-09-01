@@ -153,9 +153,14 @@ jobs:
           ssh -i "$HOME/.ssh/vendor-production" "$remote" \
             "mkdir -p '$TARGET_DIR/scripts' '$TARGET_DIR/deploy/postgres' \
               '$TARGET_DIR/src/vendor_cp'"
+          # `deploy/product.toml` travels with the adapter so the recovery
+          # bundle can record WHICH accepted contract a restore must satisfy.
+          # It is delivered read-only reference material: nothing on the host
+          # writes it, and ADR-0017 s 2 keeps its promotion in Git.
           rsync -azR -e "ssh -i $HOME/.ssh/vendor-production" \
             .env.production.example \
             docker-compose.production.yml \
+            deploy/product.toml \
             scripts/deploy_production.sh \
             scripts/deploy_production_with_registry_token.sh \
             scripts/materialize_production_secrets.py \

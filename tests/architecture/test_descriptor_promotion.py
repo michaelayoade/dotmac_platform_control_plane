@@ -188,15 +188,22 @@ def test_exactly_one_entry_predates_the_mechanism() -> None:
     assert str(pre[0]["descriptor_sha256"]).startswith("sha256:")
 
 
-def test_the_current_promotion_is_recorded_as_a_repair() -> None:
+def test_the_reconciliation_promotion_is_recorded_as_a_repair() -> None:
     """It names the operation, the receipt, and where the record lives.
 
     A reconciliation that reads like routine maintenance teaches the next reader
     that descriptors drift and get tidied up, which is the opposite of the
     lesson.
+
+    Found by KIND, not by position. This read `_ledger()[-1]` and asserted that
+    the newest promotion was the reconciliation — which is a fact about how many
+    promotions have happened since, not about the reconciliation. The first
+    legitimate promotion after it failed here, and the tempting repair was to
+    move the index. The entry being described is a specific one; identify it.
     """
-    latest = _ledger()[-1]
-    assert latest["kind"] == "reconciliation"
+    matching = [entry for entry in _ledger() if entry["kind"] == "reconciliation"]
+    assert len(matching) == 1, "exactly one promotion repairs the bootstrap drift"
+    latest = matching[0]
     repairs = latest["repairs"]
     assert isinstance(repairs, dict)
     assert repairs["operation"] == "scripts/bootstrap/bootstrap_once.sh"
