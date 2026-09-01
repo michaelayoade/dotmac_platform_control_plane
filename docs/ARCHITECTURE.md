@@ -392,8 +392,16 @@ Compose project and from every product data plane:
   same-repository Actions token over SSH stdin into a temporary Docker config
   under `/run`, then logs out and removes that config;
 - `vendor_cp.production_secrets` owns the exact four-record OpenBao schema,
-  create-only seeding, validation, and per-file atomic host materialization.
-  `scripts/materialize_production_secrets.py` is its thin operator adapter.
+  create-only seeding, typed expected-version rotation, validation, and atomic
+  host materialization. Rotation is a resumable incident operation: one
+  protected custody file holds one candidate set, the two KV records expose
+  their partial-CAS boundary in a names-only receipt, all three PostgreSQL
+  roles change in one transaction, and the app alone is force-recreated on its
+  pre-authorized immutable image. The target leg is a deterministic, separately
+  installed root-owned archive whose digest and safe ancestry are verified; it
+  never imports or changes the mutable product checkout and is retired after
+  the incident proof. `scripts/materialize_production_secrets.py` is its thin
+  operator adapter. Runtime settings never call OpenBao.
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration
@@ -455,10 +463,18 @@ layout.
 
 - **Production secret materialization** — `vendor_cp.production_secrets` is the
   sole schema, generation, validation, and host-projection owner for Vendor's
-  four canonical OpenBao records. The service creates only absent records with
-  KV v2 CAS, and the script is a thin operator adapter. Runtime settings never
-  read OpenBao, and GHCR authentication remains a per-deploy Actions token
-  rather than a fifth persistent record.
+  four canonical OpenBao records. Ordinary seeding creates only absent records
+  with KV v2 `cas=0`. The separate incident seam rotates only the three database
+  fields and the JWT/session fields with expected-version CAS, preserves CSRF
+  byte-for-byte, and refuses to touch signing or deploy identity. A partial
+  database/runtime KV update is resumable from the same protected candidate;
+  it is never exposed to a host consumer until both records commit. Receipts
+  contain names, versions, phases and immutable runtime identity only — never a
+  value or a value-derived hash. Host retries accept only four monotonic,
+  fully-classified database/environment/runtime states and refuse every mixed
+  state. The script is a thin operator adapter. Runtime
+  settings never read OpenBao, and GHCR authentication remains a per-deploy
+  Actions token rather than a fifth persistent record.
   The dependency-free `vendor_cp.product_release_pins` contract is shared by
   runtime configuration and the host operator. `pin-product-release` therefore
   cannot accept a declaration the process later rejects, and changes one

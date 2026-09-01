@@ -9,16 +9,25 @@ import sys
 from pathlib import Path
 
 from vendor_cp.production_secrets import (
+    ROLLBACK_CONFIRMATION,
     HostSecretBundle,
     ProductionSecretError,
     build_host_bundle,
+    build_rollback_payload,
     client_from_environment,
+    complete_rotation_rollback,
+    execute_secret_rotation,
+    install_rotation_adapter,
     materialize_host_bundle,
     pin_product_release,
+    read_rotation_receipt,
     reconcile_host_environment_declarations,
+    retire_rotation_adapter,
+    rollback_openbao_rotation,
     seed_missing_records,
     sync_github_deploy_key,
     transfer_host_bundle,
+    transfer_rotation_payload,
 )
 
 
@@ -27,6 +36,28 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("seed", help="create absent OpenBao records with CAS=0")
+
+    rotate = subparsers.add_parser(
+        "rotate-production",
+        help="resume the fixed vendor-cp-prod incident rotation",
+    )
+    rotate.add_argument("--known-hosts", required=True, type=Path)
+    rotate.add_argument("--custody-file", required=True, type=Path)
+    rotate.add_argument("--receipt-file", required=True, type=Path)
+    rotate.add_argument("--expected-image", required=True)
+    rotate.add_argument("--expected-revision", required=True)
+
+    rollback = subparsers.add_parser(
+        "rollback-production-incident",
+        help="restore exposed material for outage containment only",
+    )
+    rollback.add_argument("--known-hosts", required=True, type=Path)
+    rollback.add_argument("--receipt-file", required=True, type=Path)
+    rollback.add_argument(
+        "--confirm",
+        required=True,
+        help=f"must equal {ROLLBACK_CONFIRMATION!r}",
+    )
 
     push = subparsers.add_parser("push", help="materialize a host over SSH stdin")
     push.add_argument("--target", required=True, help="explicit user@host target")
@@ -48,6 +79,18 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("/root/.ssh/authorized_keys"),
     )
+
+    install_adapter = subparsers.add_parser(
+        "install-rotation-adapter",
+        help="install the digest-bound vendor-cp-prod incident adapter",
+    )
+    install_adapter.add_argument("--known-hosts", required=True, type=Path)
+
+    retire_adapter = subparsers.add_parser(
+        "retire-rotation-adapter",
+        help="remove the proved incident adapter from vendor-cp-prod",
+    )
+    retire_adapter.add_argument("--known-hosts", required=True, type=Path)
 
     reconcile = subparsers.add_parser(
         "reconcile-declarations",
@@ -82,6 +125,49 @@ def main() -> int:
                 print(f"created {path}")
             if not created:
                 print("all production OpenBao records already exist")
+            return 0
+        if args.command == "rotate-production":
+            store = client_from_environment()
+            completed = execute_secret_rotation(
+                store,
+                custody_file=args.custody_file,
+                receipt_file=args.receipt_file,
+                expected_image_reference=args.expected_image,
+                expected_source_revision=args.expected_revision,
+                host_apply=lambda payload: transfer_rotation_payload(
+                    payload,
+                    known_hosts_file=args.known_hosts,
+                ),
+            )
+            print(completed.to_json(), end="")
+            return 0
+        if args.command == "install-rotation-adapter":
+            digest = install_rotation_adapter(known_hosts_file=args.known_hosts)
+            print(f"installed production rotation adapter {digest}")
+            return 0
+        if args.command == "retire-rotation-adapter":
+            retire_rotation_adapter(known_hosts_file=args.known_hosts)
+            print("retired production rotation adapter")
+            return 0
+        if args.command == "rollback-production-incident":
+            store = client_from_environment()
+            receipt = read_rotation_receipt(args.receipt_file)
+            custody, receipt = rollback_openbao_rotation(
+                store,
+                receipt,
+                receipt_file=args.receipt_file,
+                incident_confirmation=args.confirm,
+            )
+            proof = transfer_rotation_payload(
+                build_rollback_payload(store, custody, receipt),
+                known_hosts_file=args.known_hosts,
+            )
+            rolled_back = complete_rotation_rollback(
+                receipt,
+                proof,
+                receipt_file=args.receipt_file,
+            )
+            print(rolled_back.to_json(), end="")
             return 0
         if args.command == "push":
             bundle = build_host_bundle(client_from_environment())
@@ -129,7 +215,7 @@ def main() -> int:
             if os.geteuid() != 0:
                 raise ProductionSecretError("receive must run as root")
             bundle = HostSecretBundle.from_json(sys.stdin.read())
-            receipt = materialize_host_bundle(
+            materialization = materialize_host_bundle(
                 bundle,
                 env_template=args.env_template,
                 env_file=args.env_file,
@@ -138,9 +224,9 @@ def main() -> int:
                 app_owner=(10001, 10001),
             )
             for materialized_path in (
-                receipt.env_file,
-                receipt.signing_key_file,
-                receipt.authorized_keys_file,
+                materialization.env_file,
+                materialization.signing_key_file,
+                materialization.authorized_keys_file,
             ):
                 print(f"materialized {materialized_path}")
             return 0
