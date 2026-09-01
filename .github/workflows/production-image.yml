@@ -211,7 +211,14 @@ jobs:
           docker image inspect "$reference" >/dev/null 2>&1 \
             && { echo "the candidate is still resident locally; the read-back would be a no-op" >&2; exit 1; }
 
-          docker pull "$reference" >/dev/null
+          # Output KEPT, deliberately. The absence assertion above is what
+          # makes this pull meaningful, but with the output discarded the run
+          # log carried no direct evidence that the bytes came from the
+          # registry — the proof rested entirely on the guard, and a reader
+          # auditing the log afterwards could not see the fetch happen. The
+          # layer lines and the resolved digest are cheap and they are the
+          # observation.
+          docker pull "$reference"
           pulled_layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "$reference")"
           pulled_chain="sha256:$(printf '%s' "$pulled_layers" | sha256sum | cut -d' ' -f1)"
           accepted_chain='${{ steps.identity.outputs.rootfs_chain }}'

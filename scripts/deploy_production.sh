@@ -32,6 +32,42 @@ grep -Fqx 'PLATFORM_ROOT_DOMAIN=vendor.dotmac.io' "$ENV_FILE" \
 # the one that runs on every restart this script does not perform.
 grep -Fqx 'VENDOR_DEPLOYMENT_PROFILE=production-bootstrap' "$ENV_FILE" \
     || die "deployment profile is not production-bootstrap"
+# ── The kernel's production-fatal settings, checked BEFORE anything is touched ─
+#
+# Look at the order of this script. `compose up -d app` is the SEVENTH action:
+# the image is pulled, the database is started, the manifest volume is
+# initialised, the role and ownership contracts are read, a backup is taken and
+# THE MIGRATIONS ARE APPLIED before the application is ever started. A
+# configuration error left to the application's lifespan therefore arrives with
+# the schema already advanced and the service down — the most expensive possible
+# moment to learn it, and entirely avoidable, because every input it depends on
+# is readable here.
+#
+# `CSRF_SECRET` is the live instance. Kernel a98 `validate_settings` refuses it
+# three ways: still the dev default, fewer than 32 bytes, or equal to
+# `JWT_SECRET`/`SESSION_HASH_SECRET`. The host that runs this script was
+# materialized from a template that never declared it at all.
+#
+# Nothing below prints a value. Lengths and equality only.
+readonly CSRF_REMEDY="Remediation: patch the OpenBao record \
+secret/dotmac/vendor-control-plane/production/runtime to add a csrf_secret \
+field of at least 32 bytes, distinct from jwt_secret and session_hash_secret, \
+then re-run 'materialize_production_secrets.py push'. Note that 'seed' only \
+CREATES absent records and will not repair one that already exists."
+
+env_value() { sed -n "s/^$1=//p" "$ENV_FILE" | head -1; }
+
+grep -Fqx 'CSRF_ENABLED=true' "$ENV_FILE" || die "CSRF_ENABLED is not true"
+csrf_secret="$(env_value CSRF_SECRET)"
+[[ -n "$csrf_secret" ]] \
+    || die "CSRF_SECRET is absent or empty in $ENV_FILE. $CSRF_REMEDY"
+(( ${#csrf_secret} >= 32 )) \
+    || die "CSRF_SECRET is shorter than 32 bytes. $CSRF_REMEDY"
+[[ "$csrf_secret" != "$(env_value JWT_SECRET)" \
+    && "$csrf_secret" != "$(env_value SESSION_HASH_SECRET)" ]] \
+    || die "CSRF_SECRET must differ from JWT_SECRET and SESSION_HASH_SECRET. $CSRF_REMEDY"
+unset csrf_secret
+
 [[ -f "$HOST_ID_FILE" ]] || die "$HOST_ID_FILE is missing"
 [[ "$(tr -d '\r\n' < "$HOST_ID_FILE")" == "$EXPECTED_HOST_ID" ]] \
     || die "host identity mismatch"
@@ -54,6 +90,34 @@ compose() {
 }
 
 docker pull "$VENDOR_APP_IMAGE"
+
+# The ARTIFACT's own verdict on this host's environment, still before the host
+# is touched. The greps above are a fast, dependency-free floor that restates
+# three of the kernel's rules and will drift from them; this asks the image that
+# is about to run, using the very function its lifespan calls. A clean answer
+# here is the answer the boot will give — except that it arrives before the
+# database has been started, the manifest volume initialised, a backup taken or
+# a single migration applied.
+#
+# The two DSNs are placeholders. Compose supplies the real ones from its own
+# `environment:` block, so they are absent from the env file and would be
+# reported as missing; `--network none` guarantees neither is dialled.
+#
+# `validate_settings` returns error strings that name SETTINGS and never values,
+# which is what makes it safe to print this verdict.
+readonly ENVIRONMENT_VERDICT="$(docker run --rm --network none \
+    --env-file "$ENV_FILE" \
+    --env DATABASE_URL=postgresql+psycopg://placeholder@127.0.0.1:5432/none \
+    --env PLATFORM_DATABASE_URL=postgresql+psycopg://placeholder@127.0.0.1:5432/none \
+    --entrypoint python "$VENDOR_APP_IMAGE" -c \
+    'from dotmac_kernel.config import settings, validate_settings
+for error in validate_settings(settings):
+    print(error)')"
+[[ -z "$ENVIRONMENT_VERDICT" ]] || die "the image refuses this host environment:
+${ENVIRONMENT_VERDICT}
+Nothing has been changed — no container started, no migration applied.
+${CSRF_REMEDY}"
+
 compose up -d --wait db
 compose --profile ops run --rm --no-deps manifest-init
 

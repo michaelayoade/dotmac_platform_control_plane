@@ -133,6 +133,11 @@ def test_the_read_back_actually_leaves_the_runner() -> None:
     pull = workflow.index('docker pull "$reference"')
     compare = workflow.index("registry RootFS chain $pulled_chain != accepted")
     assert remove < inspect_guard < pull < compare
+    # And the pull's own output is kept, so the run log carries the fetch as an
+    # OBSERVATION rather than leaving the whole proof resting on the guard.
+    # Measured need: release run 33474406793 passed this step with the output
+    # discarded, and the log therefore showed no evidence the bytes had moved.
+    assert 'docker pull "$reference" >/dev/null' not in workflow
 
 
 def test_the_receipt_records_per_file_distribution_digests() -> None:

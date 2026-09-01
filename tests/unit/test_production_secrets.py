@@ -16,12 +16,14 @@ import pytest
 from vendor_cp.production_secrets import (
     DATABASE_PATH,
     DEPLOY_SSH_PATH,
+    ENV_SECRET_KEYS,
     LICENCE_SIGNING_PATH,
     RUNTIME_PATH,
     SECRET_FIELDS,
     HostSecretBundle,
     OpenBaoClient,
     ProductionSecretError,
+    _render_env,
     build_host_bundle,
     materialize_host_bundle,
     pin_product_release,
@@ -51,6 +53,10 @@ def _records() -> dict[str, dict[str, str]]:
         RUNTIME_PATH: {
             "jwt_secret": "jwt_test_123",
             "session_hash_secret": "session_test_123",
+            # At least 32 bytes and distinct from the other two, because the
+            # contract now refuses anything less — the same three ways the
+            # kernel refuses a production CSRF_SECRET.
+            "csrf_secret": "csrf_test_" + "c" * 40,
         },
         DEPLOY_SSH_PATH: {
             "private_key_openssh": (
@@ -96,6 +102,7 @@ VENDOR_DB_APP_USER_PASSWORD=
 VENDOR_DB_PLATFORM_API_PASSWORD=
 JWT_SECRET=
 SESSION_HASH_SECRET=
+CSRF_SECRET=
 VENDOR_LICENCE_SIGNING_KEY_ID=vendor-prod-1
 """
 
@@ -555,3 +562,96 @@ def test_product_release_pin_refuses_a_symlinked_environment_file(
     assert target.read_text(encoding="utf-8") == (
         "VENDOR_PRODUCT_RELEASE_PINS_JSON={}\n"
     )
+
+
+# ── CSRF_SECRET is part of the contract, and its refusals are actionable ──────
+#
+# Kernel a98 `validate_settings` makes a production `CSRF_SECRET` fatal three
+# ways. Until 2026-09-01 the secret contract declared no such field at all, so
+# a host `.env` materialized from the template could not boot the artifact —
+# and the failure arrived in the application's lifespan, after the migrations.
+
+
+def test_the_runtime_record_carries_a_csrf_secret() -> None:
+    assert "csrf_secret" in SECRET_FIELDS[RUNTIME_PATH]
+    assert "CSRF_SECRET" in ENV_SECRET_KEYS
+    assert build_host_bundle(FakeSecrets(_records())).csrf_secret
+
+
+def test_a_runtime_record_without_csrf_secret_names_its_remediation() -> None:
+    """A refusal that does not say what to do sends the reader to `seed`, which
+    only creates ABSENT records and therefore cannot repair this one."""
+    records = _records()
+    del records[RUNTIME_PATH]["csrf_secret"]
+
+    with pytest.raises(ProductionSecretError) as refusal:
+        build_host_bundle(FakeSecrets(records))
+
+    message = str(refusal.value)
+    assert "missing csrf_secret" in message
+    assert RUNTIME_PATH in message
+    assert "will not repair one that exists" in message
+    assert "at least 32 bytes" in message
+    assert "distinct from `jwt_secret` and `session_hash_secret`" in message
+
+
+def test_no_secret_value_reaches_a_schema_refusal() -> None:
+    """The one refusal that names what is wrong is the one that risks naming
+    what is in it. Field NAMES only."""
+    records = _records()
+    secret_values = set(records[RUNTIME_PATH].values())
+    del records[RUNTIME_PATH]["csrf_secret"]
+
+    with pytest.raises(ProductionSecretError) as refusal:
+        build_host_bundle(FakeSecrets(records))
+
+    for value in secret_values:
+        assert value not in str(refusal.value)
+
+
+def test_a_short_csrf_secret_is_refused() -> None:
+    records = _records()
+    records[RUNTIME_PATH]["csrf_secret"] = "c" * 31
+
+    with pytest.raises(ProductionSecretError, match="at least 32 bytes"):
+        build_host_bundle(FakeSecrets(records))
+
+
+@pytest.mark.parametrize("twin", ["jwt_secret", "session_hash_secret"])
+def test_a_csrf_secret_equal_to_another_runtime_secret_is_refused(twin: str) -> None:
+    records = _records()
+    records[RUNTIME_PATH][twin] = "x" * 40
+    records[RUNTIME_PATH]["csrf_secret"] = "x" * 40
+
+    with pytest.raises(ProductionSecretError, match="must differ from"):
+        build_host_bundle(FakeSecrets(records))
+
+
+def test_the_bundle_revalidates_csrf_over_the_ssh_pipe() -> None:
+    """`from_json` is a second entry point and never calls `validate_record`."""
+    bundle = _bundle()
+    smuggled = json.loads(bundle.to_json())
+    smuggled["csrf_secret"] = "too-short"
+
+    with pytest.raises(ProductionSecretError, match="shorter than 32 bytes"):
+        HostSecretBundle.from_json(json.dumps(smuggled))
+
+
+def test_the_rendered_env_carries_the_csrf_secret() -> None:
+    rendered = _render_env(_template(), _bundle())
+
+    assert f"CSRF_SECRET={_bundle().csrf_secret}" in rendered
+
+
+def test_seed_generates_a_conforming_csrf_secret_for_an_absent_record() -> None:
+    """Only for an ABSENT record. `seed_missing_records` never touches one that
+    exists, which is exactly why the production record needs a manual patch."""
+    client = FakeSecrets()
+
+    seed_missing_records(client, keypair_factory=_keypair)
+    validate_record(RUNTIME_PATH, client.records[RUNTIME_PATH])
+
+    existing = FakeSecrets(_records())
+    before = dict(existing.records[RUNTIME_PATH])
+    seed_missing_records(existing, keypair_factory=_keypair)
+    assert existing.records[RUNTIME_PATH] == before

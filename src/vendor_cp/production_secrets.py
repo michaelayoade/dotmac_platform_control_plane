@@ -42,7 +42,7 @@ SECRET_FIELDS: Mapping[str, frozenset[str]] = {
     DATABASE_PATH: frozenset(
         {"admin_password", "app_user_password", "platform_api_password"}
     ),
-    RUNTIME_PATH: frozenset({"jwt_secret", "session_hash_secret"}),
+    RUNTIME_PATH: frozenset({"jwt_secret", "session_hash_secret", "csrf_secret"}),
     DEPLOY_SSH_PATH: frozenset(
         {"private_key_openssh", "public_key_openssh", "username"}
     ),
@@ -58,9 +58,16 @@ ENV_SECRET_KEYS = frozenset(
         "VENDOR_DB_PLATFORM_API_PASSWORD",
         "JWT_SECRET",
         "SESSION_HASH_SECRET",
+        "CSRF_SECRET",
         "VENDOR_LICENCE_SIGNING_KEY_ID",
     }
 )
+
+#: `dotmac_kernel.config.validate_settings` refuses a production `CSRF_SECRET`
+#: three ways: still the dev default, fewer than this many bytes, or equal to
+#: `JWT_SECRET`/`SESSION_HASH_SECRET`. Each raises in the application lifespan,
+#: so each must be refused where the record is validated instead.
+CSRF_SECRET_MIN_BYTES = 32
 
 _KEY_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -88,6 +95,7 @@ class HostSecretBundle:
     platform_api_password: str
     jwt_secret: str
     session_hash_secret: str
+    csrf_secret: str
     licence_key_id: str
     licence_private_key_b64url: str
     deploy_public_key_openssh: str
@@ -258,6 +266,10 @@ def generated_records(
         RUNTIME_PATH: {
             "jwt_secret": secrets.token_urlsafe(64),
             "session_hash_secret": secrets.token_urlsafe(64),
+            # Generated with the other two, and only ever for an ABSENT record.
+            # `seed_missing_records` never touches one that exists, so this does
+            # not and cannot repair the production record — see `_remediation`.
+            "csrf_secret": secrets.token_urlsafe(64),
         },
         DEPLOY_SSH_PATH: {
             "private_key_openssh": private_key,
@@ -291,12 +303,53 @@ def seed_missing_records(
     return tuple(created)
 
 
+def _remediation(path: str, missing: Sequence[str]) -> str:
+    """What an operator must actually DO, named in the refusal.
+
+    `seed_missing_records` only CREATES absent records, so it can never repair
+    an existing one — which is precisely the case a schema widening produces.
+    A refusal that does not say so sends the reader to the command that cannot
+    help.
+    """
+    if not missing:
+        return (
+            "The approved schema is fixed: remove the unexpected field rather "
+            "than widening it here."
+        )
+    instruction = (
+        f"`materialize_production_secrets.py seed` only CREATES absent records "
+        f"and will not repair one that exists, so patch {path} directly to add "
+        f"{', '.join(missing)}."
+    )
+    if "csrf_secret" in missing:
+        instruction += (
+            f" `csrf_secret` must be at least {CSRF_SECRET_MIN_BYTES} bytes and "
+            "distinct from `jwt_secret` and `session_hash_secret`: kernel a98 "
+            "`validate_settings` treats a production `CSRF_SECRET` that is "
+            "unset, shorter, or equal to either as fatal."
+        )
+    return instruction
+
+
 def validate_record(path: str, fields: Mapping[str, str]) -> None:
     expected = SECRET_FIELDS.get(path)
     if expected is None:
         raise ProductionSecretError("secret path is outside the approved set")
     if set(fields) != expected:
-        raise ProductionSecretError(f"OpenBao record {path} has an unexpected schema")
+        # Field NAMES only. A record's VALUES never reach an error message, and
+        # this is the one place where naming what is wrong risks naming what is
+        # in it.
+        missing = sorted(expected - set(fields))
+        unexpected = sorted(set(fields) - expected)
+        observed = []
+        if missing:
+            observed.append(f"missing {', '.join(missing)}")
+        if unexpected:
+            observed.append(f"unexpected {', '.join(unexpected)}")
+        raise ProductionSecretError(
+            f"OpenBao record {path} has an unexpected schema "
+            f"({'; '.join(observed)}). {_remediation(path, missing)}"
+        )
     if any(not isinstance(value, str) or not value for value in fields.values()):
         raise ProductionSecretError(f"OpenBao record {path} has an empty field")
     if path == LICENCE_SIGNING_PATH:
@@ -316,6 +369,18 @@ def validate_record(path: str, fields: Mapping[str, str]) -> None:
             raise ProductionSecretError("licence signing key is not base64url") from exc
         if len(material) != 32:
             raise ProductionSecretError("licence signing key must be 32 bytes")
+    if path == RUNTIME_PATH:
+        csrf_secret = fields["csrf_secret"]
+        if len(csrf_secret.encode("utf-8")) < CSRF_SECRET_MIN_BYTES:
+            raise ProductionSecretError(
+                f"{RUNTIME_PATH} field csrf_secret must be at least "
+                f"{CSRF_SECRET_MIN_BYTES} bytes"
+            )
+        if csrf_secret in {fields["jwt_secret"], fields["session_hash_secret"]}:
+            raise ProductionSecretError(
+                f"{RUNTIME_PATH} field csrf_secret must differ from jwt_secret "
+                "and session_hash_secret"
+            )
     if path == DEPLOY_SSH_PATH:
         if fields["username"] != "root":
             raise ProductionSecretError("production deploy SSH username must be root")
@@ -346,6 +411,7 @@ def build_host_bundle(client: SecretReader) -> HostSecretBundle:
         platform_api_password=records[DATABASE_PATH]["platform_api_password"],
         jwt_secret=records[RUNTIME_PATH]["jwt_secret"],
         session_hash_secret=records[RUNTIME_PATH]["session_hash_secret"],
+        csrf_secret=records[RUNTIME_PATH]["csrf_secret"],
         licence_key_id=records[LICENCE_SIGNING_PATH]["key_id"],
         licence_private_key_b64url=records[LICENCE_SIGNING_PATH]["private_key_b64url"],
         deploy_public_key_openssh=records[DEPLOY_SSH_PATH]["public_key_openssh"],
@@ -373,9 +439,22 @@ def validate_host_bundle(bundle: HostSecretBundle) -> None:
         bundle.platform_api_password,
         bundle.jwt_secret,
         bundle.session_hash_secret,
+        bundle.csrf_secret,
     ):
         if "\n" in value or "=" in value:
             raise ProductionSecretError("environment secret is not URL-safe")
+    # Re-asserted on the BUNDLE, not only on the record it came from: the bundle
+    # is also reconstructed from JSON over an SSH pipe, and that path never sees
+    # `validate_record`.
+    if len(bundle.csrf_secret.encode("utf-8")) < CSRF_SECRET_MIN_BYTES:
+        raise ProductionSecretError(
+            f"host bundle csrf_secret is shorter than {CSRF_SECRET_MIN_BYTES} bytes"
+        )
+    if bundle.csrf_secret in {bundle.jwt_secret, bundle.session_hash_secret}:
+        raise ProductionSecretError(
+            "host bundle csrf_secret must differ from jwt_secret and "
+            "session_hash_secret"
+        )
 
 
 def _atomic_write(
@@ -420,6 +499,7 @@ def _render_env(template: str, bundle: HostSecretBundle) -> str:
         "VENDOR_DB_PLATFORM_API_PASSWORD": bundle.platform_api_password,
         "JWT_SECRET": bundle.jwt_secret,
         "SESSION_HASH_SECRET": bundle.session_hash_secret,
+        "CSRF_SECRET": bundle.csrf_secret,
         "VENDOR_LICENCE_SIGNING_KEY_ID": bundle.licence_key_id,
     }
     seen: set[str] = set()

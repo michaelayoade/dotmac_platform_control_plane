@@ -265,6 +265,11 @@ def test_production_environment_has_no_secret_defaults() -> None:
         "VENDOR_DB_PLATFORM_API_PASSWORD",
         "JWT_SECRET",
         "SESSION_HASH_SECRET",
+        # Declared 2026-09-01. Kernel a98 makes a production CSRF_SECRET fatal
+        # three ways, and this template previously declared `CSRF_ENABLED=true`
+        # and no secret at all — so a host materialized from it could not boot
+        # the artifact.
+        "CSRF_SECRET",
     }
     values = dict(
         line.split("=", 1)
@@ -449,3 +454,101 @@ def test_host_bootstrap_requires_held_key_and_a_registered_certbot_contact() -> 
     )
     assert "secret/dotmac/licensing/signing-key" in bootstrap
     assert "certbot certonly" in bootstrap
+
+
+def test_the_deploy_refuses_a_fatal_environment_before_it_touches_anything() -> None:
+    """The failure must arrive before the migrations, not in the lifespan.
+
+    `compose up -d app` is the SEVENTH action this script takes. The image is
+    pulled, the database started, the manifest volume initialised, the role and
+    ownership contracts read, a backup taken and THE MIGRATIONS APPLIED before
+    the application is ever started — so a configuration error left to the
+    application's own `validate_settings` call arrives with the schema already
+    advanced and the service down.
+
+    Both checks are asserted, and they are not redundant. The env-file greps are
+    a dependency-free floor that needs no image; the artifact's verdict cannot
+    drift from the kernel, because it IS the kernel's function.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+
+    csrf_present = deploy.index("CSRF_SECRET is absent or empty")
+    csrf_length = deploy.index("CSRF_SECRET is shorter than 32 bytes")
+    csrf_distinct = deploy.index("CSRF_SECRET must differ from JWT_SECRET")
+    verdict = deploy.index("the image refuses this host environment")
+    start_db = deploy.index("up -d --wait db")
+    migrate = deploy.index("dotmac-platform admin migrate")
+
+    assert csrf_present < csrf_length < csrf_distinct < verdict < start_db < migrate
+    # The artifact's own function, not a re-implementation of its rules.
+    assert "validate_settings" in deploy
+    assert "--network none" in deploy
+
+
+def test_the_preflight_never_prints_a_secret_value() -> None:
+    """The one check that reads secrets is the one that must not echo them.
+
+    Lengths and equality only: `${#csrf_secret}` and `!=`. A bare `$csrf_secret`
+    inside a message would put a production credential into a deploy log.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+    preflight = deploy[
+        deploy.index("readonly CSRF_REMEDY") : deploy.index("HOST_ID_FILE is missing")
+    ]
+
+    assert "${#csrf_secret}" in preflight
+    for message in re.findall(r'die "([^"]*)"', preflight):
+        assert "$csrf_secret" not in message, message
+    assert "unset csrf_secret" in preflight
+
+
+def test_the_remediation_names_the_record_the_field_and_the_constraint() -> None:
+    """One action for the operator, not a discovery.
+
+    `seed` only CREATES absent records, so naming it alone would send the reader
+    to the command that cannot repair an existing one — which is exactly the
+    case here.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+    remedy = deploy[deploy.index("readonly CSRF_REMEDY") :].split('"')[1]
+
+    assert "secret/dotmac/vendor-control-plane/production/runtime" in remedy
+    assert "csrf_secret" in remedy
+    assert "32 bytes" in remedy
+    assert "distinct from jwt_secret and session_hash_secret" in remedy
+    assert "will not repair one that already exists" in remedy
+
+
+def test_the_console_login_claim_matches_the_measured_artifact() -> None:
+    """Canonical prose may not outlive the phase it describes.
+
+    Three documents and one profile rationale said the assembly declares no
+    form-parsing library and `POST /platform/login` cannot read its own form.
+    `python-multipart` is a main dependency and the acceptance battery drives
+    that login to a console session inside the built artifact, so the claim is
+    false wherever it is still stated as present tense.
+
+    Gated on the FACT, not on a banned phrase: while the dependency is declared
+    and the battery drives the login, the claim is forbidden; if either ever
+    stops holding, this test stops requiring its absence.
+    """
+    declares_form_parser = "python-multipart" in _text("pyproject.toml")
+    battery = _text(".github/candidate/acceptance.sh")
+    drives_the_login = (
+        "/platform/login" in battery and "form login yields a session" in battery
+    )
+    assert (
+        declares_form_parser and drives_the_login
+    ), "the premise changed; revisit the claim rather than this assertion"
+
+    present_tense = (
+        "the assembly declares no form-parsing library",
+        "cannot read its own form",
+    )
+    for relative in (
+        "src/vendor_cp/deployment_profile.py",
+        "docs/ARCHITECTURE.md",
+    ):
+        text = _text(relative)
+        for claim in present_tense:
+            assert claim not in text, f"{relative} still states: {claim}"
