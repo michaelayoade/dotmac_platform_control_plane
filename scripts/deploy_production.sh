@@ -130,13 +130,68 @@ readonly OWNER_CONTRACT="$(compose exec -T db sh -c \
 [[ "$OWNER_CONTRACT" == "app_admin|app_admin" ]] \
     || die "module database ownership contract is not satisfied"
 
+# ── The backup is a PAIR, because a dump on its own is not a rollback ────────
+#
+# Rehearsed 2026-08-30 against this host's own newest backup: a plain
+# `pg_restore` of the dump alone exited 1 with 114 missing-role errors across
+# five roles, and left a database that LOOKED recovered — 45 tables, 23 of 26
+# policies, 16 RLS-enabled tables — with no roles, no grants, and every object
+# owned by whoever ran the restore. `pg_dump` of one database carries object
+# ACLs and RLS policies but never role definitions: those live in the cluster.
+#
+# That is worse than a backup that fails outright. This assembly's plane
+# separation IS the grant/revoke matrix rather than the policies alone
+# (`dotmac_starter_mt` ADR-0023), so a restore that silently drops the role
+# layer produces a control-plane database with no plane separation, and an
+# operator reading `pg_policies` afterwards concludes the isolation model came
+# back. It did not.
+#
+# `--no-role-passwords` is the PROVED configuration, not a precaution. The same
+# artefact, restored with globals captured that way, exited 0 with zero errors
+# and the facility's `verify_recovery` reported zero findings across roles,
+# memberships, ownership, effective privileges, RLS force and the descriptor's
+# own isolation invariants — `docs/operations/recovery-proved-2026-08-30.md`.
+# It also needs no superuser, which this cluster deliberately has no password
+# for (`deploy/postgres/init-roles.sh` ends with `ALTER ROLE postgres PASSWORD
+# NULL`), and it keeps every SCRAM verifier out of a file sitting on the host.
+#
+# Both halves are written to `.tmp` and PUBLISHED only once both are complete
+# and the globals have been checked. A dump appearing beside a missing or empty
+# globals file would be the same half-artifact under a new name.
+#
+# RESTORE ORDER IS GLOBALS FIRST. Restoring the dump first recreates the 114
+# errors, because the grants it carries name principals that do not exist yet.
 mkdir -p "$BACKUP_DIR"
 readonly TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 readonly BACKUP_PATH="${BACKUP_DIR}/vendor-control-plane-${TIMESTAMP}.dump"
 readonly BACKUP_TMP="${BACKUP_PATH}.tmp"
+readonly GLOBALS_PATH="${BACKUP_DIR}/vendor-control-plane-${TIMESTAMP}.globals.sql"
+readonly GLOBALS_TMP="${GLOBALS_PATH}.tmp"
+
+compose exec -T db sh -c \
+    'exec pg_dumpall --username app_admin --database "$POSTGRES_DB" \
+        --globals-only --no-role-passwords' \
+    > "$GLOBALS_TMP"
+
+# Checked by NAME, against the five roles `deploy/postgres/init-roles.sh`
+# creates and `deploy/product.toml` declares as `[[database.roles]]`. A
+# non-empty or size check would pass on a globals file carrying only
+# tablespaces — which is exactly the shape that produces 114 errors while
+# looking like a capture. The failure arrives here, before the migration and
+# before the application is replaced, so nothing has been changed yet.
+for role in app_admin app_user platform_api outbox_dispatcher \
+            platform_outbox_dispatcher; do
+    grep -Eq "^CREATE ROLE \"?${role}\"?;\$" "$GLOBALS_TMP" || die \
+"cluster globals capture does not create role ${role}. The pair would restore \
+without the grant/revoke matrix that IS this database's plane separation, and \
+the restore would look successful. Nothing has been changed."
+done
+
 compose exec -T db sh -c \
     'exec pg_dump --username app_admin --dbname "$POSTGRES_DB" --format custom' \
     > "$BACKUP_TMP"
+
+mv "$GLOBALS_TMP" "$GLOBALS_PATH"
 mv "$BACKUP_TMP" "$BACKUP_PATH"
 
 # This is the one composed migration owner: kernel, Vendor, Release Catalog,
@@ -163,5 +218,5 @@ curl --fail --silent --show-error --max-time 10 \
     --header "Host: vendor.dotmac.io" \
     "http://127.0.0.1:${VENDOR_APP_PORT:-8100}/health/ready" >/dev/null
 
-printf 'Deployed %s; pre-migration backup: %s\n' \
-    "$VENDOR_APP_IMAGE" "$BACKUP_PATH"
+printf 'Deployed %s\npre-migration backup (restore globals FIRST): %s then %s\n' \
+    "$VENDOR_APP_IMAGE" "$GLOBALS_PATH" "$BACKUP_PATH"
