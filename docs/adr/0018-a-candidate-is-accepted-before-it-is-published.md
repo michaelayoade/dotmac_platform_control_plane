@@ -112,6 +112,7 @@ the only thing that had ever executed it:
 | role contract compared `f\|f\|t\|t` against `false\|false\|true\|true` | PostgreSQL's boolean OUTPUT function against its boolean CAST |
 | RLS check treated a `tenant_id` COLUMN as tenant SCOPE | `public.tenant_domains`, the tenant resolver's own input, against a rule it is exempt from by design |
 | readiness lane never started the application | a production-shaped environment missing `CSRF_SECRET`, which kernel a98 makes production-fatal |
+| API journey could never obtain a token | `candidate.dotmac.invalid` — a special-use domain `EmailStr` refuses, so the login body was 422 before any credential was read |
 
 All three were defects in the CHECK rather than in the artifact, and each cost a
 merge to protected `main` to discover and another to repair. The third is the

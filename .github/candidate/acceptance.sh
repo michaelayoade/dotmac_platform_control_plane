@@ -27,9 +27,42 @@ DB_PORT="${CANDIDATE_DB_PORT:-5449}"
 DB_CONTAINER="candidate-postgres"
 APP_CONTAINER="candidate-app"
 PG_IMAGE="${CANDIDATE_POSTGRES_IMAGE:-postgres:16}"
-HOSTNAME_HEADER="candidate.dotmac.invalid"
+# The platform host this run addresses. It is a Host HEADER only — every request
+# below dials 127.0.0.1 explicitly — so this name is never resolved and no such
+# host need exist.
+#
+# It was `candidate.dotmac.invalid`, chosen so it could not possibly resolve, and
+# that choice broke the API journey in a way worth recording. `.invalid` is an
+# IANA SPECIAL-USE domain, and `email-validator` (behind pydantic's `EmailStr`)
+# refuses one in the domain part regardless of deliverability checking. The
+# platform login body is an `EmailStr`, so an administrator the CLI had just
+# created successfully — the CLI does not validate as an `EmailStr` — was
+# rejected with 422 before any credential was checked. The battery reported
+# "the API did not issue a bearer token", which was true and named nothing.
+HOSTNAME_HEADER="candidate.dotmac.io"
 
 pass() { printf '  ok    %s\n' "$*"; }
+# A refusal that names nothing costs a whole run to diagnose. This renders the
+# reason and the response SHAPE, and never a value: a successful body carries a
+# bearer token, and a failing one is only a step away from carrying an echoed
+# credential.
+refusal_reason() {
+    python3 - "$1" <<'REASON'
+import json
+import sys
+
+raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+try:
+    body = json.loads(raw)
+except Exception:
+    print(raw[:200].replace("\n", " "))
+    raise SystemExit(0)
+if isinstance(body, dict):
+    print(f"detail={body.get('detail')!r} keys={sorted(body)}")
+else:
+    print(str(body)[:200])
+REASON
+}
 fail() { printf '  FAIL  %s\n' "$*" >&2; exit 1; }
 step() { printf '\n== %s\n' "$*"; }
 
@@ -470,12 +503,18 @@ printf '%s' "$admin_password" | docker run --rm --interactive --network host \
     || fail "the CLI could not create a platform administrator"
 pass "CLI: platform administrator created, password read from stdin and never on argv"
 
-token="$(curl --silent --max-time 10 --header "Host: ${HOSTNAME_HEADER}" \
+login_status="$(curl --silent --output "$WORKDIR/login.json" --write-out '%{http_code}' \
+    --max-time 10 --header "Host: ${HOSTNAME_HEADER}" \
     --header 'Content-Type: application/json' \
     --data "{\"email\":\"${admin_email}\",\"password\":\"${admin_password}\"}" \
-    "http://127.0.0.1:8000/platform/auth/login" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))')"
-test -n "$token" || fail "the API did not issue a bearer token to the CLI-created identity"
+    "http://127.0.0.1:8000/platform/auth/login")"
+token="$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get("access_token", ""))
+except Exception:
+    print("")' "$WORKDIR/login.json")"
+test -n "$token" \
+    || fail "the API did not issue a bearer token to the CLI-created identity (HTTP $login_status): $(refusal_reason "$WORKDIR/login.json")"
 pass "API: the identity the CLI created authenticates over the bearer plane"
 
 doc_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \

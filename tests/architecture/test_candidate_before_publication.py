@@ -398,6 +398,9 @@ REQUIRED_CHECKS: dict[str, str] = {
     "liveness as control": "liveness should answer 200 even with no database",
     "browser journey": "form login yields a session that reaches the console",
     "api journey": "the API did not issue a bearer token",
+    # A refusal that names nothing costs a whole run to diagnose, and a refusal
+    # that names too much echoes a credential. Both halves are required.
+    "refusals name their reason": "refusal_reason",
     "cli journey": "a read reaches the same owner the browser and API just used",
     "wrong credential": "a wrong password returned $bad_code",
     "wrong standing": "an inactive administrator with the CORRECT password",
