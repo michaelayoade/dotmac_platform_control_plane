@@ -135,6 +135,146 @@ def test_the_read_back_actually_leaves_the_runner() -> None:
     assert remove < inspect_guard < pull < compare
 
 
+def test_the_receipt_records_per_file_distribution_digests() -> None:
+    """Bundle granularity names the container, not what is inside it.
+
+    The config digest and the layer chain identify an image. Neither answers
+    "which wheel is installed in it?", so a receipt carrying only those cannot
+    be checked against a distribution artifact at all — which is the granularity
+    a prior release record called out as missing.
+    """
+    workflow = _text(IMAGE_WORKFLOW)
+    receipt = workflow[workflow.index("Emit the release receipt") :]
+    assert "distributions:$distributions" in receipt
+    assert "candidate-distributions.json" in receipt
+
+
+def test_the_distribution_digests_are_read_from_the_candidate_not_remeasured() -> None:
+    """A second `poetry build` describes different bytes.
+
+    A wheel is a zip and a zip carries timestamps, so rebuilding to measure
+    would produce a digest for an archive this image does not contain — a
+    receipt field that looks like evidence and is not. The image computes them
+    in the stage that installed them; the pipeline READS them out.
+    """
+    workflow = _text(IMAGE_WORKFLOW)
+    identity = workflow[
+        workflow.index("Record the candidate's identity") : workflow.index(
+            "Accept the candidate, or refuse it"
+        )
+    ]
+    assert "/app/distributions.json" in identity
+    # The property is that nothing INVOKES a second build, not that the words
+    # are unmentionable — the comment explaining why it must not is the
+    # documentation this rule most wants written. Same mistake, and same
+    # correction, as the Dockerfile's PYTHONPATH guard.
+    invocations = [
+        line
+        for line in identity.splitlines()
+        if "poetry build" in line and not line.lstrip().startswith("#")
+    ]
+    assert invocations == [], invocations
+    # And a receipt that recorded an empty list, or one format, would be a
+    # narrowing nobody would notice. Both are required where they are read.
+    assert 'endswith(".whl")' in identity
+    assert 'endswith(".tar.gz")' in identity
+
+
+def test_the_manifest_the_receipt_reads_is_checked_before_publication() -> None:
+    """The read happens only on the publication path, so the battery holds it.
+
+    A malformed or silently narrowed `/app/distributions.json` would otherwise
+    first be discovered by the step that reads it — after the push, with the
+    receipt unemitted. That is the exact failure shape the ordering exists to
+    prevent, so the property belongs to acceptance rather than to publication.
+    """
+    acceptance = _text(ACCEPTANCE)
+    assert "/app/distributions.json" in acceptance
+    assert "dotmac-distribution-digests/1" in acceptance
+    # Tied to the installed distribution, not free-floating.
+    assert "importlib.metadata import version" in acceptance
+
+
+def test_the_registry_read_back_is_preflighted_before_the_push() -> None:
+    """A tool that is missing must not be discovered with bytes already published."""
+    workflow = _text(IMAGE_WORKFLOW)
+    preflight = workflow.index("docker manifest inspect --help")
+    push = workflow.index("docker push")
+    assert preflight < push
+
+
+def test_the_image_carries_the_distributions_the_receipt_describes() -> None:
+    """The claim is re-derivable from a pulled image, not only from a run log."""
+    dockerfile = _text(ROOT / "Dockerfile")
+    assert (
+        "--format wheel" not in dockerfile
+    ), "only a wheel is built, so the receipt cannot carry an sdist digest"
+    assert "dotmac-distribution-digests/1" in dockerfile
+    assert "no wheel was built" in dockerfile
+    assert "no sdist was built" in dockerfile
+    assert "/app/distributions.json ./distributions.json" in dockerfile
+
+
+def test_the_battery_is_reachable_from_the_pull_request_path() -> None:
+    """Every defect this battery has had was found by a publication run.
+
+    Three of them, each costing a merge to protected main to discover: a restore
+    lane that landed zero tables, a read-back that compared two different kinds
+    of digest, and a role-contract assertion that compared PostgreSQL's boolean
+    OUTPUT (`t`/`f`) against its boolean CAST (`true`/`false`) and could not
+    hold on any correct database. All three were defects in the CHECK, and all
+    three were unreachable from the pull-request path.
+
+    The rehearsal does not weaken the ordering: acceptance is still the run
+    against the exact candidate about to be published, asserted above. This only
+    makes the battery's own defects fail in review.
+    """
+    ci = _text(CI_WORKFLOW)
+    assert "Rehearse the acceptance battery" in ci
+    assert ".github/candidate/acceptance.sh" in ci
+    # One script, two callers. A rehearsal that had its own copy would drift,
+    # and a drifting rehearsal is worse than no rehearsal.
+    assert "acceptance.sh" in _text(IMAGE_WORKFLOW)
+    assert not (ROOT / ".github" / "candidate" / "acceptance-ci.sh").exists()
+
+
+def test_the_rehearsal_does_not_become_the_acceptance() -> None:
+    """CI proves the battery runs; it does not prove the published bytes.
+
+    The image CI builds is not the candidate — it is built from a pull-request
+    head, and nothing publishes it. If acceptance were ever deleted from the
+    publication path on the grounds that "CI already runs it", the registry
+    would again hold bytes nothing accepted.
+    """
+    workflow = _text(IMAGE_WORKFLOW)
+    accept = workflow.index("Accept the candidate, or refuse it")
+    assert ".github/candidate/acceptance.sh" in workflow[accept:]
+    assert workflow.index("docker push") > accept
+
+
+def test_the_role_contract_query_renders_the_form_it_declares() -> None:
+    """PostgreSQL renders a boolean two ways, and they do not agree.
+
+    `format('%s', ...)` calls the type's output function and emits `t`/`f`; the
+    boolean-to-text CAST emits `true`/`false`. Written without the casts this
+    assertion compared `f|f|t|t` against `false|false|true|true` — measured
+    failing in run 33407635872, at the FIRST assertion of step 5, which is why
+    nothing after it in the battery had ever executed.
+
+    The readable spelling is kept in the declaration, because it is what an
+    operator reads in the failure message, and the QUERY is the half corrected.
+    """
+    acceptance = _text(ACCEPTANCE)
+    contract = acceptance[acceptance.index('step "5  database ownership') :]
+    contract = contract[: contract.index("owner_contract=")]
+    for flag in ("rolsuper", "rolcreaterole", "rolbypassrls", "rolcanlogin"):
+        assert f"{flag}::text" in contract, (
+            f"{flag} is rendered by the boolean output function, which emits "
+            "t/f and can never equal the declared true/false"
+        )
+    assert 'test "$role_contract" = "false|false|true|true"' in acceptance
+
+
 def test_the_receipt_binds_the_revision_the_run_and_the_bytes() -> None:
     workflow = _text(IMAGE_WORKFLOW)
     receipt = workflow[workflow.index("Emit the release receipt") :]
@@ -147,6 +287,7 @@ def test_the_receipt_binds_the_revision_the_run_and_the_bytes() -> None:
         "rootfs_chain",
         "lock_digest",
         "dockerfile_digest",
+        "distributions",
     ):
         assert field in receipt, field
     assert "dotmac-candidate-release-receipt/1" in receipt
@@ -266,12 +407,30 @@ REQUIRED_CHECKS: dict[str, str] = {
     "database ownership": "app_admin|app_admin",
     "role contract": "false|false|true|true",
     "grant isolation": "the plane boundary is open",
+    # A column named `tenant_id` is not the same as a tenant-SCOPED table, and
+    # the one exception is DECLARED as an equality so the ratchet fails when the
+    # set grows AND when it shrinks.
+    "rls declared, not assumed": "the declared resolver-input set is",
+    "rls non-vacuity": "so the equality above is satisfied by the declaration",
+    # Production-fatal under kernel a98 and absent from `.env.production.example`;
+    # the battery supplies its own so the rest of the run is reachable.
+    "production csrf secret": "CSRF_SECRET=candidate-csrf-secret",
     "dependency-aware readiness": (
         "readiness returned $ready_code with an unreachable database"
     ),
     "liveness as control": "liveness should answer 200 even with no database",
     "browser journey": "form login yields a session that reaches the console",
+    # Replaying `Set-Cookie` is what lets a production `__Host-`/Secure cookie
+    # survive a plain-HTTP runner. The refusal case is what proves the
+    # protection is still on after doing it.
+    "csrf still refuses without proof": "a form POST with no CSRF proof returned",
+    # The distribution manifest the receipt reads is produced on every path,
+    # but only READ on the publication path — so the candidate demonstrates it.
+    "distribution manifest": "dotmac-distribution-digests/1",
     "api journey": "the API did not issue a bearer token",
+    # A refusal that names nothing costs a whole run to diagnose, and a refusal
+    # that names too much echoes a credential. Both halves are required.
+    "refusals name their reason": "refusal_reason",
     "cli journey": "a read reaches the same owner the browser and API just used",
     "wrong credential": "a wrong password returned $bad_code",
     "wrong standing": "an inactive administrator with the CORRECT password",

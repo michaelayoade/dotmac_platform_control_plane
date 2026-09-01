@@ -27,9 +27,42 @@ DB_PORT="${CANDIDATE_DB_PORT:-5449}"
 DB_CONTAINER="candidate-postgres"
 APP_CONTAINER="candidate-app"
 PG_IMAGE="${CANDIDATE_POSTGRES_IMAGE:-postgres:16}"
-HOSTNAME_HEADER="candidate.dotmac.invalid"
+# The platform host this run addresses. It is a Host HEADER only — every request
+# below dials 127.0.0.1 explicitly — so this name is never resolved and no such
+# host need exist.
+#
+# It was `candidate.dotmac.invalid`, chosen so it could not possibly resolve, and
+# that choice broke the API journey in a way worth recording. `.invalid` is an
+# IANA SPECIAL-USE domain, and `email-validator` (behind pydantic's `EmailStr`)
+# refuses one in the domain part regardless of deliverability checking. The
+# platform login body is an `EmailStr`, so an administrator the CLI had just
+# created successfully — the CLI does not validate as an `EmailStr` — was
+# rejected with 422 before any credential was checked. The battery reported
+# "the API did not issue a bearer token", which was true and named nothing.
+HOSTNAME_HEADER="candidate.dotmac.io"
 
 pass() { printf '  ok    %s\n' "$*"; }
+# A refusal that names nothing costs a whole run to diagnose. This renders the
+# reason and the response SHAPE, and never a value: a successful body carries a
+# bearer token, and a failing one is only a step away from carrying an echoed
+# credential.
+refusal_reason() {
+    python3 - "$1" <<'REASON'
+import json
+import sys
+
+raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+try:
+    body = json.loads(raw)
+except Exception:
+    print(raw[:200].replace("\n", " "))
+    raise SystemExit(0)
+if isinstance(body, dict):
+    print(f"detail={body.get('detail')!r} keys={sorted(body)}")
+else:
+    print(str(body)[:200])
+REASON
+}
 fail() { printf '  FAIL  %s\n' "$*" >&2; exit 1; }
 step() { printf '\n== %s\n' "$*"; }
 
@@ -41,9 +74,26 @@ trap cleanup EXIT
 
 # ── The production-shaped environment ───────────────────────────────────────
 # Taken from `.env.production.example` rather than invented, so the candidate is
-# exercised in the composition it will actually run in. The two differences are
-# named: the database points at a disposable container, and the signing key is
-# generated per run by the image itself and never leaves this runner.
+# exercised in the composition it will actually run in. The three differences are
+# named: the database points at a disposable container, the signing key is
+# generated per run by the image itself and never leaves this runner, and
+# `CSRF_SECRET` is a throwaway literal.
+#
+# That third one is not a convenience — it is a FINDING. `dotmac_kernel`
+# `validate_settings` treats `CSRF_SECRET` as production-fatal in three separate
+# ways: unset (still the dev default), shorter than 32 bytes, or equal to
+# `JWT_SECRET`/`SESSION_HASH_SECRET`. Any of them raises in the application
+# lifespan when `ENVIRONMENT=production`. `.env.production.example` declares
+# `CSRF_ENABLED=true` and does NOT declare `CSRF_SECRET` at all, and
+# `vendor_cp.production_secrets` does not materialize one: `SECRET_FIELDS`
+# carries `jwt_secret` and `session_hash_secret` on the runtime record and no
+# CSRF field. A host whose `.env` was built from that template therefore cannot
+# boot this artifact.
+#
+# The battery supplies its own so the remaining checks can run at all. It does
+# NOT repair the production secret contract — that changes what
+# `materialize_production_secrets.py` requires of an OpenBao record that already
+# exists, which is a deployment-window decision and not this file's to make.
 psql_admin() { docker exec -i "$DB_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres "$@"; }
 
 dsn() { printf 'postgresql+psycopg://%s@127.0.0.1:%s/%s' "$1" "$DB_PORT" "$2"; }
@@ -89,6 +139,40 @@ docker run --rm --network none \
     --format json diagnose self --strict >/dev/null \
     || fail "diagnose self --strict found the candidate is not running installed"
 pass "dotmac-platform resolves, reports a metadata version, and is installed"
+
+step "13 the distribution manifest the release receipt will carry"
+# The receipt records a per-file digest for the wheel and the sdist, READ out of
+# this document rather than re-measured: a second `poetry build` produces a
+# different archive for identical source, because a zip carries timestamps.
+#
+# That makes the document one of the things a candidate must demonstrate. The
+# pipeline step that reads it runs on the publication path ONLY, so without this
+# a malformed or silently narrowed manifest would first be discovered after the
+# push — the precise failure shape this whole ordering exists to prevent.
+SCRIPT="
+import json, re
+from importlib.metadata import version
+
+document = json.load(open('/app/distributions.json'))
+assert document['contract'] == 'dotmac-distribution-digests/1', document.get('contract')
+files = document['files']
+wheels = [f for f in files if f['filename'].endswith('.whl')]
+sdists = [f for f in files if f['filename'].endswith('.tar.gz')]
+assert len(wheels) == 1, wheels
+assert len(sdists) == 1, sdists
+for entry in files:
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', entry['sha256']), entry
+    assert entry['size_bytes'] > 0, entry
+# Tied to the INSTALLED distribution rather than free-floating. A manifest that
+# described some other build would satisfy every check above.
+installed = version('dotmac-vendor-control-plane')
+assert wheels[0]['filename'].split('-')[1] == installed, (wheels[0]['filename'], installed)
+assert sdists[0]['filename'].endswith(installed + '.tar.gz'), (sdists[0]['filename'], installed)
+print(wheels[0]['filename'], '+', sdists[0]['filename'], 'at', installed)
+"
+distribution_report="$(in_image)" \
+    || fail "the candidate's distribution manifest is absent, malformed, or describes another build"
+pass "distribution manifest: $distribution_report"
 
 step "12 no checkout dependency — the counter-proof, run inside the candidate"
 # The positive case above passes from `site-packages`. It would ALSO pass from a
@@ -269,12 +353,24 @@ grep -qi "permission denied for table\|permission denied for relation" "$WORKDIR
 pass "lane B failed on database ownership specifically, not on object privileges"
 
 step "5  database ownership, roles, grants and isolation"
+# `::text` on every flag, and it is load-bearing rather than tidy. PostgreSQL
+# has TWO renderings of a boolean and they do not agree: the type's own output
+# function — which is what `format('%s', ...)` calls — emits `t`/`f`, while the
+# boolean-to-text CAST emits `true`/`false`. Written without the casts this
+# assertion compared `f|f|t|t` against a declared `false|false|true|true` and
+# could never hold, on any correct database. It was measured failing in run
+# 33407635872 on protected main, at the FIRST assertion of step 5, which is why
+# nothing after it in this battery had ever executed.
+#
+# The declared form is kept in the readable spelling and the QUERY is corrected,
+# rather than the other way round: `false|false|true|true` says what the role
+# contract IS to someone reading the failure message, and `f|f|t|t` does not.
 SQL="
 SELECT format('%s|%s|%s|%s',
-  (SELECT rolsuper FROM pg_roles WHERE rolname='app_admin'),
-  (SELECT rolcreaterole FROM pg_roles WHERE rolname='app_admin'),
-  (SELECT rolbypassrls FROM pg_roles WHERE rolname='app_admin'),
-  (SELECT rolcanlogin FROM pg_roles WHERE rolname='app_admin'));
+  (SELECT rolsuper::text FROM pg_roles WHERE rolname='app_admin'),
+  (SELECT rolcreaterole::text FROM pg_roles WHERE rolname='app_admin'),
+  (SELECT rolbypassrls::text FROM pg_roles WHERE rolname='app_admin'),
+  (SELECT rolcanlogin::text FROM pg_roles WHERE rolname='app_admin'));
 "
 role_contract="$(psql_admin --tuples-only --no-align --dbname restored_ok -c "$SQL" | tr -d ' ')"
 test "$role_contract" = "false|false|true|true" \
@@ -299,11 +395,41 @@ test "$reachable" = "$module_schemas" \
     || fail "platform_api reaches $reachable of $module_schemas module schemas; the online role cannot work"
 pass "$module_schemas module schemas: app_user reaches none, platform_api reaches all"
 
-forced="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
-  "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r' AND NOT (c.relrowsecurity AND c.relforcerowsecurity);" | tr -d ' ')"
-test "$forced" = "0" \
-    || fail "$forced tenant-scoped table(s) do not have RLS enabled AND forced"
-pass "every table carrying tenant_id has row security enabled and forced"
+# NAMED, not counted, and declared as an EQUALITY rather than an emptiness.
+#
+# Two corrections live here, both measured. The first version reported a number:
+# "1 tenant-scoped table does not have RLS forced" does not say which table, in
+# which schema, or whether the gap is enabled-but-not-forced or no row security
+# at all, so an operator reading the failure has to reproduce the whole battery
+# to learn what it found.
+#
+# The second is the predicate itself. Carrying a column NAMED `tenant_id` is not
+# the same as being tenant-SCOPED. `public.tenant_domains` maps a hostname to a
+# tenant and is precisely what `dotmac_kernel.middleware.tenant` reads IN ORDER
+# TO DISCOVER which tenant a request belongs to — necessarily before any tenant
+# context exists. Row security there would make every request fail to resolve,
+# so the kernel declares it platform-level and grants `app_user` SELECT on it
+# explicitly (kernel migration `0001_initial_tenant_schema`: "`tenants` and
+# `tenant_domains` (NOT under RLS — platform-level)").
+#
+# So it is DECLARED, not exempted-by-silence, and declared as an equality so the
+# ratchet bites in both directions: a newly unprotected tenant-scoped table makes
+# the observed set grow and fails, and `tenant_domains` acquiring row security
+# makes it shrink and also fails — either way the declaration is revisited
+# rather than quietly satisfied.
+RESOLVER_INPUT_TABLES="public.tenant_domains"
+unforced="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT COALESCE(string_agg(DISTINCT n.nspname||'.'||c.relname, ', ' ORDER BY n.nspname||'.'||c.relname), '') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r' AND NOT (c.relrowsecurity AND c.relforcerowsecurity);")"
+test "$unforced" = "$RESOLVER_INPUT_TABLES" \
+    || fail "tables carrying tenant_id without RLS enabled AND forced are [$unforced]; the declared resolver-input set is [$RESOLVER_INPUT_TABLES]"
+# NON-VACUITY: the assertion above is satisfied by a database with no
+# tenant-scoped table at all, which is exactly what a wrong schema name or a
+# mis-joined catalogue query would produce.
+tenant_scoped="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
+  "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN information_schema.columns col ON col.table_schema=n.nspname AND col.table_name=c.relname AND col.column_name='tenant_id' WHERE c.relkind='r';" | tr -d ' ')"
+test "$tenant_scoped" -gt 1 \
+    || fail "only $tenant_scoped table carries tenant_id, so the equality above is satisfied by the declaration alone"
+pass "$tenant_scoped tables carry tenant_id; all but the declared resolver input force row security"
 
 step "9  the exact UI assets this artifact serves"
 SCRIPT="
@@ -357,6 +483,7 @@ start_app() {
         --env JWT_SECRET=candidate-jwt-secret-not-a-real-one \
         --env SESSION_HASH_SECRET=candidate-session-secret-not-a-real-one \
         --env CSRF_ENABLED=true \
+        --env CSRF_SECRET=candidate-csrf-secret-not-a-real-one-0123456789 \
         --env RATE_LIMIT_ENABLED=false \
         --env VENDOR_PROVIDER_MODE=fake \
         --env 'VENDOR_PRODUCT_RELEASE_PINS_JSON={}' \
@@ -410,12 +537,18 @@ printf '%s' "$admin_password" | docker run --rm --interactive --network host \
     || fail "the CLI could not create a platform administrator"
 pass "CLI: platform administrator created, password read from stdin and never on argv"
 
-token="$(curl --silent --max-time 10 --header "Host: ${HOSTNAME_HEADER}" \
+login_status="$(curl --silent --output "$WORKDIR/login.json" --write-out '%{http_code}' \
+    --max-time 10 --header "Host: ${HOSTNAME_HEADER}" \
     --header 'Content-Type: application/json' \
     --data "{\"email\":\"${admin_email}\",\"password\":\"${admin_password}\"}" \
-    "http://127.0.0.1:8000/platform/auth/login" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))')"
-test -n "$token" || fail "the API did not issue a bearer token to the CLI-created identity"
+    "http://127.0.0.1:8000/platform/auth/login")"
+token="$(python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get("access_token", ""))
+except Exception:
+    print("")' "$WORKDIR/login.json")"
+test -n "$token" \
+    || fail "the API did not issue a bearer token to the CLI-created identity (HTTP $login_status): $(refusal_reason "$WORKDIR/login.json")"
 pass "API: the identity the CLI created authenticates over the bearer plane"
 
 doc_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
@@ -425,13 +558,49 @@ test "$doc_code" = "200" \
     || fail "the bearer-protected document plane returned $doc_code to a platform admin"
 pass "API: /openapi.json answers 200 to a platform-admin bearer token"
 
-cookie_jar="$WORKDIR/cookies"
-login_page="$(curl --silent --max-time 10 --cookie-jar "$cookie_jar" \
+# Cookies are REPLAYED from the response headers rather than kept in curl's
+# cookie jar, and that is forced by a real property of the artifact rather than
+# by convenience. `CSRFMiddleware` names its cookie `__Host-csrf_token` when
+# `production` is set, and the `__Host-` prefix requires `Secure` — so curl,
+# which correctly refuses to return a Secure cookie over plain `http://`, sent
+# nothing back and the login was 403. Production terminates TLS at nginx; this
+# battery drives the container directly, so the transport differs and only the
+# transport does. Replaying `Set-Cookie` verbatim is what a browser over TLS
+# would do.
+#
+# It does not weaken the check: the token is still signed, still expiring, and
+# still bound to the very cookie set being replayed, and the non-vacuity case
+# below proves the refusal still fires.
+replay_cookies() {
+    tr -d '\r' < "$1" \
+        | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' \
+        | paste -sd ';' - \
+        | sed 's/;/; /g'
+}
+
+login_page="$(curl --silent --max-time 10 --dump-header "$WORKDIR/login.head" \
     --header "Host: ${HOSTNAME_HEADER}" "http://127.0.0.1:8000/platform/login")"
+issued_cookies="$(replay_cookies "$WORKDIR/login.head")"
+test -n "$issued_cookies" \
+    || fail "the login page issued no cookie at all, so the CSRF proof cannot be bound to one"
 csrf="$(printf '%s' "$login_page" | grep -o 'name="csrf_token" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//')"
+test -n "$csrf" || fail "the login page carries no hidden csrf_token field"
+
+# NON-VACUITY, first: replaying cookies must not have turned the protection off.
+# The same request without the proof has to be refused, or "the login succeeded"
+# says nothing about whether anything was checked.
+unproven_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
+    --header "Host: ${HOSTNAME_HEADER}" --header "Cookie: ${issued_cookies}" \
+    --data-urlencode "email=${admin_email}" \
+    --data-urlencode "password=${admin_password}" \
+    "http://127.0.0.1:8000/platform/login")"
+test "$unproven_code" = "403" \
+    || fail "a form POST with no CSRF proof returned $unproven_code, expected 403 — the check is not live"
+pass "browser: a form POST carrying no CSRF proof is refused 403"
+
 login_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
-    --cookie "$cookie_jar" --cookie-jar "$cookie_jar" \
-    --header "Host: ${HOSTNAME_HEADER}" \
+    --dump-header "$WORKDIR/session.head" \
+    --header "Host: ${HOSTNAME_HEADER}" --header "Cookie: ${issued_cookies}" \
     --data-urlencode "email=${admin_email}" \
     --data-urlencode "password=${admin_password}" \
     --data-urlencode "csrf_token=${csrf}" \
@@ -440,8 +609,14 @@ case "$login_code" in
     200|302|303) ;;
     *) fail "the browser login returned $login_code — no session can be obtained" ;;
 esac
+# Anything the login response set (the platform session, a rotated CSRF token)
+# comes LAST so it overrides the value issued by the page.
+session_cookies="$(replay_cookies "$WORKDIR/session.head")"
+test -n "$session_cookies" \
+    || fail "the browser login set no cookie, so it granted no session"
 console_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 \
-    --cookie "$cookie_jar" --header "Host: ${HOSTNAME_HEADER}" \
+    --header "Cookie: ${issued_cookies}; ${session_cookies}" \
+    --header "Host: ${HOSTNAME_HEADER}" \
     "http://127.0.0.1:8000/platform/console")"
 test "$console_code" = "200" \
     || fail "the console returned $console_code to a freshly logged-in admin"

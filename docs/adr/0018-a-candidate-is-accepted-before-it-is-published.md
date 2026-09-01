@@ -30,7 +30,8 @@ accepted publication from a rejected one after the fact.
 2. Verify required CI succeeded **on that revision**.
 3. Build **one** local OCI candidate. Nothing is pushed.
 4. Record its identity: config digest, layer digests, RootFS chain, source
-   revision, lock digest, Dockerfile digest.
+   revision, lock digest, Dockerfile digest, and a per-file digest for every
+   distribution the image installed (§ 2.1).
 5. Test **those exact bytes**.
 6. Publish the same config and layers.
 7. Read the immutable registry digest back.
@@ -74,6 +75,81 @@ a field that changes meaning.
 
 This is the half of the design that could not be tested before merge, and it was
 wrong. That is the argument for running it rather than reasoning about it.
+
+## 2.1 Amendment 2026-09-01 — the receipt names what is inside the image
+
+The recorded identity was at BUNDLE granularity. A config digest and a layer
+chain identify a container; neither answers *which wheel is installed in it*, so
+the receipt could not be checked against a distribution artifact at all.
+
+The image now builds both distribution formats and computes a per-file
+`filename`/`size_bytes`/`sha256` document **in the same build stage that
+installed the wheel**, shipped to `/app/distributions.json`. The pipeline READS
+that document out of the candidate and copies it into the receipt.
+
+Read, not re-measured, and the distinction is the whole of it. A wheel is a zip
+and a zip carries timestamps, so a second `poetry build` beside the pipeline
+produces a different archive for identical source — a digest that looks like
+evidence while describing bytes the image does not contain. Shipping the
+document inside the artifact also makes the receipt's claim re-derivable by
+anyone who can pull the image, rather than trusted from a run log.
+
+The sdist is built for the receipt rather than for installation: it is what
+gives *"which source archive corresponds to this image?"* an answer that is not
+a rebuild. Its absence is refused where it is produced, so a narrowing receipt
+fails instead of quietly saying less.
+
+## 2.2 Amendment 2026-09-01 — the battery is reachable from the pull-request path
+
+Three defects have now been found in this battery, and every one of them was
+found by a publication run on protected `main`, because a publication run was
+the only thing that had ever executed it:
+
+| defect | what it actually compared |
+| --- | --- |
+| wrong-owner restore lane landed zero tables | a fresh install, reported as an upgrade refusal |
+| read-back compared `.Id` across the push | a config digest against a manifest digest |
+| role contract compared `f\|f\|t\|t` against `false\|false\|true\|true` | PostgreSQL's boolean OUTPUT function against its boolean CAST |
+| RLS check treated a `tenant_id` COLUMN as tenant SCOPE | `public.tenant_domains`, the tenant resolver's own input, against a rule it is exempt from by design |
+| readiness lane never started the application | a production-shaped environment missing `CSRF_SECRET`, which kernel a98 makes production-fatal |
+| API journey could never obtain a token | `candidate.dotmac.invalid` — a special-use domain `EmailStr` refuses, so the login body was 422 before any credential was read |
+| browser journey could never obtain a session | a `__Host-`/`Secure` production CSRF cookie against curl's cookie jar over plain `http://` |
+
+All three were defects in the CHECK rather than in the artifact, and each cost a
+merge to protected `main` to discover and another to repair. The third is the
+clearest case: `format('%s', ...)` calls a boolean's output function and emits
+`t`/`f`, while `boolean::text` emits `true`/`false`. The assertion could not hold
+on any correct database, and because it was the FIRST assertion of step 5,
+nothing after it in the battery had ever run at all.
+
+So `ci.yml`'s `image` job now REHEARSES the same script against the image it
+already builds. The rehearsal is explicitly not acceptance and does not weaken
+the ordering above: acceptance remains the run against the exact candidate about
+to be published, and CI's image is built from a pull-request head that nothing
+publishes. What the rehearsal changes is only *when* a defect in the battery
+becomes visible — in review, rather than on protected `main`.
+
+One script, two callers. A rehearsal with its own copy would drift, and a
+drifting rehearsal is worse than none;
+`tests/architecture/test_candidate_before_publication.py` holds both halves.
+
+The last two rows were found by the rehearsal itself, in review, within minutes
+of it existing — which is the argument for it.
+
+### The `CSRF_SECRET` row is a finding this ADR does not close
+
+`dotmac_kernel.validate_settings` makes `CSRF_SECRET` production-fatal in three
+separate ways: still the dev default, shorter than 32 bytes, or equal to
+`JWT_SECRET`/`SESSION_HASH_SECRET`. `.env.production.example` declares
+`CSRF_ENABLED=true` and does not declare `CSRF_SECRET`, and
+`vendor_cp.production_secrets.SECRET_FIELDS` carries `jwt_secret` and
+`session_hash_secret` on the runtime record with no CSRF field. A host `.env`
+built from that template cannot boot this artifact.
+
+The battery supplies a throwaway so the remaining checks are reachable, and
+names the deviation. Repairing the contract itself changes what
+`materialize_production_secrets.py` requires of an OpenBao record that already
+exists, which is a deployment-window decision rather than this change's.
 
 ## 3. What a candidate must demonstrate
 

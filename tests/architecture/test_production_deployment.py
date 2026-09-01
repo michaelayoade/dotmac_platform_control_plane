@@ -57,7 +57,15 @@ def test_the_runtime_image_installs_the_wheel_and_carries_no_source_tree() -> No
     runtime = dockerfile.split("AS runtime", 1)[1]
     builder = dockerfile.split("AS runtime", 1)[0]
 
-    assert "poetry build --format wheel" in builder
+    # `poetry build` with no `--format`, deliberately: BOTH distributions are
+    # produced so the release receipt can carry a per-file digest for each
+    # (this repository's ADR-0018 § 2.1). Only the wheel is installed — the
+    # sdist exists to answer "which source archive corresponds to this image?"
+    # without a rebuild, and the build refuses if either one is missing.
+    assert "poetry build --no-interaction" in builder
+    assert "--format wheel" not in builder
+    assert "no wheel was built" in builder
+    assert "no sdist was built" in builder
     assert '/bin/pip" install --no-deps --no-index dist/*.whl' in builder
     assert "/bin/dotmac-platform" in builder
     assert "--version" in builder
