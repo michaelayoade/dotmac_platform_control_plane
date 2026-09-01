@@ -247,8 +247,21 @@ and — the distinction this whole programme turned on — when an import fails
 because something OUTSIDE the kernel is missing from the environment, because a
 missing driver is not a missing kernel symbol.
 
-Its sensitivity is not argued. A planted assembly import of
-`dotmac_kernel.api_documentation` — a module first shipped at a100, absent at
-the a98 pin, and the exact module the ADR-0016 cutover will one day make this
-assembly import for real — was pushed and observed turning the lane red.
-Evidence: branch `verify/assembly-floor-plant`, CI run PLACEHOLDER_RUN.
+Its sensitivity is not argued, it is observed, in both directions on the same
+day. Unplanted, run **33516652998** job `kernel-pin`:
+
+> 65 kernel names across 14 modules, all provided by dotmac-kernel 0.1.0a98 —
+> the composed maximum, from dotmac-deployment-control
+
+Planted — `src/vendor_cp/api_documentation.py` importing
+`dotmac_kernel.api_documentation`, a module first shipped at a100, absent at the
+a98 pin, and the exact module the ADR-0016 cutover will one day make this
+assembly import for real — run **33516674334**, branch
+`verify/assembly-floor-plant` (PR #113, never merged), job `kernel-pin` RED:
+
+> error this assembly's own source imports `['dotmac_kernel.api_documentation']`,
+> which dotmac-kernel 0.1.0a98 does not provide. The assembly's OWN floor is
+> therefore ABOVE the highest floor anything composed declares …
+
+The planted job stopped THERE, before the mutation lane ran, so the red is
+attributable to this check and to nothing else in the job.
