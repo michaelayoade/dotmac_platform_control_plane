@@ -81,14 +81,17 @@ def test_the_pin_is_exactly_the_highest_floor_anything_composed_declares() -> No
     not obviously safe: it is a kernel upgrade taken on nobody's behalf, and it
     carries a migration rehearsal obligation somebody has to have discharged.
 
-    THE PREMISE THIS ASSERTION RESTS ON. Governance ADR 0021 § 10, as RULED on
+    THE PREMISE THIS ASSERTION RESTS ON. Governance ADR 0021 § 10.1, settled
     2026-09-01, makes the effective floor the maximum of the composed
     distributions' declared floors AND the assembly's own direct kernel
-    constraint. § 10 as written says the opposite and names THIS TEST as the
-    place the premise is "recorded ... as a condition to be added in the same
-    change that first breaks it"; the ruling adds it now instead, without
-    waiting to be broken. Equality with the composed maximum alone is therefore correct
-    only while the assembly's own imports are satisfied by that maximum — true
+    constraint — the latter read from the assembly's own SOURCE, because its
+    declaration is this very pin and a maximum that reads the pin as its own
+    input agrees with itself. § 10 previously named THIS TEST as the place the
+    premise was "recorded ... as a condition to be added in the same change that
+    first breaks it"; it is executed now instead, without waiting to be broken.
+
+    Equality with the composed maximum alone is therefore correct only while
+    the assembly's own imports are satisfied by that maximum — true
     today, and true by coincidence. `assembly-satisfied` in the `kernel-pin` job
     executes exactly that premise against the installed kernel, so an assembly
     import of a kernel name first shipped above the maximum turns the lane red

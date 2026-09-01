@@ -504,16 +504,18 @@ disagree, fix the drift.
     you got the published bytes; it cannot prove they import.
 
     **The assembly's own imports join that maximum, and the premise is
-    executed.** Governance ADR 0021 § 10, as RULED 2026-09-01: the effective
-    floor is the maximum of (a) every composed distribution's installed
-    `Requires-Dist` and (b) this assembly's own declared direct kernel
-    constraint. The checked-in record does not yet say this — § 10 states that
-    an assembly's own imports are NOT an input, carries the question into open
-    decision 24, and names this repository's test as where the premise is
-    recorded for later; the governance revision pinned here predates § 10
-    entirely. The ruling runs ahead of the record, so this lane is deliberately
-    stricter than the text it cites and the record owes an amendment. Equality
-    with the composed maximum alone is correct only while
+    executed.** Governance ADR 0021 § 10.1 (settled 2026-09-01, `d46d3a6`): the
+    effective floor is the maximum of (a) every composed distribution's
+    installed `Requires-Dist` and (b) this assembly's own declared direct kernel
+    constraint. That contribution is read from the assembly's OWN SOURCE, never
+    from its declaration — the declaration IS the `==` pin, and a maximum that
+    takes the pin as its own third input returns the pin and proves nothing.
+    § 10.1's own sentence is the rule: a planted assembly import first shipped
+    ABOVE that floor must turn the lane RED, planted separately from the
+    composed-set plants and producing a DISTINCT finding. (The governance
+    revision pinned in `.dotmac/standards-profile.json` predates § 10; the
+    binding text is ahead of the pin and repinning is a separate rule-15
+    change.) Equality with the composed maximum alone is correct only while
     (b) sits at or below (a) — true today, and true by COINCIDENCE. That
     coincidence may not remain an unstated premise: `assembly-satisfied`
     requires every kernel module and every top-level name `src/vendor_cp`

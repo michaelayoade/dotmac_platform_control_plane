@@ -148,29 +148,6 @@ jobs:
           poetry run python scripts/kernel_floor.py floors
           echo "the pin is bound by: $(poetry run python scripts/kernel_floor.py binding)"
 
-          # THE OTHER HALF OF THE MAXIMUM. Governance ADR 0021 section 10, as
-          # RULED on 2026-09-01, makes the effective floor the maximum of
-          # (a) every composed distribution's installed Requires-Dist and
-          # (b) this assembly's own direct kernel constraint. The record itself
-          # still says an assembly's own imports are NOT an input and carries
-          # the question into its open decision 24; the ruling runs ahead of the
-          # record, so this step is stricter than the text it cites. The equality
-          # asserted above is only correct while (b) is at or below (a) - a
-          # coincidence today, and until now an UNSTATED PREMISE that nothing
-          # executed. An assembly import of a kernel name first shipped above
-          # the composed maximum would make the equality rule drag the pin DOWN
-          # to a kernel this assembly cannot run on, silently, which is a5's
-          # defect wearing the assembly's clothes.
-          #
-          # The DSNs are dummies so the kernel can build its engine at import;
-          # nothing connects. The driver is present because the assembly
-          # declares it - and if it ever is not, this refuses to reason rather
-          # than recording an environment gap as a missing kernel symbol.
-          poetry run python scripts/kernel_floor.py assembly-needs
-          DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
-          PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
-            poetry run python scripts/kernel_floor.py assembly-satisfied
-
           # The index, not arithmetic. It has gaps — there is no published
           # 0.1.0a96 — and a target that was never published would make this
           # lane fail on a resolver error while reporting the pin proven.
@@ -221,6 +198,29 @@ jobs:
             exit 1
           fi
           echo "the resolver refuses the pair, as the pin requires"
+
+          # THE OTHER HALF OF THE MAXIMUM. ADR 0021 sections 10 and 10.1,
+          # settled 2026-09-01: the effective floor is the maximum of (a) every
+          # composed distribution's installed Requires-Dist and (b) this
+          # assembly's own direct constraint, read from ITS OWN SOURCE. Reading
+          # the pin as that third input would return the pin, agree with itself
+          # and prove nothing, so the assembly's contribution is derived from
+          # what its code imports.
+          #
+          # Placed AFTER the composed-set conditions on purpose. Section 10.1
+          # requires this to be plantable separately with those left intact, and
+          # the finding to be DISTINCT: an assembly that out-imports its
+          # composition is repaired in a different repository by a different
+          # person than a composed module that raised its floor.
+          #
+          # The DSNs are dummies so the kernel can build its engine at import;
+          # nothing connects. The driver is present because the assembly
+          # declares it - and if it ever is not, this refuses to reason rather
+          # than recording an environment gap as a missing kernel symbol.
+          poetry run python scripts/kernel_floor.py assembly-needs
+          DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+          PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+            poetry run python scripts/kernel_floor.py assembly-satisfied
 
           # 2. THE BEHAVIOUR. `--no-deps --force-reinstall` defeats the
           #    constraint on purpose: nothing else in the environment changes,

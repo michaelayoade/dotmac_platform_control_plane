@@ -215,20 +215,33 @@ boot rather than drifting.
 
 ## The floor has a second input, and now it is executed
 
-Governance ADR 0021 § 10, as RULED on 2026-09-01: the effective floor of an
-assembly is the maximum of (a) every composed distribution's installed
-`Requires-Dist` and (b) the assembly's own declared direct kernel constraint —
-its own imports join the maximum.
+Governance ADR 0021 § 10.1, settled by Michael on 2026-09-01 and transcribed
+into the record the same day (`dotmac_governance` PR #58, `d46d3a6`):
 
-Cite that carefully, because the checked-in record does not yet say it. § 10 as
-written states the opposite in as many words — "An assembly's OWN imports are
-not an input to the maximum as written above" — and carries the question into
-open decision 24, naming this repository's test as the place the premise is
-"recorded ... as a condition to be added in the same change that first breaks
-it". This repository's PINNED governance revision (`a19259b1`) predates § 10
-altogether. So the ruling runs ahead of the record: this lane is deliberately
-STRICTER than the governance text it cites, the premise is executed here rather
-than recorded for later, and the record owes an amendment.
+> The effective floor is the MAXIMUM of every composed distribution's INSTALLED
+> `Requires-Dist` and the assembly's own declared direct constraint on that
+> dependency.
+
+Two things in § 10.1 shape this implementation rather than merely licensing it:
+
+* **The assembly's contribution is read from ITS OWN SOURCE, never from its
+  declaration.** § 10.1 is explicit that "an assembly's declared direct
+  constraint on the dependency IS the `==` pin: a maximum that reads the pin as
+  its own third input returns the pin, agrees with itself, and proves nothing."
+  So the contribution here is derived from what `src/vendor_cp` imports.
+* **The plant is the rule.** "A planted assembly import first shipped ABOVE that
+  floor must turn the lane RED" is § 10.1's own sentence, and it is "the only
+  part of § 10 that cannot be satisfied by a number somebody wrote down". The
+  plant is separate from the composed-set plants, those are left intact, and the
+  finding is DISTINCT — an assembly that out-imports its composition is repaired
+  in a different repository by a different person than a composed module that
+  raised its floor.
+
+One accurate caveat: this repository's PINNED governance revision
+(`a19259b1`, `.dotmac/standards-profile.json`) predates § 10 altogether. The
+binding text is therefore ahead of the pin. Repinning is a deliberate change
+under rule 15 — it would also pull in every other decision accepted since — and
+is not taken here.
 
 The measured equality above, `pin == max(composed floors)`, is correct today
 only because nothing in `src/vendor_cp` imports a kernel name its composed
@@ -263,5 +276,8 @@ assembly import for real — run **33516674334**, branch
 > which dotmac-kernel 0.1.0a98 does not provide. The assembly's OWN floor is
 > therefore ABOVE the highest floor anything composed declares …
 
-The planted job stopped THERE, before the mutation lane ran, so the red is
-attributable to this check and to nothing else in the job.
+(That first planted run had the step placed before the composed-set
+conditions, so the job stopped at it. § 10.1 asks for the opposite — planted
+separately with the composed-set conditions LEFT INTACT — so the step was moved
+after them and the plant re-run; the composed-set halves pass and only the
+assembly half goes red, which is the separability the section requires.)
