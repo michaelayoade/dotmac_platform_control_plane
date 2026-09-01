@@ -91,6 +91,175 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
 
+  # ── THE PIN, EXECUTED ────────────────────────────────────────────────────
+  # `docs/operations/composition-census-2026-08-30.md` recorded the composed
+  # modules' declared kernel floors and then said the honest thing: "The floors
+  # above are declarations, not contracts, and this census does not upgrade
+  # them by repeating them." This job is that upgrade.
+  #
+  # `dotmac-deployment-control 0.1.0a5` is why. Its bytes were beyond doubt —
+  # peeled commit, both digests, publisher read-back, an independent consumer
+  # install, seven behavioural canaries — and it still could not boot here,
+  # because it imported a kernel module its declared floor did not require. A
+  # hash comparison proves you got the published bytes; it cannot prove they
+  # import.
+  #
+  # Every version and every module name below is DERIVED. A literal in this
+  # file is how a lane keeps passing after it has stopped testing anything —
+  # bump the pin and a hard-coded mutation target installs a version the pin no
+  # longer excludes, while a hard-coded module name demands a failure that can
+  # no longer happen. `test_kernel_floor.py` greps this file for both.
+  #
+  # (No comment line here may end in a colon: the required-gate parser reads a
+  # two-space-indented line ending in one as a job name, and would demand a gate
+  # named after a sentence.)
+  kernel-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - name: Install (kernel from Forgejo)
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: poetry install
+      # One step, deliberately. The pin, the version below it and the module
+      # names the failure must carry are three facts that have to describe the
+      # same run; passing them between steps through the environment is how two
+      # of them come to describe different ones.
+      - name: The pin excludes the version below it, and the composition needs it
+        env:
+          TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          trap 'rm -f -- "${HOME}/.netrc"' EXIT HUP INT TERM
+          umask 077
+          : > "${HOME}/.netrc"
+          chmod 600 "${HOME}/.netrc"
+          printf 'machine %s login %s password %s\n' \
+            "registry.dotmac.io" "ci-reader" "${TOKEN}" >> "${HOME}/.netrc"
+
+          PIN=$(poetry run python scripts/kernel_floor.py pinned)
+          echo "the assembly pins dotmac-kernel ${PIN}"
+          echo "declared floors, read out of each composed artifact's metadata:"
+          poetry run python scripts/kernel_floor.py floors
+          echo "the pin is bound by: $(poetry run python scripts/kernel_floor.py binding)"
+
+          # The index, not arithmetic. It has gaps — there is no published
+          # 0.1.0a96 — and a target that was never published would make this
+          # lane fail on a resolver error while reporting the pin proven.
+          curl --netrc -sS --fail -o kernel-index.html \
+            "https://registry.dotmac.io/api/packages/dotmac/pypi/simple/dotmac-kernel/"
+          EXCLUDED=$(poetry run python scripts/kernel_floor.py excluded --index-html kernel-index.html)
+          echo "the newest published kernel this pin excludes: ${EXCLUDED}"
+
+          # A scratch install of the excluded kernel, used ONLY as something to
+          # compare against. Real files rather than a hand-kept table of which
+          # alpha introduced which module: a table has rows somebody must
+          # remember to add, and the row nobody added is invisible.
+          python -m venv /tmp/excluded
+          /tmp/excluded/bin/pip install --quiet --upgrade pip
+          /tmp/excluded/bin/pip install --quiet --no-deps \
+            --index-url "https://pypi.org/simple" \
+            --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
+            "dotmac-kernel==${EXCLUDED}"
+          KERNEL_ROOT=$(/tmp/excluded/bin/python -c \
+            "import importlib.util as u; print(u.find_spec('dotmac_kernel').submodule_search_locations[0])")
+
+          # If this prints nothing the command exits non-zero and says why: the
+          # pin would then be higher than anything the composition needs, and
+          # the mutation below would be demanding a failure that cannot happen.
+          poetry run python scripts/kernel_floor.py missing-from \
+            --kernel-root "${KERNEL_ROOT}" > missing.txt
+          echo "the composition imports these, and ${EXCLUDED} has none of them:"
+          cat missing.txt
+
+          # 1. THE RESOLVER. The pin has to be enforced by something that
+          #    actually resolves, not only by a number in a file.
+          python -m venv /tmp/resolver-check
+          /tmp/resolver-check/bin/pip install --quiet --upgrade pip
+          if /tmp/resolver-check/bin/pip install --quiet \
+               --index-url "https://pypi.org/simple" \
+               --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
+               "dotmac-kernel==${PIN}" "dotmac-kernel==${EXCLUDED}" > resolver.log 2>&1; then
+            echo "::error::pip installed dotmac-kernel ${PIN} and ${EXCLUDED} together."
+            exit 1
+          fi
+          tail -n 5 resolver.log
+          # The refusal has to be the RIGHT refusal. A step satisfied by any
+          # non-zero pip would report the pin proven on a run where a typo'd
+          # index URL was the only thing that happened.
+          if ! grep -qiE "conflict|ResolutionImpossible|Cannot install" resolver.log; then
+            echo "::error::pip failed, but not with a dependency conflict, so this"
+            echo "half observed something other than the pin."
+            exit 1
+          fi
+          echo "the resolver refuses the pair, as the pin requires"
+
+          # THE OTHER HALF OF THE MAXIMUM. ADR 0021 sections 10 and 10.1,
+          # settled 2026-09-01: the effective floor is the maximum of (a) every
+          # composed distribution's installed Requires-Dist and (b) this
+          # assembly's own direct constraint, read from ITS OWN SOURCE. Reading
+          # the pin as that third input would return the pin, agree with itself
+          # and prove nothing, so the assembly's contribution is derived from
+          # what its code imports.
+          #
+          # Placed AFTER the composed-set conditions on purpose. Section 10.1
+          # requires this to be plantable separately with those left intact, and
+          # the finding to be DISTINCT: an assembly that out-imports its
+          # composition is repaired in a different repository by a different
+          # person than a composed module that raised its floor.
+          #
+          # The DSNs are dummies so the kernel can build its engine at import;
+          # nothing connects. The driver is present because the assembly
+          # declares it - and if it ever is not, this refuses to reason rather
+          # than recording an environment gap as a missing kernel symbol.
+          poetry run python scripts/kernel_floor.py assembly-needs
+          DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+          PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+            poetry run python scripts/kernel_floor.py assembly-satisfied
+
+          # 2. THE BEHAVIOUR. `--no-deps --force-reinstall` defeats the
+          #    constraint on purpose: nothing else in the environment changes,
+          #    so a failure below can only be the kernel downgrade.
+          poetry run pip install --quiet --no-deps --force-reinstall \
+            --index-url "https://pypi.org/simple" \
+            --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
+            "dotmac-kernel==${EXCLUDED}"
+          status=0
+          DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+          PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+            poetry run python -c "import vendor_cp.main" > mutation.txt 2>&1 || status=$?
+          tail -n 20 mutation.txt
+          if [ "${status}" -eq 0 ]; then
+            echo "::error::this assembly booted on dotmac-kernel ${EXCLUDED}, which the"
+            echo "pin ${PIN} excludes. The pin is then higher than anything the"
+            echo "composition needs: lower it to the version actually required, or"
+            echo "record in the same change why it was raised anyway."
+            exit 1
+          fi
+          # 3. THE RIGHT FAILURE. Unrelated breakage must not be able to stand
+          #    in for the proof, so the traceback has to name a module the
+          #    excluded kernel was measured to be missing.
+          matched=""
+          while read -r module; do
+            [ -n "${module}" ] || continue
+            if grep -q -F -- "${module}" mutation.txt; then
+              matched="${module}"
+            fi
+          done < missing.txt
+          if [ -z "${matched}" ]; then
+            echo "::error::the boot failed under dotmac-kernel ${EXCLUDED}, but its"
+            echo "output names none of the modules that kernel is missing"
+            echo "($(tr '\n' ' ' < missing.txt)). This mutation observed some other"
+            echo "breakage and the pin is still unproven."
+            exit 1
+          fi
+          echo "dotmac-kernel ${EXCLUDED} cannot boot this assembly: ${matched} is absent"
+
   image:
     runs-on: ubuntu-latest
     steps:

@@ -369,7 +369,10 @@ def test_every_test_job_runs_on_a_github_hosted_runner() -> None:
     workflow = _text(".github/workflows/ci.yml")
 
     assert "self-hosted" not in workflow
-    assert workflow.count("runs-on: ubuntu-latest") == 3
+    # Four since `kernel-pin` joined: check, postgres, image, kernel-pin.
+    # A count, and therefore two-directional — a job that stops being
+    # hosted fails here as loudly as one that is added.
+    assert workflow.count("runs-on: ubuntu-latest") == 4
     assert "DOCKER_BUILDKIT=1 docker build" in workflow
     assert "from vendor_cp.main import app" in workflow
     assert "postgresql+psycopg://app_admin@localhost:5439/vendor_cp_test" in workflow

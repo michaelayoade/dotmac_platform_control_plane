@@ -236,6 +236,7 @@ BASELINE: Final[dict[tuple[str, str], tuple[str, ...]]] = {
         "checkout_relative_production_command",
         "docs/operations/production-deployment.md",
     ): ("cd /opt/dotmac/vendor-control-plane",),
+    ("python_scripts", ".github/workflows/ci.yml"): ("python scripts/kernel_floor.py",),
     ("python_scripts", ".github/workflows/engineering-standards.yml"): (
         "python3 scripts/check_governance_pin.py",
     ),
@@ -277,6 +278,22 @@ BASELINE: Final[dict[tuple[str, str], tuple[str, ...]]] = {
 #: Every entry names a RETIREMENT CONDITION, not a preference. An exemption that
 #: cannot say what would remove it is an exemption nobody will remove.
 BASELINE_REASONS: Final[dict[str, str]] = {
+    ".github/workflows/ci.yml": (
+        "The `kernel-pin` lane's SUBJECT is this checkout's own declaration — "
+        "which kernel `pyproject.toml` pins, which submodules the composed "
+        "source imports — compared against the private index and against a "
+        "scratch install of the version the pin excludes. An installed console "
+        "script answers for the artifact it was built into and cannot answer "
+        "for the tree that declared it, which is the one question here. This is "
+        "also a hosted CI runner with a checkout by definition, not a "
+        "production host: no operator runs it and no deployment depends on it. "
+        "Retires if the pin derivation is ever needed at runtime rather than at "
+        "review time, at which point it becomes a diagnose command on the "
+        "installed console script, with a declared owner like every other "
+        "operator surface. (That script is deliberately not named here: this "
+        "module may not hold its name as a literal, because the checks that "
+        "need it read it from installed metadata.)"
+    ),
     ".github/workflows/production-deploy.yml": (
         "The host-side leg runs on the TARGET, outside any container, against an "
         "rsync'd partial checkout that has no installed package — so the secret "

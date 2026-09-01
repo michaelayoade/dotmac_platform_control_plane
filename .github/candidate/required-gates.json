@@ -16,6 +16,7 @@
     "check",
     "postgres",
     "image",
+    "kernel-pin",
     "Governance pin is a real approved revision",
     "Dotmac engineering standards"
   ]
