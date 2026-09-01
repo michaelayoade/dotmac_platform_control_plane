@@ -432,6 +432,10 @@ REQUIRED_CHECKS: dict[str, str] = {
     # The distribution manifest the receipt reads is produced on every path,
     # but only READ on the publication path — so the candidate demonstrates it.
     "distribution manifest": "dotmac-distribution-digests/1",
+    # The deploy preflight asks the artifact whether a host environment boots.
+    # That call runs only at deploy time, so the property it depends on is
+    # proved here — including that a refusal never carries a value.
+    "deploy preflight property": "refuses an absent/short/reused CSRF_SECRET",
     "api journey": "the API did not issue a bearer token",
     # A refusal that names nothing costs a whole run to diagnose, and a refusal
     # that names too much echoes a credential. Both halves are required.
