@@ -93,35 +93,76 @@ these backups**, because the recovery path they imply does not exist.
 rewritten to read as though it always said the right thing teaches nobody what
 the mistake was.
 
-**Item 1 is implemented.** `scripts/deploy_production.sh` now captures
-`pg_dumpall --globals-only --no-role-passwords` alongside the custom-format
-dump, as `vendor-control-plane-<timestamp>.globals.sql` beside
-`vendor-control-plane-<timestamp>.dump`. The two share one timestamp and are
-published together: both are written to `.tmp` and moved only once the globals
-capture has been checked to create all five roles by name. A globals file
-carrying only tablespaces — the shape that produces 114 errors while looking
-like a capture — fails the deploy at that point, before the migration and
-before the application is replaced.
+**Item 1 is implemented, and as a bundle rather than a second file.**
+`scripts/deploy_production.sh` no longer produces a backup FILE. It assembles a
+recovery bundle in a hidden temporary directory, validates it in full, and moves
+it into place with one `mv` — `rename(2)` within one filesystem, so a reader
+either sees a complete bundle or sees nothing:
 
-`--no-role-passwords` is chosen because it is the configuration that was
-actually PROVED (`recovery-proved-2026-08-30.md`: same artefact, globals
-captured that way, `pg_restore` exit 0, zero findings). It also needs no
-superuser, which this cluster deliberately has no password for, and it keeps
-every SCRAM verifier out of a file at rest on the host. The consequence is
-explicit: a restored cluster has the five roles with no passwords, so an
-operator restoring for real sets them from the host's own `.env` or from
-OpenBao before the application can connect.
+```
+/opt/backups/dotmac-vendor-control-plane/bundle-<timestamp>/
+    database.dump      pg_dump --format custom, ownership and grants INTACT
+    globals.sql        pg_dumpall --globals-only --no-role-passwords
+    manifest.json      PlatformCpRecoveryBundle.v1
+    SHA256SUMS         both components
+```
+
+Globals are captured through the **container-local PostgreSQL superuser** over
+the unix socket. `app_admin` is `NOSUPERUSER` by contract and owns one database;
+a cluster dump is not its authority. No password is needed or retained, because
+this cluster deliberately has none for `postgres`.
+
+The deploy **refuses to migrate** unless the published bundle is complete and
+`sha256sum --check` passes on it. A rollback discovered to be absent after the
+schema has advanced is not a rollback.
+
+Four validations run before the bundle is accepted, each one a way the pair can
+be present and useless: `pg_restore --list` must parse the archive; the globals
+must `CREATE ROLE` all five declared roles by name; **no SCRAM or MD5 verifier
+may appear** — `--no-role-passwords` is a flag and a flag can be dropped; and
+the cluster's own facts (PostgreSQL major, system identifier, database name,
+migration heads) are measured rather than declared. The image's source revision
+is read off its OCI label rather than accepted as an argument.
+
+`--no-role-passwords` is the configuration that was actually PROVED
+(`recovery-proved-2026-08-30.md`: same artefact, globals captured that way,
+`pg_restore` exit 0, zero findings). The consequence is stated rather than left
+to be discovered: **a restored cluster has the five roles with NULL passwords**,
+and the operator resupplies them from OpenBao before the application connects.
+That step is in the restore order below.
+
+`deploy/product.toml` now declares the widened verification set —
+`schema, row_counts, migration_heads, roles, ownership, memberships,
+effective_privileges` — promoted as a new candidate through the ledger rather
+than edited in place. The old three are satisfied by exactly the database this
+rehearsal produced: 45 tables, correct row counts, correct heads, and no
+isolation model at all.
+
+### Restore order
+
+1. a fresh PostgreSQL 16 cluster;
+2. `globals.sql` as the local superuser;
+3. create the database owned by `app_admin`;
+4. `database.dump`;
+5. resupply role passwords from OpenBao;
+6. check schema, rows, heads, roles, ownership, memberships and **effective**
+   privileges — `information_schema` sees only direct grants, so a role reaching
+   an object through a membership reads as having none.
 
 **Item 2 is NOT implemented.** Restore rehearsal is still a procedure that is
 written down rather than a routine that runs. No rehearsal has been performed
-against a pair produced by the changed script — the change is repository-local
-and the only evidence that would discharge it is a restore from this host.
+against a bundle produced by the changed script — the change is
+repository-local, and the only evidence that would discharge it is a restore
+from this host.
 
 **Item 3 is NOT implemented.** Nothing asserts the recovered SECURITY state
-after a restore. The facility's `verify_recovery` does exactly that and was the
-instrument on 2026-08-30, but it is not wired into this deploy path.
+after a restore. The Foundation's `verify_recovery` does exactly that and was
+the instrument on 2026-08-30, but it is not wired into this deploy path, and the
+verification set the descriptor now declares is a DECLARATION with no consumer
+installed here.
 
 So the sentence above — *"no production authorization should be admitted on the
 strength of these backups"* — is narrowed rather than lifted. What is fixed is
-that the artifact now CONTAINS the role layer. What remains unproved is that a
-restore of it succeeds, and only a rehearsal against a real pair can say so.
+that the artifact now contains the role layer and cannot be half-written. That a
+restore of it succeeds remains unproved, and only a rehearsal against a real
+bundle can say so.

@@ -188,15 +188,22 @@ def test_exactly_one_entry_predates_the_mechanism() -> None:
     assert str(pre[0]["descriptor_sha256"]).startswith("sha256:")
 
 
-def test_the_current_promotion_is_recorded_as_a_repair() -> None:
+def test_the_reconciliation_promotion_is_recorded_as_a_repair() -> None:
     """It names the operation, the receipt, and where the record lives.
 
     A reconciliation that reads like routine maintenance teaches the next reader
     that descriptors drift and get tidied up, which is the opposite of the
     lesson.
+
+    Found by KIND, not by position. This read `_ledger()[-1]` and asserted that
+    the newest promotion was the reconciliation — which is a fact about how many
+    promotions have happened since, not about the reconciliation. The first
+    legitimate promotion after it failed here, and the tempting repair was to
+    move the index. The entry being described is a specific one; identify it.
     """
-    latest = _ledger()[-1]
-    assert latest["kind"] == "reconciliation"
+    matching = [entry for entry in _ledger() if entry["kind"] == "reconciliation"]
+    assert len(matching) == 1, "exactly one promotion repairs the bootstrap drift"
+    latest = matching[0]
     repairs = latest["repairs"]
     assert isinstance(repairs, dict)
     assert repairs["operation"] == "scripts/bootstrap/bootstrap_once.sh"
@@ -339,8 +346,29 @@ def test_the_application_half_was_carried_forward_unchanged(path: str) -> None:
     assert block[key] == carried[path]
 
 
-def test_the_promotion_names_the_sections_it_changed() -> None:
-    """A repair of the database half says so. A promotion that touched the
-    application half and called itself a database repair is the shape this
-    keeps from passing quietly."""
-    assert _ledger()[-1]["changed_sections"] == ["migration", "database"]
+def test_every_promotion_names_the_sections_it_changed() -> None:
+    """A promotion that touched the application half while calling itself
+    something else is the shape this keeps from passing quietly.
+
+    Two assertions, and the split is the point. The general one holds for every
+    promotion there will ever be; the specific one is about the RECONCILIATION,
+    found by kind.
+
+    This read `_ledger()[-1]` and compared it with the reconciliation's own
+    sections — which made it a claim about how many promotions have happened
+    since, not about the reconciliation, and the next legitimate promotion broke
+    it. That is the second guard in this file keyed on `[-1]`; the tempting
+    repair for both was to move the index.
+    """
+    for entry in _ledger():
+        if entry["kind"] == "pre_mechanism":
+            continue
+        sections = entry["changed_sections"]
+        assert isinstance(sections, list) and sections, (
+            f"the {entry['promoted_at']} promotion names no changed section, so "
+            "nothing states what it was allowed to touch"
+        )
+
+    reconciliation = [e for e in _ledger() if e["kind"] == "reconciliation"]
+    assert len(reconciliation) == 1
+    assert reconciliation[0]["changed_sections"] == ["migration", "database"]

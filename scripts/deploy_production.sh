@@ -7,6 +7,7 @@ readonly COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
 readonly ENV_FILE="${ENV_FILE:-.env}"
 readonly HOST_ID_FILE="${HOST_ID_FILE:-/etc/dotmac-host-id}"
 readonly BACKUP_DIR="${BACKUP_DIR:-/opt/backups/dotmac-vendor-control-plane}"
+readonly DESCRIPTOR_FILE="${DESCRIPTOR_FILE:-deploy/product.toml}"
 
 die() {
     printf '%s\n' "$*" >&2
@@ -130,14 +131,15 @@ readonly OWNER_CONTRACT="$(compose exec -T db sh -c \
 [[ "$OWNER_CONTRACT" == "app_admin|app_admin" ]] \
     || die "module database ownership contract is not satisfied"
 
-# ── The backup is a PAIR, because a dump on its own is not a rollback ────────
+# ── The recovery bundle: one atomic artifact, or no deployment ───────────────
 #
 # Rehearsed 2026-08-30 against this host's own newest backup: a plain
-# `pg_restore` of the dump alone exited 1 with 114 missing-role errors across
+# `pg_restore` of a custom dump exited 1 with 114 missing-role errors across
 # five roles, and left a database that LOOKED recovered — 45 tables, 23 of 26
 # policies, 16 RLS-enabled tables — with no roles, no grants, and every object
 # owned by whoever ran the restore. `pg_dump` of one database carries object
-# ACLs and RLS policies but never role definitions: those live in the cluster.
+# ACLs and RLS policies but never role definitions, memberships or tablespaces:
+# those are CLUSTER objects and only `pg_dumpall --globals-only` emits them.
 #
 # That is worse than a backup that fails outright. This assembly's plane
 # separation IS the grant/revoke matrix rather than the policies alone
@@ -146,53 +148,209 @@ readonly OWNER_CONTRACT="$(compose exec -T db sh -c \
 # operator reading `pg_policies` afterwards concludes the isolation model came
 # back. It did not.
 #
-# `--no-role-passwords` is the PROVED configuration, not a precaution. The same
-# artefact, restored with globals captured that way, exited 0 with zero errors
-# and the facility's `verify_recovery` reported zero findings across roles,
-# memberships, ownership, effective privileges, RLS force and the descriptor's
-# own isolation invariants — `docs/operations/recovery-proved-2026-08-30.md`.
-# It also needs no superuser, which this cluster deliberately has no password
-# for (`deploy/postgres/init-roles.sh` ends with `ALTER ROLE postgres PASSWORD
-# NULL`), and it keeps every SCRAM verifier out of a file sitting on the host.
+# So a backup is no longer a file. It is a BUNDLE — dump, globals, manifest and
+# checksums — assembled in a hidden temporary directory, validated in full, and
+# moved into place with a single `mv`, which is `rename(2)` within one
+# filesystem and therefore atomic. A reader either sees a complete bundle or
+# sees nothing. And the deploy REFUSES to migrate unless one exists: a rollback
+# that is discovered to be absent after the schema has advanced is not a
+# rollback.
 #
-# Both halves are written to `.tmp` and PUBLISHED only once both are complete
-# and the globals have been checked. A dump appearing beside a missing or empty
-# globals file would be the same half-artifact under a new name.
-#
-# RESTORE ORDER IS GLOBALS FIRST. Restoring the dump first recreates the 114
-# errors, because the grants it carries name principals that do not exist yet.
+# This runs before the migration and before the application is replaced, under
+# the workflow's `vendor-control-plane-production` concurrency group, which is
+# the only deployment lock this path has.
 mkdir -p "$BACKUP_DIR"
 readonly TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-readonly BACKUP_PATH="${BACKUP_DIR}/vendor-control-plane-${TIMESTAMP}.dump"
-readonly BACKUP_TMP="${BACKUP_PATH}.tmp"
-readonly GLOBALS_PATH="${BACKUP_DIR}/vendor-control-plane-${TIMESTAMP}.globals.sql"
-readonly GLOBALS_TMP="${GLOBALS_PATH}.tmp"
+readonly BUNDLE_PATH="${BACKUP_DIR}/bundle-${TIMESTAMP}"
+[[ ! -e "$BUNDLE_PATH" ]] || die "recovery bundle $BUNDLE_PATH already exists"
+BUNDLE_TMP="$(mktemp -d "${BACKUP_DIR}/.bundle-${TIMESTAMP}.XXXXXX")"
+readonly BUNDLE_TMP
+chmod 700 "$BUNDLE_TMP"
 
+# 1. Cluster globals, through the container-local PostgreSQL superuser over the
+#    unix socket. `app_admin` is NOSUPERUSER by contract (checked above) and is
+#    not the right authority for a CLUSTER dump — it owns one database. The
+#    socket is why no password is needed and none is retained: this cluster
+#    deliberately has none for `postgres` (`deploy/postgres/init-roles.sh` ends
+#    with `ALTER ROLE postgres PASSWORD NULL`).
+#
+#    `--no-role-passwords` is the configuration that was PROVED, not a
+#    precaution: the same artefact restored with globals captured this way
+#    exited 0 with zero errors and `verify_recovery` reported zero findings
+#    across roles, memberships, ownership, effective privileges and RLS force
+#    (`docs/operations/recovery-proved-2026-08-30.md`). It reads `pg_roles`
+#    rather than `pg_authid`, so no SCRAM verifier is written to a file at rest.
+#    A restored cluster therefore has the five roles with NULL passwords, and
+#    the operator resupplies them from OpenBao before the application connects.
+compose exec -T --user postgres db \
+    pg_dumpall --username postgres --globals-only --no-role-passwords \
+    > "${BUNDLE_TMP}/globals.sql"
+
+# 2. The database, with ownership and privileges INTACT. No `--no-owner` and no
+#    `--no-privileges`: stripping either would reproduce, by flag, exactly the
+#    state the rehearsal found by accident.
 compose exec -T db sh -c \
-    'exec pg_dumpall --username app_admin --database "$POSTGRES_DB" \
-        --globals-only --no-role-passwords' \
-    > "$GLOBALS_TMP"
+    'exec pg_dump --username app_admin --dbname "$POSTGRES_DB" --format custom' \
+    > "${BUNDLE_TMP}/database.dump"
 
-# Checked by NAME, against the five roles `deploy/postgres/init-roles.sh`
-# creates and `deploy/product.toml` declares as `[[database.roles]]`. A
-# non-empty or size check would pass on a globals file carrying only
-# tablespaces — which is exactly the shape that produces 114 errors while
-# looking like a capture. The failure arrives here, before the migration and
-# before the application is replaced, so nothing has been changed yet.
+# 3. Validate BEFORE accepting. Every check below is a way the pair can be
+#    present and useless.
+[[ -s "${BUNDLE_TMP}/globals.sql" ]] || die "cluster globals capture is empty"
+[[ -s "${BUNDLE_TMP}/database.dump" ]] || die "database dump is empty"
+
+#    The dump's own table of contents must parse. A truncated custom-format
+#    dump is a well-formed FILE and `pg_restore --list` is what distinguishes
+#    it from an archive. Piped back into the container because the host holds
+#    no PostgreSQL client tools.
+compose exec -T db pg_restore --list < "${BUNDLE_TMP}/database.dump" > /dev/null \
+    || die "the database dump is not a readable pg_restore archive"
+
+#    Checked by NAME, against the five roles `deploy/postgres/init-roles.sh`
+#    creates and `deploy/product.toml` declares as `[[database.roles]]`. A
+#    non-empty check would pass on a globals file carrying only tablespaces —
+#    which is exactly the shape that produces 114 errors while looking like a
+#    capture.
 for role in app_admin app_user platform_api outbox_dispatcher \
             platform_outbox_dispatcher; do
-    grep -Eq "^CREATE ROLE \"?${role}\"?;\$" "$GLOBALS_TMP" || die \
+    grep -Eq "^CREATE ROLE \"?${role}\"?;\$" "${BUNDLE_TMP}/globals.sql" || die \
 "cluster globals capture does not create role ${role}. The pair would restore \
 without the grant/revoke matrix that IS this database's plane separation, and \
 the restore would look successful. Nothing has been changed."
 done
 
-compose exec -T db sh -c \
-    'exec pg_dump --username app_admin --dbname "$POSTGRES_DB" --format custom' \
-    > "$BACKUP_TMP"
+#    And the other direction, because `--no-role-passwords` is a flag and a flag
+#    can be dropped. A verifier in this file would be a production credential at
+#    rest in a backup directory. Matched on the SHAPE of a verifier, never
+#    printed.
+! grep -Eq "SCRAM-SHA-256\\\$|PASSWORD '(md5|SCRAM)" "${BUNDLE_TMP}/globals.sql" \
+    || die "the cluster globals capture contains a password verifier; \
+--no-role-passwords did not hold and this bundle must not be kept"
 
-mv "$GLOBALS_TMP" "$GLOBALS_PATH"
-mv "$BACKUP_TMP" "$BACKUP_PATH"
+# 4. The facts a restore has to be checked against, measured from the cluster
+#    being captured rather than assumed from a declaration.
+PG_VERSION_NUM="$(compose exec -T db sh -c \
+    'psql --username app_admin --dbname "$POSTGRES_DB" -tAc "SHOW server_version_num"' \
+    | tr -d '\r\n')"
+readonly PG_VERSION_NUM
+[[ "$PG_VERSION_NUM" =~ ^[0-9]+$ ]] || die "could not read server_version_num"
+readonly PG_MAJOR="$(( PG_VERSION_NUM / 10000 ))"
+
+CLUSTER_SYSTEM_IDENTIFIER="$(compose exec -T --user postgres db \
+    psql --username postgres -tAc \
+    'SELECT system_identifier FROM pg_control_system()' | tr -d '\r\n')"
+readonly CLUSTER_SYSTEM_IDENTIFIER
+[[ "$CLUSTER_SYSTEM_IDENTIFIER" =~ ^[0-9]+$ ]] \
+    || die "could not read the cluster system identifier"
+
+DATABASE_NAME="$(compose exec -T db sh -c 'printf %s "$POSTGRES_DB"' | tr -d '\r\n')"
+readonly DATABASE_NAME
+[[ -n "$DATABASE_NAME" ]] || die "could not read the database name"
+
+# READ OFF THE ARTIFACT, not accepted as an argument. The revision this image
+# was built from is inside its own config as an OCI label, so the manifest
+# records what the bytes say rather than what the caller asserted.
+SOURCE_REVISION="$(docker inspect \
+    --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+    "$VENDOR_APP_IMAGE" | tr -d '\r\n')"
+readonly SOURCE_REVISION
+[[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] \
+    || die "the image carries no 40-character OCI revision label"
+
+# The ACCEPTED descriptor, as the deployment adapter delivered it. A bundle that
+# cannot say which contract it is meant to satisfy cannot be checked against one.
+[[ -f "$DESCRIPTOR_FILE" ]] || die "$DESCRIPTOR_FILE is missing; the deployment \
+adapter did not deliver the accepted descriptor, so this bundle could not name \
+the contract a recovery must satisfy"
+DESCRIPTOR_SHA256="sha256:$(sha256sum "$DESCRIPTOR_FILE" | cut -d' ' -f1)"
+readonly DESCRIPTOR_SHA256
+
+MIGRATION_HEADS="$(compose exec -T db sh -c \
+    'psql --username app_admin --dbname "$POSTGRES_DB" -tAc \
+        "SELECT version_num FROM alembic_version ORDER BY version_num"' \
+    | tr -d '\r')"
+readonly MIGRATION_HEADS
+[[ -n "$MIGRATION_HEADS" ]] || die "the database reports no migration heads"
+
+# 5. Hash both components, in the format `sha256sum -c` reads back.
+( cd "$BUNDLE_TMP" && sha256sum database.dump globals.sql > SHA256SUMS )
+
+# 6. The manifest. Canonical JSON, so the bundle digest over it is re-derivable
+#    by anyone holding the bundle.
+env \
+    BUNDLE_TMP="$BUNDLE_TMP" \
+    TARGET_HOST_ID="$EXPECTED_HOST_ID" \
+    PG_MAJOR="$PG_MAJOR" \
+    CLUSTER_SYSTEM_IDENTIFIER="$CLUSTER_SYSTEM_IDENTIFIER" \
+    DATABASE_NAME="$DATABASE_NAME" \
+    IMAGE_DIGEST="$DIGEST" \
+    SOURCE_REVISION="$SOURCE_REVISION" \
+    DESCRIPTOR_SHA256="$DESCRIPTOR_SHA256" \
+    MIGRATION_HEADS="$MIGRATION_HEADS" \
+    CREATED_AT="$TIMESTAMP" \
+    python3 - <<'MANIFEST'
+import hashlib, json, os
+from pathlib import Path
+
+bundle = Path(os.environ["BUNDLE_TMP"])
+digests = {}
+for name in ("database.dump", "globals.sql"):
+    digests[name] = "sha256:" + hashlib.sha256((bundle / name).read_bytes()).hexdigest()
+
+manifest = {
+    "schema": "PlatformCpRecoveryBundle.v1",
+    "product": "dotmac_vendor_control_plane",
+    "environment": "production",
+    "target": os.environ["TARGET_HOST_ID"],
+    "postgres_major": int(os.environ["PG_MAJOR"]),
+    "cluster_system_identifier": os.environ["CLUSTER_SYSTEM_IDENTIFIER"],
+    "database_name": os.environ["DATABASE_NAME"],
+    "image_digest": os.environ["IMAGE_DIGEST"],
+    "image_source_revision": os.environ["SOURCE_REVISION"],
+    "descriptor_sha256": os.environ["DESCRIPTOR_SHA256"],
+    "migration_heads": sorted(
+        line for line in os.environ["MIGRATION_HEADS"].splitlines() if line.strip()
+    ),
+    "files": digests,
+    "created_at": os.environ["CREATED_AT"],
+    "restore_order": ["globals.sql", "database.dump"],
+}
+payload = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+# Written, not printed. The bundle digest has ONE producer, immediately below;
+# a second `print` here would be a second answer to the same question.
+(bundle / "manifest.json").write_text(payload + "\n", encoding="utf-8")
+MANIFEST
+
+# 7. The bundle digest is over the canonical manifest, which names both file
+#    digests — so one value identifies the whole artifact.
+BUNDLE_DIGEST="$(BUNDLE_TMP="$BUNDLE_TMP" python3 - <<'DIGEST'
+import hashlib, json, os
+from pathlib import Path
+payload = json.loads(
+    (Path(os.environ["BUNDLE_TMP"]) / "manifest.json").read_text(encoding="utf-8")
+)
+canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+print("sha256:" + hashlib.sha256(canonical.encode("ascii")).hexdigest())
+DIGEST
+)"
+readonly BUNDLE_DIGEST
+[[ "$BUNDLE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "could not digest the bundle"
+
+# 8. Publish atomically. Until this line there is no bundle, only a dot-prefixed
+#    temporary directory that no reader will mistake for one.
+mv "$BUNDLE_TMP" "$BUNDLE_PATH"
+
+# 9. REFUSE to go further without it — re-read from its published location
+#    rather than trusting the variables that built it. `sha256sum -c` is the
+#    check that the bytes on disk are the bytes that were hashed.
+for component in database.dump globals.sql manifest.json SHA256SUMS; do
+    [[ -f "${BUNDLE_PATH}/${component}" ]] \
+        || die "recovery bundle is incomplete: ${component} is missing"
+done
+( cd "$BUNDLE_PATH" && sha256sum --quiet --check SHA256SUMS ) \
+    || die "recovery bundle checksums do not verify; refusing to migrate"
+
+printf 'recovery bundle %s\n  digest %s\n  restore order: globals.sql then database.dump\n' \
+    "$BUNDLE_PATH" "$BUNDLE_DIGEST"
 
 # This is the one composed migration owner: kernel, Vendor, Release Catalog,
 # Entitlement Allocation, and Approvals advance before the app is replaced.
@@ -218,5 +376,5 @@ curl --fail --silent --show-error --max-time 10 \
     --header "Host: vendor.dotmac.io" \
     "http://127.0.0.1:${VENDOR_APP_PORT:-8100}/health/ready" >/dev/null
 
-printf 'Deployed %s\npre-migration backup (restore globals FIRST): %s then %s\n' \
-    "$VENDOR_APP_IMAGE" "$GLOBALS_PATH" "$BACKUP_PATH"
+printf 'Deployed %s\nrecovery bundle: %s\nrecovery bundle digest: %s\n' \
+    "$VENDOR_APP_IMAGE" "$BUNDLE_PATH" "$BUNDLE_DIGEST"
