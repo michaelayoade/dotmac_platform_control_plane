@@ -158,7 +158,8 @@ measurement; it is measured when a101 exists.)
 | a100 peeled commit | `917181b38dcc5954bac932b630909afdfb19012b` | `peeled_tag` `dotmac-kernel-v0.1.0a100` |
 | a100 on the private index | listed | the simple index, read in run 33506350578 |
 | a100 release run | **none recorded** | the kernel's publication commit carries no run id or artifact digest; a99 has such a record and a100 does not |
-| a100 wheel / sdist sha256 | relayed, **not independently verified here** | no release-run oracle to verify against |
+| a100 wheel sha256 | `60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c` — **matched** | run 33513594292: computed from the registry-served bytes, equal to the index `#sha256=` fragment AND to the relayed expectation |
+| a100 sdist sha256 | `d7d6bd6e4ae9bddf90e1b473fdefd02277a20645561f57929d461ce4da0840ae` — **matched** | same run, same three-way comparison |
 | a98/a99/a100 import boundary | identical | run **33513594292**, job `kernel-a100-arbitration` |
 | **a101** | **not allocated, not published, not tagged, not verified** | no oracle of any kind exists for it; the repair commit `6f1a2a47` is a source fact, not a release one |
 
@@ -167,6 +168,17 @@ tag makes a100 pinnable; it does not make it published-and-installable, and the
 two are different oracle kinds under rule 17. The last row is why this change
 moves no pin: an unallocated version has no coordinates to pin, and a repin
 against one would resolve to nothing.
+
+**Correction to an earlier version of this table.** It said a100's digests were
+"relayed, not independently verified here". They have since been verified: the
+arbitration downloaded the files, computed sha256 over the bytes, and compared
+each against BOTH the index's `#sha256=` fragment and the relayed expectation,
+three-way. (a98 and a99 carried no expectation, so those two rows are
+computed-versus-fragment only, which is an integrity check on the download and
+not a corroboration of a relayed claim.) This does NOT promote a100 to
+published-and-installable: the registry is not an independent witness of what a
+publisher produced, and a100 still has no release run. Digest agreement and a
+release-run oracle remain different things, which is rule 17's whole point.
 
 ## Operational functionality is not artifact adoptability
 
