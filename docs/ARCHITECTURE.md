@@ -400,8 +400,15 @@ Compose project and from every product data plane:
   pre-authorized immutable image. The target leg is a deterministic, separately
   installed root-owned archive whose digest and safe ancestry are verified; it
   never imports or changes the mutable product checkout and is retired after
-  the incident proof. `scripts/materialize_production_secrets.py` is its thin
-  operator adapter. Runtime settings never call OpenBao.
+  the incident proof. The post-bootstrap host intentionally retains no
+  `VENDOR_DB_BOOTSTRAP_PASSWORD`; because Compose interpolates every service
+  even for `ps` and `exec`, the adapter supplies one fixed non-secret parse-only
+  placeholder in the Compose process environment and overrides any inherited
+  value. It never persists that placeholder, never passes it in argv, and the
+  only `up --force-recreate` target is `app --no-deps`; the database container
+  is neither created nor recreated by rotation.
+  `scripts/materialize_production_secrets.py` is its thin operator adapter.
+  Runtime settings never call OpenBao.
 
 `scripts/deploy_production.sh` is the only production migration/deploy owner.
 It verifies the host markers, pulls an exact digest, takes a pre-migration

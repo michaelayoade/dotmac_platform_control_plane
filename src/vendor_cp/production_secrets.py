@@ -1291,6 +1291,7 @@ def client_from_environment() -> OpenBaoClient:
 ROTATION_TARGET = "root@149.102.158.144"
 ROTATION_HOST_ID = "vendor-cp-prod"
 ROTATION_DEPLOY_DIR = Path("/opt/dotmac/vendor-control-plane")
+_ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER = "rotation-compose-parse-only"
 ROTATION_ADAPTER_PATH = Path(
     "/usr/local/libexec/dotmac/platform-cp-secret-rotation-adapter.pyz"
 )
@@ -1601,8 +1602,31 @@ def _run_quiet(
     return result
 
 
-def _compose_command(deploy_dir: Path, *arguments: str) -> tuple[str, ...]:
-    return (
+def _run_compose_quiet(
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    deploy_dir: Path,
+    *arguments: str,
+    input_text: str | None = None,
+    extra_environment: Mapping[str, str] | None = None,
+    require_success: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Run Compose with an inert, process-only bootstrap interpolation.
+
+    The bootstrap password is intentionally absent after the database is first
+    created, but Compose expands every service before executing even a read-only
+    ``ps`` or an ``exec`` against the existing database.  The placeholder lets
+    Compose parse that dormant declaration.  It is never written to ``.env``,
+    never passed in argv, and no rotation command creates or recreates ``db``.
+    """
+    environment = dict(os.environ)
+    if extra_environment is not None:
+        environment.update(extra_environment)
+    # Always override an inherited value. The rotation adapter must never
+    # accidentally propagate real bootstrap material from its caller.
+    environment["VENDOR_DB_BOOTSTRAP_PASSWORD"] = (
+        _ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER
+    )
+    command = (
         "docker",
         "compose",
         "--env-file",
@@ -1611,16 +1635,26 @@ def _compose_command(deploy_dir: Path, *arguments: str) -> tuple[str, ...]:
         os.fspath(deploy_dir / "docker-compose.production.yml"),
         *arguments,
     )
+    return _run_quiet(
+        runner,
+        command,
+        input_text=input_text,
+        cwd=deploy_dir,
+        env=environment,
+        require_success=require_success,
+    )
 
 
 def _running_identity(
     deploy_dir: Path,
     runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> tuple[str, str]:
-    container = _run_quiet(
+    container = _run_compose_quiet(
         runner,
-        _compose_command(deploy_dir, "ps", "-q", "app"),
-        cwd=deploy_dir,
+        deploy_dir,
+        "ps",
+        "-q",
+        "app",
     ).stdout.strip()
     if re.fullmatch(r"[0-9a-f]{12,64}", container) is None:
         raise ProductionSecretError("production app container identity is unavailable")
@@ -1660,27 +1694,24 @@ def _capture_plan_rollout_state(
     # adapter writes them only to its mode-0600 incident prestate file, compares
     # them directly (never hashes/prints/receipts them), and deletes that file
     # immediately after the target reaches PROVED.
-    return _run_quiet(
+    return _run_compose_quiet(
         runner,
-        _compose_command(
-            deploy_dir,
-            "exec",
-            "-T",
-            "db",
-            "pg_dump",
-            "--username",
-            "postgres",
-            "--dbname",
-            "vendor_control_plane",
-            "--data-only",
-            "--no-owner",
-            "--no-privileges",
-            "--table",
-            "mod_deploy.deployment_plans",
-            "--table",
-            "mod_deploy.rollouts",
-        ),
-        cwd=deploy_dir,
+        deploy_dir,
+        "exec",
+        "-T",
+        "db",
+        "pg_dump",
+        "--username",
+        "postgres",
+        "--dbname",
+        "vendor_control_plane",
+        "--data-only",
+        "--no-owner",
+        "--no-privileges",
+        "--table",
+        "mod_deploy.deployment_plans",
+        "--table",
+        "mod_deploy.rollouts",
     ).stdout
 
 
@@ -1702,23 +1733,20 @@ def _apply_database_role_passwords(
         "ALTER ROLE platform_api PASSWORD :'platform_api_password';\n"
         "COMMIT;\n"
     )
-    _run_quiet(
+    _run_compose_quiet(
         runner,
-        _compose_command(
-            deploy_dir,
-            "exec",
-            "-T",
-            "db",
-            "psql",
-            "-X",
-            "--quiet",
-            "--username",
-            "postgres",
-            "--dbname",
-            "vendor_control_plane",
-        ),
+        deploy_dir,
+        "exec",
+        "-T",
+        "db",
+        "psql",
+        "-X",
+        "--quiet",
+        "--username",
+        "postgres",
+        "--dbname",
+        "vendor_control_plane",
         input_text=sql,
-        cwd=deploy_dir,
     )
 
 
@@ -1741,21 +1769,18 @@ def _tcp_authentication_succeeds(
         '--username "$1" --dbname vendor_control_plane --command '
         "'SELECT 1' >/dev/null 2>&1"
     )
-    result = _run_quiet(
+    result = _run_compose_quiet(
         runner,
-        _compose_command(
-            deploy_dir,
-            "exec",
-            "-T",
-            "db",
-            "sh",
-            "-ceu",
-            shell,
-            "rotation-auth",
-            role,
-        ),
+        deploy_dir,
+        "exec",
+        "-T",
+        "db",
+        "sh",
+        "-ceu",
+        shell,
+        "rotation-auth",
+        role,
         input_text=password + "\n",
-        cwd=deploy_dir,
         require_success=False,
     )
     return result.returncode == 0
@@ -1980,19 +2005,16 @@ def _prove_runtime_rotation(
         "assert hash_token(p['canary']) != p['refused_session_hash']; "
         "assert settings.csrf_secret == p['csrf_secret']"
     )
-    _run_quiet(
+    _run_compose_quiet(
         runner,
-        _compose_command(
-            deploy_dir,
-            "exec",
-            "-T",
-            "app",
-            "python",
-            "-c",
-            script,
-        ),
+        deploy_dir,
+        "exec",
+        "-T",
+        "app",
+        "python",
+        "-c",
+        script,
         input_text=proof_input,
-        cwd=deploy_dir,
     )
 
 
@@ -2262,28 +2284,16 @@ def apply_secret_rotation_on_target(
         if (after_image, after_revision) != (image_reference, source_revision):
             raise ProductionSecretError("rotation changed the app image or revision")
     else:
-        process_environment = dict(os.environ)
-        process_environment.update(
-            {
-                "VENDOR_APP_IMAGE": image_reference,
-                # Compose requires this declaration while parsing the db service;
-                # --no-deps means it is never installed or used.
-                "VENDOR_DB_BOOTSTRAP_PASSWORD": "not-used-by-app-only-rotation",
-            }
-        )
-        _run_quiet(
+        _run_compose_quiet(
             runner,
-            _compose_command(
-                deploy_dir,
-                "up",
-                "-d",
-                "--no-deps",
-                "--force-recreate",
-                "--wait",
-                "app",
-            ),
-            cwd=deploy_dir,
-            env=process_environment,
+            deploy_dir,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "--wait",
+            "app",
+            extra_environment={"VENDOR_APP_IMAGE": image_reference},
         )
         after_image, after_revision = _running_identity(deploy_dir, runner)
         if (after_image, after_revision) != (image_reference, source_revision):

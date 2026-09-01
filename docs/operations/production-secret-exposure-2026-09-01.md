@@ -42,6 +42,11 @@ was not re-inspected—the following material was absent and **not exposed**:
 - any OpenBao token or other OpenBao authentication material; and
 - the database bootstrap material, including `VENDOR_DB_BOOTSTRAP_PASSWORD`.
 
+That absence is intentional after initial cluster creation. The incident
+adapter uses a fixed non-secret, process-only Compose interpolation placeholder
+so the dormant `db` declaration can be parsed; it does not restore, rotate or
+persist bootstrap material and it never recreates the database container.
+
 `csrf_secret` at the runtime record was not exposed and must remain
 byte-for-byte unchanged. The signing and deploy records are outside the
 rotation set.
