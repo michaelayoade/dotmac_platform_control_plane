@@ -443,8 +443,8 @@ def assembly_kernel_requirements(
     """Every kernel module THIS ASSEMBLY'S OWN source imports, and the top-level
     names it binds out of each.
 
-    The second input to the effective floor (Governance ADR 0021 § 10 as
-    extended). `kernel_imports()` above answers "what does the COMPOSITION
+    The second input to the effective floor (Governance ADR 0021 § 10.1).
+    `kernel_imports()` above answers "what does the COMPOSITION
     import", which is the question the mutation lane asks of the excluded
     kernel; this answers "what does the ASSEMBLY ITSELF import", which is the
     question nobody was asking of the pinned one.
