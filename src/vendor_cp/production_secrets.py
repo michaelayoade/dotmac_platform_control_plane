@@ -2321,7 +2321,6 @@ def _prove_runtime_rotation(
                 canary.encode(),
                 hashlib.sha256,
             ).hexdigest(),
-            "csrf_secret": accepted.csrf_secret,
         },
         separators=(",", ":"),
     )

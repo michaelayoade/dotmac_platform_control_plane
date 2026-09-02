@@ -905,9 +905,9 @@ def test_runtime_material_oracle_matches_the_deployed_kernel_surface(
 ) -> None:
     """The legacy artifact exposes decode only from its security module.
 
-    Its Settings object also has no csrf_secret member. This planted package
-    makes both production facts structural: the former root import and the
-    former Settings attribute access each fail this exact program.
+    CSRF is deliberately absent here too: it is preserved by the custody and
+    environment byte-equality gates, not treated as runtime material this
+    legacy artifact consumes.
     """
     package = tmp_path / "dotmac_kernel"
     package.mkdir()
@@ -926,14 +926,12 @@ def test_runtime_material_oracle_matches_the_deployed_kernel_surface(
         "canary": "canary",
         "refused_session_hash": "refused-session-hash",
         "accepted_session_hash": accepted_hash,
-        "csrf_secret": "preserved-csrf",
     }
     environment = {
         **os.environ,
         "PYTHONPATH": str(tmp_path),
         "ACCEPTED_JWT": "accepted",
         "ACCEPTED_SESSION_HASH": accepted_hash,
-        "CSRF_SECRET": "preserved-csrf",
     }
 
     result = subprocess.run(  # noqa: S603 -- fixed interpreter and program
@@ -948,6 +946,7 @@ def test_runtime_material_oracle_matches_the_deployed_kernel_surface(
 
     assert result.returncode == 0, result.stderr
     assert "decode_access_token" not in (package / "__init__.py").read_text()
+    assert "csrf_secret" not in rotation_runtime_material_oracle_program()
 
 
 @pytest.mark.parametrize(

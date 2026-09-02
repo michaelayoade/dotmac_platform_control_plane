@@ -237,8 +237,9 @@ oracle selected from the exact image and revision, before reading or writing
 digest-bound adapter archive rather than read from the checkout. It then
 proves all three protected prior PostgreSQL
 credentials succeed and all three candidates fail over TCP/SCRAM. It likewise
-proves the running app accepts the prior JWT/session material, refuses the
-candidate, and holds the preserved CSRF value. Only then does it change all
+proves the running app accepts the prior JWT/session material and refuses the
+candidate. CSRF is not runtime material on this legacy artifact; its unchanged
+custody and `.env` bytes prove preservation. Only then does it change all
 three role verifiers in one PostgreSQL transaction over stdin, atomically patch
 exactly five lines of the current `.env` while preserving every other byte,
 mode and owner, and force-recreate only `app` on the expected image. The inverse
