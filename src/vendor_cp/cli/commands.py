@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import tomllib
 from dataclasses import asdict, is_dataclass
 from uuid import UUID
@@ -612,6 +613,44 @@ def deployment_set_desired_state(args: argparse.Namespace) -> Result:
                 "this exact revision into a plan an approval can bind to"
             ),
         )
+
+
+def deployment_require_authorization(args: argparse.Namespace) -> Result:
+    """Refuse unless Control authorizes this exact image for this reference.
+
+    The effect adapter on the production host calls this BEFORE it touches
+    anything. Putting the question here rather than in the workflow is the whole
+    point: a check that lives beside the effect is a convention one caller
+    happens to follow, and the deploy SSH key was enough to skip every one of
+    them.
+
+    It reaches no database and opens no session, because with the pinned Control
+    there is no approved-plan standing to read. When the read API is pinnable
+    this grows a session and an accepting path.
+    """
+    from vendor_cp.deployment.authority import (
+        AuthorityUnavailable,
+        require_authorized_image,
+    )
+
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image_digest):
+        raise refuse(
+            "usage.invalid_argument",
+            "--image-digest must be 'sha256:' plus 64 lowercase hex digits",
+        )
+    try:
+        require_authorized_image(
+            authorization_ref=args.authorization_ref,
+            image_digest=args.image_digest,
+        )
+    except AuthorityUnavailable as error:
+        raise refuse("evidence.capability_absent", str(error)) from error
+    return Result(
+        command="deployment require-authorization",
+        data={"authorization_ref": args.authorization_ref},
+        references={"image_digest": args.image_digest},
+        message="Control authorizes this image for this reference",
+    )
 
 
 def deployment_targets(args: argparse.Namespace) -> Result:

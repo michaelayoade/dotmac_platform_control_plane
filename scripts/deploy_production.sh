@@ -14,9 +14,46 @@ die() {
     exit 1
 }
 
-[[ $# -eq 1 ]] || die "usage: scripts/deploy_production.sh sha256:<digest>"
+[[ $# -eq 2 ]] || die "usage: scripts/deploy_production.sh sha256:<digest> <authorization-ref>"
 readonly DIGEST="$1"
+readonly AUTHORIZATION_REF="$2"
 [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "image digest is not sha256"
+[[ -n "${AUTHORIZATION_REF// }" ]] || die "an authorization reference is required"
+
+# ── This script is an EFFECT ADAPTER, not an effector anyone may call ────────
+#
+# It used to take one argument and a `sha256:` regex, and that was its entire
+# contract. Every check that made a deploy legitimate — the CI run, the release
+# receipt, the ancestry, the target name — lived in the WORKFLOW, so anyone
+# holding the deploy SSH key skipped all of them by running one command here.
+#
+# A check beside the effect is not a control; it is a convention one caller
+# happens to follow. The authority question now runs HERE, before anything is
+# touched, and is asked of Control rather than of whoever invoked this.
+#
+# Cleanup is this script's own. The wrapper that hands it a registry token has a
+# trap; this one had none, and it is the process holding the compose operation
+# when an SSH connection drops.
+cleanup_effector() {
+    local status=$?
+    [[ -n "${BUNDLE_TMP:-}" && -d "${BUNDLE_TMP:-/nonexistent}" ]] \
+        && rm -rf -- "$BUNDLE_TMP"
+    return "$status"
+}
+trap cleanup_effector EXIT HUP INT TERM
+
+# ── One deployment at a time, enforced where the deployment happens ──────────
+#
+# `concurrency:` in the workflow is GitHub-side, so it does not exist for a
+# direct invocation on this host — the identical hole as the authority check.
+# `flock` is held for the whole run and released when this process exits,
+# including when its SSH connection drops.
+readonly LOCK_FILE="${LOCK_FILE:-/var/lock/dotmac-vendor-control-plane-deploy.lock}"
+exec {LOCK_FD}>"$LOCK_FILE" || die "cannot open the deployment lock $LOCK_FILE"
+flock --nonblock "$LOCK_FD" \
+    || die "another deployment holds $LOCK_FILE. Deployments are serialized here \
+rather than in the workflow, because a workflow-side group does not exist for a \
+direct invocation on this host."
 
 [[ -f "$ENV_FILE" ]] || die "$ENV_FILE is missing"
 grep -Fqx 'APP_ENV=production' "$ENV_FILE" || die "APP_ENV marker mismatch"
@@ -119,6 +156,28 @@ ${ENVIRONMENT_VERDICT}
 Nothing has been changed — no container started, no migration applied.
 ${CSRF_REMEDY}"
 
+# ── Authorized, or nothing happens ──────────────────────────────────────────
+#
+# Asked of Control through the installed console script in a one-shot ops
+# container, on the exact image about to be deployed. `--no-deps` starts
+# nothing: this question opens no session and reaches no database, so it can be
+# answered before the first mutation rather than after it.
+#
+# The refusal is fail-closed BY DESIGN while Platform CP pins a Control without
+# the read API. A deployment that cannot be shown to be authorized does not
+# proceed, and leaving the effector ungated until the lookup exists would keep
+# the SSH-key bypass open for exactly as long as it takes someone to forget.
+#
+# Exit 4 is "nothing looked" and exit 3 is "an owner said no". They are
+# different findings for different people and this path keeps them apart.
+compose --profile ops run --rm --no-deps ops \
+    dotmac-platform deployment require-authorization \
+        --authorization-ref "$AUTHORIZATION_REF" \
+        --image-digest "$DIGEST" \
+    || die "refusing to deploy ${DIGEST}: Control did not authorize it under \
+${AUTHORIZATION_REF}. Nothing has been changed — no container started, no \
+migration applied, no bundle written."
+
 compose up -d --wait db
 compose --profile ops run --rm --no-deps manifest-init
 
@@ -189,6 +248,13 @@ compose exec -T --user postgres db \
 # 2. The database, with ownership and privileges INTACT. No `--no-owner` and no
 #    `--no-privileges`: stripping either would reproduce, by flag, exactly the
 #    state the rehearsal found by accident.
+#
+#    `sh -c 'exec pg_dump …'` is one idiom, not two coincidences. `sh -c` is
+#    needed because `$POSTGRES_DB` must expand inside the container; `exec`
+#    replaces that shell so the container's process IS pg_dump. Drop the `exec`
+#    and a dropped SSH connection leaves an orphaned shell holding the pipe
+#    while pg_dump keeps writing into it. A rewrite that keeps the command and
+#    loses the `exec` reads identically in review and reintroduces the bug.
 compose exec -T db sh -c \
     'exec pg_dump --username app_admin --dbname "$POSTGRES_DB" --format custom' \
     > "${BUNDLE_TMP}/database.dump"

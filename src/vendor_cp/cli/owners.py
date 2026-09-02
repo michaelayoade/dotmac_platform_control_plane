@@ -238,6 +238,13 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "declare what a registered target should converge on",
     ),
     Owner(
+        "deployment require-authorization",
+        "vendor_cp.deployment.authority",
+        "require_authorized_image",
+        False,
+        "refuse unless Control authorizes this exact image for this reference",
+    ),
+    Owner(
         "deployment targets",
         "vendor_cp.deployment.adapter",
         "read_target",

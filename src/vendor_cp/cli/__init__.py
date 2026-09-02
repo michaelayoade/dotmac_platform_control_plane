@@ -339,6 +339,16 @@ def build_parser() -> _Parser:
     desired.add_argument("--actor-ref")
     desired.set_defaults(handler=commands.deployment_set_desired_state)
 
+    require_auth = _command(
+        deployment_sub,
+        "deployment",
+        "require-authorization",
+        "refuse unless Control authorizes this exact image for this reference",
+    )
+    require_auth.add_argument("--authorization-ref", required=True)
+    require_auth.add_argument("--image-digest", required=True)
+    require_auth.set_defaults(handler=commands.deployment_require_authorization)
+
     targets = _command(deployment_sub, "deployment", "targets", "read one target")
     targets.add_argument("target_id")
     targets.set_defaults(handler=commands.deployment_targets)

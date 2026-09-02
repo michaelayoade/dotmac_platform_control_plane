@@ -677,3 +677,85 @@ def test_the_ordering_guard_reads_the_script_and_not_its_explanation() -> None:
         "no comment mentions the command the ordering guard probes for, so this "
         "helper is currently inert — keep it, but the sensitivity claim is stale"
     )
+
+
+# ── the effector is an effect adapter, not an effector anyone may call ───────
+
+
+def test_the_authority_check_runs_before_the_first_mutation() -> None:
+    """The check must live where the effect happens, or the bypass survives.
+
+    Every check that made a deploy legitimate used to live in the workflow —
+    CI run, release receipt, ancestry, target name — so the deploy SSH key was
+    enough to skip all of them by running this script directly. A check beside
+    the effect is a convention one caller happens to follow.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+    commands = _commands(deploy)
+
+    authority = commands.index("deployment require-authorization")
+    lock = commands.index("flock --nonblock")
+    start_db = commands.index("up -d --wait db")
+    migrate = commands.index("dotmac-platform admin migrate")
+    replace = commands.index("up -d app")
+
+    assert lock < authority < start_db < migrate < replace, (
+        "the authorization question must be answered before anything is "
+        "touched, and the lock must be held while it is"
+    )
+
+
+def test_the_effector_refuses_without_an_authorization_reference() -> None:
+    """Two arguments, and the second is what permits the deploy."""
+    deploy = _text("scripts/deploy_production.sh")
+    assert "[[ $# -eq 2 ]]" in deploy
+    assert "AUTHORIZATION_REF" in deploy
+    assert '--authorization-ref "$AUTHORIZATION_REF"' in deploy
+    # The digest alone must no longer be a sufficient argument list.
+    assert "[[ $# -eq 1 ]]" not in deploy
+
+
+def test_the_deployment_lock_is_held_on_the_host() -> None:
+    """`concurrency:` is GitHub-side and therefore absent for a direct
+    invocation on the host — the identical hole as the authority check."""
+    deploy = _text("scripts/deploy_production.sh")
+    assert "flock --nonblock" in deploy
+    assert "LOCK_FILE" in deploy
+
+
+def test_the_effector_cleans_up_after_itself() -> None:
+    """The wrapper had a trap and this script had none, and this is the process
+    holding the compose operation when an SSH connection drops."""
+    deploy = _text("scripts/deploy_production.sh")
+    assert "trap cleanup_effector EXIT HUP INT TERM" in deploy
+
+
+def test_the_orphan_protecting_exec_idiom_survives_with_its_reason() -> None:
+    """`sh -c 'exec pg_dump …'` is one idiom, not two coincidences.
+
+    `sh -c` expands `$POSTGRES_DB` inside the container; `exec` replaces that
+    shell so the container's process IS pg_dump. Drop the `exec` and a dropped
+    connection leaves an orphaned shell holding the pipe. A rewrite that keeps
+    the command and loses the `exec` reads identically in review.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+    assert "'exec pg_dump" in deploy
+    assert (
+        "orphaned shell holding the pipe" in deploy
+    ), "the reason must travel with the idiom, or the next rewrite drops it"
+
+
+def test_the_registry_token_wrapper_carries_the_reference_and_invents_none() -> None:
+    """A wrapper that supplied its own reference would be a second authority,
+    which is the shape being removed."""
+    wrapper = _text("scripts/deploy_production_with_registry_token.sh")
+    assert 'AUTHORIZATION_REF="${3:-}"' in wrapper
+    assert 'deploy_production.sh "$DIGEST" "$AUTHORIZATION_REF"' in wrapper
+    assert "does not invent one" in wrapper
+
+
+def test_the_workflow_supplies_the_authorization_reference() -> None:
+    workflow = _text(".github/workflows/production-deploy.yml")
+    assert "authorization_ref:" in workflow
+    assert "AUTHORIZATION_REF: ${{ inputs.authorization_ref }}" in workflow
+    assert "'$AUTHORIZATION_REF'" in workflow

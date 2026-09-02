@@ -27,6 +27,17 @@ on:
           main — so there was no way back to what is running.
         required: true
         type: string
+      authorization_ref:
+        description: >-
+          The Control authorization this deployment executes under. The effect
+          adapter on the host asks Control whether this exact image is
+          authorized under this reference, and refuses if it is not — so this is
+          the value that permits the deploy, not the digest beside it. A future
+          change derives image, revision, operation and digests FROM this
+          reference; until then they are still supplied alongside it and
+          cross-checked against the release receipt.
+        required: true
+        type: string
       target_server_name:
         description: Explicit production target identity
         required: true
@@ -51,6 +62,7 @@ jobs:
       CI_RUN_ID: ${{ inputs.ci_run_id }}
       IMAGE_DIGEST: ${{ inputs.image_digest }}
       IMAGE_SOURCE_REVISION: ${{ inputs.image_source_revision }}
+      AUTHORIZATION_REF: ${{ inputs.authorization_ref }}
       TARGET_SERVER_NAME: ${{ inputs.target_server_name }}
       TARGET_HOST: ${{ vars.VENDOR_PRODUCTION_HOST }}
       TARGET_USER: ${{ vars.VENDOR_PRODUCTION_USER }}
@@ -220,4 +232,4 @@ jobs:
             | ssh -i "$HOME/.ssh/vendor-production" "$remote" \
               "cd '$TARGET_DIR' && \
                 bash scripts/deploy_production_with_registry_token.sh \
-                  '$IMAGE_DIGEST' '$GITHUB_ACTOR'"
+                  '$IMAGE_DIGEST' '$GITHUB_ACTOR' '$AUTHORIZATION_REF'"
