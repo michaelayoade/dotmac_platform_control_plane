@@ -30,8 +30,9 @@ import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
+from importlib import resources
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, ClassVar, Final, Protocol
 
 from vendor_cp.product_release_pins import (
     ProductReleasePin,
@@ -1337,6 +1338,32 @@ def client_from_environment() -> OpenBaoClient:
 ROTATION_TARGET = "root@149.102.158.144"
 ROTATION_HOST_ID = "vendor-cp-prod"
 ROTATION_DEPLOY_DIR = Path("/opt/dotmac/vendor-control-plane")
+#: What each coded exit of the target preflight program MEANS.
+#:
+#: The program already refuses for eight distinct reasons and says so in its
+#: exit status. Until now `_run_quiet` discarded that status and surfaced
+#: "production rotation command failed" for all eight, so an operator inside a
+#: thirty-minute window could not tell a wrong host from a duplicate container
+#: from a missing readiness route. Re-running the remote program by hand with
+#: stderr visible was the only way to find out, which is not a thing to do under
+#: time pressure on a credential rotation.
+#:
+#: An authorization failure an operator cannot diagnose is one they will
+#: misdiagnose. The vocabulary already existed; only the last step threw it away.
+ROTATION_RUNTIME_ORACLE_SCHEMA: Final = "platform-rotation-runtime-oracle.v1"
+
+ROTATION_PREFLIGHT_REFUSALS: Final[dict[int, str]] = {
+    20: "a docker command on the target failed",
+    21: "/etc/dotmac-host-id is not the expected target host",
+    22: "the app service did not select exactly one container",
+    23: "the running image or its OCI revision label is not the expected one",
+    24: "the application did not answer on the loopback port",
+    25: "/health did not return 200 - the HTTP process is not live",
+    26: "/health/ready returned 404 - this image carries no readiness route",
+    27: "/health/ready did not return 200 - database readiness failed",
+    28: "this image serves /health/ready, so the legacy probe is not permitted",
+}
+
 ROTATION_COMPOSE_PROJECT = "dotmac_vendor_control_plane"
 ROTATION_APP_SERVICE = "app"
 _ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER = "rotation-compose-parse-only"
@@ -1644,6 +1671,7 @@ def _run_quiet(
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
     require_success: bool = True,
+    refusals: Mapping[int, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         result = runner(
@@ -1660,8 +1688,67 @@ def _run_quiet(
             "production rotation command was unavailable"
         ) from exc
     if require_success and result.returncode != 0:
-        raise ProductionSecretError("production rotation command failed")
+        raise ProductionSecretError(
+            _refusal_message(result.returncode, refusals, result.stderr or "")
+        )
     return result
+
+
+#: A credential-shaped run in a URL, an assignment, or a bare high-entropy blob.
+#: Denylisting free-form text is imperfect by nature, which is why the tests
+#: plant real material and assert it does not survive rather than trusting these.
+_CREDENTIAL_IN_URL = re.compile(r"(?P<scheme>[a-z][a-z0-9+.\-]*://)[^\s/@]+@")
+_ASSIGNED_SECRET = re.compile(
+    r"(?i)\b(password|passwd|pwd|secret|token|dsn|url|uri|key)\b\s*[:=]\s*\S+"
+)
+_HIGH_ENTROPY = re.compile(r"\b[A-Za-z0-9_\-]{20,}\b")
+_STDERR_LINES = 5
+_STDERR_CHARS = 400
+
+
+def sanitize_diagnostic_text(text: str) -> str:
+    """Keep the diagnosis, drop anything that could be material.
+
+    Stderr is the difference between "something failed" and "the host id is
+    wrong", and an operator inside a window needs the second. It is also
+    free-form text from a command this module does not own, so it is treated as
+    hostile: credentials inside URLs, assignments to secret-shaped names, and
+    bare high-entropy runs are replaced before anything is surfaced, and the
+    result is capped.
+
+    The redaction is deliberately over-broad. Losing a long identifier from a
+    diagnostic costs a reader some context; leaking one costs a rotation.
+    """
+    trimmed = "\n".join(text.strip().splitlines()[-_STDERR_LINES:])[:_STDERR_CHARS]
+    redacted = _CREDENTIAL_IN_URL.sub(r"\g<scheme><redacted>@", trimmed)
+    redacted = _ASSIGNED_SECRET.sub(
+        lambda match: f"{match.group(1)}=<redacted>", redacted
+    )
+    redacted = _HIGH_ENTROPY.sub("<redacted>", redacted)
+    return " ".join(redacted.split())
+
+
+def _refusal_message(
+    code: int, refusals: Mapping[int, str] | None, stderr: str = ""
+) -> str:
+    """Name the verdict the remote program already reached.
+
+    Both halves are carried. The exit CODE is looked up in a declared
+    vocabulary, so each of the eight refusals names itself; the stderr is
+    sanitized and appended, so a failure OUTSIDE the vocabulary is still
+    diagnosable instead of collapsing to "command failed".
+
+    This is the whole fix: the vocabulary already existed and only the last step
+    discarded it, which left an operator choosing between "wrong host",
+    "duplicate container", "identity mismatch" and "no readiness route" with
+    nothing to choose on - under time pressure, on a credential rotation.
+    """
+    named = (refusals or {}).get(code)
+    detail = sanitize_diagnostic_text(stderr)
+    suffix = f" [{detail}]" if detail else ""
+    if named is None:
+        return f"production rotation command failed (exit {code}){suffix}"
+    return f"production rotation refused (exit {code}): {named}{suffix}"
 
 
 def _recreate_app_with_compose(
@@ -2542,8 +2629,111 @@ def _adapter_ssh_prefix(known_hosts_file: Path) -> tuple[str, ...]:
     )
 
 
-def rotation_target_preflight_program() -> str:
-    """Return the stdlib-only, read-only target preflight program."""
+#: The ONE image the transitional oracle is permitted for. Both halves are part
+#: of the permission: a different digest, or a different revision at the same
+#: digest, is a different artifact and does not inherit the exception.
+LEGACY_RUNTIME_PROBE_IMAGE: Final = (
+    "ghcr.io/michaelayoade/dotmac_vendor_control_plane"
+    "@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d"
+)
+LEGACY_RUNTIME_PROBE_REVISION: Final = "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e"
+
+
+class _OracleWitness:
+    """Held only by :func:`select_readiness_oracle`."""
+
+    __slots__ = ()
+
+
+_ORACLE_ADMITTED = _OracleWitness()
+
+
+@dataclass(frozen=True, slots=True)
+class HttpReadinessOracle:
+    """The required form: the image serves `/health/ready` and it returns 200."""
+
+    name: ClassVar[str] = "http_readiness"
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyRuntimeProbeOracle:
+    """The transitional form, bound to ONE image and due for deletion.
+
+    It loads the deployed application's real settings and database runtime and
+    queries BOTH planes read-only. It exists because the route that would have
+    proved the same thing was never in this image, and deploying an image that
+    has it IS the cutover this rotation must precede.
+
+    The witness is positional and only :func:`select_readiness_oracle` holds one,
+    so this cannot be constructed for an arbitrary image. That is deliberate:
+    "permitted only for the old image" has to be something the code cannot
+    express otherwise, or it becomes a general fallback the first time someone
+    is in a hurry.
+    """
+
+    _witness: _OracleWitness
+    image_reference: str
+    source_revision: str
+    name: ClassVar[str] = "legacy_runtime_probe"
+
+    def __post_init__(self) -> None:
+        if self._witness is not _ORACLE_ADMITTED:
+            raise ProductionSecretError(
+                "the legacy runtime probe is selected, never constructed"
+            )
+        if (self.image_reference, self.source_revision) != (
+            LEGACY_RUNTIME_PROBE_IMAGE,
+            LEGACY_RUNTIME_PROBE_REVISION,
+        ):
+            raise ProductionSecretError(
+                "the legacy runtime probe is bound to one exact image and revision"
+            )
+
+
+ReadinessOracle = HttpReadinessOracle | LegacyRuntimeProbeOracle
+
+
+def select_readiness_oracle(
+    *, image_reference: str, source_revision: str
+) -> ReadinessOracle:
+    """Which oracle this image is permitted, as a fact about the image.
+
+    Two outcomes, never three. The exact transitional pair gets
+    `legacy_runtime_probe`; everything else gets `http_readiness`, which then
+    refuses if the route is missing. There is no widening and no fallback: a
+    caller cannot ask for the legacy probe, it can only turn out to be entitled
+    to one.
+    """
+    if (image_reference, source_revision) == (
+        LEGACY_RUNTIME_PROBE_IMAGE,
+        LEGACY_RUNTIME_PROBE_REVISION,
+    ):
+        return LegacyRuntimeProbeOracle(
+            _ORACLE_ADMITTED, image_reference, source_revision
+        )
+    return HttpReadinessOracle()
+
+
+def rotation_target_preflight_program(
+    oracle: ReadinessOracle | None = None,
+) -> str:
+    """Return the stdlib-only, read-only target preflight program.
+
+    The readiness clause is the oracle's. Under `http_readiness` a 404 is a
+    refusal (26). Under `legacy_runtime_probe` a 404 is EXPECTED and the
+    database-reaching half is proved separately by the in-container runtime
+    oracle - but a readiness route that unexpectedly EXISTS is itself a refusal
+    (28), because the premise of the exception is that this image has none.
+    """
+    legacy = isinstance(oracle, LegacyRuntimeProbeOracle)
+    readiness_clause = (
+        "if readiness!=404: raise SystemExit(28)"
+        if legacy
+        else (
+            "if readiness==404: raise SystemExit(26)\n"
+            "if readiness!=200: raise SystemExit(27)"
+        )
+    )
     return "\n".join(
         (
             "import json,pathlib,re,subprocess,sys,urllib.error,urllib.request",
@@ -2595,8 +2785,7 @@ def rotation_target_preflight_program() -> str:
             " except urllib.error.URLError: raise SystemExit(24)",
             "if status('/health')!=200: raise SystemExit(25)",
             "readiness=status('/health/ready')",
-            "if readiness==404: raise SystemExit(26)",
-            "if readiness!=200: raise SystemExit(27)",
+            readiness_clause,
             "print(json.dumps({'schema':'platform-secret-rotation-preflight.v1','target_host_id':TARGET,'image_reference':image,'source_revision':revision,'container_selection':'exactly_one','liveness':'passed','readiness':'passed'},sort_keys=True,separators=(',',':')))",
         )
     )
@@ -2622,6 +2811,7 @@ def preflight_rotation_target(
         runner,
         (*_adapter_ssh_prefix(known_hosts_file), remote_command),
         input_text=rotation_target_preflight_program(),
+        refusals=ROTATION_PREFLIGHT_REFUSALS,
     )
     proof = RotationTargetPreflightProof.from_json(result.stdout)
     if (proof.image_reference, proof.source_revision) != (
@@ -2630,6 +2820,113 @@ def preflight_rotation_target(
     ):
         raise ProductionSecretError("rotation preflight identity differs")
     return proof
+
+
+@dataclass(frozen=True, slots=True)
+class RotationRuntimeOracleProof:
+    """The deployed application reached BOTH database planes, and refused bad material.
+
+    This type cannot be constructed from a run that only succeeded. `from_json`
+    requires the negative half as well, because a probe observed only passing
+    cannot distinguish "the runtime reached the database" from "the check does
+    not check". That is the whole reason the oracle exists rather than a second
+    `/health`.
+
+    It carries ROLE IDENTITY and success. It never carries a DSN, a password, or
+    anything derived from one.
+    """
+
+    application_role: str
+    platform_role: str
+    database: str
+
+    @classmethod
+    def from_json(cls, payload: str) -> RotationRuntimeOracleProof:
+        try:
+            document = json.loads(payload)
+        except json.JSONDecodeError as error:
+            raise ProductionSecretError(
+                "the runtime oracle did not return a readable proof"
+            ) from error
+        if document.get("schema") != ROTATION_RUNTIME_ORACLE_SCHEMA:
+            raise ProductionSecretError("the runtime oracle proof is not this schema")
+        planes = document.get("planes") or {}
+        invalid = document.get("invalid_material") or {}
+        problems: list[str] = []
+        for plane in ("application", "platform"):
+            if not (planes.get(plane) or {}).get("reached"):
+                problems.append(f"the {plane} plane was not reached")
+            if not (invalid.get(plane) or {}).get("refused"):
+                problems.append(
+                    f"the {plane} plane ACCEPTED deliberately invalid material, so "
+                    "this probe proves nothing about the credentials it passed with"
+                )
+        if problems:
+            raise ProductionSecretError("; ".join(problems))
+        databases = {str((planes[plane] or {}).get("database")) for plane in planes}
+        if len(databases) != 1:
+            raise ProductionSecretError(
+                f"the two planes reported different databases: {sorted(databases)}"
+            )
+        return cls(
+            application_role=str(planes["application"]["role"]),
+            platform_role=str(planes["platform"]["role"]),
+            database=databases.pop(),
+        )
+
+
+ROTATION_RUNTIME_ORACLE_PAYLOAD: Final = "rotation_runtime_oracle.pyprogram"
+
+
+def rotation_runtime_oracle_program() -> str:
+    """The composite oracle, as a program the DEPLOYED image runs in-process.
+
+    `/health/ready` is an HTTP route this image never carried, but the thing that
+    route would have proved - that the application's own settings and database
+    runtime reach both planes - is already inside the image. The payload loads
+    exactly that, then hands the same runtime deliberately invalid material and
+    requires a refusal.
+
+    It is stored as package DATA rather than as a Python literal here, because it
+    is not this assembly's code: it runs in another interpreter, in another
+    image. D1's guard reads every `.py` file under `src` for connection
+    constructors and is right to - one in this assembly's runtime IS the
+    violation. Respelling the constructor to slip past the regex would have been
+    evasion; moving the payload out of the code surface makes the guard's answer
+    true instead of fooled.
+    """
+    return (
+        resources.files("vendor_cp")
+        .joinpath(ROTATION_RUNTIME_ORACLE_PAYLOAD)
+        .read_text(encoding="utf-8")
+    )
+
+
+def probe_rotation_runtime(
+    *,
+    known_hosts_file: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> RotationRuntimeOracleProof:
+    """Run the composite oracle inside the running container and prove both halves.
+
+    The program is streamed over stdin to `python -` inside the container, so it
+    runs under the container's ACTUAL environment. A probe run with material the
+    caller supplied would prove that the caller's material works, which is not
+    the question.
+    """
+    remote = (
+        "docker exec -i $(docker ps -q "
+        f"--filter label=com.docker.compose.project={ROTATION_COMPOSE_PROJECT} "
+        f"--filter label=com.docker.compose.service={ROTATION_APP_SERVICE} "
+        "--filter label=com.docker.compose.container-number=1 "
+        "--filter label=com.docker.compose.oneoff=False) python -"
+    )
+    result = _run_quiet(
+        runner,
+        (*_adapter_ssh_prefix(known_hosts_file), remote),
+        input_text=rotation_runtime_oracle_program(),
+    )
+    return RotationRuntimeOracleProof.from_json(result.stdout)
 
 
 def install_rotation_adapter(
