@@ -268,8 +268,15 @@ value is overwritten rather than propagated.
 A retry classifies exactly four aggregate states: all-prior; database candidate
 with prior environment/app; database+environment candidate with prior app; or
 all-candidate. Every mixed state is refused. The target receipt and protected
-prestate bind the one operation, adapter, image and revision across process
-death. The operator receipt contains no value or value-derived hash; successful
+prestate bind the one operation, mutation adapter, image and revision across
+process death. The one exact proof-adapter successor is closed in code and may
+resume only from `app_recreated`; every earlier phase and every other digest is
+refused. At `proved`, the target receipt retains the mutation adapter digest and
+also persists the successor proof-adapter digest. A replay succeeds only when
+that persisted proof digest names the currently executing adapter; it is never
+inferred from whichever archive happens to be installed. The returned host
+proof names the adapter that performed the final proof. The operator receipt
+contains no value or value-derived hash; successful
 coordinator proof removes the extra candidate custody file because OpenBao's
 current/historical versions then hold the recovery boundary.
 

@@ -1386,6 +1386,14 @@ ROTATION_ADAPTER_PATH = Path(
 ROTATION_TARGET_STATE_DIR = Path(
     "/var/lib/dotmac/incidents/platform-cp-secret-rotation"
 )
+# The first production mutation reached APP_RECREATED under this exact adapter.
+# A later proof-only repair may finish that same recorded operation, but may not
+# borrow this authority at an earlier mutation phase or for another digest.
+_ROTATION_PROOF_ADAPTER_PREDECESSORS: Final[frozenset[str]] = frozenset(
+    {
+        "sha256:5b9962db4dc9a114486a5b9651e1e79df9365aac938ffa1be8b940bc1ba7b595",
+    }
+)
 DATABASE_ROLE_NAMES = ("app_admin", "app_user", "platform_api")
 ROLLBACK_CONFIRMATION = "RESTORE-EXPOSED-MATERIAL-FOR-OUTAGE-CONTAINMENT"
 
@@ -2421,12 +2429,27 @@ class TargetRotationReceipt:
     phase: TargetRotationPhase
     image_reference: str
     source_revision: str
+    proof_adapter_digest: str | None = None
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[0-9a-f]{32}", self.operation_id) is None:
             raise ProductionSecretError("target receipt operation id is invalid")
-        if self.adapter_digest != rotation_adapter_digest():
-            raise ProductionSecretError("target receipt adapter is not approved")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.adapter_digest) is None:
+            raise ProductionSecretError("target receipt adapter digest is invalid")
+        if (
+            self.proof_adapter_digest is not None
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", self.proof_adapter_digest) is None
+        ):
+            raise ProductionSecretError(
+                "target receipt proof adapter digest is invalid"
+            )
+        if (
+            self.phase is not TargetRotationPhase.PROVED
+            and self.proof_adapter_digest is not None
+        ):
+            raise ProductionSecretError(
+                "target receipt names a proof adapter before proof"
+            )
         if (
             re.fullmatch(r"[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}", self.image_reference)
             is None
@@ -2465,6 +2488,28 @@ def _write_target_receipt(path: Path, receipt: TargetRotationReceipt) -> None:
 def _read_target_receipt(path: Path) -> TargetRotationReceipt:
     return TargetRotationReceipt.from_json(
         _read_protected(path, label="target rotation receipt")
+    )
+
+
+def _require_target_receipt_adapter(receipt: TargetRotationReceipt) -> None:
+    """Accept only a truthful current adapter or the one closed handoff."""
+    current = rotation_adapter_digest()
+    if receipt.adapter_digest == current:
+        if receipt.proof_adapter_digest not in {None, current}:
+            raise ProductionSecretError("target receipt proof adapter is not approved")
+        return
+    if receipt.adapter_digest not in _ROTATION_PROOF_ADAPTER_PREDECESSORS:
+        raise ProductionSecretError("target receipt adapter is not approved")
+    if receipt.phase is TargetRotationPhase.APP_RECREATED:
+        return
+    if receipt.phase is TargetRotationPhase.PROVED:
+        if receipt.proof_adapter_digest != current:
+            raise ProductionSecretError(
+                "target receipt does not bind the current proof adapter"
+            )
+        return
+    raise ProductionSecretError(
+        "predecessor adapter may resume only after app recreation"
     )
 
 
@@ -2520,6 +2565,7 @@ def apply_secret_rotation_on_target(
             source_revision,
         ):
             raise ProductionSecretError("rotation target identity drifted")
+        _require_target_receipt_adapter(target_receipt)
     else:
         initial_state = (
             _database_rotation_state(
@@ -2570,7 +2616,9 @@ def apply_secret_rotation_on_target(
             target_host_id=ROTATION_HOST_ID,
             image_reference=image_reference,
             source_revision=source_revision,
-            adapter_digest=rotation_adapter_digest(),
+            adapter_digest=(
+                target_receipt.proof_adapter_digest or target_receipt.adapter_digest
+            ),
         )
     if not plan_file.exists():
         raise ProductionSecretError("rotation target prestate is absent")
@@ -2689,7 +2737,11 @@ def apply_secret_rotation_on_target(
     )
     if current_plan_state != protected_plan_state:
         raise ProductionSecretError("rotation changed deployment plan or rollout state")
-    target_receipt = replace(target_receipt, phase=TargetRotationPhase.PROVED)
+    target_receipt = replace(
+        target_receipt,
+        phase=TargetRotationPhase.PROVED,
+        proof_adapter_digest=rotation_adapter_digest(),
+    )
     _write_target_receipt(receipt_file, target_receipt)
     plan_file.unlink()
     return HostRotationProof(
