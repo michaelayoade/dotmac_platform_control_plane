@@ -16,7 +16,7 @@ from vendor_cp.deployment.authority import (
     CONTROL_READ_API_SYMBOLS,
     AuthorityUnavailable,
     control_read_api_status,
-    require_authorized_image,
+    require_control_approved_image,
 )
 
 DIGEST = "sha256:" + "a" * 64
@@ -45,14 +45,16 @@ def test_an_unreferenced_deployment_is_refused() -> None:
     """An authorization reference is not defaulted. A deployment with none is
     one nobody approved."""
     with pytest.raises(AuthorityUnavailable, match="no authorization reference"):
-        require_authorized_image(authorization_ref="   ", image_digest=DIGEST)
+        require_control_approved_image(authorization_ref="   ", image_digest=DIGEST)
 
 
 def test_no_read_api_means_no_image_is_authorized() -> None:
     """Fail closed. Leaving the effector ungated until the lookup exists keeps
     the bypass open for as long as it takes someone to forget."""
     with pytest.raises(AuthorityUnavailable, match="exports none of"):
-        require_authorized_image(authorization_ref="rollout-1", image_digest=DIGEST)
+        require_control_approved_image(
+            authorization_ref="rollout-1", image_digest=DIGEST
+        )
 
 
 def test_the_capability_arriving_is_itself_a_refusal(
@@ -71,15 +73,17 @@ def test_the_capability_arriving_is_itself_a_refusal(
     monkeypatch.setitem(sys.modules, "dotmac_deployment_control", stand_in)
 
     with pytest.raises(AuthorityUnavailable, match="has not been written"):
-        require_authorized_image(authorization_ref="rollout-1", image_digest=DIGEST)
+        require_control_approved_image(
+            authorization_ref="rollout-1", image_digest=DIGEST
+        )
 
 
 def test_success_is_the_only_silent_outcome() -> None:
-    """`require_authorized_image` returns None or raises — it never returns a
+    """`require_control_approved_image` returns None or raises — it never returns a
     falsy value a caller could mistake for permission. That is the failure mode
     `ApprovedPlanLookup.__bool__` exists to remove, applied one level up."""
     import inspect
 
-    source = inspect.getsource(require_authorized_image)
+    source = inspect.getsource(require_control_approved_image)
     assert "return False" not in source
     assert "return None" not in source

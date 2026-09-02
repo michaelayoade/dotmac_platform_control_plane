@@ -630,7 +630,7 @@ def deployment_require_authorization(args: argparse.Namespace) -> Result:
     """
     from vendor_cp.deployment.authority import (
         AuthorityUnavailable,
-        require_authorized_image,
+        require_control_approved_image,
     )
 
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image_digest):
@@ -639,7 +639,7 @@ def deployment_require_authorization(args: argparse.Namespace) -> Result:
             "--image-digest must be 'sha256:' plus 64 lowercase hex digits",
         )
     try:
-        require_authorized_image(
+        require_control_approved_image(
             authorization_ref=args.authorization_ref,
             image_digest=args.image_digest,
         )

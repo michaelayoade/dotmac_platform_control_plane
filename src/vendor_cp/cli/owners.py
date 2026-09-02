@@ -240,7 +240,7 @@ OWNERS: Final[tuple[Owner, ...]] = (
     Owner(
         "deployment require-authorization",
         "vendor_cp.deployment.authority",
-        "require_authorized_image",
+        "require_control_approved_image",
         False,
         "refuse unless Control authorizes this exact image for this reference",
     ),

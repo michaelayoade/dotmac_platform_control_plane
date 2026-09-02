@@ -51,7 +51,7 @@ __all__ = [
     "CONTROL_READ_API_SYMBOLS",
     "AuthorityUnavailable",
     "control_read_api_status",
-    "require_authorized_image",
+    "require_control_approved_image",
 ]
 
 #: What the read API is, by name. Probed rather than assumed from a version
@@ -86,8 +86,22 @@ def control_read_api_status() -> tuple[str, ...]:
     return tuple(name for name in CONTROL_READ_API_SYMBOLS if hasattr(control, name))
 
 
-def require_authorized_image(*, authorization_ref: str, image_digest: str) -> None:
-    """Refuse unless Control says this exact image is authorized for this ref.
+def require_control_approved_image(
+    *, authorization_ref: str, image_digest: str
+) -> None:
+    """Refuse unless Control says this exact image is approved for this ref.
+
+    NAMED for what it asks, and not `require_authorized_image`, for two reasons
+    that point the same way. D4's `test_d4_the_vendor_re_implements_no
+    _authentication` matches `def (require|authenticate|verify)_…(platform|admin
+    |web|session|auth)…` by NAME and deliberately so — "any local definition of
+    one is the violation regardless of what it does" — and `authorized` contains
+    `auth`. This function authenticates no actor; it asks Control whether an
+    image was approved, which is a different question about a different subject.
+    So the collision is a false positive on a name-based guard, and the sanctioned
+    answer to that is a name that does not make the claim, never a loosened
+    detector. The rename also says more: Control APPROVED it is the fact;
+    "authorized" is the conclusion drawn from it.
 
     Returns nothing on success and raises on every other outcome, so a caller
     cannot mistake a falsy result for permission — the failure mode
