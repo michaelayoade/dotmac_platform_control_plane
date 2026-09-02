@@ -31,6 +31,7 @@ from vendor_cp.production_secrets import (
     OpenBaoClient,
     ProductionSecretError,
     RotationPhase,
+    RotationTargetPreflightProof,
     SecretRotationReceipt,
     VersionedSecretRecord,
     apply_secret_rotation_on_target,
@@ -38,6 +39,7 @@ from vendor_cp.production_secrets import (
     commit_openbao_rotation,
     complete_secret_rotation,
     execute_secret_rotation,
+    preflight_rotation_target,
     prepare_secret_rotation,
     read_rotation_custody,
     read_rotation_receipt,
@@ -46,6 +48,7 @@ from vendor_cp.production_secrets import (
     rotation_adapter_digest,
     rotation_adapter_installer_program,
     rotation_adapter_verifier_program,
+    rotation_target_preflight_program,
     transfer_rotation_payload,
 )
 
@@ -60,6 +63,14 @@ def _proof(operation_id: str) -> HostRotationProof:
         image_reference=EXPECTED_IMAGE,
         source_revision=EXPECTED_REVISION,
         adapter_digest=rotation_adapter_digest(),
+    )
+
+
+def _preflight() -> RotationTargetPreflightProof:
+    return RotationTargetPreflightProof(
+        target_host_id=ROTATION_HOST_ID,
+        image_reference=EXPECTED_IMAGE,
+        source_revision=EXPECTED_REVISION,
     )
 
 
@@ -286,7 +297,8 @@ def test_partial_openbao_records_never_reach_the_host_consumer(tmp_path: Path) -
 
     with pytest.raises(ProductionSecretError, match="injected CAS failure"):
         execute_secret_rotation(
-            store,
+            store_factory=lambda: store,
+            preflight=_preflight,
             custody_file=custody_file,
             receipt_file=receipt_file,
             expected_image_reference=EXPECTED_IMAGE,
@@ -303,7 +315,8 @@ def test_partial_openbao_records_never_reach_the_host_consumer(tmp_path: Path) -
 
     proof = _proof(read_rotation_custody(custody_file).operation_id)
     completed = execute_secret_rotation(
-        store,
+        store_factory=lambda: store,
+        preflight=_preflight,
         custody_file=custody_file,
         receipt_file=receipt_file,
         expected_image_reference=EXPECTED_IMAGE,
@@ -315,6 +328,40 @@ def test_partial_openbao_records_never_reach_the_host_consumer(tmp_path: Path) -
     assert completed.phase is RotationPhase.PROVED
     assert len(host_calls) == 1
     assert store.updates == [(DATABASE_PATH, 1), (RUNTIME_PATH, 1)]
+
+
+def test_failed_preflight_precedes_openbao_and_every_local_mutation(
+    tmp_path: Path,
+) -> None:
+    store = FakeVersionedStore()
+    custody_file = tmp_path / "private" / "rotation.custody.json"
+    receipt_file = tmp_path / "private" / "rotation.receipt.json"
+    store_factory_calls = 0
+
+    def store_factory() -> FakeVersionedStore:
+        nonlocal store_factory_calls
+        store_factory_calls += 1
+        return store
+
+    def refuse_preflight() -> RotationTargetPreflightProof:
+        raise ProductionSecretError("readiness preflight refused")
+
+    with pytest.raises(ProductionSecretError, match="readiness preflight"):
+        execute_secret_rotation(
+            store_factory=store_factory,
+            preflight=refuse_preflight,
+            custody_file=custody_file,
+            receipt_file=receipt_file,
+            expected_image_reference=EXPECTED_IMAGE,
+            expected_source_revision=EXPECTED_REVISION,
+            host_apply=lambda _payload: pytest.fail("host must not be called"),
+        )
+
+    assert store_factory_calls == 0
+    assert store.reads == []
+    assert store.updates == []
+    assert not custody_file.exists()
+    assert not receipt_file.exists()
 
 
 def test_advanced_openbao_without_matching_custody_is_refused(tmp_path: Path) -> None:
@@ -341,7 +388,8 @@ def test_advanced_openbao_without_matching_custody_is_refused(tmp_path: Path) ->
 
     with pytest.raises(ProductionSecretError, match="without custody"):
         execute_secret_rotation(
-            store,
+            store_factory=lambda: store,
+            preflight=_preflight,
             custody_file=tmp_path / "private" / "missing.custody.json",
             receipt_file=receipt_file,
             expected_image_reference=EXPECTED_IMAGE,
@@ -465,6 +513,194 @@ def test_transfer_is_fixed_to_the_named_target_and_keeps_material_off_argv(
     ):
         assert value not in " ".join(command)
     assert custody.candidate.admin_password in stdin
+
+
+def test_read_only_preflight_program_uses_exact_labels_and_both_health_axes() -> None:
+    program = rotation_target_preflight_program()
+
+    compile(program, "<rotation-target-preflight>", "exec")
+    assert "docker','ps" in program
+    assert "com.docker.compose.project=" in program
+    assert "com.docker.compose.service=" in program
+    assert "com.docker.compose.container-number=1" in program
+    assert "com.docker.compose.oneoff=False" in program
+    assert ".Config.Image" in program
+    assert ".Config.Env" not in program
+    assert "docker compose" not in program
+    assert "'/health'" in program
+    assert "'/health/ready'" in program
+
+
+class _ProbeResponse:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    def __enter__(self) -> _ProbeResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+
+def _execute_target_preflight_program(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    containers: tuple[str, ...] = ("a" * 64,),
+    liveness: int = 200,
+    readiness: int = 200,
+) -> str:
+    def run(
+        command: Sequence[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        joined = " ".join(command)
+        if command[:2] == ["docker", "ps"]:
+            output = "".join(f"{container}\n" for container in containers)
+        elif command[:2] == ["docker", "inspect"]:
+            output = EXPECTED_IMAGE + "\n"
+        elif command[:3] == ["docker", "image", "inspect"]:
+            output = EXPECTED_REVISION + "\n"
+        else:  # pragma: no cover - a new command is a security-significant change
+            raise AssertionError(joined)
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    def urlopen(
+        request: urllib.request.Request,
+        **_kwargs: object,
+    ) -> _ProbeResponse:
+        status = readiness if request.full_url.endswith("/health/ready") else liveness
+        if status >= 400:
+            raise urllib.error.HTTPError(request.full_url, status, "probe", None, None)
+        return _ProbeResponse(status)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: ROTATION_HOST_ID)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["rotation-preflight", EXPECTED_IMAGE, EXPECTED_REVISION],
+    )
+    exec(
+        compile(
+            rotation_target_preflight_program(),
+            "<rotation-target-preflight>",
+            "exec",
+        ),
+        {"__name__": "__main__"},
+    )
+    return capsys.readouterr().out
+
+
+def test_read_only_preflight_program_emits_bound_names_only_proof(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    proof = RotationTargetPreflightProof.from_json(
+        _execute_target_preflight_program(monkeypatch, capsys)
+    )
+    assert proof == _preflight()
+
+
+@pytest.mark.parametrize("containers", ((), ("a" * 64, "b" * 64)))
+def test_read_only_preflight_program_refuses_zero_or_multiple_exact_matches(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    containers: tuple[str, ...],
+) -> None:
+    with pytest.raises(SystemExit) as refusal:
+        _execute_target_preflight_program(
+            monkeypatch,
+            capsys,
+            containers=containers,
+        )
+    assert refusal.value.code == 22
+
+
+def test_read_only_preflight_program_refuses_missing_readiness_support(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as refusal:
+        _execute_target_preflight_program(
+            monkeypatch,
+            capsys,
+            liveness=200,
+            readiness=404,
+        )
+    assert refusal.value.code == 26
+
+
+def test_read_only_preflight_program_refuses_db_unready_despite_liveness(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as refusal:
+        _execute_target_preflight_program(
+            monkeypatch,
+            capsys,
+            liveness=200,
+            readiness=503,
+        )
+    assert refusal.value.code == 27
+
+
+def test_remote_preflight_binds_expected_identity_without_secret_access(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[tuple[str, ...], str | None]] = []
+
+    def runner(
+        command: Sequence[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        stdin = kwargs.get("input")
+        assert stdin is None or isinstance(stdin, str)
+        calls.append((tuple(command), stdin))
+        return subprocess.CompletedProcess(command, 0, _preflight().to_json(), "")
+
+    proof = preflight_rotation_target(
+        known_hosts_file=tmp_path / "known_hosts",
+        expected_image_reference=EXPECTED_IMAGE,
+        expected_source_revision=EXPECTED_REVISION,
+        runner=runner,
+    )
+
+    assert proof == _preflight()
+    assert len(calls) == 1
+    command, stdin = calls[0]
+    assert ROTATION_TARGET in command
+    assert EXPECTED_IMAGE in command[-1]
+    assert EXPECTED_REVISION in command[-1]
+    assert stdin == rotation_target_preflight_program()
+    assert "secret" not in command[-1].lower()
+
+
+def test_adapter_install_stops_before_writing_when_preflight_refuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_calls = 0
+
+    def refuse(**_kwargs: object) -> RotationTargetPreflightProof:
+        raise ProductionSecretError("preflight refused")
+
+    def runner(
+        _command: Sequence[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal runner_calls
+        runner_calls += 1
+        return subprocess.CompletedProcess((), 0, "", "")
+
+    monkeypatch.setattr(production_secrets, "preflight_rotation_target", refuse)
+    with pytest.raises(ProductionSecretError, match="preflight refused"):
+        production_secrets.install_rotation_adapter(
+            known_hosts_file=tmp_path / "known_hosts",
+            expected_image_reference=EXPECTED_IMAGE,
+            expected_source_revision=EXPECTED_REVISION,
+            runner=runner,
+        )
+
+    assert runner_calls == 0
 
 
 def test_rotation_payload_never_reads_or_transmits_signing_or_deploy_material(
@@ -632,6 +868,11 @@ class HostRunner:
         self.db_rotated = False
         self.runtime_rotated = False
         self.compose_bootstrap_values: list[str | None] = []
+        self.compose_image_values: list[str | None] = []
+        self.app_container_ids: tuple[str, ...] = ("a" * 64,)
+        self.db_container_ids: tuple[str, ...] = ("f" * 64,)
+        self.liveness_status = 200
+        self.readiness_status = 200
 
     def __call__(
         self, command: Sequence[str], **kwargs: object
@@ -651,8 +892,15 @@ class HostRunner:
             )
             assert bootstrap_value is None or isinstance(bootstrap_value, str)
             self.compose_bootstrap_values.append(bootstrap_value)
-            if bootstrap_value != (
-                production_secrets._ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER
+            image_value = (
+                None if environment is None else environment.get("VENDOR_APP_IMAGE")
+            )
+            assert image_value is None or isinstance(image_value, str)
+            self.compose_image_values.append(image_value)
+            if (
+                bootstrap_value
+                != (production_secrets._ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER)
+                or image_value != self.payload.expected_image_reference
             ):
                 return subprocess.CompletedProcess(
                     command,
@@ -660,8 +908,15 @@ class HostRunner:
                     "",
                     "VENDOR_DB_BOOTSTRAP_PASSWORD is required for interpolation",
                 )
-        if "compose" in command and command[-3:] == ("ps", "-q", "app"):
-            return subprocess.CompletedProcess(command, 0, "a" * 64 + "\n", "")
+        if command[:2] == ("docker", "ps"):
+            joined_command = " ".join(command)
+            selected = (
+                self.app_container_ids
+                if "com.docker.compose.service=app" in joined_command
+                else self.db_container_ids
+            )
+            stdout = "".join(container + "\n" for container in selected)
+            return subprocess.CompletedProcess(command, 0, stdout, "")
         if command[:3] == ("docker", "inspect", "--format"):
             self.identity_calls += 1
             reference = (
@@ -705,8 +960,13 @@ class HostRunner:
                 self.runtime_rotated = True
             return subprocess.CompletedProcess(command, code, "", "")
         if command and command[0] == "curl":
-            code = 1 if self.fail_kind == "readiness" else 0
-            return subprocess.CompletedProcess(command, code, "", "")
+            path = command[-1].removeprefix("http://127.0.0.1:8100")
+            status = (
+                self.liveness_status if path == "/health" else self.readiness_status
+            )
+            if self.fail_kind == "readiness" and path == "/health/ready":
+                status = 503
+            return subprocess.CompletedProcess(command, 0, str(status), "")
         if "decode_access_token" in joined:
             proof = json.loads(stdin or "{}")
             canary = proof["canary"]
@@ -798,6 +1058,79 @@ def test_host_rotation_proves_atomic_db_env_recreate_and_unchanged_state(
     assert any("--force-recreate" in command for command, _ in runner.calls)
 
 
+def _assert_no_target_mutation(
+    deploy_dir: Path,
+    runner: HostRunner,
+    before: bytes,
+) -> None:
+    assert (deploy_dir / ".env").read_bytes() == before
+    assert runner.db_rotated is False
+    assert runner.runtime_rotated is False
+    assert not any("ALTER ROLE" in (stdin or "") for _command, stdin in runner.calls)
+    assert not any("--force-recreate" in command for command, _stdin in runner.calls)
+    assert not (deploy_dir / ".rotation-state").exists()
+
+
+@pytest.mark.parametrize("container_count", (0, 2))
+def test_host_rotation_refuses_zero_or_multiple_exact_app_label_matches(
+    tmp_path: Path,
+    container_count: int,
+) -> None:
+    payload, deploy_dir, host_id, runner = _host_fixture(tmp_path)
+    before = (deploy_dir / ".env").read_bytes()
+    runner.app_container_ids = tuple(
+        f"{number + 1:064x}" for number in range(container_count)
+    )
+
+    with pytest.raises(ProductionSecretError, match="selection is not exactly one"):
+        apply_secret_rotation_on_target(
+            payload,
+            deploy_dir=deploy_dir,
+            host_id_file=host_id,
+            runner=runner,
+        )
+
+    _assert_no_target_mutation(deploy_dir, runner, before)
+
+
+def test_missing_readiness_support_refuses_before_every_target_mutation(
+    tmp_path: Path,
+) -> None:
+    payload, deploy_dir, host_id, runner = _host_fixture(tmp_path)
+    before = (deploy_dir / ".env").read_bytes()
+    runner.readiness_status = 404
+
+    with pytest.raises(ProductionSecretError, match="deploy a capable image first"):
+        apply_secret_rotation_on_target(
+            payload,
+            deploy_dir=deploy_dir,
+            host_id_file=host_id,
+            runner=runner,
+        )
+
+    assert runner.liveness_status == 200
+    _assert_no_target_mutation(deploy_dir, runner, before)
+
+
+def test_database_unready_refuses_while_liveness_passes_before_every_mutation(
+    tmp_path: Path,
+) -> None:
+    payload, deploy_dir, host_id, runner = _host_fixture(tmp_path)
+    before = (deploy_dir / ".env").read_bytes()
+    runner.readiness_status = 503
+
+    with pytest.raises(ProductionSecretError, match="database readiness"):
+        apply_secret_rotation_on_target(
+            payload,
+            deploy_dir=deploy_dir,
+            host_id_file=host_id,
+            runner=runner,
+        )
+
+    assert runner.liveness_status == 200
+    _assert_no_target_mutation(deploy_dir, runner, before)
+
+
 def test_host_rotation_uses_only_an_inert_process_interpolation_for_compose(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -818,6 +1151,7 @@ def test_host_rotation_uses_only_an_inert_process_interpolation_for_compose(
     assert set(runner.compose_bootstrap_values) == {
         production_secrets._ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER
     }
+    assert set(runner.compose_image_values) == {payload.expected_image_reference}
     recreate_commands = [
         command for command, _stdin in runner.calls if "--force-recreate" in command
     ]
@@ -846,6 +1180,7 @@ def test_host_rotation_uses_only_an_inert_process_interpolation_for_compose(
     assert "VENDOR_DB_BOOTSTRAP_PASSWORD=" not in (deploy_dir / ".env").read_text(
         encoding="utf-8"
     )
+    assert "VENDOR_APP_IMAGE=" not in (deploy_dir / ".env").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

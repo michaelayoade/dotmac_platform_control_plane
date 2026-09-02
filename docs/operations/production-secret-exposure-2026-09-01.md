@@ -1,6 +1,7 @@
 # Platform CP production secret exposure — 2026-09-01
 
-Status: remediation facility implemented; production rotation not executed.
+Status: remediation facility implemented; two production windows failed closed;
+production rotation not executed.
 
 The window `platform-cp-first-authorization-2026-09-01T10:00-11:00WAT` is
 cancelled and must never be resumed. A read-only container inspection emitted
@@ -8,6 +9,18 @@ the running application's database, JWT and session materials. It did not emit
 CSRF, signing private-key, deployment-key, OpenBao-token or bootstrap material.
 No issuer, plan, approval, rollout, deployment, database or OpenBao mutation
 occurred.
+
+The later window `platform-cp-secret-rotation-2026-09-01T13:40-14:40WAT` is
+also cancelled and must never be resumed. Its first read-only command failed
+before OpenBao identity creation, custody, database, `.env`, adapter or
+container mutation. The established host intentionally lacks both
+`VENDOR_DB_BOOTSTRAP_PASSWORD` and `VENDOR_APP_IMAGE`, so using Compose for
+identity discovery made parsing depend on creation-time inputs. Independent
+filtered Docker identity measurement then proved the running immutable image
+supports `/health` liveness but returns 404 for `/health/ready`. The image
+therefore cannot truthfully prove the database-reaching post-recreation oracle.
+Rotation stays refused until a separate accepted deployment installs an image
+with that readiness contract.
 
 The affected names are:
 
@@ -42,10 +55,12 @@ was not re-inspected—the following material was absent and **not exposed**:
 - any OpenBao token or other OpenBao authentication material; and
 - the database bootstrap material, including `VENDOR_DB_BOOTSTRAP_PASSWORD`.
 
-That absence is intentional after initial cluster creation. The incident
-adapter uses a fixed non-secret, process-only Compose interpolation placeholder
-so the dormant `db` declaration can be parsed; it does not restore, rotate or
-persist bootstrap material and it never recreates the database container.
+That absence is intentional after initial cluster creation. Read-only target
+preflight, identity discovery, and database/runtime observations no longer
+parse Compose. The incident adapter supplies fixed process-only interpolation
+only for its one app-only recreation: the exact authorized immutable image and
+a non-secret bootstrap placeholder. It does not restore, rotate or persist
+bootstrap material and it never recreates the database container.
 
 `csrf_secret` at the runtime record was not exposed and must remain
 byte-for-byte unchanged. The signing and deploy records are outside the
