@@ -20,20 +20,27 @@ import vendor_cp.production_secrets as production_secrets
 from vendor_cp.production_secrets import (
     DATABASE_PATH,
     DEPLOY_SSH_PATH,
+    LEGACY_RUNTIME_PROBE_IMAGE,
+    LEGACY_RUNTIME_PROBE_REVISION,
     LICENCE_SIGNING_PATH,
     ROLLBACK_CONFIRMATION,
     ROTATION_DEPLOY_DIR,
     ROTATION_HOST_ID,
+    ROTATION_PREFLIGHT_REFUSALS,
     ROTATION_TARGET,
     RUNTIME_PATH,
     HistoricalHostRotationProof,
     HostRotationProof,
+    HttpReadinessOracle,
+    LegacyRuntimeProbeOracle,
     OpenBaoClient,
     ProductionSecretError,
     RotationPhase,
+    RotationRuntimeOracleProof,
     RotationTargetPreflightProof,
     SecretRotationReceipt,
     VersionedSecretRecord,
+    _refusal_message,
     apply_secret_rotation_on_target,
     build_rotation_payload,
     commit_openbao_rotation,
@@ -49,6 +56,8 @@ from vendor_cp.production_secrets import (
     rotation_adapter_installer_program,
     rotation_adapter_verifier_program,
     rotation_target_preflight_program,
+    sanitize_diagnostic_text,
+    select_readiness_oracle,
     transfer_rotation_payload,
 )
 
@@ -1445,3 +1454,174 @@ def test_rollback_records_partial_cas_and_resumes_exact_historical_values(
         (DATABASE_PATH, 2),
         (RUNTIME_PATH, 2),
     ]
+
+
+# ── the operator can diagnose the refusal, and learns nothing else ───────────
+
+
+@pytest.mark.parametrize(
+    ("code", "fragment"),
+    sorted((code, text) for code, text in ROTATION_PREFLIGHT_REFUSALS.items()),
+)
+def test_every_preflight_refusal_names_itself(code: int, fragment: str) -> None:
+    """All nine, planted individually - not a representative sample.
+
+    The remote program already refuses for nine distinct reasons and says which
+    in its exit status. `_run_quiet` used to discard that and surface
+    "production rotation command failed" for every one, so an operator inside a
+    thirty-minute window could not tell a wrong host from a duplicate container
+    from a missing readiness route without re-running the program by hand.
+    """
+    message = _refusal_message(code, ROTATION_PREFLIGHT_REFUSALS)
+    assert f"exit {code}" in message
+    assert fragment in message
+
+
+def test_each_refusal_is_distinguishable_from_every_other() -> None:
+    """SENSITIVITY. Nine messages that all named the code but shared one text
+    would satisfy the test above while telling an operator nothing."""
+    rendered = {
+        code: _refusal_message(code, ROTATION_PREFLIGHT_REFUSALS)
+        for code in ROTATION_PREFLIGHT_REFUSALS
+    }
+    assert len(set(rendered.values())) == len(rendered)
+
+
+def test_an_unrecognised_exit_is_still_reported_with_its_code() -> None:
+    """A code outside the vocabulary must not collapse to the old message."""
+    message = _refusal_message(99, ROTATION_PREFLIGHT_REFUSALS)
+    assert "exit 99" in message
+
+
+#: Material shaped like the things that actually leak. Planted in stderr, which
+#: is free-form text from a command this module does not own.
+_PLANTED_SECRETS = (
+    "postgresql+psycopg://app_user:sup3rSecretPassw0rdValue@db:5432/vendor",
+    "PGPASSWORD=sup3rSecretPassw0rdValue",
+    "jwt_secret: aVeryLongHighEntropyTokenValue0123456789",
+    "sup3rSecretPassw0rdValueThatIsLong",
+)
+
+
+@pytest.mark.parametrize("planted", _PLANTED_SECRETS)
+def test_a_refusal_never_carries_secret_material(planted: str) -> None:
+    """The fix must not trade a diagnosis problem for a disclosure one."""
+    message = _refusal_message(21, ROTATION_PREFLIGHT_REFUSALS, planted)
+    assert "sup3rSecretPassw0rdValue" not in message
+    assert "aVeryLongHighEntropyTokenValue0123456789" not in message
+    assert "<redacted>" in message
+    # The diagnosis still survives the redaction.
+    assert "exit 21" in message
+
+
+def test_the_sanitizer_keeps_a_diagnosis_that_carries_no_material() -> None:
+    """SENSITIVITY the other way. A sanitizer that erased everything would pass
+    every assertion above and leave the operator exactly where they started."""
+    kept = sanitize_diagnostic_text("docker: no such container")
+    assert "no such container" in kept
+
+
+# ── the transitional oracle is bound to one image, structurally ──────────────
+
+
+def test_the_exact_pair_is_the_only_thing_that_selects_the_legacy_probe() -> None:
+    """Two outcomes, never three, and no widening."""
+    admitted = select_readiness_oracle(
+        image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+        source_revision=LEGACY_RUNTIME_PROBE_REVISION,
+    )
+    assert isinstance(admitted, LegacyRuntimeProbeOracle)
+
+    # A different revision at the SAME digest is a different artifact.
+    assert isinstance(
+        select_readiness_oracle(
+            image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+            source_revision="b" * 40,
+        ),
+        HttpReadinessOracle,
+    )
+    # And a different digest at the same revision.
+    assert isinstance(
+        select_readiness_oracle(
+            image_reference="ghcr.io/michaelayoade/x@sha256:" + "c" * 64,
+            source_revision=LEGACY_RUNTIME_PROBE_REVISION,
+        ),
+        HttpReadinessOracle,
+    )
+
+
+def test_the_legacy_probe_cannot_be_constructed_for_another_image() -> None:
+    """`permitted only for the old image` has to be inexpressible otherwise, or
+    it becomes a general fallback the first time somebody is in a hurry."""
+    with pytest.raises(ProductionSecretError, match="selected, never constructed"):
+        LegacyRuntimeProbeOracle(
+            object(),  # type: ignore[arg-type]
+            LEGACY_RUNTIME_PROBE_IMAGE,
+            LEGACY_RUNTIME_PROBE_REVISION,
+        )
+
+
+def test_the_legacy_program_refuses_an_image_that_serves_readiness() -> None:
+    """The premise of the exception is that this image has no readiness route.
+    If one appears, the exception no longer applies and the program says so."""
+    legacy = select_readiness_oracle(
+        image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+        source_revision=LEGACY_RUNTIME_PROBE_REVISION,
+    )
+    assert "raise SystemExit(28)" in rotation_target_preflight_program(legacy)
+    http = select_readiness_oracle(
+        image_reference=LEGACY_RUNTIME_PROBE_IMAGE, source_revision="d" * 40
+    )
+    assert "raise SystemExit(26)" in rotation_target_preflight_program(http)
+
+
+# ── the runtime oracle proof cannot exist without its negative half ──────────
+
+
+def _oracle_payload(*, app_refused: bool, platform_refused: bool) -> str:
+    return json.dumps(
+        {
+            "schema": "platform-rotation-runtime-oracle.v1",
+            "planes": {
+                "application": {
+                    "reached": True,
+                    "role": "app_user",
+                    "database": "vendor_control_plane",
+                },
+                "platform": {
+                    "reached": True,
+                    "role": "platform_api",
+                    "database": "vendor_control_plane",
+                },
+            },
+            "invalid_material": {
+                "application": {"refused": app_refused},
+                "platform": {"refused": platform_refused},
+            },
+        }
+    )
+
+
+def test_the_runtime_oracle_proof_reports_both_plane_identities() -> None:
+    proof = RotationRuntimeOracleProof.from_json(
+        _oracle_payload(app_refused=True, platform_refused=True)
+    )
+    assert proof.application_role == "app_user"
+    assert proof.platform_role == "platform_api"
+    assert proof.database == "vendor_control_plane"
+
+
+@pytest.mark.parametrize(
+    ("app_refused", "platform_refused"),
+    ((False, True), (True, False), (False, False)),
+)
+def test_a_probe_that_accepted_invalid_material_proves_nothing(
+    app_refused: bool, platform_refused: bool
+) -> None:
+    """A probe seen only succeeding cannot tell "the runtime reached the
+    database" from "the check does not check". So the proof type refuses to
+    exist without the negative half, on BOTH planes."""
+    with pytest.raises(ProductionSecretError, match="proves nothing"):
+        RotationRuntimeOracleProof.from_json(
+            _oracle_payload(app_refused=app_refused, platform_refused=platform_refused)
+        )

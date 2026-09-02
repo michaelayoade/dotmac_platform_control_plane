@@ -405,3 +405,123 @@ automatic operation: forward-fix by default. If a migration makes that
 impossible, stop the app and restore the pre-migration custom-format dump into a
 new database/volume before changing traffic. Never silently run Alembic down or
 delete the current production volume.
+
+## The transitional readiness oracle — amendment, 2026-09-02
+
+The rotation preflight requires a database-reaching oracle before it will touch
+a credential. The deployed image does not serve `/health/ready` — the route is
+absent from its source entirely, not merely failing — so the gate refused with
+exit 26, correctly. Deploying an image that HAS the route is the cutover, and
+the cutover is what this rotation must precede. That is a real circularity and
+it is resolved by observing that the thing the route would have proved is
+already inside the image; it simply is not reachable over HTTP.
+
+**Two named variants, and which one an image is permitted is a fact about the
+image rather than a choice the operator makes.**
+
+`http_readiness` is the required form. When the readiness route exists it is the
+only admissible oracle, and a 404 or a non-200 is a refusal.
+
+`legacy_runtime_probe` is permitted for exactly one artifact:
+
+```
+image     ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d
+revision  af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e
+```
+
+Both halves are part of the permission. A different digest, or a different
+revision at the same digest, gets `http_readiness` or gets refused; there is no
+third outcome and no widening. `select_readiness_oracle` is the only producer,
+and `LegacyRuntimeProbeOracle` carries a witness only that function holds, so
+the exception is inexpressible for any other image rather than merely
+discouraged for one. If the legacy image ever DOES serve the route, the premise
+of the exception has failed and the program refuses with exit 28.
+
+The probe loads the deployed application's own production settings and database
+runtime in-process and queries **both planes**, then hands the same runtime
+deliberately invalid material and requires it to REFUSE. `RotationRuntimeOracleProof`
+cannot be constructed unless both halves held, on both planes: a probe observed
+only succeeding cannot distinguish "the runtime reached the database" from "the
+check does not check". It reports role identity and success only — never a row,
+a DSN, a credential or a connection string.
+
+`/health` remains HTTP-process liveness, independently confirmed, and is never a
+degraded readiness check nor a substitute for either variant.
+
+### Retirement — a step, not a note
+
+**Owner: the Platform CP cutover lane. Step in the cutover checklist, not a
+follow-up.** The change that deploys the readiness-capable image is the change
+that deletes `LegacyRuntimeProbeOracle`, `rotation_runtime_oracle_program`,
+`probe_rotation_runtime`, `RotationRuntimeOracleProof`, exit 28 and this
+section, leaving `http_readiness` as the only oracle. The cutover is not
+complete while the variant still exists. `/health/ready` returning 200 is an
+independent cutover postcondition and cannot retroactively prove any earlier
+rotation.
+
+### The five-step read-only procedure, proved 2026-09-02 before any window
+
+1. **TCP/SCRAM, both directions.** The container's own material connects; the
+   same runtime with deliberately invalid material is refused — `OperationalError`
+   on both planes.
+2. **The deployed application's real settings and database runtime**, loaded
+   in-process inside the running container.
+3. **A read-only query on both planes**, reporting identity only:
+   application plane → `app_user`, platform plane → `platform_api`, both on
+   `vendor_control_plane`. Those are the two roles the descriptor declares for
+   the two planes, so the probe also observes the live plane separation.
+4. **Deliberate invalid material is refused** — the half that makes the probe
+   evidence rather than decoration.
+5. **`/health` → 200**, confirmed independently as HTTP-process liveness.
+
+### JWT and session canaries are producible on this image
+
+Measured rather than assumed, so these two secrets stay IN scope instead of
+being deferred. `dotmac_kernel.security` in the deployed image exposes
+`issue_access_token`, `decode_access_token` and `hash_token`, none of which
+writes to the database. Observed: a canary is created and accepted; a tampered
+signature is rejected; the canary is rejected under a different secret and a
+fresh canary is accepted under it; and the session hash is deterministic and
+changes with its secret. The in-process secret swap used to prove that touched
+only the probe process's own settings object and was restored.
+
+If that had not held, the rule stands for the next occasion: **do not rotate a
+secret whose postcondition you cannot prove.** Exclude it and schedule it
+separately rather than recording invalidation as assumed.
+
+### Refusals name themselves
+
+The preflight program refuses for nine distinct reasons and says which in its
+exit status. That status is now propagated with a declared meaning, alongside a
+sanitized tail of stderr:
+
+| exit | meaning |
+| --- | --- |
+| 20 | a docker command on the target failed |
+| 21 | `/etc/dotmac-host-id` is not the expected target host |
+| 22 | the app service did not select exactly one container |
+| 23 | the running image or its OCI revision label is not the expected one |
+| 24 | the application did not answer on the loopback port |
+| 25 | `/health` did not return 200 — the HTTP process is not live |
+| 26 | `/health/ready` returned 404 — this image carries no readiness route |
+| 27 | `/health/ready` did not return 200 — database readiness failed |
+| 28 | this image serves `/health/ready`, so the legacy probe is not permitted |
+
+Previously all nine surfaced as `production rotation command failed`, and the
+only way to learn which had fired was to re-run the remote program by hand with
+stderr visible — under time pressure, on a credential rotation. An authorization
+failure an operator cannot diagnose is one they will misdiagnose.
+
+Stderr is treated as hostile free-form text from a command this module does not
+own: credentials inside URLs, assignments to secret-shaped names, and bare
+high-entropy runs are redacted before anything is surfaced, and the result is
+capped. The redaction is deliberately over-broad — losing a long identifier from
+a diagnostic costs a reader some context; leaking one costs a rotation.
+
+### Diagnostic deviations recorded
+
+These read-only observations were taken outside the originally enumerated
+preflight list and are recorded here rather than treated as covered by it:
+the container healthcheck definition and health state, the published loopback
+port, and loopback `GET /health` and `GET /health/ready`. Future preflight lists
+enumerate them.
