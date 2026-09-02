@@ -250,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(
         f"ACCEPTED: run {args.run_id} is a successful {args.workflow_path} run on "
-        f"{args.branch} at {args.current_main}, with all {len(required)} required "
+        f"{args.branch} at {args.expect_head}, with all {len(required)} required "
         "gates completed and passing"
     )
     return 0

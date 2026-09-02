@@ -396,6 +396,59 @@ def test_the_deploy_requires_a_receipt_rather_than_a_pasted_digest() -> None:
     assert 'receipt.get("registry_digest") != os.environ["IMAGE_DIGEST"]' in workflow
 
 
+def test_every_verifier_argument_it_reads_is_one_it_declares() -> None:
+    """The verifier could refuse but could not ACCEPT, and that shipped.
+
+    Renaming `--current-main` to `--expect-head` updated the parser, the
+    signature and the call site, and missed one `args.current_main` in the
+    ACCEPTED message. Every refusal path still worked, so every existing test
+    passed; the success path raised `AttributeError` and exited 1. The net
+    effect was a gate that could only ever say no — a wrong answer wearing a
+    refusal's clothes — and it blocked every candidate build until CI hit it.
+
+    `test_the_verifier_makes_all_seven_checks` asserts the refusal markers are
+    present. Nothing asserted the verifier can reach acceptance at all. This
+    closes that half without a network call: every `args.<name>` the module
+    reads must be a dest the parser declares.
+    """
+    import ast
+
+    tree = ast.parse(_text(VERIFIER))
+
+    declared: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+        ):
+            for argument in node.args:
+                if isinstance(argument, ast.Constant) and isinstance(
+                    argument.value, str
+                ):
+                    declared.add(argument.value.lstrip("-").replace("-", "_"))
+            for keyword in node.keywords:
+                if keyword.arg == "dest" and isinstance(keyword.value, ast.Constant):
+                    declared.add(str(keyword.value.value))
+    assert declared, "no argparse arguments were found; this check is inert"
+
+    read = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "args"
+    }
+    assert read, "no `args.<name>` accesses were found; this check is inert"
+
+    undeclared = sorted(read - declared)
+    assert not undeclared, (
+        f"the verifier reads {undeclared} but declares no such argument. On the "
+        "ACCEPTED path this is an AttributeError, so the gate refuses "
+        "everything and looks like it is working."
+    )
+
+
 def test_the_deploy_names_the_image_revision_rather_than_assuming_the_tip() -> None:
     """Two identities, and conflating them is what removed the reverse path.
 
@@ -443,6 +496,16 @@ def test_the_candidate_build_still_requires_the_tip() -> None:
 #: from the script fails here rather than disappearing.
 REQUIRED_CHECKS: dict[str, str] = {
     "installed CLI": "the console script is not installed in the candidate",
+    # An observation about THIS candidate, not a standing rule. The deployment
+    # tool renders the execution plan an authorization binds; it has no business
+    # in the application. Nothing asserts that today — it holds by
+    # `poetry install --only main` — so the battery reads the built image.
+    "deployment tool separation": (
+        "the deployment tool must not be inside the application image"
+    ),
+    "deployment tool separation non-vacuity": (
+        "so the absence above is not evidence of anything"
+    ),
     "app import": "from vendor_cp.main import app",
     "fresh zero-to-head migration": "could not migrate an empty database to heads",
     "restored-production migration": (
