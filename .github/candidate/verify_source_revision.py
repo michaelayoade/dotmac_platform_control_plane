@@ -102,7 +102,7 @@ def verify(
     repository: str,
     workflow_path: str,
     branch: str,
-    current_main: str,
+    expect_head: str,
     required: frozenset[str],
     token: str,
 ) -> list[str]:
@@ -152,12 +152,23 @@ def verify(
         problems.append(f"run {run_id} head_sha {head_sha!r} is not a 40-hex SHA")
         return problems
 
-    # 6 — still current main.
-    if head_sha != current_main:
+    # 6 — the run describes the revision the CALLER is acting on.
+    #
+    # This used to be "still current `main`", and the two callers wanted
+    # different things from it. Building a candidate does want the tip: an image
+    # built from a superseded commit describes a tree nobody is deploying.
+    # DEPLOYING wants the revision the artifact was actually built from, which
+    # the release receipt fixes forever and which is almost never the tip.
+    #
+    # While those were one value, the only deployable image was the one built
+    # from the tip of `main` — so there was no reverse path at all, because the
+    # running bytes are by definition not the tip. The caller now states which
+    # revision it means; what is checked has not weakened.
+    if head_sha != expect_head:
         problems.append(
-            f"run {run_id} describes {head_sha}, but current {branch} is "
-            f"{current_main} — a green run on a superseded commit describes a "
-            "tree nobody is deploying"
+            f"run {run_id} describes {head_sha}, but this operation is about "
+            f"{expect_head} on {branch} — a green run on a different commit "
+            "describes a tree nobody is deploying"
         )
 
     # 7 — every required gate ran, and passed.
@@ -193,7 +204,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--workflow-path", default=".github/workflows/ci.yml")
     parser.add_argument("--branch", default="main")
-    parser.add_argument("--current-main", required=True)
+    parser.add_argument(
+        "--expect-head",
+        required=True,
+        help=(
+            "the revision this operation is about. A candidate BUILD passes "
+            "current main; a DEPLOY passes the image source revision its "
+            "release receipt fixed. Two identities, deliberately not one."
+        ),
+    )
     parser.add_argument("--gates", default=".github/candidate/required-gates.json")
     args = parser.parse_args(argv)
 
@@ -217,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         repository=args.repository,
         workflow_path=args.workflow_path,
         branch=args.branch,
-        current_main=args.current_main,
+        expect_head=args.expect_head,
         required=required,
         token=token,
     )

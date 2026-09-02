@@ -95,7 +95,7 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --workflow-path .github/workflows/ci.yml \
             --branch main \
-            --current-main "${{ steps.select.outputs.current_main }}"
+            --expect-head "${{ steps.select.outputs.current_main }}"
 
       # ── 3. Build ONE local candidate. Nothing is pushed by this step. ───
       - name: Build the candidate
