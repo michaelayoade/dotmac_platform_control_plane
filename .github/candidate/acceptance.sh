@@ -26,6 +26,7 @@ WORKDIR="$(mktemp -d)"
 DB_PORT="${CANDIDATE_DB_PORT:-5449}"
 DB_CONTAINER="candidate-postgres"
 APP_CONTAINER="candidate-app"
+CANDIDATE_NETWORK="candidate-vendor-backend"
 PG_IMAGE="${CANDIDATE_POSTGRES_IMAGE:-postgres:16}"
 # The platform host this run addresses. It is a Host HEADER only — every request
 # below dials 127.0.0.1 explicitly — so this name is never resolved and no such
@@ -68,6 +69,7 @@ step() { printf '\n== %s\n' "$*"; }
 
 cleanup() {
     docker rm -f "$APP_CONTAINER" "$DB_CONTAINER" >/dev/null 2>&1 || true
+    docker network rm "$CANDIDATE_NETWORK" >/dev/null 2>&1 || true
     rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
@@ -96,7 +98,17 @@ trap cleanup EXIT
 # exists, which is a deployment-window decision and not this file's to make.
 psql_admin() { docker exec -i "$DB_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres "$@"; }
 
-dsn() { printf 'postgresql+psycopg://%s@127.0.0.1:%s/%s' "$1" "$DB_PORT" "$2"; }
+dsn() {
+    local role="$1" database="$2" password
+    case "$role" in
+        app_admin) password=admin ;;
+        app_user) password=app ;;
+        platform_api) password=platform ;;
+        *) fail "no candidate password is declared for database role $role" ;;
+    esac
+    printf 'postgresql+psycopg://%s:%s@127.0.0.1:%s/%s' \
+        "$role" "$password" "$DB_PORT" "$database"
+}
 
 # Runs python inside the candidate image with a production-shaped environment.
 in_image() {
@@ -110,14 +122,19 @@ in_image() {
 
 step "0  disposable database, initialised by the production role script"
 docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+docker network rm "$CANDIDATE_NETWORK" >/dev/null 2>&1 || true
+docker network create "$CANDIDATE_NETWORK" >/dev/null
 docker run -d --name "$DB_CONTAINER" \
+    --network "$CANDIDATE_NETWORK" \
+    --network-alias db \
     --env POSTGRES_USER=postgres \
-    --env POSTGRES_HOST_AUTH_METHOD=trust \
+    --env 'POSTGRES_INITDB_ARGS=--auth-local=trust --auth-host=scram-sha-256' \
     --env POSTGRES_DB=candidate \
     --env VENDOR_DB_ADMIN_PASSWORD=admin \
     --env VENDOR_DB_APP_USER_PASSWORD=app \
     --env VENDOR_DB_PLATFORM_API_PASSWORD=platform \
     --volume "$PWD/deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/001-vendor-roles.sh:ro" \
+    --volume "$PWD/.github/candidate/postgres-hba.sh:/docker-entrypoint-initdb.d/002-candidate-hba.sh:ro" \
     --publish "127.0.0.1:${DB_PORT}:5432" \
     "$PG_IMAGE" >/dev/null
 for _ in $(seq 1 60); do
@@ -127,6 +144,61 @@ done
 docker exec "$DB_CONTAINER" pg_isready -U postgres -d candidate >/dev/null \
     || fail "the disposable database never became ready"
 pass "database up, roles created by deploy/postgres/init-roles.sh"
+
+step "0a loopback trust is blind; the application bridge oracle discriminates"
+# Reproduce the retired probe first. A deliberately invalid password succeeds
+# from inside PostgreSQL because 127.0.0.1 selects the earlier trust rule.
+docker exec --env PGPASSWORD=deliberately-invalid-candidate-proof \
+    "$DB_CONTAINER" psql -X --no-password --host 127.0.0.1 --port 5432 \
+    --username app_user --dbname candidate --command 'SELECT 1' >/dev/null \
+    || fail "the loopback control did not reproduce the trusted path"
+pass "control: container-local 127.0.0.1 accepts deliberately invalid material"
+
+# Read the payload from the INSTALLED wheel inside the exact image under test.
+# The source checkout is not mounted, and the image's own app runtime supplies
+# the db:5432 coordinate the production adapter uses.
+docker run --rm --network none --entrypoint python "$IMAGE" -c \
+    'from vendor_cp.production_secrets import rotation_database_auth_oracle_program as p; print(p(), end="")' \
+    >"$WORKDIR/database-auth-oracle.pyprogram" \
+    || fail "the installed image cannot produce the database auth oracle"
+
+run_database_auth_oracle() {
+    docker run --rm --interactive --network "$CANDIDATE_NETWORK" \
+        --env DATABASE_URL=postgresql+psycopg://app_user:app@db:5432/candidate \
+        --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api:platform@db:5432/candidate \
+        --entrypoint python "$IMAGE" -c "$(cat "$WORKDIR/database-auth-oracle.pyprogram")"
+}
+
+printf '%s' '{"schema":"platform-database-authentication-oracle.v1","role":"app_user","password":"deliberately-invalid-candidate-proof"}' \
+    | run_database_auth_oracle >"$WORKDIR/invalid-auth.json" \
+    || fail "the bridge oracle could not classify deliberately invalid material"
+python3 - "$WORKDIR/invalid-auth.json" <<'PY' \
+    || fail "the db:5432 bridge accepted deliberately invalid material"
+import json
+import sys
+
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {
+    "schema": "platform-database-authentication-oracle.v1",
+    "role": "app_user",
+    "accepted": False,
+}
+PY
+
+printf '%s' '{"schema":"platform-database-authentication-oracle.v1","role":"app_user","password":"app"}' \
+    | run_database_auth_oracle >"$WORKDIR/valid-auth.json" \
+    || fail "the bridge oracle could not classify valid material"
+python3 - "$WORKDIR/valid-auth.json" <<'PY' \
+    || fail "the db:5432 bridge refused the active app_user material"
+import json
+import sys
+
+assert json.load(open(sys.argv[1], encoding="utf-8")) == {
+    "schema": "platform-database-authentication-oracle.v1",
+    "role": "app_user",
+    "accepted": True,
+}
+PY
+pass "subject: db:5432 SCRAM refuses invalid and admits active material"
 
 # ═══════════════════════════════════════════════════════════════════════════
 step "1  the installed CLI, and that it is installed"
