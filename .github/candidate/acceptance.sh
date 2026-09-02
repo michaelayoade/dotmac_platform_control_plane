@@ -706,4 +706,54 @@ test "$unauth_code" = "401" \
     || fail "the document plane returned $unauth_code without a token, expected 401"
 pass "no credential: the bearer-protected document plane is 401, not 200"
 
+step "17  separation: the deployment tool is not in the application image"
+# An OBSERVATION about this candidate, not a rule about future ones.
+#
+# `dotmac-deployment-foundation` is the deployment TOOL. It renders the
+# execution plan and computes the digest an authorization binds; it has no
+# business inside the application. Today it stays out because it is in no
+# dependency group and the Dockerfile installs `--only main` — a mechanism,
+# with nothing asserting the result. This reads the RESULT, off the exact bytes
+# about to be published, because the recipe and the artifact are different
+# claims and this pipeline exists for the cases where they disagree.
+#
+# `--network none`: the answer must come from the image, not from an index.
+separation="$(docker run --rm --network none --entrypoint python "$IMAGE" -c '
+import importlib.metadata as md, importlib.util as iu, json
+names = sorted((d.metadata["Name"] or "").lower() for d in md.distributions())
+try:
+    importable = iu.find_spec("dotmac_deployment_foundation") is not None
+except ModuleNotFoundError:
+    importable = False
+print(json.dumps({
+    "present": [n for n in names if n == "dotmac-deployment-foundation"],
+    "importable": importable,
+    "distributions_seen": len(names),
+}))')"
+printf '  image reports %s\n' "$separation"
+
+python3 - "$separation" <<'SEPARATION' || fail "the deployment tool must not be inside the application image"
+import json, sys
+
+observed = json.loads(sys.argv[1])
+problems = []
+if observed["present"]:
+    problems.append(f"the image carries {observed['present']}")
+if observed["importable"]:
+    problems.append("dotmac_deployment_foundation is importable inside the image")
+# NON-VACUITY. An empty `present` list is also what a broken enumeration
+# returns, and "we found nothing" would then be indistinguishable from "we
+# looked at nothing" — the same shape as a validator only ever seen refusing.
+if observed["distributions_seen"] < 2:
+    problems.append(
+        f"only {observed['distributions_seen']} distribution(s) were enumerated, "
+        "so the absence above is not evidence of anything"
+    )
+if problems:
+    print("; ".join(problems), file=sys.stderr)
+    raise SystemExit(1)
+SEPARATION
+pass "the deployment tool must not be inside the application image, and is not"
+pass "and the enumeration saw the image's other distributions, so the absence means something"
+
 printf '\nCANDIDATE ACCEPTED\n'
