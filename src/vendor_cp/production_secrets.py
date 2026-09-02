@@ -17,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -2726,6 +2727,26 @@ def select_readiness_oracle(
     return HttpReadinessOracle()
 
 
+def _remote_command(*parts: str) -> str:
+    """One shell-safe argument for `ssh`, from separate argv parts.
+
+    `ssh` does not take an argv vector. It joins everything after the
+    destination with spaces and hands the result to the remote user's SHELL, so
+    a Python program passed as its own argv element is word-split and reparsed.
+    A program containing parentheses - which every one of ours does - dies with
+    a bash syntax error, and the argv list that looked correct locally never
+    existed on the target.
+
+    The two callers that worked built a single string by hand; the three that
+    did not passed argv. They had unit tests, and the tests passed, because a
+    fake runner receives the list this function is given and never performs the
+    join that `ssh` performs. Quoting here makes the shape uniform, and
+    `test_every_remote_command_survives_the_remote_shell` asserts the property
+    rather than the spelling.
+    """
+    return " ".join(shlex.quote(part) for part in parts)
+
+
 def rotation_target_preflight_program(
     oracle: ReadinessOracle | None = None,
 ) -> str:
@@ -2980,14 +3001,16 @@ def install_rotation_adapter(
     installer = rotation_adapter_installer_program()
     command = (
         *_adapter_ssh_prefix(known_hosts_file),
-        "python3",
-        "-c",
-        installer,
-        os.fspath(ROTATION_ADAPTER_PATH),
-        digest,
-        "/usr/local",
-        "0",
-        "0",
+        _remote_command(
+            "python3",
+            "-c",
+            installer,
+            os.fspath(ROTATION_ADAPTER_PATH),
+            digest,
+            "/usr/local",
+            "0",
+            "0",
+        ),
     )
     _run_quiet(
         runner,
@@ -3027,14 +3050,16 @@ def verify_rotation_adapter(
     verifier = rotation_adapter_verifier_program()
     command = (
         *_adapter_ssh_prefix(known_hosts_file),
-        "python3",
-        "-c",
-        verifier,
-        os.fspath(ROTATION_ADAPTER_PATH),
-        rotation_adapter_digest(),
-        "0",
-        "0",
-        "/usr/local",
+        _remote_command(
+            "python3",
+            "-c",
+            verifier,
+            os.fspath(ROTATION_ADAPTER_PATH),
+            rotation_adapter_digest(),
+            "0",
+            "0",
+            "/usr/local",
+        ),
     )
     _run_quiet(runner, command)
 
@@ -3065,10 +3090,7 @@ def retire_rotation_adapter(
     remover = "import pathlib,sys;pathlib.Path(sys.argv[1]).unlink()"
     command = (
         *_adapter_ssh_prefix(known_hosts_file),
-        "python3",
-        "-c",
-        remover,
-        os.fspath(ROTATION_ADAPTER_PATH),
+        _remote_command("python3", "-c", remover, os.fspath(ROTATION_ADAPTER_PATH)),
     )
     _run_quiet(runner, command)
 

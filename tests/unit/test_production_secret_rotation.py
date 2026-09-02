@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -41,16 +42,21 @@ from vendor_cp.production_secrets import (
     RotationTargetPreflightProof,
     SecretRotationReceipt,
     VersionedSecretRecord,
+    _adapter_ssh_prefix,
     _refusal_message,
+    _remote_command,
     apply_secret_rotation_on_target,
     build_rotation_payload,
     commit_openbao_rotation,
     complete_secret_rotation,
     execute_secret_rotation,
+    install_rotation_adapter,
     preflight_rotation_target,
     prepare_secret_rotation,
+    probe_rotation_runtime,
     read_rotation_custody,
     read_rotation_receipt,
+    retire_rotation_adapter,
     rollback_openbao_rotation,
     rotation_adapter_bytes,
     rotation_adapter_digest,
@@ -61,6 +67,7 @@ from vendor_cp.production_secrets import (
     sanitize_diagnostic_text,
     select_readiness_oracle,
     transfer_rotation_payload,
+    verify_rotation_adapter,
 )
 
 EXPECTED_IMAGE = "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:" + "c" * 64
@@ -1779,3 +1786,105 @@ def test_the_preflight_proof_names_the_same_two_oracles() -> None:
             source_revision=LEGACY_RUNTIME_PROBE_REVISION,
             readiness="passed",
         )
+
+
+# ── every remote command must survive the remote shell ──────────────────────
+
+
+class _StopAfterFirstCall(Exception):
+    """Raised by the recording runner so only the argv shape is examined."""
+
+
+def _record_first_command(recorded: list[Sequence[str]]) -> Callable[..., object]:
+    def run(command: Sequence[str], **_kwargs: object) -> object:
+        recorded.append(list(command))
+        raise _StopAfterFirstCall
+
+    return run
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    (
+        pytest.param(
+            lambda runner: preflight_rotation_target(
+                known_hosts_file=Path("/dev/null"),
+                expected_image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+                expected_source_revision=LEGACY_RUNTIME_PROBE_REVISION,
+                runner=runner,
+            ),
+            id="preflight",
+        ),
+        pytest.param(
+            lambda runner: probe_rotation_runtime(
+                known_hosts_file=Path("/dev/null"), runner=runner
+            ),
+            id="runtime-oracle",
+        ),
+        pytest.param(
+            lambda runner: install_rotation_adapter(
+                known_hosts_file=Path("/dev/null"),
+                expected_image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+                expected_source_revision=LEGACY_RUNTIME_PROBE_REVISION,
+                runner=runner,
+            ),
+            id="install-adapter",
+        ),
+        pytest.param(
+            lambda runner: verify_rotation_adapter(
+                known_hosts_file=Path("/dev/null"), runner=runner
+            ),
+            id="verify-adapter",
+        ),
+        pytest.param(
+            lambda runner: retire_rotation_adapter(
+                known_hosts_file=Path("/dev/null"), runner=runner
+            ),
+            id="retire-adapter",
+        ),
+    ),
+)
+def test_every_remote_command_survives_the_remote_shell(
+    invoke: Callable[[Callable[..., object]], object],
+) -> None:
+    """`ssh` has no argv vector - it joins and hands the result to a SHELL.
+
+    Three call sites passed the remote program as its own argv element. Locally
+    that list looks right, and the unit tests passed because a fake runner
+    receives the list and never performs the join `ssh` performs. On a real host
+    the program was word-split and bash died on the first parenthesis, so the
+    adapter install, verify and retire paths had never worked at all.
+
+    The property, asserted rather than the spelling: everything after the ssh
+    destination is ONE argument, and splitting it the way a shell would recovers
+    the tokens intact.
+    """
+    recorded: list[Sequence[str]] = []
+    with pytest.raises(_StopAfterFirstCall):
+        invoke(_record_first_command(recorded))
+
+    assert recorded, "no remote command was issued"
+    command = list(recorded[0])
+    prefix = list(_adapter_ssh_prefix(Path("/dev/null")))
+    assert command[: len(prefix)] == prefix
+
+    remainder = command[len(prefix) :]
+    assert len(remainder) == 1, (
+        "everything after the ssh destination is joined with spaces and reparsed "
+        f"by the remote shell, so it must be one already-quoted argument: {remainder}"
+    )
+
+    tokens = shlex.split(remainder[0])
+    assert tokens, "the remote command is empty after shell splitting"
+    assert tokens[0] in ("python3", "docker"), tokens[0]
+
+
+def test_the_quoting_helper_round_trips_a_program_full_of_shell_metacharacters() -> (
+    None
+):
+    """SENSITIVITY. A helper that simply joined with spaces would satisfy the
+    one-argument assertion above and be exactly the bug."""
+    program = "import sys;print(('a b','c;d'))\nprint(\"$HOME\")"
+    parts = ("python3", "-c", program, "/path with space", "sha256:" + "a" * 64)
+    assert shlex.split(_remote_command(*parts)) == list(parts)
+    assert _remote_command(*parts) != " ".join(parts)
