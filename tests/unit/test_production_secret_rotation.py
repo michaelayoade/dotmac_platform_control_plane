@@ -1661,3 +1661,121 @@ def test_the_oracle_payload_is_not_part_of_the_python_surface() -> None:
             f"{constructor} is back in the assembly's Python surface; D1 says "
             "the kernel owns the one engine"
         )
+
+
+# ── the seam: the preflight must USE the oracle, not merely have one ─────────
+
+
+def _wiring_runner(
+    sent: list[str], *, oracle_name: str, source_revision: str
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """A runner that answers whichever program it is handed, and records both."""
+
+    def run(
+        command: Sequence[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        program = str(kwargs.get("input") or "")
+        sent.append(program)
+        if "PlatformSessionLocal" in program:
+            payload = _oracle_payload(app_refused=True, platform_refused=True)
+        else:
+            payload = RotationTargetPreflightProof(
+                target_host_id=ROTATION_HOST_ID,
+                image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+                source_revision=source_revision,
+                readiness=oracle_name,
+            ).to_json()
+        return subprocess.CompletedProcess(list(command), 0, payload, "")
+
+    return run
+
+
+def test_the_preflight_runs_the_runtime_probe_for_the_legacy_image() -> None:
+    """The wiring, not the parts.
+
+    `select_readiness_oracle`, `probe_rotation_runtime` and the two variants all
+    shipped with ZERO call sites: the preflight still generated the HTTP variant
+    and would still have refused with exit 26 on the one image the exception was
+    written for. Every unit test passed, because each tested a part. Nothing
+    asserted the seam.
+    """
+    sent: list[str] = []
+    proof = preflight_rotation_target(
+        known_hosts_file=Path("/dev/null"),
+        expected_image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+        expected_source_revision=LEGACY_RUNTIME_PROBE_REVISION,
+        runner=_wiring_runner(
+            sent,
+            oracle_name=LegacyRuntimeProbeOracle.name,
+            source_revision=LEGACY_RUNTIME_PROBE_REVISION,
+        ),
+    )
+
+    assert proof.readiness == LegacyRuntimeProbeOracle.name
+    # The legacy variant was generated ...
+    assert "raise SystemExit(28)" in sent[0]
+    assert "raise SystemExit(26)" not in sent[0]
+    # ... and the database-reaching half actually ran.
+    assert any("PlatformSessionLocal" in program for program in sent), (
+        "the legacy oracle proves only that an HTTP process is alive unless the "
+        "runtime probe runs; skipping it restores the false positive"
+    )
+
+
+def test_the_preflight_does_not_run_the_runtime_probe_for_any_other_image() -> None:
+    """SENSITIVITY. A preflight that always ran the runtime probe would satisfy
+    the test above while granting every image the exception."""
+    sent: list[str] = []
+    proof = preflight_rotation_target(
+        known_hosts_file=Path("/dev/null"),
+        expected_image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+        expected_source_revision="e" * 40,
+        runner=_wiring_runner(
+            sent,
+            oracle_name=HttpReadinessOracle.name,
+            source_revision="e" * 40,
+        ),
+    )
+    assert proof.readiness == HttpReadinessOracle.name
+    assert "raise SystemExit(26)" in sent[0]
+    assert not any("PlatformSessionLocal" in program for program in sent)
+
+
+def test_a_target_answering_with_the_wrong_oracle_is_refused() -> None:
+    """The image is permitted one oracle. A target claiming the other one
+    answered is not a target this rotation understands."""
+    sent: list[str] = []
+    with pytest.raises(ProductionSecretError, match="is permitted"):
+        preflight_rotation_target(
+            known_hosts_file=Path("/dev/null"),
+            expected_image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+            expected_source_revision="f" * 40,
+            runner=_wiring_runner(
+                sent,
+                oracle_name=LegacyRuntimeProbeOracle.name,
+                source_revision="f" * 40,
+            ),
+        )
+
+
+def test_the_preflight_proof_names_the_same_two_oracles() -> None:
+    """The proof validates against literals because the oracle types are defined
+    later in the module. This ties them, so a rename cannot split one vocabulary
+    into two that agree only by coincidence."""
+    for name in (HttpReadinessOracle.name, LegacyRuntimeProbeOracle.name):
+        assert (
+            RotationTargetPreflightProof(
+                target_host_id=ROTATION_HOST_ID,
+                image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+                source_revision=LEGACY_RUNTIME_PROBE_REVISION,
+                readiness=name,
+            ).readiness
+            == name
+        )
+    with pytest.raises(ProductionSecretError, match="names no known oracle"):
+        RotationTargetPreflightProof(
+            target_host_id=ROTATION_HOST_ID,
+            image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+            source_revision=LEGACY_RUNTIME_PROBE_REVISION,
+            readiness="passed",
+        )

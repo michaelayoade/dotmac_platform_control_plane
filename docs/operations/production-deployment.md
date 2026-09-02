@@ -145,10 +145,13 @@ Preconditions, all mandatory:
 
 1. the rotation PR is merged with required CI green, and the read-only
    `preflight-rotation` command has proved the exact running image and revision,
-   an exact-one app-container label selection, `/health` liveness, and the
-   separate `/health/ready` database-reaching readiness contract. This proof
-   runs before an OpenBao identity is created, before any secret is read, and
-   before the digest-bound adapter archive is installed;
+   an exact-one app-container label selection, `/health` liveness, and **the
+   database-reaching oracle this image is permitted** — `http_readiness` where
+   the route exists, or the `legacy_runtime_probe` for the one artifact bound in
+   "The transitional readiness oracle" below. The oracle is selected from the
+   image identity the command is already bound to; a caller cannot ask for the
+   weaker one. This proof runs before an OpenBao identity is created, before any
+   secret is read, and before the digest-bound adapter archive is installed;
 2. `/etc/dotmac-host-id` is exactly `vendor-cp-prod`, the current application
    image reference contains `@sha256:...`, and its OCI revision label is a
    40-character commit;
