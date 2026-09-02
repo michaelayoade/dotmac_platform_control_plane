@@ -415,7 +415,11 @@ class RotationTargetPreflightProof:
     source_revision: str
     container_selection: str = "exactly_one"
     liveness: str = "passed"
-    readiness: str = "passed"
+    #: WHICH oracle answered - `http_readiness` or `legacy_runtime_probe` - not
+    #: the word "passed". The legacy variant runs on an image whose readiness
+    #: route returns 404, so a proof claiming "readiness: passed" there would be
+    #: false in exactly the way this whole oracle exists to prevent.
+    readiness: str = "http_readiness"
 
     def __post_init__(self) -> None:
         if self.target_host_id != ROTATION_HOST_ID:
@@ -431,8 +435,16 @@ class RotationTargetPreflightProof:
             raise ProductionSecretError("rotation preflight selection is invalid")
         if self.liveness != "passed":
             raise ProductionSecretError("rotation preflight liveness is invalid")
-        if self.readiness != "passed":
-            raise ProductionSecretError("rotation preflight readiness is invalid")
+        # The two variant names, as literals because the oracle types are
+        # defined further down this module. `test_the_preflight_proof_names_the
+        # _same_two_oracles` ties these to `HttpReadinessOracle.name` and
+        # `LegacyRuntimeProbeOracle.name`, so a rename cannot silently split
+        # them into two vocabularies.
+        if self.readiness not in ("http_readiness", "legacy_runtime_probe"):
+            raise ProductionSecretError(
+                f"rotation preflight readiness {self.readiness!r} names no known "
+                "oracle"
+            )
 
     def to_json(self) -> str:
         document = asdict(self)
@@ -2726,6 +2738,7 @@ def rotation_target_preflight_program(
     (28), because the premise of the exception is that this image has none.
     """
     legacy = isinstance(oracle, LegacyRuntimeProbeOracle)
+    reported = LegacyRuntimeProbeOracle.name if legacy else HttpReadinessOracle.name
     readiness_clause = (
         "if readiness!=404: raise SystemExit(28)"
         if legacy
@@ -2786,7 +2799,9 @@ def rotation_target_preflight_program(
             "if status('/health')!=200: raise SystemExit(25)",
             "readiness=status('/health/ready')",
             readiness_clause,
-            "print(json.dumps({'schema':'platform-secret-rotation-preflight.v1','target_host_id':TARGET,'image_reference':image,'source_revision':revision,'container_selection':'exactly_one','liveness':'passed','readiness':'passed'},sort_keys=True,separators=(',',':')))",
+            "print(json.dumps({'schema':'platform-secret-rotation-preflight.v1','target_host_id':TARGET,'image_reference':image,'source_revision':revision,'container_selection':'exactly_one','liveness':'passed','readiness':'"
+            + reported
+            + "'},sort_keys=True,separators=(',',':')))",
         )
     )
 
@@ -2803,6 +2818,12 @@ def preflight_rotation_target(
         expected_image_reference,
         expected_source_revision,
     )
+    # Selected from the identity this call is already bound to, never passed in.
+    # A caller that could choose its own oracle could choose the weaker one.
+    oracle = select_readiness_oracle(
+        image_reference=expected_image_reference,
+        source_revision=expected_source_revision,
+    )
     remote_command = (
         "python3 -I -c 'import sys;exec(sys.stdin.read())' "
         f"{expected_image_reference} {expected_source_revision}"
@@ -2810,7 +2831,7 @@ def preflight_rotation_target(
     result = _run_quiet(
         runner,
         (*_adapter_ssh_prefix(known_hosts_file), remote_command),
-        input_text=rotation_target_preflight_program(),
+        input_text=rotation_target_preflight_program(oracle),
         refusals=ROTATION_PREFLIGHT_REFUSALS,
     )
     proof = RotationTargetPreflightProof.from_json(result.stdout)
@@ -2819,6 +2840,17 @@ def preflight_rotation_target(
         expected_source_revision,
     ):
         raise ProductionSecretError("rotation preflight identity differs")
+    if proof.readiness != oracle.name:
+        raise ProductionSecretError(
+            f"the target answered with the {proof.readiness!r} oracle and this "
+            f"image is permitted {oracle.name!r}"
+        )
+    if isinstance(oracle, LegacyRuntimeProbeOracle):
+        # The database-reaching half. Under the legacy variant the HTTP route is
+        # absent by design, so skipping this would leave the preflight proving
+        # only that an HTTP process is alive - which is precisely the false
+        # positive `/health/ready` was introduced to close.
+        probe_rotation_runtime(known_hosts_file=known_hosts_file, runner=runner)
     return proof
 
 
