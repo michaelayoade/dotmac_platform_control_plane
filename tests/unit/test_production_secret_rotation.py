@@ -1641,7 +1641,7 @@ def test_the_runtime_oracle_payload_ships_and_keeps_both_halves() -> None:
     assert "SessionLocal" in program and "PlatformSessionLocal" in program
     assert "current_user" in program
     assert "deliberately-invalid-" in program
-    assert "'refused':True" in program.replace(" ", "")
+    assert '"refused":True' in program.replace(" ", "")
 
 
 def test_the_oracle_payload_is_not_part_of_the_python_surface() -> None:
