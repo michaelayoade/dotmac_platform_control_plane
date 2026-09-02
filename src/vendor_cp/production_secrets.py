@@ -406,6 +406,52 @@ class HostSecretRotationPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class RotationTargetPreflightProof:
+    """Names-only proof that the exact live image can survive rotation."""
+
+    target_host_id: str
+    image_reference: str
+    source_revision: str
+    container_selection: str = "exactly_one"
+    liveness: str = "passed"
+    readiness: str = "passed"
+
+    def __post_init__(self) -> None:
+        if self.target_host_id != ROTATION_HOST_ID:
+            raise ProductionSecretError("rotation preflight target is invalid")
+        if (
+            re.fullmatch(r"[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}", self.image_reference)
+            is None
+        ):
+            raise ProductionSecretError("rotation preflight image is not immutable")
+        if re.fullmatch(r"[0-9a-f]{40}", self.source_revision) is None:
+            raise ProductionSecretError("rotation preflight revision is invalid")
+        if self.container_selection != "exactly_one":
+            raise ProductionSecretError("rotation preflight selection is invalid")
+        if self.liveness != "passed":
+            raise ProductionSecretError("rotation preflight liveness is invalid")
+        if self.readiness != "passed":
+            raise ProductionSecretError("rotation preflight readiness is invalid")
+
+    def to_json(self) -> str:
+        document = asdict(self)
+        document["schema"] = "platform-secret-rotation-preflight.v1"
+        return json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+
+    @classmethod
+    def from_json(cls, raw: str) -> RotationTargetPreflightProof:
+        try:
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict) or parsed.pop("schema", None) != (
+                "platform-secret-rotation-preflight.v1"
+            ):
+                raise ValueError
+            return cls(**parsed)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise ProductionSecretError("rotation preflight proof is invalid") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class HostRotationProof:
     """Names-only proof returned by the target adapter."""
 
@@ -1291,6 +1337,8 @@ def client_from_environment() -> OpenBaoClient:
 ROTATION_TARGET = "root@149.102.158.144"
 ROTATION_HOST_ID = "vendor-cp-prod"
 ROTATION_DEPLOY_DIR = Path("/opt/dotmac/vendor-control-plane")
+ROTATION_COMPOSE_PROJECT = "dotmac_vendor_control_plane"
+ROTATION_APP_SERVICE = "app"
 _ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER = "rotation-compose-parse-only"
 ROTATION_ADAPTER_PATH = Path(
     "/usr/local/libexec/dotmac/platform-cp-secret-rotation-adapter.pyz"
@@ -1300,6 +1348,20 @@ ROTATION_TARGET_STATE_DIR = Path(
 )
 DATABASE_ROLE_NAMES = ("app_admin", "app_user", "platform_api")
 ROLLBACK_CONFIRMATION = "RESTORE-EXPOSED-MATERIAL-FOR-OUTAGE-CONTAINMENT"
+
+
+def _validate_rotation_image_reference(image_reference: str) -> None:
+    if re.fullmatch(r"[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}", image_reference) is None:
+        raise ProductionSecretError("rotation expected image is not immutable")
+
+
+def _validate_rotation_identity_coordinates(
+    image_reference: str,
+    source_revision: str,
+) -> None:
+    _validate_rotation_image_reference(image_reference)
+    if re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        raise ProductionSecretError("rotation expected revision is invalid")
 
 
 def rotating_set_from_bundle(bundle: HostSecretBundle) -> RotatingSecretSet:
@@ -1602,27 +1664,23 @@ def _run_quiet(
     return result
 
 
-def _run_compose_quiet(
+def _recreate_app_with_compose(
     runner: Callable[..., subprocess.CompletedProcess[str]],
     deploy_dir: Path,
-    *arguments: str,
-    input_text: str | None = None,
-    extra_environment: Mapping[str, str] | None = None,
-    require_success: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    """Run Compose with an inert, process-only bootstrap interpolation.
+    *,
+    image_reference: str,
+) -> None:
+    """Recreate only app with process-only image/bootstrap interpolation.
 
-    The bootstrap password is intentionally absent after the database is first
-    created, but Compose expands every service before executing even a read-only
-    ``ps`` or an ``exec`` against the existing database.  The placeholder lets
-    Compose parse that dormant declaration.  It is never written to ``.env``,
-    never passed in argv, and no rotation command creates or recreates ``db``.
+    All observations and database operations use exact Docker label selection,
+    so this is the one adapter operation allowed to parse the Compose file.
     """
+    _validate_rotation_image_reference(image_reference)
     environment = dict(os.environ)
-    if extra_environment is not None:
-        environment.update(extra_environment)
-    # Always override an inherited value. The rotation adapter must never
-    # accidentally propagate real bootstrap material from its caller.
+    # Always override inherited values. The rotation adapter must never
+    # accidentally propagate real bootstrap or mutable image material from its
+    # caller, and neither value is persisted.
+    environment["VENDOR_APP_IMAGE"] = image_reference
     environment["VENDOR_DB_BOOTSTRAP_PASSWORD"] = (
         _ROTATION_COMPOSE_BOOTSTRAP_PLACEHOLDER
     )
@@ -1633,31 +1691,58 @@ def _run_compose_quiet(
         os.fspath(deploy_dir / ".env"),
         "-f",
         os.fspath(deploy_dir / "docker-compose.production.yml"),
-        *arguments,
+        "up",
+        "-d",
+        "--no-deps",
+        "--force-recreate",
+        "--wait",
+        ROTATION_APP_SERVICE,
     )
-    return _run_quiet(
+    _run_quiet(
         runner,
         command,
-        input_text=input_text,
         cwd=deploy_dir,
         env=environment,
-        require_success=require_success,
     )
+
+
+def _running_container_id(
+    service: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> str:
+    if service not in {ROTATION_APP_SERVICE, "db"}:
+        raise ProductionSecretError("rotation container service is not approved")
+    result = _run_quiet(
+        runner,
+        (
+            "docker",
+            "ps",
+            "--filter",
+            f"label=com.docker.compose.project={ROTATION_COMPOSE_PROJECT}",
+            "--filter",
+            f"label=com.docker.compose.service={service}",
+            "--filter",
+            "label=com.docker.compose.container-number=1",
+            "--filter",
+            "label=com.docker.compose.oneoff=False",
+            "--format",
+            "{{.ID}}",
+        ),
+    )
+    containers = tuple(line.strip() for line in result.stdout.splitlines() if line)
+    if len(containers) != 1 or re.fullmatch(r"[0-9a-f]{12,64}", containers[0]) is None:
+        raise ProductionSecretError(
+            f"production {service} container selection is not exactly one"
+        )
+    return containers[0]
 
 
 def _running_identity(
     deploy_dir: Path,
     runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> tuple[str, str]:
-    container = _run_compose_quiet(
-        runner,
-        deploy_dir,
-        "ps",
-        "-q",
-        "app",
-    ).stdout.strip()
-    if re.fullmatch(r"[0-9a-f]{12,64}", container) is None:
-        raise ProductionSecretError("production app container identity is unavailable")
+    del deploy_dir
+    container = _running_container_id(ROTATION_APP_SERVICE, runner)
     image_reference = _run_quiet(
         runner,
         (
@@ -1686,6 +1771,50 @@ def _running_identity(
     return image_reference, revision
 
 
+def _http_probe_status(
+    path: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> int:
+    if path not in {"/health", "/health/ready"}:
+        raise ProductionSecretError("rotation probe path is not approved")
+    result = _run_quiet(
+        runner,
+        (
+            "curl",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "10",
+            "--output",
+            "/dev/null",
+            "--write-out",
+            "%{http_code}",
+            "--header",
+            "Host: vendor.dotmac.io",
+            f"http://127.0.0.1:8100{path}",
+        ),
+        require_success=False,
+    )
+    if result.returncode != 0 or re.fullmatch(r"[0-9]{3}", result.stdout) is None:
+        raise ProductionSecretError("production app health probe is unavailable")
+    return int(result.stdout)
+
+
+def _require_rotation_readiness(
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    """Prove boot plus the assembly's database-reaching readiness contract."""
+    if _http_probe_status("/health", runner) != 200:
+        raise ProductionSecretError("production app liveness did not pass")
+    readiness = _http_probe_status("/health/ready", runner)
+    if readiness == 404:
+        raise ProductionSecretError(
+            "production image has no readiness contract; deploy a capable image first"
+        )
+    if readiness != 200:
+        raise ProductionSecretError("production app database readiness did not pass")
+
+
 def _capture_plan_rollout_state(
     deploy_dir: Path,
     runner: Callable[..., subprocess.CompletedProcess[str]],
@@ -1694,24 +1823,27 @@ def _capture_plan_rollout_state(
     # adapter writes them only to its mode-0600 incident prestate file, compares
     # them directly (never hashes/prints/receipts them), and deletes that file
     # immediately after the target reaches PROVED.
-    return _run_compose_quiet(
+    del deploy_dir
+    container = _running_container_id("db", runner)
+    return _run_quiet(
         runner,
-        deploy_dir,
-        "exec",
-        "-T",
-        "db",
-        "pg_dump",
-        "--username",
-        "postgres",
-        "--dbname",
-        "vendor_control_plane",
-        "--data-only",
-        "--no-owner",
-        "--no-privileges",
-        "--table",
-        "mod_deploy.deployment_plans",
-        "--table",
-        "mod_deploy.rollouts",
+        (
+            "docker",
+            "exec",
+            container,
+            "pg_dump",
+            "--username",
+            "postgres",
+            "--dbname",
+            "vendor_control_plane",
+            "--data-only",
+            "--no-owner",
+            "--no-privileges",
+            "--table",
+            "mod_deploy.deployment_plans",
+            "--table",
+            "mod_deploy.rollouts",
+        ),
     ).stdout
 
 
@@ -1733,19 +1865,23 @@ def _apply_database_role_passwords(
         "ALTER ROLE platform_api PASSWORD :'platform_api_password';\n"
         "COMMIT;\n"
     )
-    _run_compose_quiet(
+    del deploy_dir
+    container = _running_container_id("db", runner)
+    _run_quiet(
         runner,
-        deploy_dir,
-        "exec",
-        "-T",
-        "db",
-        "psql",
-        "-X",
-        "--quiet",
-        "--username",
-        "postgres",
-        "--dbname",
-        "vendor_control_plane",
+        (
+            "docker",
+            "exec",
+            "-i",
+            container,
+            "psql",
+            "-X",
+            "--quiet",
+            "--username",
+            "postgres",
+            "--dbname",
+            "vendor_control_plane",
+        ),
         input_text=sql,
     )
 
@@ -1769,17 +1905,21 @@ def _tcp_authentication_succeeds(
         '--username "$1" --dbname vendor_control_plane --command '
         "'SELECT 1' >/dev/null 2>&1"
     )
-    result = _run_compose_quiet(
+    del deploy_dir
+    container = _running_container_id("db", runner)
+    result = _run_quiet(
         runner,
-        deploy_dir,
-        "exec",
-        "-T",
-        "db",
-        "sh",
-        "-ceu",
-        shell,
-        "rotation-auth",
-        role,
+        (
+            "docker",
+            "exec",
+            "-i",
+            container,
+            "sh",
+            "-ceu",
+            shell,
+            "rotation-auth",
+            role,
+        ),
         input_text=password + "\n",
         require_success=False,
     )
@@ -2005,15 +2145,19 @@ def _prove_runtime_rotation(
         "assert hash_token(p['canary']) != p['refused_session_hash']; "
         "assert settings.csrf_secret == p['csrf_secret']"
     )
-    _run_compose_quiet(
+    del deploy_dir
+    container = _running_container_id(ROTATION_APP_SERVICE, runner)
+    _run_quiet(
         runner,
-        deploy_dir,
-        "exec",
-        "-T",
-        "app",
-        "python",
-        "-c",
-        script,
+        (
+            "docker",
+            "exec",
+            "-i",
+            container,
+            "python",
+            "-c",
+            script,
+        ),
         input_text=proof_input,
     )
 
@@ -2140,6 +2284,9 @@ def apply_secret_rotation_on_target(
         payload.expected_source_revision,
     ):
         raise ProductionSecretError("rotation target does not match expected identity")
+    # This must precede even read-only custody classification. The same exact
+    # liveness + database-readiness pair is required again after recreation.
+    _require_rotation_readiness(runner)
     receipt_file = state_dir / "receipt.json"
     plan_file = state_dir / "plan-rollout.prestate"
     if receipt_file.exists():
@@ -2284,16 +2431,10 @@ def apply_secret_rotation_on_target(
         if (after_image, after_revision) != (image_reference, source_revision):
             raise ProductionSecretError("rotation changed the app image or revision")
     else:
-        _run_compose_quiet(
+        _recreate_app_with_compose(
             runner,
             deploy_dir,
-            "up",
-            "-d",
-            "--no-deps",
-            "--force-recreate",
-            "--wait",
-            "app",
-            extra_environment={"VENDOR_APP_IMAGE": image_reference},
+            image_reference=image_reference,
         )
         after_image, after_revision = _running_identity(deploy_dir, runner)
         if (after_image, after_revision) != (image_reference, source_revision):
@@ -2302,20 +2443,7 @@ def apply_secret_rotation_on_target(
             target_receipt, phase=TargetRotationPhase.APP_RECREATED
         )
         _write_target_receipt(receipt_file, target_receipt)
-    _run_quiet(
-        runner,
-        (
-            "curl",
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--max-time",
-            "10",
-            "--header",
-            "Host: vendor.dotmac.io",
-            "http://127.0.0.1:8100/health/ready",
-        ),
-    )
+    _require_rotation_readiness(runner)
     if (
         _runtime_rotation_state(
             deploy_dir,
@@ -2414,12 +2542,110 @@ def _adapter_ssh_prefix(known_hosts_file: Path) -> tuple[str, ...]:
     )
 
 
+def rotation_target_preflight_program() -> str:
+    """Return the stdlib-only, read-only target preflight program."""
+    return "\n".join(
+        (
+            "import json,pathlib,re,subprocess,sys,urllib.error,urllib.request",
+            f"TARGET={ROTATION_HOST_ID!r}",
+            f"PROJECT={ROTATION_COMPOSE_PROJECT!r}",
+            f"SERVICE={ROTATION_APP_SERVICE!r}",
+            "expected_image=sys.argv[1]",
+            "expected_revision=sys.argv[2]",
+            "def run(command):",
+            " result=subprocess.run(command,text=True,capture_output=True,check=False)",
+            " if result.returncode != 0: raise SystemExit(20)",
+            " return result.stdout.strip()",
+            (
+                "if pathlib.Path('/etc/dotmac-host-id').read_text().strip()"
+                "!=TARGET: raise SystemExit(21)"
+            ),
+            (
+                "containers=[line for line in run(['docker','ps','--filter',"
+                "f'label=com.docker.compose.project={PROJECT}','--filter',"
+                "f'label=com.docker.compose.service={SERVICE}','--filter',"
+                "'label=com.docker.compose.container-number=1','--filter',"
+                "'label=com.docker.compose.oneoff=False','--format','{{.ID}}'])"
+                ".splitlines() if line]"
+            ),
+            (
+                "if len(containers)!=1 or "
+                "not re.fullmatch(r'[0-9a-f]{12,64}',containers[0]): "
+                "raise SystemExit(22)"
+            ),
+            "container=containers[0]",
+            "image=run(['docker','inspect','--format','{{.Config.Image}}',container])",
+            (
+                "revision=run(['docker','image','inspect','--format',"
+                "'{{index .Config.Labels \\\"org.opencontainers.image.revision\\\"}}',"
+                "image])"
+            ),
+            (
+                "if image!=expected_image or revision!=expected_revision: "
+                "raise SystemExit(23)"
+            ),
+            "def status(path):",
+            " request=urllib.request.Request('http://127.0.0.1:8100'+path,headers={'Host':'vendor.dotmac.io'})",
+            " try:",
+            (
+                "  with urllib.request.urlopen(request,timeout=10) as response: "
+                "return response.status"
+            ),
+            " except urllib.error.HTTPError as error: return error.code",
+            " except urllib.error.URLError: raise SystemExit(24)",
+            "if status('/health')!=200: raise SystemExit(25)",
+            "readiness=status('/health/ready')",
+            "if readiness==404: raise SystemExit(26)",
+            "if readiness!=200: raise SystemExit(27)",
+            "print(json.dumps({'schema':'platform-secret-rotation-preflight.v1','target_host_id':TARGET,'image_reference':image,'source_revision':revision,'container_selection':'exactly_one','liveness':'passed','readiness':'passed'},sort_keys=True,separators=(',',':')))",
+        )
+    )
+
+
+def preflight_rotation_target(
+    *,
+    known_hosts_file: Path,
+    expected_image_reference: str,
+    expected_source_revision: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> RotationTargetPreflightProof:
+    """Prove exact identity and readiness without installing or reading secrets."""
+    _validate_rotation_identity_coordinates(
+        expected_image_reference,
+        expected_source_revision,
+    )
+    remote_command = (
+        "python3 -I -c 'import sys;exec(sys.stdin.read())' "
+        f"{expected_image_reference} {expected_source_revision}"
+    )
+    result = _run_quiet(
+        runner,
+        (*_adapter_ssh_prefix(known_hosts_file), remote_command),
+        input_text=rotation_target_preflight_program(),
+    )
+    proof = RotationTargetPreflightProof.from_json(result.stdout)
+    if (proof.image_reference, proof.source_revision) != (
+        expected_image_reference,
+        expected_source_revision,
+    ):
+        raise ProductionSecretError("rotation preflight identity differs")
+    return proof
+
+
 def install_rotation_adapter(
     *,
     known_hosts_file: Path,
+    expected_image_reference: str,
+    expected_source_revision: str,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str:
     """Atomically install the one digest-bound adapter outside the checkout."""
+    preflight_rotation_target(
+        known_hosts_file=known_hosts_file,
+        expected_image_reference=expected_image_reference,
+        expected_source_revision=expected_source_revision,
+        runner=runner,
+    )
     archive = rotation_adapter_bytes()
     digest = rotation_adapter_digest()
     installer = rotation_adapter_installer_program()
@@ -2575,8 +2801,9 @@ def complete_secret_rotation(
 
 
 def execute_secret_rotation(
-    store: VersionedSecretStore,
     *,
+    store_factory: Callable[[], VersionedSecretStore],
+    preflight: Callable[[], RotationTargetPreflightProof],
     custody_file: Path,
     receipt_file: Path,
     expected_image_reference: str,
@@ -2586,10 +2813,14 @@ def execute_secret_rotation(
 ) -> SecretRotationReceipt:
     """Run or resume the ordered operation without exposing a partial record.
 
+    The live identity/readiness preflight runs before the OpenBao client even
+    exists and therefore before any custody read or candidate generation.
     `host_apply` is called only after BOTH OpenBao records are committed. A
     failed second CAS therefore cannot materialize a mixed bundle or touch the
     database/application, and a retry uses the protected custody set.
     """
+    preflight()
+    store = store_factory()
     if receipt_file.exists() and not custody_file.exists():
         existing = read_rotation_receipt(receipt_file)
         if existing.phase is RotationPhase.PROVED:

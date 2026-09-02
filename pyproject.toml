@@ -184,6 +184,15 @@ select = ["E", "F", "I", "UP", "B", "S"]
 # asserts are the point in tests; S105/S106 flag dummy fixture "passwords"
 # (e.g. password_hash="x") that are not real secrets.
 "tests/**" = ["S101", "S105", "S106"]
+# The rotation preflight is GENERATED Python that runs on the target host, and
+# executing it is the only way to test it. S102's premise is a string of unknown
+# provenance reaching `exec`: this string is produced by
+# `production_secrets.rotation_target_preflight_program()` in this repository,
+# compiled with a fixed filename, and run with `subprocess`, `Path.read_text` and
+# `urlopen` all monkeypatched — nothing external reaches it. Refusing to execute
+# it would leave the program that REFUSES a 404 readiness probe untested, which
+# is the one behaviour that cancelled a production window.
+"tests/unit/test_production_secret_rotation.py" = ["S101", "S105", "S106", "S102"]
 # The concurrency proof interpolates a per-test scratch TABLE NAME it generated
 # itself (uuid4 hex) — table identifiers cannot be bound as parameters, and no
 # external input reaches these statements.

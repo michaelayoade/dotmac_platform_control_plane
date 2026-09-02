@@ -20,6 +20,7 @@ from vendor_cp.production_secrets import (
     install_rotation_adapter,
     materialize_host_bundle,
     pin_product_release,
+    preflight_rotation_target,
     read_rotation_receipt,
     reconcile_host_environment_declarations,
     retire_rotation_adapter,
@@ -46,6 +47,14 @@ def _parser() -> argparse.ArgumentParser:
     rotate.add_argument("--receipt-file", required=True, type=Path)
     rotate.add_argument("--expected-image", required=True)
     rotate.add_argument("--expected-revision", required=True)
+
+    preflight = subparsers.add_parser(
+        "preflight-rotation",
+        help="prove exact target identity and readiness before credential access",
+    )
+    preflight.add_argument("--known-hosts", required=True, type=Path)
+    preflight.add_argument("--expected-image", required=True)
+    preflight.add_argument("--expected-revision", required=True)
 
     rollback = subparsers.add_parser(
         "rollback-production-incident",
@@ -85,6 +94,8 @@ def _parser() -> argparse.ArgumentParser:
         help="install the digest-bound vendor-cp-prod incident adapter",
     )
     install_adapter.add_argument("--known-hosts", required=True, type=Path)
+    install_adapter.add_argument("--expected-image", required=True)
+    install_adapter.add_argument("--expected-revision", required=True)
 
     retire_adapter = subparsers.add_parser(
         "retire-rotation-adapter",
@@ -127,9 +138,13 @@ def main() -> int:
                 print("all production OpenBao records already exist")
             return 0
         if args.command == "rotate-production":
-            store = client_from_environment()
             completed = execute_secret_rotation(
-                store,
+                store_factory=client_from_environment,
+                preflight=lambda: preflight_rotation_target(
+                    known_hosts_file=args.known_hosts,
+                    expected_image_reference=args.expected_image,
+                    expected_source_revision=args.expected_revision,
+                ),
                 custody_file=args.custody_file,
                 receipt_file=args.receipt_file,
                 expected_image_reference=args.expected_image,
@@ -141,8 +156,20 @@ def main() -> int:
             )
             print(completed.to_json(), end="")
             return 0
+        if args.command == "preflight-rotation":
+            proof = preflight_rotation_target(
+                known_hosts_file=args.known_hosts,
+                expected_image_reference=args.expected_image,
+                expected_source_revision=args.expected_revision,
+            )
+            print(proof.to_json(), end="")
+            return 0
         if args.command == "install-rotation-adapter":
-            digest = install_rotation_adapter(known_hosts_file=args.known_hosts)
+            digest = install_rotation_adapter(
+                known_hosts_file=args.known_hosts,
+                expected_image_reference=args.expected_image,
+                expected_source_revision=args.expected_revision,
+            )
             print(f"installed production rotation adapter {digest}")
             return 0
         if args.command == "retire-rotation-adapter":

@@ -143,10 +143,12 @@ target, directory, service, role, command, image or revision override.
 
 Preconditions, all mandatory:
 
-1. the rotation PR is merged with required CI green, and the exact merged
-   digest-bound adapter archive is installed at
-   `/usr/local/libexec/dotmac/platform-cp-secret-rotation-adapter.pyz` without
-   changing or importing the product checkout;
+1. the rotation PR is merged with required CI green, and the read-only
+   `preflight-rotation` command has proved the exact running image and revision,
+   an exact-one app-container label selection, `/health` liveness, and the
+   separate `/health/ready` database-reaching readiness contract. This proof
+   runs before an OpenBao identity is created, before any secret is read, and
+   before the digest-bound adapter archive is installed;
 2. `/etc/dotmac-host-id` is exactly `vendor-cp-prod`, the current application
    image reference contains `@sha256:...`, and its OCI revision label is a
    40-character commit;
@@ -161,7 +163,10 @@ Preconditions, all mandatory:
 6. the operator accepts that JWT and session rotation invalidates every current
    API/browser session; CSRF stays byte-for-byte unchanged; and
 7. no one runs `docker inspect` on container environment data. Identity is
-   read only from the container image reference and OCI revision label.
+   selected without Compose through the exact project, service,
+   container-number and one-off Docker labels, then read only from the
+   container image reference and OCI revision label. Zero or multiple matches
+   refuse.
 
 Create a private operator directory at mode `0700`. Keep it outside Git,
 synchronized storage, tickets and reports. The receipt is names-only; the
@@ -174,7 +179,21 @@ CUSTODY_DIR=<absolute-mode-0700-private-directory>
 EXPECTED_IMAGE=<exact-current-name@sha256:digest>
 EXPECTED_REVISION=<exact-current-40-character-oci-revision>
 PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
-  install-rotation-adapter --known-hosts "$KNOWN_HOSTS"
+  preflight-rotation \
+  --known-hosts "$KNOWN_HOSTS" \
+  --expected-image "$EXPECTED_IMAGE" \
+  --expected-revision "$EXPECTED_REVISION"
+```
+
+Only after that command passes, create the narrow short-lived OpenBao rotation
+identity. Then install the exact adapter and run the resumable rotation:
+
+```bash
+PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
+  install-rotation-adapter \
+  --known-hosts "$KNOWN_HOSTS" \
+  --expected-image "$EXPECTED_IMAGE" \
+  --expected-revision "$EXPECTED_REVISION"
 PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
   rotate-production \
   --known-hosts "$KNOWN_HOSTS" \
@@ -184,7 +203,15 @@ PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
   --expected-revision "$EXPECTED_REVISION"
 ```
 
-Installation refuses a missing/symlinked/foreign-owned/group-or-world-writable
+The standalone preflight uses no Compose command and needs neither
+`VENDOR_APP_IMAGE` nor the deliberately absent bootstrap declaration. It does
+not install a file, instantiate an OpenBao client, create custody, or inspect
+container environment data. `/health` remains liveness only. A 200 there can
+never compensate for a missing or failing `/health/ready`; an image without the
+readiness contract must be deployed separately before rotation.
+
+Installation repeats the same preflight, then refuses a
+missing/symlinked/foreign-owned/group-or-world-writable
 ancestor under `/usr/local`, installs the archive root:root mode `0555`, and
 verifies its SHA-256 before any payload is sent. The payload repeats that exact
 digest and the adapter verifies it from inside its own archive before applying
@@ -199,32 +226,34 @@ It reloads the same candidate; it never mints a replacement. A runtime-record
 CAS conflict after the database-record CAS cannot reach the host: projection,
 PostgreSQL and the app begin only after both record versions are committed.
 
-On the host the adapter first proves all three protected prior PostgreSQL
+On the host the adapter first repeats the exact liveness and database-reaching
+readiness proof, before reading or writing `.env` or database state. It then
+proves all three protected prior PostgreSQL
 credentials succeed and all three candidates fail over TCP/SCRAM. It likewise
 proves the running app accepts the prior JWT/session material, refuses the
 candidate, and holds the preserved CSRF value. Only then does it change all
 three role verifiers in one PostgreSQL transaction over stdin, atomically patch
 exactly five lines of the current `.env` while preserving every other byte,
 mode and owner, and force-recreate only `app` on the expected image. The inverse
-database/runtime proofs, readiness, preserved CSRF and unchanged image/revision
+database/runtime proofs, the identical readiness oracle, preserved CSRF and
+unchanged image/revision
 must then hold. A mode-0600 transient host file holds the pre-operation
 `mod_deploy.deployment_plans`/`rollouts` bytes long enough to prove they remain
 byte-identical; it is never printed or hashed and is deleted on success. The
 names-only target receipt distinguishes a fresh proof from a historical replay
 after a lost response. It never reads Docker environment metadata.
 
-The database bootstrap credential is a first-cluster input and is deliberately
-absent from the established host. Docker Compose nevertheless expands the
-`db` service before it executes any command, including read-only `ps` and
-`exec`. Every adapter-owned Compose invocation therefore overrides
-`VENDOR_DB_BOOTSTRAP_PASSWORD` in the Compose process environment with one
-fixed, non-secret parse-only placeholder. The placeholder is not a credential:
-it is never written to `.env`, argv, custody, target state or either receipt,
-and it never reaches a container. Rotation has exactly one `compose up`: the
-`--no-deps --force-recreate app` step above. It may `exec` in the existing
-database to prove and atomically change role verifiers, but it never targets
-`db` with `up`, `create`, `run`, `restart` or `recreate`. An inherited real
-bootstrap value is overwritten rather than propagated.
+The database bootstrap credential and `VENDOR_APP_IMAGE` declaration are
+deliberately absent from the established host. Identity selection and every
+database/app observation use Docker labels plus filtered inspect or direct
+`docker exec`; none parses Compose. Rotation has exactly one Compose command:
+the app-only `up --no-deps --force-recreate --wait app` step. For that command
+alone, the adapter supplies the expected immutable image and one fixed,
+non-secret bootstrap parse placeholder in the Compose process environment.
+Neither is written to `.env`, argv, custody, target state or either receipt;
+the placeholder never enters a container. The adapter never targets `db` with
+`up`, `create`, `run`, `restart` or `recreate`, and an inherited real bootstrap
+value is overwritten rather than propagated.
 
 A retry classifies exactly four aggregate states: all-prior; database candidate
 with prior environment/app; database+environment candidate with prior app; or

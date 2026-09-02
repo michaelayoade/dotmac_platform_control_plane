@@ -405,11 +405,17 @@ Compose project and from every product data plane:
   installed root-owned archive whose digest and safe ancestry are verified; it
   never imports or changes the mutable product checkout and is retired after
   the incident proof. The post-bootstrap host intentionally retains no
-  `VENDOR_DB_BOOTSTRAP_PASSWORD`; because Compose interpolates every service
-  even for `ps` and `exec`, the adapter supplies one fixed non-secret parse-only
-  placeholder in the Compose process environment and overrides any inherited
-  value. It never persists that placeholder, never passes it in argv, and the
-  only `up --force-recreate` target is `app --no-deps`; the database container
+  `VENDOR_DB_BOOTSTRAP_PASSWORD` or `VENDOR_APP_IMAGE`. Target discovery does
+  not parse Compose: exact project/service/container-number/one-off Docker
+  labels must select one app, and filtered image/revision inspection binds its
+  identity without reading environment data. A read-only preflight proves
+  `/health` liveness and the separate database-reaching `/health/ready` oracle
+  before OpenBao construction, custody or adapter installation, and the same
+  oracle must pass after recreation. Compose is used only for
+  `up --no-deps --force-recreate --wait app`; for that command alone the
+  adapter supplies the exact immutable app image and one fixed non-secret
+  bootstrap parse placeholder in process environment, overriding inherited
+  values. Neither is persisted or passed in argv, and the database container
   is neither created nor recreated by rotation.
   `scripts/materialize_production_secrets.py` is its thin operator adapter.
   Runtime settings never call OpenBao.
