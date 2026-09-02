@@ -1935,8 +1935,9 @@ def _capture_plan_rollout_state(
 ) -> str:
     # The bytes are classified as protected operational evidence. The target
     # adapter writes them only to its mode-0600 incident prestate file, compares
-    # them directly (never hashes/prints/receipts them), and deletes that file
-    # immediately after the target reaches PROVED.
+    # them after canonicalizing only pg_dump's matched restrict nonce pair
+    # (never hashes/prints/receipts them), and deletes that file immediately
+    # after the target reaches PROVED.
     del deploy_dir
     container = _running_container_id("db", runner)
     return _run_quiet(
@@ -1959,6 +1960,43 @@ def _capture_plan_rollout_state(
             "mod_deploy.rollouts",
         ),
     ).stdout
+
+
+def _canonicalize_plan_rollout_dump(raw: str) -> str:
+    """Replace only pg_dump's generated, matched restrict nonce pair.
+
+    PostgreSQL emits a fresh nonce on every dump in ``\\restrict`` and
+    ``\\unrestrict`` meta-commands. Comparing raw dumps therefore reports drift
+    when every protected row is unchanged. Refuse malformed or unmatched
+    commands; all other bytes remain part of the comparison.
+    """
+    lines = raw.splitlines(keepends=True)
+    found: list[tuple[int, str, str]] = []
+    command_pattern = re.compile(r"^\\(?:un)?restrict(?:\s|$)")
+    pattern = re.compile(r"^\\(?P<kind>un)?restrict (?P<nonce>\S+)(?P<end>\r?\n?)$")
+    for index, line in enumerate(lines):
+        if command_pattern.match(line) is None:
+            continue
+        match = pattern.fullmatch(line)
+        if match is None:
+            raise ProductionSecretError(
+                "plan prestate dump has malformed restrict guards"
+            )
+        found.append((index, match.group("kind") or "", match.group("nonce")))
+    if not found:
+        return raw
+    if len(found) != 2 or [item[1] for item in found] != ["", "un"]:
+        raise ProductionSecretError("plan prestate dump has malformed restrict guards")
+    if found[0][2] != found[1][2]:
+        raise ProductionSecretError("plan prestate dump restrict guards disagree")
+    for index, kind, _nonce in found:
+        ending = (
+            "\r\n"
+            if lines[index].endswith("\r\n")
+            else ("\n" if lines[index].endswith("\n") else "")
+        )
+        lines[index] = f"\\{kind}restrict <generated>{ending}"
+    return "".join(lines)
 
 
 def _apply_database_role_passwords(
@@ -2643,9 +2681,13 @@ def apply_secret_rotation_on_target(
         != "candidate"
     ):
         raise ProductionSecretError("runtime rotation did not converge")
-    if _capture_plan_rollout_state(deploy_dir, runner) != _read_protected(
-        plan_file, label="target plan prestate"
-    ):
+    current_plan_state = _canonicalize_plan_rollout_dump(
+        _capture_plan_rollout_state(deploy_dir, runner)
+    )
+    protected_plan_state = _canonicalize_plan_rollout_dump(
+        _read_protected(plan_file, label="target plan prestate")
+    )
+    if current_plan_state != protected_plan_state:
         raise ProductionSecretError("rotation changed deployment plan or rollout state")
     target_receipt = replace(target_receipt, phase=TargetRotationPhase.PROVED)
     _write_target_receipt(receipt_file, target_receipt)
