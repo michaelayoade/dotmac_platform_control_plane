@@ -14,5 +14,7 @@ trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
 } >"$temporary"
 chmod --reference="${PGDATA}/pg_hba.conf" "$temporary"
 mv -f -- "$temporary" "${PGDATA}/pg_hba.conf"
-psql --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" \
-    --dbname "$POSTGRES_DB" --command 'SELECT pg_reload_conf();' >/dev/null
+# The official entrypoint stops its temporary initialization server after this
+# script and starts the final server against these bytes. Reloading here is both
+# unnecessary and misleading: the temporary server has command-line-only
+# listen settings that correctly refuse a SIGHUP change during initialization.

@@ -128,6 +128,7 @@ docker run -d --name "$DB_CONTAINER" \
     --network "$CANDIDATE_NETWORK" \
     --network-alias db \
     --env POSTGRES_USER=postgres \
+    --env POSTGRES_PASSWORD=postgres \
     --env 'POSTGRES_INITDB_ARGS=--auth-local=trust --auth-host=scram-sha-256' \
     --env POSTGRES_DB=candidate \
     --env VENDOR_DB_ADMIN_PASSWORD=admin \
