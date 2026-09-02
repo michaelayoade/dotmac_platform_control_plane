@@ -2009,17 +2009,9 @@ def _tcp_authentication_succeeds(
 ) -> bool:
     if role not in {"app_admin", "app_user", "platform_api"}:
         raise ProductionSecretError("database role is outside the rotation set")
-    request = json.dumps(
-        {
-            "schema": ROTATION_DATABASE_AUTH_ORACLE_SCHEMA,
-            "role": role,
-            "password": password,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    shell = rotation_database_auth_oracle_program()
     del deploy_dir
-    container = _running_container_id(ROTATION_APP_SERVICE, runner)
+    container = _running_container_id("db", runner)
     result = _run_quiet(
         runner,
         (
@@ -2027,15 +2019,70 @@ def _tcp_authentication_succeeds(
             "exec",
             "-i",
             container,
-            "python",
-            "-c",
-            rotation_database_auth_oracle_program(),
+            "sh",
+            "-ceu",
+            shell,
+            "rotation-auth",
+            role,
         ),
-        input_text=request,
+        input_text=password + "\n",
+        require_success=False,
     )
-    return DatabaseAuthenticationProof.from_json(
-        result.stdout, expected_role=role
-    ).accepted
+    return result.returncode == 0
+
+
+def _require_database_authentication_subject(
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    """Prove the bridge listener and exact database roles exist before probing."""
+    container = _running_container_id("db", runner)
+    readiness = _run_quiet(
+        runner,
+        (
+            "docker",
+            "exec",
+            container,
+            "pg_isready",
+            "--host",
+            "db",
+            "--port",
+            "5432",
+            "--dbname",
+            "vendor_control_plane",
+        ),
+        require_success=False,
+    )
+    if readiness.returncode != 0:
+        raise ProductionSecretError(
+            "database authentication bridge is not accepting connections"
+        )
+    subject = _run_quiet(
+        runner,
+        (
+            "docker",
+            "exec",
+            container,
+            "psql",
+            "-X",
+            "--username",
+            "postgres",
+            "--dbname",
+            "vendor_control_plane",
+            "--tuples-only",
+            "--no-align",
+            "--command",
+            "SELECT CASE WHEN current_database() = 'vendor_control_plane' "
+            "AND (SELECT array_agg(rolname ORDER BY rolname) "
+            "FROM pg_roles WHERE rolname IN "
+            "('app_admin','app_user','platform_api') AND rolcanlogin) "
+            "= ARRAY['app_admin','app_user','platform_api']::name[] "
+            "THEN 'ready' ELSE 'not-ready' END",
+        ),
+    ).stdout.strip()
+    if subject != "ready":
+        raise ProductionSecretError(
+            "database authentication subject is not the declared role set"
+        )
 
 
 class DatabaseCredentialMaterialState(StrEnum):
@@ -2054,6 +2101,7 @@ def _database_role_states(
     candidate: RotatingSecretSet,
     runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> dict[str, DatabaseCredentialMaterialState]:
+    _require_database_authentication_subject(runner)
     states: dict[str, DatabaseCredentialMaterialState] = {}
     for role, prior_password, candidate_password in (
         ("app_admin", prior.admin_password, candidate.admin_password),
@@ -2986,54 +3034,11 @@ class RotationRuntimeOracleProof:
 
 
 ROTATION_RUNTIME_ORACLE_PAYLOAD: Final = "rotation_runtime_oracle.pyprogram"
-ROTATION_DATABASE_AUTH_ORACLE_PAYLOAD: Final = "rotation_database_auth_oracle.pyprogram"
-ROTATION_DATABASE_AUTH_ORACLE_SCHEMA: Final = (
-    "platform-database-authentication-oracle.v1"
-)
-
-
-@dataclass(frozen=True, slots=True)
-class DatabaseAuthenticationProof:
-    """Names-only answer from the deployed application's database boundary."""
-
-    role: str
-    accepted: bool
-
-    @classmethod
-    def from_json(
-        cls, payload: str, *, expected_role: str
-    ) -> DatabaseAuthenticationProof:
-        try:
-            document = json.loads(payload)
-        except json.JSONDecodeError as error:
-            raise ProductionSecretError(
-                "the database authentication oracle returned an unreadable proof"
-            ) from error
-        if not isinstance(document, dict) or set(document) != {
-            "schema",
-            "role",
-            "accepted",
-        }:
-            raise ProductionSecretError(
-                "the database authentication oracle proof has an unexpected shape"
-            )
-        if document["schema"] != ROTATION_DATABASE_AUTH_ORACLE_SCHEMA:
-            raise ProductionSecretError(
-                "the database authentication oracle proof is not this schema"
-            )
-        if document["role"] != expected_role:
-            raise ProductionSecretError(
-                "the database authentication oracle answered for another role"
-            )
-        if type(document["accepted"]) is not bool:
-            raise ProductionSecretError(
-                "the database authentication oracle result is not boolean"
-            )
-        return cls(role=expected_role, accepted=document["accepted"])
+ROTATION_DATABASE_AUTH_ORACLE_PAYLOAD: Final = "rotation_database_auth_oracle.shprogram"
 
 
 def rotation_database_auth_oracle_program() -> str:
-    """Return the network-authentication payload executed by the deployed app."""
+    """Return the exact bridge-authentication program the DB container runs."""
     return (
         resources.files("vendor_cp")
         .joinpath(ROTATION_DATABASE_AUTH_ORACLE_PAYLOAD)

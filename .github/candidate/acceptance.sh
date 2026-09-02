@@ -145,60 +145,53 @@ done
 docker exec "$DB_CONTAINER" pg_isready -U postgres -d candidate >/dev/null \
     || fail "the disposable database never became ready"
 pass "database up, roles created by deploy/postgres/init-roles.sh"
+psql_admin --dbname candidate --command \
+    'CREATE DATABASE vendor_control_plane OWNER app_admin' >/dev/null \
+    || fail "the production-named authentication subject could not be created"
 
-step "0a loopback trust is blind; the application bridge oracle discriminates"
+step "0a loopback trust is blind; the bridge oracle discriminates"
 # Reproduce the retired probe first. A deliberately invalid password succeeds
 # from inside PostgreSQL because 127.0.0.1 selects the earlier trust rule.
 docker exec --env PGPASSWORD=deliberately-invalid-candidate-proof \
     "$DB_CONTAINER" psql -X --no-password --host 127.0.0.1 --port 5432 \
-    --username app_user --dbname candidate --command 'SELECT 1' >/dev/null \
+    --username app_user --dbname vendor_control_plane --command 'SELECT 1' >/dev/null \
     || fail "the loopback control did not reproduce the trusted path"
 pass "control: container-local 127.0.0.1 accepts deliberately invalid material"
 
-# Read the payload from the INSTALLED wheel inside the exact image under test.
-# The source checkout is not mounted, and the image's own app runtime supplies
-# the db:5432 coordinate the production adapter uses.
+# Prove the exact network subject exists before interpreting any credential
+# failure. Readiness is over db:5432, while database/role existence is checked
+# through the container's trusted local socket without reading any credential.
+docker exec "$DB_CONTAINER" pg_isready --host db --port 5432 \
+    --dbname vendor_control_plane >/dev/null \
+    || fail "the bridge listener is not accepting connections"
+subject="$(psql_admin --tuples-only --no-align --dbname vendor_control_plane --command \
+    "SELECT CASE WHEN current_database() = 'vendor_control_plane' AND
+        (SELECT array_agg(rolname ORDER BY rolname) FROM pg_roles
+         WHERE rolname IN ('app_admin','app_user','platform_api') AND rolcanlogin)
+        = ARRAY['app_admin','app_user','platform_api']::name[]
+     THEN 'ready' ELSE 'not-ready' END")"
+test "$subject" = ready \
+    || fail "the database authentication subject is not the declared role set"
+
+# Read the shell payload from the INSTALLED wheel inside the exact image under
+# test. The source checkout is not mounted. The same payload is carried in the
+# isolated target adapter archive and executed by the production coordinator.
 docker run --rm --network none --entrypoint python "$IMAGE" -c \
     'from vendor_cp.production_secrets import rotation_database_auth_oracle_program as p; print(p(), end="")' \
-    >"$WORKDIR/database-auth-oracle.pyprogram" \
+    >"$WORKDIR/database-auth-oracle.shprogram" \
     || fail "the installed image cannot produce the database auth oracle"
 
 run_database_auth_oracle() {
-    docker run --rm --interactive --network "$CANDIDATE_NETWORK" \
-        --env DATABASE_URL=postgresql+psycopg://app_user:app@db:5432/candidate \
-        --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api:platform@db:5432/candidate \
-        --entrypoint python "$IMAGE" -c "$(cat "$WORKDIR/database-auth-oracle.pyprogram")"
+    docker exec --interactive "$DB_CONTAINER" sh -ceu \
+        "$(cat "$WORKDIR/database-auth-oracle.shprogram")" rotation-auth "$1"
 }
 
-printf '%s' '{"schema":"platform-database-authentication-oracle.v1","role":"app_user","password":"deliberately-invalid-candidate-proof"}' \
-    | run_database_auth_oracle >"$WORKDIR/invalid-auth.json" \
-    || fail "the bridge oracle could not classify deliberately invalid material"
-python3 - "$WORKDIR/invalid-auth.json" <<'PY' \
-    || fail "the db:5432 bridge accepted deliberately invalid material"
-import json
-import sys
-
-assert json.load(open(sys.argv[1], encoding="utf-8")) == {
-    "schema": "platform-database-authentication-oracle.v1",
-    "role": "app_user",
-    "accepted": False,
-}
-PY
-
-printf '%s' '{"schema":"platform-database-authentication-oracle.v1","role":"app_user","password":"app"}' \
-    | run_database_auth_oracle >"$WORKDIR/valid-auth.json" \
-    || fail "the bridge oracle could not classify valid material"
-python3 - "$WORKDIR/valid-auth.json" <<'PY' \
+if printf '%s\n' deliberately-invalid-candidate-proof \
+    | run_database_auth_oracle app_user; then
+    fail "the db:5432 bridge accepted deliberately invalid material"
+fi
+printf '%s\n' app | run_database_auth_oracle app_user \
     || fail "the db:5432 bridge refused the active app_user material"
-import json
-import sys
-
-assert json.load(open(sys.argv[1], encoding="utf-8")) == {
-    "schema": "platform-database-authentication-oracle.v1",
-    "role": "app_user",
-    "accepted": True,
-}
-PY
 pass "subject: db:5432 SCRAM refuses invalid and admits active material"
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,22 @@
+# Run only inside the exact label-selected PostgreSQL container. The password
+# arrives on stdin and is written to a mode-0600 temporary PGPASSFILE; neither
+# the password nor anything derived from it is printed or placed in argv.
+umask 077
+credential=$(mktemp)
+trap 'rm -f "$credential"' EXIT HUP INT TERM
+IFS= read -r password
+printf 'db:5432:vendor_control_plane:%s:%s\n' "$1" "$password" >"$credential"
+unset password
+
+observed=$(
+    PGPASSFILE="$credential" psql -X --no-password \
+        --host db --port 5432 --username "$1" \
+        --dbname vendor_control_plane --tuples-only --no-align \
+        --command "SELECT CASE WHEN inet_client_addr() IS NOT NULL
+            AND inet_server_addr() IS NOT NULL
+            AND NOT inet_client_addr() <<= inet '127.0.0.0/8'
+            AND inet_client_addr() <> inet '::1'
+            THEN 'bridge' ELSE 'not-bridge' END" \
+        2>/dev/null
+) || exit 1
+test "$observed" = bridge
