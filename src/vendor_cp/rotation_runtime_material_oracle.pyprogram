@@ -1,0 +1,20 @@
+# Payload executed by the deployed legacy application's interpreter. The
+# deployed kernel exports hash_token at its package root but decode_access_token
+# only from dotmac_kernel.security. Resolve the callable that actually exists;
+# importing both from the root makes every credential state look unproved.
+import json
+import os
+import sys
+
+from dotmac_kernel.security import decode_access_token, hash_token
+
+p = json.load(sys.stdin)
+assert decode_access_token(p["refused_jwt"]) is None
+assert decode_access_token(p["accepted_jwt"]) is not None
+assert hash_token(p["canary"]) == p["accepted_session_hash"]
+assert hash_token(p["canary"]) != p["refused_session_hash"]
+
+# The legacy Settings model has no csrf_secret attribute. CSRF is deliberately
+# preserved, not rotated; prove the container environment inherited the exact
+# held value without printing or hashing it.
+assert os.environ.get("CSRF_SECRET") == p["csrf_secret"]

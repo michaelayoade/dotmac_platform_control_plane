@@ -2325,17 +2325,7 @@ def _prove_runtime_rotation(
         },
         separators=(",", ":"),
     )
-    script = (
-        "import json,sys; "
-        "from dotmac_kernel import decode_access_token,hash_token; "
-        "from dotmac_kernel.config import settings; "
-        "p=json.load(sys.stdin); "
-        "assert decode_access_token(p['refused_jwt']) is None; "
-        "assert decode_access_token(p['accepted_jwt']) is not None; "
-        "assert hash_token(p['canary']) == p['accepted_session_hash']; "
-        "assert hash_token(p['canary']) != p['refused_session_hash']; "
-        "assert settings.csrf_secret == p['csrf_secret']"
-    )
+    script = rotation_runtime_material_oracle_program()
     del deploy_dir
     container = _running_container_id(ROTATION_APP_SERVICE, runner)
     _run_quiet(
@@ -2714,6 +2704,9 @@ def rotation_adapter_bytes() -> bytes:
         f"vendor_cp/{ROTATION_RUNTIME_ORACLE_PAYLOAD}": (
             package_dir / ROTATION_RUNTIME_ORACLE_PAYLOAD
         ).read_bytes(),
+        f"vendor_cp/{ROTATION_RUNTIME_MATERIAL_ORACLE_PAYLOAD}": (
+            package_dir / ROTATION_RUNTIME_MATERIAL_ORACLE_PAYLOAD
+        ).read_bytes(),
     }
     output = io.BytesIO()
     with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_STORED) as archive:
@@ -3035,6 +3028,9 @@ class RotationRuntimeOracleProof:
 
 ROTATION_RUNTIME_ORACLE_PAYLOAD: Final = "rotation_runtime_oracle.pyprogram"
 ROTATION_DATABASE_AUTH_ORACLE_PAYLOAD: Final = "rotation_database_auth_oracle.shprogram"
+ROTATION_RUNTIME_MATERIAL_ORACLE_PAYLOAD: Final = (
+    "rotation_runtime_material_oracle.pyprogram"
+)
 
 
 def rotation_database_auth_oracle_program() -> str:
@@ -3066,6 +3062,15 @@ def rotation_runtime_oracle_program() -> str:
     return (
         resources.files("vendor_cp")
         .joinpath(ROTATION_RUNTIME_ORACLE_PAYLOAD)
+        .read_text(encoding="utf-8")
+    )
+
+
+def rotation_runtime_material_oracle_program() -> str:
+    """Return the exact legacy-image JWT/session/CSRF proof program."""
+    return (
+        resources.files("vendor_cp")
+        .joinpath(ROTATION_RUNTIME_MATERIAL_ORACLE_PAYLOAD)
         .read_text(encoding="utf-8")
     )
 

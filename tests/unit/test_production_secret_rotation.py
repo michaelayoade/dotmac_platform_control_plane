@@ -31,6 +31,7 @@ from vendor_cp.production_secrets import (
     ROTATION_DEPLOY_DIR,
     ROTATION_HOST_ID,
     ROTATION_PREFLIGHT_REFUSALS,
+    ROTATION_RUNTIME_MATERIAL_ORACLE_PAYLOAD,
     ROTATION_RUNTIME_ORACLE_PAYLOAD,
     ROTATION_TARGET,
     RUNTIME_PATH,
@@ -66,6 +67,7 @@ from vendor_cp.production_secrets import (
     rotation_adapter_installer_program,
     rotation_adapter_verifier_program,
     rotation_database_auth_oracle_program,
+    rotation_runtime_material_oracle_program,
     rotation_runtime_oracle_program,
     rotation_target_preflight_program,
     sanitize_diagnostic_text,
@@ -870,6 +872,11 @@ def test_adapter_archive_carries_the_runtime_oracle_and_bridge_probe(
         assert archive.read(auth_member) == (
             rotation_database_auth_oracle_program().encode()
         )
+        material_member = f"vendor_cp/{ROTATION_RUNTIME_MATERIAL_ORACLE_PAYLOAD}"
+        assert material_member in archive.namelist()
+        assert archive.read(material_member) == (
+            rotation_runtime_material_oracle_program().encode()
+        )
 
     adapter = tmp_path / "adapter.pyz"
     adapter.write_bytes(rotation_adapter_bytes())
@@ -891,6 +898,56 @@ def test_adapter_archive_carries_the_runtime_oracle_and_bridge_probe(
     )
     assert imported.returncode == 0, imported.stderr
     assert imported.stdout.strip() == "True"
+
+
+def test_runtime_material_oracle_matches_the_deployed_kernel_surface(
+    tmp_path: Path,
+) -> None:
+    """The legacy artifact exposes decode only from its security module.
+
+    Its Settings object also has no csrf_secret member. This planted package
+    makes both production facts structural: the former root import and the
+    former Settings attribute access each fail this exact program.
+    """
+    package = tmp_path / "dotmac_kernel"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "security.py").write_text(
+        "import os\n"
+        "def decode_access_token(token):\n"
+        "    return {'ok': True} if token == os.environ['ACCEPTED_JWT'] else None\n"
+        "def hash_token(value):\n"
+        "    return os.environ['ACCEPTED_SESSION_HASH']\n"
+    )
+    accepted_hash = "accepted-session-hash"
+    payload = {
+        "refused_jwt": "refused",
+        "accepted_jwt": "accepted",
+        "canary": "canary",
+        "refused_session_hash": "refused-session-hash",
+        "accepted_session_hash": accepted_hash,
+        "csrf_secret": "preserved-csrf",
+    }
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(tmp_path),
+        "ACCEPTED_JWT": "accepted",
+        "ACCEPTED_SESSION_HASH": accepted_hash,
+        "CSRF_SECRET": "preserved-csrf",
+    }
+
+    result = subprocess.run(  # noqa: S603 -- fixed interpreter and program
+        (sys.executable, "-c", rotation_runtime_material_oracle_program()),
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=environment,
+        cwd=tmp_path,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "decode_access_token" not in (package / "__init__.py").read_text()
 
 
 @pytest.mark.parametrize(
