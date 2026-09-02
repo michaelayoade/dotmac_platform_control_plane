@@ -27,6 +27,7 @@ from vendor_cp.production_secrets import (
     LEGACY_RUNTIME_PROBE_REVISION,
     LICENCE_SIGNING_PATH,
     ROLLBACK_CONFIRMATION,
+    ROTATION_DATABASE_AUTH_ORACLE_PAYLOAD,
     ROTATION_DEPLOY_DIR,
     ROTATION_HOST_ID,
     ROTATION_PREFLIGHT_REFUSALS,
@@ -64,6 +65,7 @@ from vendor_cp.production_secrets import (
     rotation_adapter_digest,
     rotation_adapter_installer_program,
     rotation_adapter_verifier_program,
+    rotation_database_auth_oracle_program,
     rotation_runtime_oracle_program,
     rotation_target_preflight_program,
     sanitize_diagnostic_text,
@@ -854,7 +856,7 @@ def test_adapter_archive_runs_in_isolated_mode_without_checkout_imports(
     assert "rotation adapter" in result.stderr
 
 
-def test_adapter_archive_carries_the_runtime_oracle_it_must_run(
+def test_adapter_archive_carries_the_runtime_oracle_and_bridge_probe(
     tmp_path: Path,
 ) -> None:
     """The target adapter runs outside the checkout. A source-only payload
@@ -863,6 +865,11 @@ def test_adapter_archive_carries_the_runtime_oracle_it_must_run(
         member = f"vendor_cp/{ROTATION_RUNTIME_ORACLE_PAYLOAD}"
         assert member in archive.namelist()
         assert archive.read(member) == rotation_runtime_oracle_program().encode()
+        auth_member = f"vendor_cp/{ROTATION_DATABASE_AUTH_ORACLE_PAYLOAD}"
+        assert auth_member in archive.namelist()
+        assert archive.read(auth_member) == (
+            rotation_database_auth_oracle_program().encode()
+        )
 
     adapter = tmp_path / "adapter.pyz"
     adapter.write_bytes(rotation_adapter_bytes())
@@ -917,6 +924,7 @@ class HostRunner:
         self.identity_calls = 0
         self.fail_kind: str | None = None
         self.old_auth_succeeds = False
+        self.role_auth_states: dict[str, str] = {}
         self.db_rotated = False
         self.runtime_rotated = False
         self.compose_bootstrap_values: list[str | None] = []
@@ -996,15 +1004,35 @@ class HostRunner:
                 return subprocess.CompletedProcess(command, 1, "", "refused")
             self.db_rotated = True
             return subprocess.CompletedProcess(command, 0, "", "")
+        if "pg_isready" in command and "--host" in command:
+            return subprocess.CompletedProcess(command, 0, "accepting\n", "")
+        if (
+            "psql" in command
+            and "--command" in command
+            and "current_database()" in command[-1]
+        ):
+            return subprocess.CompletedProcess(command, 0, "ready\n", "")
         if "rotation-auth" in command:
+            role = command[-1]
             password = (stdin or "").strip()
-            is_old = password in self.payload.replaced.to_object().values()
-            is_active = (is_old and not self.db_rotated) or (
-                not is_old and self.db_rotated
-            )
-            if is_old and self.db_rotated and self.old_auth_succeeds:
-                is_active = True
-            code = 0 if is_active else 1
+            prior_by_role = {
+                "app_admin": self.payload.replaced.admin_password,
+                "app_user": self.payload.replaced.app_user_password,
+                "platform_api": self.payload.replaced.platform_api_password,
+            }
+            is_prior = password == prior_by_role[role]
+            state = self.role_auth_states.get(role)
+            if state is None:
+                accepted = (is_prior and not self.db_rotated) or (
+                    not is_prior and self.db_rotated
+                )
+                if is_prior and self.db_rotated and self.old_auth_succeeds:
+                    accepted = True
+            else:
+                accepted = state == "both" or state == (
+                    "prior" if is_prior else "candidate"
+                )
+            code = 0 if accepted else 1
             return subprocess.CompletedProcess(command, code, "", "")
         if "--force-recreate" in command:
             code = 1 if self.fail_kind == "recreate" else 0
@@ -1119,6 +1147,25 @@ def test_host_rotation_proves_atomic_db_env_recreate_and_unchanged_state(
             assert value not in rendered
         assert "docker inspect" not in rendered or ".Config.Env" not in rendered
     assert any("--force-recreate" in command for command, _ in runner.calls)
+    auth_calls = [
+        (command, stdin)
+        for command, stdin in runner.calls
+        if "rotation-auth" in command
+    ]
+    assert auth_calls
+    assert {command[3] for command, _request in auth_calls} == {
+        runner.db_container_ids[0]
+    }
+    assert all(command[4:6] == ("sh", "-ceu") for command, _ in auth_calls)
+    assert all(
+        command[6] == rotation_database_auth_oracle_program()
+        for command, _ in auth_calls
+    )
+    assert {command[-1] for command, _request in auth_calls} == {
+        "app_admin",
+        "app_user",
+        "platform_api",
+    }
 
 
 def _assert_no_target_mutation(
@@ -1391,13 +1438,38 @@ def test_host_rotation_refuses_when_an_old_tcp_credential_still_works(
     payload, deploy_dir, host_id, runner = _host_fixture(tmp_path)
     runner.old_auth_succeeds = True
 
-    with pytest.raises(ProductionSecretError, match="mixed rotation state"):
+    with pytest.raises(
+        ProductionSecretError,
+        match=("app_admin=both, app_user=both, platform_api=both"),
+    ):
         apply_secret_rotation_on_target(
             payload,
             deploy_dir=deploy_dir,
             host_id_file=host_id,
             runner=runner,
         )
+
+
+@pytest.mark.parametrize("state", ("neither", "both"))
+def test_host_rotation_names_each_nonconvergent_role_state_before_mutation(
+    tmp_path: Path, state: str
+) -> None:
+    payload, deploy_dir, host_id, runner = _host_fixture(tmp_path)
+    before = (deploy_dir / ".env").read_bytes()
+    runner.role_auth_states["app_user"] = state
+
+    with pytest.raises(
+        ProductionSecretError,
+        match=f"app_admin=prior, app_user={state}, platform_api=prior",
+    ):
+        apply_secret_rotation_on_target(
+            payload,
+            deploy_dir=deploy_dir,
+            host_id_file=host_id,
+            runner=runner,
+        )
+
+    _assert_no_target_mutation(deploy_dir, runner, before)
 
 
 def test_host_rotation_refuses_a_csrf_change_before_any_command(tmp_path: Path) -> None:
@@ -1694,6 +1766,30 @@ def test_the_runtime_oracle_payload_ships_and_keeps_both_halves() -> None:
     assert "current_user" in program
     assert "deliberately-invalid-" in program
     assert '"refused":True' in program.replace(" ", "")
+
+
+def test_the_database_authentication_oracle_is_bridge_bound_and_names_no_material() -> (
+    None
+):
+    program = rotation_database_auth_oracle_program()
+
+    parsed = subprocess.run(  # noqa: S603 -- fixed shell syntax check
+        ("sh", "-n"),
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+    assert "PGPASSFILE" in program
+    assert "--host db --port 5432" in program
+    assert "--dbname vendor_control_plane" in program
+    assert "inet_client_addr() IS NOT NULL" in program
+    assert "inet_server_addr() IS NOT NULL" in program
+    assert "inet '127.0.0.0/8'" in program
+    assert "inet '::1'" in program
+    assert "2>/dev/null" in program
+    assert "echo" not in program
 
 
 def test_the_oracle_payload_is_not_part_of_the_python_surface() -> None:

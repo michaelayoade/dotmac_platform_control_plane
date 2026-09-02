@@ -347,7 +347,7 @@ def test_image_smokes_use_the_production_database_dialect() -> None:
 
     acceptance = _text(".github/candidate/acceptance.sh")
     assert "sqlite+pysqlite" not in acceptance
-    assert "postgresql+psycopg://%s@127.0.0.1" in acceptance
+    assert "postgresql+psycopg://%s:%s@127.0.0.1" in acceptance
     for role in ("app_admin", "app_user", "platform_api"):
         assert f"dsn {role}" in acceptance
 

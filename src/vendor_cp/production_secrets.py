@@ -2009,16 +2009,7 @@ def _tcp_authentication_succeeds(
 ) -> bool:
     if role not in {"app_admin", "app_user", "platform_api"}:
         raise ProductionSecretError("database role is outside the rotation set")
-    shell = (
-        "umask 077; credential=$(mktemp); "
-        "trap 'rm -f \"$credential\"' EXIT HUP INT TERM; "
-        "IFS= read -r password; "
-        "printf '127.0.0.1:5432:vendor_control_plane:%s:%s\\n' \"$1\" "
-        '"$password" >"$credential"; unset password; '
-        'PGPASSFILE="$credential" psql -X --no-password --host 127.0.0.1 '
-        '--username "$1" --dbname vendor_control_plane --command '
-        "'SELECT 1' >/dev/null 2>&1"
-    )
+    shell = rotation_database_auth_oracle_program()
     del deploy_dir
     container = _running_container_id("db", runner)
     result = _run_quiet(
@@ -2040,6 +2031,101 @@ def _tcp_authentication_succeeds(
     return result.returncode == 0
 
 
+def _require_database_authentication_subject(
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    """Prove the bridge listener and exact database roles exist before probing."""
+    container = _running_container_id("db", runner)
+    readiness = _run_quiet(
+        runner,
+        (
+            "docker",
+            "exec",
+            container,
+            "pg_isready",
+            "--host",
+            "db",
+            "--port",
+            "5432",
+            "--dbname",
+            "vendor_control_plane",
+        ),
+        require_success=False,
+    )
+    if readiness.returncode != 0:
+        raise ProductionSecretError(
+            "database authentication bridge is not accepting connections"
+        )
+    subject = _run_quiet(
+        runner,
+        (
+            "docker",
+            "exec",
+            container,
+            "psql",
+            "-X",
+            "--username",
+            "postgres",
+            "--dbname",
+            "vendor_control_plane",
+            "--tuples-only",
+            "--no-align",
+            "--command",
+            "SELECT CASE WHEN current_database() = 'vendor_control_plane' "
+            "AND (SELECT array_agg(rolname ORDER BY rolname) "
+            "FROM pg_roles WHERE rolname IN "
+            "('app_admin','app_user','platform_api') AND rolcanlogin) "
+            "= ARRAY['app_admin','app_user','platform_api']::name[] "
+            "THEN 'ready' ELSE 'not-ready' END",
+        ),
+    ).stdout.strip()
+    if subject != "ready":
+        raise ProductionSecretError(
+            "database authentication subject is not the declared role set"
+        )
+
+
+class DatabaseCredentialMaterialState(StrEnum):
+    """Which protected material the database accepts for one named role."""
+
+    PRIOR = "prior"
+    CANDIDATE = "candidate"
+    NEITHER = "neither"
+    BOTH = "both"
+
+
+def _database_role_states(
+    deploy_dir: Path,
+    *,
+    prior: RotatingSecretSet,
+    candidate: RotatingSecretSet,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> dict[str, DatabaseCredentialMaterialState]:
+    _require_database_authentication_subject(runner)
+    states: dict[str, DatabaseCredentialMaterialState] = {}
+    for role, prior_password, candidate_password in (
+        ("app_admin", prior.admin_password, candidate.admin_password),
+        ("app_user", prior.app_user_password, candidate.app_user_password),
+        ("platform_api", prior.platform_api_password, candidate.platform_api_password),
+    ):
+        prior_accepted = _tcp_authentication_succeeds(
+            deploy_dir, role=role, password=prior_password, runner=runner
+        )
+        candidate_accepted = _tcp_authentication_succeeds(
+            deploy_dir, role=role, password=candidate_password, runner=runner
+        )
+        if prior_accepted and not candidate_accepted:
+            state = DatabaseCredentialMaterialState.PRIOR
+        elif candidate_accepted and not prior_accepted:
+            state = DatabaseCredentialMaterialState.CANDIDATE
+        elif prior_accepted and candidate_accepted:
+            state = DatabaseCredentialMaterialState.BOTH
+        else:
+            state = DatabaseCredentialMaterialState.NEITHER
+        states[role] = state
+    return states
+
+
 def _database_rotation_state(
     deploy_dir: Path,
     *,
@@ -2047,28 +2133,19 @@ def _database_rotation_state(
     candidate: RotatingSecretSet,
     runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> str:
-    prior_results: list[bool] = []
-    candidate_results: list[bool] = []
-    for role, prior_password, candidate_password in (
-        ("app_admin", prior.admin_password, candidate.admin_password),
-        ("app_user", prior.app_user_password, candidate.app_user_password),
-        ("platform_api", prior.platform_api_password, candidate.platform_api_password),
-    ):
-        prior_results.append(
-            _tcp_authentication_succeeds(
-                deploy_dir, role=role, password=prior_password, runner=runner
-            )
-        )
-        candidate_results.append(
-            _tcp_authentication_succeeds(
-                deploy_dir, role=role, password=candidate_password, runner=runner
-            )
-        )
-    if all(prior_results) and not any(candidate_results):
+    states = _database_role_states(
+        deploy_dir, prior=prior, candidate=candidate, runner=runner
+    )
+    if all(state is DatabaseCredentialMaterialState.PRIOR for state in states.values()):
         return "prior"
-    if all(candidate_results) and not any(prior_results):
+    if all(
+        state is DatabaseCredentialMaterialState.CANDIDATE for state in states.values()
+    ):
         return "candidate"
-    raise ProductionSecretError("database credentials are in a mixed rotation state")
+    summary = ", ".join(f"{role}={state.value}" for role, state in states.items())
+    raise ProductionSecretError(
+        f"database credentials are not uniformly prior or candidate: {summary}"
+    )
 
 
 def materialize_rotated_environment(
@@ -2631,6 +2708,9 @@ def rotation_adapter_bytes() -> bytes:
             package_dir / "product_release_pins.py"
         ).read_bytes(),
         "vendor_cp/production_secrets.py": Path(__file__).read_bytes(),
+        f"vendor_cp/{ROTATION_DATABASE_AUTH_ORACLE_PAYLOAD}": (
+            package_dir / ROTATION_DATABASE_AUTH_ORACLE_PAYLOAD
+        ).read_bytes(),
         f"vendor_cp/{ROTATION_RUNTIME_ORACLE_PAYLOAD}": (
             package_dir / ROTATION_RUNTIME_ORACLE_PAYLOAD
         ).read_bytes(),
@@ -2954,6 +3034,16 @@ class RotationRuntimeOracleProof:
 
 
 ROTATION_RUNTIME_ORACLE_PAYLOAD: Final = "rotation_runtime_oracle.pyprogram"
+ROTATION_DATABASE_AUTH_ORACLE_PAYLOAD: Final = "rotation_database_auth_oracle.shprogram"
+
+
+def rotation_database_auth_oracle_program() -> str:
+    """Return the exact bridge-authentication program the DB container runs."""
+    return (
+        resources.files("vendor_cp")
+        .joinpath(ROTATION_DATABASE_AUTH_ORACLE_PAYLOAD)
+        .read_text(encoding="utf-8")
+    )
 
 
 def rotation_runtime_oracle_program() -> str:

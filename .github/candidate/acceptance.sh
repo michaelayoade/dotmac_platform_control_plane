@@ -26,6 +26,7 @@ WORKDIR="$(mktemp -d)"
 DB_PORT="${CANDIDATE_DB_PORT:-5449}"
 DB_CONTAINER="candidate-postgres"
 APP_CONTAINER="candidate-app"
+CANDIDATE_NETWORK="candidate-vendor-backend"
 PG_IMAGE="${CANDIDATE_POSTGRES_IMAGE:-postgres:16}"
 # The platform host this run addresses. It is a Host HEADER only — every request
 # below dials 127.0.0.1 explicitly — so this name is never resolved and no such
@@ -68,6 +69,7 @@ step() { printf '\n== %s\n' "$*"; }
 
 cleanup() {
     docker rm -f "$APP_CONTAINER" "$DB_CONTAINER" >/dev/null 2>&1 || true
+    docker network rm "$CANDIDATE_NETWORK" >/dev/null 2>&1 || true
     rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
@@ -96,7 +98,17 @@ trap cleanup EXIT
 # exists, which is a deployment-window decision and not this file's to make.
 psql_admin() { docker exec -i "$DB_CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres "$@"; }
 
-dsn() { printf 'postgresql+psycopg://%s@127.0.0.1:%s/%s' "$1" "$DB_PORT" "$2"; }
+dsn() {
+    local role="$1" database="$2" password
+    case "$role" in
+        app_admin) password=admin ;;
+        app_user) password=app ;;
+        platform_api) password=platform ;;
+        *) fail "no candidate password is declared for database role $role" ;;
+    esac
+    printf 'postgresql+psycopg://%s:%s@127.0.0.1:%s/%s' \
+        "$role" "$password" "$DB_PORT" "$database"
+}
 
 # Runs python inside the candidate image with a production-shaped environment.
 in_image() {
@@ -110,14 +122,20 @@ in_image() {
 
 step "0  disposable database, initialised by the production role script"
 docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+docker network rm "$CANDIDATE_NETWORK" >/dev/null 2>&1 || true
+docker network create "$CANDIDATE_NETWORK" >/dev/null
 docker run -d --name "$DB_CONTAINER" \
+    --network "$CANDIDATE_NETWORK" \
+    --network-alias db \
     --env POSTGRES_USER=postgres \
-    --env POSTGRES_HOST_AUTH_METHOD=trust \
+    --env POSTGRES_PASSWORD=postgres \
+    --env 'POSTGRES_INITDB_ARGS=--auth-local=trust --auth-host=scram-sha-256' \
     --env POSTGRES_DB=candidate \
     --env VENDOR_DB_ADMIN_PASSWORD=admin \
     --env VENDOR_DB_APP_USER_PASSWORD=app \
     --env VENDOR_DB_PLATFORM_API_PASSWORD=platform \
     --volume "$PWD/deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/001-vendor-roles.sh:ro" \
+    --volume "$PWD/.github/candidate/postgres-hba.sh:/docker-entrypoint-initdb.d/002-candidate-hba.sh:ro" \
     --publish "127.0.0.1:${DB_PORT}:5432" \
     "$PG_IMAGE" >/dev/null
 for _ in $(seq 1 60); do
@@ -127,6 +145,54 @@ done
 docker exec "$DB_CONTAINER" pg_isready -U postgres -d candidate >/dev/null \
     || fail "the disposable database never became ready"
 pass "database up, roles created by deploy/postgres/init-roles.sh"
+psql_admin --dbname candidate --command \
+    'CREATE DATABASE vendor_control_plane OWNER app_admin' >/dev/null \
+    || fail "the production-named authentication subject could not be created"
+
+step "0a loopback trust is blind; the bridge oracle discriminates"
+# Reproduce the retired probe first. A deliberately invalid password succeeds
+# from inside PostgreSQL because 127.0.0.1 selects the earlier trust rule.
+docker exec --env PGPASSWORD=deliberately-invalid-candidate-proof \
+    "$DB_CONTAINER" psql -X --no-password --host 127.0.0.1 --port 5432 \
+    --username app_user --dbname vendor_control_plane --command 'SELECT 1' >/dev/null \
+    || fail "the loopback control did not reproduce the trusted path"
+pass "control: container-local 127.0.0.1 accepts deliberately invalid material"
+
+# Prove the exact network subject exists before interpreting any credential
+# failure. Readiness is over db:5432, while database/role existence is checked
+# through the container's trusted local socket without reading any credential.
+docker exec "$DB_CONTAINER" pg_isready --host db --port 5432 \
+    --dbname vendor_control_plane >/dev/null \
+    || fail "the bridge listener is not accepting connections"
+subject="$(psql_admin --tuples-only --no-align --dbname vendor_control_plane --command \
+    "SELECT CASE WHEN current_database() = 'vendor_control_plane' AND
+        (SELECT array_agg(rolname ORDER BY rolname) FROM pg_roles
+         WHERE rolname IN ('app_admin','app_user','platform_api') AND rolcanlogin)
+        = ARRAY['app_admin','app_user','platform_api']::name[]
+     THEN 'ready' ELSE 'not-ready' END")"
+test "$subject" = ready \
+    || fail "the database authentication subject is not the declared role set"
+
+# Read the shell payload from the INSTALLED wheel inside the exact image under
+# test. The source checkout is not mounted. The same payload is carried in the
+# isolated target adapter archive and executed by the production coordinator.
+docker run --rm --network none --entrypoint python "$IMAGE" -c \
+    'from vendor_cp.production_secrets import rotation_database_auth_oracle_program as p; print(p(), end="")' \
+    >"$WORKDIR/database-auth-oracle.shprogram" \
+    || fail "the installed image cannot produce the database auth oracle"
+
+run_database_auth_oracle() {
+    docker exec --interactive "$DB_CONTAINER" sh -ceu \
+        "$(cat "$WORKDIR/database-auth-oracle.shprogram")" rotation-auth "$1"
+}
+
+if printf '%s\n' deliberately-invalid-candidate-proof \
+    | run_database_auth_oracle app_user; then
+    fail "the db:5432 bridge accepted deliberately invalid material"
+fi
+printf '%s\n' app | run_database_auth_oracle app_user \
+    || fail "the db:5432 bridge refused the active app_user material"
+pass "subject: db:5432 SCRAM refuses invalid and admits active material"
 
 # ═══════════════════════════════════════════════════════════════════════════
 step "1  the installed CLI, and that it is installed"
