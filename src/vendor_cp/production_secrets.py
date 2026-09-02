@@ -1902,11 +1902,25 @@ def _http_probe_status(
 
 def _require_rotation_readiness(
     runner: Callable[..., subprocess.CompletedProcess[str]],
+    *,
+    image_reference: str,
+    source_revision: str,
 ) -> None:
-    """Prove boot plus the assembly's database-reaching readiness contract."""
+    """Prove boot plus the oracle selected by the exact running artifact."""
     if _http_probe_status("/health", runner) != 200:
         raise ProductionSecretError("production app liveness did not pass")
     readiness = _http_probe_status("/health/ready", runner)
+    oracle = select_readiness_oracle(
+        image_reference=image_reference,
+        source_revision=source_revision,
+    )
+    if isinstance(oracle, LegacyRuntimeProbeOracle):
+        if readiness != 404:
+            raise ProductionSecretError(
+                "legacy runtime probe is not permitted when readiness exists"
+            )
+        _probe_rotation_runtime_on_target(runner)
+        return
     if readiness == 404:
         raise ProductionSecretError(
             "production image has no readiness contract; deploy a capable image first"
@@ -2386,7 +2400,11 @@ def apply_secret_rotation_on_target(
         raise ProductionSecretError("rotation target does not match expected identity")
     # This must precede even read-only custody classification. The same exact
     # liveness + database-readiness pair is required again after recreation.
-    _require_rotation_readiness(runner)
+    _require_rotation_readiness(
+        runner,
+        image_reference=image_reference,
+        source_revision=source_revision,
+    )
     receipt_file = state_dir / "receipt.json"
     plan_file = state_dir / "plan-rollout.prestate"
     if receipt_file.exists():
@@ -2543,7 +2561,11 @@ def apply_secret_rotation_on_target(
             target_receipt, phase=TargetRotationPhase.APP_RECREATED
         )
         _write_target_receipt(receipt_file, target_receipt)
-    _require_rotation_readiness(runner)
+    _require_rotation_readiness(
+        runner,
+        image_reference=image_reference,
+        source_revision=source_revision,
+    )
     if (
         _runtime_rotation_state(
             deploy_dir,
@@ -2609,6 +2631,9 @@ def rotation_adapter_bytes() -> bytes:
             package_dir / "product_release_pins.py"
         ).read_bytes(),
         "vendor_cp/production_secrets.py": Path(__file__).read_bytes(),
+        f"vendor_cp/{ROTATION_RUNTIME_ORACLE_PAYLOAD}": (
+            package_dir / ROTATION_RUNTIME_ORACLE_PAYLOAD
+        ).read_bytes(),
     }
     output = io.BytesIO()
     with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_STORED) as archive:
@@ -2977,6 +3002,19 @@ def probe_rotation_runtime(
     result = _run_quiet(
         runner,
         (*_adapter_ssh_prefix(known_hosts_file), remote),
+        input_text=rotation_runtime_oracle_program(),
+    )
+    return RotationRuntimeOracleProof.from_json(result.stdout)
+
+
+def _probe_rotation_runtime_on_target(
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> RotationRuntimeOracleProof:
+    """Run the composite oracle directly from inside the target adapter."""
+    container = _running_container_id(ROTATION_APP_SERVICE, runner)
+    result = _run_quiet(
+        runner,
+        ("docker", "exec", "-i", container, "python", "-"),
         input_text=rotation_runtime_oracle_program(),
     )
     return RotationRuntimeOracleProof.from_json(result.stdout)
