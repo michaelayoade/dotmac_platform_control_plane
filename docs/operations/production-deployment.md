@@ -247,7 +247,9 @@ database/runtime proofs, the identical readiness oracle, preserved CSRF and
 unchanged image/revision
 must then hold. A mode-0600 transient host file holds the pre-operation
 `mod_deploy.deployment_plans`/`rollouts` bytes long enough to prove they remain
-byte-identical; it is never printed or hashed and is deleted on success. The
+byte-identical after replacing only pg_dump's matched generated
+`\\restrict`/`\\unrestrict` nonce; it is never printed or hashed and is deleted
+on success. The
 names-only target receipt distinguishes a fresh proof from a historical replay
 after a lost response. It never reads Docker environment metadata.
 

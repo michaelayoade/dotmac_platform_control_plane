@@ -1224,6 +1224,98 @@ def test_host_rotation_proves_atomic_db_env_recreate_and_unchanged_state(
     }
 
 
+def test_plan_prestate_ignores_only_pg_dump_restrict_nonce() -> None:
+    before = (
+        "-- PostgreSQL database dump\n"
+        "\\restrict beforeNonce\n"
+        "COPY mod_deploy.deployment_plans (id) FROM stdin;\n"
+        "row-one\n"
+        "\\.\n"
+        "\\unrestrict beforeNonce\n"
+    )
+    after = before.replace("beforeNonce", "afterNonce")
+    changed = after.replace("row-one", "row-two")
+
+    assert production_secrets._canonicalize_plan_rollout_dump(before) == (
+        production_secrets._canonicalize_plan_rollout_dump(after)
+    )
+    assert production_secrets._canonicalize_plan_rollout_dump(before) != (
+        production_secrets._canonicalize_plan_rollout_dump(changed)
+    )
+
+
+def test_plan_prestate_refuses_unmatched_restrict_guards() -> None:
+    with pytest.raises(ProductionSecretError, match="restrict guards disagree"):
+        production_secrets._canonicalize_plan_rollout_dump(
+            "\\restrict first\nbody\n\\unrestrict second\n"
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "\\restrict\nbody\n\\unrestrict\n",
+        "\\restrict token extra\nbody\n\\unrestrict token\n",
+        "\\restrict token\nbody\n",
+        "\\unrestrict token\nbody\n\\restrict token\n",
+        "\\restrict token\nbody\n\\restrict token\n",
+        "\\restrict token\nbody\n\\unrestrict token\n\\restrict\n",
+    ),
+)
+def test_plan_prestate_refuses_malformed_restrict_guards(raw: str) -> None:
+    with pytest.raises(ProductionSecretError, match="malformed restrict guards"):
+        production_secrets._canonicalize_plan_rollout_dump(raw)
+
+
+def test_app_recreated_retry_accepts_only_a_new_pg_dump_nonce(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload, deploy_dir, host_id, runner = _host_fixture(tmp_path)
+    protected = (
+        "\\restrict protectedNonce\n"
+        "COPY mod_deploy.deployment_plans (id) FROM stdin;\n"
+        "\\.\n"
+        "\\unrestrict protectedNonce\n"
+    )
+    current = protected.replace("protectedNonce", "currentNonce")
+    monkeypatch.setattr(
+        production_secrets, "_capture_plan_rollout_state", lambda *_args: protected
+    )
+    original = production_secrets._write_target_receipt
+
+    def write_app_recreated_then_fail(
+        path: Path, receipt: production_secrets.TargetRotationReceipt
+    ) -> None:
+        original(path, receipt)
+        if receipt.phase is production_secrets.TargetRotationPhase.APP_RECREATED:
+            raise RuntimeError("injected after app recreation")
+
+    monkeypatch.setattr(
+        production_secrets, "_write_target_receipt", write_app_recreated_then_fail
+    )
+    with pytest.raises(RuntimeError, match="injected after app recreation"):
+        apply_secret_rotation_on_target(
+            payload,
+            deploy_dir=deploy_dir,
+            host_id_file=host_id,
+            runner=runner,
+        )
+
+    monkeypatch.setattr(production_secrets, "_write_target_receipt", original)
+    monkeypatch.setattr(
+        production_secrets, "_capture_plan_rollout_state", lambda *_args: current
+    )
+    proof = apply_secret_rotation_on_target(
+        payload,
+        deploy_dir=deploy_dir,
+        host_id_file=host_id,
+        runner=runner,
+    )
+
+    assert proof.plan_rollout_state == "unchanged"
+    assert not (deploy_dir / ".rotation-state" / "plan-rollout.prestate").exists()
+
+
 def _assert_no_target_mutation(
     deploy_dir: Path,
     runner: HostRunner,
