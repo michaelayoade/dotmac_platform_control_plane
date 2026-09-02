@@ -209,9 +209,11 @@ PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
 The standalone preflight uses no Compose command and needs neither
 `VENDOR_APP_IMAGE` nor the deliberately absent bootstrap declaration. It does
 not install a file, instantiate an OpenBao client, create custody, or inspect
-container environment data. `/health` remains liveness only. A 200 there can
-never compensate for a missing or failing `/health/ready`; an image without the
-readiness contract must be deployed separately before rotation.
+container environment data. `/health` remains liveness only. For an ordinary
+image, a 200 there can never compensate for a missing or failing
+`/health/ready`. The one legacy image instead runs the selected in-process
+two-plane runtime probe; it cannot inherit that exception by tag, digest alone,
+or operator choice.
 
 Installation repeats the same preflight, then refuses a
 missing/symlinked/foreign-owned/group-or-world-writable
@@ -230,7 +232,9 @@ CAS conflict after the database-record CAS cannot reach the host: projection,
 PostgreSQL and the app begin only after both record versions are committed.
 
 On the host the adapter first repeats the exact liveness and database-reaching
-readiness proof, before reading or writing `.env` or database state. It then
+oracle selected from the exact image and revision, before reading or writing
+`.env` or database state. The legacy probe program is embedded in the
+digest-bound adapter archive rather than read from the checkout. It then
 proves all three protected prior PostgreSQL
 credentials succeed and all three candidates fail over TCP/SCRAM. It likewise
 proves the running app accepts the prior JWT/session material, refuses the

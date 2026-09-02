@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
 import shlex
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -852,6 +854,38 @@ def test_adapter_archive_runs_in_isolated_mode_without_checkout_imports(
     assert "rotation adapter" in result.stderr
 
 
+def test_adapter_archive_carries_the_runtime_oracle_it_must_run(
+    tmp_path: Path,
+) -> None:
+    """The target adapter runs outside the checkout. A source-only payload
+    would let coordinator preflight pass and then fail after OpenBao advanced."""
+    with zipfile.ZipFile(io.BytesIO(rotation_adapter_bytes())) as archive:
+        member = f"vendor_cp/{ROTATION_RUNTIME_ORACLE_PAYLOAD}"
+        assert member in archive.namelist()
+        assert archive.read(member) == rotation_runtime_oracle_program().encode()
+
+    adapter = tmp_path / "adapter.pyz"
+    adapter.write_bytes(rotation_adapter_bytes())
+    imported = subprocess.run(  # noqa: S603 -- fixed interpreter and archive
+        (
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys;sys.path.insert(0,sys.argv[1]);"
+            "from vendor_cp.production_secrets import "
+            "rotation_runtime_oracle_program;"
+            "print('PlatformSessionLocal' in rotation_runtime_oracle_program())",
+            str(adapter),
+        ),
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert imported.returncode == 0, imported.stderr
+    assert imported.stdout.strip() == "True"
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
@@ -985,6 +1019,17 @@ class HostRunner:
             if self.fail_kind == "readiness" and path == "/health/ready":
                 status = 503
             return subprocess.CompletedProcess(command, 0, str(status), "")
+        if (
+            command[:2] == ("docker", "exec")
+            and stdin is not None
+            and "PlatformSessionLocal" in stdin
+        ):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                _oracle_payload(app_refused=True, platform_refused=True),
+                "",
+            )
         if "decode_access_token" in joined:
             proof = json.loads(stdin or "{}")
             canary = proof["canary"]
@@ -1888,3 +1933,41 @@ def test_the_quoting_helper_round_trips_a_program_full_of_shell_metacharacters()
     parts = ("python3", "-c", program, "/path with space", "sha256:" + "a" * 64)
     assert shlex.split(_remote_command(*parts)) == list(parts)
     assert _remote_command(*parts) != " ".join(parts)
+
+
+def test_the_target_adapter_uses_the_legacy_oracle_before_and_after_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The coordinator seam is not enough. The installed target adapter must
+    use the selected oracle on both sides of its mutation boundary."""
+    payload, deploy_dir, host_id, runner = _host_fixture(tmp_path)
+    payload = replace(
+        payload,
+        expected_image_reference=LEGACY_RUNTIME_PROBE_IMAGE,
+        expected_source_revision=LEGACY_RUNTIME_PROBE_REVISION,
+    )
+    runner.payload = payload
+    runner.readiness_status = 404
+    monkeypatch.setattr(
+        production_secrets,
+        "_running_identity",
+        lambda _deploy_dir, _runner: (
+            LEGACY_RUNTIME_PROBE_IMAGE,
+            LEGACY_RUNTIME_PROBE_REVISION,
+        ),
+    )
+
+    proof = apply_secret_rotation_on_target(
+        payload,
+        deploy_dir=deploy_dir,
+        host_id_file=host_id,
+        runner=runner,
+    )
+
+    assert proof.readiness == "passed"
+    runtime_programs = [
+        stdin
+        for _command, stdin in runner.calls
+        if stdin is not None and "PlatformSessionLocal" in stdin
+    ]
+    assert len(runtime_programs) >= 2
