@@ -1301,6 +1301,16 @@ def test_app_recreated_retry_accepts_only_a_new_pg_dump_nonce(
             runner=runner,
         )
 
+    state_dir = deploy_dir / ".rotation-state"
+    receipt_path = state_dir / "receipt.json"
+    persisted = json.loads(receipt_path.read_text(encoding="utf-8"))
+    predecessor = next(iter(production_secrets._ROTATION_PROOF_ADAPTER_PREDECESSORS))
+    persisted["adapter_digest"] = predecessor
+    persisted.pop("proof_adapter_digest", None)
+    receipt_path.write_text(
+        json.dumps(persisted, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(production_secrets, "_write_target_receipt", original)
     monkeypatch.setattr(
         production_secrets, "_capture_plan_rollout_state", lambda *_args: current
@@ -1313,7 +1323,129 @@ def test_app_recreated_retry_accepts_only_a_new_pg_dump_nonce(
     )
 
     assert proof.plan_rollout_state == "unchanged"
-    assert not (deploy_dir / ".rotation-state" / "plan-rollout.prestate").exists()
+    proved = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert proved["adapter_digest"] == predecessor
+    assert proved["proof_adapter_digest"] == rotation_adapter_digest()
+    assert not (state_dir / "plan-rollout.prestate").exists()
+
+    replay = apply_secret_rotation_on_target(
+        payload,
+        deploy_dir=deploy_dir,
+        host_id_file=host_id,
+        runner=runner,
+    )
+    assert type(replay) is production_secrets.HistoricalHostRotationProof
+    assert replay.adapter_digest == rotation_adapter_digest()
+
+
+def _target_receipt(
+    phase: production_secrets.TargetRotationPhase,
+    *,
+    adapter_digest: str,
+    proof_adapter_digest: str | None = None,
+) -> production_secrets.TargetRotationReceipt:
+    return production_secrets.TargetRotationReceipt(
+        operation_id="a" * 32,
+        adapter_digest=adapter_digest,
+        phase=phase,
+        image_reference=EXPECTED_IMAGE,
+        source_revision=EXPECTED_REVISION,
+        proof_adapter_digest=proof_adapter_digest,
+    )
+
+
+def test_target_receipt_refuses_a_malformed_adapter_digest() -> None:
+    with pytest.raises(ProductionSecretError, match="adapter digest is invalid"):
+        _target_receipt(
+            production_secrets.TargetRotationPhase.APP_RECREATED,
+            adapter_digest="not-a-digest",
+        )
+
+
+@pytest.mark.parametrize("phase", tuple(production_secrets.TargetRotationPhase))
+def test_current_adapter_receipt_is_accepted_at_every_phase(
+    phase: production_secrets.TargetRotationPhase,
+) -> None:
+    production_secrets._require_target_receipt_adapter(
+        _target_receipt(phase, adapter_digest=rotation_adapter_digest())
+    )
+
+
+def test_target_receipt_refuses_proof_provenance_before_proved() -> None:
+    with pytest.raises(ProductionSecretError, match="proof adapter before proof"):
+        _target_receipt(
+            production_secrets.TargetRotationPhase.APP_RECREATED,
+            adapter_digest=rotation_adapter_digest(),
+            proof_adapter_digest=rotation_adapter_digest(),
+        )
+
+
+def test_current_adapter_proved_receipt_refuses_a_foreign_proof_digest() -> None:
+    with pytest.raises(ProductionSecretError, match="proof adapter is not approved"):
+        production_secrets._require_target_receipt_adapter(
+            _target_receipt(
+                production_secrets.TargetRotationPhase.PROVED,
+                adapter_digest=rotation_adapter_digest(),
+                proof_adapter_digest="sha256:" + "e" * 64,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "phase",
+    (
+        production_secrets.TargetRotationPhase.PREPARED,
+        production_secrets.TargetRotationPhase.DATABASE_COMMITTED,
+        production_secrets.TargetRotationPhase.ENVIRONMENT_WRITTEN,
+    ),
+)
+def test_predecessor_adapter_cannot_resume_a_mutation_phase(
+    phase: production_secrets.TargetRotationPhase,
+) -> None:
+    predecessor = next(iter(production_secrets._ROTATION_PROOF_ADAPTER_PREDECESSORS))
+    with pytest.raises(ProductionSecretError, match="only after app recreation"):
+        production_secrets._require_target_receipt_adapter(
+            _target_receipt(phase, adapter_digest=predecessor)
+        )
+
+
+@pytest.mark.parametrize("phase", tuple(production_secrets.TargetRotationPhase))
+def test_unknown_adapter_receipt_is_refused_at_every_phase(
+    phase: production_secrets.TargetRotationPhase,
+) -> None:
+    with pytest.raises(ProductionSecretError, match="adapter is not approved"):
+        production_secrets._require_target_receipt_adapter(
+            _target_receipt(phase, adapter_digest="sha256:" + "f" * 64)
+        )
+
+
+@pytest.mark.parametrize(
+    "proof_adapter_digest",
+    (None, "sha256:" + "e" * 64),
+)
+def test_predecessor_proved_receipt_requires_the_current_proof_adapter(
+    proof_adapter_digest: str | None,
+) -> None:
+    predecessor = next(iter(production_secrets._ROTATION_PROOF_ADAPTER_PREDECESSORS))
+    with pytest.raises(ProductionSecretError, match="bind the current proof adapter"):
+        production_secrets._require_target_receipt_adapter(
+            _target_receipt(
+                production_secrets.TargetRotationPhase.PROVED,
+                adapter_digest=predecessor,
+                proof_adapter_digest=proof_adapter_digest,
+            )
+        )
+
+
+def test_predecessor_proved_receipt_accepts_the_persisted_current_proof() -> None:
+    predecessor = next(iter(production_secrets._ROTATION_PROOF_ADAPTER_PREDECESSORS))
+    production_secrets._require_target_receipt_adapter(
+        _target_receipt(
+            production_secrets.TargetRotationPhase.PROVED,
+            adapter_digest=predecessor,
+            proof_adapter_digest=rotation_adapter_digest(),
+        )
+    )
 
 
 def _assert_no_target_mutation(
