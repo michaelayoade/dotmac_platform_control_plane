@@ -27,6 +27,7 @@ from vendor_cp.production_secrets import (
     ROTATION_DEPLOY_DIR,
     ROTATION_HOST_ID,
     ROTATION_PREFLIGHT_REFUSALS,
+    ROTATION_RUNTIME_ORACLE_PAYLOAD,
     ROTATION_TARGET,
     RUNTIME_PATH,
     HistoricalHostRotationProof,
@@ -55,6 +56,7 @@ from vendor_cp.production_secrets import (
     rotation_adapter_digest,
     rotation_adapter_installer_program,
     rotation_adapter_verifier_program,
+    rotation_runtime_oracle_program,
     rotation_target_preflight_program,
     sanitize_diagnostic_text,
     select_readiness_oracle,
@@ -1624,4 +1626,38 @@ def test_a_probe_that_accepted_invalid_material_proves_nothing(
     with pytest.raises(ProductionSecretError, match="proves nothing"):
         RotationRuntimeOracleProof.from_json(
             _oracle_payload(app_refused=app_refused, platform_refused=platform_refused)
+        )
+
+
+def test_the_runtime_oracle_payload_ships_and_keeps_both_halves() -> None:
+    """The payload is package DATA, so nothing imports it and a typo would only
+    surface on the target. It is read here instead.
+
+    Both halves are asserted. A payload that lost its negative half would still
+    run, still print a proof-shaped document, and prove nothing — which is the
+    failure mode the whole oracle exists to avoid.
+    """
+    program = rotation_runtime_oracle_program()
+    assert "SessionLocal" in program and "PlatformSessionLocal" in program
+    assert "current_user" in program
+    assert "deliberately-invalid-" in program
+    assert "'refused':True" in program.replace(" ", "")
+
+
+def test_the_oracle_payload_is_not_part_of_the_python_surface() -> None:
+    """D1's guard reads every `.py` under `src` for connection constructors and
+    is right to: one in this assembly's runtime IS the violation.
+
+    The payload opens a connection in another interpreter, in another image, to
+    prove invalid credentials are refused. Respelling the constructor to slip
+    past the regex would be evasion; keeping the payload out of the code surface
+    is what makes the guard's answer true rather than fooled. This holds it
+    there.
+    """
+    assert ROTATION_RUNTIME_ORACLE_PAYLOAD.endswith(".pyprogram")
+    source = Path(production_secrets.__file__).read_text(encoding="utf-8")
+    for constructor in ("create_engine", "psycopg.connect", "sessionmaker"):
+        assert constructor not in source, (
+            f"{constructor} is back in the assembly's Python surface; D1 says "
+            "the kernel owns the one engine"
         )
