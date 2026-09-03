@@ -677,3 +677,67 @@ def test_the_ordering_guard_reads_the_script_and_not_its_explanation() -> None:
         "no comment mentions the command the ordering guard probes for, so this "
         "helper is currently inert — keep it, but the sensitivity claim is stale"
     )
+
+
+# ── the long-running app holds no owner credential ───────────────────────────
+
+
+def _compose_service_block(compose: str, name: str) -> str:
+    """The lines of one top-level service, by its two-space-indented header."""
+    start = compose.index(f"\n  {name}:")
+    tail = compose[start + 1 :]
+    end = len(tail)
+    for line_start in _service_headers(tail):
+        if line_start > 0:
+            end = line_start
+            break
+    return tail[:end]
+
+
+def _service_headers(text: str) -> list[int]:
+    offsets, position = [], 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.rstrip("\n")
+        if (
+            stripped.startswith("  ")
+            and not stripped.startswith("   ")
+            and stripped.endswith(":")
+        ):
+            offsets.append(position)
+        position += len(line)
+    return offsets
+
+
+def test_the_app_container_does_not_hold_the_migration_dsn() -> None:
+    """The application never migrates, so it never holds `app_admin`.
+
+    `dotmac-platform admin migrate` runs in the one-shot `ops` container; the
+    accepted descriptor's app role declares exactly two materials. Handing the
+    long-running app the migration DSN gave every process in that container a
+    standing BYPASSRLS owner credential with no code path that uses it, and a
+    third derived alias of the admin password in the exposure surface the
+    2026-09-01 incident measured.
+    """
+    compose = _text("docker-compose.production.yml")
+    app = _compose_service_block(compose, "app")
+    active_app = "\n".join(
+        line for line in app.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    assert "MIGRATION_DATABASE_URL:" not in active_app
+    assert (
+        "app_admin" not in active_app
+    ), "no alias of the owner credential may reach the long-running app"
+    # SENSITIVITY: the app still declares its two runtime materials, so an
+    # empty or mis-sliced block cannot satisfy the absences above vacuously.
+    assert "DATABASE_URL:" in active_app
+    assert "PLATFORM_DATABASE_URL:" in active_app
+
+    # The other direction: the migration RUNNER keeps its owner material —
+    # `owner_material = "MIGRATION_DATABASE_URL"` names it in the descriptor.
+    ops = _compose_service_block(compose, "ops")
+    assert "MIGRATION_DATABASE_URL:" in ops
+    assert (
+        tomllib.loads(_text("deploy/product.toml"))["migration"]["owner_material"]
+        == "MIGRATION_DATABASE_URL"
+    )
