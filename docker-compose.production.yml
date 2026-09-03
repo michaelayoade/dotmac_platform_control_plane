@@ -52,7 +52,15 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://app_user:${VENDOR_DB_APP_USER_PASSWORD:?Set VENDOR_DB_APP_USER_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
       PLATFORM_DATABASE_URL: postgresql+psycopg://platform_api:${VENDOR_DB_PLATFORM_API_PASSWORD:?Set VENDOR_DB_PLATFORM_API_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
-      MIGRATION_DATABASE_URL: postgresql+psycopg://app_admin:${VENDOR_DB_ADMIN_PASSWORD:?Set VENDOR_DB_ADMIN_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
+      # No MIGRATION_DATABASE_URL, deliberately. The long-running application
+      # never migrates - `dotmac-platform admin migrate` runs in the one-shot
+      # `ops` container below - and the accepted descriptor's app role declares
+      # exactly two materials, DATABASE_URL and PLATFORM_DATABASE_URL. Handing
+      # the app the `app_admin` DSN gave every process in this container a
+      # standing BYPASSRLS owner credential it had no code path to use, and put
+      # a third derived alias of the admin password into the exposure surface
+      # the 2026-09-01 incident measured. The ops service keeps it: that is the
+      # migration runner, and `owner_material` names it there.
     ports:
       - "127.0.0.1:${VENDOR_APP_PORT:-8100}:8000"
     volumes:
