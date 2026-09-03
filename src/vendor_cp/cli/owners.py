@@ -280,6 +280,13 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "compare a target's rolled-out and observed state",
     ),
     Owner(
+        "deployment readiness-packet",
+        "vendor_cp.deployment.readiness_packet",
+        "validate_readiness_packet",
+        False,
+        "refuse a readiness packet that cannot yet justify naming a window",
+    ),
+    Owner(
         "deployment foundation",
         "vendor_cp.cli.delegate",
         "run_foundation",

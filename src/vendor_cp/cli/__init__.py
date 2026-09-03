@@ -386,6 +386,19 @@ def build_parser() -> _Parser:
     drift.add_argument("target_id")
     drift.set_defaults(handler=commands.deployment_drift)
 
+    readiness_packet = _command(
+        deployment_sub,
+        "deployment",
+        "readiness-packet",
+        "validate the terms that must exist before a window is named",
+    )
+    readiness_packet.add_argument(
+        "--packet",
+        required=True,
+        help="path to a file holding the readiness packet as a JSON object",
+    )
+    readiness_packet.set_defaults(handler=commands.deployment_readiness_packet)
+
     foundation = _command(
         deployment_sub,
         "deployment",
