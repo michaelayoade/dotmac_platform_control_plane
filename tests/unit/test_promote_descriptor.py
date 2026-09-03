@@ -87,6 +87,20 @@ def _bootstrap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides: obj
     return accepted, candidate, receipt, ledger_path
 
 
+def _refusal(call) -> object:  # noqa: ANN001
+    """Run something expected to refuse and return WHICH refusal answered.
+
+    Asserting the code rather than the message is what this file learned the
+    hard way: `match="nothing to promote"` passed CI review and failed in CI
+    because a different refusal answered first, and the branch it named could
+    never execute. A regex found that; only a code can pin it.
+    """
+    with pytest.raises(SystemExit) as raised:
+        call()
+    assert isinstance(raised.value, promote.Refused)
+    return raised.value.refusal
+
+
 def _build(candidate: Path, receipt: Path, **kwargs: object) -> dict[str, object]:
     return promote.build_entry(
         candidate=candidate,
@@ -128,8 +142,10 @@ def test_the_licence_is_the_heads_the_receipt_measured(
             "product_descriptor_sha256": "sha256:" + "9" * 64,
         },
     )
-    with pytest.raises(SystemExit, match="does not declare"):
-        _build(candidate, receipt)
+    assert (
+        _refusal(lambda: _build(candidate, receipt))
+        is promote.PromotionRefusal.HEADS_MISMATCH
+    )
 
 
 def test_heads_are_compared_as_a_set_not_as_text(
@@ -175,8 +191,10 @@ def test_a_broken_chain_is_refused_rather_than_extended(
     _, candidate, receipt, _ = _bootstrap(
         tmp_path, monkeypatch, chain_head="sha256:" + "0" * 64
     )
-    with pytest.raises(SystemExit, match="chain is already broken"):
-        _build(candidate, receipt)
+    assert (
+        _refusal(lambda: _build(candidate, receipt))
+        is promote.PromotionRefusal.CHAIN_BROKEN
+    )
 
 
 def test_a_candidate_that_changes_nothing_is_refused(
@@ -185,8 +203,10 @@ def test_a_candidate_that_changes_nothing_is_refused(
     _, candidate, receipt, _ = _bootstrap(
         tmp_path, monkeypatch, candidate=ACCEPTED_TOML
     )
-    with pytest.raises(SystemExit, match="nothing to promote"):
-        _build(candidate, receipt)
+    assert (
+        _refusal(lambda: _build(candidate, receipt))
+        is promote.PromotionRefusal.ALREADY_ACCEPTED
+    )
 
 
 def test_carrying_the_application_half_requires_a_stated_reason(
@@ -195,8 +215,10 @@ def test_carrying_the_application_half_requires_a_stated_reason(
     """The facts are derived; the reason is not. No file knows why the
     application did not move."""
     _, candidate, receipt, _ = _bootstrap(tmp_path, monkeypatch)
-    with pytest.raises(SystemExit, match="--carry-why"):
-        _build(candidate, receipt, carry_why="")
+    assert (
+        _refusal(lambda: _build(candidate, receipt, carry_why=""))
+        is promote.PromotionRefusal.CARRY_REASON_MISSING
+    )
 
 
 def test_a_moved_application_half_is_not_recorded_as_carried_forward(
@@ -221,8 +243,10 @@ def test_a_date_that_is_not_a_date_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, candidate, receipt, _ = _bootstrap(tmp_path, monkeypatch)
-    with pytest.raises(SystemExit, match="not a YYYY-MM-DD date"):
-        _build(candidate, receipt, promoted_at="yesterday")
+    assert (
+        _refusal(lambda: _build(candidate, receipt, promoted_at="yesterday"))
+        is promote.PromotionRefusal.BAD_DATE
+    )
 
 
 def test_a_receipt_without_measured_heads_licenses_nothing(
@@ -231,8 +255,10 @@ def test_a_receipt_without_measured_heads_licenses_nothing(
     _, candidate, receipt, _ = _bootstrap(
         tmp_path, monkeypatch, receipt={"product_descriptor_sha256": "sha256:x"}
     )
-    with pytest.raises(SystemExit, match="records no migration_heads"):
-        _build(candidate, receipt)
+    assert (
+        _refusal(lambda: _build(candidate, receipt))
+        is promote.PromotionRefusal.NO_MEASURED_HEADS
+    )
 
 
 def test_a_dry_run_writes_nothing_and_apply_writes_both(
@@ -269,27 +295,67 @@ def test_a_dry_run_writes_nothing_and_apply_writes_both(
     assert promotions[-1]["changed_sections"] == ["backup"]
 
 
-def test_bytes_already_promoted_are_refused(
+def test_superseded_bytes_cannot_be_promoted_a_second_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Append-only is not the same as idempotent: promoting the same bytes twice
-    would record a change that did not happen the second time."""
-    _, candidate, receipt, ledger_path = _bootstrap(tmp_path, monkeypatch)
-    argv = [
-        "--candidate",
-        str(candidate),
-        "--receipt",
-        str(receipt),
-        "--kind",
-        "contract_change",
-        "--summary",
-        "a change",
-        "--carry-why",
-        "nothing was deployed",
-        "--promoted-at",
-        "2026-09-03",
-        "--apply",
-    ]
-    assert promote.main(argv) == 0
-    with pytest.raises(SystemExit, match="promoted before"):
-        promote.main(argv)
+    """Append-only is not idempotent: re-promoting bytes that were accepted once
+    and have since been superseded records a change that already happened.
+
+    TWO promotions are needed to reach this, and that is the finding. With one,
+    the retried candidate IS the accepted descriptor, so `ALREADY_ACCEPTED`
+    answers first -- which is exactly how the earlier version of this test
+    passed while naming a refusal that had not fired.
+    """
+    _, first, receipt, ledger_path = _bootstrap(tmp_path, monkeypatch)
+    second = first.parent / "2026-09-03-second.toml"
+    second.write_text(ACCEPTED_TOML.replace("retain = 3", "retain = 7"), "utf-8")
+
+    def run(candidate: Path) -> int:
+        return promote.main(
+            [
+                "--candidate",
+                str(candidate),
+                "--receipt",
+                str(receipt),
+                "--kind",
+                "contract_change",
+                "--summary",
+                "a change",
+                "--carry-why",
+                "nothing was deployed",
+                "--promoted-at",
+                "2026-09-03",
+                "--apply",
+            ]
+        )
+
+    assert run(first) == 0
+    assert run(second) == 0
+    assert len(json.loads(ledger_path.read_text())["promotions"]) == 3
+
+    assert _refusal(lambda: run(first)) is promote.PromotionRefusal.ALREADY_PROMOTED
+
+
+def test_no_refusal_code_ships_without_a_test() -> None:
+    """A two-directional ratchet on the refusal vocabulary.
+
+    Maintained by hand beside the tests that drive it, so a new code cannot ship
+    untested and a retired one cannot linger naming a branch nobody reaches.
+    `MISSING_FILE`, `UNREADABLE` and `LEDGER_EMPTY` are argument and
+    file-integrity refusals covered by the CLI's own contract rather than by a
+    case here, and they are listed so that stays a stated choice.
+    """
+    assert set(promote.PromotionRefusal) == {
+        promote.PromotionRefusal.MISSING_FILE,
+        promote.PromotionRefusal.UNREADABLE,
+        promote.PromotionRefusal.BAD_DATE,
+        promote.PromotionRefusal.LEDGER_EMPTY,
+        promote.PromotionRefusal.CHAIN_BROKEN,
+        promote.PromotionRefusal.ALREADY_ACCEPTED,
+        promote.PromotionRefusal.ALREADY_PROMOTED,
+        promote.PromotionRefusal.NO_MEASURED_HEADS,
+        promote.PromotionRefusal.NO_DECLARED_HEADS,
+        promote.PromotionRefusal.HEADS_MISMATCH,
+        promote.PromotionRefusal.NOTHING_CHANGED,
+        promote.PromotionRefusal.CARRY_REASON_MISSING,
+    }

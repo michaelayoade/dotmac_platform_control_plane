@@ -52,6 +52,7 @@ import re
 import shutil
 import sys
 import tomllib
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
@@ -71,11 +72,43 @@ APPLICATION_HALF: Final = (
 )
 
 
-class Refused(SystemExit):
-    """A promotion that must not be written, and why."""
+class PromotionRefusal(StrEnum):
+    """Why a promotion was refused, as a value rather than a sentence.
 
-    def __init__(self, reason: str) -> None:
-        super().__init__(f"refused: {reason}")
+    A caller distinguishing "these bytes are already accepted" from "these bytes
+    were accepted once and have since been superseded" by matching prose is one
+    rewording away from a test that stops discriminating -- and the ordering
+    defect that made the first of those unreachable was found by a regex and
+    would have been PINNED by one. The refusals carry codes so a test asserts
+    which one answered.
+    """
+
+    MISSING_FILE = "MISSING_FILE"
+    UNREADABLE = "UNREADABLE"
+    BAD_DATE = "BAD_DATE"
+    LEDGER_EMPTY = "LEDGER_EMPTY"
+    CHAIN_BROKEN = "CHAIN_BROKEN"
+    ALREADY_ACCEPTED = "ALREADY_ACCEPTED"
+    ALREADY_PROMOTED = "ALREADY_PROMOTED"
+    NO_MEASURED_HEADS = "NO_MEASURED_HEADS"
+    NO_DECLARED_HEADS = "NO_DECLARED_HEADS"
+    HEADS_MISMATCH = "HEADS_MISMATCH"
+    NOTHING_CHANGED = "NOTHING_CHANGED"
+    CARRY_REASON_MISSING = "CARRY_REASON_MISSING"
+
+
+class Refused(SystemExit):
+    """A promotion that must not be written, and why.
+
+    Carries the machine-readable `refusal`; the message explains it to an
+    operator and is not the thing to assert on.
+    """
+
+    refusal: PromotionRefusal
+
+    def __init__(self, refusal: PromotionRefusal, reason: str) -> None:
+        super().__init__(f"refused[{refusal}]: {reason}")
+        self.refusal = refusal
 
 
 def raw_digest(path: Path) -> str:
@@ -90,13 +123,17 @@ def raw_digest(path: Path) -> str:
 
 def _document(path: Path, *, what: str) -> dict[str, Any]:
     if not path.is_file():
-        raise Refused(f"the {what} {path} does not exist")
+        raise Refused(
+            PromotionRefusal.MISSING_FILE, f"the {what} {path} does not exist"
+        )
     try:
         if path.suffix == ".toml":
             return tomllib.loads(path.read_text(encoding="utf-8"))
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError, json.JSONDecodeError) as e:
-        raise Refused(f"the {what} {path} is unreadable: {e}") from e
+        raise Refused(
+            PromotionRefusal.UNREADABLE, f"the {what} {path} is unreadable: {e}"
+        ) from e
 
 
 def _at(document: dict[str, Any], dotted: str) -> object:
@@ -120,19 +157,26 @@ def receipt_heads(receipt: dict[str, Any]) -> tuple[str, ...]:
         parts = [str(item).strip() for item in raw]
     else:
         raise Refused(
+            PromotionRefusal.NO_MEASURED_HEADS,
             "the receipt records no migration_heads, so it cannot say what the "
-            "run produced and cannot license anything"
+            "run produced and cannot license anything",
         )
     heads = tuple(sorted(part for part in parts if part))
     if not heads:
-        raise Refused("the receipt records an empty migration_heads")
+        raise Refused(
+            PromotionRefusal.NO_MEASURED_HEADS,
+            "the receipt records an empty migration_heads",
+        )
     return heads
 
 
 def declared_heads(descriptor: dict[str, Any]) -> tuple[str, ...]:
     migration = descriptor.get("migration")
     if not isinstance(migration, dict) or not migration.get("expected_heads"):
-        raise Refused("the candidate declares no migration.expected_heads")
+        raise Refused(
+            PromotionRefusal.NO_DECLARED_HEADS,
+            "the candidate declares no migration.expected_heads",
+        )
     return tuple(sorted(str(h).strip() for h in migration["expected_heads"]))
 
 
@@ -162,7 +206,10 @@ def build_entry(
     promoted_at: str,
 ) -> dict[str, Any]:
     if not _ISO_DATE.fullmatch(promoted_at):
-        raise Refused(f"--promoted-at {promoted_at!r} is not a YYYY-MM-DD date")
+        raise Refused(
+            PromotionRefusal.BAD_DATE,
+            f"--promoted-at {promoted_at!r} is not a YYYY-MM-DD date",
+        )
     accepted_doc = _document(ACCEPTED, what="accepted descriptor")
     candidate_doc = _document(candidate, what="candidate descriptor")
     receipt = _document(receipt_path, what="receipt")
@@ -170,35 +217,56 @@ def build_entry(
 
     promotions = ledger.get("promotions")
     if not isinstance(promotions, list) or not promotions:
-        raise Refused("the promotion ledger holds no promotions")
+        raise Refused(
+            PromotionRefusal.LEDGER_EMPTY, "the promotion ledger holds no promotions"
+        )
 
     superseded = raw_digest(ACCEPTED)
     candidate_digest = raw_digest(candidate)
 
     if promotions[-1].get("descriptor_sha256") != superseded:
         raise Refused(
+            PromotionRefusal.CHAIN_BROKEN,
             "the ledger's last promotion does not name the accepted descriptor "
-            "on disk, so the chain is already broken and this would extend it"
+            "on disk, so the chain is already broken and this would extend it",
+        )
+    # ORDER IS THE RULE HERE, not a preference. The chain check above
+    # guarantees the ledger's last entry names `superseded`, so `superseded` is
+    # always IN the ledger -- and with the two checks the other way round,
+    # "already promoted" answered every candidate identical to the accepted
+    # descriptor and the identity refusal below could never execute. Present in
+    # the source, unreachable in the process, and its own test passed because
+    # something refused. Specific first.
+    if candidate_digest == superseded:
+        raise Refused(
+            PromotionRefusal.ALREADY_ACCEPTED,
+            "the candidate is the accepted descriptor; nothing to promote",
         )
     if any(entry.get("descriptor_sha256") == candidate_digest for entry in promotions):
-        raise Refused("these exact bytes have been promoted before")
-    if candidate_digest == superseded:
-        raise Refused("the candidate is the accepted descriptor; nothing to promote")
+        raise Refused(
+            PromotionRefusal.ALREADY_PROMOTED,
+            "these exact bytes have been promoted before, and are not what is "
+            "accepted now -- promoting them again would record a change that "
+            "already happened",
+        )
 
     # THE LICENCE. Everything else checks the chain; this checks the deployment.
     measured = receipt_heads(receipt)
     declared = declared_heads(candidate_doc)
     if measured != declared:
         raise Refused(
+            PromotionRefusal.HEADS_MISMATCH,
             "the receipt measured heads the candidate does not declare -- "
             f"receipt {list(measured)}, candidate {list(declared)}. A candidate "
             "that does not describe what the run produced must not become "
-            "accepted truth"
+            "accepted truth",
         )
 
     sections = changed_sections(accepted_doc, candidate_doc)
     if not sections:
-        raise Refused("the candidate changes no section")
+        raise Refused(
+            PromotionRefusal.NOTHING_CHANGED, "the candidate changes no section"
+        )
 
     # A key that MOVED is simply absent from `carried_forward`; there is no
     # refusal for "moved but its section was not declared", because
@@ -216,8 +284,9 @@ def build_entry(
     if carried and not carry_why:
         entry_keys = ", ".join(sorted(carried))
         raise Refused(
+            PromotionRefusal.CARRY_REASON_MISSING,
             f"this promotion carries {entry_keys} across unchanged and no "
-            "--carry-why says why the application half did not move"
+            "--carry-why says why the application half did not move",
         )
 
     entry: dict[str, Any] = {
