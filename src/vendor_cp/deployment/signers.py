@@ -62,9 +62,10 @@ Control gives the same condition, so the two sides read as one vocabulary.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final
+from typing import Final, Protocol
 
 __all__ = [
     "AUTHORIZATION_PURPOSE",
@@ -74,6 +75,7 @@ __all__ = [
     "AuthorizationSignerPointer",
     "ObservationSignerPointer",
     "SignerPointerRefused",
+    "SignerPointerLike",
     "SignerRefusal",
     "require_distinct_signers",
 ]
@@ -106,8 +108,15 @@ class SignerRefusal(StrEnum):
     #: The declared purpose is not the one this descriptor signs for. Named as
     #: Control names the same condition.
     PURPOSE_MISMATCH = "PURPOSE_MISMATCH"
-    #: Both signers named one pointer, collapsing two questions into one key.
+    #: Two or more signers named one pointer, collapsing distinct questions
+    #: into one key.
     SHARED_POINTER = "SHARED_POINTER"
+    #: Two or more signers named DIFFERENT pointers holding the SAME key. Only
+    #: detectable when public fingerprints are supplied; see the note on
+    #: `require_distinct_signers`.
+    SHARED_KEY_MATERIAL = "SHARED_KEY_MATERIAL"
+    #: Fewer than two signers were offered, so nothing could have been compared.
+    NOTHING_TO_COMPARE = "NOTHING_TO_COMPARE"
 
 
 class SignerPointerRefused(ValueError):
@@ -178,21 +187,107 @@ class ObservationSignerPointer:
         _validate(self.pointer, purpose="observation")
 
 
-def require_distinct_signers(
-    authorization: AuthorizationSignerPointer,
-    observation: ObservationSignerPointer,
-) -> None:
-    """Refuse a pair that is one key wearing two purposes.
+class SignerPointerLike(Protocol):
+    """Any purpose-bound pointer descriptor, whatever its concrete class.
 
-    Neither dataclass can see the other, so the rule that actually matters —
-    that the two pointers are different — has to be checked where both are in
-    hand. A pair naming one pointer twice would satisfy every per-class refusal
-    above and still collapse *may this happen* into *this is what happened*.
+    A Protocol rather than a base class because the descriptors are deliberately
+    unrelated types that share no member with each other's Control-side
+    counterparts. Structural typing lets this function see all of them without
+    giving them a common ancestor that would suggest they are interchangeable.
     """
-    if authorization.pointer == observation.pointer:
+
+    @property
+    def pointer(self) -> str: ...
+
+    @property
+    def purpose(self) -> str: ...
+
+
+def require_distinct_signers(
+    *signers: SignerPointerLike,
+    fingerprints: Mapping[str, str] | None = None,
+) -> None:
+    """Refuse a set of signers that is fewer keys than it is purposes.
+
+    Written for a PAIR and widened when Control a11 made the count four. Two
+    identities admit one collision; four admit six, and the shapes are not just
+    "both the same": three sharing one pointer, two disjoint pairs, or two
+    pointers holding one key. A function that compares two arguments cannot see
+    any of those, and silently checked one sixth of the question.
+
+    ## What this catches, and what belongs to Control
+
+    **Ours, always:** two or more purposes naming the same POINTER. Every
+    colliding purpose is named, not the first pair found, because an operator
+    repairing one collision at a time re-runs the ceremony once per pair.
+
+    **Ours, only when told:** two purposes at DIFFERENT pointers holding the
+    same key. `fingerprints` maps pointer to public-key fingerprint. A
+    fingerprint is public — deriving it needs no private material and this
+    module still holds none — but it must be SUPPLIED, because a seam that
+    fetched it would be dereferencing a pointer, which is the one thing this
+    module may never do (ADR-0009).
+
+    **Control's, and not ours:** the same collision observed at signing time.
+    Control a11 raises `dispatch_signer_purpose_reused` when the dispatch
+    identity's `public_key_fingerprint` equals the authorization's. That covers
+    ONE ordered pair, at the moment of use, on material Control can see.
+
+    **Nobody's, and say so rather than imply otherwise:** when `fingerprints` is
+    omitted, distinct pointers sharing one key are unmonitored here. That is not
+    a gap this function can close on its own, and a caller that omits the
+    argument should know it is choosing the weaker check rather than the
+    complete one.
+    """
+    if len(signers) < 2:
         raise SignerPointerRefused(
-            SignerRefusal.SHARED_POINTER,
-            f"both signers name {authorization.pointer!r}. Separate purposes need "
-            "separate keys, or the observation cannot contradict the "
-            "authorization and is an echo rather than evidence",
+            SignerRefusal.NOTHING_TO_COMPARE,
+            f"{len(signers)} signer(s) offered; distinctness is a property of a "
+            "SET, and a call with fewer than two can only ever pass",
         )
+
+    _refuse_collisions(
+        {signer.purpose: signer.pointer for signer in signers},
+        refusal=SignerRefusal.SHARED_POINTER,
+        subject="pointer",
+        why=(
+            "Separate purposes need separate keys, or one compromise covers "
+            "questions that were meant to be answered independently"
+        ),
+    )
+    if fingerprints is None:
+        return
+    _refuse_collisions(
+        {
+            signer.purpose: fingerprints[signer.pointer]
+            for signer in signers
+            if signer.pointer in fingerprints
+        },
+        refusal=SignerRefusal.SHARED_KEY_MATERIAL,
+        subject="key",
+        why=(
+            "Distinct pointers holding one key is the same collision wearing "
+            "two names: a pointer is a spelling, and the key is the thing"
+        ),
+    )
+
+
+def _refuse_collisions(
+    by_purpose: Mapping[str, str], *, refusal: SignerRefusal, subject: str, why: str
+) -> None:
+    """Name every colliding group, never the first one found."""
+    grouped: dict[str, list[str]] = {}
+    for purpose, value in by_purpose.items():
+        grouped.setdefault(value, []).append(purpose)
+    collisions = {
+        value: sorted(purposes)
+        for value, purposes in grouped.items()
+        if len(purposes) > 1
+    }
+    if not collisions:
+        return
+    detail = "; ".join(
+        f"{', '.join(purposes)} share {subject} {value!r}"
+        for value, purposes in sorted(collisions.items())
+    )
+    raise SignerPointerRefused(refusal, f"{detail}. {why}")
