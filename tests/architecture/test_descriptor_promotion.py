@@ -47,6 +47,36 @@ RECONCILIATION = (
 )
 V017 = ROOT / "alembic" / "versions" / "v017_deployment_target_authority.py"
 
+#: Which authority each descriptor's declared migration heads answer to.
+#:
+#: This mapping exists because the assertion below was once pointed at a single
+#: descriptor by name, and the moment a SECOND descriptor appeared the obvious
+#: repair was to move it -- for a good reason, since a descriptor that
+#: deliberately predates the current composition cannot satisfy the composed
+#: predicate. Moving it is correct and leaves the first descriptor checked by
+#: nothing, which is the failure this map makes impossible: the subject a
+#: predicate covers is DATA in one reviewed place, so retargeting is a visible
+#: edit here rather than an invisible line change in a test body.
+#:
+#: `composed_lineages` -- the heads recomputed from the installed lineages.
+#:     Right for whichever descriptor states the composition the tree currently
+#:     builds.
+#: `promotion_ledger` -- the accepted descriptor may only have moved its
+#:     `migration` section in a promotion that SAYS it did.
+#:
+#: When a prospective descriptor lands, `deploy/product.toml` moves to
+#: `promotion_ledger` and the prospective file takes `composed_lineages`. Both
+#: predicates already exist, so that is a data edit and nothing goes uncovered.
+DESCRIPTOR_HEADS_AUTHORITY: Final[dict[str, str]] = {
+    "deploy/product.toml": "composed_lineages",
+}
+
+#: Authorities this file actually exercises, maintained by hand beside the tests
+#: that exercise them and ratcheted against the map in both directions.
+EXERCISED_AUTHORITIES: Final[frozenset[str]] = frozenset(
+    {"composed_lineages", "promotion_ledger"}
+)
+
 #: The bootstrap receipt this promotion repairs, and the descriptor digest that
 #: receipt binds. Both are coordinates of an operation that already happened on
 #: a host, so they are recorded rather than derived — but every place they
@@ -69,6 +99,15 @@ _CREATE_SCHEMA = re.compile(
 
 def _digest(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _descriptors_answering(authority: str) -> list[Path]:
+    """Descriptor files on disk whose heads answer to `authority`."""
+    return [
+        ROOT / relative
+        for relative, declared in DESCRIPTOR_HEADS_AUTHORITY.items()
+        if declared == authority and (ROOT / relative).is_file()
+    ]
 
 
 def _ledger() -> list[dict[str, object]]:
@@ -227,10 +266,25 @@ def test_the_reconciliation_record_names_what_it_repairs() -> None:
 
 
 def test_the_declared_heads_are_the_composed_effective_heads() -> None:
-    """Recomputed from the installed lineages, offline, with no database."""
-    migration = _descriptor()["migration"]
-    assert isinstance(migration, dict)
-    assert tuple(migration["expected_heads"]) == composed_effective_heads()
+    """Recomputed from the installed lineages, offline, with no database.
+
+    The subject is resolved from `DESCRIPTOR_HEADS_AUTHORITY` rather than named
+    here. When a second descriptor arrives, this assertion does not move -- the
+    map does, in one reviewed place, and the descriptor it stops covering picks
+    up `promotion_ledger` in the same edit.
+    """
+    subjects = _descriptors_answering("composed_lineages")
+    assert subjects, (
+        "no descriptor answers to composed_lineages, so this recomputes the "
+        "heads and compares them with nothing"
+    )
+    for path in subjects:
+        migration = tomllib.loads(path.read_text(encoding="utf-8"))["migration"]
+        assert isinstance(migration, dict)
+        assert tuple(migration["expected_heads"]) == composed_effective_heads(), (
+            f"{path.relative_to(ROOT)} declares heads that are not the composed "
+            "effective heads"
+        )
 
 
 def test_the_effective_head_derivation_is_not_the_graph_heads() -> None:
@@ -372,3 +426,130 @@ def test_every_promotion_names_the_sections_it_changed() -> None:
     reconciliation = [e for e in _ledger() if e["kind"] == "reconciliation"]
     assert len(reconciliation) == 1
     assert reconciliation[0]["changed_sections"] == ["migration", "database"]
+
+
+# ── every descriptor answers to a named authority, and the ledger is one ─────
+
+
+def test_every_descriptor_on_disk_declares_a_heads_authority() -> None:
+    """A new descriptor must state which authority its heads answer to.
+
+    This is the guard that makes a retarget impossible rather than merely
+    discouraged. Adding a second `product.toml` and pointing the composed
+    assertion at it is exactly the change that leaves the first one covered by
+    nothing, and it is a change nobody reads as a loss of coverage -- the diff
+    shows one legitimate subject replaced by another. Here it fails until the
+    new file is given an authority of its own, which forces the question.
+
+    Found by glob, never by a hand list: a hand list cannot see the file added
+    tomorrow, which is the whole shape being defended against.
+    """
+    found = {
+        path.relative_to(ROOT).as_posix()
+        for path in DEPLOY.glob("**/product.toml")
+        if "candidates" not in path.parts
+    }
+    assert found, "no descriptor found at all; this guard would pass over nothing"
+    undeclared = found - set(DESCRIPTOR_HEADS_AUTHORITY)
+    assert not undeclared, (
+        f"{sorted(undeclared)} declare migration heads and no authority says "
+        "what those heads must equal. Add an entry to "
+        "DESCRIPTOR_HEADS_AUTHORITY rather than pointing an existing assertion "
+        "at the new file: moving one leaves the other unchecked"
+    )
+
+
+def test_no_declared_authority_is_unexercised() -> None:
+    """A two-directional ratchet on the authority vocabulary.
+
+    A third authority cannot be declared without a test that applies it, and a
+    retired one cannot linger in the map naming a predicate nobody runs.
+    """
+    assert set(DESCRIPTOR_HEADS_AUTHORITY.values()) <= EXERCISED_AUTHORITIES
+    assert EXERCISED_AUTHORITIES == {"composed_lineages", "promotion_ledger"}
+
+
+def _promoted_pairs() -> list[tuple[dict[str, object], dict[str, object], object]]:
+    """Consecutive promotions where both descriptors exist as files.
+
+    The first ledger entry predates the mechanism and records a digest with no
+    candidate file, so the pair spanning it cannot be compared. That is stated
+    by skipping it, not by pretending the comparison happened.
+    """
+    pairs = []
+    previous: dict[str, object] | None = None
+    for entry in _ledger():
+        candidate = entry.get("candidate")
+        document = (
+            tomllib.loads((ROOT / str(candidate)).read_text(encoding="utf-8"))
+            if candidate
+            else None
+        )
+        if previous is not None and document is not None:
+            pairs.append((previous, document, entry))
+        if document is not None:
+            previous = document
+    return pairs
+
+
+def test_a_promotion_changed_only_the_sections_it_named() -> None:
+    """The accepted descriptor's own authority, and the half that was missing.
+
+    `test_every_promotion_names_the_sections_it_changed` asserts that
+    `changed_sections` is present and non-empty. It never compares the claim
+    with the files, so a promotion could declare `["backup"]` and quietly move
+    `migration.expected_heads` -- and the accepted descriptor's heads would have
+    changed with nothing recording that they had.
+
+    Both directions, because over-claiming is its own defect: a section named
+    and not moved makes the ledger describe a change that did not happen, and a
+    reader auditing the chain would look for it.
+    """
+    pairs = _promoted_pairs()
+    assert pairs, (
+        "no consecutive promotions have candidate files on both sides, so this "
+        "compares nothing"
+    )
+    for before, after, entry in pairs:
+        declared = set(entry["changed_sections"])  # type: ignore[arg-type]
+        moved = {
+            section
+            for section in set(before) | set(after)
+            if before.get(section) != after.get(section)
+        }
+        where = entry["promoted_at"]
+        assert moved <= declared, (
+            f"the {where} promotion moved {sorted(moved - declared)} without "
+            "naming it in changed_sections"
+        )
+        assert declared <= moved, (
+            f"the {where} promotion names {sorted(declared - moved)} as changed "
+            "and did not change it"
+        )
+
+
+def test_the_changed_section_comparison_can_still_fail() -> None:
+    """SENSITIVITY, with no writer involved.
+
+    A comparison that only ever sees promotions that agree with themselves is
+    also what a broken predicate looks like. Plant the exact defect the rule
+    exists to refuse -- a heads change smuggled under a promotion that claims
+    only `backup` moved -- and confirm it is caught.
+    """
+    pairs = _promoted_pairs()
+    assert pairs
+    before, after, entry = pairs[-1]
+    smuggled = dict(after)
+    migration = dict(before["migration"])  # type: ignore[arg-type]
+    migration["expected_heads"] = ["0001_not_the_declared_head"]
+    smuggled["migration"] = migration
+
+    declared = set(entry["changed_sections"])  # type: ignore[arg-type]
+    moved = {
+        section
+        for section in set(before) | set(smuggled)
+        if before.get(section) != smuggled.get(section)
+    }
+    assert (
+        "migration" in moved - declared
+    ), "the comparison did not notice a heads change outside changed_sections"
