@@ -28,7 +28,7 @@ import tomllib
 from dataclasses import asdict, is_dataclass
 from uuid import UUID
 
-from vendor_cp.cli.exits import refuse
+from vendor_cp.cli.exits import ExitCode, refuse
 from vendor_cp.cli.io import Result, read_bytes, read_secret
 from vendor_cp.cli.runtime import platform_db
 
@@ -716,6 +716,59 @@ def deployment_drift(args: argparse.Namespace) -> Result:
     with platform_db() as db:
         report = read_drift(db, UUID(args.target_id))
     return Result(command="deployment drift", data=_fields(report))
+
+
+def deployment_readiness_packet(args: argparse.Namespace) -> Result:
+    """Refuse a packet that cannot yet justify naming a window, and name why.
+
+    Touches no database: the packet is a document, and whether its terms are
+    present is a question about the document. The refusal is returned as a
+    structured `Result` rather than raised, because the terms an operator has
+    to go and get are the whole answer — putting them only in a message would
+    make the next step a reading exercise.
+    """
+    from vendor_cp.deployment.readiness_packet import (
+        HELD_PENDING_MINT,
+        PacketRefused,
+        validate_readiness_packet,
+    )
+
+    raw = read_bytes(args.packet, what="readiness packet")
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise refuse(
+            "usage.invalid_argument",
+            f"{args.packet} is not readable JSON ({error})",
+        ) from error
+    if not isinstance(document, dict):
+        raise refuse(
+            "usage.invalid_argument",
+            f"{args.packet} does not hold a JSON object, so there is no packet "
+            "to validate",
+        )
+
+    try:
+        packet = validate_readiness_packet(document)
+    except PacketRefused as refused:
+        return Result(
+            command="deployment readiness-packet",
+            data={
+                "refusal": str(refused.refusal),
+                "terms": [str(term) for term in refused.terms],
+                "awaiting_mint": sorted(
+                    str(term) for term in refused.terms if term in HELD_PENDING_MINT
+                ),
+            },
+            exit_code=ExitCode.REFUSED,
+            refusal_code="owner.readiness_refused",
+            message=str(refused),
+        )
+
+    return Result(
+        command="deployment readiness-packet",
+        data={"terms": sorted(str(term) for term in packet.terms)},
+    )
 
 
 # ── recovery ────────────────────────────────────────────────────────────────

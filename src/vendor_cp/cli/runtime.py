@@ -142,6 +142,7 @@ _BY_NAME: Final[tuple[tuple[str, str], ...]] = (
     ("ReleaseEvidenceConflict", "owner.conflict"),
     ("ReleaseEvidenceError", "usage.bad_request"),
     ("ProductionSecretError", "config.invalid"),
+    ("PacketRefused", "owner.readiness_refused"),
 )
 
 
