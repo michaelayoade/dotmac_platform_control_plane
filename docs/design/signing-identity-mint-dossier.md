@@ -11,16 +11,17 @@
 > one-line change if Michael decides otherwise. They are written as defaults so
 > the ceremony is not blocked on a conversation.
 
-## The three identities
+## The four identities
 
-One ceremony, three identities. They are not interchangeable and they do not
+One ceremony, four identities. They are not interchangeable and they do not
 live in the same place — that separation is the whole point.
 
 | # | purpose constant | pointer (OpenBao KV v2) | private half lives with | public half verified by |
 |---|---|---|---|---|
 | 1 | `deployment_authorization` | `secret/dotmac/platform-cp/authorization-signing/primary` | the Platform CP authorization issuer | the **target**, at `/etc/dotmac/platform-cp/authorization-verification.json` |
 | 2 | `target_execution_observation` | `secret/dotmac/platform-cp/target-observation-signing/primary` | the **target host** (it signs what it applied) | Platform CP / Deployment Control |
-| 3 | `platform_release_evidence` | `secret/dotmac/platform-cp/release-evidence-signing/primary` | the release-evidence producer (Platform CP release path) | the **target**, at `/etc/dotmac/platform-cp/release-evidence-verification.json` |
+| 3 | `deployment_dispatch` | `secret/dotmac/platform-cp/dispatch-signing/primary` | the Platform CP dispatcher (the caller injects it) | the **executor**, through `verify_dispatch_envelope` |
+| 4 | `platform_release_evidence` | `secret/dotmac/platform-cp/release-evidence-signing/primary` | the release-evidence producer (Platform CP release path) | the **target**, at `/etc/dotmac/platform-cp/release-evidence-verification.json` |
 
 Identities 1 and 2 answer two different questions — *may this happen* and *this
 is what happened*. One key answering both would make the observation unable to
@@ -34,13 +35,66 @@ evidence that it behaved.
 
 ### Purpose constants are not free text
 
-Spelled exactly as the code spells them. 1 and 2 are on `main` today in
-`src/vendor_cp/deployment/signers.py` and are restated from Deployment Control
-a10; 3 (`platform_release_evidence`) lands with the atomic cutover, which
-already consumes it in `bindings.py` through `Ed25519EvidenceVerifier`. Its
-pointer is reserved **now** so one ceremony covers all three.
+Spelled exactly as the code spells them, and each read from the source that
+declares it rather than from a description:
 
-## Decision 1 — three identities, one ceremony (recommended)
+- `deployment_authorization` and `target_execution_observation` are on `main`
+  today in `src/vendor_cp/deployment/signers.py`, restated from Control a10.
+- `deployment_dispatch` is Control a11's `dispatch_envelope.py:45`. No
+  descriptor for it exists in this repository yet.
+- `platform_release_evidence` lands with the atomic cutover, which already
+  consumes it in `bindings.py` through `Ed25519EvidenceVerifier`.
+
+The two without descriptors have their pointers reserved **now**, so one
+ceremony covers all four.
+
+## Amendment — the fourth identity, and why the count moved again
+
+`deployment_dispatch` was added on 2026-09-03, after Control **0.1.0a11**
+shipped `dispatch_envelope.py`. Read from Control's own bytes rather than from a
+description: `DISPATCH_PURPOSE = "deployment_dispatch"` at
+`dispatch_envelope.py:45`, with `DispatchSignerIdentity` refusing any other
+purpose as `dispatch_purpose_mismatch`.
+
+It is **structurally distinct in the same way a10's pair are** — the three
+signer protocols share no member name at all:
+
+| purpose | signer members |
+|---|---|
+| `deployment_authorization` | `identity` / `sign` |
+| `deployment_dispatch` | `dispatch_identity` / `sign_dispatch` |
+| `target_execution_observation` | `execution_observation_identity` / `sign_execution_observation` |
+
+So one cannot be passed where another is expected even by accident, and that
+property now holds across three of the four rather than across a pair.
+
+**The caller signs it.** `service.py` takes `dispatch_signer: DispatchSigner` as
+a parameter, so the private half lives on the Platform CP side — the same side
+as authorization — and the executor verifies. a11 is explicit: callers adopting
+it must inject a dispatch-purpose signer and verify the dispatch envelope
+before executing it.
+
+**This is the second time the count has moved.** The third identity came from
+reading the WIP loader; the fourth from a distribution that did not exist when
+this document was written. The lesson is not "count more carefully" — it is that
+the one-ceremony argument holds whatever the number, which is why it is stated
+in terms of enrolment cost rather than in terms of three.
+
+### Control already refuses one of the six collisions, by KEY not by pointer
+
+a11 carries `SIGNER_PURPOSE_REUSED = "dispatch_signer_purpose_reused"`, raised
+when `identity.public_key_fingerprint == authorized.public_key_fingerprint` —
+the dispatch signer may not be the authorization signer's physical key.
+
+Note what that compares. Control compares **fingerprints**; this product's
+`require_distinct_signers` compares **pointers**. Two different pointers holding
+the same key material pass the pointer check and are refused by Control's. A
+pointer is a spelling; the key is the thing. The pointer check is still worth
+having — it catches the mistake earlier and covers pairs Control never sees —
+but it is not equivalent, and nobody should read a green pointer check as
+Control's guarantee.
+
+## Decision 1 — four identities, one ceremony (recommended)
 
 The release-evidence purpose is not speculative. The atomic cutover's
 `bindings.py` already loads its verifier on the target, and the missing signed
@@ -114,7 +168,7 @@ the `## App Tokens (` heading still reads as described before relying on the
 automatic pickup; if it has changed, the enrolment step changes with it and
 nothing else here does.
 
-## Step 1 — generate the three keypairs (trusted workstation, offline)
+## Step 1 — generate the four keypairs (trusted workstation, offline)
 
 Ed25519, 32-byte public keys, as `PublicVerificationIdentity` requires.
 
@@ -122,7 +176,7 @@ Ed25519, 32-byte public keys, as `PublicVerificationIdentity` requires.
 umask 077
 mkdir -p ~/dotmac-platform-cp-mint && cd ~/dotmac-platform-cp-mint
 
-for id in authorization target-observation release-evidence; do
+for id in authorization dispatch target-observation release-evidence; do
   openssl genpkey -algorithm ed25519 -out "${id}.key.pem"
 done
 ls -l   # three files, mode 0600. Do not cat them.
@@ -137,7 +191,12 @@ python3 - <<'PY'
 import base64, pathlib
 from cryptography.hazmat.primitives import serialization
 
-for name in ("authorization", "target-observation", "release-evidence"):
+for name in (
+        "authorization",
+        "dispatch",
+        "target-observation",
+        "release-evidence",
+    ):
     priv = serialization.load_pem_private_key(
         pathlib.Path(f"{name}.key.pem").read_bytes(), password=None
     )
@@ -164,7 +223,7 @@ print(PublicKeyFingerprintV1.from_public_key_b64('<public_key_b64url>').canonica
 where the fingerprint does not identify the key, so a transcription slip fails
 at load rather than at verification time.
 
-## Step 3 — three least-privilege policies
+## Step 3 — four least-privilege policies
 
 One policy per identity. Each grants read on its own path and **explicitly
 denies** the other two and the licensing key.
@@ -176,12 +235,24 @@ would not. That is the failure this is defending against, not today's grants.
 
 ```hcl
 # platform-cp-authorization-signing.hcl
-path "secret/data/dotmac/platform-cp/authorization-signing/primary"     { capabilities = ["read"] }
-path "secret/metadata/dotmac/platform-cp/authorization-signing/primary" { capabilities = ["read"] }
-path "secret/data/dotmac/platform-cp/target-observation-signing/*"      { capabilities = ["deny"] }
-path "secret/data/dotmac/platform-cp/release-evidence-signing/*"        { capabilities = ["deny"] }
-path "secret/data/dotmac/licensing/*"                                   { capabilities = ["deny"] }
-path "secret/metadata/dotmac/licensing/*"                               { capabilities = ["deny"] }
+path "secret/data/dotmac/platform-cp/authorization-signing/primary"          { capabilities = ["read"] }
+path "secret/metadata/dotmac/platform-cp/authorization-signing/primary"      { capabilities = ["read"] }
+path "secret/data/dotmac/platform-cp/dispatch-signing/*"                     { capabilities = ["deny"] }
+path "secret/data/dotmac/platform-cp/target-observation-signing/*"           { capabilities = ["deny"] }
+path "secret/data/dotmac/platform-cp/release-evidence-signing/*"             { capabilities = ["deny"] }
+path "secret/data/dotmac/licensing/*"                                        { capabilities = ["deny"] }
+path "secret/metadata/dotmac/licensing/*"                                    { capabilities = ["deny"] }
+```
+
+```hcl
+# platform-cp-dispatch-signing.hcl
+path "secret/data/dotmac/platform-cp/dispatch-signing/primary"               { capabilities = ["read"] }
+path "secret/metadata/dotmac/platform-cp/dispatch-signing/primary"           { capabilities = ["read"] }
+path "secret/data/dotmac/platform-cp/authorization-signing/*"                { capabilities = ["deny"] }
+path "secret/data/dotmac/platform-cp/target-observation-signing/*"           { capabilities = ["deny"] }
+path "secret/data/dotmac/platform-cp/release-evidence-signing/*"             { capabilities = ["deny"] }
+path "secret/data/dotmac/licensing/*"                                        { capabilities = ["deny"] }
+path "secret/metadata/dotmac/licensing/*"                                    { capabilities = ["deny"] }
 ```
 
 ```hcl
@@ -189,28 +260,31 @@ path "secret/metadata/dotmac/licensing/*"                               { capabi
 path "secret/data/dotmac/platform-cp/target-observation-signing/primary"     { capabilities = ["read"] }
 path "secret/metadata/dotmac/platform-cp/target-observation-signing/primary" { capabilities = ["read"] }
 path "secret/data/dotmac/platform-cp/authorization-signing/*"                { capabilities = ["deny"] }
+path "secret/data/dotmac/platform-cp/dispatch-signing/*"                     { capabilities = ["deny"] }
 path "secret/data/dotmac/platform-cp/release-evidence-signing/*"             { capabilities = ["deny"] }
 path "secret/data/dotmac/licensing/*"                                        { capabilities = ["deny"] }
 path "secret/metadata/dotmac/licensing/*"                                    { capabilities = ["deny"] }
 ```
 
 ```hcl
-# platform-cp-release-evidence-signing.hcl   (identity 3)
-path "secret/data/dotmac/platform-cp/release-evidence-signing/primary"     { capabilities = ["read"] }
-path "secret/metadata/dotmac/platform-cp/release-evidence-signing/primary" { capabilities = ["read"] }
-path "secret/data/dotmac/platform-cp/authorization-signing/*"              { capabilities = ["deny"] }
-path "secret/data/dotmac/platform-cp/target-observation-signing/*"         { capabilities = ["deny"] }
-path "secret/data/dotmac/licensing/*"                                      { capabilities = ["deny"] }
-path "secret/metadata/dotmac/licensing/*"                                  { capabilities = ["deny"] }
+# platform-cp-release-evidence-signing.hcl
+path "secret/data/dotmac/platform-cp/release-evidence-signing/primary"       { capabilities = ["read"] }
+path "secret/metadata/dotmac/platform-cp/release-evidence-signing/primary"   { capabilities = ["read"] }
+path "secret/data/dotmac/platform-cp/authorization-signing/*"                { capabilities = ["deny"] }
+path "secret/data/dotmac/platform-cp/dispatch-signing/*"                     { capabilities = ["deny"] }
+path "secret/data/dotmac/platform-cp/target-observation-signing/*"           { capabilities = ["deny"] }
+path "secret/data/dotmac/licensing/*"                                        { capabilities = ["deny"] }
+path "secret/metadata/dotmac/licensing/*"                                    { capabilities = ["deny"] }
 ```
 
 ```sh
 bao policy write platform-cp-authorization-signing      platform-cp-authorization-signing.hcl
 bao policy write platform-cp-target-observation-signing platform-cp-target-observation-signing.hcl
+bao policy write platform-cp-dispatch-signing           platform-cp-dispatch-signing.hcl
 bao policy write platform-cp-release-evidence-signing   platform-cp-release-evidence-signing.hcl
 ```
 
-## Step 4 — write the three records
+## Step 4 — write the four records
 
 `key=@file` reads the value from the file. Do **not** use command substitution:
 that puts the private key in `argv`, where `ps` can read it.
@@ -229,6 +303,14 @@ bao kv put secret/dotmac/platform-cp/target-observation-signing/primary \
   purpose=target_execution_observation \
   key_id=platform-cp-target-observation-2026-09 \
   private_key_pem=@target-observation.key.pem \
+  public_key_b64url='<from step 2>' \
+  public_key_fingerprint='<from step 2>'
+
+bao kv put secret/dotmac/platform-cp/dispatch-signing/primary \
+  algorithm=ed25519 \
+  purpose=deployment_dispatch \
+  key_id=platform-cp-dispatch-2026-09 \
+  private_key_pem=@dispatch.key.pem \
   public_key_b64url='<from step 2>' \
   public_key_fingerprint='<from step 2>'
 
@@ -257,6 +339,7 @@ Append three lines under `## App Tokens (` in `/opt/openbao/CREDENTIALS.md`:
 ```
 - platform-cp-authorization-signing: <token>
 - platform-cp-target-observation-signing: <token>
+- platform-cp-dispatch-signing: <token>
 - platform-cp-release-evidence-signing: <token>
 ```
 
@@ -267,6 +350,8 @@ bao token create -policy=platform-cp-authorization-signing \
   -period=720h -display-name=platform-cp-authorization-signing
 bao token create -policy=platform-cp-target-observation-signing \
   -period=720h -display-name=platform-cp-target-observation-signing
+bao token create -policy=platform-cp-dispatch-signing \
+  -period=720h -display-name=platform-cp-dispatch-signing
 bao token create -policy=platform-cp-release-evidence-signing \
   -period=720h -display-name=platform-cp-release-evidence-signing
 ```
@@ -302,23 +387,31 @@ Root-owned, regular files, under 16 KiB, schema
 
 ## Step 7 — verification: demonstrate, do not assert
 
-Two layers, because they can fail independently. **Every check below asserts on
-an exit status and discards stdout; no value is printed.**
+Two layers, because they fail independently. **Every check asserts on an exit
+status and discards stdout; no value is printed.**
 
-### 7a — each token reaches its own path and is denied the others
+**The arithmetic changed with the fourth identity, and not by one.** Four
+identities are **twelve ordered pairs** — every identity against every purpose
+that is not its own — plus four diagonal cases that must succeed. A fourth
+member does not add one case, it adds six unordered pairs' worth of directions.
+Nothing below is omitted as "cannot fail": all twelve are asserted, and where a
+pair needs a package that may not be installed, the pair is named along with
+what it needs rather than quietly skipped.
 
-For each token in turn, as that token:
+### 7a — reach: each token reads its own path and no other
+
+Four successes and **sixteen denials** (each token against the other three
+pointers and the licensing path). For each token in turn, as that token:
 
 ```sh
 export BAO_TOKEN=<the authorization token>
 
-# MUST succeed
 bao kv get -field=public_key_fingerprint \
   secret/dotmac/platform-cp/authorization-signing/primary >/dev/null \
   && echo "own path: reachable (expected)"
 
-# MUST each fail
 for p in \
+  secret/dotmac/platform-cp/dispatch-signing/primary \
   secret/dotmac/platform-cp/target-observation-signing/primary \
   secret/dotmac/platform-cp/release-evidence-signing/primary \
   secret/dotmac/licensing/signing-key
@@ -331,54 +424,73 @@ do
 done
 ```
 
-Repeat with the observation token and the release-evidence token, rotating which
-path is the permitted one. **Nine denials and three successes.** A run that
-produces twelve successes means the policies did not attach; a run that produces
-twelve denials means the KV v2 path form is wrong (constraint 1) and proves
-nothing about isolation — both failure modes look like "it did not blow up", so
-count the successes rather than reading for errors.
+Repeat with each of the other three tokens, rotating which path is the permitted
+one. **Count the successes: exactly four, and sixteen denials.** Twenty
+successes means the policies did not attach; twenty denials means the KV v2 path
+form is wrong (constraint 1) and proves nothing about isolation. Both failure
+modes look like "it did not blow up", so counting is the check.
 
-### 7b — each key verifies only its own purpose
+### 7b — purpose: the twelve ordered pairs
 
-The token check proves reach. It does not prove a key cannot be *used* for the
-wrong job — that is the cryptographic layer, and the code already refuses it
-three independent ways:
+Reach proves a token cannot *fetch* another's material. It does not prove a key
+cannot be *used* for the wrong job. That is the cryptographic layer, and it is
+enforced in three places depending on which purpose is being misused:
 
-- `PublicVerificationIdentity.__post_init__` refuses a purpose/key mismatch and
-  a fingerprint that does not identify its key;
-- `Ed25519EvidenceVerifier` refuses any identity whose purpose is not
-  `platform_release_evidence`, and the authorization verifier refuses the
-  converse;
-- Deployment Control's two identity Protocols share no member name
-  (`identity`/`sign` against
-  `execution_observation_identity`/`sign_execution_observation`), so one cannot
-  be passed where the other is expected even by accident.
+| holder \ used as | authorization | dispatch | observation | release evidence |
+|---|---|---|---|---|
+| **authorization** | must succeed | (1) | (2) | (3) |
+| **dispatch** | (4) | must succeed | (5) | (6) |
+| **observation** | (7) | (8) | must succeed | (9) |
+| **release evidence** | (10) | (11) | (12) | must succeed |
 
-Demonstrate it rather than citing it — build each verification descriptor and
-show the wrong-purpose verifier refuses it:
+Each numbered cell must REFUSE. The mechanism that refuses it, and what that
+mechanism needs to be present:
+
+- **(3), (10) — the target-side loader.** `PublicVerificationIdentity.read(path,
+  purpose=...)` refuses when the file's `purpose` field is not the one asked
+  for. Needs the two published verification files from step 6 and the assembly's
+  `bindings` module.
+- **(1), (4), (5), (8), (11) — Control's own identity types.**
+  `DispatchSignerIdentity` refuses a foreign purpose as
+  `dispatch_purpose_mismatch`, and the authorization and observation identities
+  refuse theirs the same way. Needs `dotmac-deployment-control` installed.
+- **(2), (6), (7), (9), (12) — the same Control types, other direction.**
+
+Demonstrate rather than cite. The shape for the loader pairs:
 
 ```sh
 python3 - <<'PY'
-from vendor_cp.deployment.bindings import (
-    Ed25519EvidenceVerifier, PublicVerificationIdentity,
-)
+from vendor_cp.deployment.bindings import PublicVerificationIdentity
 from dotmac_deployment_foundation import SpecError
 
-authorization = PublicVerificationIdentity.read(
-    "/etc/dotmac/platform-cp/authorization-verification.json",
-    purpose="deployment_authorization",
-)
 try:
-    Ed25519EvidenceVerifier(authorization)
+    PublicVerificationIdentity.read(
+        "/etc/dotmac/platform-cp/authorization-verification.json",
+        purpose="platform_release_evidence",
+    )
 except SpecError as refused:
-    print("authorization key refused as release evidence (expected):", refused)
+    print("authorization file refused as release evidence (expected):", refused)
 else:
-    raise SystemExit("REFUSE THE CEREMONY: one key served both purposes")
+    raise SystemExit("REFUSE THE CEREMONY: one identity served two purposes")
 PY
 ```
 
 The `else: raise` is the point. A `try/except` that only prints on refusal
 passes just as happily when nothing was refused.
+
+### 7c — what this step does NOT prove
+
+`require_distinct_signers` in `vendor_cp.deployment.signers` compares **two
+pointers**. It was written for a pair and has not been widened for four, so it
+does not see dispatch or release evidence at all, and it cannot see the shapes
+four identities make available: three sharing one pointer, two disjoint pairs,
+or two identities at different pointers holding the **same key material**.
+
+Control refuses exactly one of those collisions, for exactly one pair, by
+comparing public-key **fingerprints** (`dispatch_signer_purpose_reused`). Do not
+read that as covering the rest, and do not read a green pointer check as
+Control's guarantee. Widening it is a code change, deliberately not made inside
+a document.
 
 ## If something goes wrong
 
