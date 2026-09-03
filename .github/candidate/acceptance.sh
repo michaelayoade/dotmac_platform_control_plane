@@ -138,12 +138,40 @@ docker run -d --name "$DB_CONTAINER" \
     --volume "$PWD/.github/candidate/postgres-hba.sh:/docker-entrypoint-initdb.d/002-candidate-hba.sh:ro" \
     --publish "127.0.0.1:${DB_PORT}:5432" \
     "$PG_IMAGE" >/dev/null
+# ONE predicate, and it has to discriminate two things this step used to
+# conflate. `pg_isready` answers "is a server accepting connections", which is
+# TRUE while the entrypoint is still running /docker-entrypoint-initdb.d
+# against its TEMPORARY server — before `001-vendor-roles.sh` has created a
+# single role, and before the temporary server is STOPPED to start the real
+# one. So the old wait could return on either side of initialisation, and the
+# next statement would meet `role "app_admin" does not exist` or a refused
+# connection, intermittently, depending on which finished first.
+#
+# `-h 127.0.0.1` forces TCP, and the entrypoint's temporary server sets
+# `listen_addresses=''` — it is reachable only over the unix socket. So a TCP
+# connection cannot be answered by it, and asking that connection for the role
+# proves BOTH halves at once: the real server is up, and initialisation ran.
+# Waiting for the role over the socket and then for liveness would NOT be
+# equivalent: both can be satisfied inside the initialisation window, with the
+# stop still ahead.
+#
+# The `pass` line below has always CLAIMED the roles were created. It is now
+# the thing that was checked. A step reporting success it never observed is
+# how this survived being green.
+initialised() {
+    docker exec -e PGPASSWORD=postgres "$DB_CONTAINER" \
+        psql -h 127.0.0.1 -p 5432 -U postgres -d candidate -tAc \
+        "select 1 from pg_roles where rolname = 'app_admin'" 2>/dev/null \
+        | grep -qx 1
+}
 for _ in $(seq 1 60); do
-    docker exec "$DB_CONTAINER" pg_isready -U postgres -d candidate >/dev/null 2>&1 && break
+    initialised && break
     sleep 1
 done
-docker exec "$DB_CONTAINER" pg_isready -U postgres -d candidate >/dev/null \
-    || fail "the disposable database never became ready"
+initialised \
+    || fail "the disposable database never finished initialising: no app_admin \
+over a TCP connection, so either init-roles.sh did not run or the server never \
+came up"
 pass "database up, roles created by deploy/postgres/init-roles.sh"
 psql_admin --dbname candidate --command \
     'CREATE DATABASE vendor_control_plane OWNER app_admin' >/dev/null \
