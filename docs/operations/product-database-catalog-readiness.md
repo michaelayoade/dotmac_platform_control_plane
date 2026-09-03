@@ -27,18 +27,13 @@ not duplicate any module's schema contract. Presence is all this part proves: a
 non-null attribute is not proof that canonical bytes parse, cover the selected
 plane or agree with a live observation.
 
-**The other direction — a module adopting a contribution — is dormant, and this
-is the honest statement of it.** The probe reads a `database_catalog` attribute,
-and the exact-pinned kernel's `ModuleManifest` declares no such field, so no
-module release of this generation could publish one even in principle. Today the
-six therefore record a fact about the kernel generation, not about six module
-owners, and only the composition half of the ratchet can fail.
-`pinned_manifest_declares_contribution_field` states that premise and
-`test_the_module_probe_is_dormant_because_the_pinned_kernel_carries_no_field`
-holds it, so the premise dies with the pin that established it rather than
-outliving it in silence (`AGENTS.md` rule 13). Had the kernel named the field
-anything else, the set would have sat at six for ever and a repin would have
-passed over it without a word.
+**The other direction — a module adopting a contribution — is live at the a100
+pin.** The exact-pinned kernel's `ModuleManifest` declares `database_catalog`,
+so each of the six rows now records a fact about that module's pinned release,
+not a fact about an unreachable kernel axis. The prior dormant premise was
+retired in the same change that raised the pin;
+`test_the_module_probe_is_live_on_the_pinned_kernel` holds the inverse so a
+future kernel cannot silently make the axis unreachable again.
 
 The command itself is now executed by
 `test_the_commands_exit_code_is_observed_in_both_directions` rather than only

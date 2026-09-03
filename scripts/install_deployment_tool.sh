@@ -4,10 +4,11 @@
 #
 # ## Why not a version
 #
-# `0.3.0a3` is on no index and carries no tag. It is the first Foundation
-# artifact anywhere that can produce an `ExecutionPlanDigestV1`: published
-# `0.2.0a2` and the frozen `0.3.0a2` candidate both predate `execution_plan.py`.
-# So the pin is a build coordinate plus a digest, recorded in
+# `0.3.0a4` is on no index and carries no tag. It carries the execution-plan
+# and verifier protocols this cutover needs; its CLI runtime-binding seam is a
+# separate, still-open integration and this installer does not pretend the
+# protocols are reachable merely because their modules import. The pin is a
+# build coordinate plus a digest, recorded in
 # `deploy/foundation-candidate.json`, and the digest is checked BEFORE any
 # installer runs.
 #
@@ -89,7 +90,7 @@ readonly SOURCE_REPOSITORY ARTIFACT_ID WHEEL_FILENAME WHEEL_SHA256 WHEEL_SIZE EX
 
 # The lease, refused explicitly. GitHub deletes the artifact at `expires_at`,
 # and a 404 from a deleted artifact reads like a network problem.
-"$PYTHON" - "$EXPIRES_AT" <<'PY' || die "the candidate artifact lease has expired; a3 must be published, or a new candidate built and this file replaced"
+"$PYTHON" - "$EXPIRES_AT" <<'PY' || die "the candidate artifact lease has expired; a4 must be published, or a new candidate built and this file replaced"
 import datetime as dt, sys
 sys.exit(0 if dt.datetime.now(dt.UTC) < dt.datetime.fromisoformat(sys.argv[1]) else 1)
 PY

@@ -27,7 +27,7 @@ import re
 from pathlib import Path
 from typing import Final
 
-from vendor_cp.api_documentation import (
+from dotmac_kernel.api_documentation import (
     OPENAPI_PATH,
     PRODUCTION,
     REDOC_PATH,

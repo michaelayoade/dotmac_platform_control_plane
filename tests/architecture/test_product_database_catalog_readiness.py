@@ -49,34 +49,12 @@ def test_debt_detector_is_sensitive_to_presence_and_absence() -> None:
     assert missing_module_database_catalogs(modules) == frozenset({"missing"})
 
 
-def test_the_module_probe_is_dormant_because_the_pinned_kernel_carries_no_field() -> (
-    None
-):
-    """Say why the probe reports all six, because it is not about the six.
+def test_the_module_probe_is_live_on_the_pinned_kernel() -> None:
+    """The debt now describes module releases, not an unreachable kernel axis."""
 
-    ``missing_module_database_catalogs`` reads a manifest attribute that the
-    EXACT-PINNED kernel's ``ModuleManifest`` does not declare.  While that holds,
-    no module release could publish a contribution even in principle — the
-    manifest could not be constructed — so the probe's composition half is the
-    only half that can fail, and "all six are missing" is a fact about the kernel
-    generation rather than about any module owner.
-
-    The operations note previously claimed that "adopting a contribution cannot
-    pass silently".  Half of that was true and half was not, and nothing said
-    which.  This assertion is the premise made enforceable (``AGENTS.md`` rule
-    13): the moment the pin moves to a kernel whose manifest carries the field,
-    this test fails, and the review that raised the pin has to confirm that the
-    probe now measures what its name says.  Had the kernel named the field
-    anything else, the ratchet would have sat at all-six for ever and a repin
-    would have passed over it in silence.
-    """
-
-    assert not pinned_manifest_declares_contribution_field(), (
-        f"the pinned kernel's ModuleManifest now declares {CONTRIBUTION_FIELD!r}. "
-        "The module probe is no longer dormant: confirm in this same change that "
-        "each composed module's pinned release either publishes a contribution or "
-        "is still recorded in MODULE_DATABASE_CATALOG_DEBT for a reason about "
-        "that module, then delete this test with the premise it was holding."
+    assert pinned_manifest_declares_contribution_field(), (
+        f"the pinned kernel no longer declares {CONTRIBUTION_FIELD!r}; the six "
+        "module rows would therefore describe an unreachable axis again"
     )
 
 

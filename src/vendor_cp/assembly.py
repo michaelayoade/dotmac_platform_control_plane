@@ -17,6 +17,7 @@ from dotmac_commercial_agreements import module as commercial_agreements_module
 from dotmac_deployment_control import module as deployment_control_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import FeatureManifest, ModuleManifest, ProductAssemblySpec
+from dotmac_kernel.api_documentation import environment_api_documentation_policy
 from dotmac_licensing import module as licensing_module
 from dotmac_release_catalog import module as release_catalog_module
 
@@ -159,6 +160,11 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
 
     return ProductAssemblySpec(
         name=ASSEMBLY_NAME,
+        # ADR-0016's exposure decision is now consumed at the kernel's typed
+        # construction seam.  Resolve directly from the raw environment: an
+        # unset or unfamiliar value must keep the fail-closed production
+        # policy, not inherit this assembly's separate development default.
+        api_documentation=environment_api_documentation_policy(),
         # The INTENT half of the composition (`dotmac_starter_mt` ADR-0028):
         # which plane of a selectable module this product installs. Not
         # implied by the

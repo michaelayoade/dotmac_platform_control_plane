@@ -11,7 +11,7 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a98` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a100` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source. That version is not transcribed here by
@@ -19,6 +19,16 @@ it owns and — just as importantly — what it must never become.
   stated in this document differs from the one `pyproject.toml` pins. It said
   `0.1.0a77` for the three weeks after the pin moved to a98, and nothing could
   see it.
+- The a100 adoption consumes the accepted ADR-0016 API-documentation policy
+  through `ProductAssemblySpec.api_documentation`. `assembly.build_spec()`
+  imports `environment_api_documentation_policy` directly from the supported
+  `dotmac_kernel.api_documentation` module; the former Vendor implementation
+  is deleted, and `main.py` is again only `create_app(build_spec())`. The
+  official a100 wheel was measured before adoption at
+  `sha256:60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c`
+  (release run `33483169850`, artifact `9790730793`). a98, a99 and a100 were
+  also exercised under this assembly's exact dependency closure; a100 adds no
+  migration and makes no a101 claim.
 - The a61 → a77 compatibility uplift moves no domain writer and composes no new
   module. It does cross kernel a68's platform-audit registry enforcement, so
   every Vendor-owned platform audit action is now declared on exactly one

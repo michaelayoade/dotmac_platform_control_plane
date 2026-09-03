@@ -224,3 +224,26 @@ rewritten, when the kernel field exists — the declared policies move to
   cannot publish its API by omission.
 * This change alters no data, no migration, no privilege and no module
   composition. It removes routes and adds one guarded route.
+
+## 8. Kernel ownership adopted — 2026-09-03
+
+The obligation in § 6 is discharged by the Platform CP kernel-a100 adoption.
+`dotmac_kernel.api_documentation` is a supported public module in the official
+a100 artifact, and `ProductAssemblySpec.api_documentation` is enforced by
+`create_app` at construction. `assembly.build_spec()` now imports and calls
+`environment_api_documentation_policy()` directly; the local
+`vendor_cp.api_documentation` implementation is deleted, and `main.py` contains
+no post-construction route mutation.
+
+The existing fail-closed environment split is preserved: the documentation
+helper reads raw `ENVIRONMENT`, so an unset or unfamiliar value selects the
+production policy even though the separate deployment-profile resolver has a
+development default. Product tests now exercise the installed kernel seam and
+plant removal of the spec field; kernel tests remain the owner of the policy's
+internal construction and audit mechanics.
+
+This is an ownership cutover, not a production-deployment claim. The official
+a100 wheel was measured at
+`sha256:60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c`
+(release run `33483169850`, artifact `9790730793`); deployment remains governed
+by the separately authorized production path.

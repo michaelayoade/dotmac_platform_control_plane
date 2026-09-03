@@ -1,5 +1,29 @@
 # Kernel a98, a99 and a100 — one boundary, measured; a100 is not a regression
 
+## Outcome — 2026-09-03
+
+The historical assessment below established that a100 did not regress the
+kernel's independent import boundary. A later consumer matrix settled the
+assembly question separately: official a100 and a101 wheels both booted under
+Platform CP's exact marker-resolved 41-distribution closure, with no checkout or
+`PYTHONPATH`, and no operation passed on a101 while failing on a100.
+
+Platform CP therefore adopts **a100**, not a101. The floor is earned by the
+accepted ADR-0016 cutover: `assembly.build_spec()` now imports
+`environment_api_documentation_policy` from the supported
+`dotmac_kernel.api_documentation` module, first shipped in a100, and supplies it
+as `ProductAssemblySpec.api_documentation`. The local Vendor policy owner is
+deleted and `main.py` returns to `create_app(build_spec())`. The official wheel
+used by the matrix is
+`sha256:60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c`
+(release run `33483169850`, artifact `9790730793`). The unchanged kernel
+migration tree keeps head `0028_machine_attribution`.
+
+This outcome does not retract the artifact-boundary defect described below.
+That defect is real at a98, a99 and a100 alike and was repaired independently
+in a101. It is not a Platform CP a101 adoption reason because this consumer
+declares the PostgreSQL driver the failing counterfactual removes.
+
 **Status:** assessed on 2026-09-01, and revised the same day when an independent
 arbitration settled the question this document had left open. The pin holds at
 `0.1.0a98`. **No pin move is possible yet**: the repair lands in a101, and a101

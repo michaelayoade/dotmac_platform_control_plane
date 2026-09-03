@@ -26,7 +26,7 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a98)
+KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a100)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 

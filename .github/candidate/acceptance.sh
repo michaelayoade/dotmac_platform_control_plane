@@ -317,7 +317,7 @@ step "2  the application imports, and publishes the production documentation sur
 # No ENVIRONMENT is set on purpose: `classify_environment` fails closed, so an
 # image with nothing declared must already serve the production inventory.
 SCRIPT="
-from vendor_cp.main import app; import vendor_cp.api_documentation as policy; assert app is not None; assert policy.classify_environment(None) == policy.PRODUCTION; paths = {getattr(route, 'path', '') for route in app.routes}; assert not paths & {'/docs', '/docs/oauth2-redirect', '/redoc'}, paths; assert not policy.audit_api_documentation( app, policy.api_documentation_policy(policy.PRODUCTION)); assert '/openapi.json' in paths, 'the document plane must be served, not merely declared'
+from vendor_cp.main import app; import dotmac_kernel.api_documentation as policy; assert app is not None; assert policy.classify_environment(None) == policy.PRODUCTION; paths = {getattr(route, 'path', '') for route in app.routes}; assert not paths & {'/docs', '/docs/oauth2-redirect', '/redoc'}, paths; assert not policy.audit_api_documentation( app, policy.api_documentation_policy(policy.PRODUCTION)); assert '/openapi.json' in paths, 'the document plane must be served, not merely declared'
 "
 in_image || fail "the built bytes do not serve the production documentation policy"
 pass "app imports; /docs, /docs/oauth2-redirect and /redoc are ABSENT from the live inventory"
@@ -329,7 +329,7 @@ step "10 the documentation gate refuses an omission too, in the artifact"
 # development policy is applied to the same app to prove the gate can still
 # object in the other direction.
 SCRIPT="
-import vendor_cp.api_documentation as policy
+import dotmac_kernel.api_documentation as policy
 from vendor_cp.main import app
 findings = policy.audit_api_documentation(app, policy.api_documentation_policy(policy.DEVELOPMENT))
 assert findings, 'the production artifact satisfied the DEVELOPMENT policy, so the gate is not discriminating'

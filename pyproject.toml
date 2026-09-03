@@ -29,7 +29,7 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a98", extras = [
+dotmac-kernel = { version = "0.1.0a100", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
@@ -125,12 +125,14 @@ dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # wrote the tag. The resolved artifacts were compared against that evidence
 # before this pin was accepted: wheel `9b02cf33…7b8fc0`, sdist `68871c24…1adad0`.
 #
-# The kernel pin moves a77 -> a98 BECAUSE a6 requires it, and it is pinned
-# EXACTLY here rather than left to the resolver. Twenty-one alphas of kernel is
-# not a bump whose consequences are discovered at boot — which is the lesson a5
-# just taught at lower cost. This pin is not deployment authorization: the
-# a77->a98 migration still owes a rehearsal against a RESTORED isolated
-# database before it reaches the running deployment.
+# The earlier a77 -> a98 move was bound by a6 and rehearsed independently.
+# Kernel a100 is now the exact pin because this assembly directly consumes
+# `dotmac_kernel.api_documentation`, first shipped in a100, at its accepted
+# ADR-0016 construction seam. The artifact-only matrix established that a100
+# boots under this assembly's exact 41-distribution closure; the official wheel
+# is sha256:60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c
+# (release run 33483169850, artifact 9790730793). This is not deployment
+# authorization and makes no a101 claim.
 dotmac-deployment-control = { version = "0.1.0a6", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and

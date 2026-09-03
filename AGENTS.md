@@ -310,9 +310,9 @@ disagree, fix the drift.
 20. **A surface a framework enables by DEFAULT is still a declared decision, and
     the application is its authority.** FastAPI mounts `/docs`,
     `/docs/oauth2-redirect`, `/redoc` and `/openapi.json` unless told otherwise,
-    and `create_app` tells it nothing — so "forgot to think about it" and
-    "decided to publish it" are the same bytes. `ApiDocumentationPolicy` makes
-    the decision typed and per-environment, split into the two planes that
+    and an assembly that supplies no policy is refused before an app exists.
+    `ApiDocumentationPolicy` makes the decision typed and per-environment,
+    split into the two planes that
     authenticate differently and always will: browser pages, which are DISABLED
     in production, and the OpenAPI document, which is served only behind the
     bearer guard `require_platform_admin`. `PLATFORM_BEARER` is not expressible
@@ -329,10 +329,13 @@ disagree, fix the drift.
     the compose file publishes, or by a block that matches first, and it is not
     reviewed with the application whose surface it claims to define.
 
-    The gate reads the LIVE route inventory rather than the source, and its
-    sensitivity case is the one that matters: FastAPI's default configuration,
-    planted on a bare app AND on this assembly's own `create_app(build_spec())`,
-    must FAIL the production gate (ADR-0016;
+    The kernel owns the type, constructor arguments and live-inventory audit.
+    This assembly consumes it directly from
+    `dotmac_kernel.api_documentation` in `build_spec()`; no Vendor policy
+    implementation or post-construction route surgery exists. The sensitivity
+    case is the one that matters: deleting the spec binding must make
+    `create_app` REFUSE, and FastAPI's default configuration on a bare app must
+    still FAIL the production audit (ADR-0016;
     `tests/unit/test_api_documentation_policy.py`,
     `tests/architecture/test_api_documentation_ingress.py`).
 21. **The operator surface is an INSTALLED console script, and its exit codes
@@ -516,9 +519,11 @@ disagree, fix the drift.
     revision pinned in `.dotmac/standards-profile.json` predates § 10; the
     binding text is ahead of the pin and repinning is a separate rule-15
     change.) Equality with the composed maximum alone is correct only while
-    (b) sits at or below (a) — true today, and true by COINCIDENCE. That
-    coincidence may not remain an unstated premise: `assembly-satisfied`
-    requires every kernel module and every top-level name `src/vendor_cp`
+    (b) sits at or below (a). The a100 adoption makes (b) concrete rather than
+    coincidental: ADR-0016 directly imports `dotmac_kernel.api_documentation`,
+    first shipped in a100, and the a99 mutation must fail naming that module.
+    `assembly-satisfied` requires every kernel module and every top-level name
+    `src/vendor_cp`
     imports to be provided by an installation of the composed maximum, and a
     planted assembly import of a kernel name first shipped above it turns the
     lane red. When the premise dies, the answer is to record the assembly as a
@@ -543,9 +548,9 @@ disagree, fix the drift.
 
     **A published version is not blamed for a boundary its predecessors share.**
     Kernel a98, a99 and a100 reach a product-owned PostgreSQL driver on the
-    public `create_app` symbol identically; a100 regressed nothing, a98 is what
-    runs in production, and the repair is a101. Operational functionality and
-    independent artifact adoptability are different properties with different
-    oracles, and a pin may not name a version that has not been published
+    public `create_app` symbol identically; a100 regressed nothing, and this
+    assembly's declared closure supplies that driver. Operational functionality
+    and independent artifact adoptability are different properties with
+    different oracles, and a pin may not name a version that has not been published
     (`scripts/kernel_floor.py`, `tests/architecture/test_kernel_floor.py`, CI job
     `kernel-pin`; `docs/operations/kernel-a100-assessment-2026-09-01.md`).

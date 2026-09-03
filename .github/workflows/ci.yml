@@ -281,13 +281,14 @@ jobs:
             --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
             dotmac-vendor-control-plane:ci \
             -c "from vendor_cp.main import app; \
-                import vendor_cp.api_documentation as policy; \
+                from vendor_cp.assembly import build_spec; \
+                policy = build_spec().api_documentation; \
                 assert app is not None; \
-                assert policy.classify_environment(None) == policy.PRODUCTION; \
+                assert policy is not None; \
+                assert policy.environment == 'production'; \
                 paths = {getattr(route, 'path', '') for route in app.routes}; \
                 assert not paths & {'/docs', '/docs/oauth2-redirect', '/redoc'}, paths; \
-                assert not policy.audit_api_documentation( \
-                    app, policy.api_documentation_policy(policy.PRODUCTION))"
+                assert '/openapi.json' in paths"
       # ── Clean-install acceptance ────────────────────────────────────────
       # Six steps, and step 3 is the one that cannot be faked. The runtime stage
       # installs a WHEEL and copies no `src` and no `scripts`, so the repository

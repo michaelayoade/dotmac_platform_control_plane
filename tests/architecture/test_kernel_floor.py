@@ -10,15 +10,13 @@ Two directions, and both have to be able to fail:
   bytes that could not boot here, because it imported a kernel module its
   declared floor did not require. The static half below refuses a pin that does
   not satisfy every composed distribution's own `Requires-Dist`.
-* pinned too HIGH — a kernel upgrade nobody asked for still owes the migration
-  rehearsal a kernel upgrade owes. `missing-from` refuses when every module the
-  composition imports is already present in the excluded kernel, and the pin is
-  held equal to the highest floor anything composed declares.
-* the EQUALITY ITSELF wrong — `pin == max(composed floors)` is only the whole
-  rule while the assembly's own imports are satisfied by that maximum. That was
-  a coincidence nothing checked. `assembly-satisfied` executes it, and a planted
-  assembly import of a kernel name first shipped above the maximum turns the
-  lane red.
+* pinned too HIGH — a kernel upgrade nobody asked for still owes a named floor
+  owner. The effective set contains every artifact floor plus the assembly's
+  direct constraint.
+* the assembly contribution fictitious — its exact constraint would agree with
+  itself. `missing-from` derives a missing surface from the real source against
+  the immediately excluded kernel, and `assembly-satisfied` proves the pinned
+  surface is present.
 
 Every refusal path here is executed against a planted violation. A parser whose
 error branch has never run is prose.
@@ -38,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from kernel_floor import (  # noqa: E402
+    ASSEMBLY_FLOOR_OWNER,
     DEPENDENCY,
     FloorError,
     absent_from_kernel,
@@ -74,40 +73,30 @@ def _pyproject(tmp_path: Path, kernel: str) -> Path:
 # ── the pin, and what binds it ──────────────────────────────────────────────
 
 
-def test_the_pin_is_exactly_the_highest_floor_anything_composed_declares() -> None:
+def test_the_pin_is_exactly_the_effective_composition_floor() -> None:
     """Neither under- nor over-constrained, and the module that asked is named.
 
     Held as equality rather than as `>=`. A pin above every declared floor is
     not obviously safe: it is a kernel upgrade taken on nobody's behalf, and it
     carries a migration rehearsal obligation somebody has to have discharged.
 
-    THE PREMISE THIS ASSERTION RESTS ON. Governance ADR 0021 § 10.1, settled
-    2026-09-01, makes the effective floor the maximum of the composed
-    distributions' declared floors AND the assembly's own direct kernel
-    constraint — the latter read from the assembly's own SOURCE, because its
-    declaration is this very pin and a maximum that reads the pin as its own
-    input agrees with itself. § 10 previously named THIS TEST as the place the
-    premise was "recorded ... as a condition to be added in the same change that
-    first breaks it"; it is executed now instead, without waiting to be broken.
-
-    Equality with the composed maximum alone is therefore correct only while
-    the assembly's own imports are satisfied by that maximum — true
-    today, and true by coincidence. `assembly-satisfied` in the `kernel-pin` job
-    executes exactly that premise against the installed kernel, so an assembly
-    import of a kernel name first shipped above the maximum turns the lane red
-    instead of quietly making this assertion drag the pin down to a kernel this
-    assembly cannot run on. When that day comes the answer is to record the
-    assembly as a floor contributor and move the pin — never to loosen this.
+    Governance ADR 0021 § 10.1 makes the effective floor the maximum of the
+    composed distributions' artifact-declared floors and the assembly's direct
+    exact constraint. The assembly row is named explicitly. Because that number
+    alone is circular, `missing-from` derives its need from source against the
+    immediately excluded published kernel, while `assembly-satisfied` proves
+    the effective maximum supplies the imported surface.
     """
 
     pin = declared_pin()
     name, floor = binding_distribution()
 
     assert pin == floor, (
-        f"this assembly pins {DEPENDENCY} {pin} while the highest floor any "
-        f"composed distribution declares is {floor}, from {name}. Declared "
+        f"this assembly pins {DEPENDENCY} {pin} while the effective floor is "
+        f"{floor}, from {name}. Declared module "
         f"floors: {sorted(declared_kernel_floors().items())}."
     )
+    assert name == ASSEMBLY_FLOOR_OWNER
 
 
 def test_every_composed_distribution_declares_a_readable_kernel_floor() -> None:

@@ -369,10 +369,13 @@ def test_image_smokes_prove_the_built_bytes_publish_no_api_documentation() -> No
         ".github/candidate/acceptance.sh",
     ):
         source = _text(path)
-        assert "import vendor_cp.api_documentation as policy" in source
-        assert "policy.classify_environment(None) == policy.PRODUCTION" in source
         assert "'/docs', '/docs/oauth2-redirect', '/redoc'" in source
-        assert "policy.audit_api_documentation(" in source
+        assert "'/openapi.json'" in source
+    workflow = _text(".github/workflows/ci.yml")
+    assert "policy = build_spec().api_documentation" in workflow
+    assert "policy.environment == 'production'" in workflow
+    acceptance = _text(".github/candidate/acceptance.sh")
+    assert "policy.audit_api_documentation(" in acceptance
 
 
 def test_every_test_job_runs_on_a_github_hosted_runner() -> None:

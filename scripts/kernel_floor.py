@@ -27,12 +27,10 @@ published bytes; it cannot prove they import.**
 
 `dotmac-deployment-control` is a library: its floor is a lower bound it declares
 for its own imports, and its canary installs that minimum. This repository is an
-ASSEMBLY. It pins the kernel EXACTLY, and the pin has to satisfy every composed
-distribution's declared lower bound at once. So the question here is not "does
-the declared minimum import" but "is the exact pin the tightest version that
-still satisfies everything composed" — an assembly that pins too LOW dies at
-boot the way a5 did, and one that pins too HIGH has taken a kernel upgrade
-nothing asked for and owes the migration rehearsal that comes with it.
+ASSEMBLY. It pins the kernel EXACTLY, and the pin has to equal the maximum of
+every composed distribution's declared lower bound and the assembly's own
+direct constraint. A pin too LOW dies at boot the way a5 did; a pin too HIGH
+has taken a kernel upgrade no named owner asked for.
 
 Both halves are derived, and neither is copied into a document:
 
@@ -42,6 +40,9 @@ Both halves are derived, and neither is copied into a document:
   lower bound, read from INSTALLED METADATA. Not from a source tree, not from a
   changelog and not from the census's prose: the artifact's own declaration is
   the thing that binds a resolver.
+* `binding_distribution()` — the maximum after adding the assembly's direct
+  exact constraint under the named `assembly:vendor_cp` owner. That declaration
+  would be circular by itself, so the source-derived checks below must prove it.
 * `newest_excluded()` — the highest version the private index actually lists
   below the pin. That is the mutation target, and reading it from the index
   rather than computing "the pin minus one" matters: the index has gaps
@@ -73,11 +74,11 @@ into the record the same day (`dotmac_governance` PR #58, `d46d3a6`):
 
 Two things in § 10.1 shape this implementation rather than merely licensing it:
 
-* **The assembly's contribution is read from ITS OWN SOURCE, never from its
-  declaration.** § 10.1 is explicit that "an assembly's declared direct
-  constraint on the dependency IS the `==` pin: a maximum that reads the pin as
-  its own third input returns the pin, agrees with itself, and proves nothing."
-  So the contribution here is derived from what `src/vendor_cp` imports.
+* **The assembly contribution is stated by the exact constraint and established
+  from ITS OWN SOURCE.** Reading the pin as the third input does return the pin
+  and proves nothing alone. `assembly_kernel_requirements` derives what
+  `src/vendor_cp` imports, while the excluded-kernel plant proves the immediately
+  lower published version lacks a surface the source actually needs.
 * **The plant is the rule.** "A planted assembly import first shipped ABOVE that
   floor must turn the lane RED" is § 10.1's own sentence, and it is "the only
   part of § 10 that cannot be satisfied by a number somebody wrote down". The
@@ -92,20 +93,13 @@ binding text is therefore ahead of the pin. Repinning is a deliberate change
 under rule 15 — it would also pull in every other decision accepted since — and
 is not taken here.
 
-Today those two happen to agree, and the equality `pin == max(composed floors)`
-holds only because of a coincidence: nothing in `src/vendor_cp` imports a kernel
-symbol its composed modules do not already require. That coincidence was an
-UNSTATED PREMISE — the equality assertion was true for a reason nothing checked,
-and the day somebody imports `dotmac_kernel.<something first shipped above the
-pin>` here, the equality rule would drag the pin DOWN to a version this assembly
-cannot run on, and would do it silently. That is a5's defect wearing the
-assembly's clothes.
-
-`unsatisfied_kernel_requirements()` states that premise where a lane holds it:
-every kernel module and every top-level name `src/vendor_cp` imports must be
-provided by an installation of the composed maximum. An unsatisfied name means
-the assembly's own floor is ABOVE that maximum, and the answer is to record the
-assembly as a floor contributor and move the pin — never to loosen the equality.
+Today the assembly is the binding owner at a100 while the highest module floor
+is a98. `unsatisfied_kernel_requirements()` verifies every kernel module and
+top-level name `src/vendor_cp` imports is present in the effective maximum. The
+separate excluded-version check observes that a99 lacks a source-imported
+surface, so the assembly contribution is not merely a number agreeing with
+itself. A future move raises the declared contribution and its source-derived
+plant together; it never loosens the equality.
 
 Two deliberate limits, stated rather than implied:
 
@@ -139,6 +133,7 @@ from typing import Final
 REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 PYPROJECT: Final = REPO_ROOT / "pyproject.toml"
 ASSEMBLY_PACKAGE: Final = REPO_ROOT / "src" / "vendor_cp"
+ASSEMBLY_FLOOR_OWNER: Final = "assembly:vendor_cp"
 
 DEPENDENCY: Final = "dotmac-kernel"
 #: The import name behind that distribution name.
@@ -308,16 +303,20 @@ def declared_kernel_floors(
 
 
 def binding_distribution(floors: dict[str, str] | None = None) -> tuple[str, str]:
-    """The composed distribution whose declared floor is the highest, and it.
+    """The owner whose declared floor is the effective maximum, and it.
 
     Naming it matters as much as the number. When the pin has to move, the
     reviewer needs to know WHICH module asked — a bump nobody can attribute is
     a kernel upgrade taken on nobody's behalf.
     """
 
-    resolved = declared_kernel_floors() if floors is None else floors
+    resolved = (
+        {**declared_kernel_floors(), ASSEMBLY_FLOOR_OWNER: declared_pin()}
+        if floors is None
+        else floors
+    )
     if not resolved:
-        raise FloorError("no composed distribution declares a kernel floor")
+        raise FloorError("no composed distribution or assembly declares a kernel floor")
     name = max(resolved, key=lambda key: (parse(resolved[key]), key))
     return name, resolved[name]
 
@@ -491,11 +490,11 @@ def unsatisfied_kernel_requirements(
     """Which of the assembly's own kernel requirements an INSTALLED kernel lacks.
 
     Non-empty means the assembly out-imports whatever kernel is installed. Run
-    against an installation of the composed maximum, that is the statement the
-    equality rule needs and has never had: the assembly's own floor is at or
-    below the composed maximum, so the maximum of the two IS the composed
-    maximum, so `pin == max(composed floors)` is the whole rule and not an
-    accident.
+    against an installation of the effective maximum, this verifies that the
+    assembly's declared contribution is real rather than a circular restatement
+    of its exact pin.  The excluded-version plant independently proves that a
+    source import first shipped at this floor makes the immediately lower
+    published kernel fail for the named missing surface.
 
     `import_module` is injectable because the interesting half is the failure
     half, and an importer whose refusal has never run is prose.
@@ -614,17 +613,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.what == "assembly-satisfied":
             # The premise, held where it can fail. This answers "is the
-            # assembly's own floor at or below the composed maximum", so it may
-            # only be asked of an installation OF that maximum — asking a
+            # assembly's own declared floor is provided by the effective maximum",
+            # so it may only be asked of an installation OF that maximum — asking a
             # different kernel answers a different question and would report
             # the equality rule proven on a run that never tested it.
-            binding_name, composed_maximum = binding_distribution()
+            binding_name, effective_maximum = binding_distribution()
             installed = installed_kernel_version()
-            if installed != composed_maximum:
+            if installed != effective_maximum:
                 raise FloorError(
                     f"the installed {DEPENDENCY} is {installed} while the "
-                    f"highest floor anything composed declares is "
-                    f"{composed_maximum} (from {binding_name}). This check only "
+                    f"effective assembly floor is {effective_maximum} "
+                    f"(from {binding_name}). This check only "
                     "means something against an installation of that maximum."
                 )
             needed = assembly_kernel_requirements()
@@ -634,18 +633,14 @@ def main(argv: list[str] | None = None) -> int:
                     "this assembly's own source imports "
                     f"{list(unsatisfied)}, which {DEPENDENCY} {installed} does "
                     "not provide. The assembly's OWN floor is therefore ABOVE "
-                    f"the highest floor anything composed declares, so "
-                    "`pin == max(composed floors)` is no longer the rule: the "
-                    "effective floor is the maximum of the composed floors AND "
-                    "the assembly's own direct constraint (Governance ADR 0021 "
-                    "§ 10). Raise the pin to a kernel that provides these and "
-                    "record the assembly as a floor contributor. Do NOT loosen "
-                    "the equality assertion."
+                    f"the declared effective floor. Raise the pin and the "
+                    "assembly contribution together to a kernel that provides "
+                    "these. Do NOT loosen the equality assertion."
                 )
             print(
                 f"{sum(len(names) for names in needed.values())} kernel names "
                 f"across {len(needed)} modules, all provided by {DEPENDENCY} "
-                f"{installed} — the composed maximum, from {binding_name}"
+                f"{installed} — the effective maximum, from {binding_name}"
             )
             return 0
         if args.what == "imports":

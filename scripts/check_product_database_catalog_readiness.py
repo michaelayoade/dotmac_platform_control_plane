@@ -14,17 +14,11 @@ register.  A reviewer may remove an entry only with the integration that makes
 its retirement machine-provable.  Merely publishing every module contribution
 can never make this command report product readiness.
 
-The module half of that ratchet is currently DORMANT, and saying so is the
-point.  ``missing_module_database_catalogs`` asks each composed manifest for a
-``database_catalog`` attribute, and the EXACT-PINNED kernel's ``ModuleManifest``
-declares no such field — so no module could carry one even if its own release
-published it.  Today the probe therefore reports all six for a reason about the
-KERNEL rather than about the modules, and only its composition half can fail.
-``pinned_manifest_declares_contribution_field`` states that premise so a test
-can hold it: when the pin moves to a kernel carrying the field, the premise dies
-and the review that raised the pin has to confirm the probe now measures the
-thing its name claims (``AGENTS.md`` rule 13 — a guard premise is enforceable or
-the region is unmonitored rather than exempt).
+The module half of that ratchet is live at the a100 pin.  Its ``ModuleManifest``
+declares ``database_catalog``, so every row now describes a pinned module
+release that has not published its contribution.  The prior dormant premise is
+gone; a test now holds the inverse so a future kernel cannot silently make this
+axis unreachable again.
 """
 
 from __future__ import annotations
@@ -191,19 +185,7 @@ def missing_module_database_catalogs(
 def pinned_manifest_declares_contribution_field(
     manifest: type = ModuleManifest,
 ) -> bool:
-    """Whether the EXACT-PINNED kernel's manifest type can carry a contribution.
-
-    This is the premise the module probe above rests on, made observable.  While
-    it is False, ``missing_module_database_catalogs`` cannot report anything but
-    every composed stateful module, because the attribute it reads is one no
-    manifest of this generation has: a module release that published a
-    contribution could not even be constructed against this kernel.  The probe is
-    a FORWARD probe, and its "all six" is not evidence about the six.
-
-    Kept next to the probe rather than in the test, so the two read the same
-    ``CONTRIBUTION_FIELD`` and cannot drift into asking about different
-    attributes.
-    """
+    """Whether the exact-pinned manifest can carry the contribution being read."""
 
     return CONTRIBUTION_FIELD in {field.name for field in dataclasses.fields(manifest)}
 
