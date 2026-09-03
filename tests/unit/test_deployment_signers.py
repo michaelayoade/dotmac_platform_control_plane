@@ -13,6 +13,8 @@ reworded sentence stops a prose assertion discriminating, silently.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pytest
 
 from vendor_cp.deployment.signers import (
@@ -39,6 +41,8 @@ EXERCISED_REFUSALS = frozenset(
         SignerRefusal.FOREIGN_NAMESPACE,
         SignerRefusal.PURPOSE_MISMATCH,
         SignerRefusal.SHARED_POINTER,
+        SignerRefusal.SHARED_KEY_MATERIAL,
+        SignerRefusal.NOTHING_TO_COMPARE,
     }
 )
 
@@ -176,3 +180,115 @@ def test_signer_purposes_match_the_installed_control() -> None:
         EXECUTION_OBSERVATION_PURPOSE
         == control_observation.EXECUTION_OBSERVATION_PURPOSE
     )
+
+
+# ── distinctness is a property of the SET, not of a pair ────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class _Signer:
+    """A purpose-bound pointer whose class this module does not ship yet.
+
+    `deployment_dispatch` and `platform_release_evidence` have no descriptor on
+    `main`, and distinctness must be checkable for them before their classes
+    land -- otherwise the guard arrives after the ceremony it exists to protect.
+    Structural typing is what makes that possible.
+    """
+
+    pointer: str
+    purpose: str
+
+
+DISPATCH = _Signer(f"{POINTER_PREFIX}dispatch-signing/primary", "deployment_dispatch")
+EVIDENCE = _Signer(
+    f"{POINTER_PREFIX}release-evidence-signing/primary", "platform_release_evidence"
+)
+
+
+def test_four_distinct_signers_are_admitted() -> None:
+    """POSITIVE CONTROL for the widened check."""
+    require_distinct_signers(
+        AuthorizationSignerPointer(AUTH),
+        ObservationSignerPointer(OBS),
+        DISPATCH,
+        EVIDENCE,
+    )
+
+
+def test_three_purposes_sharing_one_pointer_are_all_named() -> None:
+    """A pair-shaped check saw one sixth of this question at four identities."""
+    shared = f"{POINTER_PREFIX}shared/primary"
+    with pytest.raises(SignerPointerRefused) as refused:
+        require_distinct_signers(
+            AuthorizationSignerPointer(shared),
+            ObservationSignerPointer(shared),
+            _Signer(shared, "deployment_dispatch"),
+            EVIDENCE,
+        )
+    assert refused.value.refusal is SignerRefusal.SHARED_POINTER
+    message = str(refused.value)
+    for purpose in ("deployment_authorization", "deployment_dispatch"):
+        assert purpose in message
+
+
+def test_two_disjoint_pairs_are_both_reported() -> None:
+    """An operator repairing one collision per run re-runs the ceremony once per
+    pair, which is the operator-surface defect in its ceremony form."""
+    first = f"{POINTER_PREFIX}one/primary"
+    second = f"{POINTER_PREFIX}two/primary"
+    with pytest.raises(SignerPointerRefused) as refused:
+        require_distinct_signers(
+            AuthorizationSignerPointer(first),
+            _Signer(first, "deployment_dispatch"),
+            ObservationSignerPointer(second),
+            _Signer(second, "platform_release_evidence"),
+        )
+    message = str(refused.value)
+    assert first in message
+    assert second in message
+
+
+def test_two_pointers_holding_one_key_are_refused_when_fingerprints_are_given() -> None:
+    """A pointer is a spelling; the key is the thing.
+
+    Distinct pointers pass every pointer comparison and still collapse two
+    purposes into one key. Fingerprints are PUBLIC, so comparing them holds this
+    module to pointers-only while still catching the collision.
+    """
+    with pytest.raises(SignerPointerRefused) as refused:
+        require_distinct_signers(
+            AuthorizationSignerPointer(AUTH),
+            ObservationSignerPointer(OBS),
+            fingerprints={AUTH: "fp-same", OBS: "fp-same"},
+        )
+    assert refused.value.refusal is SignerRefusal.SHARED_KEY_MATERIAL
+
+
+def test_distinct_keys_at_distinct_pointers_are_admitted() -> None:
+    """SENSITIVITY for the fingerprint check: it must not refuse everything."""
+    require_distinct_signers(
+        AuthorizationSignerPointer(AUTH),
+        ObservationSignerPointer(OBS),
+        fingerprints={AUTH: "fp-a", OBS: "fp-b"},
+    )
+
+
+def test_without_fingerprints_the_shared_key_shape_is_not_checked_here() -> None:
+    """The boundary, asserted so neither side assumes the other has it.
+
+    Omitting `fingerprints` is choosing the weaker check. This module may not
+    fetch them -- that would be dereferencing a pointer -- so the shape is
+    unmonitored HERE and belongs to Control's own
+    `dispatch_signer_purpose_reused`, which sees one ordered pair at signing
+    time. Asserting the gap keeps it from being quietly assumed closed.
+    """
+    require_distinct_signers(
+        AuthorizationSignerPointer(AUTH), ObservationSignerPointer(OBS)
+    )
+
+
+def test_fewer_than_two_signers_cannot_pass_for_a_check() -> None:
+    """A call that can only ever pass is not a check."""
+    with pytest.raises(SignerPointerRefused) as refused:
+        require_distinct_signers(AuthorizationSignerPointer(AUTH))
+    assert refused.value.refusal is SignerRefusal.NOTHING_TO_COMPARE
