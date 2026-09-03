@@ -130,7 +130,7 @@ def _bundle(
     incumbent: tuple[tuple[str, str], ...] = INCUMBENT,
 ) -> PlatformCpRecoveryBundle:
     deploy = tmp_path / "deploy-root"
-    (deploy / "deploy").mkdir(parents=True)
+    (deploy / "deploy").mkdir(parents=True, exist_ok=True)
     (deploy / "docker-compose.production.yml").write_text("name: x\n")
     (deploy / ".env").write_text("APP_ENV=production\n")
     (deploy / "deploy/product.toml").write_text("schema = 'ProductDeploymentSpec.v1'\n")
