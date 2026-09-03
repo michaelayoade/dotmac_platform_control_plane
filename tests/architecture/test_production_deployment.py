@@ -12,6 +12,8 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -741,3 +743,111 @@ def test_the_app_container_does_not_hold_the_migration_dsn() -> None:
         tomllib.loads(_text("deploy/product.toml"))["migration"]["owner_material"]
         == "MIGRATION_DATABASE_URL"
     )
+
+
+# ── the legacy path is HARDENED: canonical lock, typed reference, no early mutation ──
+
+
+_REFERENCE_ALLOWLIST = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+
+
+def test_lock_validation_and_trap_precede_every_mutation() -> None:
+    """No host mutation before the authorization boundary.
+
+    The reference is validated and the canonical lock held before anything is
+    touched — no pull, no compose, no backup, no migration. The successor's
+    admit check lands at the marked point; nothing here pretends to be it.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+    commands = _commands(deploy)
+
+    validation = commands.index('"$AUTHORIZATION_REF" =~')
+    lock = commands.index("flock --nonblock")
+    trap = commands.index("trap cleanup_effector")
+    first_mutations = [
+        commands.index("docker pull"),
+        commands.index("up -d --wait db"),
+        commands.index("--format custom"),
+        commands.index("dotmac-platform admin migrate"),
+        commands.index("up -d app"),
+    ]
+    boundary = min(first_mutations)
+    assert validation < boundary
+    assert trap < lock < boundary
+
+
+def test_nothing_pretends_to_be_the_admit_check() -> None:
+    """A gate shaped like the successor but unable to admit wedges the path;
+    a gate that quietly admits preserves the bypass. Neither may exist here —
+    the reference is carried, not consulted, until the successor lands."""
+    deploy = _text("scripts/deploy_production.sh")
+    assert "require-authorization" not in deploy
+    assert "authorized_images" not in _commands(deploy)
+
+
+def test_the_lock_is_the_foundation_convention_derived_from_the_descriptor() -> None:
+    """Same inode or it serialises nothing.
+
+    `engine/lock.py: lock_path()` names the file `dotmac_{product}_deploy.lock`
+    under /var/lock, and the Foundation takes it with fcntl.flock() — which is
+    flock(2), the same primitive as flock(1) here. A different file name, or an
+    fcntl-style lockf, would let each side hold "the lock" while the other
+    proceeds. Derived from the descriptor's own `product`, not spelled twice.
+    """
+    product = tomllib.loads(_text("deploy/product.toml"))["product"]
+    expected = f"/var/lock/dotmac_{product}_deploy.lock"
+    deploy = _text("scripts/deploy_production.sh")
+    assert expected in deploy
+    assert "flock --nonblock" in deploy
+    # The symlink and regular-file refusals are the honest shell approximation
+    # of the Python owner's O_NOFOLLOW + fstat; their absence would take the
+    # lock on a file of someone else's choosing.
+    assert '[[ -L "$LOCK_FILE" ]]' in deploy
+
+
+def test_the_reference_allowlist_is_enforced_at_every_layer() -> None:
+    """Each layer is separately invokable, so each validates for itself. The
+    allowlist IS the injection defence: nothing that can pass it can become
+    shell on the far side of an ssh boundary."""
+    pattern = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+    for path in (
+        ".github/workflows/production-deploy.yml",
+        "scripts/deploy_production_with_registry_token.sh",
+        "scripts/deploy_production.sh",
+    ):
+        assert pattern in _text(path), f"{path} does not validate the reference"
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    (
+        "a'; rm -rf /tmp; echo '",
+        "a$(reboot)",
+        "a`id`",
+        "a b",
+        'a"b',
+        "",
+        "-leading-dash",
+        "a" * 129,
+    ),
+)
+def test_the_allowlist_refuses_shell_shaped_references(hostile: str) -> None:
+    """SENSITIVITY, refusing half."""
+    assert re.fullmatch(_REFERENCE_ALLOWLIST, hostile) is None
+
+
+@pytest.mark.parametrize(
+    "benign", ("rollout-1", "CHG-PCP-2026-09-03.01", "a", "x" * 128)
+)
+def test_the_allowlist_admits_real_references(benign: str) -> None:
+    """SENSITIVITY, admitting half — an allowlist admitting nothing would pass
+    every refusal test while making the path unusable."""
+    assert re.fullmatch(_REFERENCE_ALLOWLIST, benign) is not None
+
+
+def test_the_workflow_validates_before_the_ssh_boundary() -> None:
+    workflow = _text(".github/workflows/production-deploy.yml")
+    validate = workflow.index('"$AUTHORIZATION_REF" =~')
+    boundary = workflow.index("Install the production SSH identity")
+    remote = workflow.index("'$AUTHORIZATION_REF'\"")
+    assert validate < boundary < remote
