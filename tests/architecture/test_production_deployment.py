@@ -745,6 +745,129 @@ def test_the_app_container_does_not_hold_the_migration_dsn() -> None:
     )
 
 
+def _active(block: str) -> str:
+    """A compose block with comment lines removed.
+
+    The comment explaining why a material is absent necessarily NAMES it, so a
+    detector that reads raw text forbids the explanation instead of the
+    behaviour — and the cheapest way to satisfy it is to delete the reasoning.
+    """
+    return "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def _materials_in(block: str) -> set[str]:
+    """Which DECLARED materials a compose block actually sets.
+
+    Bounded by `runtime_materials.names` rather than matching any assignment,
+    so this answers a question about the declared vocabulary instead of
+    grepping for a concept.
+    """
+    declared = tomllib.loads(_text("deploy/product.toml"))["runtime_materials"]
+    active = _active(block)
+    # Anchored to the start of a mapping entry, NOT a substring search:
+    # `DATABASE_URL:` occurs inside both `PLATFORM_DATABASE_URL:` and
+    # `MIGRATION_DATABASE_URL:`, so a substring test reports a material the
+    # block never set and would let one name vouch for another.
+    return {
+        name
+        for name in declared["names"]
+        if re.search(rf"^\s*{re.escape(name)}:", active, re.MULTILINE)
+    }
+
+
+def test_no_declared_long_running_role_may_hold_the_owner_material() -> None:
+    """Derived from the descriptor, so a role added tomorrow is covered today.
+
+    `test_the_app_container_does_not_hold_the_migration_dsn` above pins the
+    `app` service BY NAME. That is the service that had the defect, and naming
+    it keeps the regression legible — but a hand-named service cannot see the
+    worker, sidecar or second web role somebody adds next, and an integration
+    branch that predates the removal rebasing over this file is exactly how the
+    owner credential comes back.
+
+    So this one enumerates the ROLES the accepted descriptor declares. Every one
+    of them is long-running by construction — a role has replicas, a stop grace
+    period and a health probe — and none of them may hold the material the
+    descriptor names as the migration runner's.
+    """
+    product = tomllib.loads(_text("deploy/product.toml"))
+    owner_material = product["migration"]["owner_material"]
+    roles = product["roles"]
+    assert roles, "no declared roles: this guard would pass over an empty set"
+
+    compose = _text("docker-compose.production.yml")
+    for role in roles:
+        block = _compose_service_block(compose, role["code"])
+        held = _materials_in(block)
+
+        assert owner_material not in held, (
+            f"the long-running {role['code']!r} role holds {owner_material}, a "
+            "standing owner credential in every process of that container"
+        )
+        assert "app_admin" not in _active(
+            block
+        ), f"no alias of the owner credential may reach {role['code']!r}"
+        # SENSITIVITY, per role: the block really was found and really was read.
+        # Without this, a renamed service would yield an empty block and satisfy
+        # every absence above by finding nothing at all.
+        assert held == set(role["materials"]), (
+            f"{role['code']!r} sets {sorted(held)} but its role declares "
+            f"{sorted(role['materials'])}"
+        )
+
+
+def test_the_migration_runner_still_holds_what_the_descriptor_names() -> None:
+    """POSITIVE CONTROL for the absences above. If the material vanished from
+    the compose file entirely, every refusal would pass for the wrong reason."""
+    product = tomllib.loads(_text("deploy/product.toml"))
+    owner_material = product["migration"]["owner_material"]
+    ops = _compose_service_block(_text("docker-compose.production.yml"), "ops")
+    assert owner_material in _materials_in(ops)
+
+    role_codes = {role["code"] for role in product["roles"]}
+    assert "ops" not in role_codes, (
+        "the migration runner is a one-shot container, not a declared role; if "
+        "it became one, the guard above would forbid the material it needs"
+    )
+
+
+def test_the_owner_material_detector_bites_and_ignores_prose() -> None:
+    """SENSITIVITY. A guard never observed failing is not evidence.
+
+    Both directions: it must fire on a real reintroduction, and it must stay
+    silent on the comment that explains the absence — which is the exact text
+    sitting in `docker-compose.production.yml` today.
+    """
+    reintroduced = (
+        "    environment:\n"
+        "      DATABASE_URL: postgresql+psycopg://app@db:5432/x\n"
+        "      MIGRATION_DATABASE_URL: postgresql+psycopg://app_admin@db:5432/x\n"
+    )
+    assert "MIGRATION_DATABASE_URL" in _materials_in(reintroduced)
+
+    explained = (
+        "    environment:\n"
+        "      # No MIGRATION_DATABASE_URL, deliberately. The long-running\n"
+        "      # application never migrates.\n"
+        "      DATABASE_URL: postgresql+psycopg://app@db:5432/x\n"
+    )
+    assert _materials_in(explained) == {"DATABASE_URL"}
+
+
+def test_one_material_name_cannot_vouch_for_another() -> None:
+    """SENSITIVITY for the anchoring. `DATABASE_URL` is a substring of both
+    other names, so a substring test would report a block as holding a material
+    it never set — and, worse, would report the app as holding `DATABASE_URL`
+    on the strength of the migration DSN alone."""
+    platform_only = "    environment:\n      PLATFORM_DATABASE_URL: x\n"
+    assert _materials_in(platform_only) == {"PLATFORM_DATABASE_URL"}
+
+    migration_only = "    environment:\n      MIGRATION_DATABASE_URL: x\n"
+    assert _materials_in(migration_only) == {"MIGRATION_DATABASE_URL"}
+
+
 # ── the legacy path is HARDENED: canonical lock, typed reference, no early mutation ──
 
 
