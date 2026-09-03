@@ -27,6 +27,15 @@ on:
           main — so there was no way back to what is running.
         required: true
         type: string
+      authorization_ref:
+        description: >-
+          The Control authorization this deployment will execute under. While
+          the legacy path is frozen this is validated and carried, never acted
+          on; the successor derives image, revision, operation and digests from
+          it. Shape-restricted so it can cross the ssh boundary without ever
+          being interpretable as shell.
+        required: true
+        type: string
       target_server_name:
         description: Explicit production target identity
         required: true
@@ -51,6 +60,7 @@ jobs:
       CI_RUN_ID: ${{ inputs.ci_run_id }}
       IMAGE_DIGEST: ${{ inputs.image_digest }}
       IMAGE_SOURCE_REVISION: ${{ inputs.image_source_revision }}
+      AUTHORIZATION_REF: ${{ inputs.authorization_ref }}
       TARGET_SERVER_NAME: ${{ inputs.target_server_name }}
       TARGET_HOST: ${{ vars.VENDOR_PRODUCTION_HOST }}
       TARGET_USER: ${{ vars.VENDOR_PRODUCTION_USER }}
@@ -70,6 +80,15 @@ jobs:
             exit 1
           }
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          # Validated BEFORE anything crosses the ssh boundary. The remote
+          # command is a string the remote shell re-parses, so the only safe
+          # reference is one that cannot contain shell at all: no quote, no
+          # space, no dollar, no backtick can pass this allowlist. The wrapper
+          # and the host script validate the same shape on arrival.
+          [[ "$AUTHORIZATION_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || {
+            echo "authorization_ref must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\$" >&2
+            exit 1
+          }
           test -n "$TARGET_HOST"
           test -n "$TARGET_USER"
           test -n "$TARGET_DIR"
@@ -220,4 +239,4 @@ jobs:
             | ssh -i "$HOME/.ssh/vendor-production" "$remote" \
               "cd '$TARGET_DIR' && \
                 bash scripts/deploy_production_with_registry_token.sh \
-                  '$IMAGE_DIGEST' '$GITHUB_ACTOR'"
+                  '$IMAGE_DIGEST' '$GITHUB_ACTOR' '$AUTHORIZATION_REF'"

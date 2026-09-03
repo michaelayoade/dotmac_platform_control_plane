@@ -14,9 +14,66 @@ die() {
     exit 1
 }
 
-[[ $# -eq 1 ]] || die "usage: scripts/deploy_production.sh sha256:<digest>"
+[[ $# -eq 2 ]] || die "usage: scripts/deploy_production.sh sha256:<digest> <authorization-ref>"
 readonly DIGEST="$1"
+readonly AUTHORIZATION_REF="$2"
 [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "image digest is not sha256"
+# Validated ON ARRIVAL, not trusted from the caller, and the allowlist is the
+# injection defence: no quote, no space, no dollar, no backtick can pass, so a
+# reference can cross an ssh remote-command boundary without becoming shell.
+# The workflow and the wrapper validate the same shape before sending; each
+# layer checks for itself because each layer is separately invokable.
+[[ "$AUTHORIZATION_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+    || die "authorization reference must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\$"
+
+# This script's own cleanup. The wrapper that hands it a registry token traps;
+# this process is the one holding the compose operation and the bundle
+# temporary when an SSH connection drops, and it had no trap of its own.
+cleanup_effector() {
+    local status=$?
+    [[ -n "${BUNDLE_TMP:-}" && -d "${BUNDLE_TMP:-/nonexistent}" ]] \
+        && rm -rf -- "$BUNDLE_TMP"
+    return "$status"
+}
+trap cleanup_effector EXIT HUP INT TERM
+
+# ── One deployment at a time, on the SAME inode the Foundation locks ─────────
+#
+# The lock file name is the Foundation's own convention —
+# `engine/lock.py: lock_path()` returns `dotmac_{product}_deploy.lock` under
+# /var/lock, and the product is `dotmac_vendor_control_plane` from the accepted
+# descriptor. Foundation takes it with fcntl.flock(), which is flock(2);
+# `flock(1)` here is the same primitive, so the two contend on the same inode
+# rather than each holding "the lock" while the other proceeds. A different
+# name, or fcntl-style lockf here, would serialise nothing while appearing to.
+#
+# Weaker than the Python owner in one respect, stated rather than hidden:
+# flock(1) follows symlinks and cannot fstat the descriptor it locked, so the
+# best a shell caller can do is refuse a symlink or a non-regular file before
+# opening. The successor executes through the Foundation and inherits the
+# hardened lock; this shell path is frozen below anyway.
+readonly LOCK_FILE="${LOCK_FILE:-/var/lock/dotmac_dotmac_vendor_control_plane_deploy.lock}"
+[[ -L "$LOCK_FILE" ]] && die "deployment lock $LOCK_FILE is a symlink; refusing"
+[[ ! -e "$LOCK_FILE" || -f "$LOCK_FILE" ]] \
+    || die "deployment lock $LOCK_FILE is not a regular file; refusing"
+exec {LOCK_FD}>>"$LOCK_FILE" || die "cannot open deployment lock $LOCK_FILE"
+flock --nonblock "$LOCK_FD" || die "another deployment holds $LOCK_FILE \
+($(head -c 200 "$LOCK_FILE" 2>/dev/null || echo 'holder unreadable')). Two \
+concurrent runs each start a backup and each migrate; that is the load-52 \
+incident this lock exists to prevent."
+printf '%s %s\n' "$$" "legacy-freeze ${DIGEST}" >"$LOCK_FILE"
+
+# ── Where the successor's ADMIT check lands ─────────────────────────────────
+#
+# The authorization reference is validated and carried, and NOT yet consulted:
+# resolving approved-plan standing and `authorized_images` arrives with the
+# authorized executor (Foundation a5 + Control a10), which replaces this
+# script's role wholesale. Nothing here pretends to be that check — a gate
+# shaped like the successor but unable to admit is how a path stays wedged, and
+# a gate that quietly admits is how a bypass survives a rewrite. Until the
+# successor demonstrates a real admit path, this hardened legacy path remains
+# production's emergency executor: canonical lock held, identifiers validated,
+# no mutation above this line.
 
 [[ -f "$ENV_FILE" ]] || die "$ENV_FILE is missing"
 grep -Fqx 'APP_ENV=production' "$ENV_FILE" || die "APP_ENV marker mismatch"
