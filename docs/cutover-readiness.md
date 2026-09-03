@@ -89,23 +89,19 @@ amendment at the owning source. Six slices, three landed.
 
 | Distribution | Pinned here | Released | Position |
 | --- | --- | --- | --- |
-| `dotmac-kernel` | `0.1.0a100` | a101 | a100 is adopted for the real ADR-0016 `dotmac_kernel.api_documentation` construction seam; the official artifact passed the exact-closure matrix and adds no migration. `kernel-pin` derives the a99 negative mutation from the index and requires that missing module to be the failure. a101 is published but not adopted here — see `docs/operations/kernel-a100-assessment-2026-09-01.md` |
+| `dotmac-kernel` | `0.1.0a101` | a101 | current; the verified a101 artifact keeps the ADR-0016 API-documentation seam and makes the public `create_app` import independent of the product-owned PostgreSQL driver |
 | `dotmac-approvals` | `0.1.0a5` | a5 | current |
 | `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current (a5 unpublished; never pin it) |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
 | `dotmac-commercial-agreements` | `0.1.0a2` | a2 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
-| `dotmac-deployment-control` | `0.1.0a2` | a2 | current |
+| `dotmac-deployment-control` | `0.1.0a10` | a10 | current; includes the approved-plan read API, portable signed authorization, image-set and execution-plan bindings, and the typed database catalogue |
 | `dotmac-brand-profiles` | not pinned | a1, tagged | deferred by local decision (ADR-0007 § 6) |
 
-ADR-0007's rule is that a package enters with the coherent slice that consumes
-it, so "not pinned" for Deployment Control is sequencing, not a blocker: the
-release exists and the slice may be written now.
-
-**a2 rather than a1**, because a1 returns the raw unique-constraint error
-instead of the canonical verdict when two genuinely concurrent first
-observations race, and this assembly receives arrivals from deployments it does
-not control over an at-least-once transport.
+The original a2 composition established the target owner. The a10 pin is the
+artifact floor for the current cutover: earlier releases cannot bind the
+authorized image set, canonical descriptor, Foundation execution plan and
+approved-plan read-back into one portable authorization.
 
 ## Deployment Control is two differently-shaped halves
 

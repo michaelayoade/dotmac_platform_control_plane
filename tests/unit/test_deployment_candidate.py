@@ -11,6 +11,7 @@ inputs are refused before they get there.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -72,7 +73,7 @@ class _Spy:
     second opinion about what those values mean.
     """
 
-    calls: list[dict[str, str]] = field(default_factory=list)
+    calls: list[dict[str, object]] = field(default_factory=list)
 
     def __call__(
         self,
@@ -81,6 +82,7 @@ class _Spy:
         image: CandidateImage,
         target: str,
         operation: str,
+        prestate: Mapping[str, object],
     ) -> RenderedCandidate:
         self.calls.append(
             {
@@ -89,6 +91,7 @@ class _Spy:
                 "source_revision": image.source_revision,
                 "target": target,
                 "operation": operation,
+                "prestate": dict(prestate),
             }
         )
         return RenderedCandidate("sha256:" + "0" * 64, "sha256:" + "1" * 64, b"{}")
@@ -102,6 +105,14 @@ def _render(receipt_document: dict[str, str], spy: _Spy) -> None:
         image,
         target="vendor-cp-prod",
         operation="deploy",
+        prestate={
+            "roles": [
+                {
+                    "role": "app",
+                    "image_digest": "sha256:" + "9" * 64,
+                }
+            ]
+        },
         renderer=spy,
     )
 
@@ -270,5 +281,10 @@ def test_a_candidate_with_no_target_is_refused() -> None:
     image = admit_candidate_image(receipt, _observation(receipt))
     with pytest.raises(CandidateRefused, match="authorizes every host"):
         render_candidate(
-            str(DESCRIPTOR), image, target="  ", operation="deploy", renderer=_Spy()
+            str(DESCRIPTOR),
+            image,
+            target="  ",
+            operation="deploy",
+            prestate={"roles": []},
+            renderer=_Spy(),
         )

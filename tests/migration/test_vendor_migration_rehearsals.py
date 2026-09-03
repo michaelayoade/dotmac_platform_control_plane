@@ -26,7 +26,7 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a100)
+KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a101)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 
@@ -58,7 +58,7 @@ LICENSING_HEAD = "li_0001_licensing"
 # module head IS depended on by a vendor revision — `v017` names it — so it
 # is an ancestor and NOT a version row, the same shape `ap_0001` had before
 # a5 moved that lineage past it.
-DEPLOYMENT_CONTROL_HEAD = "dc_0002_canonical_plan_digest"
+DEPLOYMENT_CONTROL_HEAD = "dc_0006_observation_key_identity"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v018_licence_delivery_intents"
@@ -223,7 +223,7 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         #
         # Commercial Agreements depends on kernel `0026`, which kept the kernel
         # tip an ancestor while `0026` WAS the tip. At `0028` it no longer is.
-        # `v017` names `dc_0001` rather than its lineage's tip, so `dc_0002` is
+        # `v017` names `dc_0001` rather than its lineage's tip, so `dc_0006` is
         # likewise depended on by nothing.
         KERNEL_HEAD,
         DEPLOYMENT_CONTROL_HEAD,

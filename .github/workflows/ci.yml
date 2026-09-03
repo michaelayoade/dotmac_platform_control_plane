@@ -37,6 +37,13 @@ jobs:
           POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
           POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: poetry install
+      - name: Install the exact unpublished Foundation candidate for contract tests
+        env:
+          GH_TOKEN: ${{ secrets.FOUNDATION_ARTIFACT_READ_TOKEN }}
+        run: |
+          python3 scripts/stage_foundation_candidate.py
+          poetry run pip install --no-index --no-deps --only-binary=:all: \
+            .candidate-build/*.whl
       - name: Lint
         run: poetry run ruff check .
       - name: Format check
@@ -264,6 +271,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Stage the exact Foundation candidate for the image build
+        env:
+          GH_TOKEN: ${{ secrets.FOUNDATION_ARTIFACT_READ_TOKEN }}
+        run: python3 scripts/stage_foundation_candidate.py
       - name: Build the production runtime without publishing
         env:
           FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}

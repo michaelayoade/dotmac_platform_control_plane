@@ -1,0 +1,93 @@
+{
+  "assembly": "dotmac-vendor-control-plane",
+  "module_planes": [
+    {
+      "module": "approvals",
+      "planes": [
+        "platform"
+      ]
+    }
+  ],
+  "modules": [
+    {
+      "code": "accounts",
+      "source": "assembly"
+    },
+    {
+      "code": "allocations",
+      "source": "assembly"
+    },
+    {
+      "code": "approvals",
+      "contract_version": 2,
+      "distribution": "dotmac-approvals",
+      "version": "0.1.0a5"
+    },
+    {
+      "code": "commercial_agreements",
+      "contract_version": 2,
+      "distribution": "dotmac-commercial-agreements",
+      "version": "0.1.0a2"
+    },
+    {
+      "code": "console",
+      "contract_version": 2,
+      "declared_version": "0.1.0",
+      "source": "assembly"
+    },
+    {
+      "code": "contracts",
+      "source": "assembly"
+    },
+    {
+      "code": "deployment_control",
+      "contract_version": 2,
+      "distribution": "dotmac-deployment-control",
+      "version": "0.1.0a10"
+    },
+    {
+      "code": "entitlement_allocation",
+      "contract_version": 2,
+      "distribution": "dotmac-entitlement-allocation",
+      "version": "0.1.0a6"
+    },
+    {
+      "code": "licence_delivery",
+      "source": "assembly"
+    },
+    {
+      "code": "licensing",
+      "contract_version": 2,
+      "distribution": "dotmac-licensing",
+      "version": "0.1.0a1"
+    },
+    {
+      "code": "offers",
+      "source": "assembly"
+    },
+    {
+      "code": "provisioning",
+      "source": "assembly"
+    },
+    {
+      "code": "readiness",
+      "source": "assembly"
+    },
+    {
+      "code": "release_catalog",
+      "contract_version": 2,
+      "distribution": "dotmac-release-catalog",
+      "version": "0.1.0a4"
+    },
+    {
+      "code": "release_evidence",
+      "source": "assembly"
+    },
+    {
+      "code": "vendor_approvals",
+      "source": "assembly"
+    }
+  ],
+  "schema": "ProductAssemblyManifest.v1",
+  "web_enabled": true
+}

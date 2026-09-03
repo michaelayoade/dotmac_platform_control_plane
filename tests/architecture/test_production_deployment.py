@@ -106,6 +106,62 @@ def test_the_runtime_image_installs_the_wheel_and_carries_no_source_tree() -> No
     assert "COPY --chown=10001:10001 alembic ./alembic" in runtime
 
 
+def test_the_image_carries_a_complete_offline_deployment_tool_bundle() -> None:
+    dockerfile = _text("Dockerfile")
+    workflow = _text(".github/workflows/production-image.yml")
+    ci = _text(".github/workflows/ci.yml")
+    installer = _text("scripts/install_deployment_tool.sh")
+    resolver = _text("scripts/stage_foundation_candidate.py")
+
+    assert "dotmac-deployment-tool-bundle/1" in dockerfile
+    assert "/opt/dotmac/deployment-wheelhouse" in dockerfile
+    assert "deployment-tool-requirements.txt" in dockerfile
+    assert "--dest /opt/dotmac/deployment-wheelhouse" in dockerfile
+    assert "--no-deps --only-binary=:all:" in dockerfile
+    assert "deploy/foundation-candidate.json" in resolver
+    assert "secrets.FOUNDATION_ARTIFACT_READ_TOKEN" in workflow
+    assert (
+        "secrets.GITHUB_TOKEN"
+        not in workflow.split(
+            "Stage the exact Foundation candidate for the image build", 1
+        )[1].split("Build the candidate", 1)[0]
+    )
+    assert "python3 scripts/stage_foundation_candidate.py" in workflow
+    assert ci.count("python3 scripts/stage_foundation_candidate.py") == 2
+    assert ci.count("secrets.FOUNDATION_ARTIFACT_READ_TOKEN") == 2
+    assert ".github/workflows/foundation-candidate.yml" in resolver
+    assert "repository_id" in resolver and "head_repository_id" in resolver
+    assert "wheel_sha256" in resolver and "wheel_size" in resolver
+    assert "--no-index --no-deps --only-binary=:all:" in ci
+
+    # The target consumes only the already-present digest-pinned image. It has
+    # no registry/index credential and no network fallback.
+    assert "docker pull" not in installer
+    assert "gh api" not in installer
+    assert 'image inspect "$IMAGE_REFERENCE"' in installer
+    assert 'cp "$container_id:${BUNDLE_PATH}/."' in installer
+    assert "PIP_INDEX_URL" in installer and "PIP_EXTRA_INDEX_URL" in installer
+    assert "--no-index --no-deps --only-binary=:all:" in installer
+
+
+def test_deployment_tool_install_is_versioned_and_switches_only_after_proof() -> None:
+    installer = _commands(_text("scripts/install_deployment_tool.sh"))
+
+    assert 'readonly RELEASES="$TOOL_ROOT/releases"' in installer
+    assert 'readonly CURRENT="$TOOL_ROOT/current"' in installer
+    assert "flock -x 9" in installer
+    assert '"$PYTHON" -m venv "$RELEASE"' in installer
+    assert 'mktemp -d "$RELEASES/.staging.XXXXXX"' not in installer
+    assert 'mv -- "$stage" "$RELEASE"' not in installer
+    assert '"$RELEASE/bin/dotmac-deploy" --version' in installer
+    assert 'mv -Tf -- "$link" "$CURRENT"' in installer
+    assert 'rm -rf -- "$TOOL_ROOT"' not in installer
+    verify = installer.index("discover_bindings()")
+    execute = installer.index('"$RELEASE/bin/dotmac-deploy" --version')
+    switch = installer.index('mv -Tf -- "$link" "$CURRENT"')
+    assert verify < execute < switch
+
+
 def test_the_import_path_guard_can_still_see_an_assignment() -> None:
     """SENSITIVITY. An empty offender list is also what a broken check returns,
     and this one has already been wrong once in the permissive direction.

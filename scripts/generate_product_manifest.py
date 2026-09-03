@@ -9,10 +9,11 @@ gate reported green on a composition nobody had pinned.
 
 ## Why the version recorded is the DISTRIBUTION's, not the manifest's
 
-A module carries a version literal on its `ModuleManifest` and its wheel carries
-one in distribution metadata, and those are two copies of the same fact. They
-can disagree: at the time of writing `dotmac-deployment-control` declares
-`0.1.0a2` on its manifest while the installed distribution is `0.1.0a6`.
+A module may carry a version literal on its `ModuleManifest` while its wheel
+carries one in distribution metadata, and those are two copies of the same
+fact. They can disagree. Deployment Control did through a6; from a7 onward it
+derives the manifest value from installed metadata, but other modules are still
+checked rather than assumed to follow that pattern.
 
 The manifest records the DISTRIBUTION version, because that is artifact
 identity — it is the thing the lockfile pins, the thing the hash covers, and the
@@ -34,7 +35,8 @@ from pathlib import Path
 from vendor_cp.assembly import build_spec
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / "deploy" / "product-manifest.json"
+MANIFEST = ROOT / "deploy" / "prospective" / "product-manifest.json"
+IMMUTABLE_MANIFESTS = ROOT / "deploy" / "manifests"
 
 #: Module code -> the distribution that ships it. A module with no entry is
 #: assembled in this repository and has no separate distribution identity.
@@ -104,10 +106,23 @@ def digest(manifest: dict[str, object]) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(manifest)).hexdigest()
 
 
+def immutable_manifest_path(manifest: dict[str, object]) -> Path:
+    identity = digest(manifest).removeprefix("sha256:")
+    return IMMUTABLE_MANIFESTS / f"sha256-{identity}.json"
+
+
 def main() -> int:
     manifest = build_manifest()
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
-    MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    rendered = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    MANIFEST.write_text(rendered)
+    immutable = immutable_manifest_path(manifest)
+    immutable.parent.mkdir(parents=True, exist_ok=True)
+    if immutable.exists() and immutable.read_text(encoding="utf-8") != rendered:
+        raise SystemExit(
+            f"immutable manifest {immutable} already exists with different bytes"
+        )
+    immutable.write_text(rendered, encoding="utf-8")
     print(digest(manifest))
     return 0
 

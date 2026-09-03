@@ -20,8 +20,10 @@ from vendor_cp.deployment.signers import (
     EXECUTION_OBSERVATION_PURPOSE,
     FORBIDDEN_SIGNING_POINTERS,
     POINTER_PREFIX,
+    RELEASE_EVIDENCE_PURPOSE,
     AuthorizationSignerPointer,
     ObservationSignerPointer,
+    ReleaseEvidenceSignerPointer,
     SignerPointerRefused,
     SignerRefusal,
     require_distinct_signers,
@@ -29,6 +31,7 @@ from vendor_cp.deployment.signers import (
 
 AUTH = "secret/dotmac/platform-cp/authorization-signing/primary"
 OBS = "secret/dotmac/platform-cp/target-observation-signing/primary"
+RELEASE = "secret/dotmac/platform-cp/release-evidence-signing/primary"
 
 #: The refusal codes this file actually drives, maintained by hand beside the
 #: tests that drive them. Ratcheted in both directions against the enum below,
@@ -54,6 +57,7 @@ def test_the_two_pointers_are_admitted() -> None:
     ever observed refusing might refuse everything."""
     assert AuthorizationSignerPointer(AUTH).purpose == AUTHORIZATION_PURPOSE
     assert ObservationSignerPointer(OBS).purpose == EXECUTION_OBSERVATION_PURPOSE
+    assert ReleaseEvidenceSignerPointer(RELEASE).purpose == RELEASE_EVIDENCE_PURPOSE
 
 
 def test_every_forbidden_pointer_is_refused_by_value_whatever_its_namespace() -> None:
@@ -67,7 +71,11 @@ def test_every_forbidden_pointer_is_refused_by_value_whatever_its_namespace() ->
     """
     assert FORBIDDEN_SIGNING_POINTERS, "an empty forbidden set refuses nothing"
     for pointer in FORBIDDEN_SIGNING_POINTERS:
-        for factory in (AuthorizationSignerPointer, ObservationSignerPointer):
+        for factory in (
+            AuthorizationSignerPointer,
+            ObservationSignerPointer,
+            ReleaseEvidenceSignerPointer,
+        ):
             with pytest.raises(SignerPointerRefused) as refused:
                 factory(pointer)
             assert refused.value.refusal is SignerRefusal.FORBIDDEN_POINTER
@@ -124,6 +132,9 @@ def test_a_signer_may_not_declare_the_other_purpose() -> None:
     with pytest.raises(SignerPointerRefused) as observation:
         ObservationSignerPointer(OBS, purpose=AUTHORIZATION_PURPOSE)
     assert observation.value.refusal is SignerRefusal.PURPOSE_MISMATCH
+    with pytest.raises(SignerPointerRefused) as release:
+        ReleaseEvidenceSignerPointer(RELEASE, purpose=AUTHORIZATION_PURPOSE)
+    assert release.value.refusal is SignerRefusal.PURPOSE_MISMATCH
 
 
 def test_one_pointer_cannot_serve_both_purposes() -> None:
@@ -131,12 +142,16 @@ def test_one_pointer_cannot_serve_both_purposes() -> None:
     twice satisfies every per-class refusal and still collapses the two
     questions into one key."""
     require_distinct_signers(
-        AuthorizationSignerPointer(AUTH), ObservationSignerPointer(OBS)
+        AuthorizationSignerPointer(AUTH),
+        ObservationSignerPointer(OBS),
+        ReleaseEvidenceSignerPointer(RELEASE),
     )
     same = "secret/dotmac/platform-cp/shared/primary"
     with pytest.raises(SignerPointerRefused) as refused:
         require_distinct_signers(
-            AuthorizationSignerPointer(same), ObservationSignerPointer(same)
+            AuthorizationSignerPointer(same),
+            ObservationSignerPointer(OBS),
+            ReleaseEvidenceSignerPointer(same),
         )
     assert refused.value.refusal is SignerRefusal.SHARED_POINTER
 
@@ -144,7 +159,11 @@ def test_one_pointer_cannot_serve_both_purposes() -> None:
 def test_no_key_material_can_be_held_here() -> None:
     """The seam carries pointers. A field able to hold a secret would make this
     module a place where one could come to rest."""
-    for pointer in (AuthorizationSignerPointer(AUTH), ObservationSignerPointer(OBS)):
+    for pointer in (
+        AuthorizationSignerPointer(AUTH),
+        ObservationSignerPointer(OBS),
+        ReleaseEvidenceSignerPointer(RELEASE),
+    ):
         assert set(type(pointer).__dataclass_fields__) == {"pointer", "purpose"}
 
 

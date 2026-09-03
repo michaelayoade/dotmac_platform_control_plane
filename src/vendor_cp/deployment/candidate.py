@@ -270,6 +270,7 @@ class PlanRenderer(Protocol):
         image: CandidateImage,
         target: str,
         operation: str,
+        prestate: Mapping[str, object],
     ) -> RenderedCandidate: ...
 
 
@@ -279,6 +280,7 @@ def _foundation_renderer(
     image: CandidateImage,
     target: str,
     operation: str,
+    prestate: Mapping[str, object],
 ) -> RenderedCandidate:
     """Replace two fields, then let the Foundation say what that means.
 
@@ -295,6 +297,7 @@ def _foundation_renderer(
             build_plan,
         )
         from dotmac_deployment_foundation.execution_plan import (  # noqa: PLC0415
+            HostPrestateV1,
             render_execution_plan,
         )
         from dotmac_deployment_foundation.spec import (  # noqa: PLC0415
@@ -318,12 +321,14 @@ def _foundation_renderer(
         source_revision=image.source_revision,
     )
     document = build_canonical_document(candidate)
+    host_prestate = HostPrestateV1.from_document(dict(prestate))
     plan = render_execution_plan(
         candidate,
         build_plan(candidate),
         target=target,
         operation=operation,
         descriptor_digest=document.sha256_digest(),
+        prestate=host_prestate,
     )
     return RenderedCandidate(
         descriptor_digest=document.sha256_digest(),
@@ -338,6 +343,7 @@ def render_candidate(
     *,
     target: str,
     operation: str,
+    prestate: Mapping[str, object],
     renderer: PlanRenderer | None = None,
 ) -> RenderedCandidate:
     """Derive the candidate's canonical document and execution plan.
@@ -360,4 +366,5 @@ def render_candidate(
         image=image,
         target=target,
         operation=operation,
+        prestate=prestate,
     )

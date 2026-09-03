@@ -5,4 +5,5 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 dist/
+.candidate-build/
 .env

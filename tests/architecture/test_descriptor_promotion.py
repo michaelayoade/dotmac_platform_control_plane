@@ -41,6 +41,7 @@ from vendor_cp.migrations import composed_version_locations, make_alembic_config
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "deploy"
 ACCEPTED = DEPLOY / "product.toml"
+PROSPECTIVE = DEPLOY / "prospective" / "product.toml"
 LEDGER = DEPLOY / "descriptor-promotions.json"
 RECONCILIATION = (
     ROOT / "docs" / "operations" / "descriptor-reconciliation-2026-08-31.md"
@@ -81,6 +82,10 @@ def _ledger() -> list[dict[str, object]]:
 
 def _descriptor() -> dict[str, object]:
     return tomllib.loads(ACCEPTED.read_text(encoding="utf-8"))
+
+
+def _prospective_descriptor() -> dict[str, object]:
+    return tomllib.loads(PROSPECTIVE.read_text(encoding="utf-8"))
 
 
 def _isolation(code: str) -> dict[str, object]:
@@ -228,7 +233,7 @@ def test_the_reconciliation_record_names_what_it_repairs() -> None:
 
 def test_the_declared_heads_are_the_composed_effective_heads() -> None:
     """Recomputed from the installed lineages, offline, with no database."""
-    migration = _descriptor()["migration"]
+    migration = _prospective_descriptor()["migration"]
     assert isinstance(migration, dict)
     assert tuple(migration["expected_heads"]) == composed_effective_heads()
 

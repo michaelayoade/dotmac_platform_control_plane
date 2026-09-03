@@ -97,6 +97,14 @@ jobs:
             --branch main \
             --expect-head "${{ steps.select.outputs.current_main }}"
 
+      - name: Stage the exact Foundation candidate for the image build
+        env:
+          # Repository GITHUB_TOKEN is scoped to Platform CP and cannot read
+          # another repository's Actions artifacts, even when that repository
+          # is public. This credential is read-only Actions access to Starter.
+          GH_TOKEN: ${{ secrets.FOUNDATION_ARTIFACT_READ_TOKEN }}
+        run: python3 scripts/stage_foundation_candidate.py
+
       # ── 3. Build ONE local candidate. Nothing is pushed by this step. ───
       - name: Build the candidate
         env:

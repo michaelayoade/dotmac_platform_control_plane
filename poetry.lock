@@ -385,14 +385,14 @@ reference = "forgejo"
 
 [[package]]
 name = "dotmac-deployment-control"
-version = "0.1.0a6"
+version = "0.1.0a10"
 description = "DotMac Deployment Control — desired deployment intent, immutable plans, approval-gated rollouts, authenticated target acknowledgements and drift reconciliation for licensed deployments (ADR-0057 § 3)"
 optional = false
 python-versions = ">=3.11,<3.14"
 groups = ["main"]
 files = [
-    {file = "dotmac_deployment_control-0.1.0a6-py3-none-any.whl", hash = "sha256:9b02cf33f954b6562858af320b518c10f9e93aa92fbc3873e4a83fdf117b8fc0"},
-    {file = "dotmac_deployment_control-0.1.0a6.tar.gz", hash = "sha256:68871c24360ece99d8cd8301daa6c0d246e646c2c57ed19a7b9ea3d42b1adad0"},
+    {file = "dotmac_deployment_control-0.1.0a10-py3-none-any.whl", hash = "sha256:4c0050bb7fd048345ea1899aa34ad6012dc7ba9d5f4ba10785d5ff3eda8c5dbd"},
+    {file = "dotmac_deployment_control-0.1.0a10.tar.gz", hash = "sha256:ba99565657ad48d3b519318dcb3a5a47ba00889753064a9e7c2c99cfb9b560dc"},
 ]
 
 [package.dependencies]
@@ -427,14 +427,14 @@ reference = "forgejo"
 
 [[package]]
 name = "dotmac-kernel"
-version = "0.1.0a100"
+version = "0.1.0a101"
 description = "DotMac platform kernel — multi-tenant FastAPI foundation (config, RLS db, identity/tenancy models, security, platform auth, middleware, settings, features registry, audit)"
 optional = false
 python-versions = ">=3.11,<3.14"
 groups = ["main"]
 files = [
-    {file = "dotmac_kernel-0.1.0a100-py3-none-any.whl", hash = "sha256:60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c"},
-    {file = "dotmac_kernel-0.1.0a100.tar.gz", hash = "sha256:d7d6bd6e4ae9bddf90e1b473fdefd02277a20645561f57929d461ce4da0840ae"},
+    {file = "dotmac_kernel-0.1.0a101-py3-none-any.whl", hash = "sha256:9145716dadd08423421d08483f6a9ff4de47d6d94ef4bcf16e29edcca008c569"},
+    {file = "dotmac_kernel-0.1.0a101.tar.gz", hash = "sha256:47fcd972710f4d73f397d981e14cd6ce73e73ce32fb9f003e4453f4bfcc10715"},
 ]
 
 [package.dependencies]
@@ -1647,4 +1647,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "600af9b1a7a83ab0780a607d1e767042ff4283dd6bff6eb559b7b31a7481ed78"
+content-hash = "92dd514039e2e570938772bab59b9d8653944694ced2ab3b784ec104209c60fd"

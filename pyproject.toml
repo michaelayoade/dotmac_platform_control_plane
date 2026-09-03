@@ -19,6 +19,9 @@ packages = [{ include = "vendor_cp", from = "src" }]
 [tool.poetry.scripts]
 dotmac-platform = "vendor_cp.cli:run"
 
+[tool.poetry.plugins."dotmac_deployment_foundation.execution_bindings"]
+platform-cp = "vendor_cp.deployment.bindings:execution_bindings"
+
 [tool.poetry.dependencies]
 python = ">=3.12,<3.14"
 # The kernel is PINNED EXACTLY to the published alpha and resolved ONLY from the
@@ -29,7 +32,7 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a100", extras = [
+dotmac-kernel = { version = "0.1.0a101", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
@@ -90,8 +93,11 @@ dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # one supported plane set, so no `ModulePlaneSelection` is possible and none is
 # made. Its two declared prerequisites were already bound here.
 #
-# a6. Three published versions below it are refused, and they failed three
-# DIFFERENT questions — deliberately not collapsed into one "use the latest".
+# a10. Earlier releases remain published, but only a10 carries the complete
+# signed execution lifecycle this assembly composes: portable authorization,
+# authorized image sets, the received Foundation execution-plan digest,
+# purpose-bound target observations, replay coordinates and the closed
+# `recover` operation.
 #
 #   a3  its evidence chain: published by a defective internal verifier.
 #   a4  its BEHAVIOUR: `snapshot_digest` returned bare hex while its sibling
@@ -109,31 +115,19 @@ dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # a5's artifact identity and behaviour both passed; only its declared floor was
 # wrong. It remains published and is refused BY NAME by the release guard.
 #
-# a6 carries `Requires-Dist: dotmac-kernel (>=0.1.0a98)` — read out of the
-# PUBLISHED WHEEL rather than from a source tree — and a canary that installs
-# the wheel against exactly that declared minimum and drives a real collision
-# through `conflict_savepoint`, with a paired mutation forcing a97 and
-# requiring both a resolver conflict and a behavioural failure. The floor can
-# now fail in both directions, which is what makes it a contract rather than a
-# claim.
-#
 # Oracles (AGENTS.md rule 17). Pinnable — `peeled_tag`
-# `dotmac-deployment-control-v0.1.0a6`, peeled commit
-# `518711c36e9e5774e11b02c6ab35ec0c9c7b75b9`, tag object
-# `553c2bb014a9c2a3d8ebecafa06c4166bc94be1b`. Published and installable —
-# `release_run` 33322980430, verified by run 33323067886 (VERIFIED 7/7), which
-# wrote the tag. The resolved artifacts were compared against that evidence
-# before this pin was accepted: wheel `9b02cf33…7b8fc0`, sdist `68871c24…1adad0`.
+# `dotmac-deployment-control-v0.1.0a10`, peeled commit
+# `4a56f5836cab48fa2ed7ca00e5affc4364114b31`, tag object
+# `accbc88d5a2b266931450d4a7dc6820c1d301c4b`. Published by run
+# 33767109015 and independently verified by run 33767371612. Registry
+# read-back matched wheel `4c0050bb…c5dbd` and sdist `ba995656…60dc`.
 #
-# The earlier a77 -> a98 move was bound by a6 and rehearsed independently.
-# Kernel a100 is now the exact pin because this assembly directly consumes
-# `dotmac_kernel.api_documentation`, first shipped in a100, at its accepted
-# ADR-0016 construction seam. The artifact-only matrix established that a100
-# boots under this assembly's exact 41-distribution closure; the official wheel
-# is sha256:60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c
-# (release run 33483169850, artifact 9790730793). This is not deployment
-# authorization and makes no a101 claim.
-dotmac-deployment-control = { version = "0.1.0a6", source = "forgejo" }
+# Kernel a101 is exact-pinned because its public `create_app` import no longer
+# requires the product's PostgreSQL driver at import time. It was published
+# from `037ef065376c0ad4597cc59f86f4ef3eb7d5322b` and independently verified
+# by run 33714838596. Registry bytes: wheel `9145716d…c569`, sdist
+# `47fcd972…0715`. This pin is installation, not deployment authorization.
+dotmac-deployment-control = { version = "0.1.0a10", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor

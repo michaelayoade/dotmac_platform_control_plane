@@ -1,0 +1,480 @@
+# Platform Control Plane — ProductDeploymentSpec.v1.
+#
+# This exists so `PostgresRecoveryBundleV1` has a product declaration to check a
+# recovery AGAINST. Without it PROVED is not merely unreached, it is unreachable
+# by construction: the facility carries no product names, roles, schemas or
+# invariants of its own, and refuses a bundle it cannot compare to a contract.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# THIS FILE IS A PROMOTED CANDIDATE. IT IS NEVER HAND-EDITED.
+#
+# ADR-0017 § 2 names three artifacts. This is the ACCEPTED descriptor — the one
+# `dotmac-deploy drift` compares a running deployment against — and it holds the
+# exact bytes of a candidate that `deploy/descriptor-promotions.json` records as
+# promoted. `tests/architecture/test_descriptor_promotion.py` compares the two
+# files byte for byte, so an edit made here rather than in a new candidate fails
+# the build.
+#
+# That constraint is the point rather than ceremony. Editing the accepted
+# descriptor to agree with a database makes the database the authority and this
+# file a transcript of it, and once hand-editing is normal the next DRIFT is
+# indistinguishable from the next CORRECTION.
+#
+# Provenance of these bytes:
+#   candidate    deploy/candidates/2026-09-01-recovery-bundle-verification.toml
+#   promoted     2026-09-01, as a CONTRACT CHANGE rather than a deployment
+#   record       docs/operations/backup-restore-rehearsal-2026-08-30.md
+#                (its Disposition section)
+#   supersedes   deploy/candidates/2026-08-31-post-bootstrap.toml
+#
+# The image half is UNCHANGED and deliberately so. This promotion changes what
+# a recovery is checked FOR, not what is deployed: `[image]` still names the
+# artifact the application is running, because no deployment has occurred and a
+# descriptor advanced here would claim one nobody performed (ADR-0017 s 2).
+#
+# The ledger's `descriptor_sha256` is a RAW-BYTES sha256 of the file, which is
+# the convention the bootstrap receipt's `product_descriptor_sha256` already
+# uses. `assembly.manifest_digest` below is over CANONICAL bytes. Two digest
+# conventions live in this one file and neither is wrong; say which is which,
+# because comparing one to the other silently produces a mismatch that looks
+# like tampering.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# THE IMAGE HALF AND THE DATABASE HALF ADVANCED ON DIFFERENT EVENTS
+#
+# The single-use issuer bootstrap (ADR-0013, `scripts/bootstrap/bootstrap_once.sh`)
+# is CREATE-ONLY: it ran the composed migration lineage in a short-lived `ops`
+# container and did not replace, restart or repin the running application. So on
+# the target it describes, the two halves of this descriptor are true as of
+# different moments, and both are true NOW:
+#
+#   [image]     UNCHANGED. The application still runs `sha256:45715e42…` at
+#               revision `af9fcf6d…`. A descriptor advanced here would claim a
+#               deployment nobody performed — ADR-0017 § 2's refusal.
+#   [migration] ADVANCED. The bootstrap applied the composed lineage to its
+#   [database]  heads, which created `mod_deploy` and applied `v017`'s
+#               revocation (ADR-0011's Amendment of 2026-08-21). A descriptor left behind here claims a database that
+#               no longer exists, which is the same defect mirrored, and it is
+#               the one that actually happened.
+#
+# The earlier version of this header treated the two as one unit and said both
+# deltas would arrive "in the SAME change that deploys". The bootstrap advanced
+# the database WITHOUT deploying, so that sentence stopped being reachable, and
+# nothing noticed for a day. See the reconciliation record and ADR-0017 § 8.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW THE DATABASE HALF WAS DERIVED
+#
+# NOT by reading production and writing it down. Every declaration below is
+# derived from what the operation was SPECIFIED to do, and the measurement is
+# used to confirm the derivation rather than to produce it — a descriptor copied
+# from a catalogue can only ever agree with it, including where the catalogue is
+# wrong.
+#
+#   expected_heads      the composed revision graph's heads, minus every
+#                       revision another applied revision names in `depends_on`
+#                       (Alembic prunes a subsumed dependency from
+#                       `alembic_version`, which is why `cg_0001` and `li_0001`
+#                       are heads of the graph and not rows in the table).
+#                       Recomputed offline, from the installed lineages, by
+#                       `tests/architecture/test_descriptor_promotion.py`.
+#   expected_schemas    `public` plus every schema a composed migration creates,
+#                       scanned out of the lineages by the same test.
+#   isolation           `dc_0001` grants `USAGE ON SCHEMA mod_deploy` to
+#                       `platform_api` and `app_admin` and never to `app_user`;
+#                       `v017` revokes `DELETE` on
+#                       `public.licence_delivery_targets` from `platform_api`
+#                       and its own post-condition proves `SELECT`, `INSERT` and
+#                       `UPDATE` survive. That is ADR-0011's AMENDMENT of
+#                       2026-08-21, not its § 4 as written — § 4 required
+#                       revoking INSERT and UPDATE too, and the amendment keeps
+#                       them because the reconciler needs them. `v017`'s own
+#                       docstring says so. "§ 4" for a DELETE-only revoke is a
+#                       shorthand this file used to carry, and it sends a reader
+#                       to the wrong paragraph.
+#
+# The role closure below is unchanged and stays as it was measured: the recovery
+# lane found that products document three database roles while their clusters
+# hold five, and a descriptor written from documentation would have declared a
+# role closure the database does not have.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# DRIFT IS NOW CHECKED IN BOTH DIRECTIONS
+#
+# State the gap precisely, because the loose version — "nothing compared this
+# file to a live database" — is FALSE, and the true statement is narrower and
+# worse. The Foundation's `classify_invariant_breaches` DOES compare a
+# descriptor's declared `[[database.isolation]]` invariants against a catalogue
+# captured from live production. What had no live comparison anywhere was
+# `expected_schemas` and `expected_heads` — parsed, and consumed by nothing —
+# while `dotmac-deploy drift` compares image, config and manifest digests and
+# never opens a database at all.
+#
+# And the isolation comparison could not have caught this even where it runs: it
+# is scoped to the invariants the descriptor DECLARES, and this descriptor
+# declared no DELETE invariant. A comparison scoped to what was declared cannot
+# report what was never declared — the same sentence as the direction below, one
+# level up.
+#
+# `dotmac-platform admin descriptor-drift` reports declared-but-absent AND
+# present-but-undeclared over schemas, migration heads, roles and effective
+# privileges, against a catalogue capture from the target. The second direction
+# is the one that would have caught this: `mod_deploy` was present and
+# undeclared, and no check whose question is "does everything declared exist?"
+# can see that. It is also the first live consumer `expected_schemas` and
+# `expected_heads` have ever had — being wrong about them cost nothing until
+# now, which is its own reason this went unnoticed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema = "ProductDeploymentSpec.v1"
+
+# The frozen coordinate, not the new repository name. The repository is
+# `dotmac_platform_control_plane`; the distribution, import package, image,
+# Compose project and database all still say `vendor`, deliberately, and this
+# identifier has to match the deployment it describes rather than the
+# repository that describes it.
+product = "dotmac_vendor_control_plane"
+environment = "production"
+
+[assembly]
+manifest_path = "deploy/manifests/sha256-f2a20eed058bf90fabf4a7e9bcbeb3b4b273b0d0666f5c724b856cf5b9b7ad46.json"
+# The REAL digest of the committed manifest, generated from the composed
+# ProductAssemblySpec by `scripts/generate_product_manifest.py` and kept in sync
+# by `tests/architecture/test_product_manifest.py`.
+#
+# It was the all-zero placeholder until 2026-08-31. That value is a
+# syntactically perfect digest naming nothing, so the descriptor parsed and any
+# gate checking only parsing reported green — while `dotmac-deploy drift` could
+# not tell an approved module set from any other. A production descriptor may
+# carry no placeholder.
+manifest_digest = "sha256:f2a20eed058bf90fabf4a7e9bcbeb3b4b273b0d0666f5c724b856cf5b9b7ad46"
+
+[image]
+# The digest RUNNING on the target, read from the container rather than from a
+# deploy log. A tag here is how a deployment silently goes backwards.
+reference = "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d"
+# Read from the image's own `org.opencontainers.image.revision` label.
+source_revision = "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e"
+
+[runtime_materials]
+names = [
+  "DATABASE_URL",
+  "PLATFORM_DATABASE_URL",
+  "MIGRATION_DATABASE_URL",
+]
+
+[[roles]]
+code = "app"
+# The bind address is NOT in this file, and that is the point.
+#
+# This descriptor is a reusable artifact: its canonical bytes have to be the
+# same in every environment, so that one reviewed artifact can be deployed to
+# several without being rebuilt. A literal address makes it
+# environment-specific, and the literal that was here — `0.0.0.0` — is the
+# worst kind, because it reads as "no opinion" while being the most permissive
+# bind there is.
+#
+# What the descriptor states is EXPOSURE INTENT: this role listens on a port,
+# and the compose publication binds it to loopback only. WHERE it binds inside
+# the container is supplied by the host's private inventory through
+# VENDOR_BIND_ADDRESS, and `:?` makes an inventory that forgets it fail closed
+# rather than silently defaulting to something permissive.
+#
+# Verified against the published foundation 0.2.0a2 rather than assumed: the
+# parameterised form validates, survives `render` into the compose `command:`
+# intact, and leaves no literal address anywhere in the rendered output.
+command = [
+  "uvicorn",
+  "vendor_cp.main:app",
+  "--host",
+  "${VENDOR_BIND_ADDRESS:?Set VENDOR_BIND_ADDRESS in the host inventory}",
+  "--port",
+  "8000",
+]
+replicas = 1
+stop_grace_seconds = 30
+materials = ["DATABASE_URL", "PLATFORM_DATABASE_URL"]
+
+[roles.resources]
+cpus = "2.0"
+memory = "768m"
+pids = 256
+
+[roles.security]
+user = "10001:10001"
+read_only_root = true
+no_new_privileges = true
+cap_drop = ["ALL"]
+tmpfs = ["/tmp"]
+
+# The probe is DECLARED rather than defaulted, because the default one fails
+# against a perfectly healthy process here.
+#
+# This application serves one endpoint, `/health`, and the kernel's platform
+# guard is host-exact. Measured on the running container: with
+# `Host: vendor.dotmac.io` it answers 200; without it, 400. The facility's
+# default probe sends no Host header, so it would report unhealthy forever —
+# the same failure mode as the `wget` probe emitted into an image that had no
+# `wget`, and worse than no probe because it reports "unhealthy" rather than
+# "unknown".
+#
+# `probe` overrides the default with an explicit argument array, which is where
+# the header goes.
+#
+# LIVENESS ONLY, and no readiness probe is declared. `/health` is the kernel's
+# liveness route and its docstring says so — "does not touch DB" — so calling
+# it readiness would be a lie the facility would happily render: a readiness
+# gate that passes while the database is unreachable turns the warm-candidate
+# switch into a timer. This application has no dependency-aware endpoint yet.
+# When it grows one, declare it as `ready`; do not point both at this path,
+# which the facility refuses anyway.
+[roles.health.live]
+path = "/health"
+port = 8000
+interval_seconds = 10
+timeout_seconds = 5
+retries = 10
+start_period_seconds = 15
+probe = [
+  "python",
+  "-c",
+  "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health', headers={'Host': 'vendor.dotmac.io'}); urllib.request.urlopen(r, timeout=3)",
+]
+
+[migration]
+# One composed migration owner: kernel, Vendor and every module lineage advance
+# together before the application is replaced.
+command = ["dotmac-platform", "admin", "migrate"]
+heads_command = ["dotmac-platform", "admin", "migrate", "--target", "current"]
+owner_material = "MIGRATION_DATABASE_URL"
+# The six heads the composed lineage reaches, and therefore the six rows
+# `alembic_version` holds after `dotmac-platform admin migrate`.
+#
+# DERIVED, not read back. The composed revision graph has eight heads; two of
+# them — `cg_0001_agreements` and `li_0001_licensing` — are named in another
+# applied revision's `depends_on` (vendor `v015` and `v016`), and Alembic prunes
+# a subsumed dependency from the version table. The same pruning is why the four
+# heads this file declared before the bootstrap carried no kernel revision at
+# all: the kernel lineage ended at `0026_platform_audit_log`, which
+# `ea_0003_platform_audit_log` depends on. `0028_machine_attribution` is a head
+# here because nothing depends on it.
+#
+# Kept in the composed graph's own order — sorted — so a reviewer can compare
+# this list against the recomputation without reordering it in their head.
+expected_heads = [
+  "0028_machine_attribution",
+  "ap_0002_outbox_relay",
+  "dc_0006_observation_key_identity",
+  "ea_0003_platform_audit_log",
+  "rl_0001_release_artifacts",
+  "v018_licence_delivery_intents",
+]
+compatibility = "maintenance_required"
+lock_timeout_seconds = 300
+lock_retries = 4
+
+[backup]
+[[backup.datasets]]
+code = "primary"
+kind = "postgres"
+material = "MIGRATION_DATABASE_URL"
+retention_days = 14
+checksum = "sha256"
+encryption = "none"
+restore_proof_max_age_days = 30
+# What a recovery is checked FOR, widened to the layer whose absence was
+# measured. The 2026-08-30 rehearsal restored 45 tables, 23 of 26 policies and
+# 16 RLS-enabled tables from a dump carrying NO roles, NO grants and every
+# object owned by the restoring superuser — and every check in the old three
+# would have passed on it. `schema` and `row_counts` are satisfied by exactly
+# the database that has lost its isolation model.
+#
+# The four added names are the Foundation's own `PRIVILEGE_VERIFICATIONS`, not
+# a local vocabulary. They are absent from published `0.2.0a2`; that is not a
+# regression here, because `0.2.0a2` already refuses this descriptor outright
+# on `[database]`, which it also does not know.
+verify = [
+  "schema",
+  "row_counts",
+  "migration_heads",
+  "roles",
+  "ownership",
+  "memberships",
+  "effective_privileges",
+]
+
+# ── The database contract ────────────────────────────────────────────────────
+#
+# What a recovery is checked against. Roles first, because a restore that lost
+# the roles lost the grants, the ownership and the policies with them — this
+# database's isolation is enforced by grants and revocations, so a role layer
+# that does not come back is an isolation layer that does not come back, and it
+# comes back looking fine.
+
+[database]
+postgres_major = 16
+# `public` plus every schema a composed migration creates. `mod_deploy` joined
+# the list when `dc_0001_deployment_control` ran; it is the schema whose absence
+# from this declaration is the drift this candidate repairs.
+expected_schemas = [
+  "public",
+  "mod_agreements",
+  "mod_approvals",
+  "mod_deploy",
+  "mod_ealloc",
+  "mod_licensing",
+  "mod_rel",
+]
+tablespaces = "none"
+
+# Five roles, measured. Everything documents three.
+#
+# `inherit` is declared on every one because losing it is invisible: a role that
+# silently becomes INHERIT acquires everything its groups hold and nothing about
+# the database looks different afterwards. The closure here is flat — no role
+# holds any membership — which is itself the fact worth freezing, because a
+# membership appearing later is a privilege change no grant audit would show.
+
+[[database.roles]]
+name = "app_admin"
+kind = "migration_owner"
+inherit = true
+login = true
+# The one role that bypasses RLS. It owns every table and runs migrations, so
+# this is correct and is exactly the attribute a bad restore hands to the wrong
+# role.
+bypassrls = true
+member_of = []
+
+[[database.roles]]
+name = "app_user"
+kind = "tenant_app"
+inherit = true
+login = true
+bypassrls = false
+member_of = []
+
+[[database.roles]]
+name = "platform_api"
+kind = "platform_app"
+inherit = true
+login = true
+bypassrls = false
+member_of = []
+
+[[database.roles]]
+name = "outbox_dispatcher"
+kind = "dispatcher"
+inherit = true
+login = true
+bypassrls = false
+member_of = []
+
+[[database.roles]]
+name = "platform_outbox_dispatcher"
+kind = "dispatcher"
+inherit = true
+login = true
+bypassrls = false
+member_of = []
+
+# Isolation, in BOTH directions.
+#
+# Only the denial half is the classic mistake: a control-plane role revoked from
+# everything passes every "cannot reach" assertion and cannot run the product.
+# So the permission half is declared too, and a recovery that over-revokes fails
+# here rather than in production.
+#
+# Both are checked with `has_table_privilege` / `has_schema_privilege`
+# semantics — EFFECTIVE privilege. `information_schema` sees only DIRECT grants,
+# so a role reaching an object through a membership reads as having none, and an
+# isolation gate built on that view passes over a real privilege.
+#
+# Schema USAGE rather than a list of table names WHERE THE CLAIM IS ABOUT A
+# WHOLE SCHEMA: revoking USAGE makes every object in the schema unreachable
+# regardless of table grants, and it does not go stale the moment a module adds
+# a table. A 16-table list would have been accurate on the day it was written.
+#
+# The two TABLE-scoped entries at the end are not an exception to that. They
+# state a claim that is genuinely about one table and one privilege — the
+# ADR-0011 seal — and widening either into a schema claim would assert something
+# false in order to keep the shapes uniform.
+
+[[database.isolation]]
+code = "app-user-cannot-reach-platform-schemas"
+role = "app_user"
+scope = "schema"
+objects = ["mod_agreements", "mod_approvals", "mod_deploy", "mod_ealloc", "mod_licensing", "mod_rel"]
+privileges = ["USAGE"]
+denied = true
+
+[[database.isolation]]
+code = "platform-api-can-reach-platform-schemas"
+role = "platform_api"
+scope = "schema"
+objects = ["mod_agreements", "mod_approvals", "mod_deploy", "mod_ealloc", "mod_licensing", "mod_rel"]
+privileges = ["USAGE"]
+denied = false
+
+# The ADR-0011 seal, declared for the first time here.
+#
+# ADR-0011's Amendment of 2026-08-21, NOT its § 4 as written: § 4 required
+# revoking INSERT and UPDATE as well, and the amendment keeps both because the
+# reconciler needs them. The pair below IS that amendment, not a softened
+# reading of § 4.
+#
+# `v017_deployment_target_authority` revokes `DELETE` on the delivery-target
+# projection from the online platform role. `mod_deploy.deployment_targets` owns
+# deployment-target identity now; `public.licence_delivery_targets` is a
+# rebuildable projection, and a role holding `DELETE` on a projection can only
+# destroy evidence.
+#
+# TABLE scope, not schema, and that is deliberate: the revoke is one privilege
+# on one table, and a schema-scoped claim would say something much broader that
+# is not true — `platform_api` still reaches everything else in `public`.
+[[database.isolation]]
+code = "platform-api-cannot-delete-the-delivery-target-projection"
+role = "platform_api"
+scope = "table"
+objects = ["public.licence_delivery_targets"]
+privileges = ["DELETE"]
+denied = true
+
+# The other half, for the same reason the schema pair above has two entries: a
+# revoke checked only in the denial direction is satisfied by revoking
+# everything, and `v017`'s own post-condition refuses exactly that outcome —
+# the reconciler needs `INSERT` and `UPDATE` and staging needs `SELECT`, so a
+# projection nothing can rebuild is a broken delivery path rather than a sealed
+# one (ADR-0010 § 1).
+[[database.isolation]]
+code = "platform-api-keeps-the-delivery-target-projection-writable"
+role = "platform_api"
+scope = "table"
+objects = ["public.licence_delivery_targets"]
+privileges = ["SELECT", "INSERT", "UPDATE"]
+denied = false
+
+[[database.isolation]]
+code = "app-user-keeps-the-tenant-schema"
+role = "app_user"
+scope = "schema"
+objects = ["public"]
+privileges = ["USAGE"]
+denied = false
+
+[telemetry]
+logs = true
+metrics = false
+traces = false
+app_direct_shipping = false
+deployment_annotations = false
+
+[[external_dependencies]]
+code = "postgres"
+kind = "postgres"
+required_for = ["ready", "migrate", "backup"]
+material = "DATABASE_URL"
+
+[rollout]
+stability_window_seconds = 120
+rollback_images_retained = 2

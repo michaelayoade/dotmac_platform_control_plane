@@ -206,6 +206,96 @@ docker run --rm --network none \
     || fail "diagnose self --strict found the candidate is not running installed"
 pass "dotmac-platform resolves, reports a metadata version, and is installed"
 
+step "1a the offline deployment-tool bundle discovers the installed provider"
+docker run --rm --user 0:0 --network none --entrypoint sh "$IMAGE" -ceu '
+python3 -m venv /tmp/deployment-tool
+/tmp/deployment-tool/bin/pip install --disable-pip-version-check --quiet \
+    --no-index --no-deps --only-binary=:all: \
+    /opt/dotmac/deployment-wheelhouse/*.whl
+mkdir -p /etc/dotmac/platform-cp
+/tmp/deployment-tool/bin/python - <<"PY"
+import base64
+import json
+import pathlib
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from dotmac_deployment_control import PublicKeyFingerprintV1
+
+root = pathlib.Path("/etc/dotmac/platform-cp")
+for filename, purpose in (
+    ("authorization-verification.json", "deployment_authorization"),
+    ("release-evidence-verification.json", "platform_release_evidence"),
+):
+    public = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+    encoded = base64.urlsafe_b64encode(public).decode("ascii").rstrip("=")
+    document = {
+        "schema": "PlatformCpPublicVerificationIdentity.v1",
+        "key_id": "candidate-" + purpose,
+        "algorithm": "ed25519",
+        "purpose": purpose,
+        "public_key_b64url": encoded,
+        "public_key_fingerprint": PublicKeyFingerprintV1.from_public_key_b64(
+            encoded
+        ).canonical,
+    }
+    path = root / filename
+    path.write_text(json.dumps(document), encoding="utf-8")
+    path.chmod(0o600)
+PY
+cd /
+env -u PYTHONPATH /tmp/deployment-tool/bin/python -P - <<"PY"
+from dotmac_deployment_foundation.execution_bindings import (
+    declared_provider_names,
+    discover_bindings,
+)
+
+assert declared_provider_names() == ("platform-cp",)
+bindings = discover_bindings()
+assert bindings is not None
+assert bindings.provider == "platform-cp"
+PY
+
+# Symmetric absence: removing the installed distribution removes the provider
+# declaration. This is not a source-tree import and the network stays disabled.
+/tmp/deployment-tool/bin/pip uninstall --quiet --yes dotmac-vendor-control-plane
+env -u PYTHONPATH /tmp/deployment-tool/bin/python -P - <<"PY"
+from dotmac_deployment_foundation.execution_bindings import (
+    declared_provider_names,
+    discover_bindings,
+)
+
+assert declared_provider_names() == ()
+assert discover_bindings() is None
+PY
+
+# Ambiguity is a refusal naming both declarations, never an iteration-order
+# choice. Plant a second distribution beside a fresh real installation.
+/tmp/deployment-tool/bin/pip install --disable-pip-version-check --quiet \
+    --no-index --no-deps --only-binary=:all: \
+    /opt/dotmac/deployment-wheelhouse/dotmac_vendor_control_plane-*.whl
+site="$(/tmp/deployment-tool/bin/python -c "import sysconfig; print(sysconfig.get_paths()[\"purelib\"])")"
+mkdir -p "$site/planted_second_provider-1.0.dist-info"
+printf "%s\n" "[dotmac_deployment_foundation.execution_bindings]" \
+    "platform-cp = planted:factory" \
+    > "$site/planted_second_provider-1.0.dist-info/entry_points.txt"
+printf "%s\n" "Metadata-Version: 2.1" "Name: planted-second-provider" \
+    "Version: 1.0" > "$site/planted_second_provider-1.0.dist-info/METADATA"
+env -u PYTHONPATH /tmp/deployment-tool/bin/python -P - <<"PY"
+from dotmac_deployment_foundation import PreconditionFailed
+from dotmac_deployment_foundation.execution_bindings import discover_bindings
+
+try:
+    discover_bindings()
+except PreconditionFailed as error:
+    message = str(error)
+    assert "dotmac-vendor-control-plane:platform-cp" in message, message
+    assert "planted-second-provider:platform-cp" in message, message
+else:
+    raise AssertionError("two provider declarations did not refuse")
+PY
+'
+pass "offline wheelhouse admits one installed Platform provider, refuses zero and two"
+
 step "13 the distribution manifest the release receipt will carry"
 # The receipt records a per-file digest for the wheel and the sdist, READ out of
 # this document rather than re-measured: a second `poetry build` produces a

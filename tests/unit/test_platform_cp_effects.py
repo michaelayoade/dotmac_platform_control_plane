@@ -18,11 +18,23 @@ from vendor_cp.deployment.effects import (
 
 
 @dataclass(frozen=True)
+class _CanonicalDocument:
+    digest: str
+
+    def sha256_digest(self) -> str:
+        return self.digest
+
+
+@dataclass(frozen=True)
 class _Spec:
     product: str = "dotmac_vendor_control_plane"
     environment: str = "production"
     image: str = "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:" + "a" * 64
     source_revision: str = "b" * 40
+    descriptor_digest: str = "sha256:" + "c" * 64
+
+    def to_canonical_document(self) -> _CanonicalDocument:
+        return _CanonicalDocument(self.descriptor_digest)
 
 
 class _Process:
@@ -101,7 +113,9 @@ def _result(
     return PlatformBackupResult(dataset, path, size, checksum, algorithm)
 
 
-def _bundle(tmp_path: Path, process: _Process) -> PlatformCpRecoveryBundle:
+def _bundle(
+    tmp_path: Path, process: _Process, *, spec: _Spec | None = None
+) -> PlatformCpRecoveryBundle:
     deploy = tmp_path / "deploy-root"
     (deploy / "deploy").mkdir(parents=True)
     (deploy / "docker-compose.production.yml").write_text("name: x\n")
@@ -110,7 +124,7 @@ def _bundle(tmp_path: Path, process: _Process) -> PlatformCpRecoveryBundle:
     host = tmp_path / "host-id"
     host.write_text("vendor-cp-prod\n")
     return PlatformCpRecoveryBundle(
-        _Spec(),
+        spec or _Spec(),
         deploy,
         target="vendor-cp-prod",
         host_id_file=host,
@@ -179,9 +193,24 @@ def test_each_component_and_the_descriptor_binding_are_live(tmp_path: Path) -> N
         (root / name).write_bytes(original)
         assert bundle.verify(result), name
 
-    descriptor = tmp_path / "deploy-root/deploy/product.toml"
-    descriptor.write_text("schema = 'changed'\n")
-    assert not bundle.verify(result)
+    different_spec = _Spec(descriptor_digest="sha256:" + "d" * 64)
+    verifier = _bundle(tmp_path, _Process(), spec=different_spec)
+    assert not verifier.verify(result)
+
+
+def test_bundle_binds_the_executed_spec_not_the_accepted_descriptor_file(
+    tmp_path: Path,
+) -> None:
+    first = _Spec(descriptor_digest="sha256:" + "1" * 64)
+    second = _Spec(descriptor_digest="sha256:" + "2" * 64)
+    result = _bundle(tmp_path, _Process(), spec=first).capture(
+        "primary", timeout_seconds=300
+    )
+
+    # Same deploy directory and image, different canonical descriptor. If the
+    # bundle reopened deploy/product.toml both verifiers would accept it.
+    assert _bundle(tmp_path, _Process(), spec=first).verify(result)
+    assert not _bundle(tmp_path, _Process(), spec=second).verify(result)
 
 
 def test_host_and_dataset_must_match_before_a_capture(tmp_path: Path) -> None:

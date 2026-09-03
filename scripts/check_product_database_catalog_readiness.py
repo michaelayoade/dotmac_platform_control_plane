@@ -14,7 +14,7 @@ register.  A reviewer may remove an entry only with the integration that makes
 its retirement machine-provable.  Merely publishing every module contribution
 can never make this command report product readiness.
 
-The module half of that ratchet is live at the a100 pin.  Its ``ModuleManifest``
+The module half of that ratchet is live at the a101 pin.  Its ``ModuleManifest``
 declares ``database_catalog``, so every row now describes a pinned module
 release that has not published its contribution.  The prior dormant premise is
 gone; a test now holds the inverse so a future kernel cannot silently make this
@@ -48,7 +48,6 @@ MODULE_DATABASE_CATALOG_DEBT: Final[frozenset[str]] = frozenset(
     {
         "approvals",
         "commercial_agreements",
-        "deployment_control",
         "entitlement_allocation",
         "licensing",
         "release_catalog",

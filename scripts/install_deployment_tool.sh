@@ -1,169 +1,228 @@
 #!/usr/bin/env bash
-# Install the deployment-tool Foundation from an UNPUBLISHED, digest-bound
-# candidate, into an environment this repository's application never sees.
+# Install the Foundation and this assembly's execution bindings from the
+# complete wheelhouse carried by one immutable Platform candidate image.
 #
-# ## Why not a version
-#
-# `0.3.0a4` is on no index and carries no tag. It carries the execution-plan
-# and verifier protocols this cutover needs; its CLI runtime-binding seam is a
-# separate, still-open integration and this installer does not pretend the
-# protocols are reachable merely because their modules import. The pin is a
-# build coordinate plus a digest, recorded in
-# `deploy/foundation-candidate.json`, and the digest is checked BEFORE any
-# installer runs.
-#
-# ## The three refusals, and why each is structural rather than a habit
-#
-# 1. NO INDEX FALLBACK. `pip --no-index` cannot reach Forgejo or PyPI. Without
-#    it, a wrong artifact id or a corrupt download would silently resolve
-#    `dotmac-deployment-foundation` to published `0.2.0a2` — which has no
-#    `execution_plan` module at all — and the failure would surface later as
-#    "the digest is absent" rather than as "you installed the wrong wheel".
-#    That is the worst available shape: a wrong answer wearing a missing one's
-#    clothes. `--no-deps` closes the same door on a transitive resolve; the
-#    Foundation declares zero runtime dependencies, so it costs nothing.
-#
-# 2. NO SOURCE-TREE FALLBACK. The proof runs with `-P` (the interpreter never
-#    prepends the working directory to `sys.path`), with `PYTHONPATH` cleared
-#    and with the working directory outside every checkout, then asserts the
-#    module resolved under this environment's own `site-packages` and that no
-#    `sys.path` entry lies inside a checkout. A `git archive` extraction on
-#    `PYTHONPATH` is exactly how a receipt came to name a version whose bytes
-#    nobody could retrieve (`docs/adr/0017` s 5); asserting the absence is the
-#    only way to know it did not happen again.
-#
-# 3. NO REBUILD. `--only-binary=:all:` against an absolute path to the exact
-#    `.whl`. Never a source tree, never the sdist. A rebuild produces bytes
-#    nobody verified, under a name somebody did.
-#
-# ## It does not enter the application image
-#
-# The environment is created OUTSIDE this repository and refused if it is not.
-# Nothing here touches `pyproject.toml` or `poetry.lock`, and the Dockerfile
-# installs only the `main` dependency group, so no group membership exists that
-# could carry the wheel into the image.
-#
-# ## Usage
-#
-#   scripts/install_deployment_tool.sh            # install and prove
-#   TOOL_ROOT=/some/dir scripts/install_deployment_tool.sh
-#
-# Prints the resolved `dotmac-deploy` path on success. Every value is a knob
-# with a documented default; nothing here is hardcoded to one machine.
+# Nothing is fetched and nothing is rebuilt on the target. The image must
+# already be present by digest. Every wheel is size- and digest-checked before
+# pip sees it, installation happens in a new versioned directory, and `current`
+# moves atomically only after the installed CLI discovers exactly the
+# `platform-cp` binding and loads both fixed, root-owned trust roots.
 set -euo pipefail
 umask 077
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly REPO_ROOT
-readonly COORDINATES="${COORDINATES:-${REPO_ROOT}/deploy/foundation-candidate.json}"
-readonly TOOL_ROOT="${TOOL_ROOT:-${XDG_STATE_HOME:-${HOME}/.local/state}/dotmac/platform-cp-deployment-tool}"
+readonly IMAGE_REFERENCE="${1:-${IMAGE_REFERENCE:-}}"
+readonly TOOL_ROOT="${TOOL_ROOT:-/opt/dotmac/platform-cp-deployment-tool}"
 readonly PYTHON="${PYTHON:-python3.12}"
+readonly DOCKER="${DOCKER:-/usr/bin/docker}"
+readonly BUNDLE_PATH="/opt/dotmac/deployment-wheelhouse"
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
-command -v gh >/dev/null || die "gh is required to fetch the candidate artifact"
+[[ "$IMAGE_REFERENCE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] \
+    || die "usage: $0 <repository@sha256:digest>"
+[[ "$TOOL_ROOT" = /* ]] || die "TOOL_ROOT must be an absolute path"
 command -v "$PYTHON" >/dev/null || die "PYTHON=$PYTHON is not on PATH"
-[[ -f "$COORDINATES" ]] || die "$COORDINATES is missing"
+[[ -x "$DOCKER" ]] || die "DOCKER=$DOCKER is not executable"
 
-# The environment must live outside the repository. This is refusal 2 as a
-# property of the filesystem rather than of the caller's care: an environment
-# inside the tree is one the tree could shadow, and one a build could copy.
-case "$TOOL_ROOT" in
-    "$REPO_ROOT"|"$REPO_ROOT"/*)
-        die "TOOL_ROOT ($TOOL_ROOT) is inside the repository. The deployment
-tool must not live in the tree it deploys: that tree is the INPUT, and an input
-that supplies its own tooling is not an input that was verified." ;;
-esac
+# No implicit pull. The caller already admitted and pulled this exact image;
+# resolving a tag or fetching something newer inside the installer would make
+# the tool environment come from different bytes than the execution plan.
+"$DOCKER" image inspect "$IMAGE_REFERENCE" >/dev/null 2>&1 \
+    || die "the digest-pinned image is not present locally; refusing to pull"
 
-field() { "$PYTHON" -c "import json,sys; print(json.load(open(sys.argv[1]))['$1'])" "$COORDINATES"; }
+work="$(mktemp -d)"
+container_id=""
+release_created=""
+release_ready=""
+cleanup() {
+    if [[ -n "$container_id" ]]; then
+        "$DOCKER" rm -f "$container_id" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$release_created" && -z "$release_ready" && -d "$RELEASE" ]]; then
+        rm -rf -- "$RELEASE"
+    fi
+    rm -rf -- "$work"
+}
+trap cleanup EXIT HUP INT TERM
 
-SOURCE_REPOSITORY="$(field source_repository)"
-ARTIFACT_ID="$(field artifact_id)"
-WHEEL_FILENAME="$(field wheel_filename)"
-WHEEL_SHA256="$(field wheel_sha256)"
-WHEEL_SIZE="$(field wheel_size_bytes)"
-EXPIRES_AT="$(field expires_at)"
-VERSION="$(field version)"
-readonly SOURCE_REPOSITORY ARTIFACT_ID WHEEL_FILENAME WHEEL_SHA256 WHEEL_SIZE EXPIRES_AT VERSION
+container_id="$("$DOCKER" create "$IMAGE_REFERENCE")" \
+    || die "could not create a stopped container from the admitted image"
+mkdir -p "$work/wheelhouse"
+"$DOCKER" cp "$container_id:${BUNDLE_PATH}/." "$work/wheelhouse" \
+    || die "the candidate image carries no deployment-tool bundle"
+"$DOCKER" rm -f "$container_id" >/dev/null
+container_id=""
 
-[[ "$WHEEL_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "wheel_sha256 is not 64 lowercase hex"
+bundle_id="$($PYTHON - "$work/wheelhouse" <<'PY'
+import datetime as dt
+import hashlib
+import json
+import pathlib
+import re
+import sys
 
-# The lease, refused explicitly. GitHub deletes the artifact at `expires_at`,
-# and a 404 from a deleted artifact reads like a network problem.
-"$PYTHON" - "$EXPIRES_AT" <<'PY' || die "the candidate artifact lease has expired; a4 must be published, or a new candidate built and this file replaced"
-import datetime as dt, sys
-sys.exit(0 if dt.datetime.now(dt.UTC) < dt.datetime.fromisoformat(sys.argv[1]) else 1)
+root = pathlib.Path(sys.argv[1])
+manifest_path = root / "bundle.json"
+try:
+    raw = manifest_path.read_bytes()
+    document = json.loads(raw)
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"deployment-tool bundle manifest is unreadable: {error}")
+required = {"contract", "source_revision", "foundation", "files"}
+if not isinstance(document, dict) or set(document) != required:
+    raise SystemExit("deployment-tool bundle manifest has unknown or missing keys")
+if document["contract"] != "dotmac-deployment-tool-bundle/1":
+    raise SystemExit(f"unknown deployment-tool bundle {document['contract']!r}")
+if not re.fullmatch(r"[0-9a-f]{40}", document["source_revision"]):
+    raise SystemExit("deployment-tool bundle source_revision is not a full commit")
+foundation = document["foundation"]
+foundation_required = {
+    "source_repository",
+    "source_sha",
+    "run_id",
+    "artifact_id",
+    "expires_at",
+    "version",
+    "wheel_filename",
+    "wheel_sha256",
+    "wheel_size_bytes",
+}
+if not isinstance(foundation, dict) or set(foundation) != foundation_required:
+    raise SystemExit("deployment-tool Foundation coordinate is incomplete")
+if dt.datetime.now(dt.UTC) >= dt.datetime.fromisoformat(foundation["expires_at"]):
+    raise SystemExit("the Foundation candidate lease has expired")
+if not re.fullmatch(r"[0-9a-f]{64}", foundation["wheel_sha256"]):
+    raise SystemExit("Foundation wheel digest is malformed")
+
+files = document["files"]
+if not isinstance(files, list) or not files:
+    raise SystemExit("deployment-tool bundle lists no wheels")
+expected_names = set()
+for entry in files:
+    if not isinstance(entry, dict) or set(entry) != {
+        "filename", "size_bytes", "sha256"
+    }:
+        raise SystemExit("deployment-tool bundle has a malformed file row")
+    name = entry["filename"]
+    if (
+        not isinstance(name, str)
+        or pathlib.PurePath(name).name != name
+        or not name.endswith(".whl")
+        or name in expected_names
+    ):
+        raise SystemExit(f"invalid or duplicate wheel name {name!r}")
+    expected_names.add(name)
+    path = root / name
+    if not path.is_file() or path.is_symlink():
+        raise SystemExit(f"wheel {name!r} is absent or not a regular file")
+    actual_size = path.stat().st_size
+    actual_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual_size != entry["size_bytes"]:
+        raise SystemExit(f"wheel {name!r} size differs from its manifest")
+    if actual_sha != entry["sha256"]:
+        raise SystemExit(f"wheel {name!r} digest differs from its manifest")
+actual_names = {path.name for path in root.iterdir() if path.name != "bundle.json"}
+if actual_names != expected_names:
+    raise SystemExit(
+        "deployment-tool bundle contains unmanifested or missing files: "
+        f"extra={sorted(actual_names - expected_names)}, "
+        f"missing={sorted(expected_names - actual_names)}"
+    )
+if foundation["wheel_filename"] not in expected_names:
+    raise SystemExit("the accepted Foundation wheel is absent from the bundle")
+foundation_row = next(
+    entry for entry in files if entry["filename"] == foundation["wheel_filename"]
+)
+if (
+    foundation_row["size_bytes"] != foundation["wheel_size_bytes"]
+    or foundation_row["sha256"] != foundation["wheel_sha256"]
+):
+    raise SystemExit("the bundle and Foundation coordinate identify different bytes")
+print(hashlib.sha256(raw).hexdigest())
 PY
+)" || die "the deployment-tool bundle failed verification"
+[[ "$bundle_id" =~ ^[0-9a-f]{64}$ ]] || die "bundle id is not sha256"
 
-WORK="$(mktemp -d)"
-trap 'rm -rf -- "$WORK"' EXIT HUP INT TERM
+readonly RELEASES="$TOOL_ROOT/releases"
+readonly RELEASE="$RELEASES/$bundle_id"
+readonly CURRENT="$TOOL_ROOT/current"
+mkdir -p "$RELEASES"
+exec 9>"$TOOL_ROOT/.install.lock"
+flock -x 9
+if [[ -e "$TOOL_ROOT/bin/python" || -e "$TOOL_ROOT/pyvenv.cfg" ]]; then
+    die "TOOL_ROOT is a legacy in-place environment; refusing to overwrite it"
+fi
 
-gh api "/repos/${SOURCE_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > "${WORK}/artifact.zip" \
-    || die "could not download artifact ${ARTIFACT_ID} from ${SOURCE_REPOSITORY}"
-unzip -o -q "${WORK}/artifact.zip" -d "${WORK}/unpacked" \
-    || die "the downloaded artifact is not a readable zip"
-
-readonly WHEEL="${WORK}/unpacked/${WHEEL_FILENAME}"
-[[ -f "$WHEEL" ]] || die "the artifact does not contain ${WHEEL_FILENAME}"
-
-# BEFORE pip. A digest checked after installation has already run whatever it
-# was going to run.
-actual_size="$(wc -c < "$WHEEL" | tr -d ' ')"
-[[ "$actual_size" == "$WHEEL_SIZE" ]] \
-    || die "wheel is ${actual_size} bytes, expected ${WHEEL_SIZE}"
-actual_sha="$("$PYTHON" -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$WHEEL")"
-[[ "$actual_sha" == "$WHEEL_SHA256" ]] \
-    || die "wheel sha256 ${actual_sha} != pinned ${WHEEL_SHA256}. These are not
-the bytes this repository accepted. Nothing has been installed."
-
-rm -rf -- "$TOOL_ROOT"
-mkdir -p "$(dirname "$TOOL_ROOT")"
-"$PYTHON" -m venv "$TOOL_ROOT" || die "could not create the tool environment"
-
-env -u PYTHONPATH -u PIP_INDEX_URL -u PIP_EXTRA_INDEX_URL \
-    "${TOOL_ROOT}/bin/pip" install \
+if [[ ! -d "$RELEASE" ]]; then
+    # A venv cannot be moved after installation: every console-script shebang
+    # names the absolute interpreter path that existed when pip wrote it. The
+    # final versioned path is never current while it is built, and the lock
+    # makes an incomplete directory unobservable to another installer.
+    mkdir -- "$RELEASE"
+    release_created=1
+    "$PYTHON" -m venv "$RELEASE" || die "could not create deployment tool environment"
+    env -u PYTHONPATH -u PIP_INDEX_URL -u PIP_EXTRA_INDEX_URL \
+        "$RELEASE/bin/pip" install \
         --no-index --no-deps --only-binary=:all: \
         --disable-pip-version-check --quiet \
-        "$WHEEL" \
-    || die "installing the verified wheel failed"
+        "$work"/wheelhouse/*.whl \
+        || die "installing the verified offline wheelhouse failed"
 
-# Refusal 2, asserted rather than assumed. Run from `/` so the working
-# directory is outside every checkout, with `-P` so it could not have been
-# added to `sys.path` even if it were.
-( cd / && env -u PYTHONPATH "${TOOL_ROOT}/bin/python" -P - "$VERSION" <<'PY' )
+    # Metadata enumeration happens before import. Loading the binding then
+    # proves the fixed trust roots exist and satisfy their purpose contracts.
+    ( cd / && env -u PYTHONPATH "$RELEASE/bin/python" -P - <<'PY' ) \
+        || die "the deployment tool failed installed-artifact discovery"
 import importlib.metadata as md
-import sys, sysconfig
+import pathlib
 
-from dotmac_deployment_foundation import execution_plan as ep
+from dotmac_deployment_foundation.execution_bindings import (
+    declared_provider_names,
+    discover_bindings,
+)
 
-expected_version = sys.argv[1]
-purelib = sysconfig.get_paths()["purelib"]
-installed = md.version("dotmac-deployment-foundation")
-
-print(f"  interpreter    {sys.executable}")
-print(f"  execution_plan {ep.__file__}")
-print(f"  version        {installed}")
-print(f"  site-packages  {purelib}")
-
-if not ep.__file__.startswith(purelib):
-    raise SystemExit(
-        f"execution_plan resolved to {ep.__file__}, which is outside this "
-        f"environment's site-packages ({purelib}). Something is shadowing the "
-        "installed wheel, and the whole point of pinning by digest is that the "
-        "bytes that run are the bytes that were verified."
-    )
-shadowed = [entry for entry in sys.path if entry and "/Downloads/management/" in entry]
-if shadowed:
-    raise SystemExit(f"a source checkout is on sys.path: {shadowed}")
-if installed != expected_version:
-    raise SystemExit(f"installed {installed}, pinned {expected_version}")
-for name in ("render_execution_plan", "require_execution_plan_digest"):
-    if not hasattr(ep, name):
-        raise SystemExit(
-            f"the installed Foundation has no {name}. This is the capability "
-            "the candidate pin exists for; a wheel without it is the wrong wheel."
-        )
-print(f"  schemas        {ep.EXECUTION_PLAN_SCHEMA} / {ep.EXECUTION_PLAN_DIGEST_SCHEMA}")
+names = declared_provider_names()
+if names != ("platform-cp",):
+    raise SystemExit(f"execution binding declarations are {names!r}, expected platform-cp")
+bindings = discover_bindings()
+if bindings is None or bindings.provider != "platform-cp":
+    raise SystemExit("the installed Platform wheel did not load its execution bindings")
+if md.version("dotmac-deployment-foundation") != "0.3.0a5":
+    raise SystemExit("the installed Foundation is not the accepted a5 candidate")
+provider = pathlib.Path(md.distribution("dotmac-vendor-control-plane").locate_file(""))
+if not provider.is_dir():
+    raise SystemExit("the Platform provider has no installed distribution root")
 PY
+    "$RELEASE/bin/dotmac-deploy" --version >/dev/null \
+        || die "the installed dotmac-deploy console script is not executable"
+    printf '%s\n' "$bundle_id" > "$RELEASE/.bundle-id"
+    chmod 0444 "$RELEASE/.bundle-id"
+    release_ready=1
+else
+    [[ ! -L "$RELEASE" ]] || die "the versioned deployment tool is a symlink"
+    [[ -f "$RELEASE/.bundle-id" ]] \
+        || die "the existing versioned deployment tool has no bundle identity"
+    [[ "$(cat "$RELEASE/.bundle-id")" == "$bundle_id" ]] \
+        || die "the existing versioned deployment tool has a different identity"
+    ( cd / && env -u PYTHONPATH "$RELEASE/bin/python" -P - <<'PY' ) \
+        || die "the existing deployment tool no longer discovers its provider"
+from dotmac_deployment_foundation.execution_bindings import (
+    declared_provider_names,
+    discover_bindings,
+)
 
-printf '%s\n' "${TOOL_ROOT}/bin/dotmac-deploy"
+if declared_provider_names() != ("platform-cp",):
+    raise SystemExit("the existing deployment tool provider set changed")
+bindings = discover_bindings()
+if bindings is None or bindings.provider != "platform-cp":
+    raise SystemExit("the existing Platform provider no longer loads")
+PY
+    "$RELEASE/bin/dotmac-deploy" --version >/dev/null \
+        || die "the existing dotmac-deploy console script is not executable"
+fi
+
+link="$TOOL_ROOT/.current.$bundle_id"
+rm -f -- "$link"
+ln -s "releases/$bundle_id" "$link"
+mv -Tf -- "$link" "$CURRENT"
+
+printf '%s\n' "$CURRENT/bin/dotmac-deploy"

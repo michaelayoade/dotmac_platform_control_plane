@@ -23,7 +23,7 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
     dependencies = config["tool"]["poetry"]["dependencies"]
 
-    assert dependencies["dotmac-kernel"]["version"] == "0.1.0a100"
+    assert dependencies["dotmac-kernel"]["version"] == "0.1.0a101"
     assert dependencies["dotmac-kernel"]["source"] == "forgejo"
     # Every authority module pin is asserted. Only the release catalogue was, which is
     # how the entitlement-allocation pin could have drifted to a range or to a
@@ -48,6 +48,27 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
         "version": "0.1.0a1",
         "source": "forgejo",
     }
+    assert dependencies["dotmac-deployment-control"] == {
+        "version": "0.1.0a10",
+        "source": "forgejo",
+    }
+
+
+def test_every_exact_dotmac_pin_is_the_version_resolved_in_the_lock() -> None:
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    locked = tomllib.loads((ROOT / "poetry.lock").read_text())
+    versions = {package["name"]: package["version"] for package in locked["package"]}
+    dependencies = config["tool"]["poetry"]["dependencies"]
+    exact = {
+        name: value["version"]
+        for name, value in dependencies.items()
+        if name.startswith("dotmac-")
+        and isinstance(value, dict)
+        and value.get("source") == "forgejo"
+        and not any(marker in value["version"] for marker in "<>=^~*")
+    }
+    assert exact
+    assert {name: versions.get(name) for name in exact} == exact
 
 
 def test_release_catalog_manifest_is_composed() -> None:

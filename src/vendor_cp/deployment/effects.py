@@ -6,11 +6,10 @@ cannot know: a usable Platform CP backup is an atomic four-file recovery bundle,
 not one compressed database dump.  ``PlatformCpComposeHostEffects`` delegates
 every general effect and replaces only ``backup`` / ``verify_backup``.
 
-The a4 Foundation CLI cannot construct this adapter: its only provider branch
-constructs ``ComposeHostEffects`` directly, and its parser exposes no effects
-factory.  The class below is therefore the typed integration seam for the
-assembly executor that Control a10 must make reachable.  It deliberately does
-not invent that unpublished authorization or target-observation API.
+Foundation a5 discovers this adapter from the assembly distribution's declared
+execution-bindings entry point. The class below implements the complete a5
+``Effects`` protocol while replacing only the recovery-bundle operations the
+general provider cannot own.
 """
 
 from __future__ import annotations
@@ -27,7 +26,12 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
+
+if TYPE_CHECKING:
+    from dotmac_deployment_foundation.engine import CommandResult, RoleObservation
+    from dotmac_deployment_foundation.evidence import SignedEvidenceEnvelope
+    from dotmac_deployment_foundation.spec import ProductDeploymentSpec
 
 EXPECTED_PRODUCT = "dotmac_vendor_control_plane"
 EXPECTED_ENVIRONMENT = "production"
@@ -80,10 +84,23 @@ class PlatformBackupResult:
 
 
 class ProductSpec(Protocol):
-    product: str
-    environment: str
-    image: str
-    source_revision: str
+    @property
+    def product(self) -> str: ...
+
+    @property
+    def environment(self) -> str: ...
+
+    @property
+    def image(self) -> str: ...
+
+    @property
+    def source_revision(self) -> str: ...
+
+    def to_canonical_document(self) -> CanonicalDocumentLike: ...
+
+
+class CanonicalDocumentLike(Protocol):
+    def sha256_digest(self) -> str: ...
 
 
 class BackupResultLike(Protocol):
@@ -236,7 +253,6 @@ class PlatformCpRecoveryBundle:
         host_id_file: Path | str = "/etc/dotmac-host-id",
         compose_file: Path | str | None = None,
         env_file: Path | str | None = None,
-        descriptor_file: Path | str | None = None,
         backup_dir: Path | str = "/opt/backups/dotmac-vendor-control-plane",
         docker_bin: str = "/usr/bin/docker",
         process: ProcessExecutor | None = None,
@@ -259,9 +275,13 @@ class PlatformCpRecoveryBundle:
             compose_file or self._deploy_dir / "docker-compose.production.yml"
         )
         self._env_file = Path(env_file or self._deploy_dir / ".env")
-        self._descriptor_file = Path(
-            descriptor_file or self._deploy_dir / "deploy/product.toml"
-        )
+        # Bind recovery to the exact parsed spec handed to this execution.
+        # Reopening deploy/product.toml here bound a prospective deployment's
+        # backup to the PREVIOUS accepted descriptor, because the binding
+        # factory receives the parsed spec but not its source filename.
+        self._descriptor_digest = spec.to_canonical_document().sha256_digest()
+        if not _DIGEST.fullmatch(self._descriptor_digest):
+            raise ValueError("the Platform CP descriptor digest is malformed")
         self._backup_dir = Path(backup_dir)
         self._docker_bin = str(docker)
         self._process = process or SubprocessExecutor()
@@ -510,12 +530,6 @@ class PlatformCpRecoveryBundle:
                 )
             if not heads:
                 raise self._error("backup", "the database reports no migration heads")
-            try:
-                descriptor_digest = f"sha256:{_sha256(self._descriptor_file)}"
-            except OSError as error:
-                raise self._error(
-                    "backup", f"accepted descriptor is unreadable: {error}"
-                ) from error
             image_digest = self._spec.image.rsplit("@", 1)[-1]
             if not _DIGEST.fullmatch(image_digest):
                 raise self._error("backup", "the descriptor image is not digest-pinned")
@@ -539,7 +553,7 @@ class PlatformCpRecoveryBundle:
                 "database_name": database_name,
                 "image_digest": image_digest,
                 "image_source_revision": revision,
-                "descriptor_sha256": descriptor_digest,
+                "descriptor_sha256": self._descriptor_digest,
                 "migration_heads": sorted(
                     line for line in heads.splitlines() if line.strip()
                 ),
@@ -613,7 +627,7 @@ class PlatformCpRecoveryBundle:
             "target": self._target,
             "image_digest": self._spec.image.rsplit("@", 1)[-1],
             "image_source_revision": self._spec.source_revision,
-            "descriptor_sha256": f"sha256:{_sha256(self._descriptor_file)}",
+            "descriptor_sha256": self._descriptor_digest,
             "files": expected_files,
             "restore_order": ["globals.sql", "database.dump"],
         }
@@ -667,16 +681,20 @@ class PlatformCpComposeHostEffects:
     def image_labels(self, reference: str) -> Mapping[str, str]:
         return cast(Mapping[str, str], self._delegate_call("image_labels", reference))
 
-    def release_evidence(self, revision: str) -> Mapping[str, object]:
+    def release_evidence(self, revision: str) -> SignedEvidenceEnvelope | None:
+        # Foundation a5's seam is ``SignedEvidenceEnvelope | None``. Keeping
+        # the delegate's object intact is load-bearing: converting the nested
+        # signed document to strings was the a4 corruption this protocol fixed.
         return cast(
-            Mapping[str, object], self._delegate_call("release_evidence", revision)
+            "SignedEvidenceEnvelope | None",
+            self._delegate_call("release_evidence", revision),
         )
 
     def manifest_digest(self, manifest_path: str) -> str:
         return str(self._delegate_call("manifest_digest", manifest_path))
 
     def observe_roles(self) -> Sequence[object]:
-        return cast(Sequence[object], self._delegate_call("observe_roles"))
+        return cast(Sequence[RoleObservation], self._delegate_call("observe_roles"))
 
     def working_tree_dirty(self) -> bool:
         return bool(self._delegate_call("working_tree_dirty"))
@@ -693,12 +711,34 @@ class PlatformCpComposeHostEffects:
         *,
         timeout_seconds: int,
         materials: Sequence[str] = (),
-    ) -> object:
-        return self._delegate_call(
-            "run_command",
-            command,
-            timeout_seconds=timeout_seconds,
-            materials=materials,
+    ) -> CommandResult:
+        return cast(
+            CommandResult,
+            self._delegate_call(
+                "run_command",
+                command,
+                timeout_seconds=timeout_seconds,
+                materials=materials,
+            ),
+        )
+
+    def run_migration_command(
+        self,
+        command: Sequence[str],
+        *,
+        timeout_seconds: int,
+        materials: Sequence[str] = (),
+        image: str,
+    ) -> CommandResult:
+        return cast(
+            CommandResult,
+            self._delegate_call(
+                "run_migration_command",
+                command,
+                timeout_seconds=timeout_seconds,
+                materials=materials,
+                image=image,
+            ),
         )
 
     def backup(self, dataset_code: str, *, timeout_seconds: int) -> BackupResultLike:
@@ -707,18 +747,24 @@ class PlatformCpComposeHostEffects:
     def verify_backup(self, result: BackupResultLike) -> bool:
         return self._recovery.verify(result)
 
-    def migration_heads(self) -> Sequence[str]:
-        return cast(Sequence[str], self._delegate_call("migration_heads"))
+    def migration_heads(self, *, image: str) -> Sequence[str]:
+        return cast(Sequence[str], self._delegate_call("migration_heads", image=image))
 
     def stop_roles(self, roles: Sequence[str], *, timeout_seconds: int) -> None:
         self._delegate_call("stop_roles", roles, timeout_seconds=timeout_seconds)
 
-    def start_candidate(self, role: str, *, timeout_seconds: int) -> str:
+    def start_candidate(self, role: str, *, timeout_seconds: int, image: str) -> str:
         return str(
             self._delegate_call(
-                "start_candidate", role, timeout_seconds=timeout_seconds
+                "start_candidate",
+                role,
+                timeout_seconds=timeout_seconds,
+                image=image,
             )
         )
+
+    def role_ready(self, role: str) -> bool:
+        return bool(self._delegate_call("role_ready", role))
 
     def candidate_ready(self, role: str) -> bool:
         return bool(self._delegate_call("candidate_ready", role))
@@ -791,6 +837,9 @@ class PlatformCpComposeHostEffects:
     def write_evidence(self, evidence: Mapping[str, object]) -> str:
         return str(self._delegate_call("write_evidence", evidence))
 
+    def read_evidence(self, path: str) -> Mapping[str, object]:
+        return cast(Mapping[str, object], self._delegate_call("read_evidence", path))
+
     def prune_images(self, *, retain: int) -> None:
         self._delegate_call("prune_images", retain=retain)
 
@@ -802,7 +851,7 @@ ComposeEffectsFactory = Callable[..., object]
 
 
 def build_platform_cp_effects(
-    spec: ProductSpec,
+    spec: ProductDeploymentSpec,
     deploy_dir: Path | str,
     *,
     target: str,
@@ -812,8 +861,8 @@ def build_platform_cp_effects(
 ) -> PlatformCpComposeHostEffects:
     """Build the product decorator from Foundation's published provider API.
 
-    This is not wired into a launcher.  Foundation a4 has no runtime-binding
-    factory, so nothing can reach this function from the published CLI yet.
+    Foundation a5 reaches this function through the assembly distribution's
+    execution-bindings entry point.
     """
     if compose_effects_factory is None:
         from dotmac_deployment_foundation.providers import (  # noqa: PLC0415

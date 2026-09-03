@@ -1,10 +1,15 @@
-"""Two signers, because they answer two different questions.
+"""Three signers, because they answer three different questions.
 
 The **authorization** signer answers *may this happen* — it signs the Control
 envelope that permits a deployment. The **observation** signer answers *this is
 what happened* — it signs what the target actually applied. One key answering
 both would make the observation unable to contradict the authorization, and an
 observation that cannot contradict is not evidence, it is an echo.
+
+The **release-evidence** signer answers *these artifact bytes earned this
+revision's release gates*. It runs in CI, not on the target and not in Control;
+borrowing either of the other keys would let the release pipeline authorize a
+deployment or forge the target's account of what happened.
 
 ## What this module is, and is not
 
@@ -69,10 +74,12 @@ from typing import Final
 __all__ = [
     "AUTHORIZATION_PURPOSE",
     "EXECUTION_OBSERVATION_PURPOSE",
+    "RELEASE_EVIDENCE_PURPOSE",
     "FORBIDDEN_SIGNING_POINTERS",
     "POINTER_PREFIX",
     "AuthorizationSignerPointer",
     "ObservationSignerPointer",
+    "ReleaseEvidenceSignerPointer",
     "SignerPointerRefused",
     "SignerRefusal",
     "require_distinct_signers",
@@ -84,6 +91,7 @@ __all__ = [
 #: cannot silently drift from the authority that enforces them.
 AUTHORIZATION_PURPOSE: Final = "deployment_authorization"
 EXECUTION_OBSERVATION_PURPOSE: Final = "target_execution_observation"
+RELEASE_EVIDENCE_PURPOSE: Final = "platform_release_evidence"
 
 #: Pointers no deployment signer may name, whatever it is called.
 FORBIDDEN_SIGNING_POINTERS: Final[frozenset[str]] = frozenset(
@@ -178,21 +186,44 @@ class ObservationSignerPointer:
         _validate(self.pointer, purpose="observation")
 
 
+@dataclass(frozen=True, slots=True)
+class ReleaseEvidenceSignerPointer:
+    """Where the CI release-evidence key lives. Never the key."""
+
+    pointer: str
+    purpose: str = RELEASE_EVIDENCE_PURPOSE
+
+    def __post_init__(self) -> None:
+        if self.purpose != RELEASE_EVIDENCE_PURPOSE:
+            raise SignerPointerRefused(
+                SignerRefusal.PURPOSE_MISMATCH,
+                "a release-evidence signer must declare "
+                f"{RELEASE_EVIDENCE_PURPOSE!r}",
+            )
+        _validate(self.pointer, purpose="release evidence")
+
+
 def require_distinct_signers(
     authorization: AuthorizationSignerPointer,
     observation: ObservationSignerPointer,
+    release_evidence: ReleaseEvidenceSignerPointer,
 ) -> None:
-    """Refuse a pair that is one key wearing two purposes.
+    """Refuse any pair that is one key wearing multiple purposes.
 
     Neither dataclass can see the other, so the rule that actually matters —
     that the two pointers are different — has to be checked where both are in
     hand. A pair naming one pointer twice would satisfy every per-class refusal
     above and still collapse *may this happen* into *this is what happened*.
     """
-    if authorization.pointer == observation.pointer:
+    pointers = {
+        authorization.pointer,
+        observation.pointer,
+        release_evidence.pointer,
+    }
+    if len(pointers) != 3:
         raise SignerPointerRefused(
             SignerRefusal.SHARED_POINTER,
-            f"both signers name {authorization.pointer!r}. Separate purposes need "
-            "separate keys, or the observation cannot contradict the "
-            "authorization and is an echo rather than evidence",
+            "authorization, target observation and release evidence must name "
+            "three distinct pointers. Separate claims need separate keys, or "
+            "one authority can forge another authority's evidence",
         )
