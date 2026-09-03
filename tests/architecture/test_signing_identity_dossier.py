@@ -77,9 +77,27 @@ def declared_pointers(text: str) -> dict[str, str]:
     """
     pairs: dict[str, str] = {}
     for line in text.splitlines():
-        tokens = _BACKTICKED.findall(line)
-        purposes = [t for t in tokens if _PURPOSE_SHAPED.fullmatch(t)]
-        pointers = [t for t in tokens if t.startswith(POINTER_PREFIX)]
+        if not line.lstrip().startswith("|"):
+            continue
+        # Per CELL, not per line. Scanning the whole line counted
+        # `verify_dispatch_envelope` -- prose in the "verified by" column -- as a
+        # second purpose, so the row had two candidates and was skipped, and the
+        # count assertion then reported the fourth purpose as simply absent. A
+        # purpose is a cell that is EXACTLY one backticked identifier; a cell of
+        # prose that happens to contain one is not a declaration.
+        cells = [cell.strip() for cell in line.split("|")]
+        purposes = [
+            _BACKTICKED.fullmatch(cell).group(1)  # type: ignore[union-attr]
+            for cell in cells
+            if _BACKTICKED.fullmatch(cell)
+            and _PURPOSE_SHAPED.fullmatch(_BACKTICKED.fullmatch(cell).group(1))  # type: ignore[union-attr]
+        ]
+        pointers = [
+            _BACKTICKED.fullmatch(cell).group(1)  # type: ignore[union-attr]
+            for cell in cells
+            if _BACKTICKED.fullmatch(cell)
+            and _BACKTICKED.fullmatch(cell).group(1).startswith(POINTER_PREFIX)  # type: ignore[union-attr]
+        ]
         if len(purposes) == 1 and len(pointers) == 1:
             pairs[purposes[0]] = pointers[0]
     return pairs
