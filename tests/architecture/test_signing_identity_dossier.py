@@ -42,9 +42,29 @@ DOSSIER = (
 #: that lands it, and this comment with it.
 RELEASE_EVIDENCE_PURPOSE = "platform_release_evidence"
 
+#: `deployment_dispatch`, read from Control a11's `dispatch_envelope.py:45`
+#: (`DISPATCH_PURPOSE`). Pinned as a literal for the same reason as the one
+#: above: no descriptor for it exists in this repository yet, and Control is a
+#: separate distribution. Replace both with imported constants in the change
+#: that lands their descriptors.
+DISPATCH_PURPOSE = "deployment_dispatch"
+
 EXPECTED_PURPOSES = frozenset(
-    {AUTHORIZATION_PURPOSE, EXECUTION_OBSERVATION_PURPOSE, RELEASE_EVIDENCE_PURPOSE}
+    {
+        AUTHORIZATION_PURPOSE,
+        EXECUTION_OBSERVATION_PURPOSE,
+        DISPATCH_PURPOSE,
+        RELEASE_EVIDENCE_PURPOSE,
+    }
 )
+
+#: A purpose is a lowercase identifier. The reader matches SHAPE rather than an
+#: allowlist, and that is the whole difference between this guard biting and
+#: passing: filtering rows through `EXPECTED_PURPOSES` meant a row naming an
+#: UNDECLARED purpose was silently skipped, so the count assertion below still
+#: saw the old number and agreed with itself. A guard that only reads what it
+#: already expects cannot report a surprise.
+_PURPOSE_SHAPED = re.compile(r"^[a-z][a-z0-9_]*$")
 
 _BACKTICKED = re.compile(r"`([^`]+)`")
 
@@ -57,9 +77,27 @@ def declared_pointers(text: str) -> dict[str, str]:
     """
     pairs: dict[str, str] = {}
     for line in text.splitlines():
-        tokens = _BACKTICKED.findall(line)
-        purposes = [t for t in tokens if t in EXPECTED_PURPOSES]
-        pointers = [t for t in tokens if t.startswith(POINTER_PREFIX)]
+        if not line.lstrip().startswith("|"):
+            continue
+        # Per CELL, not per line. Scanning the whole line counted
+        # `verify_dispatch_envelope` -- prose in the "verified by" column -- as a
+        # second purpose, so the row had two candidates and was skipped, and the
+        # count assertion then reported the fourth purpose as simply absent. A
+        # purpose is a cell that is EXACTLY one backticked identifier; a cell of
+        # prose that happens to contain one is not a declaration.
+        cells = [cell.strip() for cell in line.split("|")]
+        purposes = [
+            _BACKTICKED.fullmatch(cell).group(1)  # type: ignore[union-attr]
+            for cell in cells
+            if _BACKTICKED.fullmatch(cell)
+            and _PURPOSE_SHAPED.fullmatch(_BACKTICKED.fullmatch(cell).group(1))  # type: ignore[union-attr]
+        ]
+        pointers = [
+            _BACKTICKED.fullmatch(cell).group(1)  # type: ignore[union-attr]
+            for cell in cells
+            if _BACKTICKED.fullmatch(cell)
+            and _BACKTICKED.fullmatch(cell).group(1).startswith(POINTER_PREFIX)  # type: ignore[union-attr]
+        ]
         if len(purposes) == 1 and len(pointers) == 1:
             pairs[purposes[0]] = pointers[0]
     return pairs
@@ -82,13 +120,17 @@ def test_the_dossier_is_present_and_not_empty() -> None:
     assert len(DOSSIER.read_text(encoding="utf-8")) > 2000
 
 
-def test_the_dossier_declares_exactly_the_three_purposes() -> None:
-    """One ceremony, three identities. A fourth would need a policy, a token, an
-    enrolment line and a verification pass that this document does not carry."""
+def test_the_dossier_declares_exactly_the_expected_purposes() -> None:
+    """One ceremony, four identities. A fifth would need a policy, a token, an
+    enrolment line and a verification pass this document does not carry.
+
+    The reader takes any purpose-shaped row, so an undeclared purpose arrives
+    here as a surprise rather than being filtered out on the way in.
+    """
     declared = declared_pointers(DOSSIER.read_text(encoding="utf-8"))
     assert set(declared) == EXPECTED_PURPOSES, (
-        "the dossier's purpose/pointer table does not declare exactly the three "
-        f"purposes; found {sorted(declared)}"
+        "the dossier's purpose/pointer table does not declare exactly the "
+        f"expected purposes; found {sorted(declared)}"
     )
 
 
@@ -106,10 +148,12 @@ def test_every_declared_pointer_is_admitted_by_the_shipped_descriptor() -> None:
     observation = declared[EXECUTION_OBSERVATION_PURPOSE]
     assert ObservationSignerPointer(observation).pointer == observation
 
-    # No descriptor on `main` yet; hold it to the two rules that already exist.
-    release_evidence = declared[RELEASE_EVIDENCE_PURPOSE]
-    assert release_evidence.startswith(POINTER_PREFIX)
-    assert release_evidence not in FORBIDDEN_SIGNING_POINTERS
+    # No descriptor on `main` yet for these two; hold them to the two rules
+    # that already exist, and to the same prefix every signer answers to.
+    for purpose in (DISPATCH_PURPOSE, RELEASE_EVIDENCE_PURPOSE):
+        pointer = declared[purpose]
+        assert pointer.startswith(POINTER_PREFIX), purpose
+        assert pointer not in FORBIDDEN_SIGNING_POINTERS, purpose
 
 
 def test_the_dossier_names_no_undeclared_pointer() -> None:
@@ -188,3 +232,28 @@ def test_the_pairing_reader_finds_a_well_formed_row() -> None:
     assert declared_pointers(doctored) == {
         AUTHORIZATION_PURPOSE: f"{POINTER_PREFIX}a/primary"
     }
+
+
+def test_an_undeclared_purpose_row_is_read_rather_than_skipped() -> None:
+    """SENSITIVITY for the reader, and the reason it no longer filters.
+
+    The earlier reader kept only rows whose purpose was already in
+    `EXPECTED_PURPOSES`. A row naming a purpose nobody had declared was
+    therefore dropped on the way in, and the count assertion compared the three
+    it expected against the three it had been allowed to see -- agreeing with
+    itself while the document declared something else. Control a11 adding a
+    fourth purpose is exactly the event that shape cannot report.
+
+    Now the row is read, so it shows up as a surprise the count refuses.
+    """
+    doctored = (
+        _DOCTORED_HEADER
+        + f"| 1 | `{AUTHORIZATION_PURPOSE}` | `{POINTER_PREFIX}a/primary` |\n"
+        f"| 2 | `an_undeclared_purpose` | `{POINTER_PREFIX}b/primary` |\n"
+    )
+    declared = declared_pointers(doctored)
+    assert "an_undeclared_purpose" in declared, (
+        "the reader skipped a purpose it did not already expect, so the count "
+        "assertion can never see a new one"
+    )
+    assert set(declared) != EXPECTED_PURPOSES
