@@ -82,6 +82,58 @@ def _verify(tmp_path: Path, document: object, *, wheel: str = WHEEL) -> object:
     return verify_embedded_profile(EXPECTED, **_write(tmp_path, document, wheel=wheel))
 
 
+def _inventory_pairs(wheel: str = WHEEL) -> list[tuple[str, str]]:
+    """The exact `(filename, sha256)` pairs `_write` puts in the image."""
+    return [
+        ("vendor_cp-0.1.0.tar.gz", OTHER_WHEEL),
+        ("vendor_cp-0.1.0-py3-none-any.whl", wheel),
+    ]
+
+
+def _inventory_digest(wheel: str = WHEEL) -> str:
+    """THE SPECIFICATION, re-implemented here rather than imported.
+
+    Importing `canonical_inventory_digest` would make every assertion below a
+    statement that one function agrees with itself — the same reason the module
+    calls its own encoding a spec for a producer to implement separately. This is
+    the second implementation that makes the comparison mean something.
+    """
+    body = sorted(_inventory_pairs(wheel))
+    encoded = json.dumps(
+        [[name, digest] for name, digest in body],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _proof(**over: object) -> dict[str, object]:
+    """A proof that ESTABLISHES, unless a test breaks exactly one thing."""
+    proof: dict[str, object] = {
+        "schema": INTEGRATION_ABSENCE_SCHEMA,
+        "state": "absent_proven",
+        "concern": "integration",
+        "source_revision": REVISION,
+        "image_digest": WHEEL,
+        "observed_inventory_digest": _inventory_digest(),
+        "families": {name: [] for name in sorted(INTEGRATION_SURFACE_FAMILIES)},
+        "method": "entry-point metadata + AST walk over the installed image",
+        "positive_control": ["dotmac_integration.connectors:paystack"],
+        "established_at": "2026-09-04T12:00:00Z",
+        "established_by": "platform-cp-profile-job",
+    }
+    proof.update(over)
+    return proof
+
+
+def _with_proof(proof: dict[str, object], *, concern: str = "integration") -> dict:
+    """Twelve declared bindings, and one concern left to the proof."""
+    return _document(
+        concerns=tuple(name for name in FOUNDATION_CONCERNS if name != concern),
+        absence_proofs=[proof],
+    )
+
+
 # ── the transition that proves consumption ──────────────────────────────────
 
 
@@ -201,12 +253,8 @@ def test_another_images_absence_proof_is_refused_although_well_formed(
     check looks at. It is still inadmissible, because a proof that concern X is
     absent from image A says nothing whatever about image B.
     """
-    foreign = {
-        "concern": "integration",
-        "source_revision": "e" * 40,
-        "statement": "no integration provider is installed",
-    }
-    document = _document(absence_proofs=[foreign])
+    foreign = _proof(source_revision="e" * 40)
+    document = _with_proof(foreign)
 
     # The document itself is internally valid: its digest verifies. The refusal
     # is therefore about provenance, not about corruption.
@@ -219,15 +267,46 @@ def test_another_images_absence_proof_is_refused_although_well_formed(
 
 def test_this_images_own_absence_proof_is_accepted(tmp_path: Path) -> None:
     """SENSITIVITY for the test above: the refusal is about the coordinates and
-    not about the presence of an absence proof at all."""
-    own = {
+    not about the presence of an absence proof at all.
+
+    **The fixture changed, and the reason is the point of this file.** This test
+    used to pass a proof carrying only a concern, a revision and a free-text
+    `statement` — no schema, no families, no inventory digest — and assert that
+    it was ADMITTED. As a sensitivity control that was the right idea; as a
+    stated property it was the general "nothing applies" escape hatch, written
+    down: anything naming a concern and this revision satisfied it.
+
+    The control it was meant to be is preserved by making the near miss a proof
+    that ESTABLISHES. Now the two tests differ in exactly one field — the
+    revision — so the refusal above is demonstrably about provenance and not
+    about the presence of a proof.
+    """
+    assert _verify(tmp_path, _with_proof(_proof())).verdict is ProfileVerdict.ADMITTED
+
+
+def test_the_shape_that_used_to_be_admitted_is_the_escape_hatch_and_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Recorded as its own property, not left implied by a repaired fixture.
+
+    A concern name, this artifact's revision and a sentence. That is the whole
+    document, and it used to ADMIT. It establishes nothing: it names no schema,
+    visited no family, carries no positive control, and its only tie to this
+    image is a revision string a writer typed. Ruled 2026-09-04 — absence is
+    approved only through `IntegrationSurfaceAbsenceProofV1`, bound to the exact
+    installed artifact and a closed surface inventory, and *"this is not a
+    general 'nothing applies' escape hatch."*
+
+    This is the test for the NEXT one of these, not for the last.
+    """
+    shapeless = {
         "concern": "integration",
         "source_revision": REVISION,
         "statement": "no integration provider is installed",
     }
-    assert _verify(tmp_path, _document(absence_proofs=[own])).verdict is (
-        ProfileVerdict.ADMITTED
-    )
+    outcome = _verify(tmp_path, _document(absence_proofs=[shapeless]))
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_INADMISSIBLE
+    assert "certifies nothing here" in outcome.detail
 
 
 # ── completeness ────────────────────────────────────────────────────────────
@@ -317,58 +396,6 @@ def test_the_defaults_point_into_the_artifact_not_into_a_checkout() -> None:
 # proof counts, because a gate nothing can satisfy gets waived rather than met.
 # Every other one says a proof that establishes nothing does not, because a gate
 # anything can satisfy is not a gate.
-
-
-def _inventory_pairs(wheel: str = WHEEL) -> list[tuple[str, str]]:
-    """The exact `(filename, sha256)` pairs `_write` puts in the image."""
-    return [
-        ("vendor_cp-0.1.0.tar.gz", OTHER_WHEEL),
-        ("vendor_cp-0.1.0-py3-none-any.whl", wheel),
-    ]
-
-
-def _inventory_digest(wheel: str = WHEEL) -> str:
-    """THE SPECIFICATION, re-implemented here rather than imported.
-
-    Importing `canonical_inventory_digest` would make every assertion below a
-    statement that one function agrees with itself — the same reason the module
-    calls its own encoding a spec for a producer to implement separately. This is
-    the second implementation that makes the comparison mean something.
-    """
-    body = sorted(_inventory_pairs(wheel))
-    encoded = json.dumps(
-        [[name, digest] for name, digest in body],
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
-
-
-def _proof(**over: object) -> dict[str, object]:
-    """A proof that ESTABLISHES, unless a test breaks exactly one thing."""
-    proof: dict[str, object] = {
-        "schema": INTEGRATION_ABSENCE_SCHEMA,
-        "state": "absent_proven",
-        "concern": "integration",
-        "source_revision": REVISION,
-        "image_digest": WHEEL,
-        "observed_inventory_digest": _inventory_digest(),
-        "families": {name: [] for name in sorted(INTEGRATION_SURFACE_FAMILIES)},
-        "method": "entry-point metadata + AST walk over the installed image",
-        "positive_control": ["dotmac_integration.connectors:paystack"],
-        "established_at": "2026-09-04T12:00:00Z",
-        "established_by": "platform-cp-profile-job",
-    }
-    proof.update(over)
-    return proof
-
-
-def _with_proof(proof: dict[str, object], *, concern: str = "integration") -> dict:
-    """Twelve declared bindings, and one concern left to the proof."""
-    return _document(
-        concerns=tuple(name for name in FOUNDATION_CONCERNS if name != concern),
-        absence_proofs=[proof],
-    )
 
 
 def test_an_established_absence_proof_satisfies_integration(tmp_path: Path) -> None:
