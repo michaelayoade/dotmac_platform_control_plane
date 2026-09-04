@@ -57,6 +57,17 @@ from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 from typing import Any, Final
 
+# The ONE import outside the pure-stdlib set, and it is deliberate. `signers`
+# imports only `collections.abc`, `dataclasses`, `enum` and `typing` — it has no
+# filesystem, environment, process, network, crypto or secret source — so
+# admitting it preserves the allowlist's premise exactly rather than weakening
+# it. The alternative was restating the purpose string here, which is the second
+# statement that drifts from the thing it describes.
+from vendor_cp.deployment.signers import (
+    RELEASE_EVIDENCE_PURPOSE,
+    ReleaseEvidenceSignerPointer,
+)
+
 __all__ = [
     "RELEASE_EVIDENCE_SCHEMA",
     "RUN_FACTS",
@@ -101,6 +112,11 @@ class EvidenceRefusal(StrEnum):
     UNUSABLE_KEY_ID = "UNUSABLE_KEY_ID"
     #: The signing function returned something that is not a signature.
     UNUSABLE_SIGNATURE = "UNUSABLE_SIGNATURE"
+    #: The identity handed to the producer is not a release-evidence signer.
+    #: Its own refusal rather than a shared one: being handed the AUTHORIZATION
+    #: key with a release-evidence key id and being handed no key id at all are
+    #: different mistakes, and a caller cannot tell them apart from one code.
+    PURPOSE_MISMATCH = "PURPOSE_MISMATCH"
 
 
 class EvidenceRefused(ValueError):
@@ -186,7 +202,7 @@ def canonical_bytes(document: Mapping[str, Any]) -> bytes:
 def sign_release_evidence(
     facts: Mapping[str, str],
     *,
-    key_id: str,
+    signer: ReleaseEvidenceSignerPointer,
     sign: Callable[[bytes], bytes],
 ) -> dict[str, Any]:
     """Produce the on-disk envelope: `{document, signature, key_id}`.
@@ -194,7 +210,30 @@ def sign_release_evidence(
     `document` is the nested object the signature covers and is never
     stringified; `key_id` sits OUTSIDE it, because a document carrying its own
     key id would let a forger nominate the key that verifies it.
+
+    ## Why this takes an identity rather than a key id
+
+    It used to take `key_id: str` beside an unrelated signing callable, so
+    nothing structurally prevented the AUTHORIZATION key being handed a
+    release-evidence key id: two arguments that had to agree, with no type
+    saying so. `ReleaseEvidenceSignerPointer` binds the purpose and the key id
+    into one value that has already refused the wrong purpose, which moves that
+    check from a review to this call site.
+
+    It does not close the coupling entirely, and says so rather than implying
+    otherwise: the pointer cannot carry the signing callable, because a pointer
+    able to reach material would be the thing it exists not to be. Pairing the
+    callable with the identity is the custody adapter's single job. What changed
+    is that it is now ONE job in one place instead of every caller's.
     """
+    purpose = getattr(signer, "purpose", None)
+    if purpose != RELEASE_EVIDENCE_PURPOSE:
+        raise EvidenceRefused(
+            EvidenceRefusal.PURPOSE_MISMATCH,
+            f"release evidence must be signed by a {RELEASE_EVIDENCE_PURPOSE!r} "
+            f"identity; this one declares {purpose!r}",
+        )
+    key_id = signer.key_id
     if not key_id.strip():
         raise EvidenceRefused(
             EvidenceRefusal.UNUSABLE_KEY_ID,

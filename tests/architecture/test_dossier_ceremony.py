@@ -616,7 +616,29 @@ PRODUCER = (
 #: of what this module can reach, and removing one that is still imported fails
 #: just as loudly as adding one that is not allowed.
 PRODUCER_IMPORT_ALLOWLIST: frozenset[str] = frozenset(
-    {"__future__", "base64", "json", "re", "collections.abc", "enum", "typing"}
+    {
+        "__future__",
+        "base64",
+        "json",
+        "re",
+        "collections.abc",
+        "enum",
+        "typing",
+        # Admitted so the producer can REQUIRE a typed release-evidence
+        # identity instead of a bare key id beside an unrelated callable. It
+        # preserves the premise above rather than weakening it: `signers`
+        # imports only `collections.abc`, `dataclasses`, `enum` and `typing`,
+        # so it is as incapable of obtaining key material as every other entry
+        # here — and `test_the_admitted_module_is_as_incapable_as_the_rest`
+        # asserts that rather than trusting this comment.
+        "vendor_cp.deployment.signers",
+    }
+)
+
+#: What `vendor_cp.deployment.signers` is itself allowed to import, for the
+#: entry above to keep meaning what it says. Same premise, one level down.
+SIGNERS_IMPORT_ALLOWLIST: frozenset[str] = frozenset(
+    {"__future__", "collections.abc", "dataclasses", "enum", "typing"}
 )
 
 #: Identifier fragments that name private key material. Checked against NAMES
@@ -883,3 +905,51 @@ def test_an_unparseable_producer_refuses_rather_than_passing_as_clean() -> None:
     """ABSENT must be distinguishable from UNPARSED."""
     finding = _producer_only("def broken(:\n", ProducerRefusal.UNREADABLE_MODULE)
     assert "cannot parse" in finding.detail
+
+
+def test_the_admitted_module_is_as_incapable_as_the_rest() -> None:
+    """The producer's allowlist admits one first-party module, and that entry is
+    only sound while the module cannot reach key material either.
+
+    Asserted one level down rather than assumed: an import added to `signers`
+    tomorrow would silently widen what the producer can reach, and the producer's
+    own guard would not see it because `signers` would still be a single
+    allowlisted name.
+    """
+    signers = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "vendor_cp"
+        / "deployment"
+        / "signers.py"
+    )
+    tree = ast.parse(signers.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    assert imported <= SIGNERS_IMPORT_ALLOWLIST, sorted(
+        imported - SIGNERS_IMPORT_ALLOWLIST
+    )
+
+
+def test_the_signers_allowlist_is_not_vacuous() -> None:
+    """NON-VACUITY: a module that imported nothing would satisfy the check above
+    while proving nothing about what it may reach."""
+    assert SIGNERS_IMPORT_ALLOWLIST
+    signers = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "vendor_cp"
+        / "deployment"
+        / "signers.py"
+    )
+    tree = ast.parse(signers.read_text(encoding="utf-8"))
+    modules = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert modules, "signers imports nothing, so the allowlist above is vacuous"
