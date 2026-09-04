@@ -65,14 +65,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final, Protocol
+from typing import ClassVar, Final, Protocol
 
 __all__ = [
     "AUTHORIZATION_PURPOSE",
     "EXECUTION_OBSERVATION_PURPOSE",
     "FORBIDDEN_SIGNING_POINTERS",
+    "POINTER_MATERIAL",
     "POINTER_PREFIX",
     "AuthorizationSignerPointer",
+    "MaterialKind",
     "ObservationSignerPointer",
     "SignerPointerRefused",
     "SignerPointerLike",
@@ -96,6 +98,31 @@ FORBIDDEN_SIGNING_POINTERS: Final[frozenset[str]] = frozenset(
 #: which pointers a signer may name is not an implementation detail of the
 #: check that enforces it.
 POINTER_PREFIX: Final = "secret/dotmac/platform-cp/"
+
+
+class MaterialKind(StrEnum):
+    """What kind of material a pointer names — declared, never inferred.
+
+    Three of the four signing pointers name PRIVATE signing material this
+    product may hold. `target_execution_observation` does not: Michael's
+    custody ruling of 2026-09-04 keeps that private key on the target, so the
+    path in this namespace holds the target's PUBLIC verification identity and
+    nothing else.
+
+    The asymmetry is DECLARED rather than left for a reader to notice, and the
+    type was not split to express it. A split would say the observation pointer
+    is a different KIND of thing, which it is not — it is the same thing (a
+    purpose-bound pointer) naming a different kind of material. What a reader
+    actually needs is not a second class but an answer to one question before
+    they write a policy against the path: *may private material live here?* So
+    that question is answered on the type.
+    """
+
+    #: Signing material. A read policy against this path is legitimate.
+    PRIVATE = "PRIVATE"
+    #: A verification identity only. A read policy is unnecessary, and writing
+    #: private material here would defeat the custody it exists to express.
+    PUBLIC = "PUBLIC"
 
 
 class SignerRefusal(StrEnum):
@@ -158,6 +185,8 @@ def _validate(pointer: str, *, purpose: str) -> str:
 class AuthorizationSignerPointer:
     """Where the authorization key lives. Never the key."""
 
+    material: ClassVar[MaterialKind] = MaterialKind.PRIVATE
+
     pointer: str
     purpose: str = AUTHORIZATION_PURPOSE
 
@@ -174,6 +203,9 @@ class AuthorizationSignerPointer:
 class ObservationSignerPointer:
     """Where the target-observation key lives. Never the key."""
 
+    #: PUBLIC, and the one asymmetry in the set. See `MaterialKind`.
+    material: ClassVar[MaterialKind] = MaterialKind.PUBLIC
+
     pointer: str
     purpose: str = EXECUTION_OBSERVATION_PURPOSE
 
@@ -185,6 +217,20 @@ class ObservationSignerPointer:
                 f"{EXECUTION_OBSERVATION_PURPOSE!r}",
             )
         _validate(self.pointer, purpose="observation")
+
+
+#: Every signing purpose and the kind of material its pointer names. Two have
+#: descriptor classes on `main` and carry it as a `ClassVar`; `deployment_dispatch`
+#: and `platform_release_evidence` do not exist as types yet, so they are named
+#: here as literals until they do. This mapping is what binds the mint dossier's
+#: custody table to code — `tests/architecture/test_dossier_ceremony.py` refuses
+#: a document whose table disagrees with it.
+POINTER_MATERIAL: Final[dict[str, MaterialKind]] = {
+    AUTHORIZATION_PURPOSE: AuthorizationSignerPointer.material,
+    EXECUTION_OBSERVATION_PURPOSE: ObservationSignerPointer.material,
+    "deployment_dispatch": MaterialKind.PRIVATE,
+    "platform_release_evidence": MaterialKind.PRIVATE,
+}
 
 
 class SignerPointerLike(Protocol):
