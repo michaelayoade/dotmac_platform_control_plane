@@ -318,19 +318,36 @@ def read_rollout(db: Session, rollout_id: UUID) -> RolloutView:
 def read_drift(db: Session, target_id: UUID) -> ModuleDriftReport:
     """The module's computed difference between rolled-out and observed state.
 
-    A `None` from the module means the target has no rollout to compare
-    against. That is an absence of evidence rather than a clean bill of health,
-    so it is raised rather than rendered as an empty report — a caller reading
-    "no drift" off a target nothing has ever deployed to is the failure this
-    avoids.
+    `None` from the module means one thing and one thing only: **the target row
+    does not exist**. Verified against the pinned owner rather than inferred —
+    `drift()` returns `None` on `db.get(DeploymentTarget, target_id) is None`
+    and on nothing else.
+
+    ## What this docstring used to claim, and why it was wrong
+
+    It said a `None` meant "the target has no rollout to compare against", and
+    refused with a message saying so. That condition never fires. A target with
+    no successful rollout gets a real `DriftReport` whose
+    `rolled_out_release_ref` and `rolled_out_revision` are `None` — so the only
+    caller who ever saw that refusal was one naming a target that had been
+    deleted or never registered, and they were told something else entirely.
+
+    The underlying worry was legitimate: a caller must not read "no drift" off a
+    target nothing has ever deployed to. But the owner already answers it, and
+    answers it better than an exception could. `DriftReport.drifted` is `False`
+    when `rolled_out_revision is None` — its own docstring says *"Silence is not
+    drift"* — and `never_observed` is kept deliberately separate from `drifted`,
+    because a target that has never reported is unknown rather than wrong.
+
+    So the interpretation is DROPPED rather than restated. This adapter refuses
+    the condition the owner actually signals and assigns no meaning the owner
+    did not; a caller distinguishing "deployed and matching" from "nothing
+    rolled out yet" reads `rolled_out_revision` and `never_observed`, which are
+    the owner's words for it.
     """
     report = drift(db, target_id)
     if report is None:
-        raise NotFoundError(
-            f"deployment target {target_id} has no rolled-out plan to compare "
-            "against, so no drift can be computed — this is an absence of "
-            "evidence, not an absence of drift"
-        )
+        raise NotFoundError(f"deployment target {target_id} does not exist")
     return report
 
 
