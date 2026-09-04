@@ -218,3 +218,37 @@ def test_the_observation_is_bound_and_not_signed() -> None:
     source = MODULE.read_text(encoding="utf-8")
     assert "signers" not in source
     assert "sign(" not in source
+
+
+def test_each_count_is_wrapped_in_its_own_savepoint() -> None:
+    """One refusal must not abort the transaction and turn every later table
+    into a false UNKNOWN. Asserted on the statement SEQUENCE, which is the only
+    place the isolation is visible from here."""
+    issued: list[str] = []
+
+    class _Result:
+        def __init__(self, rows: list[tuple[str, str]] | None = None) -> None:
+            self._rows = rows or []
+
+        def __iter__(self):  # noqa: ANN204
+            return iter(self._rows)
+
+        def scalar_one(self) -> object:
+            raise RuntimeError("permission denied")
+
+    class _Connection:
+        def execute(self, statement: object) -> _Result:
+            rendered = str(statement)
+            issued.append(rendered)
+            if "pg_catalog.pg_class" in rendered:
+                return _Result([("public", "a"), ("public", "b")])
+            return _Result()
+
+    observe_table_inventory(_Connection(), binding=BINDING)  # type: ignore[arg-type]
+
+    assert issued.count("SAVEPOINT table_count") == 2
+    assert issued.count("ROLLBACK TO SAVEPOINT table_count") == 2
+    # And the rollback follows the failed count rather than preceding it.
+    first_savepoint = issued.index("SAVEPOINT table_count")
+    first_rollback = issued.index("ROLLBACK TO SAVEPOINT table_count")
+    assert first_savepoint < first_rollback

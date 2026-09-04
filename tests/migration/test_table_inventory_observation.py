@@ -166,7 +166,57 @@ def test_emptiness_here_is_a_fact_about_the_fixture(migrated: str) -> None:
         observed = observe_table_inventory(conn, binding=_binding())
     counted = [t for t in observed.tables if t.outcome is ReadOutcome.COUNTED]
     assert counted
-    assert all(t.row_count == 0 for t in counted), (
-        "a freshly migrated database holds rows, which means this fixture is "
-        "not the empty-by-construction baseline this comment describes"
+
+    # `alembic_version` is migration BOOKKEEPING, not governed data: a migrated
+    # database holds one row per applied head by definition. Excluded by name
+    # rather than by a blanket "mostly empty", so a second table appearing with
+    # rows fails here instead of being absorbed.
+    bookkeeping = {"public.alembic_version"}
+    populated = {
+        t.qualified for t in counted if t.row_count and t.qualified not in bookkeeping
+    }
+    assert populated == set(), (
+        f"a freshly migrated database holds rows in {sorted(populated)}, so "
+        "this fixture is not the empty-by-construction baseline it describes"
     )
+    assert any(t.qualified in bookkeeping and t.row_count for t in counted), (
+        "alembic_version is empty, so this database was never migrated and the "
+        "emptiness above is vacuous"
+    )
+
+
+def test_one_unreadable_table_does_not_make_the_others_unknown(
+    migrated: str, url_for: Callable[..., str]
+) -> None:
+    """THE REGRESSION GUARD for a defect CI found in the first version.
+
+    A failed statement puts a PostgreSQL transaction into an aborted state where
+    every subsequent statement is refused. Without a savepoint around each
+    count, the FIRST denied table made every table after it UNKNOWN — an
+    inventory reporting forty unknowns because one was denied, which reads as a
+    broken database rather than one denied privilege, and would send a
+    retirement decision entirely the wrong way.
+
+    Ordering is what makes this a proof: the denied table sorts BEFORE the
+    readable one, so a run without savepoints cannot pass by accident.
+    """
+    with _connect(migrated) as conn:
+        database = conn.execute(text("SELECT current_database()")).scalar_one()
+        # 'aaa_' sorts first in the inventory's own ORDER BY.
+        conn.execute(text("CREATE TABLE public.aaa_denied_canary (id int)"))
+        conn.execute(text("CREATE TABLE public.zzz_readable_canary (id int)"))
+        conn.execute(text("REVOKE ALL ON public.aaa_denied_canary FROM app_user"))
+        conn.execute(text("GRANT SELECT ON public.zzz_readable_canary TO app_user"))
+        conn.commit()
+
+    with _connect(url_for(migrated, database, user="app_user")) as conn:
+        observed = observe_table_inventory(conn, binding=_binding())
+
+    by_name = {t.qualified: t for t in observed.tables}
+    assert by_name["public.aaa_denied_canary"].outcome is ReadOutcome.UNKNOWN
+    later = by_name["public.zzz_readable_canary"]
+    assert later.outcome is ReadOutcome.COUNTED, (
+        "a table AFTER the denied one came back UNKNOWN, so one refusal is "
+        "still poisoning the rest of the transaction"
+    )
+    assert later.row_count == 0

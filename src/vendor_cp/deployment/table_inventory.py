@@ -103,6 +103,19 @@ READ_ONLY_SQL: Final = "SET TRANSACTION READ ONLY"
 #: hanging the observation or returning a partial answer.
 STATEMENT_TIMEOUT_SQL: Final = "SET LOCAL statement_timeout = '{ms}ms'"
 
+#: Each count runs inside its own savepoint, and this is not tidiness.
+#:
+#: A failed statement puts a PostgreSQL transaction into an aborted state where
+#: every subsequent statement is refused until it is rolled back. Without a
+#: savepoint the FIRST unreadable table would make every table after it UNKNOWN
+#: — an inventory reporting forty unknowns because one was denied, which reads
+#: as a broken database rather than as one denied privilege. CI found exactly
+#: that: a readable table came back UNKNOWN because an earlier one had been
+#: refused.
+SAVEPOINT_SQL: Final = "SAVEPOINT table_count"
+RELEASE_SAVEPOINT_SQL: Final = "RELEASE SAVEPOINT table_count"
+ROLLBACK_SAVEPOINT_SQL: Final = "ROLLBACK TO SAVEPOINT table_count"
+
 
 class ReadOutcome(StrEnum):
     """Whether a table's cardinality was established. UNKNOWN is a member."""
@@ -232,12 +245,12 @@ def observe_table_inventory(
     listed = connection.execute(text(TABLE_INVENTORY_SQL))
     rows = [(str(row[0]), str(row[1])) for row in listed]
 
+    connection.execute(text(STATEMENT_TIMEOUT_SQL.format(ms=int(statement_timeout_ms))))
+
     observations: list[TableObservation] = []
     for schema, table in rows:
+        connection.execute(text(SAVEPOINT_SQL))
         try:
-            connection.execute(
-                text(STATEMENT_TIMEOUT_SQL.format(ms=int(statement_timeout_ms)))
-            )
             counted = connection.execute(
                 text(ROW_COUNT_SQL.format(schema=schema, table=table))
             )
@@ -248,8 +261,12 @@ def observe_table_inventory(
                 raise TypeError(f"{schema}.{table} returned a non-integer count")
             value = raw
         except Exception:  # noqa: BLE001 - every failure is the same answer
+            # Back to the savepoint, so ONE refusal does not abort the
+            # transaction and turn every remaining table into a false UNKNOWN.
+            connection.execute(text(ROLLBACK_SAVEPOINT_SQL))
             observations.append(TableObservation(schema, table, ReadOutcome.UNKNOWN))
             continue
+        connection.execute(text(RELEASE_SAVEPOINT_SQL))
         observations.append(TableObservation(schema, table, ReadOutcome.COUNTED, value))
 
     return TableInventoryObservation(binding=binding, tables=tuple(observations))
