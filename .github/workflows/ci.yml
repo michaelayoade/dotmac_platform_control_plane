@@ -393,4 +393,10 @@ jobs:
       # that whole class fail in review instead. One script, two callers: a copy
       # would drift, and a drifting rehearsal is worse than none.
       - name: Rehearse the acceptance battery against the built bytes
+        # The revision the battery's profile readback expects. Supplied from
+        # OUTSIDE the image on purpose: reading it back off the artifact would
+        # make the expectation a copy of the claim it is checking. It is the
+        # same value this job passed as `SOURCE_REVISION` when it built.
+        env:
+          CANDIDATE_SOURCE_REVISION: ${{ github.sha }}
         run: .github/candidate/acceptance.sh dotmac-vendor-control-plane:ci
