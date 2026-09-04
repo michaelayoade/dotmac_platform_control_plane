@@ -161,10 +161,12 @@ class RelayHealth:
     last_settled_age_seconds: int | None = None
     #: Whether any worker identity has ever stamped a heartbeat.
     relay_ever_reported: bool | None = None
-    #: TRUE since `v019_relay_heartbeat`. It was `False` for exactly as long as
-    #: no relay ran in production, when the compose file answered the question
-    #: instead; the slice that composed the relay service lifted the deferral
-    #: rather than leaving a flag describing a gap that had closed.
+    #: Whether THIS deployment can detect a relay dying while nothing is
+    #: queued. True since `v019_relay_heartbeat` wherever a relay is composed;
+    #: False where none is, because a deployment with no relay cannot measure
+    #: one's liveness and saying otherwise would be the placeholder this field
+    #: exists to avoid. It was False everywhere for exactly as long as no relay
+    #: ran in production, when the compose file answered the question instead.
     relay_liveness_during_quiescence_measurable: bool = True
 
     @property
@@ -181,8 +183,18 @@ def relay_health(
     stale_lease_after: timedelta,
     heartbeat_stale_after: timedelta,
     settled_within: timedelta,
+    relay_expected: bool = True,
 ) -> RelayHealth:
     """Observe the relay as of `now`, from the heartbeat and the outbox.
+
+    `relay_expected` states this deployment's COMPOSITION, not whether to check.
+    A deployment that runs no relay cannot be asked whether its relay is alive,
+    and answering `RELAY_NOT_RUNNING` there would be true and useless — it would
+    make a single-container artifact permanently unready for not running a
+    service it was never given. With it False the verdict falls back to the
+    queue-derived signals, which need no heartbeat and still turn red on an
+    ageing backlog, and `relay_liveness_during_quiescence_measurable` reports
+    False because that is then the truth.
 
     `now` is injected and never read from the wall clock, so a report is
     reproducible and a test can age a row without sleeping.
@@ -196,7 +208,7 @@ def relay_health(
     stale_before = now - stale_lease_after
 
     beat = heartbeat.read(db)
-    if not beat.observed:
+    if relay_expected and not beat.observed:
         # The heartbeat could not be read. The outbox might still answer, and it
         # is tempting to report what it says — but every verdict below turns on
         # whether the relay is alive, and a verdict formed without that is a
@@ -245,6 +257,7 @@ def relay_health(
             settled_age=settled_age,
             heartbeat_stale_after=heartbeat_stale_after,
             settled_within=settled_within,
+            relay_expected=relay_expected,
         ),
         pending_total=pending_total,
         overdue_total=overdue_total,
@@ -256,7 +269,8 @@ def relay_health(
         activation_dead=activation_dead,
         heartbeat_age_seconds=heartbeat_age,
         last_settled_age_seconds=settled_age,
-        relay_ever_reported=beat.ever_reported,
+        relay_ever_reported=beat.ever_reported if beat.observed else None,
+        relay_liveness_during_quiescence_measurable=relay_expected,
     )
 
 
@@ -269,17 +283,27 @@ def _verdict(
     settled_age: int | None,
     heartbeat_stale_after: timedelta,
     settled_within: timedelta,
+    relay_expected: bool,
 ) -> RelayVerdict:
     """First member of `VERDICT_PRECEDENCE` whose condition holds."""
     if dead_total > 0:
         return RelayVerdict.ACTIVATION_DEAD_LETTERED
-    # `None` is "never reported", which is not the same fact as "reported long
-    # ago" but has the same verdict: nothing is draining this queue.
-    if heartbeat_age is None or heartbeat_age > heartbeat_stale_after.total_seconds():
-        return RelayVerdict.RELAY_NOT_RUNNING
+    if relay_expected:
+        # `None` is "never reported", which is not the same fact as "reported
+        # long ago" but has the same verdict: nothing is draining this queue.
+        if (
+            heartbeat_age is None
+            or heartbeat_age > heartbeat_stale_after.total_seconds()
+        ):
+            return RelayVerdict.RELAY_NOT_RUNNING
     if stale_lease_total > 0:
         return RelayVerdict.ACTIVATION_LEASE_STALE
     if overdue_total > 0:
+        if not relay_expected:
+            # No relay is composed here, so nothing has proved it is alive and
+            # WEDGED — which asserts exactly that — may not be claimed. The
+            # backlog is real and still red; only the diagnosis is weaker.
+            return RelayVerdict.ACTIVATION_BACKLOG_OVERDUE
         # Alive, with work that should have moved. WEDGED unless something
         # actually settled inside the window — the one signal that separates a
         # relay failing every delivery from a relay merely behind a long queue.

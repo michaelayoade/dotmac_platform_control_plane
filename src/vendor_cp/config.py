@@ -89,6 +89,22 @@ class VendorSettings:
     # so it is a knob rather than a constant: a deployment whose queue is
     # normally quiet needs a longer window than one under constant load.
     relay_settled_within_seconds: int = 600
+    # Whether THIS deployment runs a relay. Composition, not a switch on the
+    # check.
+    #
+    # `True` by default, which is the fail-closed direction: a deployment that
+    # forgot to say gets the strict answer, and a stopped relay makes it
+    # unready. A deployment that genuinely runs no relay — a single-container
+    # artifact acceptance run, a developer machine — says so, and readiness
+    # falls back to the queue-derived signals that need no heartbeat. It does
+    # NOT fall back to silence: an ageing backlog still turns it red, and
+    # `relay_liveness_during_quiescence_measurable` correctly reports False,
+    # because a deployment with no relay cannot measure one's liveness.
+    #
+    # `vendor_cp.deployment.relay_preflight` refuses the combination that would
+    # make this a lie: a descriptor declaring the relay role in a deployment
+    # that does not expect one.
+    relay_expected: bool = True
 
 
 def _positive_seconds(name: str, *, default: int) -> int:
@@ -114,6 +130,25 @@ def _positive_seconds(name: str, *, default: int) -> int:
             "every pending event instantly overdue"
         )
     return seconds
+
+
+def _flag(name: str, *, default: bool) -> bool:
+    """A boolean knob, or a refusal — never a silent fallback to the default.
+
+    An unrecognised value is a configuration mistake, and guessing what
+    `VENDOR_RELAY_EXPECTED=maybe` meant is how a deployment ends up with the
+    permissive reading of a question nobody answered.
+    """
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"true", "1", "yes", "on"}:
+        return True
+    if raw in {"false", "0", "no", "off"}:
+        return False
+    raise ProductionConfigurationError(
+        f"{name}={raw!r} is not a boolean; use true or false"
+    )
 
 
 def load_vendor_settings() -> VendorSettings:
@@ -166,6 +201,7 @@ def load_vendor_settings() -> VendorSettings:
         relay_settled_within_seconds=_positive_seconds(
             "VENDOR_RELAY_SETTLED_WITHIN_SECONDS", default=600
         ),
+        relay_expected=_flag("VENDOR_RELAY_EXPECTED", default=True),
     )
 
 

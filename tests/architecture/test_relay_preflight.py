@@ -165,6 +165,48 @@ def test_the_dispatcher_credential_leaking_into_another_service_is_refused(
     )
 
 
+def test_composing_a_relay_while_not_expecting_one_is_refused(tree: Path) -> None:
+    """The one way the composition flag could become an escape hatch.
+
+    `VENDOR_RELAY_EXPECTED=false` is honest for a single-container artifact run
+    and dangerous in production: set where the compose file declares a `relay`
+    service, it silences exactly the verdict that service exists to produce. So
+    the combination is refused rather than left to review.
+    """
+    _patch(
+        tree,
+        ".env.production.example",
+        "VENDOR_RELAY_EXPECTED=true",
+        "VENDOR_RELAY_EXPECTED=false",
+    )
+    packet = build_preflight_packet(tree)
+    assert packet.verdict is Verdict.REFUSED
+    assert (
+        packet.of(Precondition.A_COMPOSED_RELAY_IS_EXPECTED_BY_THE_ENVIRONMENT).finding
+        is Finding.REFUSED
+    )
+
+
+def test_not_composing_a_relay_and_not_expecting_one_is_consistent(
+    tree: Path,
+) -> None:
+    """SENSITIVITY, pointed at the premise rather than the conclusion. The
+    refusal above must be about the COMBINATION, not about the word `false` —
+    a deployment that composes no relay and expects none is coherent."""
+    _patch(tree, "docker-compose.production.yml", "\n  relay:\n", "\n  relayed:\n")
+    _patch(
+        tree,
+        ".env.production.example",
+        "VENDOR_RELAY_EXPECTED=true",
+        "VENDOR_RELAY_EXPECTED=false",
+    )
+    packet = build_preflight_packet(tree)
+    assert (
+        packet.of(Precondition.A_COMPOSED_RELAY_IS_EXPECTED_BY_THE_ENVIRONMENT).finding
+        is Finding.SATISFIED
+    )
+
+
 # ── unknown is not satisfied ────────────────────────────────────────────────
 
 

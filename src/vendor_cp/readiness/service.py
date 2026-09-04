@@ -127,6 +127,7 @@ def check_readiness(
     stale_lease_after: timedelta,
     heartbeat_stale_after: timedelta,
     settled_within: timedelta,
+    relay_expected: bool = True,
 ) -> ReadinessReport:
     """Can this process reach its database, and is its outbox being drained?
 
@@ -151,6 +152,7 @@ def check_readiness(
         stale_lease_after=stale_lease_after,
         heartbeat_stale_after=heartbeat_stale_after,
         settled_within=settled_within,
+        relay_expected=relay_expected,
     )
     detail = _FROM_RELAY[health.verdict]
     return ReadinessReport(ready=detail is ReadinessDetail.READY, detail=detail)

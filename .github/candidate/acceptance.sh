@@ -610,6 +610,11 @@ print(base64.urlsafe_b64encode(raw).rstrip(b'=').decode())
 printf '%s' "$signing_key" > "$WORKDIR/primary.key"
 unset signing_key
 
+# This battery starts ONE container: the application, and no relay. Saying so
+# with VENDOR_RELAY_EXPECTED=false is a statement about THIS composition, not
+# a switch on the check. Readiness still refuses an ageing backlog here, and
+# it correctly reports that relay liveness during quiescence is not
+# measurable in this arrangement, because there is no relay to measure.
 start_app() {
     local database_url="$1"
     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
@@ -634,6 +639,7 @@ start_app() {
         --env VENDOR_LICENCE_SIGNING_KEY_FILE=/run/candidate/primary.key \
         --env VENDOR_LICENCE_SIGNING_KEY_ID=candidate-1 \
         --env VENDOR_LICENCE_DELIVERY_MODE=logging \
+        --env VENDOR_RELAY_EXPECTED=false \
         --volume "$WORKDIR/primary.key:/run/candidate/primary.key:ro" \
         "$IMAGE" >/dev/null
 }

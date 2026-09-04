@@ -111,7 +111,9 @@ def _settled(db: Session, *, at: datetime) -> None:
     )
 
 
-def _observe(db: Session, *, now: datetime = NOW) -> RelayHealth:
+def _observe(
+    db: Session, *, now: datetime = NOW, relay_expected: bool = True
+) -> RelayHealth:
     return relay_health(
         db,
         now=now,
@@ -119,6 +121,7 @@ def _observe(db: Session, *, now: datetime = NOW) -> RelayHealth:
         stale_lease_after=STALE_AFTER,
         heartbeat_stale_after=HEARTBEAT_STALE_AFTER,
         settled_within=SETTLED_WITHIN,
+        relay_expected=relay_expected,
     )
 
 
@@ -451,3 +454,60 @@ def test_quiescent_liveness_is_now_measured_and_the_deferral_is_recorded(
         health.pending_total == 0
     ), "the queue must be empty for this to mean anything"
     assert health.verdict is RelayVerdict.RELAY_NOT_RUNNING
+
+
+# ── the deployment's composition, which is not a switch on the check ────────
+
+
+def test_a_deployment_with_no_relay_is_not_permanently_unready(db: Session) -> None:
+    """The conflation this flag repairs.
+
+    A single-container artifact acceptance run has a reachable, migrated
+    database and no relay. Reporting `RELAY_NOT_RUNNING` there is true and
+    useless: it makes the artifact permanently unready for not running a service
+    it was never given, and it says nothing about the artifact.
+    """
+    health = _observe(db, relay_expected=False)
+    assert health.verdict is RelayVerdict.DRAINING
+    assert health.relay_liveness_during_quiescence_measurable is False
+
+
+def test_a_deployment_with_no_relay_still_refuses_an_ageing_backlog(
+    db: Session,
+) -> None:
+    """NOT a switch on the check, and this is the assertion that proves it.
+
+    With no relay composed there is no heartbeat to read, so liveness is
+    unmeasurable — but the queue asymmetry needs no heartbeat, and work that
+    should have moved and did not is still red.
+    """
+    _event(db, status=OutboxStatus.PENDING, available_at=OVERDUE_AT)
+    health = _observe(db, relay_expected=False)
+    assert health.verdict is RelayVerdict.ACTIVATION_BACKLOG_OVERDUE
+    assert health.overdue_total == 1
+
+
+def test_a_deployment_with_no_relay_never_claims_a_wedge(db: Session) -> None:
+    """WEDGED asserts the relay is ALIVE. Nothing here has proved that, so the
+    diagnosis is the weaker true one rather than the stronger convenient one."""
+    _event(db, status=OutboxStatus.PENDING, available_at=OVERDUE_AT)
+    assert _observe(db, relay_expected=False).verdict is not RelayVerdict.RELAY_WEDGED
+
+
+def test_a_deployment_with_no_relay_still_reports_dead_letters(db: Session) -> None:
+    """Terminal, and independent of whether anything is draining."""
+    _event(db, status=OutboxStatus.DEAD, available_at=OVERDUE_AT)
+    assert (
+        _observe(db, relay_expected=False).verdict
+        is RelayVerdict.ACTIVATION_DEAD_LETTERED
+    )
+
+
+def test_expecting_a_relay_is_the_default(db: Session) -> None:
+    """FAIL-CLOSED. A deployment that forgot to say gets the strict answer, so
+    the permissive reading is never the one nobody chose."""
+    from vendor_cp.config import load_vendor_settings
+
+    assert load_vendor_settings().relay_expected is True
+    # ...and with the default, a database that has never seen a relay is red.
+    assert _observe(db).verdict is RelayVerdict.RELAY_NOT_RUNNING

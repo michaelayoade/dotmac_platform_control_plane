@@ -110,6 +110,9 @@ class Precondition(StrEnum):
     HEARTBEAT_MIGRATION_GRANTS_THE_DISPATCHER_NOTHING = (
         "heartbeat_migration_grants_the_dispatcher_nothing"
     )
+    A_COMPOSED_RELAY_IS_EXPECTED_BY_THE_ENVIRONMENT = (
+        "a_composed_relay_is_expected_by_the_environment"
+    )
 
     # ── target-only ─────────────────────────────────────────────────────────
     OPENBAO_RECORD_EXISTS = "openbao_record_exists"
@@ -428,6 +431,50 @@ def _check_migration_grants(root: Path) -> PreflightResult:
     return PreflightResult(where, Finding.SATISFIED, "no grant to the dispatcher")
 
 
+def _check_relay_is_expected(root: Path) -> PreflightResult:
+    """A deployment that COMPOSES a relay must also EXPECT one.
+
+    `VENDOR_RELAY_EXPECTED=false` tells readiness this deployment runs no relay,
+    which is true for a single-container artifact run and false — dangerously —
+    for production. Set where the compose file declares a `relay` service, it
+    would silence exactly the verdict the service exists to produce. That is the
+    one way the composition flag could become an escape hatch, so it is refused
+    here rather than left to review.
+    """
+    where = Precondition.A_COMPOSED_RELAY_IS_EXPECTED_BY_THE_ENVIRONMENT
+    compose = _read(root, "docker-compose.production.yml")
+    environment = _read(root, ".env.production.example")
+    if compose is None or environment is None:
+        return PreflightResult(where, Finding.UNKNOWN, "compose or env unreadable")
+    composed = "\n  relay:\n" in compose
+    declared = [
+        line.strip()
+        for line in environment.splitlines()
+        if line.strip().startswith("VENDOR_RELAY_EXPECTED=")
+    ]
+    if not composed:
+        return PreflightResult(
+            where, Finding.SATISFIED, "no relay composed, so none is expected"
+        )
+    if not declared:
+        return PreflightResult(
+            where,
+            Finding.SATISFIED,
+            "a relay is composed and the environment declares no override, so "
+            "the fail-closed default applies",
+        )
+    value = declared[0].partition("=")[2].strip().lower()
+    if value in {"false", "0", "no", "off"}:
+        return PreflightResult(
+            where,
+            Finding.REFUSED,
+            "the compose file declares a relay service and the environment says "
+            "VENDOR_RELAY_EXPECTED=false, which would silence the verdict that "
+            "service exists to produce",
+        )
+    return PreflightResult(where, Finding.SATISFIED, f"composed and expected ({value})")
+
+
 def build_preflight_packet(root: Path | None = None) -> PreflightPacket:
     """Every precondition, decided from files alone.
 
@@ -442,6 +489,7 @@ def build_preflight_packet(root: Path | None = None) -> PreflightPacket:
         _check_pointer_only(base),
         _check_secret_path(base),
         _check_migration_grants(base),
+        _check_relay_is_expected(base),
         *(
             PreflightResult(precondition, Finding.UNKNOWN, answered_by)
             for precondition, answered_by in TARGET_ONLY.items()

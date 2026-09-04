@@ -96,6 +96,7 @@ def health_ready(db: Db, response: Response) -> ReadinessResponse:
             seconds=vendor_settings.relay_heartbeat_stale_seconds
         ),
         settled_within=timedelta(seconds=vendor_settings.relay_settled_within_seconds),
+        relay_expected=vendor_settings.relay_expected,
     )
     if not report.ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

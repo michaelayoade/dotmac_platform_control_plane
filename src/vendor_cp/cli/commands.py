@@ -627,6 +627,7 @@ def relay_health(args: argparse.Namespace) -> Result:
             settled_within=timedelta(
                 seconds=vendor_settings.relay_settled_within_seconds
             ),
+            relay_expected=vendor_settings.relay_expected,
         )
     return Result(command="relay health", data=_fields(health))
 
