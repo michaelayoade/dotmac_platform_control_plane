@@ -138,6 +138,30 @@ def _require_composed_heads(connection: object) -> None:
         )
 
 
+def _enforce_data_governance(connection: object) -> None:
+    """Make the composed database refuse what it must refuse — in-transaction.
+
+    A thin adapter, deliberately: the decision belongs to
+    `vendor_cp.data_governance`, which owns the classification, the revoke and
+    the read-back. This file only says WHEN.
+
+    Runs on the DEPLOY path only, beside `_require_composed_heads` and after it,
+    for two reasons that are both about ordering. A rehearsal driving an
+    intermediate target has not built every table, so a completeness check there
+    would refuse for a reason about the rehearsal rather than about the database.
+    And a module lineage that ran AFTER this would hand its own `DELETE` grant
+    back — running once composed heads are proven reached is what makes the
+    result independent of the order the eight lineages happen to take.
+
+    Raising rolls the ENTIRE composition back. That is the point: a database
+    that grew a table nobody classified does not start half-governed, and the
+    refusal names the file to classify it in.
+    """
+    from vendor_cp.data_governance import enforce_retention
+
+    enforce_retention(connection)  # type: ignore[arg-type]
+
+
 def run_migrations_online() -> None:
     configuration = config.get_section(config.config_ini_section) or {}
     configuration["sqlalchemy.url"] = get_url()
@@ -168,6 +192,7 @@ def run_migrations_online() -> None:
             context.run_migrations()
             if config.attributes.get("require_composed_heads"):
                 _require_composed_heads(connection)
+                _enforce_data_governance(connection)
 
 
 if context.is_offline_mode():

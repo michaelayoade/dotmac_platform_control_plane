@@ -309,3 +309,149 @@ name when unbound and satisfied when declared, and unreachable by the absence
 route. Both are held by
 `tests/unit/test_profile_readback.py::test_request_evidence_context_is_a_slot_this_verifier_already_judges`
 and `::test_request_evidence_context_cannot_be_reached_by_the_absence_route`.
+
+---
+
+## Addendum, 2026-09-04 (third) — `data_governance` has an implementation
+
+Michael ruled the substance the previous addendum said was blocked on a decision
+rather than a keystroke:
+
+> *"Data governance: for first production, explicitly classify every table.
+> Authoritative control/evidence records use enforced retain: no automated hard
+> deletion and no `DELETE` for online roles. Any transient table that does not
+> fit must receive an explicit policy rather than inheriting this one. New
+> unclassified tables fail admission."*
+
+`vendor_cp.data_governance` implements it. `AGENTS.md` rule 25 is the normative
+statement; this records what was measured.
+
+### The classification — 58 tables, four dispositions
+
+Every table the eight composed lineages build, held against the live catalogue
+by `tests/migration/test_data_governance_catalogue.py` in BOTH directions — and
+against the real composed database by `dotmac-platform admin migrate`, which is
+where the first draft was found wrong.
+
+**The first attempt derived the list from the migration SOURCES and got three
+names wrong**, because kernel `0018_idempotency_one_owner` and
+`0022_party_role_grants` RENAME tables rather than recreating them: the database
+holds `idempotency_records`, `platform_idempotency_records` and
+`party_role_grants`, not the names their creating revisions used. CI's deploy
+step refused, named all six discrepancies in both directions, and committed
+nothing. That is the mechanism working, and it is recorded here rather than
+quietly corrected — a classification read out of the revision that created a
+table is exactly the reading this enforcement exists to stop anyone trusting.
+
+| disposition | count | what it means |
+| --- | --- | --- |
+| `ENFORCED_RETAIN` | 54 | an authoritative control or evidence record. No automated hard deletion; no `DELETE`/`TRUNCATE` for `platform_api` or `app_user` |
+| `SUPERSEDED_IN_PLACE` | 2 | `public.domain_settings`, `public.relay_heartbeats` — a current-state value replaced by `UPDATE`. Not a record, so not RETAINED; the same grant by a stated route |
+| `LIFECYCLE_DELETE` | 1 | `public.feature_flag_overrides` — the online role KEEPS `DELETE` |
+| `MIGRATION_BOOKKEEPING` | 1 | `public.alembic_version` — not a record this deployment governs |
+
+Requirement 3 is what the second and third rows are for. Retain is not applied
+by default: the criterion is measured — *does a composed, mounted code path
+delete rows from this table as an online role?* — and exactly one table answers
+yes. `dotmac_kernel.platform_web.set_flag` clears a flag override by deleting
+the row, `PLATFORM_WEB_SURFACE` is mounted because this assembly composes with
+`web_enabled=True`, and absence is what "no override" means. So it is classified
+`LIFECYCLE_DELETE`, with its deleting owner and its trigger named, and the
+enforcement PROVES the online role can still act on it.
+
+### Which enforcement is code and which is a grant
+
+**A grant.** `enforce_retention` issues `REVOKE DELETE, TRUNCATE ... FROM
+platform_api, app_user` on all 57 non-transient tables and reads the outcome back
+through `has_table_privilege` — never `information_schema`, which misses a
+privilege reached through role membership. PostgreSQL refuses the statement; that
+is the enforcement. Two escapes a table grant does not close are checked on the
+live catalogue rather than assumed: an `ON DELETE CASCADE` executes with the
+referencing table's owner's privileges, and a `SECURITY DEFINER` function runs
+as its owner (the kernel's outbox claim/settle pair are exactly that shape).
+
+**Code, and weaker.** "No automated hard deletion" is a claim about call sites.
+`DELETION_SITES` enumerates all eight row-deletion sites in this repository and
+in the seven composed distributions; the scan derives its own coverage from 328
+files and is held to the ledger two-directionally, so a kernel repin adding a
+deletion fails the build. Seven of the eight are `NOT_COMPOSED` or
+`REHEARSAL_ONLY` with a premise that is itself checked; the eighth is the
+`set_flag` site above. This is recorded as the weaker half deliberately: it
+cannot see a `psql` session.
+
+### What happens on a new unclassified table — measured
+
+At CI, `test_every_table_the_composed_database_holds_is_classified` fails.
+
+At deploy, `enforce_retention` runs inside the composed upgrade's single
+transaction — `alembic/env.py`, guarded by the deploy path's
+`require_composed_heads` attribute — and raises `DataGovernanceRefusal` naming
+the table and naming the file to classify it in. Nothing commits.
+`test_a_new_unclassified_table_refuses_the_deploy` creates a table after
+composition, exactly as a repinned module's lineage would, and drives that
+refusal. The reverse direction is driven too: a classified table the database no
+longer has refuses as well, because a policy describing nothing is how a dropped
+table stops being noticed.
+
+The deploy path being the consumer is proved rather than asserted. The same
+scratch database is composed twice: once with `make_alembic_config` (no
+post-condition), where at least 15 `(role, table)` pairs still hold `DELETE`;
+then with `deploy_config`, where every lineage is already at heads so no DDL
+runs at all — and the only pairs left holding `DELETE` are the two on
+`public.feature_flag_overrides`. CI's Postgres job already runs
+`dotmac-platform admin migrate` against a real composed database before the test
+suite, so the enforcement executes there on every run.
+
+### The count, restated — and it did not move
+
+| what is being counted | figure |
+| --- | --- |
+| **concerns bound in something a deployment executes** | **0 of 13** |
+| **concerns with an implementation present in the assembly** | **11 of 13** |
+
+The second moves from ten to eleven: `data_governance` now has a provider
+(`vendor_cp.data_governance`, assembly-owned, coordinated by this repository's
+peeled commit) and a runtime consumer that is not a test (`alembic/env.py` on
+the `dotmac-platform admin migrate` path).
+
+**The first is still zero and this change does not move it.** All three reasons
+stand unchanged: no profile document is written, no `ApplicationFoundationProfile`
+type exists under `src/`, and the merged verifier has no caller outside its own
+module and tests. A module, a migration hook, a ledger and three test files are
+none of those things. The route from eleven to thirteen is a different route from
+the route from zero to thirteen.
+
+`request_evidence_context` and `integration` are unchanged: the first is
+`dotmac-kernel`'s to extract product-first from ERP, the second is Foundation's
+`IntegrationSurfaceAbsenceProofV1`, already consumed here.
+
+### `table_inventory` now has a caller
+
+`vendor_cp.deployment.table_inventory` said it was an INPUT to a future owner. It
+was, and it had no caller in the source tree at all — which by this document's
+own rule made it absent. `govern_observation` is that owner's consumption of it:
+a production census judged against the classification, where an `UNKNOWN` table
+becomes `GovernanceVerdict.UNESTABLISHED` rather than a clean verdict, because a
+retention decision may not rest on a partial inventory.
+
+Stated precisely, because the distinction is this document's own: the census now
+has a non-test caller in `src/`, and `govern_observation` itself does not yet
+have one — no operator command runs a production census. `enforce_retention` is
+what a deployment executes. The savepoint discipline the census needed does not
+apply to the live reads here: each asks ONE set-returning statement, so a
+per-table refusal cannot abort the transaction, and copying the fix where its
+premise does not hold would look like diligence and mean nothing.
+
+### One thing this change did NOT do, and it is a decision rather than an omission
+
+`deploy/product.toml` already carries `[[database.isolation]]` claims — the
+ADR-0011 `DELETE` seal on `public.licence_delivery_targets`, in both directions —
+and those are compared against a live capture by `admin descriptor-drift` and by
+the candidate acceptance script. Publishing the other 56 `DELETE` denials there
+is the obvious next step and was deliberately not taken: `drift._isolation_findings`
+records an UNOBSERVED role/object pair as `DECLARED_ABSENT` rather than as a
+quiet pass, so declaring them without the capture producing readings for them
+would turn one green descriptor into ~112 findings. Whether the descriptor
+publishes the whole retention seal — and therefore what a capture must probe — is
+a deployment-contract decision, not an implementation detail, and it needs
+Michael.
