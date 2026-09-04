@@ -134,6 +134,7 @@ docker run -d --name "$DB_CONTAINER" \
     --env VENDOR_DB_ADMIN_PASSWORD=admin \
     --env VENDOR_DB_APP_USER_PASSWORD=app \
     --env VENDOR_DB_PLATFORM_API_PASSWORD=platform \
+    --env VENDOR_DB_DISPATCHER_PASSWORD=dispatcher \
     --volume "$PWD/deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/001-vendor-roles.sh:ro" \
     --volume "$PWD/.github/candidate/postgres-hba.sh:/docker-entrypoint-initdb.d/002-candidate-hba.sh:ro" \
     --publish "127.0.0.1:${DB_PORT}:5432" \
@@ -609,6 +610,11 @@ print(base64.urlsafe_b64encode(raw).rstrip(b'=').decode())
 printf '%s' "$signing_key" > "$WORKDIR/primary.key"
 unset signing_key
 
+# This battery starts ONE container: the application, and no relay. Saying so
+# with VENDOR_RELAY_EXPECTED=false is a statement about THIS composition, not
+# a switch on the check. Readiness still refuses an ageing backlog here, and
+# it correctly reports that relay liveness during quiescence is not
+# measurable in this arrangement, because there is no relay to measure.
 start_app() {
     local database_url="$1"
     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
@@ -633,6 +639,7 @@ start_app() {
         --env VENDOR_LICENCE_SIGNING_KEY_FILE=/run/candidate/primary.key \
         --env VENDOR_LICENCE_SIGNING_KEY_ID=candidate-1 \
         --env VENDOR_LICENCE_DELIVERY_MODE=logging \
+        --env VENDOR_RELAY_EXPECTED=false \
         --volume "$WORKDIR/primary.key:/run/candidate/primary.key:ro" \
         "$IMAGE" >/dev/null
 }

@@ -451,7 +451,10 @@ def test_deployment_adapter_includes_the_owned_secret_materializer() -> None:
     assert "src/vendor_cp/product_release_pins.py" in workflow
     assert "pin-product-release" in _text("scripts/materialize_production_secrets.py")
     assert '"options": {"cas": 0}' in service
-    assert service.count("secret/dotmac/vendor-control-plane/production/") == 3
+    # Four production records: database, runtime, deploy-ssh, and the relay
+    # dispatcher. The fourth is its own record rather than a field on the
+    # database one, because that record is the rotation ceremony's subject.
+    assert service.count("secret/dotmac/vendor-control-plane/production/") == 4
     assert "secret/dotmac/licensing/signing-key" in service
     assert "production/ghcr-read" not in service
     assert "required reviewer" in operations.lower()
@@ -974,3 +977,103 @@ def test_the_workflow_validates_before_the_ssh_boundary() -> None:
     boundary = workflow.index("Install the production SSH identity")
     remote = workflow.index("'$AUTHORIZATION_REF'\"")
     assert validate < boundary < remote
+
+
+def test_the_relay_runs_as_its_own_service_with_its_own_credential() -> None:
+    """The drain is a SECOND process role, not a thread inside the API.
+
+    Three properties, each of which the composition would be wrong without. It
+    holds the dispatcher credential and the API does not, so that credential is
+    absent from every request-serving process. It publishes no port, because it
+    serves nothing. And it reaches the installed console script directly, like
+    every other production entry point — no interpreter in front of it and no
+    `src` in the image for a path to resolve against.
+    """
+    compose = _text("docker-compose.production.yml")
+    relay = compose.split("  relay:" + chr(10), 1)[1].split("  ops:" + chr(10), 1)[0]
+
+    assert "image: ${VENDOR_APP_IMAGE:?" in relay
+    assert "entrypoint:" not in relay
+    assert '"dotmac-platform", "relay", "run"' in relay
+    assert "scripts/" not in relay
+    assert "ports:" not in relay, "the relay serves nothing and must publish nothing"
+    assert "networks: [vendor_backend]" in relay
+    assert "read_only: true" in relay
+    assert "no-new-privileges:true" in relay
+    assert "cap_drop:" in relay
+    # The dispatcher DSN is composed from an env reference, never a literal, and
+    # `:?` makes a host inventory that forgot it fail closed.
+    assert (
+        "VENDOR_RELAY_DISPATCHER_DATABASE_URL: postgresql+psycopg://"
+        "platform_outbox_dispatcher:${VENDOR_DB_DISPATCHER_PASSWORD:?" in relay
+    )
+    # The relay never migrates. Handing a long-running process the `app_admin`
+    # BYPASSRLS credential gives it a standing owner credential it has no code
+    # path to use — the defect the `app` service's own comment records.
+    #
+    # Checked as an ASSIGNMENT rather than as a substring: the compose file
+    # explains in a comment why the variable is absent, and the first version of
+    # this assertion was failed by that explanation.
+    assert "MIGRATION_DATABASE_URL:" not in relay
+
+
+def test_only_the_relay_holds_the_dispatcher_credential() -> None:
+    """NON-VACUITY for the assertion above, pointed the other way.
+
+    A relay that has the credential proves nothing if the API has it too. The
+    `app` and `ops` services must not carry it: co-hosting the dispatcher DSN
+    would put a lease-and-settle credential in every process serving a request.
+    """
+    compose = _text("docker-compose.production.yml")
+    app_block = compose.split("  app:" + chr(10), 1)[1].split("  relay:" + chr(10), 1)[
+        0
+    ]
+    ops_block = compose.split("  ops:" + chr(10), 1)[1]
+
+    assert "VENDOR_RELAY_DISPATCHER_DATABASE_URL" not in app_block
+    assert "VENDOR_RELAY_DISPATCHER_DATABASE_URL" not in ops_block
+
+
+def test_the_dispatcher_password_reaches_the_initializer_through_getenv() -> None:
+    """Same contract as the other three roles: through `\\getenv`, never argv,
+    SQL text or a log line.
+
+    FIRST CLUSTER INITIALISATION ONLY, and the initializer says so. On a host
+    whose data directory already exists this line has never run and never will,
+    which is why the credential is an operator act there rather than a
+    re-run — `docs/operations/production-deployment.md` carries that sequence.
+    """
+    initializer = _text("deploy/postgres/init-roles.sh")
+
+    assert "\\getenv dispatcher_password VENDOR_DB_DISPATCHER_PASSWORD" in initializer
+    assert (
+        "ALTER ROLE platform_outbox_dispatcher PASSWORD :'dispatcher_password'"
+        in initializer
+    )
+    assert "VENDOR_DB_DISPATCHER_PASSWORD:?" in initializer
+
+
+def test_no_dispatcher_material_is_committed_anywhere() -> None:
+    """The pointer is in the tree; the value never is.
+
+    Scoped to the files this slice authored rather than to the whole repository,
+    because a repository-wide secret scan is a different tool with a different
+    failure mode. What this asserts is that every place the dispatcher password
+    is NAMED, it is named as an environment reference or an OpenBao path.
+    """
+    for relative in (
+        "docker-compose.production.yml",
+        ".env.production.example",
+        "deploy/product.toml",
+        "deploy/candidates/2026-09-04-activation-relay-service.toml",
+        "deploy/descriptor-promotions.json",
+    ):
+        text = _text(relative)
+        for number, line in enumerate(text.splitlines(), 1):
+            if "VENDOR_DB_DISPATCHER_PASSWORD" not in line:
+                continue
+            stripped = line.strip()
+            assigned = stripped.partition("=")[2] if stripped.count("=") else ""
+            assert (
+                assigned == "" or "${" in line or stripped.startswith("#")
+            ), f"{relative}:{number} assigns a value to the dispatcher password"

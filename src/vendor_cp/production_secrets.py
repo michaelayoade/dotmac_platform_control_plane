@@ -45,6 +45,22 @@ LICENCE_SIGNING_PATH = "secret/dotmac/licensing/signing-key"
 DATABASE_PATH = "secret/dotmac/vendor-control-plane/production/database"
 RUNTIME_PATH = "secret/dotmac/vendor-control-plane/production/runtime"
 DEPLOY_SSH_PATH = "secret/dotmac/vendor-control-plane/production/deploy-ssh"
+#: The platform outbox relay's dispatcher credential.
+#:
+#: A SEPARATE record rather than a fourth field on `DATABASE_PATH`, and the
+#: reason is the rotation ceremony rather than tidiness. `RotatingSecretSet` is
+#: a closed six-field value and `validate_record` requires an EXACT field-set
+#: match, so a fourth password on the database record would make
+#: `execute_secret_rotation` refuse the candidate it just minted — a rotation
+#: that fails closed, but fails. Extending the ceremony to a fourth database
+#: role means extending its per-role two-direction TCP/SCRAM proof as well, and
+#: that is its own slice with its own evidence.
+#:
+#: So this record is deliberately OUTSIDE the current rotation ceremony, exactly
+#: as `csrf_secret` is preserved rather than rotated, and the follow-up is named
+#: rather than implied: until the ceremony covers it, rotating the dispatcher
+#: password is a manual operator act.
+RELAY_DISPATCHER_PATH = "secret/dotmac/vendor-control-plane/production/relay-dispatcher"
 
 SECRET_FIELDS: Mapping[str, frozenset[str]] = {
     LICENCE_SIGNING_PATH: frozenset({"key_id", "private_key_b64url"}),
@@ -55,6 +71,7 @@ SECRET_FIELDS: Mapping[str, frozenset[str]] = {
     DEPLOY_SSH_PATH: frozenset(
         {"private_key_openssh", "public_key_openssh", "username"}
     ),
+    RELAY_DISPATCHER_PATH: frozenset({"dispatcher_password"}),
 }
 
 OWNED_ENV_DECLARATIONS = frozenset({"VENDOR_DEPLOYMENT_PROFILE"})
@@ -69,6 +86,7 @@ ENV_SECRET_KEYS = frozenset(
         "SESSION_HASH_SECRET",
         "CSRF_SECRET",
         "VENDOR_LICENCE_SIGNING_KEY_ID",
+        "VENDOR_DB_DISPATCHER_PASSWORD",
     }
 )
 
@@ -114,6 +132,7 @@ class HostSecretBundle:
     admin_password: str
     app_user_password: str
     platform_api_password: str
+    dispatcher_password: str
     jwt_secret: str
     session_hash_secret: str
     csrf_secret: str
@@ -827,6 +846,13 @@ def generated_records(
             "public_key_openssh": public_key,
             "username": "root",
         },
+        # The platform outbox relay's dispatcher credential. Generated only for
+        # an ABSENT record, like every other value here: `seed_missing_records`
+        # never touches one that exists, so running seed against a live estate
+        # cannot rotate this by accident.
+        RELAY_DISPATCHER_PATH: {
+            "dispatcher_password": secrets.token_urlsafe(48),
+        },
     }
     for path, fields in records.items():
         validate_record(path, fields)
@@ -960,6 +986,7 @@ def build_host_bundle(client: SecretReader) -> HostSecretBundle:
         admin_password=records[DATABASE_PATH]["admin_password"],
         app_user_password=records[DATABASE_PATH]["app_user_password"],
         platform_api_password=records[DATABASE_PATH]["platform_api_password"],
+        dispatcher_password=records[RELAY_DISPATCHER_PATH]["dispatcher_password"],
         jwt_secret=records[RUNTIME_PATH]["jwt_secret"],
         session_hash_secret=records[RUNTIME_PATH]["session_hash_secret"],
         csrf_secret=records[RUNTIME_PATH]["csrf_secret"],
@@ -988,6 +1015,7 @@ def validate_host_bundle(bundle: HostSecretBundle) -> None:
         bundle.admin_password,
         bundle.app_user_password,
         bundle.platform_api_password,
+        bundle.dispatcher_password,
         bundle.jwt_secret,
         bundle.session_hash_secret,
         bundle.csrf_secret,
@@ -1048,6 +1076,7 @@ def _render_env(template: str, bundle: HostSecretBundle) -> str:
         "VENDOR_DB_ADMIN_PASSWORD": bundle.admin_password,
         "VENDOR_DB_APP_USER_PASSWORD": bundle.app_user_password,
         "VENDOR_DB_PLATFORM_API_PASSWORD": bundle.platform_api_password,
+        "VENDOR_DB_DISPATCHER_PASSWORD": bundle.dispatcher_password,
         "JWT_SECRET": bundle.jwt_secret,
         "SESSION_HASH_SECRET": bundle.session_hash_secret,
         "CSRF_SECRET": bundle.csrf_secret,

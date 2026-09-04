@@ -84,14 +84,19 @@ def health_ready(db: Db, response: Response) -> ReadinessResponse:
     """Ask the service, set the status, return the two fields. Nothing else.
 
     Reading the clock and the configured windows here is the adapter's job, not
-    a decision: the service is handed `now` and both thresholds so its answer is
-    reproducible and the windows stay the deployment's configuration.
+    a decision: the service is handed `now` and every window so its answer is
+    reproducible and the thresholds stay the deployment's configuration.
     """
     report = check_readiness(
         db,
         now=datetime.now(UTC),
         overdue_after=timedelta(seconds=vendor_settings.relay_overdue_seconds),
         stale_lease_after=timedelta(seconds=vendor_settings.relay_stale_lease_seconds),
+        heartbeat_stale_after=timedelta(
+            seconds=vendor_settings.relay_heartbeat_stale_seconds
+        ),
+        settled_within=timedelta(seconds=vendor_settings.relay_settled_within_seconds),
+        relay_expected=vendor_settings.relay_expected,
     )
     if not report.ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

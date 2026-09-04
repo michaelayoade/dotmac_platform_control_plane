@@ -50,7 +50,8 @@ from vendor_cp.contracts import adapter as agreements
 from vendor_cp.migrations import make_alembic_config
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
-from vendor_cp.relay.health import RelayVerdict, relay_health
+from vendor_cp.relay.health import RelayHealth, RelayVerdict, relay_health
+from vendor_cp.relay.models import RelayHeartbeat
 from vendor_cp.relay.runner import RelayComposition, drain_once
 
 PRODUCT = "dotmac-sub"
@@ -58,6 +59,8 @@ CAPABILITIES = ("cap.a", "cap.b")
 DISPATCHER_ROLE = "platform_outbox_dispatcher"
 PLATFORM_ROLE = "platform_api"
 WINDOW = timedelta(seconds=300)
+HEARTBEAT_WINDOW = timedelta(seconds=120)
+SETTLED_WINDOW = timedelta(seconds=600)
 
 
 # ── the database under test ─────────────────────────────────────────────────
@@ -411,12 +414,33 @@ def test_the_platform_role_can_read_the_outbox(
 # ── health, against the same real table ─────────────────────────────────────
 
 
-def test_health_reports_a_stalled_relay_and_then_a_drained_one(
+def _observe(
+    db: Session,
+    *,
+    now: datetime,
+    heartbeat_stale_after: timedelta = HEARTBEAT_WINDOW,
+    settled_within: timedelta = SETTLED_WINDOW,
+) -> RelayHealth:
+    return relay_health(
+        db,
+        now=now,
+        overdue_after=WINDOW,
+        stale_lease_after=WINDOW,
+        heartbeat_stale_after=heartbeat_stale_after,
+        settled_within=settled_within,
+    )
+
+
+def test_health_reports_a_stopped_relay_and_then_a_draining_one(
     migrated: tuple[str, str],
 ) -> None:
-    """The health verdict over rows a real activation wrote and a real drain
-    settled. Both directions in one test, because either alone is satisfied by
-    a function that returns a constant.
+    """Both directions over rows a real activation wrote and a real drain
+    settled, because either alone is satisfied by a function returning a
+    constant.
+
+    Before any drain, no worker has ever stamped: the relay has never run, and
+    that is what health says — not "backlog overdue", which would describe the
+    symptom rather than the cause.
     """
     platform_url, dispatcher_url = migrated
     with _sessions(platform_url) as platform:
@@ -424,15 +448,11 @@ def test_health_reports_a_stalled_relay_and_then_a_drained_one(
             _activate_an_agreement(db)
 
         with platform.platform_session() as db:
-            # As of a moment well past the window, the undrained row is a stall.
-            stalled = relay_health(
-                db,
-                now=datetime.now(UTC) + timedelta(hours=1),
-                overdue_after=WINDOW,
-                stale_lease_after=WINDOW,
-            )
-        assert stalled.verdict is RelayVerdict.ACTIVATION_BACKLOG_OVERDUE
-        assert stalled.activation_overdue == 1
+            stopped = _observe(db, now=datetime.now(UTC))
+        assert stopped.verdict is RelayVerdict.RELAY_NOT_RUNNING
+        assert stopped.relay_ever_reported is False
+        assert stopped.heartbeat_age_seconds is None
+        assert stopped.activation_overdue == 0  # not yet overdue; it is UNDRAINED
 
         drain_once(
             worker_id="relay-test",
@@ -440,15 +460,161 @@ def test_health_reports_a_stalled_relay_and_then_a_drained_one(
         )
 
         with platform.platform_session() as db:
-            drained = relay_health(
-                db,
-                now=datetime.now(UTC) + timedelta(hours=1),
-                overdue_after=WINDOW,
-                stale_lease_after=WINDOW,
-            )
+            drained = _observe(db, now=datetime.now(UTC))
         assert drained.verdict is RelayVerdict.DRAINING
         assert drained.activation_overdue == 0
         assert drained.observed is True
+        assert drained.relay_ever_reported is True
+        assert drained.heartbeat_age_seconds is not None
+
+
+def test_a_real_drain_writes_a_durable_heartbeat(
+    migrated: tuple[str, str],
+) -> None:
+    """The heartbeat is a ROW, written on the delivery connection.
+
+    Asserted against the table rather than against the health verdict, because
+    the verdict would also be produced by a reader that invented a timestamp.
+    """
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            _activate_an_agreement(db)
+        drain_once(
+            worker_id="relay-test",
+            composition=_composition(dispatcher_url, platform),
+        )
+        with platform.platform_session() as db:
+            row = db.get(RelayHeartbeat, "relay-test")
+            assert row is not None
+            assert row.last_polled_at is not None
+            # This poll CLAIMED, so both advance.
+            assert row.last_claimed_at is not None
+
+
+def test_an_idle_drain_still_stamps_and_does_not_erase_the_last_claim(
+    migrated: tuple[str, str],
+) -> None:
+    """THE WHOLE REASON THE HEARTBEAT EXISTS.
+
+    A poll that claims nothing must still prove the relay is alive — otherwise
+    an idle relay and a dead one produce identical evidence, which is the state
+    this table was added to end.
+
+    And `last_claimed_at` must SURVIVE that idle poll. Writing the excluded NULL
+    would make every idle cycle look like a worker that has never claimed since
+    it started, which is a different and much more alarming fact.
+    """
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            _activate_an_agreement(db)
+        composition = _composition(dispatcher_url, platform)
+        drain_once(worker_id="relay-test", composition=composition)
+        with platform.platform_session() as db:
+            first = db.get(RelayHeartbeat, "relay-test")
+            assert first is not None
+            claimed_at = first.last_claimed_at
+            polled_at = first.last_polled_at
+        assert claimed_at is not None
+
+        # Nothing left to claim.
+        idle = drain_once(worker_id="relay-test", composition=composition)
+        assert idle.claimed == 0
+
+        with platform.platform_session() as db:
+            second = db.get(RelayHeartbeat, "relay-test")
+            assert second is not None
+            assert second.last_polled_at > polled_at, "an idle poll must still stamp"
+            assert (
+                second.last_claimed_at == claimed_at
+            ), "an idle poll must not erase the last real claim"
+
+
+class _RefusingConsumer(_FixedCatalogueConsumer):
+    """A transport whose every delivery fails. The wedge, made real.
+
+    Not a stub of the verdict: the kernel worker really does claim the batch,
+    really does take the exception, and really does back the row off — so what
+    the health surface reads afterwards is the state a wedged production relay
+    actually leaves behind.
+    """
+
+    def deliver(self, event: object, platform_db: Session) -> None:
+        raise RuntimeError("delivery refused by the wedge canary")
+
+
+def test_a_relay_that_claims_and_settles_nothing_is_wedged_not_healthy(
+    migrated: tuple[str, str],
+) -> None:
+    """THE STATE THAT HIDES, end to end.
+
+    The process is alive and heartbeating — every liveness probe reports it
+    healthy — it claims its batch, and nothing is ever settled. That must be RED
+    and it must be its own word, because the operator's first action is to read
+    the delivery failures rather than to restart anything.
+
+    The windows are chosen so the heartbeat is comfortably INSIDE its staleness
+    window while the outbox row is comfortably past its overdue window: the two
+    are independent facts, and the point is that liveness alone says healthy.
+    """
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            _activate_an_agreement(db)
+        dispatcher = DatabaseRuntime.from_urls(
+            database_url=dispatcher_url, platform_database_url=dispatcher_url
+        )
+        wedged_composition = RelayComposition(
+            dispatcher_sessions=dispatcher.platform_session_factory,
+            delivery_sessions=platform.platform_session_factory,
+            transport=_RefusingConsumer(),
+        )
+        report = drain_once(worker_id="relay-test", composition=wedged_composition)
+        assert report.claimed >= 1, "the wedge must CLAIM; that is what hides it"
+
+        with platform.platform_session() as db:
+            # Nothing settled and nothing staged: the work was picked up and
+            # put straight back.
+            assert _count(db, status=OutboxStatus.SENT.value) == 0
+            assert _count(db, status=OutboxStatus.PENDING.value) >= 1
+            observed_at = datetime.now(UTC) + timedelta(seconds=400)
+            wedged = _observe(
+                db,
+                now=observed_at,
+                heartbeat_stale_after=timedelta(seconds=900),
+                settled_within=timedelta(seconds=60),
+            )
+        assert wedged.verdict is RelayVerdict.RELAY_WEDGED
+        assert wedged.last_settled_age_seconds is None
+        # Alive. This is the half a liveness probe would report as healthy.
+        assert wedged.heartbeat_age_seconds is not None
+        assert wedged.heartbeat_age_seconds < 900
+
+
+def test_the_same_shape_with_a_working_transport_is_not_wedged(
+    migrated: tuple[str, str],
+) -> None:
+    """NON-VACUITY for the wedge. Identical windows and an identical elapsed
+    observation time — only the transport differs — must NOT report a wedge, or
+    the verdict is measuring the clock rather than the delivery."""
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            _activate_an_agreement(db)
+        drain_once(
+            worker_id="relay-test",
+            composition=_composition(dispatcher_url, platform),
+        )
+        with platform.platform_session() as db:
+            healthy = _observe(
+                db,
+                now=datetime.now(UTC) + timedelta(seconds=400),
+                heartbeat_stale_after=timedelta(seconds=900),
+                settled_within=timedelta(seconds=60),
+            )
+        assert healthy.verdict is not RelayVerdict.RELAY_WEDGED
+        assert healthy.verdict is RelayVerdict.DRAINING
 
 
 def test_health_refuses_to_answer_as_the_dispatcher(
@@ -471,6 +637,8 @@ def test_health_refuses_to_answer_as_the_dispatcher(
                 now=datetime.now(UTC),
                 overdue_after=WINDOW,
                 stale_lease_after=WINDOW,
+                heartbeat_stale_after=HEARTBEAT_WINDOW,
+                settled_within=SETTLED_WINDOW,
             )
         finally:
             session.rollback()
