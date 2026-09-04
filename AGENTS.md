@@ -583,3 +583,55 @@ disagree, fix the drift.
     oracles, and a pin may not name a version that has not been published
     (`scripts/kernel_floor.py`, `tests/architecture/test_kernel_floor.py`, CI job
     `kernel-pin`; `docs/operations/kernel-a100-assessment-2026-09-01.md`).
+25. **Every table is classified, and the grant is what enforces it.** Ruled
+    2026-09-04: *"for first production, explicitly classify every table.
+    Authoritative control/evidence records use enforced retain: no automated
+    hard deletion and no `DELETE` for online roles. Any transient table that
+    does not fit must receive an explicit policy rather than inheriting this
+    one. New unclassified tables fail admission."*
+    `vendor_cp.data_governance` (`PlatformDataGovernanceV1`) is the one owner.
+
+    **Two enforcements, and only the second is enforcement.** "No automated hard
+    deletion" is a claim about code: every row-deletion site in this repository
+    and in the seven composed distributions is enumerated in `DELETION_SITES`
+    and held two-directionally by a scan that derives its own coverage, so a
+    kernel repin adding one fails the build and a site that disappears fails it
+    too. That is real and it is still weaker than a privilege, because it sees
+    no `psql` session. `REVOKE DELETE, TRUNCATE` from `platform_api` and
+    `app_user` on every governed table is what PostgreSQL refuses on, and it is
+    read back through `has_table_privilege` in the same transaction — issuing a
+    `REVOKE` proves a statement ran, not that a privilege is gone (vendor `v012`,
+    `v013`, `v014`, `v017`). Two escapes a table grant does not close are checked
+    on the live catalogue rather than assumed: an `ON DELETE CASCADE` runs with
+    the referencing table's owner's privileges, and a `SECURITY DEFINER`
+    function runs as its owner.
+
+    **Retain is never inherited.** A transient table gets a policy of its own.
+    `LIFECYCLE_DELETE` names the deleting owner AND the trigger and KEEPS the
+    online `DELETE`, which the enforcement then proves in the positive
+    direction — a revoke checked only where it should bite is satisfied by
+    revoking everything. `SUPERSEDED_IN_PLACE` is for a current-state gauge
+    replaced by `UPDATE`: not a record, so not retained, reaching the same grant
+    by a stated route rather than by default. Today that is
+    `public.feature_flag_overrides` (the platform console clears an override by
+    deleting the row) and `public.domain_settings` /
+    `public.relay_heartbeats`.
+
+    **Coverage is derived; the DECISIONS are enumerated** — rule 10's shape.
+    Nothing lists which tables get checked: `enforce_retention` reads
+    `pg_class` and holds what it finds against `GOVERNED_TABLES` in both
+    directions. An unclassified table refuses; a classification the database no
+    longer has refuses too. Admission fails at two moments for two reasons: CI
+    fails the build when a migration creates an unclassified table, and the
+    deploy refuses inside the composed upgrade's single transaction — which is
+    the half that still holds when the table arrived from a repinned module
+    rather than from this repository.
+
+    **Retention PERIODS are not decided here.** "Enforced retain" as ruled needs
+    none. A future decision to dispose of anything on a schedule is a policy
+    change in `GOVERNED_TABLES` plus a disposer with a named owner, and it will
+    have to move a table out of `ENFORCED_RETAIN` to get the privilege it needs
+    (`src/vendor_cp/data_governance.py`, `alembic/env.py`,
+    `tests/unit/test_data_governance.py`,
+    `tests/architecture/test_data_governance.py`,
+    `tests/migration/test_data_governance_catalogue.py`).
