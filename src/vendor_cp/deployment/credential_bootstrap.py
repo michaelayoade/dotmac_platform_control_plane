@@ -99,6 +99,7 @@ REFUSAL_CODES: Final[frozenset[str]] = frozenset(
         "material.version_mismatch",
         "credential.already_present",
         "credential.authentication_failed",
+        "credential.authentication_not_enforced",
     }
 )
 
@@ -315,6 +316,61 @@ def _install(db: Session, principal: str, material: str) -> None:
     db.execute(text(statement))
 
 
+def _prove_authentication(
+    instruction: PrincipalCredentialBootstrap,
+    material: str,
+    authenticate: CredentialAuthenticator,
+    *,
+    installed: bool,
+) -> None:
+    """Step 6, in BOTH directions — because one direction is not a proof.
+
+    The referenced material must authenticate, and a deliberately wrong one must
+    NOT. The second half is the one that makes the first mean anything: a host
+    configured with `trust` accepts every password, so a positive-only check
+    passes there while proving nothing at all about the credential.
+
+    That is measured rather than imagined. The migration-tier cluster runs
+    `POSTGRES_HOST_AUTH_METHOD: trust`, and this negative control is what caught
+    it — a wrong password authenticated, and the positive half had been green
+    the whole time.
+
+    The wrong material is derived from the real one so it is guaranteed to
+    differ, and it is used exactly once. It costs one failed-authentication line
+    in the server log, which is the price of knowing the proof can fail.
+    """
+    if not authenticate(
+        database=instruction.database,
+        principal=instruction.principal,
+        material=material,
+    ):
+        raise BootstrapRefused(
+            "credential.authentication_failed",
+            f"role {instruction.principal!r} does not authenticate with the "
+            + (
+                "referenced material. The credential is COMMITTED and must not "
+                "be altered again; investigate the host's authentication "
+                "configuration"
+                if installed
+                else "referenced material, so the effect did not complete. It "
+                "is NOT reconcilable by this path: installing over an unknown "
+                "credential is a rotation, and needs its own authorization"
+            ),
+        )
+    if authenticate(
+        database=instruction.database,
+        principal=instruction.principal,
+        material=material + "-deliberately-wrong",
+    ):
+        raise BootstrapRefused(
+            "credential.authentication_not_enforced",
+            f"the host accepted a deliberately wrong credential for "
+            f"{instruction.principal!r}, so it is not enforcing password "
+            "authentication and no credential can be proven on it. The "
+            "positive check passed and means nothing",
+        )
+
+
 def bootstrap_principal_credential(
     admin_db: Session,
     instruction: PrincipalCredentialBootstrap,
@@ -356,19 +412,7 @@ def bootstrap_principal_credential(
     _install(admin_db, instruction.principal, material)
     admin_db.commit()  # Step 6a. The proof below is meaningless before this.
 
-    authenticated = authenticate(
-        database=instruction.database,
-        principal=instruction.principal,
-        material=material,
-    )
-    if not authenticated:
-        raise BootstrapRefused(
-            "credential.authentication_failed",
-            f"role {instruction.principal!r} was installed and then could not "
-            "authenticate with the referenced material. The credential is "
-            "COMMITTED and must not be altered again; investigate the host's "
-            "authentication configuration",
-        )
+    _prove_authentication(instruction, material, authenticate, installed=True)
     return BootstrapReceipt(
         outcome=BootstrapOutcome.INSTALLED,
         database=instruction.database,
@@ -395,18 +439,7 @@ def verify_credential(
     rotate a credential the relay may already be using.
     """
     material, version = _resolve_material(instruction, secrets)
-    if not authenticate(
-        database=instruction.database,
-        principal=instruction.principal,
-        material=material,
-    ):
-        raise BootstrapRefused(
-            "credential.authentication_failed",
-            f"role {instruction.principal!r} does not authenticate with the "
-            "referenced material, so the effect did not complete. It is NOT "
-            "reconcilable by this path: installing over an unknown credential "
-            "is a rotation, and needs its own authorization",
-        )
+    _prove_authentication(instruction, material, authenticate, installed=False)
     return BootstrapReceipt(
         outcome=BootstrapOutcome.ALREADY_INSTALLED,
         database=instruction.database,

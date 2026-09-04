@@ -107,14 +107,22 @@ class _AdminSession:
         self.rolled_back = True
 
 
-def _authenticator(result: bool = True) -> Any:
+def _authenticator(result: bool = True, *, enforces: bool = True) -> Any:
+    """A host that accepts `MATERIAL` and, when `enforces`, rejects anything else.
+
+    `enforces=False` models a `trust`-configured server: it says yes to every
+    password. That is not hypothetical — the migration-tier cluster is exactly
+    that, and it is what the two-directional proof exists to catch.
+    """
     calls: list[dict[str, str]] = []
 
     def _authenticate(*, database: str, principal: str, material: str) -> bool:
         calls.append(
             {"database": database, "principal": principal, "material": material}
         )
-        return result
+        if not enforces:
+            return True
+        return result if material == MATERIAL else False
 
     _authenticate.calls = calls  # type: ignore[attr-defined]
     return _authenticate
@@ -260,15 +268,18 @@ def test_authentication_is_proved_after_the_commit() -> None:
         authenticate=authenticate,
     )
     assert session.committed is True
-    assert authenticate.calls == [
-        {
-            "database": "vendor_control_plane",
-            "principal": PRINCIPAL,
-            "material": MATERIAL,
-        }
-    ]
+    assert authenticate.calls[0] == {
+        "database": "vendor_control_plane",
+        "principal": PRINCIPAL,
+        "material": MATERIAL,
+    }
     assert receipt.outcome is BootstrapOutcome.INSTALLED
     assert receipt.authenticated is True
+    # BOTH directions were driven: the referenced material, then a deliberately
+    # wrong one. A positive-only proof passes on a host that accepts anything.
+    assert len(authenticate.calls) == 2
+    assert authenticate.calls[0]["material"] == MATERIAL
+    assert authenticate.calls[1]["material"] != MATERIAL
 
 
 def test_a_failed_proof_refuses_and_says_the_credential_is_committed() -> None:
@@ -388,5 +399,51 @@ def test_the_allowlist_is_narrow_and_can_refuse() -> None:
 
 
 def test_every_refusal_code_is_declared_and_distinct() -> None:
-    assert len(REFUSAL_CODES) == 9
+    assert len(REFUSAL_CODES) == 10
     assert all(code.count(".") == 1 for code in REFUSAL_CODES)
+
+
+# ── step 6 needs a host that can say no ─────────────────────────────────────
+
+
+def test_a_host_that_accepts_anything_is_refused() -> None:
+    """A PROOF THAT CANNOT FAIL IS NOT A PROOF.
+
+    A `trust`-configured server accepts every password, so the positive half of
+    step 6 passes there while establishing nothing. This is not hypothetical:
+    the migration-tier cluster runs `POSTGRES_HOST_AUTH_METHOD: trust`, and its
+    negative control is what found it — a wrong password authenticated, and the
+    positive check had been green the whole time.
+    """
+    session = _AdminSession()
+    with pytest.raises(BootstrapRefused) as refused:
+        bootstrap_principal_credential(
+            session,  # type: ignore[arg-type]
+            INSTRUCTION,
+            secrets=_secrets(),
+            authenticate=_authenticator(enforces=False),
+        )
+    assert refused.value.code == "credential.authentication_not_enforced"
+    assert "means nothing" in refused.value.message
+
+
+def test_the_crash_path_also_requires_an_enforcing_host() -> None:
+    """Step 7 reads rather than writes, and its proof is the same proof."""
+    with pytest.raises(BootstrapRefused) as refused:
+        verify_credential(
+            INSTRUCTION,
+            secrets=_secrets(),
+            authenticate=_authenticator(enforces=False),
+        )
+    assert refused.value.code == "credential.authentication_not_enforced"
+
+
+def test_the_wrong_material_is_derived_from_the_real_one() -> None:
+    """So it is guaranteed to differ. A hardcoded wrong password could collide
+    with the real one and turn the negative control into a false alarm."""
+    authenticate = _authenticator()
+    verify_credential(INSTRUCTION, secrets=_secrets(), authenticate=authenticate)
+    tried = [call["material"] for call in authenticate.calls]
+    assert tried[0] == MATERIAL
+    assert tried[1].startswith(MATERIAL)
+    assert tried[1] != MATERIAL

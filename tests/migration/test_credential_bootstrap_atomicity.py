@@ -72,6 +72,10 @@ def role(superuser_url: str) -> Iterator[str]:
         conn.commit()
     yield name
     with _connect(superuser_url) as conn:
+        # A role holding a grant cannot be dropped: PostgreSQL refuses with
+        # `DependentObjectsStillExist`. `DROP OWNED BY` removes the privileges
+        # this role was given in this database first.
+        conn.execute(text(f"DROP OWNED BY {name}"))
         conn.execute(text(f"DROP ROLE IF EXISTS {name}"))
         conn.commit()
 
@@ -213,17 +217,39 @@ def test_server_side_quoting_survives_a_hostile_role_name(
             conn.commit()
 
 
-# ── premise 5: the installed credential actually authenticates ──────────────
+# ── premise 5: whether this host can even REFUSE a credential ──────────────
 
 
-def test_the_installed_credential_authenticates_and_a_wrong_one_does_not(
+def _authenticates(base: str, role: str, material: str) -> bool:
+    """Try one login. Returns an answer; a refused password is not an error."""
+    from urllib.parse import quote
+
+    scheme, _, hostpart = base.partition("://")
+    host = hostpart.rpartition("@")[2]
+    try:
+        with _connect(f"{scheme}://{role}:{quote(material, safe='')}@{host}") as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception:
+        return False
+
+
+def test_this_cluster_does_not_enforce_password_authentication(
     superuser_url: str, role: str, url_for: Callable[..., str]
 ) -> None:
-    """PREMISE 5, both directions.
+    """PREMISE 5, and the finding that changed the effect.
 
-    Step 6's proof is only a proof if authentication is what it measures. The
-    negative half is what makes it one: a connection helper that succeeded
-    regardless would pass the positive case and prove nothing.
+    The negative control here FAILED on its first run: a deliberately wrong
+    password authenticated. The migration-tier cluster runs
+    `POSTGRES_HOST_AUTH_METHOD: trust`, so every password is accepted, and a
+    positive-only authentication proof passes on it while establishing nothing.
+
+    So this measures the cluster rather than pretending otherwise, and the test
+    below turns that into the fixture for the guard it produced. The
+    scram-enforcing case is exercised by `.github/candidate/acceptance.sh`,
+    whose PostgreSQL is initialised with `--auth-host=scram-sha-256`; asserting
+    real authentication HERE would be asserting it of a server that cannot
+    refuse.
     """
     with _connect(superuser_url) as conn:
         database = conn.execute(text("SELECT current_database()")).scalar_one()
@@ -232,21 +258,78 @@ def test_the_installed_credential_authenticates_and_a_wrong_one_does_not(
         conn.commit()
 
     base = url_for(superuser_url, database, user=role)
-    scheme, _, hostpart = base.partition("://")
-    host = hostpart.rpartition("@")[2]
-    from urllib.parse import quote
+    assert _authenticates(base, role, HOSTILE) is True
+    # The line that matters: on a trust-configured host this is ALSO true.
+    assert _authenticates(base, role, HOSTILE + "-wrong") is True, (
+        "this cluster now enforces passwords, so the effect's "
+        "not-enforced refusal can no longer be measured here and this test "
+        "must be replaced by the real two-directional proof"
+    )
 
-    def _authenticates(material: str) -> bool:
-        url = f"{scheme}://{role}:{quote(material, safe='')}@{host}"
-        try:
-            with _connect(url) as conn:
-                conn.execute(text("SELECT 1"))
-            return True
-        except Exception:
-            return False
 
-    assert _authenticates(HOSTILE) is True
-    assert _authenticates(HOSTILE + "-wrong") is False
+def test_the_effect_refuses_a_host_that_accepts_anything(
+    superuser_url: str, role: str, url_for: Callable[..., str]
+) -> None:
+    """THE GUARD, DRIVEN AGAINST A REAL SERVER THAT CANNOT REFUSE.
+
+    Step 6 proves authentication in both directions, and the second direction is
+    what makes the first mean anything. Here the host accepts every password, so
+    the effect must refuse rather than report a credential it cannot verify —
+    and the refusal must name that reason rather than a generic failure.
+
+    The role is allowlisted for the duration, because the point under test is
+    the authentication proof rather than the allowlist.
+    """
+    from vendor_cp.deployment import credential_bootstrap as effect
+
+    with _connect(superuser_url) as conn:
+        database = conn.execute(text("SELECT current_database()")).scalar_one()
+        conn.execute(text(f"GRANT CONNECT ON DATABASE {database} TO {role}"))
+        conn.commit()
+
+    base = url_for(superuser_url, database, user=role)
+
+    class _Record:
+        version = 1
+        fields = {"dispatcher_password": HOSTILE}
+
+    class _Secrets:
+        def read_versioned(self, path: str) -> object:
+            return _Record()
+
+    def _authenticate(*, database: str, principal: str, material: str) -> bool:
+        return _authenticates(base, principal, material)
+
+    instruction = effect.PrincipalCredentialBootstrap(
+        database=database,
+        principal=role,
+        secret_path="secret/dotmac/vendor-control-plane/production/relay-dispatcher",
+        secret_field="dispatcher_password",
+        expected_version=1,
+    )
+
+    from sqlalchemy.orm import Session
+
+    engine = create_engine(superuser_url)
+    try:
+        with Session(engine) as session:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(effect, "ALLOWED_PRINCIPALS", frozenset({role}))
+                with pytest.raises(effect.BootstrapRefused) as refused:
+                    effect.bootstrap_principal_credential(
+                        session,
+                        instruction,
+                        secrets=_Secrets(),
+                        authenticate=_authenticate,
+                    )
+        assert refused.value.code == "credential.authentication_not_enforced"
+    finally:
+        engine.dispose()
+
+    # And the credential IS committed, which is the state the refusal describes:
+    # the install happened, the proof did not.
+    with _connect(superuser_url) as conn:
+        assert _password_present(conn, role) is True
 
 
 # ── the lock the effect takes is released by the transaction ────────────────
