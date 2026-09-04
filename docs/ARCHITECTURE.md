@@ -331,6 +331,17 @@ empty by default and `relay drain` raises rather than reporting a pass that
 claimed nothing, because "drained 0 events" from a relay with no credential is
 indistinguishable from "drained 0 events" from a healthy idle one.
 
+**The relay is not a SURFACE, and ADR-0019 is why that now matters.** It bears
+no route and carries no manifest, so `route_bearing_codes` cannot see it and it
+enters no profile's `surface_inventory`. That was a placement choice when the
+roster was hand-written; under derivation it is enforced. Had the operator
+detail been mounted as a tenth vendor feature, every profile would be REQUIRED
+to name it — completeness is now checked against the derived universe rather
+than against a second declaration — and a relay-stall report would have become
+withholdable, which is the same defect as a readiness probe with an off switch.
+Putting the numbers on `dotmac-platform relay health` and the verdict on an
+existing never-withheld route avoids both.
+
 **Readiness composes the verdict.** `/health/ready` asked only whether the
 database answered, so a deployment whose outbox was not being drained reported
 ready. It now asks both questions in order — the database probe first, because

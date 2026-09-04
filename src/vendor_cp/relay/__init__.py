@@ -17,6 +17,14 @@ Two modules, and the split is the point:
   allocation is; this only introduces them to each other.
 - `health` reports whether the drain is happening. It writes nothing.
 
+Neither is a SURFACE, either: this package bears no route and carries no
+manifest, so ADR-0019's derived `route_bearing_codes` cannot see it and no
+profile's `surface_inventory` names it. The operator detail lives on
+`dotmac-platform relay health`; the verdict rides on `readiness`, which is the
+sole member of `NEVER_WITHHELD_SURFACES`. A relay-stall report a deployment
+could switch off would be the same defect as a readiness probe with an off
+switch.
+
 Neither is a second allocation authority. `ContractEventConsumer` remains an
 adapter over `vendor_cp.allocations.adapter.stage_allocation`, and no name from
 the allocation module's AUTHORITY surface appears in this package
