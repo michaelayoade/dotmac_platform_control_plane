@@ -61,6 +61,49 @@ class VendorSettings:
     # "offline_bundle" renders a self-contained artifact for an air-gapped
     # site. Networked transports are a separate, credentialed slice.
     licence_delivery_mode: str = "logging"
+    # The platform outbox relay (`vendor_cp.relay`). The DSN is the
+    # `platform_outbox_dispatcher` role's — a THIRD ROLE on the one
+    # control-plane database, never a second database (deny case D1). Empty is
+    # the default and is fail-closed: `relay drain` REFUSES rather than
+    # reporting that it drained nothing, because a green zero from an
+    # unconfigured relay is the silence this subsystem exists to end.
+    relay_dispatcher_database_url: str = ""
+    # How long a platform outbox event may sit pending-and-due before the relay
+    # is judged not to be draining. Comfortably above the retry backoff floor:
+    # a failing event is legitimately due-and-undelivered for a moment on each
+    # attempt, and that is a retry, not a stall.
+    relay_overdue_seconds: int = 300
+    # How long a CLAIMED row may hold its lease before the claim is judged
+    # abandoned. Defaults to the kernel `RelayPolicy.stale_lease_seconds`
+    # value and must never be TIGHTER than it: a window shorter than the
+    # relay's own reclaim window would report a stale lease the relay still
+    # considers live, which is an alert for a healthy system.
+    relay_stale_lease_seconds: int = 300
+
+
+def _positive_seconds(name: str, *, default: int) -> int:
+    """A duration knob, or a refusal — never a silent fallback to the default.
+
+    An unparseable or non-positive threshold is a configuration mistake, and
+    the failure mode of accepting it is the worst one available here: a zero or
+    negative window makes every pending event instantly overdue, so the relay
+    health surface goes permanently red and an operator learns to ignore it.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        seconds = int(raw)
+    except ValueError as error:
+        raise ProductionConfigurationError(
+            f"{name}={raw!r} is not an integer number of seconds"
+        ) from error
+    if seconds <= 0:
+        raise ProductionConfigurationError(
+            f"{name}={seconds} must be positive; a non-positive window makes "
+            "every pending event instantly overdue"
+        )
+    return seconds
 
 
 def load_vendor_settings() -> VendorSettings:
@@ -98,6 +141,15 @@ def load_vendor_settings() -> VendorSettings:
         licence_delivery_mode=os.getenv("VENDOR_LICENCE_DELIVERY_MODE", "logging")
         .strip()
         .lower(),
+        relay_dispatcher_database_url=os.getenv(
+            "VENDOR_RELAY_DISPATCHER_DATABASE_URL", ""
+        ).strip(),
+        relay_overdue_seconds=_positive_seconds(
+            "VENDOR_RELAY_OVERDUE_SECONDS", default=300
+        ),
+        relay_stale_lease_seconds=_positive_seconds(
+            "VENDOR_RELAY_STALE_LEASE_SECONDS", default=300
+        ),
     )
 
 

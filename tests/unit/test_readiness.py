@@ -8,9 +8,18 @@ and the first request an operator made was what found out.
 
 Two properties therefore matter more than the route's existence: it must FAIL
 when the dependency is unreachable, and it must reveal nothing while doing so.
+
+The second half of that gap was measured later: readiness reported DATABASE
+liveness and nothing else, so a deployment whose platform outbox was not being
+drained — an activated agreement producing no entitlement allocation — was
+reported ready. The relay verdict is composed in for that reason, and the tests
+below hold it to the same two properties: it must fail when the drain is
+stalled, and it must publish a member rather than a number.
 """
 
 from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from dotmac_kernel import create_app
@@ -25,6 +34,10 @@ from vendor_cp.readiness.service import (
     ReadinessReport,
     check_readiness,
 )
+from vendor_cp.relay.health import RelayHealth, RelayVerdict
+
+NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
+WINDOW = timedelta(seconds=300)
 
 
 class _UnreachableSession:
@@ -34,30 +47,128 @@ class _UnreachableSession:
     def execute(self, statement: object) -> object:
         raise OperationalError("SELECT 1", {}, Exception("connection refused"))
 
+    def scalar(self, statement: object) -> object:
+        raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
 
 class _ReachableSession:
+    """Reachable, and its outbox is empty — a healthy idle deployment.
+
+    `execute(...).scalar_one()` answers 0 for every count the relay observation
+    takes, and `scalar` answers `None` for the oldest-overdue timestamp. This is
+    a real shape rather than a patched decision: the readiness composition is
+    what is under test, and stubbing the verdict would remove it.
+    """
+
     def __init__(self) -> None:
         self.statements: list[str] = []
 
     def execute(self, statement: object) -> object:
         self.statements.append(str(statement))
-        return object()
+        return _Zero()
+
+    def scalar(self, statement: object) -> object:
+        self.statements.append(str(statement))
+        return None
 
 
-def test_a_reachable_database_is_ready() -> None:
+class _Zero:
+    def scalar_one(self) -> int:
+        return 0
+
+
+def _check(session: object, *, now: datetime = NOW) -> ReadinessReport:
+    return check_readiness(
+        session,  # type: ignore[arg-type]
+        now=now,
+        overdue_after=WINDOW,
+        stale_lease_after=WINDOW,
+    )
+
+
+# ── the database half ───────────────────────────────────────────────────────
+
+
+def test_a_reachable_database_with_an_empty_outbox_is_ready() -> None:
     session = _ReachableSession()
-    report = check_readiness(session)  # type: ignore[arg-type]
+    report = _check(session)
     assert report == ReadinessReport(ready=True, detail=ReadinessDetail.READY)
-    assert session.statements == [PROBE]
+    assert PROBE in session.statements[0]
 
 
 def test_an_unreachable_database_is_not_ready_and_does_not_raise() -> None:
     """Returning is the point. A probe that propagated the driver's exception
     would turn an expected, transient answer into a 500 in the logs of
     everything watching — the unreachable case is a NORMAL outcome of asking."""
-    report = check_readiness(_UnreachableSession())  # type: ignore[arg-type]
+    report = _check(_UnreachableSession())
     assert report.ready is False
     assert report.detail is ReadinessDetail.DATABASE_UNREACHABLE
+
+
+def test_an_unreachable_database_is_not_reported_as_an_unreadable_outbox() -> None:
+    """ORDER. The two questions have different repairs — one sends an operator
+    to the network or the credential, the other to a privilege on one table —
+    so the database probe is asked FIRST and its answer is not overwritten."""
+    assert _check(_UnreachableSession()).detail is not (
+        ReadinessDetail.RELAY_STATE_UNKNOWN
+    )
+
+
+def test_the_probe_is_the_cheapest_statement_that_proves_a_round_trip() -> None:
+    """A readiness check that read the catalogue would be a load source of its
+    own on every orchestrator poll."""
+    assert PROBE == "SELECT 1"
+
+
+# ── the relay half ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("verdict", "expected"),
+    [
+        (RelayVerdict.DRAINING, ReadinessDetail.READY),
+        (
+            RelayVerdict.ACTIVATION_BACKLOG_OVERDUE,
+            ReadinessDetail.ACTIVATION_BACKLOG_OVERDUE,
+        ),
+        (RelayVerdict.ACTIVATION_LEASE_STALE, ReadinessDetail.ACTIVATION_LEASE_STALE),
+        (
+            RelayVerdict.ACTIVATION_DEAD_LETTERED,
+            ReadinessDetail.ACTIVATION_DEAD_LETTERED,
+        ),
+        (RelayVerdict.RELAY_STATE_UNKNOWN, ReadinessDetail.RELAY_STATE_UNKNOWN),
+    ],
+)
+def test_every_relay_verdict_reaches_readiness_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    verdict: RelayVerdict,
+    expected: ReadinessDetail,
+) -> None:
+    """One row per member, so a verdict added without a mapping fails here
+    rather than silently taking whichever branch it falls through to."""
+    monkeypatch.setattr(
+        "vendor_cp.readiness.service.relay_health",
+        lambda *_args, **_kwargs: RelayHealth(verdict=verdict),
+    )
+    report = _check(_ReachableSession())
+    assert report.detail is expected
+    assert report.ready is (expected is ReadinessDetail.READY)
+
+
+def test_only_a_draining_relay_is_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The constraint in one line: an activated agreement that produces no
+    allocation must not look complete."""
+    for verdict in RelayVerdict:
+        monkeypatch.setattr(
+            "vendor_cp.readiness.service.relay_health",
+            lambda *_args, _v=verdict, **_kwargs: RelayHealth(verdict=_v),
+        )
+        assert _check(_ReachableSession()).ready is (
+            verdict is RelayVerdict.DRAINING
+        ), verdict
+
+
+# ── the vocabulary is closed and the two enums cannot drift ─────────────────
 
 
 def test_the_detail_vocabulary_is_closed_and_carries_no_driver_text() -> None:
@@ -66,16 +177,47 @@ def test_the_detail_vocabulary_is_closed_and_carries_no_driver_text() -> None:
     assert {member.value for member in ReadinessDetail} == {
         "ready",
         "database_unreachable",
+        "activation_backlog_overdue",
+        "activation_lease_stale",
+        "activation_dead_lettered",
+        "relay_state_unknown",
     }
-    report = check_readiness(_UnreachableSession())  # type: ignore[arg-type]
+    report = _check(_UnreachableSession())
     assert "connection refused" not in report.detail.value
     assert isinstance(report.detail, ReadinessDetail)
 
 
-def test_the_probe_is_the_cheapest_statement_that_proves_a_round_trip() -> None:
-    """A readiness check that read the catalogue would be a load source of its
-    own on every orchestrator poll."""
-    assert PROBE == "SELECT 1"
+def test_every_non_draining_relay_verdict_has_a_readiness_member() -> None:
+    """Both directions, so the two vocabularies cannot drift apart. `DRAINING`
+    is the one verdict that maps onto an existing member (`ready`) rather than
+    contributing a value of its own."""
+    published = {member.value for member in ReadinessDetail}
+    for verdict in RelayVerdict:
+        if verdict is RelayVerdict.DRAINING:
+            continue
+        assert verdict.value in published, verdict
+
+
+def test_readiness_publishes_no_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The depths and ages exist on `RelayHealth` and stay there. This probe is
+    unauthenticated; telling a caller how much work the control plane is
+    carrying is not the same as telling it the deployment cannot serve."""
+    monkeypatch.setattr(
+        "vendor_cp.readiness.service.relay_health",
+        lambda *_args, **_kwargs: RelayHealth(
+            verdict=RelayVerdict.ACTIVATION_BACKLOG_OVERDUE,
+            pending_total=4_512,
+            overdue_total=4_512,
+            oldest_overdue_age_seconds=98_765,
+        ),
+    )
+    report = _check(_ReachableSession())
+    rendered = f"{report.ready}{report.detail.value}"
+    assert "4512" not in rendered
+    assert "98765" not in rendered
+
+
+# ── the route, and the profiles that may not withhold it ────────────────────
 
 
 @pytest.mark.parametrize("profile", [p.code for p in PROFILES])
@@ -129,8 +271,34 @@ def test_the_route_answers_503_when_the_dependency_is_gone() -> None:
     assert payload["detail"] == "database_unreachable"
 
 
+def test_the_route_answers_503_when_the_relay_is_stalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reachable database is the point: this deployment can serve requests
+    and still cannot complete an activation, and the orchestrator must see
+    that."""
+    from dotmac_kernel.db import get_platform_db
+
+    monkeypatch.setattr(
+        "vendor_cp.readiness.service.relay_health",
+        lambda *_args, **_kwargs: RelayHealth(
+            verdict=RelayVerdict.ACTIVATION_BACKLOG_OVERDUE
+        ),
+    )
+    app = create_app(assembly.build_spec(deployment_profile("full")))
+    app.dependency_overrides[get_platform_db] = lambda: _ReachableSession()
+    with TestClient(app) as client:
+        response = client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json() == {
+        "ready": False,
+        "detail": "activation_backlog_overdue",
+    }
+
+
 def test_the_route_answers_200_when_the_dependency_answers() -> None:
-    """NON-VACUITY for the test above: a route that always 503'd would pass it."""
+    """NON-VACUITY for the two tests above: a route that always 503'd would pass
+    them."""
     from dotmac_kernel.db import get_platform_db
 
     app = create_app(assembly.build_spec(deployment_profile("full")))
