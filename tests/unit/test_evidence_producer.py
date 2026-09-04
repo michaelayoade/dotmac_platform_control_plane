@@ -24,6 +24,7 @@ from vendor_cp.deployment.evidence_producer import (
     release_evidence_document,
     sign_release_evidence,
 )
+from vendor_cp.deployment.signers import ReleaseEvidenceSignerPointer
 
 EXERCISED_REFUSALS = frozenset(
     {
@@ -32,10 +33,33 @@ EXERCISED_REFUSALS = frozenset(
         EvidenceRefusal.FOREIGN_RUN,
         EvidenceRefusal.UNUSABLE_KEY_ID,
         EvidenceRefusal.UNUSABLE_SIGNATURE,
+        EvidenceRefusal.PURPOSE_MISMATCH,
     }
 )
 
 KEY_ID = "platform-cp-release-evidence-2026-09"
+
+#: The typed identity the producer now requires. Built once from the same key
+#: id, so every call below names the key through the value that has already
+#: refused a wrong purpose rather than through a bare string beside a callable.
+SIGNER = ReleaseEvidenceSignerPointer(
+    pointer="secret/dotmac/platform-cp/release-evidence-signing/primary",
+    key_id=KEY_ID,
+)
+
+
+def _blank_key_id_signer() -> ReleaseEvidenceSignerPointer:
+    """A well-formed identity that names no key.
+
+    The pointer deliberately does not refuse this — the producer owns that
+    check and has since before the type existed. Building it here is what keeps
+    `UNUSABLE_KEY_ID` a reachable refusal rather than a code for a branch that
+    cannot execute.
+    """
+    return ReleaseEvidenceSignerPointer(
+        pointer="secret/dotmac/platform-cp/release-evidence-signing/primary",
+        key_id="  ",
+    )
 
 
 def facts(**overrides: str) -> dict[str, str]:
@@ -81,7 +105,7 @@ def test_a_produced_envelope_verifies_with_the_matching_public_key() -> None:
     might refuse everything.
     """
     private = Ed25519PrivateKey.generate()
-    envelope = sign_release_evidence(facts(), key_id=KEY_ID, sign=private.sign)
+    envelope = sign_release_evidence(facts(), signer=SIGNER, sign=private.sign)
 
     signature = _verifier_decode(envelope["signature"])
     private.public_key().verify(signature, canonical_bytes(envelope["document"]))
@@ -91,7 +115,7 @@ def test_the_signature_covers_the_document_and_nothing_else() -> None:
     """SENSITIVITY for the test above: verification must FAIL on a document that
     moved, or the signature would be decorative."""
     private = Ed25519PrivateKey.generate()
-    envelope = sign_release_evidence(facts(), key_id=KEY_ID, sign=private.sign)
+    envelope = sign_release_evidence(facts(), signer=SIGNER, sign=private.sign)
 
     tampered = {**envelope["document"], "conclusion": "failure"}
     with pytest.raises(InvalidSignature):
@@ -111,7 +135,7 @@ def test_the_document_is_a_nested_object_never_a_string() -> None:
     a package this repository does not depend on.
     """
     envelope = sign_release_evidence(
-        facts(), key_id=KEY_ID, sign=Ed25519PrivateKey.generate().sign
+        facts(), signer=SIGNER, sign=Ed25519PrivateKey.generate().sign
     )
     assert isinstance(envelope["document"], dict)
     assert not isinstance(envelope["document"], str)
@@ -122,7 +146,7 @@ def test_the_key_id_sits_outside_the_document() -> None:
     """A document carrying its own key id would let a forger nominate the key
     that verifies it."""
     envelope = sign_release_evidence(
-        facts(), key_id=KEY_ID, sign=Ed25519PrivateKey.generate().sign
+        facts(), signer=SIGNER, sign=Ed25519PrivateKey.generate().sign
     )
     assert envelope["key_id"] == KEY_ID
     assert "key_id" not in envelope["document"]
@@ -196,7 +220,9 @@ def test_evidence_with_no_key_id_is_refused() -> None:
     assert (
         _refusal(
             lambda: sign_release_evidence(
-                facts(), key_id="  ", sign=Ed25519PrivateKey.generate().sign
+                facts(),
+                signer=_blank_key_id_signer(),
+                sign=Ed25519PrivateKey.generate().sign,
             )
         )
         is EvidenceRefusal.UNUSABLE_KEY_ID
@@ -207,7 +233,7 @@ def test_a_signer_that_returns_nothing_is_refused() -> None:
     """An empty signature would produce an envelope that looks signed."""
     assert (
         _refusal(
-            lambda: sign_release_evidence(facts(), key_id=KEY_ID, sign=lambda _: b"")
+            lambda: sign_release_evidence(facts(), signer=SIGNER, sign=lambda _: b"")
         )
         is EvidenceRefusal.UNUSABLE_SIGNATURE
     )
@@ -217,7 +243,7 @@ def test_the_signature_is_canonical_unpadded_base64url() -> None:
     """The far side refuses padding and non-canonical encodings, so a padded
     signature would look right here and be rejected on the target."""
     envelope = sign_release_evidence(
-        facts(), key_id=KEY_ID, sign=Ed25519PrivateKey.generate().sign
+        facts(), signer=SIGNER, sign=Ed25519PrivateKey.generate().sign
     )
     signature = envelope["signature"]
     assert "=" not in signature
@@ -267,3 +293,27 @@ def test_the_evidence_contract_matches_the_installed_foundation() -> None:
     parsed = evidence.ReleaseEvidenceV1.from_document(document)
     assert parsed.canonical_bytes() == canonical_bytes(document)
     assert parsed.from_a_fork() is False
+
+
+def test_an_identity_of_another_purpose_is_refused() -> None:
+    """PURPOSE_MISMATCH, exercised here so the two-directional ratchet above is
+    satisfied by a real refusal rather than by a name added to a set.
+
+    This is the gap the typed identity closes: the producer took a key id and a
+    signing callable as unrelated arguments, so the AUTHORIZATION key could be
+    handed a release-evidence key id and nothing would object.
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from vendor_cp.deployment.signers import AuthorizationSignerPointer
+
+    authorization = AuthorizationSignerPointer(
+        pointer="secret/dotmac/platform-cp/authorization-signing/primary"
+    )
+    with pytest.raises(EvidenceRefused) as refused:
+        sign_release_evidence(
+            facts(),
+            signer=authorization,  # type: ignore[arg-type]
+            sign=Ed25519PrivateKey.generate().sign,
+        )
+    assert refused.value.refusal is EvidenceRefusal.PURPOSE_MISMATCH

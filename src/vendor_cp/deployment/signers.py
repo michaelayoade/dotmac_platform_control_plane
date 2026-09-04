@@ -255,6 +255,14 @@ class ReleaseEvidenceSignerPointer:
     exists not to be. What it does is make the PURPOSE and the KEY ID
     inseparable, so the remaining pairing is the custody adapter's single job
     rather than every caller's.
+
+    ## Why an EMPTY key id is refused by the producer and not here
+
+    One owner for one check. The producer has refused a blank key id as
+    `UNUSABLE_KEY_ID` since before this type existed, with its own stated reason
+    — no policy could select a key to verify against. Re-refusing it here would
+    make that branch unreachable: a second guard that renders the first dead is
+    not defence in depth, it is a test that can no longer fail.
     """
 
     material: ClassVar[MaterialKind] = MaterialKind.PRIVATE
@@ -269,12 +277,6 @@ class ReleaseEvidenceSignerPointer:
                 SignerRefusal.PURPOSE_MISMATCH,
                 "a release-evidence signer must declare "
                 f"{RELEASE_EVIDENCE_PURPOSE!r}",
-            )
-        if not self.key_id.strip():
-            raise SignerPointerRefused(
-                SignerRefusal.PURPOSE_MISMATCH,
-                "a release-evidence signer must name its key id, or no policy "
-                "can select a key to check its signature against",
             )
         _validate(self.pointer, purpose="release evidence")
 
