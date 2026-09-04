@@ -196,3 +196,50 @@ def test_the_key_id_comes_from_the_identity_not_the_caller() -> None:
     parameters = inspect.signature(sign_release_evidence).parameters
     assert "key_id" not in parameters
     assert "signer" in parameters
+
+
+# ── the serialized value is namespaced by surface ───────────────────────────
+
+
+def test_the_shared_reason_is_preserved_and_the_surface_distinguishes_it() -> None:
+    """One reason, two surfaces, and the wire has to say which.
+
+    The producer and the verifier refuse the same class of mistake, so
+    `PURPOSE_MISMATCH` stays as the shared reason — renaming either into an
+    unrelated reason would hide that they are one condition seen twice. What
+    could not stay shared is the SERIALIZED value: signing is refused BEFORE any
+    evidence exists, verification AFTER evidence arrived, and an operator
+    branching on one string cannot tell which happened. Those mean opposite
+    things about whether an artifact is out there.
+    """
+    from vendor_cp.deployment.signers import SignerRefusal
+
+    assert EvidenceRefusal.PURPOSE_MISMATCH.name == "PURPOSE_MISMATCH"
+    assert (
+        EvidenceRefusal.PURPOSE_MISMATCH.value
+        == "RELEASE_EVIDENCE_SIGNING_PURPOSE_MISMATCH"
+    )
+    # The pointer-construction refusal is Control's name and does NOT move.
+    assert SignerRefusal.PURPOSE_MISMATCH.value == "PURPOSE_MISMATCH"
+    assert (
+        EvidenceRefusal.PURPOSE_MISMATCH.value != SignerRefusal.PURPOSE_MISMATCH.value
+    )
+
+
+def test_the_namespaced_value_follows_the_estate_s_syntax() -> None:
+    """Underscore-separated, surface first — the way Control names its four —
+    rather than punctuation invented while fixing a naming problem. Uppercase
+    because that is this enum's own convention, which every member shares."""
+    value = EvidenceRefusal.PURPOSE_MISMATCH.value
+    assert value.isupper()
+    assert " " not in value and "." not in value and ":" not in value
+    assert value.endswith("_PURPOSE_MISMATCH")
+    assert value.startswith("RELEASE_EVIDENCE_SIGNING_")
+    assert all(member.value.isupper() for member in EvidenceRefusal)
+
+
+def test_no_two_producer_refusals_share_a_serialized_value() -> None:
+    """NON-VACUITY for the namespacing: a value that collided with a sibling
+    inside this enum would defeat the purpose one layer closer to home."""
+    values = [member.value for member in EvidenceRefusal]
+    assert len(set(values)) == len(values)
