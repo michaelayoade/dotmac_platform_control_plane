@@ -99,6 +99,7 @@ def test_materialized_environment_requires_every_held_value(tmp_path: Path) -> N
         "VENDOR_DB_ADMIN_PASSWORD=admin\n"
         "VENDOR_DB_APP_USER_PASSWORD=app\n"
         "VENDOR_DB_PLATFORM_API_PASSWORD=platform\n"
+        "VENDOR_DB_DISPATCHER_PASSWORD=dispatcher\n"
         "JWT_SECRET=jwt\n"
         "SESSION_HASH_SECRET=session\n"
         "VENDOR_LICENCE_SIGNING_KEY_ID=vendor-prod-1\n",
@@ -116,6 +117,7 @@ def test_empty_or_duplicate_held_value_refuses_the_marker(tmp_path: Path) -> Non
         "VENDOR_DB_ADMIN_PASSWORD=admin\n"
         "VENDOR_DB_APP_USER_PASSWORD=\n"
         "VENDOR_DB_PLATFORM_API_PASSWORD=platform\n"
+        "VENDOR_DB_DISPATCHER_PASSWORD=dispatcher\n"
         "JWT_SECRET=jwt\n"
         "SESSION_HASH_SECRET=session\n"
         "VENDOR_LICENCE_SIGNING_KEY_ID=vendor-prod-1\n"

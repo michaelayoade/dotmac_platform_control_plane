@@ -21,6 +21,12 @@ readonly REQUIRED_ENV_KEYS=(
     VENDOR_DB_ADMIN_PASSWORD
     VENDOR_DB_APP_USER_PASSWORD
     VENDOR_DB_PLATFORM_API_PASSWORD
+    # The platform outbox relay's dispatcher credential. Required here for
+    # the same reason as its three siblings: a host bootstrapped without it
+    # brings up a relay service that cannot authenticate, and the compose
+    # file's `:?` would fail the deploy rather than this check failing the
+    # bootstrap — later, and further from the cause.
+    VENDOR_DB_DISPATCHER_PASSWORD
     JWT_SECRET
     SESSION_HASH_SECRET
     VENDOR_LICENCE_SIGNING_KEY_ID
