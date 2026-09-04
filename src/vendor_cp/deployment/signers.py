@@ -73,9 +73,11 @@ __all__ = [
     "FORBIDDEN_SIGNING_POINTERS",
     "POINTER_MATERIAL",
     "POINTER_PREFIX",
+    "RELEASE_EVIDENCE_PURPOSE",
     "AuthorizationSignerPointer",
     "MaterialKind",
     "ObservationSignerPointer",
+    "ReleaseEvidenceSignerPointer",
     "SignerPointerRefused",
     "SignerPointerLike",
     "SignerRefusal",
@@ -88,6 +90,11 @@ __all__ = [
 #: cannot silently drift from the authority that enforces them.
 AUTHORIZATION_PURPOSE: Final = "deployment_authorization"
 EXECUTION_OBSERVATION_PURPOSE: Final = "target_execution_observation"
+#: Platform CP's own release-evidence purpose. Unlike the two above it is not
+#: Control's — this product signs its own release evidence — but it is declared
+#: here with them so every purpose in `POINTER_MATERIAL` resolves to a symbol
+#: rather than to a string typed twice.
+RELEASE_EVIDENCE_PURPOSE: Final = "platform_release_evidence"
 
 #: Pointers no deployment signer may name, whatever it is called.
 FORBIDDEN_SIGNING_POINTERS: Final[frozenset[str]] = frozenset(
@@ -224,17 +231,74 @@ class ObservationSignerPointer:
         _validate(self.pointer, purpose="observation")
 
 
-#: Every signing purpose and the kind of material its pointer names. Two have
-#: descriptor classes on `main` and carry it as a `ClassVar`; `deployment_dispatch`
-#: and `platform_release_evidence` do not exist as types yet, so they are named
-#: here as literals until they do. This mapping is what binds the mint dossier's
+@dataclass(frozen=True, slots=True)
+class ReleaseEvidenceSignerPointer:
+    """Where the release-evidence key lives, and which key id it is. Never the key.
+
+    The third typed pointer, and the one that closes a gap the other two never
+    had. `platform_release_evidence` was a dict entry and a JSON field — DATA,
+    which cannot refuse a wrong purpose — so the full matrix accepted four
+    diagonals and refused sixteen off-diagonals rather than five and twenty.
+    This module's own comment said as much: *"do not exist as types yet, so they
+    are named here as literals until they do."*
+
+    ## Why this one carries a `key_id` and the others do not
+
+    The producer must name the key that signed an envelope, and its gap was that
+    `key_id` and the signing callable arrived as unrelated arguments — nothing
+    structurally stopped the authorization key being handed a release-evidence
+    key id. Binding the two into one identity moves that from a review to a call
+    site.
+
+    It is still not the whole coupling: this type cannot hold the signing
+    callable, because a pointer that could reach material would be the thing it
+    exists not to be. What it does is make the PURPOSE and the KEY ID
+    inseparable, so the remaining pairing is the custody adapter's single job
+    rather than every caller's.
+    """
+
+    material: ClassVar[MaterialKind] = MaterialKind.PRIVATE
+
+    pointer: str
+    key_id: str
+    purpose: str = RELEASE_EVIDENCE_PURPOSE
+
+    def __post_init__(self) -> None:
+        if self.purpose != RELEASE_EVIDENCE_PURPOSE:
+            raise SignerPointerRefused(
+                SignerRefusal.PURPOSE_MISMATCH,
+                "a release-evidence signer must declare "
+                f"{RELEASE_EVIDENCE_PURPOSE!r}",
+            )
+        if not self.key_id.strip():
+            raise SignerPointerRefused(
+                SignerRefusal.PURPOSE_MISMATCH,
+                "a release-evidence signer must name its key id, or no policy "
+                "can select a key to check its signature against",
+            )
+        _validate(self.pointer, purpose="release evidence")
+
+
+#: Every signing purpose and the kind of material its pointer names. THREE now
+#: have descriptor classes and carry it as a `ClassVar`, and two are still
+#: literals for DIFFERENT reasons:
+#:
+#:   `deployment_dispatch`  has no type anywhere yet.
+#:   `deployment_recovery`  is CONTROL's purpose, not this product's, so its
+#:                          type is Control's to publish and this entry reads
+#:                          the name out of their source rather than owning it.
+#:
+#: A literal is exactly the second statement that drifts from the thing it
+#: describes, which is why each one that gains a type stops being one.
+#:
+#: This mapping is what binds the mint dossier's
 #: custody table to code — `tests/architecture/test_dossier_ceremony.py` refuses
 #: a document whose table disagrees with it.
 POINTER_MATERIAL: Final[dict[str, MaterialKind]] = {
     AUTHORIZATION_PURPOSE: AuthorizationSignerPointer.material,
     EXECUTION_OBSERVATION_PURPOSE: ObservationSignerPointer.material,
     "deployment_dispatch": MaterialKind.PRIVATE,
-    "platform_release_evidence": MaterialKind.PRIVATE,
+    RELEASE_EVIDENCE_PURPOSE: ReleaseEvidenceSignerPointer.material,
     #: Control's `RECOVERY_PURPOSE`, read from `recovery_grant.py:77`. PRIVATE
     #: by the rule the whole table now follows: THE SIGNER IS THE PARTY MAKING
     #: THE STATEMENT. The target signs observations because the target asserts
