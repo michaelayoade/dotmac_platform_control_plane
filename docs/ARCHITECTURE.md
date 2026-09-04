@@ -350,26 +350,51 @@ publishes one member of a closed vocabulary. The probe is unauthenticated, so it
 carries the verdict and deliberately never a count; the depths, ages and dead
 letters are `dotmac-platform relay health`, behind a shell on the host.
 
-**What distinguishes idle from dead, and what does not.** The fault requires
-work to exist: an activated agreement writes a row, so a relay that is not
-running lets that row age past `VENDOR_RELAY_OVERDUE_SECONDS` and readiness goes
-red. An empty queue with nothing overdue is genuinely idle and genuinely ready.
-The case this does **not** cover is a relay that dies during total quiescence,
-and `RelayHealth.relay_liveness_during_quiescence_measurable` is `False` rather
-than absent — the same shape as `keyring_uptake_lag_measurable` in
-`vendor_cp.licensing.delivery_ops`. Closing it needs a durable heartbeat, a
-table and a migration, and belongs with the slice that composes the relay into
-the deployment.
+**Three states, because they need three different first actions.** Idle,
+stopped and wedged, and the last is the one that hides.
 
-**Not yet deployed, and that is the honest state.** This composes the relay and
-makes its absence visible; it does not run one in production.
-`docker-compose.production.yml` defines no relay service, and
-`deploy/postgres/init-roles.sh` creates `platform_outbox_dispatcher` without
-setting a password — so no dispatcher credential exists to configure yet.
-Whether one exists on the running host is an operator measurement against a host
-Michael names (rule 17), not a claim derivable here. Production currently holds
-zero rows in every one of these tables, so readiness stays green until an
-agreement is actually activated.
+* **idle but healthy** — alive, nothing overdue. An empty queue means nothing is
+  incomplete, so this is genuinely ready rather than merely quiet.
+* **stopped** — no heartbeat, or the freshest older than
+  `VENDOR_RELAY_HEARTBEAT_STALE_SECONDS`. `relay_ever_reported` separates a
+  relay that has never started from one that died.
+* **wedged** — alive, polling, claiming, and settling NOTHING. Every liveness
+  check in the deployment reports it healthy, which is exactly why it needs a
+  name. It is separated from a relay that is merely BEHIND a long queue by the
+  freshest `sent_at`: if nothing settled inside
+  `VENDOR_RELAY_SETTLED_WITHIN_SECONDS`, work is not moving.
+
+Two independent sources, and neither is inferred from the other: the heartbeat
+says whether the process lives, the outbox says whether work moves. If either
+could not be read the answer is `RELAY_STATE_UNKNOWN` with every count `None` —
+an unread query is never reported as a measurement.
+
+**The heartbeat, and the deferral it lifted.** `v019_relay_heartbeat` creates
+`public.relay_heartbeats`, one row per worker identity, stamped on every poll
+INCLUDING the idle ones. `RelayHealth.relay_liveness_during_quiescence_measurable`
+is now `True`; it was `False` for exactly as long as no relay ran in production,
+when the compose file answered the question instead. The slice that composed the
+relay service killed that premise and lifted the deferral in the same change,
+rather than leaving a flag describing a gap that had closed — the exemption
+shape `dotmac_starter_mt` ADR-0018 refuses. A test asserts the flip *and* the
+fact that earns it, so `True` returned by a module that could not actually see
+quiescent death still fails.
+
+The heartbeat is written on the `platform_api` delivery connection, never the
+dispatcher's: `platform_outbox_dispatcher` holds EXECUTE on two kernel functions
+and no table privilege of any kind, and `v019` grants it nothing.
+
+**Composed into the deployment, not deployed.** `docker-compose.production.yml`
+declares a `relay` service running the installed console script with the
+dispatcher credential the `app` service deliberately does not carry, and
+`deploy/product.toml` declares it as a second process role in a new promoted
+candidate. What this repository does not do is run it: the deploy is Michael's.
+The dispatcher material is an OpenBao POINTER only —
+`secret/dotmac/vendor-control-plane/production/relay-dispatcher` — and no value
+appears in this tree. `init-roles.sh` sets that password only on FIRST cluster
+initialisation, so on the existing host it is an operator act;
+`docs/operations/production-deployment.md` carries the sequence, and the check
+that it worked reads `heartbeat_age_seconds` rather than the password.
 
 **Proven where the claim path exists.** The drain proof is
 `tests/migration/test_platform_relay_drain.py`, against a migrated scratch

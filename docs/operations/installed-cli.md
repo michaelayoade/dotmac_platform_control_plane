@@ -72,18 +72,42 @@ events" from a healthy idle relay, and one of those has to be a refusal.
 identifier, so two invocations that silently shared one would each believe they
 held the other's claim.
 
+`dotmac-platform relay run --worker-id <id>` is the long-running form, and it is
+what the production `relay` service executes. It polls until `SIGTERM`, stamping
+`public.relay_heartbeats` on EVERY cycle including the idle ones — that "including
+the idle ones" is the whole point, because a relay with an empty queue is
+otherwise indistinguishable from a stopped one.
+
 `dotmac-platform relay health` reports whether the drain is happening: pending
 and overdue depths, the oldest overdue age, abandoned leases, dead letters, and
 the same three counts narrowed to activation facts. A count that could not be
 TAKEN comes back as null rather than zero — a zero that means "could not query"
 reads exactly like a zero that means "nothing is wrong".
 
-It also reports `relay_liveness_during_quiescence_measurable: false`, and that
-is a real limitation rather than a placeholder. A relay that dies while nothing
-is queued is invisible from the queue alone; proving it lives during quiescence
-needs a durable heartbeat, which needs a table and a migration, and that is
-scoped to the slice that composes the relay into the deployment. Until then the
-gap is declared where a reader meets it.
+### Three states, because they need three different first actions
+
+| verdict | what it means | what to do |
+| --- | --- | --- |
+| `relay_draining` | alive, nothing overdue | nothing — including when the queue is empty, which is idle-but-healthy rather than merely quiet |
+| `relay_not_running` | no heartbeat, or the freshest is stale | start the relay; `relay_ever_reported` says whether it has ever run at all |
+| `relay_wedged` | alive, work overdue, **nothing settled** in the window | read the delivery failures — restarting will not help |
+| `activation_backlog_overdue` | alive, work overdue, deliveries **are** settling | a long queue, not a stuck one; look at throughput |
+| `activation_lease_stale` | a worker claimed and never settled | it died mid-delivery; the stale reclaim will pick the rows up |
+| `activation_dead_lettered` | retries exhausted, rows retained | needs a human; it will not clear on its own |
+| `relay_state_unknown` | a source could not be read | fix the read — this is never reported as a measurement |
+
+**Wedged is the one that hides.** A relay that is alive, polling and claiming
+while every delivery fails satisfies every liveness check there is. It is
+separated from "merely behind" by the freshest `sent_at`: if nothing has settled
+inside `VENDOR_RELAY_SETTLED_WITHIN_SECONDS`, work is not moving. That is why
+the `relay` service declares **no container healthcheck** — a green checkmark
+there beside a red readiness probe would be the reassuring half of a
+contradiction.
+
+`relay_liveness_during_quiescence_measurable` is now `true`. It was `false` for
+exactly as long as no relay ran in production, when the compose file answered
+the question instead; `v019_relay_heartbeat` and the `relay` service lifted that
+deferral in the change that killed its premise.
 
 The unauthenticated `/health/ready` probe publishes the VERDICT alone — one
 member of a closed vocabulary, never a count. The numbers are here, behind a

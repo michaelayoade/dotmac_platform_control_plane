@@ -4,27 +4,52 @@
 this module; the decision about what counts as a stalled relay lives in one
 place so the probe and the terminal cannot disagree.
 
-## The distinction this exists to make
+## Three states, and the third is the one that hides
 
-An idle relay and a dead relay look identical from the queue when the queue is
-empty. They are not the same thing, and a health surface that reports one as the
-other is the defect. The asymmetry that resolves it without a heartbeat is that
-the fault requires work to exist: an activated agreement WRITES an outbox row,
-so if the relay is not running, the row ages and this module sees it. Nothing
-queued and nothing overdue means nothing is incomplete, and that is genuinely
-ready rather than merely quiet.
+"Is it running" and "is work moving" are different questions, and a heartbeat
+only answers the first. A relay can be alive, polling, claiming batches and
+settling NOTHING — every delivery raising, every row going back to pending.
+That reads as healthy to any liveness check, which is exactly why it needs a
+name of its own.
 
-## What that leaves uncovered, stated rather than implied
+* **idle but healthy** (`DRAINING`) — heartbeat fresh, nothing overdue. An
+  empty queue means nothing is incomplete; this is genuinely ready rather than
+  merely quiet.
+* **stopped** (`RELAY_NOT_RUNNING`) — no heartbeat at all, or the freshest is
+  older than the window. Nothing moves until someone starts it.
+* **wedged** (`RELAY_WEDGED`) — heartbeat fresh, work overdue, and NOTHING has
+  settled inside the window. Alive and not getting through.
+* **behind** (`ACTIVATION_BACKLOG_OVERDUE`) — heartbeat fresh, work overdue,
+  but deliveries ARE settling. A long queue, not a stuck one.
 
-A relay that dies during total quiescence is invisible here until the next
-activation. `relay_liveness_during_quiescence_measurable` is `False` and says so
-at the point a reader meets it, following the `keyring_uptake_lag_measurable`
-precedent in `vendor_cp.licensing.delivery_ops`. Closing it needs a durable
-heartbeat the relay stamps each cycle, which needs a table, a migration and a
-new writer. That is deliberately deferred to the slice that composes the relay
-into the deployment, where the migration, the compose service and the dispatcher
-credential land as one change under one authorization — not bought separately
-this week to detect a state the compose file already answers.
+The last two are separated by the freshest `sent_at`, and that separation is the
+point: collapsing them lets a wedge hide behind "it is catching up", and sends
+an operator to look at throughput when in fact every delivery is failing.
+
+## Two independent sources, and neither is inferred from the other
+
+The heartbeat says whether the process lives. The outbox says whether work
+moves. A verdict is only ever formed from what was actually READ: if either
+source could not be read, the answer is `RELAY_STATE_UNKNOWN` and every count is
+`None`. Nothing here concludes "alive" from an empty queue, or "draining" from a
+fresh heartbeat.
+
+## The deferral was LIFTED by the slice that killed its premise
+
+The first slice derived everything from the queue, on an asymmetry that holds:
+the fault requires work to exist, so an activated agreement writes a row and a
+relay that is not running lets it age. That left exactly one gap — a relay dying
+while the queue is empty — and it shipped
+`relay_liveness_during_quiescence_measurable = False` naming the gap rather than
+omitting the dimension.
+
+Its premise was that while no relay ran in production, absence during quiescence
+was already knowable from the compose file, which named no relay service.
+`v019_relay_heartbeat` and the production relay service kill that premise in the
+same change, so the flag is `True` here and the heartbeat is what answers. An
+exemption whose premise has evaporated is the shape `dotmac_starter_mt` ADR-0018
+refuses; it is lifted in the change that killed it rather than left describing
+nothing.
 
 ## A count that could not be taken is `None`
 
@@ -56,6 +81,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vendor_cp.contracts.adapter import ACTIVATED_EVENT_TYPE
+from vendor_cp.relay import heartbeat
 
 
 class RelayVerdict(str, Enum):
@@ -67,30 +93,41 @@ class RelayVerdict(str, Enum):
     operator surface renders.
     """
 
-    #: Nothing is overdue, no lease is abandoned, nothing is dead-lettered.
-    #: Includes the genuinely idle case: an empty queue means nothing is
-    #: incomplete.
+    #: Alive, and nothing is overdue. Includes the genuinely idle case: an empty
+    #: queue means nothing is incomplete.
     DRAINING = "relay_draining"
-    #: Rows became due at least `overdue_after` ago and are still pending. The
-    #: relay is not claiming them.
+    #: No heartbeat, or the freshest is older than the window. STOPPED.
+    RELAY_NOT_RUNNING = "relay_not_running"
+    #: Alive, work overdue, and nothing settled inside the window. WEDGED —
+    #: claiming and not getting through. The state a liveness check calls
+    #: healthy.
+    RELAY_WEDGED = "relay_wedged"
+    #: Alive, work overdue, and deliveries ARE settling. BEHIND, not stuck.
     ACTIVATION_BACKLOG_OVERDUE = "activation_backlog_overdue"
     #: A worker claimed rows and never settled them. It took the lease and died.
     ACTIVATION_LEASE_STALE = "activation_lease_stale"
     #: Delivery failed `max_attempts` times and the rows are retained as dead
     #: letters. This will not fix itself.
     ACTIVATION_DEAD_LETTERED = "activation_dead_lettered"
-    #: The outbox could not be read. Not a green zero, and not a guess.
+    #: A source could not be read. Not a green zero, and not a guess.
     RELAY_STATE_UNKNOWN = "relay_state_unknown"
 
 
 #: Severity order, most severe first. The verdict is the first member whose
-#: condition holds. Dead letters outrank a stale lease because they are
-#: terminal; a stale lease outranks a backlog because a crashed worker explains
-#: the backlog and sends the operator somewhere more specific.
+#: condition holds.
+#:
+#: `RELAY_NOT_RUNNING` outranks the two stall verdicts because it EXPLAINS them:
+#: a stopped relay produces an overdue backlog and an abandoned lease as
+#: symptoms, and reporting a symptom above its cause sends an operator to the
+#: wrong place. `ACTIVATION_DEAD_LETTERED` outranks even that, because it is
+#: terminal — starting the relay will not clear a dead letter, and it is the one
+#: state that needs a human rather than a restart.
 VERDICT_PRECEDENCE: Final[tuple[RelayVerdict, ...]] = (
     RelayVerdict.RELAY_STATE_UNKNOWN,
     RelayVerdict.ACTIVATION_DEAD_LETTERED,
+    RelayVerdict.RELAY_NOT_RUNNING,
     RelayVerdict.ACTIVATION_LEASE_STALE,
+    RelayVerdict.RELAY_WEDGED,
     RelayVerdict.ACTIVATION_BACKLOG_OVERDUE,
     RelayVerdict.DRAINING,
 )
@@ -98,7 +135,7 @@ VERDICT_PRECEDENCE: Final[tuple[RelayVerdict, ...]] = (
 
 @dataclass(frozen=True, slots=True)
 class RelayHealth:
-    """One observation of the platform outbox, as of an injected `now`.
+    """One observation of the relay, as of an injected `now`.
 
     Each field is one observation; none is a blend of two, and none is a score.
     """
@@ -116,17 +153,23 @@ class RelayHealth:
     activation_pending: int | None = None
     activation_overdue: int | None = None
     activation_dead: int | None = None
-    #: FALSE, and not as a placeholder. A relay that dies while nothing is
-    #: queued is undetectable from the queue alone; proving it lives during
-    #: quiescence needs a durable heartbeat, a table and a migration, and that
-    #: is scoped to the slice that composes the relay into the deployment. A
-    #: dashboard reading this field knows the difference between "checked and
-    #: fine" and "not checked".
-    relay_liveness_during_quiescence_measurable: bool = False
+    #: Age of the freshest heartbeat, and of the freshest settled delivery.
+    #: `None` for "never" — which is a different fact from "long ago" and the
+    #: two must not be collapsed: a relay that has never reported and one that
+    #: reported an hour ago need different first questions.
+    heartbeat_age_seconds: int | None = None
+    last_settled_age_seconds: int | None = None
+    #: Whether any worker identity has ever stamped a heartbeat.
+    relay_ever_reported: bool | None = None
+    #: TRUE since `v019_relay_heartbeat`. It was `False` for exactly as long as
+    #: no relay ran in production, when the compose file answered the question
+    #: instead; the slice that composed the relay service lifted the deferral
+    #: rather than leaving a flag describing a gap that had closed.
+    relay_liveness_during_quiescence_measurable: bool = True
 
     @property
     def observed(self) -> bool:
-        """Whether the outbox answered at all."""
+        """Whether both sources answered."""
         return self.verdict is not RelayVerdict.RELAY_STATE_UNKNOWN
 
 
@@ -136,8 +179,10 @@ def relay_health(
     now: datetime,
     overdue_after: timedelta,
     stale_lease_after: timedelta,
+    heartbeat_stale_after: timedelta,
+    settled_within: timedelta,
 ) -> RelayHealth:
-    """Observe the platform outbox as of `now`.
+    """Observe the relay as of `now`, from the heartbeat and the outbox.
 
     `now` is injected and never read from the wall clock, so a report is
     reproducible and a test can age a row without sleeping.
@@ -149,6 +194,15 @@ def relay_health(
     """
     overdue_before = now - overdue_after
     stale_before = now - stale_lease_after
+
+    beat = heartbeat.read(db)
+    if not beat.observed:
+        # The heartbeat could not be read. The outbox might still answer, and it
+        # is tempting to report what it says — but every verdict below turns on
+        # whether the relay is alive, and a verdict formed without that is a
+        # guess wearing a member name.
+        return RelayHealth(verdict=RelayVerdict.RELAY_STATE_UNKNOWN)
+
     try:
         pending_total = _count(db, status=OutboxStatus.PENDING)
         dead_total = _count(db, status=OutboxStatus.DEAD)
@@ -164,6 +218,7 @@ def relay_health(
                 PlatformOutboxEvent.available_at <= overdue_before,
             )
         )
+        last_settled = db.scalar(select(func.max(PlatformOutboxEvent.sent_at)))
         activation_pending = _count(
             db, status=OutboxStatus.PENDING, event_type=ACTIVATED_EVENT_TYPE
         )
@@ -179,11 +234,17 @@ def relay_health(
     except Exception:  # noqa: BLE001 - every failure mode is the same answer
         return RelayHealth(verdict=RelayVerdict.RELAY_STATE_UNKNOWN)
 
+    heartbeat_age = _age_seconds(beat.freshest_poll, now=now)
+    settled_age = _age_seconds(last_settled, now=now)
     return RelayHealth(
         verdict=_verdict(
             dead_total=dead_total,
             stale_lease_total=stale_lease_total,
             overdue_total=overdue_total,
+            heartbeat_age=heartbeat_age,
+            settled_age=settled_age,
+            heartbeat_stale_after=heartbeat_stale_after,
+            settled_within=settled_within,
         ),
         pending_total=pending_total,
         overdue_total=overdue_total,
@@ -193,19 +254,41 @@ def relay_health(
         activation_pending=activation_pending,
         activation_overdue=activation_overdue,
         activation_dead=activation_dead,
+        heartbeat_age_seconds=heartbeat_age,
+        last_settled_age_seconds=settled_age,
+        relay_ever_reported=beat.ever_reported,
     )
 
 
 def _verdict(
-    *, dead_total: int, stale_lease_total: int, overdue_total: int
+    *,
+    dead_total: int,
+    stale_lease_total: int,
+    overdue_total: int,
+    heartbeat_age: int | None,
+    settled_age: int | None,
+    heartbeat_stale_after: timedelta,
+    settled_within: timedelta,
 ) -> RelayVerdict:
     """First member of `VERDICT_PRECEDENCE` whose condition holds."""
     if dead_total > 0:
         return RelayVerdict.ACTIVATION_DEAD_LETTERED
+    # `None` is "never reported", which is not the same fact as "reported long
+    # ago" but has the same verdict: nothing is draining this queue.
+    if heartbeat_age is None or heartbeat_age > heartbeat_stale_after.total_seconds():
+        return RelayVerdict.RELAY_NOT_RUNNING
     if stale_lease_total > 0:
         return RelayVerdict.ACTIVATION_LEASE_STALE
     if overdue_total > 0:
-        return RelayVerdict.ACTIVATION_BACKLOG_OVERDUE
+        # Alive, with work that should have moved. WEDGED unless something
+        # actually settled inside the window — the one signal that separates a
+        # relay failing every delivery from a relay merely behind a long queue.
+        settled_recently = (
+            settled_age is not None and settled_age <= settled_within.total_seconds()
+        )
+        if settled_recently:
+            return RelayVerdict.ACTIVATION_BACKLOG_OVERDUE
+        return RelayVerdict.RELAY_WEDGED
     return RelayVerdict.DRAINING
 
 

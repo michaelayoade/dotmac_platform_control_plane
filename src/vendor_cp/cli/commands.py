@@ -531,6 +531,37 @@ def relay_drain(args: argparse.Namespace) -> Result:
     return Result(command="relay drain", data=_fields(report))
 
 
+def relay_run(args: argparse.Namespace) -> Result:
+    """The long-running service. Returns only when a signal asks it to stop.
+
+    The signal handlers are installed HERE rather than in the runner: the runner
+    receives a `threading.Event` and knows nothing about process signals, which
+    is what lets a test drive it without a process. `SIGTERM` is the one Docker
+    sends on `stop`, and handling it is the difference between a clean shutdown
+    that settles its current batch and a kill that leaves a lease behind.
+    """
+    import signal
+    import threading
+
+    from vendor_cp.relay.runner import run
+
+    stop = threading.Event()
+
+    def _request_stop(_signum: int, _frame: object) -> None:
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _request_stop)
+    signal.signal(signal.SIGINT, _request_stop)
+    run(
+        worker_id=args.worker_id,
+        stop=stop,
+        poll_interval=args.poll_interval,
+    )
+    return Result(
+        command="relay run", data={"worker_id": args.worker_id, "stopped": True}
+    )
+
+
 def relay_health(args: argparse.Namespace) -> Result:
     """The full observation: counts, ages, dead letters and what is unmeasured.
 
@@ -549,6 +580,12 @@ def relay_health(args: argparse.Namespace) -> Result:
             overdue_after=timedelta(seconds=vendor_settings.relay_overdue_seconds),
             stale_lease_after=timedelta(
                 seconds=vendor_settings.relay_stale_lease_seconds
+            ),
+            heartbeat_stale_after=timedelta(
+                seconds=vendor_settings.relay_heartbeat_stale_seconds
+            ),
+            settled_within=timedelta(
+                seconds=vendor_settings.relay_settled_within_seconds
             ),
         )
     return Result(command="relay health", data=_fields(health))

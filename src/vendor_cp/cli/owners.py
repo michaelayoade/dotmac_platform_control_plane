@@ -231,6 +231,13 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "claim one platform outbox batch and deliver it",
     ),
     Owner(
+        "relay run",
+        "vendor_cp.relay.runner",
+        "run",
+        True,
+        "run the platform outbox relay until stopped",
+    ),
+    Owner(
         "relay health",
         "vendor_cp.relay.health",
         "relay_health",

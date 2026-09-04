@@ -52,29 +52,39 @@ class _UnreachableSession:
 
 
 class _ReachableSession:
-    """Reachable, and its outbox is empty — a healthy idle deployment.
+    """Reachable, its relay alive, its outbox empty — a healthy idle deployment.
 
-    `execute(...).scalar_one()` answers 0 for every count the relay observation
-    takes, and `scalar` answers `None` for the oldest-overdue timestamp. This is
-    a real shape rather than a patched decision: the readiness composition is
-    what is under test, and stubbing the verdict would remove it.
+    A real shape rather than a patched decision: the readiness COMPOSITION is
+    what is under test here, and stubbing the verdict would remove the thing
+    being tested. `execute(...)` answers both shapes the observation needs — a
+    `scalar_one()` count of 0, and a `one()` heartbeat row whose freshest poll
+    is `now` — and `scalar` answers `None` for the timestamp lookups.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, heartbeat_at: datetime | None = NOW) -> None:
         self.statements: list[str] = []
+        self._heartbeat_at = heartbeat_at
 
     def execute(self, statement: object) -> object:
         self.statements.append(str(statement))
-        return _Zero()
+        return _Row(self._heartbeat_at)
 
     def scalar(self, statement: object) -> object:
         self.statements.append(str(statement))
         return None
 
 
-class _Zero:
+class _Row:
+    """Answers `scalar_one()` as a count and `one()` as a heartbeat pair."""
+
+    def __init__(self, heartbeat_at: datetime | None) -> None:
+        self._heartbeat_at = heartbeat_at
+
     def scalar_one(self) -> int:
         return 0
+
+    def one(self) -> tuple[datetime | None, datetime | None]:
+        return (self._heartbeat_at, None)
 
 
 def _check(session: object, *, now: datetime = NOW) -> ReadinessReport:
@@ -83,6 +93,8 @@ def _check(session: object, *, now: datetime = NOW) -> ReadinessReport:
         now=now,
         overdue_after=WINDOW,
         stale_lease_after=WINDOW,
+        heartbeat_stale_after=WINDOW,
+        settled_within=WINDOW,
     )
 
 
@@ -127,6 +139,8 @@ def test_the_probe_is_the_cheapest_statement_that_proves_a_round_trip() -> None:
     ("verdict", "expected"),
     [
         (RelayVerdict.DRAINING, ReadinessDetail.READY),
+        (RelayVerdict.RELAY_NOT_RUNNING, ReadinessDetail.RELAY_NOT_RUNNING),
+        (RelayVerdict.RELAY_WEDGED, ReadinessDetail.RELAY_WEDGED),
         (
             RelayVerdict.ACTIVATION_BACKLOG_OVERDUE,
             ReadinessDetail.ACTIVATION_BACKLOG_OVERDUE,
@@ -177,6 +191,8 @@ def test_the_detail_vocabulary_is_closed_and_carries_no_driver_text() -> None:
     assert {member.value for member in ReadinessDetail} == {
         "ready",
         "database_unreachable",
+        "relay_not_running",
+        "relay_wedged",
         "activation_backlog_overdue",
         "activation_lease_stale",
         "activation_dead_lettered",
@@ -323,3 +339,34 @@ def test_liveness_and_readiness_are_different_answers() -> None:
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
         assert client.get("/health/ready").status_code == 503
+
+
+def test_a_stopped_relay_makes_the_probe_answer_503() -> None:
+    """The deployment can serve requests and cannot complete an activation.
+
+    A real shape rather than a patched verdict: the heartbeat is simply old, and
+    the composition reaches `relay_not_running` on its own.
+    """
+    from dotmac_kernel.db import get_platform_db
+
+    app = create_app(assembly.build_spec(deployment_profile("full")))
+    stale = _ReachableSession(heartbeat_at=NOW - timedelta(days=1))
+    app.dependency_overrides[get_platform_db] = lambda: stale
+    with TestClient(app) as client:
+        response = client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json() == {"ready": False, "detail": "relay_not_running"}
+
+
+def test_a_relay_that_never_reported_makes_the_probe_answer_503() -> None:
+    """A deployment whose relay has never started. The heartbeat table is
+    readable and empty, which is a measurement rather than an unknown."""
+    from dotmac_kernel.db import get_platform_db
+
+    app = create_app(assembly.build_spec(deployment_profile("full")))
+    never = _ReachableSession(heartbeat_at=None)
+    app.dependency_overrides[get_platform_db] = lambda: never
+    with TestClient(app) as client:
+        response = client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json() == {"ready": False, "detail": "relay_not_running"}

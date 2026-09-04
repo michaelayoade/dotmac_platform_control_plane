@@ -10,11 +10,13 @@ Two questions, asked in order, kept apart because they have different repairs.
 1. **Can this process reach the one control-plane database?** `SELECT 1` on the
    session the kernel hands out. The narrowest statement whose answer changes
    what the process can do.
-2. **Is the platform outbox being drained?** Delegated whole to
+2. **Is the relay alive, and is work moving?** Delegated whole to
    `vendor_cp.relay.health`, which owns that decision so the probe and the
    `relay health` terminal command cannot disagree. It is asked SECOND and only
    when the first answered, so an unreachable database is reported as an
-   unreachable database rather than as an unreadable outbox.
+   unreachable database rather than as an unreadable outbox. Three states reach
+   this probe as distinct members — stopped, wedged and merely behind — because
+   they need three different first actions from whoever is paged.
 
 The second question is here because readiness that reported only database
 liveness was the measured gap: an activated agreement enqueues an outbox row
@@ -78,6 +80,8 @@ class ReadinessDetail(str, Enum):
 
     READY = "ready"
     DATABASE_UNREACHABLE = "database_unreachable"
+    RELAY_NOT_RUNNING = RelayVerdict.RELAY_NOT_RUNNING.value
+    RELAY_WEDGED = RelayVerdict.RELAY_WEDGED.value
     ACTIVATION_BACKLOG_OVERDUE = RelayVerdict.ACTIVATION_BACKLOG_OVERDUE.value
     ACTIVATION_LEASE_STALE = RelayVerdict.ACTIVATION_LEASE_STALE.value
     ACTIVATION_DEAD_LETTERED = RelayVerdict.ACTIVATION_DEAD_LETTERED.value
@@ -90,6 +94,8 @@ class ReadinessDetail(str, Enum):
 #: `test_readiness.py` asserts the mapping covers every member.
 _FROM_RELAY: Final[dict[RelayVerdict, ReadinessDetail]] = {
     RelayVerdict.DRAINING: ReadinessDetail.READY,
+    RelayVerdict.RELAY_NOT_RUNNING: ReadinessDetail.RELAY_NOT_RUNNING,
+    RelayVerdict.RELAY_WEDGED: ReadinessDetail.RELAY_WEDGED,
     RelayVerdict.ACTIVATION_BACKLOG_OVERDUE: (
         ReadinessDetail.ACTIVATION_BACKLOG_OVERDUE
     ),
@@ -119,6 +125,8 @@ def check_readiness(
     now: datetime,
     overdue_after: timedelta,
     stale_lease_after: timedelta,
+    heartbeat_stale_after: timedelta,
+    settled_within: timedelta,
 ) -> ReadinessReport:
     """Can this process reach its database, and is its outbox being drained?
 
@@ -141,6 +149,8 @@ def check_readiness(
         now=now,
         overdue_after=overdue_after,
         stale_lease_after=stale_lease_after,
+        heartbeat_stale_after=heartbeat_stale_after,
+        settled_within=settled_within,
     )
     detail = _FROM_RELAY[health.verdict]
     return ReadinessReport(ready=detail is ReadinessDetail.READY, detail=detail)

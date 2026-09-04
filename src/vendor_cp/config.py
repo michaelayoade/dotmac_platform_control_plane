@@ -79,6 +79,16 @@ class VendorSettings:
     # relay's own reclaim window would report a stale lease the relay still
     # considers live, which is an alert for a healthy system.
     relay_stale_lease_seconds: int = 300
+    # How long the freshest relay heartbeat may age before the relay is judged
+    # STOPPED. Must be comfortably above the poll interval: a window near the
+    # cadence turns one slow cycle into an outage report.
+    relay_heartbeat_stale_seconds: int = 120
+    # How recently SOMETHING must have settled for an overdue backlog to read as
+    # "behind" rather than "wedged". This is the one signal separating a relay
+    # failing every delivery from a relay merely working through a long queue,
+    # so it is a knob rather than a constant: a deployment whose queue is
+    # normally quiet needs a longer window than one under constant load.
+    relay_settled_within_seconds: int = 600
 
 
 def _positive_seconds(name: str, *, default: int) -> int:
@@ -149,6 +159,12 @@ def load_vendor_settings() -> VendorSettings:
         ),
         relay_stale_lease_seconds=_positive_seconds(
             "VENDOR_RELAY_STALE_LEASE_SECONDS", default=300
+        ),
+        relay_heartbeat_stale_seconds=_positive_seconds(
+            "VENDOR_RELAY_HEARTBEAT_STALE_SECONDS", default=120
+        ),
+        relay_settled_within_seconds=_positive_seconds(
+            "VENDOR_RELAY_SETTLED_WITHIN_SECONDS", default=600
         ),
     )
 

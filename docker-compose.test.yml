@@ -8,6 +8,7 @@ services:
       VENDOR_DB_ADMIN_PASSWORD: admin
       VENDOR_DB_APP_USER_PASSWORD: app
       VENDOR_DB_PLATFORM_API_PASSWORD: platform
+      VENDOR_DB_DISPATCHER_PASSWORD: dispatcher
       # Disposable localhost-only test DB. The production initializer creates
       # the permanent roles; trust lets the suite exercise each role without
       # copying test passwords into every DSN. The container binds only to

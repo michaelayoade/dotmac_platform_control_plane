@@ -48,21 +48,25 @@ package removes.
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Final
 
 from dotmac_kernel.messaging import RelayPolicy
 from dotmac_kernel.messaging.platform_worker import (
     PlatformDeliveryTransport,
     SessionFactory,
-    run_forever,
     run_once,
 )
 from dotmac_kernel.session_runtime import DatabaseRuntime
 
 from vendor_cp.allocations.consumer import ContractEventConsumer
 from vendor_cp.config import VendorSettings, vendor_settings
+from vendor_cp.relay import heartbeat
+
+logger = logging.getLogger("vendor_cp.relay.runner")
 
 #: The kernel's own prod-safe tuning, bound once. A module-level singleton
 #: rather than a call in a default argument: `RelayPolicy` is frozen so the
@@ -170,6 +174,7 @@ def drain_once(
     composition: RelayComposition | None = None,
     settings: VendorSettings = vendor_settings,
     policy: RelayPolicy = DEFAULT_POLICY,
+    now: datetime | None = None,
 ) -> DrainReport:
     """Claim one batch and deliver it. Returns how many were LEASED.
 
@@ -188,7 +193,47 @@ def drain_once(
         )
     finally:
         dispatcher_db.close()
+    _stamp(arrangement, worker_id=worker_id, claimed=claimed > 0, now=now)
     return DrainReport(worker_id=worker_id, claimed=claimed)
+
+
+def _stamp(
+    arrangement: RelayComposition,
+    *,
+    worker_id: str,
+    claimed: bool,
+    now: datetime | None,
+) -> None:
+    """Record this poll, on its OWN transaction, and never fail the drain.
+
+    Its own session and its own commit, deliberately: the heartbeat must be
+    durable even on a cycle where every delivery failed, and sharing the
+    delivery transaction would roll the liveness fact back with the work. A
+    relay that is alive and failing every delivery is exactly the WEDGED state
+    `vendor_cp.relay.health` exists to name, and it can only name it if the
+    heartbeat survives the failure.
+
+    A heartbeat that cannot be written is LOGGED and swallowed. It is an
+    observation, not the job: refusing to drain because the liveness table is
+    unwritable would turn a reporting fault into an outage. Health notices
+    anyway — the heartbeat ages, and a stale heartbeat is `RELAY_NOT_RUNNING`,
+    which is the correct thing to say about a relay whose liveness cannot be
+    established.
+    """
+    session = arrangement.delivery_sessions()
+    try:
+        heartbeat.stamp(
+            session,
+            worker_id=worker_id,
+            now=now or datetime.now(UTC),
+            claimed=claimed,
+        )
+        session.commit()
+    except Exception as error:  # noqa: BLE001 - reported, never fatal
+        session.rollback()
+        logger.warning("relay heartbeat could not be recorded: %r", error)
+    finally:
+        session.close()
 
 
 def run(
@@ -202,20 +247,37 @@ def run(
 ) -> None:
     """Poll until `stop` is set. The long-lived process the deployment runs.
 
+    ## Why this loop is here and not `dotmac_kernel.messaging.platform_worker
+    .run_forever`
+
+    The kernel's `run_forever` is a loop over its own `run_once` with an
+    interruptible idle sleep, and it has no seam for a per-cycle side effect.
+    The heartbeat has to be stamped on EVERY cycle including the idle ones —
+    that is the entire reason it exists — so the cadence is owned here.
+
+    What is NOT re-implemented is the part that matters: `run_once` is the
+    kernel's, unchanged, and it still owns claiming, delivery, settling, backoff
+    and dead-lettering. What this file owns is when to call it and what to
+    record afterwards. A fresh dispatcher session per iteration and an
+    interruptible sleep on an idle poll are the kernel loop's own discipline,
+    kept deliberately identical.
+
     `stop` is supplied by the caller rather than created here so the process
-    that installs the signal handlers owns the shutdown, which is the kernel
-    worker's own contract.
+    that installs the signal handlers owns the shutdown.
     """
     arrangement = composition or composed(settings)
-    run_forever(
-        dispatcher_session_factory=arrangement.dispatcher_sessions,
-        platform_session_factory=arrangement.delivery_sessions,
-        transport=arrangement.transport,
-        worker_id=worker_id,
-        stop=stop,
-        policy=policy,
-        poll_interval=poll_interval,
-    )
+    logger.info("platform relay worker %s starting", worker_id)
+    while not stop.is_set():
+        report = drain_once(
+            worker_id=worker_id,
+            composition=arrangement,
+            policy=policy,
+        )
+        if report.claimed == 0:
+            # Interruptible, so a stop during an idle window is immediate rather
+            # than waiting out the interval.
+            stop.wait(poll_interval)
+    logger.info("platform relay worker %s stopped", worker_id)
 
 
 __all__ = [

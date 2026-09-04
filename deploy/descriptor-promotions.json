@@ -1,6 +1,6 @@
 {
   "schema": "DescriptorPromotionLedger.v1",
-  "note": "ADR-0017 s 2. The accepted descriptor (deploy/product.toml) is always the exact bytes of one candidate. This ledger says which, and why it was promoted. The last entry is the accepted one. Entries are append-only and a candidate file is immutable once it appears here; tests/architecture/test_descriptor_promotion.py enforces both, and compares the accepted descriptor with its candidate byte for byte so a hand edit cannot pass. Digests here are RAW-BYTES sha256 of the file, the same convention the bootstrap receipt's product_descriptor_sha256 uses — NOT the canonical-bytes convention assembly.manifest_digest uses.",
+  "note": "ADR-0017 s 2. The accepted descriptor (deploy/product.toml) is always the exact bytes of one candidate. This ledger says which, and why it was promoted. The last entry is the accepted one. Entries are append-only and a candidate file is immutable once it appears here; tests/architecture/test_descriptor_promotion.py enforces both, and compares the accepted descriptor with its candidate byte for byte so a hand edit cannot pass. Digests here are RAW-BYTES sha256 of the file, the same convention the bootstrap receipt's product_descriptor_sha256 uses \u2014 NOT the canonical-bytes convention assembly.manifest_digest uses.",
   "promotions": [
     {
       "promoted_at": "2026-08-30",
@@ -23,7 +23,7 @@
         "receipt_sha256": "sha256:ffce65ec6e755c83d8a1418d382fae3966b7ef2e7955f1d15f22af926451d272",
         "receipt_bound_descriptor_sha256": "sha256:99eef0cc82bc73065c17c543e7a3d8824e825d3c97da22bd4e73f648e0b2daeb",
         "receipt_bound_descriptor_source_revision": "e8d5b543",
-        "why_the_receipt_does_not_close_this": "The receipt is not silent about the end state — it records migration_heads, measured after the migrate. The defect is narrower: it carries exactly ONE descriptor field, product_descriptor_sha256, and that field is a literal fixed at authorship naming deploy/product.toml at the revision the run STARTED from. Every descriptor coordinate in the receipt points backwards, so no reader of it can tell that the descriptor it names stopped being true during the run that named it, and nothing diffs the recorded heads against a declaration.",
+        "why_the_receipt_does_not_close_this": "The receipt is not silent about the end state \u2014 it records migration_heads, measured after the migrate. The defect is narrower: it carries exactly ONE descriptor field, product_descriptor_sha256, and that field is a literal fixed at authorship naming deploy/product.toml at the revision the run STARTED from. Every descriptor coordinate in the receipt points backwards, so no reader of it can tell that the descriptor it names stopped being true during the run that named it, and nothing diffs the recorded heads against a declaration.",
         "record": "docs/operations/descriptor-reconciliation-2026-08-31.md",
         "adr_0011_citation": "The DELETE-only revoke is ADR-0011's Amendment of 2026-08-21, not its section 4 as written, which required revoking INSERT and UPDATE as well. v017's own docstring says so. The superseded descriptor cited section 4."
       },
@@ -53,6 +53,41 @@
         "image.reference": "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
         "image.source_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
         "assembly.manifest_digest": "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
+      }
+    },
+    {
+      "promoted_at": "2026-09-04",
+      "kind": "composition_change",
+      "candidate": "deploy/candidates/2026-09-04-activation-relay-service.toml",
+      "descriptor_sha256": "sha256:42d1b0b6bbb8b1b0cc9990cd5630a4be66ea778aaa206ef69a22c3cc72f1c5aa",
+      "summary": "Declares the platform outbox relay as a SECOND process role, the dispatcher material it needs, and the migration that gives it a durable heartbeat. Before this the activation chain had no drain in the deployment at all: ContractEventConsumer was constructed nowhere and docker-compose.production.yml named no relay service, so an activated agreement produced no entitlement allocation and nothing said so. No deployment is claimed: the image half is carried across unchanged and byte-identical, because the relay composes no module, no feature and no route - it is a second process running the SAME image's installed console script.",
+      "supersedes": "sha256:e355737b6d03f436aae9050b40f3c206dc6eee02edb6e16110ea4f4fd632b541",
+      "changed_sections": [
+        "migration",
+        "roles",
+        "runtime_materials"
+      ],
+      "carried_forward": {
+        "why": "This promotion declares what a deployment WILL run. It performs no deployment, so every half of the descriptor that describes the APPLICATION ARTIFACT is carried across unchanged and recorded here, and a promotion that moved one of them silently fails tests/architecture/test_descriptor_promotion.py rather than passing as a composition change. assembly.manifest_digest is carried rather than recomputed-and-hoped: it was regenerated from the composed ProductAssemblySpec and is byte-identical, which is the check that the relay really did add no composed surface.",
+        "image.reference": "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
+        "image.source_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
+        "assembly.manifest_digest": "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
+      },
+      "material": {
+        "why_a_pointer_and_not_a_value": "VENDOR_RELAY_DISPATCHER_DATABASE_URL is declared in [runtime_materials] by NAME. Its material lives in OpenBao at secret/dotmac/vendor-control-plane/production/relay-dispatcher and reaches a host only through the .env that materialize_production_secrets.py renders. No value appears in this repository, in this ledger, or in any candidate.",
+        "openbao_path": "secret/dotmac/vendor-control-plane/production/relay-dispatcher",
+        "outside_the_rotation_ceremony": "A separate record rather than a fourth field on the shared production/database record, because that record is the rotation ceremony's subject: RotatingSecretSet is a closed six-field value and validate_record requires an exact field-set match, so a fourth password there would make execute_secret_rotation refuse the candidate it had just minted. Extending the ceremony to a fourth database role needs its own per-role two-direction TCP/SCRAM proof and is named follow-up work, not a side effect of composing a relay.",
+        "first_cluster_only": "deploy/postgres/init-roles.sh sets the role's password, and PostgreSQL runs that file only when the data directory is created. On an already-initialised host it has never run and never will, so there the credential is an operator act - docs/operations/production-deployment.md carries the sequence."
+      },
+      "plan_input_assessment": {
+        "rule": "dotmac_platform_control_plane ADR-0013 (the operator authorization issuer and its bootstrap) amendment A6.4, as replaced 2026-09-04. Cited WITH its repository on the clause's own instruction: dotmac_governance has an unrelated ADR 0013, so a bare 'ADR-0013 A6.4' resolves to the wrong record. The rule: target, desired state, profile digest, authorized images and execution-plan inputs derive from ONE immutable reference, and no independently supplied value may join the plan SILENTLY. Loud means one of three - derived with the plan recording that provenance; refused at the boundary with a typed refusal naming which of the five; or accepted through an explicit override carried into BOTH the plan and the receipt. Silent is the residue: accepted, used, covered by the digest, and in neither the refusal path nor the plan's own provenance record.",
+        "answer": "Not a plan input. A6.4's five values are Deployment Control's - what propose/authorize freeze into mod_deploy and an approver approves - and the clause's own repair is that the operator names a reference instead of submitting raw specification, image or digest values. deploy/product.toml is a different artifact: the FOUNDATION's accepted descriptor, what render, apply and drift compare one host against. No code path feeds this descriptor, or its digest, into propose_deployment_plan, so none of the five is sourced from it.",
+        "if_it_ever_becomes_one": {
+          "class_1_bytes_of_the_candidate": "ROUTE 1, already satisfied. The relay role, its command shape, its materials list and the migration heads are bytes of an immutable, digest-recorded candidate, and their provenance IS this ledger entry: candidate path, raw-bytes digest, supersedes, changed_sections derived by diffing rather than asserted, and a carried_forward block naming every application value that did not move. expected_heads is recomputed offline from the composed lineages and manifest_digest was regenerated from the composed ProductAssemblySpec. Derived, with the derivation recorded.",
+          "class_2_host_supplied_parameters": "ROUTE 2, PARTIALLY. VENDOR_RELAY_WORKER_ID and the dispatcher DSN's material are referenced as ${...} and resolved from the host inventory at render time. They are refused at the boundary - `:?` makes an inventory that omits either fail closed rather than defaulting - but that is a compose-level refusal, NOT a typed one naming which of A6.4's five. So under a descriptor-as-plan-input reading they would be loud in effect and not yet loud in FORM, and that gap is named here rather than left to be discovered."
+        },
+        "the_gap_is_not_introduced_here": "The app role's command already carries ${VENDOR_BIND_ADDRESS:?...}, and the descriptor argues for it at length: a reusable artifact's canonical bytes must be identical in every environment so one reviewed artifact can serve several. This promotion adds two parameters to that existing class with the same fail-closed discipline; it does not create the class.",
+        "not_decided_here": "Whether A6.4 reaches a Foundation descriptor at all, and if so whether route 2 requires a typed refusal for host-inventory parameters, is one question about all three parameters together. That belongs to the ADR lane, not to a deployment slice. Recorded so it is a named question rather than an assumption nobody wrote down."
       }
     }
   ]

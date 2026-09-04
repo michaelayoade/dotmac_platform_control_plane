@@ -63,6 +63,56 @@ entry point. The named product-manifest volume is initialized by the deployment
 owner before the app starts: the long-running app mounts it read-only, while the
 one-off ops profile is the only UID 10001 process that mounts it read-write.
 
+## The relay dispatcher credential on an ALREADY-INITIALISED host
+
+`deploy/postgres/init-roles.sh` sets this password, and it runs **once**, when
+PostgreSQL creates the data directory. `vendor.dotmac.io` was initialised before
+the relay existed, so on that host the line has never run and never will:
+re-running the script is not a repair, and neither is recreating the `db`
+service — the volume already exists, so the entrypoint skips every init script
+it contains. Removing the volume to force initialisation would destroy the
+database.
+
+So on an existing host the role's password is an **operator act**, and it is
+Michael's rather than an automated step. The role itself already exists —
+`platform_outbox_dispatcher` is created by kernel `0012_platform_outbox` and by
+`init-roles.sh`, with `LOGIN NOSUPERUSER NOBYPASSRLS` and no password — so what
+is missing is only the credential.
+
+The sequence, in order:
+
+1. **Seed the OpenBao record.** `materialize_production_secrets.py seed` creates
+   `secret/dotmac/vendor-control-plane/production/relay-dispatcher` with a
+   generated `dispatcher_password`. KV v2 `cas=0`: it creates an absent record
+   and never overwrites an existing one, so this is safe to run against the live
+   estate.
+2. **Set the role's password on the database**, as `app_admin`, reading the
+   value from OpenBao into the session rather than typing it. `ALTER ROLE
+   platform_outbox_dispatcher PASSWORD …` — never with the value on the command
+   line, because `/proc/<pid>/cmdline` is world-readable for as long as the
+   process lives.
+3. **Materialise the host `.env`**, which renders `VENDOR_DB_DISPATCHER_PASSWORD`
+   from the same record. The compose file composes the dispatcher DSN from it and
+   `:?` makes an inventory that forgot it fail closed.
+4. **Migrate, then start the relay.** `v019_relay_heartbeat` must be applied
+   before the relay runs, or every heartbeat write fails and health reports
+   `relay_not_running` about a relay that is running — correctly, since a relay
+   whose liveness cannot be established is not one you should trust.
+
+**Verifying it worked does not require reading the value.** After the relay
+starts, `dotmac-platform relay health` reports a `heartbeat_age_seconds` that is
+small and falling, and `/health/ready` answers 200. Before it starts, the same
+surfaces say `relay_not_running`. That pair is the check; the password itself
+never needs to be seen.
+
+**This record is outside the rotation ceremony.** `execute_secret_rotation`
+covers the three roles on the shared `database` record, whose candidate set is a
+closed six-field value with an exact-match validator — a fourth password there
+would make a rotation refuse the candidate it had just minted. Rotating the
+dispatcher password is therefore a manual operator act today, and extending the
+ceremony to cover it is named follow-up work rather than something this slice
+did halfway.
+
 ## One-time host contract
 
 The canonical production OpenBao locations are:
@@ -77,7 +127,10 @@ The canonical production OpenBao locations are:
   `jwt_secret`, `session_hash_secret`, and `csrf_secret`;
 - deploy SSH identity:
   `secret/dotmac/vendor-control-plane/production/deploy-ssh`, containing exactly
-  `private_key_openssh`, `public_key_openssh`, and `username`.
+  `private_key_openssh`, `public_key_openssh`, and `username`;
+- platform outbox relay dispatcher:
+  `secret/dotmac/vendor-control-plane/production/relay-dispatcher`, containing
+  exactly `dispatcher_password`.
 
 Never paste their values into a command, ticket, log, or tracked file. Use the
 checked-in `vendor_cp.production_secrets` operator service. Ordinary OpenBao

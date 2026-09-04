@@ -10,6 +10,11 @@ services:
       VENDOR_DB_ADMIN_PASSWORD: ${VENDOR_DB_ADMIN_PASSWORD:?Set VENDOR_DB_ADMIN_PASSWORD}
       VENDOR_DB_APP_USER_PASSWORD: ${VENDOR_DB_APP_USER_PASSWORD:?Set VENDOR_DB_APP_USER_PASSWORD}
       VENDOR_DB_PLATFORM_API_PASSWORD: ${VENDOR_DB_PLATFORM_API_PASSWORD:?Set VENDOR_DB_PLATFORM_API_PASSWORD}
+      # Consumed by init-roles.sh on FIRST cluster initialisation only. An
+      # already-initialised host never runs that script again, so there the
+      # dispatcher password is an operator act — see
+      # docs/operations/production-deployment.md.
+      VENDOR_DB_DISPATCHER_PASSWORD: ${VENDOR_DB_DISPATCHER_PASSWORD:?Set VENDOR_DB_DISPATCHER_PASSWORD}
     volumes:
       - vendor_postgres_data:/var/lib/postgresql/data
       - ./deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/001-vendor-roles.sh:ro
@@ -98,6 +103,73 @@ services:
       timeout: 5s
       retries: 10
     networks: [vendor_frontend, vendor_backend]
+
+  # The platform outbox relay — the drain that turns an activated commercial
+  # agreement into a staged entitlement allocation.
+  #
+  # Its own service rather than a thread inside `app`, for three reasons that
+  # are each independently sufficient. It holds a DIFFERENT database credential
+  # (`platform_outbox_dispatcher`, which has EXECUTE on two kernel functions and
+  # no table privilege at all), so co-hosting would put that credential in every
+  # request-serving process. It has a different failure mode — a wedged relay
+  # must be restartable without dropping API traffic. And a relay inside the API
+  # would scale with the API, which is the wrong axis entirely.
+  #
+  # No published port. It serves nothing; it polls.
+  relay:
+    image: ${VENDOR_APP_IMAGE:?Set VENDOR_APP_IMAGE to an immutable digest reference}
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://app_user:${VENDOR_DB_APP_USER_PASSWORD:?Set VENDOR_DB_APP_USER_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
+      PLATFORM_DATABASE_URL: postgresql+psycopg://platform_api:${VENDOR_DB_PLATFORM_API_PASSWORD:?Set VENDOR_DB_PLATFORM_API_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
+      # The dispatcher DSN. A THIRD ROLE on the one control-plane database, not
+      # a second database: it can lease and settle outbox rows through the
+      # kernel's `SECURITY DEFINER` functions and can read no business table.
+      #
+      # The material is held in OpenBao at
+      # secret/dotmac/vendor-control-plane/production/relay-dispatcher and
+      # reaches this file only through the host-local `.env` that
+      # `materialize_production_secrets.py` renders. No value is ever committed.
+      VENDOR_RELAY_DISPATCHER_DATABASE_URL: postgresql+psycopg://platform_outbox_dispatcher:${VENDOR_DB_DISPATCHER_PASSWORD:?Set VENDOR_DB_DISPATCHER_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
+      # No MIGRATION_DATABASE_URL. The relay never migrates, and handing it the
+      # `app_admin` BYPASSRLS credential would give a long-running process a
+      # standing owner credential it has no code path to use — the same defect
+      # the `app` service's comment above records.
+    volumes:
+      - vendor_product_manifests:/run/dotmac/product-manifests:ro
+      - ${VENDOR_LICENCE_SIGNING_KEY_HOST_FILE:?Set VENDOR_LICENCE_SIGNING_KEY_HOST_FILE}:/run/secrets/dotmac/vendor-control-plane/licence-signing/primary.key:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    # The INSTALLED console script, like every other production entry point:
+    # no interpreter in front of it, no `src` in the image for a path to resolve
+    # against. `--worker-id` is required rather than defaulted to a hostname
+    # because the outbox lease is held BY that identifier.
+    command: ["dotmac-platform", "relay", "run", "--worker-id", "${VENDOR_RELAY_WORKER_ID:-vendor-cp-prod-relay-1}"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${VENDOR_RELAY_PIDS_LIMIT:-128}
+    mem_limit: ${VENDOR_RELAY_MEM_LIMIT:-256m}
+    # Longer than the poll interval and longer than one delivery, so SIGTERM
+    # lets the current batch settle instead of leaving a lease for the stale
+    # reclaim to pick up.
+    stop_grace_period: 30s
+    # No healthcheck, deliberately, and this is not an omission.
+    #
+    # A process-local probe here could only report that the process is running,
+    # which is precisely the claim a WEDGED relay also satisfies — alive,
+    # polling, settling nothing. The real liveness fact is the durable heartbeat
+    # in `public.relay_heartbeats`, and the thing that reads it is
+    # `/health/ready` on the `app` service plus `dotmac-platform relay health`.
+    # A green checkmark here beside a red readiness probe would be worse than no
+    # checkmark at all.
+    networks: [vendor_backend]
 
   ops:
     image: ${VENDOR_APP_IMAGE:?Set VENDOR_APP_IMAGE to an immutable digest reference}
