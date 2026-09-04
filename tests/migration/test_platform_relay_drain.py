@@ -253,14 +253,22 @@ def test_an_activation_reaches_an_allocation_through_the_real_relay(
         with platform.platform_session() as db:
             active = _activate_an_agreement(db)
         with platform.platform_session() as db:
+            # Exactly one ACTIVATION fact. The queued TOTAL is deliberately
+            # derived rather than written down: the lifecycle also emits
+            # `proposed` and `approved`, and how many facts the upstream owners
+            # publish is their business and will change. A literal here would
+            # make this test fail on their next release while proving nothing
+            # about the drain.
             assert _count(db, event_type=AGREEMENT_ACTIVATED_V1) == 1
+            queued = _count(db, status=OutboxStatus.PENDING.value)
+            assert queued >= 1
             assert allocations.list_for_contract(db, active.id) == []
 
         report = drain_once(
             worker_id="relay-test",
             composition=_composition(dispatcher_url, platform),
         )
-        assert report.claimed == 1
+        assert report.claimed == queued
 
         with platform.platform_session() as db:
             staged = allocations.list_for_contract(db, active.id)
@@ -270,10 +278,14 @@ def test_an_activation_reaches_an_allocation_through_the_real_relay(
                 ("cap.a", 2),
                 ("cap.b", 1),
             }
-            # The row is SETTLED, not merely delivered. A relay that staged the
-            # allocation and failed to settle would redeliver forever.
-            assert _count(db, status=OutboxStatus.SENT.value) == 1
+            # Every row is SETTLED, not merely delivered — including the two the
+            # consumer ignores. A relay that staged the allocation and failed to
+            # settle would redeliver forever, and a consumer that RAISED on a
+            # fact it does not handle would dead-letter every other transition.
+            assert _count(db, status=OutboxStatus.SENT.value) == queued
             assert _count(db, status=OutboxStatus.PENDING.value) == 0
+            # ...and exactly one of them produced an allocation.
+            assert _count(db, event_type=AGREEMENT_ACTIVATED_V1) == 1
 
 
 def test_a_drain_with_nothing_queued_claims_nothing_and_stages_nothing(
@@ -307,7 +319,12 @@ def test_redelivering_one_event_stages_nothing_new(
         with platform.platform_session() as db:
             active = _activate_an_agreement(db)
         composition = _composition(dispatcher_url, platform)
-        assert drain_once(worker_id="relay-test", composition=composition).claimed == 1
+        with platform.platform_session() as db:
+            queued = _count(db, status=OutboxStatus.PENDING.value)
+        assert (
+            drain_once(worker_id="relay-test", composition=composition).claimed
+            == queued
+        )
 
         with platform.platform_session() as db:
             first = allocations.list_for_contract(db, active.id)
@@ -320,7 +337,13 @@ def test_redelivering_one_event_stages_nothing_new(
                 )
             )
 
-        assert drain_once(worker_id="relay-test", composition=composition).claimed == 1
+        # The SAME rows are claimed and delivered a second time. That is the
+        # shape a crash between delivery and settle leaves behind, and it is
+        # what at-least-once means.
+        assert (
+            drain_once(worker_id="relay-test", composition=composition).claimed
+            == queued
+        )
 
         with platform.platform_session() as db:
             again = allocations.list_for_contract(db, active.id)
@@ -357,6 +380,9 @@ def test_the_dispatcher_can_still_claim_a_batch(
     with _sessions(platform_url) as platform:
         with platform.platform_session() as db:
             _activate_an_agreement(db)
+        with platform.platform_session() as db:
+            queued = _count(db, status=OutboxStatus.PENDING.value)
+    assert queued >= 1
     with _connect(dispatcher_url) as conn:
         claimed = conn.execute(
             text(
@@ -365,7 +391,7 @@ def test_the_dispatcher_can_still_claim_a_batch(
             )
         ).all()
         conn.commit()
-    assert len(claimed) == 1
+    assert len(claimed) == queued
 
 
 def test_the_platform_role_can_read_the_outbox(
