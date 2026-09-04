@@ -632,6 +632,6 @@ disagree, fix the drift.
     change in `GOVERNED_TABLES` plus a disposer with a named owner, and it will
     have to move a table out of `ENFORCED_RETAIN` to get the privilege it needs
     (`src/vendor_cp/data_governance.py`, `alembic/env.py`,
-    `tests/unit/test_data_governance.py`,
-    `tests/architecture/test_data_governance.py`,
+    `tests/unit/test_data_governance_decisions.py`,
+    `tests/architecture/test_no_automated_hard_deletion.py`,
     `tests/migration/test_data_governance_catalogue.py`).

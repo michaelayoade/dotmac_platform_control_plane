@@ -328,9 +328,20 @@ statement; this records what was measured.
 
 ### The classification — 58 tables, four dispositions
 
-Every table the eight composed lineages build, derived from the migration
-sources and held against the live catalogue by
-`tests/migration/test_data_governance_catalogue.py` in BOTH directions.
+Every table the eight composed lineages build, held against the live catalogue
+by `tests/migration/test_data_governance_catalogue.py` in BOTH directions — and
+against the real composed database by `dotmac-platform admin migrate`, which is
+where the first draft was found wrong.
+
+**The first attempt derived the list from the migration SOURCES and got three
+names wrong**, because kernel `0018_idempotency_one_owner` and
+`0022_party_role_grants` RENAME tables rather than recreating them: the database
+holds `idempotency_records`, `platform_idempotency_records` and
+`party_role_grants`, not the names their creating revisions used. CI's deploy
+step refused, named all six discrepancies in both directions, and committed
+nothing. That is the mechanism working, and it is recorded here rather than
+quietly corrected — a classification read out of the revision that created a
+table is exactly the reading this enforcement exists to stop anyone trusting.
 
 | disposition | count | what it means |
 | --- | --- | --- |

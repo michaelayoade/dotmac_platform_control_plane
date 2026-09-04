@@ -21,7 +21,8 @@ already hold themselves to.
 **The code rule is our own discipline, and is weaker.** "No automated hard
 deletion" is a claim about call sites, and a call site is a fact about the code
 this assembly happens to compose today.
-`tests/architecture/test_data_governance.py` enumerates every row-deletion site
+`tests/architecture/test_no_automated_hard_deletion.py` enumerates every
+row-deletion site
 in this repository and in the composed distributions and holds the set
 two-directionally, so a kernel repin that adds one fails the build. That is a
 real ratchet and it is still second: it cannot see a psql session, and it dies
@@ -332,11 +333,14 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
     ),
     _retain(
         "public",
-        "inbox_records",
+        "idempotency_records",
         "the tenant idempotency ledger — the record that says an effect already "
-        "happened. `dotmac_kernel.idempotency.purge_expired` exists and this "
-        "deployment schedules it nowhere; its own docstring puts a fleet-wide "
-        "purge on `app_admin`, which is not an online role",
+        "happened. Kernel `0018_idempotency_one_owner` RENAMED `inbox_records` "
+        "to this, keeping the table's identity, so a classification written from "
+        "the creating revision alone names a table that no longer exists (CI "
+        "caught exactly that). `dotmac_kernel.idempotency.purge_expired` exists "
+        "and this deployment schedules it nowhere; its own docstring puts a "
+        "fleet-wide purge on `app_admin`, which is not an online role",
     ),
     _retain(
         "public",
@@ -352,7 +356,14 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
     _retain("public", "parties", "the fleet-wide identity record"),
     _retain("public", "party_organizations", "the organization subtype of an identity"),
     _retain("public", "party_persons", "the person subtype of an identity"),
-    _retain("public", "party_roles", "who was granted which role, and by whom"),
+    _retain(
+        "public",
+        "party_role_grants",
+        "who was granted which role, and by whom. Kernel `0022_party_role_grants` "
+        "RENAMED `party_roles` to this; the grant is the record, and the rename "
+        "is why a classification must be held against the live catalogue rather "
+        "than against the revision that created the table",
+    ),
     _retain(
         "public",
         "platform_admins",
@@ -367,9 +378,11 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
     ),
     _retain(
         "public",
-        "platform_inbox_records",
-        "the platform idempotency ledger. Same reading as `inbox_records`: a "
-        "purge is `app_admin`'s and this deployment schedules none",
+        "platform_idempotency_records",
+        "the platform idempotency ledger, renamed from `platform_inbox_records` "
+        "by kernel `0018_idempotency_one_owner`. Same reading as "
+        "`idempotency_records`: a purge is `app_admin`'s and this deployment "
+        "schedules none",
     ),
     _retain(
         "public",
@@ -767,7 +780,7 @@ class DeletionSite:
 
 #: EVERY row-deletion site in this repository and in the composed distributions,
 #: enumerated and held two-directionally by
-#: `tests/architecture/test_data_governance.py`. A kernel repin that adds one
+#: `tests/architecture/test_no_automated_hard_deletion.py`. A repin that adds one
 #: fails the build; removing one without lowering this list fails it too.
 #:
 #: This is the WEAKER of the two enforcements and is second on purpose. It sees
@@ -819,7 +832,7 @@ DELETION_SITES: Final[tuple[DeletionSite, ...]] = (
         distribution="dotmac-kernel",
         module="dotmac_kernel.idempotency",
         symbol="purge_expired",
-        target="public.inbox_records and public.platform_inbox_records",
+        target="public.idempotency_records and public.platform_idempotency_records",
         reachability=Reachability.NOT_COMPOSED,
         premise="a function a product SCHEDULES, and this deployment schedules "
         "it nowhere — zero call sites here. Its own docstring puts a fleet-wide "

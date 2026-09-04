@@ -1,9 +1,9 @@
 """The grant, proved against a real composed database.
 
 This is the half of `PlatformDataGovernanceV1` that is enforcement rather than
-discipline. `tests/architecture/test_data_governance.py` shows that no composed
-code removes a row from a retained table; nothing there can show that the
-DATABASE refuses one. These tests connect as the actual online roles and ask
+discipline. `tests/architecture/test_no_automated_hard_deletion.py` shows that
+no composed code removes a row from a retained table; nothing there can show
+that the DATABASE refuses one. These tests connect as the actual online roles and ask
 PostgreSQL.
 
 ## The before/after is the evidence that the DEPLOY PATH is the consumer
