@@ -88,6 +88,9 @@
         },
         "the_gap_is_not_introduced_here": "The app role's command already carries ${VENDOR_BIND_ADDRESS:?...}, and the descriptor argues for it at length: a reusable artifact's canonical bytes must be identical in every environment so one reviewed artifact can serve several. This promotion adds two parameters to that existing class with the same fail-closed discipline; it does not create the class.",
         "not_decided_here": "Whether A6.4 reaches a Foundation descriptor at all, and if so whether route 2 requires a typed refusal for host-inventory parameters, is one question about all three parameters together. That belongs to the ADR lane, not to a deployment slice. Recorded so it is a named question rather than an assumption nobody wrote down."
+      },
+      "ratified_decisions": {
+        "no_container_healthcheck_on_the_relay_role": "Accepted by Michael 2026-09-04: '/health/ready, heartbeat age and settlement progress own health; a process-local healthcheck must not call a wedged relay healthy.' The candidate declares the relay role with no [roles.health] block, and this records that the omission is a ratified decision rather than an unvalidated inference. Recorded HERE rather than in the candidate, because a promoted candidate is immutable and a ratification arriving after promotion must not rewrite the bytes it ratifies."
       }
     }
   ]

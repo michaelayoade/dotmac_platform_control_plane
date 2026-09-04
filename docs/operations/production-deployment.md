@@ -63,55 +63,140 @@ entry point. The named product-manifest volume is initialized by the deployment
 owner before the app starts: the long-running app mounts it read-only, while the
 one-off ops profile is the only UID 10001 process that mounts it read-write.
 
-## The relay dispatcher credential on an ALREADY-INITIALISED host
+## Enabling the platform outbox relay on `vendor-cp-prod`
 
-`deploy/postgres/init-roles.sh` sets this password, and it runs **once**, when
-PostgreSQL creates the data directory. `vendor.dotmac.io` was initialised before
-the relay existed, so on that host the line has never run and never will:
-re-running the script is not a repair, and neither is recreating the `db`
-service — the volume already exists, so the entrypoint skips every init script
-it contains. Removing the volume to force initialisation would destroy the
-database.
+**Authorized by Michael on 2026-09-04 against an explicitly named target:**
+`vendor-cp-prod` / `149.102.158.144`. No other host is in scope, and the target
+is never inferred.
 
-So on an existing host the role's password is an **operator act**, and it is
-Michael's rather than an automated step. The role itself already exists —
-`platform_outbox_dispatcher` is created by kernel `0012_platform_outbox` and by
-`init-roles.sh`, with `LOGIN NOSUPERUSER NOBYPASSRLS` and no password — so what
-is missing is only the credential.
+**Three prohibitions, and they are absolute.** Do not rerun
+`deploy/postgres/init-roles.sh`. Do not recreate the PostgreSQL service. Do not
+touch its volume. That script runs only when PostgreSQL creates the data
+directory; on this host it ran long ago and re-running it is not a repair.
+Removing the volume to force initialisation would destroy the database.
 
-The sequence, in order:
+**Recover forward, never re-mint.** If the database update succeeds and a later
+step fails, RETAIN the record and continue from the failed step. Minting a
+replacement password after the role already holds the first one puts the record
+and the database into disagreement, and the failure that follows is an
+authentication error nobody can attribute.
 
-1. **Seed the OpenBao record.** `materialize_production_secrets.py seed` creates
+**No step discloses the value.** Not to a terminal, a log, a ticket, a
+transcript or a command line — `/proc/<pid>/cmdline` is world-readable for as
+long as a process lives, and a registration token leaked on this fleet exactly
+that way. Every verification below is satisfied without reading the password.
+
+### The six steps, in order
+
+Steps 1–3 need nothing from the relay. Steps 4–6 need the relay service to
+exist on the host, which means slice 2 must be **merged and deployed** first —
+see "What step 4 additionally requires" below, which is not optional.
+
+1. **Mint the record.** `materialize_production_secrets.py seed` creates
    `secret/dotmac/vendor-control-plane/production/relay-dispatcher` with a
-   generated `dispatcher_password`. KV v2 `cas=0`: it creates an absent record
-   and never overwrites an existing one, so this is safe to run against the live
-   estate.
-2. **Set the role's password on the database**, as `app_admin`, reading the
-   value from OpenBao into the session rather than typing it. `ALTER ROLE
-   platform_outbox_dispatcher PASSWORD …` — never with the value on the command
-   line, because `/proc/<pid>/cmdline` is world-readable for as long as the
-   process lives.
-3. **Materialise the host `.env`**, which renders `VENDOR_DB_DISPATCHER_PASSWORD`
-   from the same record. The compose file composes the dispatcher DSN from it and
-   `:?` makes an inventory that forgot it fail closed.
-4. **Migrate, then start the relay.** `v019_relay_heartbeat` must be applied
-   before the relay runs, or every heartbeat write fails and health reports
-   `relay_not_running` about a relay that is running — correctly, since a relay
-   whose liveness cannot be established is not one you should trust.
+   generated `dispatcher_password`. KV v2 `cas=0`, so it creates an absent
+   record and can never overwrite an existing one — safe against the live
+   estate, and the reason a re-run after a later failure is a no-op rather than
+   a silent rotation.
 
-**Verifying it worked does not require reading the value.** After the relay
-starts, `dotmac-platform relay health` reports a `heartbeat_age_seconds` that is
-small and falling, and `/health/ready` answers 200. Before it starts, the same
-surfaces say `relay_not_running`. That pair is the check; the password itself
-never needs to be seen.
+2. **Set it on the existing role.** `platform_outbox_dispatcher` already exists
+   with `LOGIN NOSUPERUSER NOBYPASSRLS` and no password; only the credential is
+   missing. Connect as `app_admin` and `ALTER ROLE platform_outbox_dispatcher
+   PASSWORD …`, reading the value from OpenBao into the session rather than
+   typing it, and never as a command-line argument.
 
-**This record is outside the rotation ceremony.** `execute_secret_rotation`
-covers the three roles on the shared `database` record, whose candidate set is a
-closed six-field value with an exact-match validator — a fourth password there
-would make a rotation refuse the candidate it had just minted. Rotating the
-dispatcher password is therefore a manual operator act today, and extending the
-ceremony to cover it is named follow-up work rather than something this slice
-did halfway.
+3. **Materialize the host environment.** This renders
+   `VENDOR_DB_DISPATCHER_PASSWORD` into the host-local `.env` from the record
+   minted in step 1. **Read the warning under "What step 3 actually rewrites"
+   before running it.**
+
+4. **Start the relay service.** `docker compose up -d relay`. It publishes no
+   port and declares no container healthcheck, by decision rather than
+   omission — see below.
+
+5. **Verify the authenticated connection and a fresh durable heartbeat.**
+   `dotmac-platform relay health` must report a `heartbeat_age_seconds` that is
+   small and falling. That single number carries both facts: the relay could
+   only have written `public.relay_heartbeats` by connecting successfully as
+   `platform_outbox_dispatcher` for the claim and as `platform_api` for the
+   stamp. Before step 4 the same command reports `relay_not_running` with
+   `relay_ever_reported: false`, which is the before-picture worth capturing.
+
+6. **Verify one real outbox settlement.** A platform outbox event must go from
+   `pending` to `sent` by the relay's own action. **Read "What step 6 needs that
+   does not exist yet" — there is nothing queued on this host to settle.**
+
+`/health/ready` answering 200 is the composed confirmation of 5 and 6 together:
+it is red while the relay is stopped, red while it is wedged, and green only
+when the heartbeat is fresh and work is moving.
+
+### Findings against the authorized sequence
+
+Three things the steps as written do not say, each of which stops execution if
+it is discovered at the moment it matters instead of now.
+
+**What step 4 additionally requires.** The relay service must be present in the
+host's compose file, and `v019_relay_heartbeat` must be applied. Both arrive
+with slice 2, and neither is implied by "start the service":
+
+* the host's `docker-compose.production.yml` must be the one carrying the
+  `relay` service, or `up -d relay` names a service that does not exist;
+* the migration must have run, or every heartbeat write fails and
+  `relay health` reports `relay_not_running` **about a relay that is running** —
+  the one false answer this whole design exists to prevent, arriving through the
+  back door of an unapplied migration.
+
+Migrations run in the one-shot `ops` container, as `dotmac-platform admin
+migrate`, before the application is replaced — the ordinary composed-migration
+path, not a relay-specific act.
+
+**What step 3 actually rewrites.** `materialize` is not relay-scoped. It renders
+the COMPLETE `.env` from the template plus a COMPLETE secret bundle, and it also
+rewrites the licence signing key file and the deploy `authorized_keys`. Two
+consequences: it refuses unless every OpenBao record is present and valid, and
+it converges every secret line on the host to whatever OpenBao currently holds.
+If the host and OpenBao have drifted for any reason, step 3 is where that
+resolves — silently, in OpenBao's favour. That may be exactly right; it should
+be a decision rather than a surprise.
+
+**What step 6 needs that does not exist yet.** As of the 2026-08-30 census,
+`public.platform_outbox_events` holds ZERO rows on this host, so there is
+nothing pending for the relay to settle. Step 6 therefore requires an operation
+that EMITS a platform event first, and the emitting owners are Commercial
+Agreements, Approvals, Licensing and Deployment Control. An agreement activation
+is the chain this relay exists for, but it is also the longest path — it needs a
+platform admin, an offer version, a published approval policy and a recorded
+decision before `activate` can be called. An approvals decision is the shortest
+real emitter.
+
+Which operation produces the settlement is Michael's choice, because it is a
+real state change on production rather than a test fixture. What must not happen
+is inserting a row into `platform_outbox_events` by hand to satisfy the check:
+that would verify the relay against a fact no owner emitted, which is a
+rehearsal wearing a production verification's clothes.
+
+### Why there is no container healthcheck on the relay
+
+Accepted by Michael on 2026-09-04: *"`/health/ready`, heartbeat age and
+settlement progress own health; a process-local healthcheck must not call a
+wedged relay healthy."*
+
+A probe against the relay container could only report that the process is
+running — which is exactly the claim a WEDGED relay also satisfies: alive,
+polling, claiming, settling nothing. A green checkmark there beside a red
+readiness probe is the reassuring half of a contradiction.
+
+### Rotating this password later
+
+The record is deliberately OUTSIDE the rotation ceremony.
+`execute_secret_rotation` covers the three roles on the shared `database`
+record, whose candidate set is a closed six-field value with an exact-match
+validator — a fourth password there would make a rotation refuse the candidate
+it had just minted. Rotating the dispatcher password is therefore a manual
+operator act today, following the same two steps 1 and 2 above with a CAS
+update in place of a create. Extending the ceremony to a fourth database role
+needs its own per-role two-direction TCP/SCRAM proof and is named follow-up
+work.
 
 ## One-time host contract
 
