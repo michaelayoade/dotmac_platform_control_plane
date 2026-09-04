@@ -157,13 +157,42 @@ def test_no_key_material_can_be_held_here() -> None:
     """The seam carries pointers. A field able to hold a secret would make this
     module a place where one could come to rest.
 
-    This read `__dataclass_fields__`, which is not the set of instance fields:
-    it also carries ClassVar and InitVar PSEUDO-fields. So declaring
-    `material: ClassVar[MaterialKind]` -- a class constant that holds no
-    per-instance state -- made a correct declaration look like a new place a
-    secret could rest, and the assertion could not tell the two apart.
+    ## The trap, because it is not obvious and you will meet it
 
-    Strengthened rather than relaxed. Three claims now, where there was one:
+    `__dataclass_fields__` is NOT the set of instance fields. It also carries
+    ClassVar and InitVar **pseudo-fields**, so a class constant appears in it
+    exactly as a real field does. Declaring `material: ClassVar[MaterialKind]`
+    therefore read as a new place material could rest, and the original
+    one-line assertion had no way to tell a constant from state.
+    `dataclasses.fields()` is the set that answers the question this test asks.
+
+    ## Why ClassVar is fine here and InitVar would not be
+
+    This is the distinction that matters, and it is not a technicality.
+
+    A **ClassVar** is one value on the class. It is not per-instance state and
+    it **cannot be passed to the constructor**, so no caller can hand material
+    to a descriptor through it. It is a declaration a reader consults --
+    `material` says whether the pointer names private signing material or a
+    public verification identity -- and declarations are what this module is
+    made of.
+
+    An **InitVar is an `__init__` parameter.** That is precisely a way material
+    could be handed IN, at construction, by any caller -- which is the thing
+    this test exists to refuse. The two look identical in
+    `__dataclass_fields__` and are opposites for this purpose, which is why
+    claim 3 below separates them by asking the constructor rather than by
+    trusting the annotation.
+
+    ## If you are adding one
+
+    A new ClassVar: add its name to `DECLARED_CLASS_ATTRIBUTES` and it passes.
+    That list exists so widening what the seam carries is a reviewed change
+    rather than a silent one.
+
+    A new InitVar: don't. If a descriptor genuinely needs a value at
+    construction it belongs as a normal field and this test should be argued
+    with on the merits, not amended around.
     """
     for pointer in (AuthorizationSignerPointer(AUTH), ObservationSignerPointer(OBS)):
         cls = type(pointer)
