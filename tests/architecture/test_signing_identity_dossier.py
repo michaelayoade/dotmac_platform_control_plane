@@ -623,17 +623,30 @@ def test_an_identity_the_matrix_does_not_cover_is_refused() -> None:
     """
     doctored = _dossier_with(
         "| 4 | `platform_release_evidence` | release evidence |",
-        "| 5 | `recovery_probe_purpose` | recovery | "
-        "`secret/dotmac/platform-cp/recovery-signing/primary` | a holder | "
+        "| 6 | `key_escrow_probe` | escrow | "
+        "`secret/dotmac/platform-cp/escrow-signing/primary` | a holder | "
         "a verifier |\n| 4 | `platform_release_evidence` | release evidence |",
     )
-    finding = _matrix_only(doctored, MatrixRefusal.AXES_DISAGREE_WITH_IDENTITIES)
-    assert "recovery" in finding.detail
+    findings = scan_matrix(doctored)
+    axes = [
+        f for f in findings if f.refusal is MatrixRefusal.AXES_DISAGREE_WITH_IDENTITIES
+    ]
+    assert len(axes) == 1, findings
+    assert "escrow" in axes[0].detail
+    # The stated counts go stale in the same edit, and reporting BOTH is right:
+    # an editor who adds an identity has two registers to move, and being told
+    # about one of them would send them round the loop twice.
+    assert MatrixRefusal.STATED_IDENTITY_COUNT_DISAGREES in {
+        f.refusal for f in findings
+    }
 
 
 def test_a_directed_pair_the_matrix_omits_is_refused() -> None:
     """A cell reusing another's number hides the missing one behind a count."""
-    doctored = _dossier_with("| (10) | (11) | (12) |", "| (10) | (11) | (11) |")
+    doctored = _dossier_with(
+        "| (17) | (18) | (19) | (20) | must succeed |",
+        "| (17) | (18) | (19) | (19) | must succeed |",
+    )
     findings = scan_matrix(doctored)
     assert {f.refusal for f in findings} == {
         MatrixRefusal.ORDERED_PAIR_NUMBERED_TWICE,
@@ -645,11 +658,11 @@ def test_a_pair_no_mechanism_claims_is_refused() -> None:
     """`each demonstrably able to refuse`: a numbered cell nobody attributed to
     a refusing mechanism was drawn, not checked."""
     doctored = _dossier_with(
-        "- **(2), (6), (7), (9), (12) — the same Control types, other direction.**",
-        "- **(2), (6), (7), (9) — the same Control types, other direction.**",
+        "- **(4), (8), (12), (16) — used as RECOVERY.**",
+        "- **(4), (8), (12) — used as RECOVERY.**",
     )
     finding = _matrix_only(doctored, MatrixRefusal.PAIR_HAS_NO_REFUSING_MECHANISM)
-    assert "[12]" in finding.detail
+    assert "[16]" in finding.detail
 
 
 def test_a_diagonal_that_is_not_required_to_succeed_is_refused() -> None:
@@ -660,7 +673,12 @@ def test_a_diagonal_that_is_not_required_to_succeed_is_refused() -> None:
     including their own purpose.
     """
     doctored = _dossier_with(
-        "| **authorization** | must succeed |", "| **authorization** | (13) |"
+        # A number OUTSIDE the derived range, so the plant tests the diagonal
+        # rule alone. `(13)` is a real cell in a five-identity matrix and would
+        # have fired the duplicate rule as well, making the assertion below pass
+        # for a reason it does not name.
+        "| **authorization** | must succeed |",
+        "| **authorization** | (21) |",
     )
     finding = _matrix_only(doctored, MatrixRefusal.DIAGONAL_NOT_REQUIRED_TO_SUCCEED)
     assert "authorization used as authorization" in finding.detail
@@ -670,11 +688,11 @@ def test_a_prose_count_that_disagrees_with_the_matrix_is_refused() -> None:
     """The sentence and the table are two registers, and the sentence is the one
     a reader believes. It moved by hand twice; now it cannot move alone."""
     doctored = _dossier_with(
-        "### 7b — purpose: the twelve ordered pairs",
-        "### 7b — purpose: the thirteen ordered pairs",
+        "### 7b — purpose: the twenty ordered pairs",
+        "### 7b — purpose: the thirty ordered pairs",
     )
     finding = _matrix_only(doctored, MatrixRefusal.STATED_COUNT_DISAGREES)
-    assert "thirteen" in finding.detail
+    assert "thirty" in finding.detail
 
 
 def test_a_stated_identity_count_that_disagrees_is_refused() -> None:
@@ -685,11 +703,11 @@ def test_a_stated_identity_count_that_disagrees_is_refused() -> None:
     This is the rule that found it, so it is planted rather than assumed.
     """
     doctored = _dossier_with(
+        "# Signing identity mint dossier — five purpose-bound Ed25519 identities",
         "# Signing identity mint dossier — four purpose-bound Ed25519 identities",
-        "# Signing identity mint dossier — three purpose-bound Ed25519 identities",
     )
     finding = _matrix_only(doctored, MatrixRefusal.STATED_IDENTITY_COUNT_DISAGREES)
-    assert "three purpose-bound" in finding.detail
+    assert "four purpose-bound" in finding.detail
 
 
 def test_the_identity_count_reader_ignores_a_phrase_with_no_count() -> None:
@@ -706,7 +724,7 @@ def test_an_unreadable_cell_refuses_rather_than_passing_as_clean() -> None:
     Every rule above passes by finding nothing, so a cell the reader cannot
     parse would otherwise read exactly like a cell with nothing wrong with it.
     """
-    doctored = _dossier_with("| (4) | must succeed |", "| see below | must succeed |")
+    doctored = _dossier_with("| (5) | must succeed |", "| see below | must succeed |")
     findings = scan_matrix(doctored)
     # TWO distinct findings, and reporting them separately is the point: the
     # cell cannot be read AND the directed pair it should have carried is now
