@@ -9,17 +9,22 @@ this verifier's answer, the document is not being consumed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from vendor_cp.deployment.profile_readback import (
+    ABSENCE_PROOF_CONCERNS,
     DISTRIBUTIONS_CONTRACT,
     FOUNDATION_CONCERNS,
+    INTEGRATION_ABSENCE_SCHEMA,
+    INTEGRATION_SURFACE_FAMILIES,
     PROFILE_CONTRACT,
     ExpectedArtifact,
     ProfileVerdict,
+    canonical_inventory_digest,
     canonical_profile_digest,
     verify_embedded_profile,
 )
@@ -301,3 +306,363 @@ def test_the_defaults_point_into_the_artifact_not_into_a_checkout() -> None:
     assert DEFAULT_PROFILE_PATH == Path("/app/application_foundation_profile.json")
     assert DEFAULT_DISTRIBUTIONS_PATH == Path("/app/distributions.json")
     assert DEFAULT_PROFILE_PATH.parent == DEFAULT_DISTRIBUTIONS_PATH.parent
+
+
+# ── an absence proof SATISFIES, and only when it ESTABLISHES ────────────────
+#
+# Ruled 2026-09-04: absence is approved only through
+# `IntegrationSurfaceAbsenceProofV1`, bound to the exact installed artifact and a
+# closed surface inventory — "this is not a general 'nothing applies' escape
+# hatch". The tests below are two halves of one property. The first says a real
+# proof counts, because a gate nothing can satisfy gets waived rather than met.
+# Every other one says a proof that establishes nothing does not, because a gate
+# anything can satisfy is not a gate.
+
+
+def _inventory_pairs(wheel: str = WHEEL) -> list[tuple[str, str]]:
+    """The exact `(filename, sha256)` pairs `_write` puts in the image."""
+    return [
+        ("vendor_cp-0.1.0.tar.gz", OTHER_WHEEL),
+        ("vendor_cp-0.1.0-py3-none-any.whl", wheel),
+    ]
+
+
+def _inventory_digest(wheel: str = WHEEL) -> str:
+    """THE SPECIFICATION, re-implemented here rather than imported.
+
+    Importing `canonical_inventory_digest` would make every assertion below a
+    statement that one function agrees with itself — the same reason the module
+    calls its own encoding a spec for a producer to implement separately. This is
+    the second implementation that makes the comparison mean something.
+    """
+    body = sorted(_inventory_pairs(wheel))
+    encoded = json.dumps(
+        [[name, digest] for name, digest in body],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _proof(**over: object) -> dict[str, object]:
+    """A proof that ESTABLISHES, unless a test breaks exactly one thing."""
+    proof: dict[str, object] = {
+        "schema": INTEGRATION_ABSENCE_SCHEMA,
+        "state": "absent_proven",
+        "concern": "integration",
+        "source_revision": REVISION,
+        "image_digest": WHEEL,
+        "observed_inventory_digest": _inventory_digest(),
+        "families": {name: [] for name in sorted(INTEGRATION_SURFACE_FAMILIES)},
+        "method": "entry-point metadata + AST walk over the installed image",
+        "positive_control": ["dotmac_integration.connectors:paystack"],
+        "established_at": "2026-09-04T12:00:00Z",
+        "established_by": "platform-cp-profile-job",
+    }
+    proof.update(over)
+    return proof
+
+
+def _with_proof(proof: dict[str, object], *, concern: str = "integration") -> dict:
+    """Twelve declared bindings, and one concern left to the proof."""
+    return _document(
+        concerns=tuple(name for name in FOUNDATION_CONCERNS if name != concern),
+        absence_proofs=[proof],
+    )
+
+
+def test_an_established_absence_proof_satisfies_integration(tmp_path: Path) -> None:
+    """The half that keeps the gate REACHABLE.
+
+    Twelve concerns declared, the thirteenth proven absent against this image's
+    own distribution inventory. If a proven absence could not satisfy a concern,
+    a product with genuinely no integration surface could never reach 13/13 —
+    and an unmeetable gate gets waived rather than met.
+    """
+    outcome = _verify(tmp_path, _with_proof(_proof()))
+    assert outcome.verdict is ProfileVerdict.ADMITTED
+    assert outcome.bound_concerns == FOUNDATION_CONCERNS
+    assert "1 proven absent" in outcome.detail
+
+
+def test_a_manufactured_inventory_digest_establishes_nothing(tmp_path: Path) -> None:
+    """The half that keeps the gate from being BYPASSABLE — the planted defect.
+
+    Everything else about this proof is perfect: right schema, right concern,
+    right revision, five families all empty, a positive control. The only change
+    is a digest a caller wrote instead of one derived from the image. Writing a
+    string is free; making it equal a digest an independent reader computed is
+    not, and that asymmetry is the entire load-bearing half.
+    """
+    forged = _proof(observed_inventory_digest="sha256:" + "e" * 64)
+    outcome = _verify(tmp_path, _with_proof(forged))
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_UNESTABLISHED
+    assert "cannot manufacture" in outcome.detail
+
+
+def test_the_near_miss_is_admitted_so_the_check_is_not_refusing_everything(
+    tmp_path: Path,
+) -> None:
+    """The sensitivity proof's other half.
+
+    A check that refuses every proof would pass the test above for the wrong
+    reason. This is the SAME proof with the SAME everything, differing only in
+    that the inventory digest is the derived one — and it is admitted. The
+    refusal above therefore bites on the digest and on nothing else.
+    """
+    outcome = _verify(tmp_path, _with_proof(_proof()))
+    assert outcome.verdict is ProfileVerdict.ADMITTED
+
+
+def test_the_absence_route_is_closed_to_data_governance(tmp_path: Path) -> None:
+    """The escape hatch, planted directly.
+
+    `data_governance` was ruled to need a real implementation, and an earlier
+    ruling already refused an `inapplicable` for it. A proof of the one approved
+    schema, otherwise perfect, relabelled to certify it must be REFUSED rather
+    than ignored — ignoring it would let the document carry a certification
+    nobody rejected.
+    """
+    hijacked = _proof(concern="data_governance")
+    outcome = _verify(tmp_path, _with_proof(hijacked, concern="data_governance"))
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_INADMISSIBLE
+    assert "may only prove 'integration' absent" in outcome.detail
+
+
+def test_an_unknown_absence_schema_certifies_nothing(tmp_path: Path) -> None:
+    """A second proof type invented later does not inherit this one's approval."""
+    outcome = _verify(
+        tmp_path, _with_proof(_proof(schema="DataGovernanceAbsenceProofV1"))
+    )
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_INADMISSIBLE
+    assert "certifies nothing here" in outcome.detail
+
+
+def test_the_approved_absence_map_has_exactly_one_entry() -> None:
+    """Stated as a value, so widening it is a visible edit rather than a drift.
+
+    Read off the module dict itself — a plain module-level mapping, so `.values()`
+    is the mapping's values and not a descriptor standing in for them.
+    """
+    assert ABSENCE_PROOF_CONCERNS == {INTEGRATION_ABSENCE_SCHEMA: "integration"}
+    assert "data_governance" not in ABSENCE_PROOF_CONCERNS.values()
+    assert "request_evidence_context" not in ABSENCE_PROOF_CONCERNS.values()
+
+
+def test_a_proof_that_visited_four_of_five_families_establishes_nothing(
+    tmp_path: Path,
+) -> None:
+    """The producing type refused this AT CONSTRUCTION, in another process.
+
+    What arrives here is JSON, and a constructor's refusals do not travel in a
+    document. A family never looked at is not a family found empty.
+    """
+    partial = dict(_proof()["families"])  # type: ignore[arg-type]
+    partial.pop("message_consumer")
+    outcome = _verify(tmp_path, _with_proof(_proof(families=partial)))
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_UNESTABLISHED
+    assert "message_consumer" in outcome.detail
+
+
+def test_a_proof_reporting_an_unregistered_family_is_refused(tmp_path: Path) -> None:
+    """A surface nobody registered silently satisfies 'none present'."""
+    widened = dict(_proof()["families"])  # type: ignore[arg-type]
+    widened["grpc_stream"] = []
+    outcome = _verify(tmp_path, _with_proof(_proof(families=widened)))
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_UNESTABLISHED
+    assert "grpc_stream" in outcome.detail
+
+
+def test_a_proof_that_found_a_surface_is_unbound_rather_than_absent(
+    tmp_path: Path,
+) -> None:
+    """Found something is a THIRD answer, not a weaker absence."""
+    occupied = dict(_proof()["families"])  # type: ignore[arg-type]
+    occupied["outbound_connector"] = ["vendor_cp.relay:dispatch"]
+    outcome = _verify(tmp_path, _with_proof(_proof(families=occupied)))
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_UNESTABLISHED
+    assert "UNBOUND" in outcome.detail
+
+
+def test_a_proof_with_no_positive_control_cannot_say_which_it_is(
+    tmp_path: Path,
+) -> None:
+    """Without the instrument shown finding something, a scan that never finds
+    anything and an artifact that has nothing are the same colour."""
+    outcome = _verify(tmp_path, _with_proof(_proof(positive_control=[])))
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_UNESTABLISHED
+    assert "positive control" in outcome.detail
+
+
+def test_a_document_not_declaring_absent_proven_is_not_making_the_claim(
+    tmp_path: Path,
+) -> None:
+    outcome = _verify(tmp_path, _with_proof(_proof(state="inapplicable")))
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_UNESTABLISHED
+    assert "not making this claim" in outcome.detail
+
+
+def test_a_proof_bound_to_another_artifact_establishes_nothing(
+    tmp_path: Path,
+) -> None:
+    """Same revision, same image, a different installed artifact."""
+    outcome = _verify(tmp_path, _with_proof(_proof(image_digest=OTHER_WHEEL)))
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_UNESTABLISHED
+    assert "binds to artifact" in outcome.detail
+
+
+def test_the_foreign_check_still_precedes_establishment(tmp_path: Path) -> None:
+    """A cross-target proof is refused as FOREIGN, not as unestablished.
+
+    Two different repairs — a proof produced for another build versus one that
+    proves nothing — so they keep two verdicts. Collapsing them would report an
+    honest proof of the wrong artifact as a failed scan.
+    """
+    outcome = _verify(tmp_path, _with_proof(_proof(source_revision="f" * 40)))
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_FOREIGN
+
+
+def test_a_concern_cannot_be_both_bound_and_proven_absent(tmp_path: Path) -> None:
+    """Two of the four states at once is a document that has not decided.
+
+    Accepting either would be this verifier deciding for it.
+    """
+    document = _document(concerns=FOUNDATION_CONCERNS, absence_proofs=[_proof()])
+    outcome = _verify(tmp_path, document)
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_INADMISSIBLE
+    assert "declared bound AND proven absent" in outcome.detail
+
+
+def test_without_a_proof_integration_is_simply_unsatisfied(tmp_path: Path) -> None:
+    """The state before any of this: twelve concerns and no thirteenth."""
+    document = _document(
+        concerns=tuple(n for n in FOUNDATION_CONCERNS if n != "integration")
+    )
+    outcome = _verify(tmp_path, document)
+    assert outcome.verdict is ProfileVerdict.CONCERNS_INCOMPLETE
+    assert "integration" in outcome.detail
+
+
+# ── the inventory digest is over the IMAGE's record ─────────────────────────
+
+
+def test_the_derived_inventory_digest_matches_an_independent_encoder() -> None:
+    """Two implementations of one spec, agreeing. If they ever disagree, the
+    producer's third implementation would disagree with one of them too."""
+    assert canonical_inventory_digest(_inventory_pairs()) == _inventory_digest()
+
+
+def test_the_inventory_digest_moves_when_the_inventory_does() -> None:
+    """A digest that did not change when a distribution changed would bind a
+    proof to nothing, which is the same as not checking it."""
+    assert canonical_inventory_digest(_inventory_pairs()) != canonical_inventory_digest(
+        _inventory_pairs(wheel=OTHER_WHEEL)
+    )
+
+
+def test_the_inventory_digest_does_not_depend_on_file_order() -> None:
+    """The builder emits sorted; a reader must not depend on it having done so."""
+    pairs = _inventory_pairs()
+    assert canonical_inventory_digest(pairs) == canonical_inventory_digest(
+        list(reversed(pairs))
+    )
+
+
+def test_a_narrowed_distribution_record_is_unusable_not_a_smaller_inventory(
+    tmp_path: Path,
+) -> None:
+    """An entry missing its digest makes the WHOLE record unusable.
+
+    Skipping it would still produce a digest — over a set that is not the
+    artifact's — and a silently narrowed second witness is exactly what the
+    second witness exists to prevent. Unreadable is not mismatched.
+    """
+    paths = _write(tmp_path, _with_proof(_proof()))
+    paths["distributions_path"].write_text(
+        json.dumps(
+            {
+                "contract": DISTRIBUTIONS_CONTRACT,
+                "files": [
+                    {"filename": "vendor_cp-0.1.0.tar.gz"},
+                    {"filename": "vendor_cp-0.1.0-py3-none-any.whl", "sha256": WHEEL},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    outcome = verify_embedded_profile(EXPECTED, **paths)
+    assert outcome.verdict is ProfileVerdict.DOCUMENT_UNREADABLE
+
+
+def test_two_wheels_are_no_single_second_witness(tmp_path: Path) -> None:
+    """Picking one of several would be choosing which witness to believe."""
+    paths = _write(tmp_path, _with_proof(_proof()))
+    paths["distributions_path"].write_text(
+        json.dumps(
+            {
+                "contract": DISTRIBUTIONS_CONTRACT,
+                "files": [
+                    {"filename": "vendor_cp-0.1.0-py3-none-any.whl", "sha256": WHEEL},
+                    {"filename": "vendor_cp-0.1.0-py2-none-any.whl", "sha256": WHEEL},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    outcome = verify_embedded_profile(EXPECTED, **paths)
+    assert outcome.verdict is ProfileVerdict.DOCUMENT_UNREADABLE
+    assert "exactly one wheel" in outcome.detail
+
+
+# ── request_evidence_context: expressible and verifiable when it arrives ────
+#
+# The implementation is `dotmac-kernel`'s, extracted product-first from ERP's
+# trusted-proxy behaviour, with Foundation owning the profile/verifier contract.
+# That work is not this lane's. What IS this lane's is that the profile can
+# express the binding and this verifier can judge it the day it lands — and that
+# it cannot be reached by the absence route in the meantime.
+
+
+def test_request_evidence_context_is_a_slot_this_verifier_already_judges(
+    tmp_path: Path,
+) -> None:
+    """Unbound it blocks by name; bound it satisfies. No change needed here when
+    the kernel implementation arrives — only a binding in the document."""
+    owed = "request_evidence_context"
+    without = _document(concerns=tuple(n for n in FOUNDATION_CONCERNS if n != owed))
+    blocked = _verify(tmp_path, without)
+    assert blocked.verdict is ProfileVerdict.CONCERNS_INCOMPLETE
+    assert owed in blocked.detail
+    assert owed not in blocked.bound_concerns
+
+    admitted = _verify(tmp_path, _document())
+    assert admitted.verdict is ProfileVerdict.ADMITTED
+    assert owed in admitted.bound_concerns
+
+
+def test_request_evidence_context_cannot_be_reached_by_the_absence_route(
+    tmp_path: Path,
+) -> None:
+    """It has an owner and an adopter; it is owed, not absent."""
+    outcome = _verify(
+        tmp_path,
+        _with_proof(
+            _proof(concern="request_evidence_context"),
+            concern="request_evidence_context",
+        ),
+    )
+    assert outcome.verdict is ProfileVerdict.ABSENCE_PROOF_INADMISSIBLE
+
+
+def test_every_verdict_has_a_place_in_the_precedence_order() -> None:
+    """A verdict added without a precedence slot is a verdict nobody ordered.
+
+    `VERDICT_PRECEDENCE` states which refusal wins when several apply. A member
+    missing from it is not "last"; it is unstated, and the next reader has to
+    infer an order from the function body — which is where the order stops being
+    a contract. The same property `relay.health` holds its own verdicts to.
+    """
+    from vendor_cp.deployment.profile_readback import VERDICT_PRECEDENCE
+
+    assert set(VERDICT_PRECEDENCE) == set(ProfileVerdict)
+    assert len(VERDICT_PRECEDENCE) == len(ProfileVerdict)

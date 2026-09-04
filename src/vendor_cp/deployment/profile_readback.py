@@ -56,6 +56,64 @@ artifact. A proof that concern X is absent from image A says nothing about image
 B. A naive check — parse the proof, recompute its internal digest, accept —
 passes this case, which is why the proof's own declared coordinates are checked
 against the expected ones rather than against the proof itself.
+
+## An absence proof SATISFIES, and only when it ESTABLISHES
+
+Ruled 2026-09-04: a proven absence may satisfy a concern, but **only** through
+`IntegrationSurfaceAbsenceProofV1`, bound to the exact installed artifact and to
+a closed surface inventory — *"this is not a general 'nothing applies' escape
+hatch."*
+
+Four things keep it from becoming one, and the fourth is the one people leave
+out:
+
+1. **A closed schema-to-concern map.** :data:`ABSENCE_PROOF_CONCERNS` has one
+   entry. A document of this schema naming any other concern is refused by name
+   rather than ignored, so a hand-written proof cannot certify
+   `data_governance` — which an earlier ruling already refused an `inapplicable`
+   for, and which an absence proof does not repair either.
+
+2. **The unmanufacturable half.** ``observed_inventory_digest`` must equal a
+   digest THIS module computes from ``distributions.json`` — the per-file record
+   the builder stage produced independently of the profile. A caller may write
+   any string into the proof; it cannot make that string equal one derived from
+   the image without having examined that image.
+
+3. **Coordinates that bind it to this artifact.** ``source_revision`` and the
+   artifact digest, checked against what the caller holds from the release
+   receipt rather than against the document.
+
+4. **The producing type's own refusals, RE-CHECKED here.**
+   `IntegrationSurfaceAbsenceProofV1.__post_init__` enforces complete
+   enumeration, emptiness and a positive control — *in the producing process*.
+   What arrives here is JSON. **The constructor's refusals did not travel with
+   it.** A verifier that trusted the schema string would accept
+   ``{"schema": "IntegrationSurfaceAbsenceProofV1", "state": "absent_proven"}``
+   with no families at all, which is precisely the escape hatch. So the five
+   families are re-enumerated, each must be present and empty, and the positive
+   control must be non-empty — a proof whose instrument was never shown finding
+   anything cannot distinguish "nothing is there" from "this scan finds nothing".
+
+### What is NOT checked, and why it is named rather than skipped
+
+The proof's ``image_digest`` is compared against the caller's
+:attr:`ExpectedArtifact.wheel_sha256` — the INSTALLED ARTIFACT, which is what
+Foundation's own docstring calls it. That reading is forced rather than
+preferred: the proof travels INSIDE the profile document, the profile document is
+baked into the container image, and a container digest computed over layers that
+include the document cannot appear in the document. The two alternatives are
+self-contradictory, so the artifact reading is the only one left.
+
+If Foundation settles on a different meaning, this check fails LOUDLY rather than
+admitting wrongly, which is the safe direction for an inference about another
+repository's type. It is recorded here as an inference, not as a shared contract.
+
+## The inventory digest is a SPECIFICATION, like the profile digest
+
+:func:`canonical_inventory_digest` is what a producer must implement separately,
+never import. Sharing an encoder would make the comparison a statement that one
+function agrees with itself — the same reason `canonical_profile_digest` is a
+spec rather than a shared helper.
 """
 
 from __future__ import annotations
@@ -69,12 +127,16 @@ from pathlib import Path
 from typing import Final
 
 __all__ = [
+    "ABSENCE_PROOF_CONCERNS",
     "DEFAULT_DISTRIBUTIONS_PATH",
     "DEFAULT_PROFILE_PATH",
+    "INTEGRATION_ABSENCE_SCHEMA",
+    "INTEGRATION_SURFACE_FAMILIES",
     "PROFILE_CONTRACT",
     "ExpectedArtifact",
     "ProfileReadback",
     "ProfileVerdict",
+    "canonical_inventory_digest",
     "canonical_profile_digest",
     "verify_embedded_profile",
 ]
@@ -109,6 +171,43 @@ FOUNDATION_CONCERNS: Final[tuple[str, ...]] = (
     "integration",
 )
 
+#: Foundation's discriminated proof schema. Spelled out rather than imported:
+#: nothing in this module imports the builder or the type it verifies, and a
+#: string read out of the document is what actually arrives.
+INTEGRATION_ABSENCE_SCHEMA: Final = "IntegrationSurfaceAbsenceProofV1"
+
+#: The closed surface inventory the proof must have enumerated COMPLETELY.
+#: Restated here, not imported, because the check is against what the DOCUMENT
+#: says — and a verifier that took the list from the same place the producer did
+#: would agree with the producer by construction.
+INTEGRATION_SURFACE_FAMILIES: Final[frozenset[str]] = frozenset(
+    {
+        "outbound_connector",
+        "inbound_webhook",
+        "scheduled_sync",
+        "message_consumer",
+        "external_api_client",
+    }
+)
+
+#: Which concern each absence-proof schema may satisfy. ONE entry, and the point
+#: of the mapping is everything that is not in it.
+#:
+#: Ruled 2026-09-04: absence is approved only through
+#: `IntegrationSurfaceAbsenceProofV1`, and *"this is not a general 'nothing
+#: applies' escape hatch."* `data_governance` in particular is not repairable
+#: this way — an earlier ruling already refused an `inapplicable` for it, and it
+#: needs a real implementation rather than a better proof of emptiness. A proof
+#: naming a concern this map does not grant it is REFUSED, never ignored: ignoring
+#: it would let a document carry a certification nobody rejected.
+ABSENCE_PROOF_CONCERNS: Final[dict[str, str]] = {
+    INTEGRATION_ABSENCE_SCHEMA: "integration",
+}
+
+#: The state a proven absence declares. A document that omits it is not making
+#: this claim, whatever else it carries.
+ABSENCE_PROVEN_STATE: Final = "absent_proven"
+
 
 class ProfileVerdict(StrEnum):
     """Why the artifact was or was not admitted. Ordered by precedence below."""
@@ -128,7 +227,14 @@ class ProfileVerdict(StrEnum):
     PROFILE_DIGEST_MISMATCHED = "profile_digest_mismatched"
     #: A well-formed absence proof produced for a DIFFERENT artifact.
     ABSENCE_PROOF_FOREIGN = "absence_proof_foreign"
-    #: Fewer than thirteen concerns are bound, or one is bound to nothing.
+    #: A proof of a schema that may not certify the concern it names — or of a
+    #: schema this verifier grants nothing at all. Refused, never ignored.
+    ABSENCE_PROOF_INADMISSIBLE = "absence_proof_inadmissible"
+    #: Well-formed, for this artifact, and it ESTABLISHES nothing: an inventory
+    #: digest that is not the one derived from the image, an incomplete
+    #: enumeration, a family that was not empty, or no positive control.
+    ABSENCE_PROOF_UNESTABLISHED = "absence_proof_unestablished"
+    #: Fewer than thirteen concerns are satisfied, or one is bound to nothing.
     CONCERNS_INCOMPLETE = "concerns_incomplete"
 
 
@@ -143,6 +249,8 @@ VERDICT_PRECEDENCE: Final[tuple[ProfileVerdict, ...]] = (
     ProfileVerdict.ARTIFACT_COORDINATES_MISMATCHED,
     ProfileVerdict.WHEEL_DIGEST_MISMATCHED,
     ProfileVerdict.ABSENCE_PROOF_FOREIGN,
+    ProfileVerdict.ABSENCE_PROOF_INADMISSIBLE,
+    ProfileVerdict.ABSENCE_PROOF_UNESTABLISHED,
     ProfileVerdict.CONCERNS_INCOMPLETE,
     ProfileVerdict.ADMITTED,
 )
@@ -172,8 +280,9 @@ class ProfileReadback:
 
     verdict: ProfileVerdict
     detail: str
-    #: The concerns the document actually bound, for a reader that wants to see
-    #: WHICH are missing rather than only that some are.
+    #: The concerns the document actually satisfied — declared bound, or proven
+    #: absent by an ESTABLISHED proof. For a reader that wants to see WHICH are
+    #: missing rather than only that some are.
     bound_concerns: tuple[str, ...] = ()
 
     @property
@@ -227,27 +336,64 @@ def _load(path: Path) -> tuple[Mapping[str, object] | None, ProfileReadback | No
     return parsed, None
 
 
-def _installed_wheel_digest(path: Path) -> str | None:
-    """The wheel digest as the BUILDER STAGE recorded it, read independently.
+def canonical_inventory_digest(files: Sequence[tuple[str, str]]) -> str:
+    """The digest of the artifact's own distribution inventory.
+
+    THE SPECIFICATION, which a proof's producer implements separately: the
+    `(filename, sha256)` pairs of every distribution the builder stage recorded,
+    sorted by filename, as UTF-8 JSON with no insignificant whitespace.
+
+    Filename and digest only. A size is redundant beside a content digest, and a
+    field that adds nothing to the identity adds a way for two correct
+    implementations to disagree.
+
+    This is what makes ``observed_inventory_digest`` unmanufacturable: a caller
+    can write any string into a proof, and cannot make that string equal this
+    value without having read the same inventory.
+    """
+    body = sorted((str(name), str(digest)) for name, digest in files)
+    encoded = json.dumps(
+        [list(pair) for pair in body], separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _distribution_inventory(path: Path) -> tuple[tuple[str, str], ...] | None:
+    """The builder stage's per-file record, read independently of the profile.
 
     None when the record is missing or unusable — the caller turns that into
     `DOCUMENT_UNREADABLE` rather than into a mismatch, because a missing
     second witness is not a disagreement between two.
+
+    An entry missing either half makes the WHOLE inventory unusable rather than
+    being skipped. A silently narrowed inventory still produces a digest, and a
+    digest over the wrong set is the failure this second witness exists to
+    prevent.
     """
     document, _failure = _load(path)
     if document is None or document.get("contract") != DISTRIBUTIONS_CONTRACT:
         return None
     files = document.get("files")
-    if not isinstance(files, list):
+    if not isinstance(files, list) or not files:
         return None
+    entries: list[tuple[str, str]] = []
     for entry in files:
         if not isinstance(entry, dict):
-            continue
+            return None
         name = entry.get("filename")
         digest = entry.get("sha256")
-        if isinstance(name, str) and name.endswith(".whl") and isinstance(digest, str):
-            return digest
-    return None
+        if not isinstance(name, str) or not isinstance(digest, str):
+            return None
+        entries.append((name, digest))
+    return tuple(entries)
+
+
+def _wheel_digest(inventory: Sequence[tuple[str, str]]) -> str | None:
+    """The one `.whl` entry's digest, or None when there is not exactly one."""
+    wheels = [digest for name, digest in inventory if name.endswith(".whl")]
+    if len(wheels) != 1:
+        return None
+    return wheels[0]
 
 
 def _absence_proofs(document: Mapping[str, object]) -> Sequence[Mapping[str, object]]:
@@ -255,6 +401,74 @@ def _absence_proofs(document: Mapping[str, object]) -> Sequence[Mapping[str, obj
     if not isinstance(proofs, list):
         return ()
     return [entry for entry in proofs if isinstance(entry, dict)]
+
+
+def _establishes(
+    proof: Mapping[str, object], *, artifact_digest: str, inventory_digest: str
+) -> str:
+    """Empty when the proof establishes its concern's absence; else the reason.
+
+    The producing type's `__post_init__` already refused an incomplete
+    enumeration, an occupied family and a missing positive control — **in the
+    producing process.** What arrives here is JSON, and a constructor's refusals
+    do not travel in a document. So they are re-checked, against what this
+    document actually says, or a hand-written object with the right `schema`
+    string would satisfy a concern nothing ever scanned.
+    """
+    if proof.get("state") != ABSENCE_PROVEN_STATE:
+        return (
+            f"the proof declares state {proof.get('state')!r}, not "
+            f"{ABSENCE_PROVEN_STATE!r}; it is not making this claim"
+        )
+    if proof.get("observed_inventory_digest") != inventory_digest:
+        return (
+            "the proof's observed inventory digest "
+            f"{proof.get('observed_inventory_digest')!r} is not the one derived "
+            f"from this image's own distribution record ({inventory_digest}). "
+            "This is the half a caller cannot manufacture: writing a string is "
+            "free, making it equal a digest an independent reader computed is "
+            "not"
+        )
+    if proof.get("image_digest") != artifact_digest:
+        return (
+            f"the proof binds to artifact {proof.get('image_digest')!r} and this "
+            f"one is {artifact_digest!r}"
+        )
+    families = proof.get("families")
+    if not isinstance(families, dict):
+        return (
+            "the proof reports no family mapping, so no family was visited and "
+            "nothing was enumerated"
+        )
+    missing = sorted(INTEGRATION_SURFACE_FAMILIES - set(families))
+    if missing:
+        return (
+            f"the proof did not visit {missing}. A family never looked at is not "
+            "a family found empty, and a subset is the shape complete "
+            "enumeration exists to refuse"
+        )
+    unregistered = sorted(set(families) - INTEGRATION_SURFACE_FAMILIES)
+    if unregistered:
+        return (
+            f"the proof reports families {unregistered}, which are outside the "
+            "closed inventory. A surface nobody registered silently satisfies "
+            "'none present', which is the failure mode absence proofs actually "
+            "have"
+        )
+    occupied = sorted(name for name, found in families.items() if found)
+    if occupied:
+        return (
+            f"the scan found integration surfaces in {occupied}. The concern is "
+            "not absent; it is UNBOUND, and needs a provider rather than a proof"
+        )
+    control = proof.get("positive_control")
+    if not isinstance(control, list) or not control:
+        return (
+            "the proof carries no positive control. Without the instrument shown "
+            "finding something known to exist, a scan that never finds anything "
+            "and an artifact that has nothing are the same colour"
+        )
+    return ""
 
 
 def verify_embedded_profile(
@@ -300,14 +514,23 @@ def verify_embedded_profile(
             f"{expected.source_revision!r}",
         )
 
-    carried = _installed_wheel_digest(distributions_path)
-    if carried is None:
+    inventory = _distribution_inventory(distributions_path)
+    if inventory is None:
         return ProfileReadback(
             ProfileVerdict.DOCUMENT_UNREADABLE,
             f"the independent distribution record at {distributions_path} is "
             "missing or unusable, so the profile's wheel claim has no second "
             "witness. An artifact that describes itself is not evidence about "
             "itself",
+        )
+    carried = _wheel_digest(inventory)
+    if carried is None:
+        return ProfileReadback(
+            ProfileVerdict.DOCUMENT_UNREADABLE,
+            f"the distribution record at {distributions_path} does not name "
+            "exactly one wheel, so there is no single second witness to compare "
+            "against. Picking one of several would be choosing which witness to "
+            "believe",
         )
     claimed = document.get("wheel_sha256")
     if claimed != expected.wheel_sha256 or carried != expected.wheel_sha256:
@@ -318,6 +541,8 @@ def verify_embedded_profile(
             f"expected {expected.wheel_sha256!r})",
         )
 
+    inventory_digest = canonical_inventory_digest(inventory)
+    proven_absent: set[str] = set()
     for proof in _absence_proofs(document):
         proof_revision = proof.get("source_revision")
         if proof_revision != expected.source_revision:
@@ -329,27 +554,72 @@ def verify_embedded_profile(
                 f"{expected.source_revision!r}). It may be perfectly well-formed "
                 "and still say nothing about THIS image",
             )
+        schema = proof.get("schema")
+        concern = proof.get("concern")
+        granted = ABSENCE_PROOF_CONCERNS.get(str(schema))
+        if granted is None:
+            return ProfileReadback(
+                ProfileVerdict.ABSENCE_PROOF_INADMISSIBLE,
+                f"absence proof schema {schema!r} certifies nothing here. "
+                f"Exactly {sorted(ABSENCE_PROOF_CONCERNS)} may satisfy a concern "
+                "by proving it absent, and an unknown schema is refused rather "
+                "than ignored — ignoring it would let a document carry a "
+                "certification nobody rejected",
+            )
+        if concern != granted:
+            return ProfileReadback(
+                ProfileVerdict.ABSENCE_PROOF_INADMISSIBLE,
+                f"a {schema} names concern {concern!r}, and that schema may only "
+                f"prove {granted!r} absent. Absence is not a general 'nothing "
+                "applies' route: a concern outside this map needs an "
+                "implementation, not a better proof of emptiness",
+            )
+        unestablished = _establishes(
+            proof,
+            artifact_digest=expected.wheel_sha256,
+            inventory_digest=inventory_digest,
+        )
+        if unestablished:
+            return ProfileReadback(
+                ProfileVerdict.ABSENCE_PROOF_UNESTABLISHED,
+                f"the {granted!r} absence proof is well-formed and establishes "
+                f"nothing: {unestablished}",
+            )
+        proven_absent.add(granted)
 
     concerns = document.get("concerns")
-    bound: tuple[str, ...] = ()
+    declared: set[str] = set()
     if isinstance(concerns, dict):
-        bound = tuple(
+        declared = {
             name
             for name in FOUNDATION_CONCERNS
             if isinstance(concerns.get(name), dict) and concerns.get(name)
+        }
+    both = sorted(declared & proven_absent)
+    if both:
+        return ProfileReadback(
+            ProfileVerdict.ABSENCE_PROOF_INADMISSIBLE,
+            f"{both} are declared bound AND proven absent. Those are two of the "
+            "four states a concern may be in, and a concern is in exactly one — "
+            "a document asserting both has not decided which is true, and "
+            "accepting either would be this verifier deciding for it",
         )
+    satisfied = declared | proven_absent
+    bound = tuple(name for name in FOUNDATION_CONCERNS if name in satisfied)
     if len(bound) != len(FOUNDATION_CONCERNS):
         missing = [name for name in FOUNDATION_CONCERNS if name not in bound]
         return ProfileReadback(
             ProfileVerdict.CONCERNS_INCOMPLETE,
-            f"{len(bound)} of {len(FOUNDATION_CONCERNS)} concerns are bound; "
-            f"unbound: {', '.join(missing)}",
+            f"{len(bound)} of {len(FOUNDATION_CONCERNS)} concerns are "
+            f"satisfied; unsatisfied: {', '.join(missing)}",
             bound,
         )
 
     return ProfileReadback(
         ProfileVerdict.ADMITTED,
-        f"all {len(FOUNDATION_CONCERNS)} concerns bound, profile digest and "
-        "wheel agree with the independent distribution record",
+        f"all {len(FOUNDATION_CONCERNS)} concerns satisfied "
+        f"({len(declared)} bound, {len(proven_absent)} proven absent against "
+        "this image's own inventory), profile digest and wheel agree with the "
+        "independent distribution record",
         bound,
     )
