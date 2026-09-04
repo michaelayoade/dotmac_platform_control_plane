@@ -13,6 +13,8 @@ reworded sentence stops a prose assertion discriminating, silently.
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 from dataclasses import dataclass
 
 import pytest
@@ -145,11 +147,48 @@ def test_one_pointer_cannot_serve_both_purposes() -> None:
     assert refused.value.refusal is SignerRefusal.SHARED_POINTER
 
 
+#: Class-level attributes these descriptors may carry beyond their two fields.
+#: Declared, so adding one is a reviewed change rather than a silent widening of
+#: what the seam can hold.
+DECLARED_CLASS_ATTRIBUTES = frozenset({"material"})
+
+
 def test_no_key_material_can_be_held_here() -> None:
     """The seam carries pointers. A field able to hold a secret would make this
-    module a place where one could come to rest."""
+    module a place where one could come to rest.
+
+    This read `__dataclass_fields__`, which is not the set of instance fields:
+    it also carries ClassVar and InitVar PSEUDO-fields. So declaring
+    `material: ClassVar[MaterialKind]` -- a class constant that holds no
+    per-instance state -- made a correct declaration look like a new place a
+    secret could rest, and the assertion could not tell the two apart.
+
+    Strengthened rather than relaxed. Three claims now, where there was one:
+    """
     for pointer in (AuthorizationSignerPointer(AUTH), ObservationSignerPointer(OBS)):
-        assert set(type(pointer).__dataclass_fields__) == {"pointer", "purpose"}
+        cls = type(pointer)
+
+        # 1. INSTANCE state is exactly the two pointers-only fields. This is the
+        #    original claim, now made against the set that actually answers it.
+        instance_fields = {field.name for field in dataclasses.fields(cls)}
+        assert instance_fields == {"pointer", "purpose"}, cls.__name__
+
+        # 2. Everything else on the dataclass is declared. A pseudo-field added
+        #    later fails here instead of arriving unnoticed.
+        extras = set(cls.__dataclass_fields__) - instance_fields
+        assert (
+            extras <= DECLARED_CLASS_ATTRIBUTES
+        ), f"{cls.__name__} carries undeclared dataclass entries {sorted(extras)}"
+
+        # 3. And each extra is a ClassVar, not an InitVar. The distinction is
+        #    the whole point: an InitVar IS an `__init__` parameter, so it is a
+        #    way material could be handed IN, which is exactly what this test
+        #    exists to refuse. A ClassVar cannot be passed to the constructor.
+        accepted = set(inspect.signature(cls).parameters)
+        assert not (extras & accepted), (
+            f"{cls.__name__} accepts {sorted(extras & accepted)} at construction; "
+            "an InitVar can carry material in, which a ClassVar cannot"
+        )
 
 
 def test_signer_purposes_match_the_installed_control() -> None:
