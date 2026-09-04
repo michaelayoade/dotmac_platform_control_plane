@@ -116,7 +116,27 @@ class EvidenceRefusal(StrEnum):
     #: Its own refusal rather than a shared one: being handed the AUTHORIZATION
     #: key with a release-evidence key id and being handed no key id at all are
     #: different mistakes, and a caller cannot tell them apart from one code.
-    PURPOSE_MISMATCH = "PURPOSE_MISMATCH"
+    #:
+    #: ## Why the member and the value differ, uniquely in this enum
+    #:
+    #: `PURPOSE_MISMATCH` is the SHARED REASON, and it stays: the producer and
+    #: the verifier refuse the same class of mistake, and renaming either into
+    #: an unrelated reason would hide that they are one condition seen twice.
+    #:
+    #: The SERIALIZED value is namespaced by surface, because the two are not
+    #: interchangeable to anyone reading them. Signing is refused BEFORE any
+    #: evidence exists; verification is refused AFTER evidence arrived. An
+    #: operator branching on one string cannot tell which happened, and those
+    #: mean opposite things about whether an artifact is out there.
+    #:
+    #: The syntax follows the estate's — underscore-separated, surface first,
+    #: the way Control names its four (`authorization_purpose_mismatch` and its
+    #: siblings) — rather than introducing punctuation while fixing a naming
+    #: problem. Uppercase because that is this enum's own convention, which its
+    #: five members share.
+    #:
+    #: This value is unpublished, which is why it is the side that moves.
+    PURPOSE_MISMATCH = "RELEASE_EVIDENCE_SIGNING_PURPOSE_MISMATCH"
 
 
 class EvidenceRefused(ValueError):
