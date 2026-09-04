@@ -170,6 +170,11 @@ jobs:
 
       # ── 5. Test those exact bytes ───────────────────────────────────────
       - name: Accept the candidate, or refuse it
+        # The selected source SHA, held by this workflow rather than read back
+        # off the candidate — the profile readback's expectation must not come
+        # from the artifact it is judging.
+        env:
+          CANDIDATE_SOURCE_REVISION: ${{ steps.select.outputs.source_sha }}
         run: .github/candidate/acceptance.sh "${CANDIDATE_TAG}"
 
       # ── 6. Publish the SAME config and layers ───────────────────────────

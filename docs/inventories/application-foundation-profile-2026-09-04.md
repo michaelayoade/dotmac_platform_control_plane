@@ -455,3 +455,133 @@ would turn one green descriptor into ~112 findings. Whether the descriptor
 publishes the whole retention seal — and therefore what a capture must probe — is
 a deployment-contract decision, not an implementation detail, and it needs
 Michael.
+
+---
+
+## Addendum, 2026-09-04 (fourth) — the document is BUILT, and what each slot needs to BIND
+
+Michael's blocker, verbatim: *"Ten providers are implemented, but zero of
+thirteen concerns are bound into an executable profile. … Nothing builds,
+embeds, admission-checks and reads back the complete document."* Four verbs.
+This addendum records the first and the fourth, the wiring for the second and
+third, and the inventory nobody had.
+
+### A concern is bound because a provider ANSWERED
+
+`vendor_cp.deployment.profile` builds the document. Nothing in it writes a
+concern because a literal said so: for every slot it RESOLVES the providers in
+the environment the image actually has — `importlib.import_module` plus
+`getattr` against the installed distributions — and refuses to emit anything if
+a symbol is missing. A kernel repin that removed
+`write_platform_audit_event` does not produce a profile claiming
+`audit_telemetry`; it fails the image build, by name.
+
+Three facts per provider and none of them typed in: the **version** from
+`importlib.metadata` (what the INSTALLER recorded — the rule
+`vendor_cp.identity` already holds this assembly to), the **coordinate** from
+`poetry.lock`'s recorded wheel hash or the peeled commit the image was built at,
+and a **cross-check** between them. A distribution whose installed version
+disagrees with the lock is refused, because the coordinate would then name a
+wheel that is not in this image.
+
+It runs as `python -m vendor_cp.deployment.profile` inside the builder stage,
+from the INSTALLED wheel, so the document is produced by the same bytes it
+describes. A Dockerfile heredoc would have made the whole thing a literal in a
+build file — the exact shape this replaces — and nothing would lint, type-check
+or be testable.
+
+### What each of the thirteen needs to BIND, as opposed to be present
+
+This is the inventory that did not exist. "Present" is a fact about the source
+tree; "bound" is a fact about a document an artifact carries.
+
+| concern | present? | what BINDING additionally required | state |
+| --- | --- | --- | --- |
+| `identity_session` | yes | three kernel symbols resolving in the installed env; kernel wheel hash from the lock | **bound** |
+| `authorization` | yes | both platform guards resolving | **bound** |
+| `persistence_migrations` | yes | kernel `versions_dir` + this assembly's composed config and locations | **bound** |
+| `settings_secrets` | yes | assembly settings + secret materializer importing; assembly coordinate = peeled commit | **bound** |
+| `audit_telemetry` | yes | `write_platform_audit_event` resolving | **bound** |
+| `health_runtime_admission` | yes | readiness service, surface admission and `create_app` all resolving | **bound** |
+| `worker_execution` | yes | the kernel worker AND `vendor_cp.relay.runner` — the consumer that made it non-inert in #150 | **bound** |
+| `edge_security` | yes | CSRF, security-headers and rate-limit middleware all importing | **bound** |
+| `api_web_interaction` | yes | `create_app`, `web_surfaces` and the composed `vendor_cp.main:app` | **bound** |
+| `deployment_recovery` | yes | the control module's lineage + manifest, and the assembly's bundle/capture | **bound** |
+| `data_governance` | yes (#167) | `enforce_retention`, `GOVERNED_TABLES`, `CONTRACT` resolving | **bound** |
+| `request_evidence_context` | **in `dotmac-kernel`, not here** | an installed artifact and real assembly wiring that CONSUME it | **declared unbound** |
+| `integration` | proof type exists, in Foundation | a producible `IntegrationSurfaceAbsenceProofV1` | **declared unbound** |
+
+So the emitted document binds **eleven**, and names the other two with their
+reasons rather than merely being short. `verify_embedded_profile` returns
+`CONCERNS_INCOMPLETE` naming exactly those two — the correct verdict for this
+artifact.
+
+### `integration` cannot be filled from this side, and that is a finding
+
+The previous addendum recorded the seam as ready. Building the producer showed
+what "ready" did not cover: `IntegrationSurfaceAbsenceProofV1` lives in
+`dotmac-deployment-foundation`, which this assembly deliberately does not depend
+on and which the acceptance battery's **step 17** proves is absent from the
+image. So the proof cannot be CONSTRUCTED here.
+
+Hand-writing its JSON is not the workaround it looks like. The whole value of
+that type is the refusals its constructor performs — complete enumeration,
+emptiness, a positive control — and `profile_readback`'s own docstring is that
+*"a constructor's refusals do not travel in a document."* Re-implementing them
+from this side would produce a second, drifting copy of another repository's
+type in the one place where drift is unobservable.
+
+Installing Foundation as a BUILD-ONLY tool in the builder stage would work
+(only the emitted JSON would travel to runtime, leaving step 17 intact), but
+pinning it at all is a composition decision this repository has not taken —
+`pyproject.toml` says so explicitly. **Flagged, not invented.**
+
+`canonical_inventory_digest` is consequently NOT used by the builder: the only
+thing that needed it was that proof. No second implementation was written and
+the local one was not hardened further. Its ownership stays routed to
+Foundation, and it has to be settled before a proof is ever produced here.
+
+### The readback, run against real bytes for the first time
+
+Acceptance step 18 runs `verify_embedded_profile` INSIDE the candidate, against
+`/app/application_foundation_profile.json` and `/app/distributions.json` as the
+image carries them. One script, two callers: the PR rehearsal and the
+publication path, so this cannot drift.
+
+The probe asserts a NAMED verdict, and
+`tests/architecture/test_profile_embedding.py::EXPECTED_CANDIDATE_VERDICT` must
+agree with it. It is `DOCUMENT_ABSENT` in the commit that adds the probe and
+`CONCERNS_INCOMPLETE` in the commit that embeds the document, and both move
+together or the build fails. A probe that accepted any answer would have passed
+straight through the embed and proved nothing about it.
+
+**Two honest limitations, named rather than papered over.**
+`CANDIDATE_SOURCE_REVISION` is supplied by the CALLER — the workflow's own SHA
+in the rehearsal, the selected source SHA on the publication path — so the
+revision expectation genuinely comes from outside the image. The WHEEL
+expectation does not: there is no external source for it today, because the
+release receipt itself reads the wheel digest out of `/app/distributions.json`
+(step 13). The verifier's three-witness design therefore collapses to two on
+this path — the document's claim against the image's independent per-file
+record — and the "expectation from a receipt" leg is not exercised until a
+receipt exists to hold it.
+
+### The count, restated — and the first figure has NOT moved
+
+| what is being counted | figure |
+| --- | --- |
+| **concerns bound in something a deployment executes** | **0 of 13** |
+| **concerns with an implementation present in the assembly** | **11 of 13** |
+
+A builder is not a deployment. What is now true that was not: a document exists,
+it is produced from providers that answered, it is embedded in the image, and
+the candidate-acceptance battery reads it back. What is still not true: nothing
+ADMITS on it. The readback returns `CONCERNS_INCOMPLETE`, no deploy gates on the
+verdict, and image admission is not wired — which is correct, because two
+concerns are genuinely unsatisfied and wiring admission now would either block
+every deployment or be softened into accepting anything.
+
+The route from eleven to thirteen runs through `dotmac-kernel`
+(`request_evidence_context`) and a Foundation composition decision
+(`integration`). The route from zero to thirteen additionally requires a deploy
+path that refuses on the verdict. They are still different routes.

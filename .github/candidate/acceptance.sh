@@ -858,4 +858,86 @@ SEPARATION
 pass "the deployment tool must not be inside the application image, and is not"
 pass "and the enumeration saw the image's other distributions, so the absence means something"
 
+step "18  the foundation profile, READ BACK out of the artifact"
+# The reading half of the pair. `vendor_cp.deployment.profile_readback` shipped
+# BEFORE the document it verifies and has, until this step existed, only ever
+# been driven against `tmp_path` fixtures — so "the verifier works" meant "the
+# verifier agrees with files a test wrote", which is a different claim from
+# anything about an image.
+#
+# It runs INSIDE the candidate, against `/app/application_foundation_profile.json`
+# and `/app/distributions.json` as the image actually carries them, and it prints
+# the verdict. What this step asserts about that verdict changes exactly once, in
+# the commit that embeds the document — and that CHANGE is the evidence the
+# document is consumed rather than merely shipped. Presence is not consumption.
+#
+# ## What the expectation is, and what it is not
+#
+# `CANDIDATE_SOURCE_REVISION` is supplied by the CALLER — the workflow's own
+# commit SHA in the PR rehearsal, the selected source SHA on the publication
+# path — so the revision expectation genuinely comes from outside the image.
+#
+# The WHEEL expectation does not, and saying so is the point. There is no
+# external source for it today: the release receipt itself reads the wheel digest
+# out of `/app/distributions.json` (step 13), so taking it from anywhere else here
+# would be inventing a witness. The verifier's three-witness design therefore
+# collapses to two on this path — the document's claim against the image's
+# independent per-file record — and the "expectation from a receipt" leg is NOT
+# exercised until a receipt exists to hold it. That is a named limitation, not a
+# check pretending to be one.
+: "${CANDIDATE_SOURCE_REVISION:?the caller must supply the revision it expects; \
+reading it back out of the image would make the expectation a copy of the claim}"
+
+profile_expected_wheel="$(docker run --rm --network none --entrypoint python "$IMAGE" -c '
+import json
+files = json.load(open("/app/distributions.json"))["files"]
+wheels = [f["sha256"] for f in files if f["filename"].endswith(".whl")]
+assert len(wheels) == 1, wheels
+print(wheels[0])
+')" || fail "the candidate carries no single-wheel distribution record to expect against"
+
+SCRIPT="
+import json
+from vendor_cp.deployment.profile_readback import ExpectedArtifact, verify_embedded_profile
+
+outcome = verify_embedded_profile(
+    ExpectedArtifact(
+        source_revision='${CANDIDATE_SOURCE_REVISION}',
+        wheel_sha256='${profile_expected_wheel}',
+    )
+)
+print(json.dumps({
+    'verdict': str(outcome.verdict),
+    'bound': list(outcome.bound_concerns),
+    'detail': outcome.detail,
+}))
+"
+profile_readback="$(in_image)" \
+    || fail "the profile readback could not run inside the candidate at all"
+printf '  image reports %s\n' "$profile_readback"
+
+python3 - "$profile_readback" <<'PROFILE' || fail "the candidate's foundation profile is not in the state this commit expects"
+import json, sys
+
+observed = json.loads(sys.argv[1])
+verdict = observed["verdict"]
+
+# THE ARTIFACT CARRIES NO PROFILE DOCUMENT YET, and this asserts exactly that,
+# against real bytes rather than against a fixture. It is the state
+# `profile_readback`'s own docstring calls "the honest state of the artifact
+# today", and it has never actually been observed.
+#
+# The commit that embeds the document REPLACES this block. Do not soften it into
+# "any verdict is fine": a step that accepts every answer would go on passing
+# through the embed and prove nothing about it.
+if verdict != "document_absent":
+    print(f"expected document_absent, got {verdict}: {observed['detail']}", file=sys.stderr)
+    raise SystemExit(1)
+if observed["bound"]:
+    print(f"an absent document bound {observed['bound']}", file=sys.stderr)
+    raise SystemExit(1)
+PROFILE
+pass "the foundation profile readback ran against the artifact and refused it: document_absent"
+pass "and the refusal is now an OBSERVATION, which is what the embed will be measured against"
+
 printf '\nCANDIDATE ACCEPTED\n'
