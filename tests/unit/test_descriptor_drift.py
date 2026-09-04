@@ -273,7 +273,7 @@ def test_the_pre_bootstrap_descriptor_fails_against_the_post_bootstrap_database(
     assert heads[Direction.PRESENT_UNDECLARED] == {
         "0028_machine_attribution",
         "dc_0002_canonical_plan_digest",
-        "v018_licence_delivery_intents",
+        "v019_relay_heartbeat",
     }
     assert heads[Direction.DECLARED_ABSENT] == {"v016_licensing_authority"}
 

@@ -451,7 +451,10 @@ def test_deployment_adapter_includes_the_owned_secret_materializer() -> None:
     assert "src/vendor_cp/product_release_pins.py" in workflow
     assert "pin-product-release" in _text("scripts/materialize_production_secrets.py")
     assert '"options": {"cas": 0}' in service
-    assert service.count("secret/dotmac/vendor-control-plane/production/") == 3
+    # Four production records: database, runtime, deploy-ssh, and the relay
+    # dispatcher. The fourth is its own record rather than a field on the
+    # database one, because that record is the rotation ceremony's subject.
+    assert service.count("secret/dotmac/vendor-control-plane/production/") == 4
     assert "secret/dotmac/licensing/signing-key" in service
     assert "production/ghcr-read" not in service
     assert "required reviewer" in operations.lower()
@@ -1007,7 +1010,11 @@ def test_the_relay_runs_as_its_own_service_with_its_own_credential() -> None:
     # The relay never migrates. Handing a long-running process the `app_admin`
     # BYPASSRLS credential gives it a standing owner credential it has no code
     # path to use — the defect the `app` service's own comment records.
-    assert "MIGRATION_DATABASE_URL" not in relay
+    #
+    # Checked as an ASSIGNMENT rather than as a substring: the compose file
+    # explains in a comment why the variable is absent, and the first version of
+    # this assertion was failed by that explanation.
+    assert "MIGRATION_DATABASE_URL:" not in relay
 
 
 def test_only_the_relay_holds_the_dispatcher_credential() -> None:

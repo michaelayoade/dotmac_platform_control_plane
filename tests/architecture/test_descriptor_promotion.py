@@ -539,17 +539,29 @@ def test_the_changed_section_comparison_can_still_fail() -> None:
     pairs = _promoted_pairs()
     assert pairs
     before, after, entry = pairs[-1]
-    smuggled = dict(after)
-    migration = dict(before["migration"])  # type: ignore[arg-type]
-    migration["expected_heads"] = ["0001_not_the_declared_head"]
-    smuggled["migration"] = migration
-
     declared = set(entry["changed_sections"])  # type: ignore[arg-type]
+
+    # The planted section is DERIVED rather than named. It used to be
+    # `migration`, which worked only while no promotion declared that section --
+    # the 2026-09-04 promotion legitimately does, and the plant then became
+    # indistinguishable from the change it was smuggled alongside, so this test
+    # failed while the predicate it guards was working perfectly. Any section
+    # the promotion did NOT declare carries the same proof and keeps carrying it
+    # whatever a future promotion touches.
+    undeclared = sorted(set(before) - declared)
+    assert undeclared, (
+        "the last promotion declares every section, so there is nothing to "
+        "smuggle a change into and this sensitivity check proves nothing"
+    )
+    section = undeclared[0]
+    smuggled = dict(after)
+    smuggled[section] = {"planted": "not the promoted value"}
+
     moved = {
-        section
-        for section in set(before) | set(smuggled)
-        if before.get(section) != smuggled.get(section)
+        name
+        for name in set(before) | set(smuggled)
+        if before.get(name) != smuggled.get(name)
     }
-    assert (
-        "migration" in moved - declared
-    ), "the comparison did not notice a heads change outside changed_sections"
+    assert section in moved - declared, (
+        f"the comparison did not notice a {section} change outside " "changed_sections"
+    )

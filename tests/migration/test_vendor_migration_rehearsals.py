@@ -61,7 +61,7 @@ LICENSING_HEAD = "li_0001_licensing"
 DEPLOYMENT_CONTROL_HEAD = "dc_0002_canonical_plan_digest"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-VENDOR_HEAD = "v018_licence_delivery_intents"
+VENDOR_HEAD = "v019_relay_heartbeat"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:

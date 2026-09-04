@@ -95,6 +95,11 @@ VENDOR_OWNED_TABLES: Final[frozenset[str]] = frozenset(
         # own, and this is the correlation record that SURVIVES the cutover
         # alongside the immutable artifact read.
         "licence_delivery_intents",
+        # The platform outbox relay's durable liveness fact (`v019`). Vendor's
+        # own and not a delivery table: it is what lets a relay dying during
+        # total quiescence be distinguished from an idle one, and it retires
+        # with the relay rather than with ADR-0010's transport ledger.
+        "relay_heartbeats",
     }
 )
 

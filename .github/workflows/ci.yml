@@ -352,6 +352,12 @@ jobs:
           VENDOR_DB_ADMIN_PASSWORD: admin-placeholder
           VENDOR_DB_APP_USER_PASSWORD: app-placeholder
           VENDOR_DB_PLATFORM_API_PASSWORD: platform-placeholder
+          # The relay dispatcher's. A placeholder like its three
+          # siblings: this rehearsal interpolates the compose file and
+          # never starts the database, and `:?` in the compose file
+          # makes an inventory that omits it fail closed — which is what
+          # this job just proved by failing before the value existed.
+          VENDOR_DB_DISPATCHER_PASSWORD: dispatcher-placeholder
           VENDOR_LICENCE_SIGNING_KEY_HOST_FILE: /tmp/not-used
         run: |
           set -euo pipefail

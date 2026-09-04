@@ -18,6 +18,7 @@ from vendor_cp.production_secrets import (
     DEPLOY_SSH_PATH,
     ENV_SECRET_KEYS,
     LICENCE_SIGNING_PATH,
+    RELAY_DISPATCHER_PATH,
     RUNTIME_PATH,
     SECRET_FIELDS,
     HostSecretBundle,
@@ -67,6 +68,7 @@ def _records() -> dict[str, dict[str, str]]:
             "public_key_openssh": "ssh-ed25519 AAAA vendor-cp-prod-deploy",
             "username": "root",
         },
+        RELAY_DISPATCHER_PATH: {"dispatcher_password": "dispatcher_test_123"},
     }
 
 
@@ -107,7 +109,7 @@ VENDOR_LICENCE_SIGNING_KEY_ID=vendor-prod-1
 """
 
 
-def test_seed_creates_exact_four_records_and_no_registry_credential() -> None:
+def test_seed_creates_exact_five_records_and_no_registry_credential() -> None:
     client = FakeSecrets()
 
     created = seed_missing_records(client, keypair_factory=_keypair)
@@ -118,6 +120,10 @@ def test_seed_creates_exact_four_records_and_no_registry_credential() -> None:
         DATABASE_PATH,
         RUNTIME_PATH,
         DEPLOY_SSH_PATH,
+        # The relay dispatcher joined as its OWN record rather than as a fourth
+        # field on the database one, because that record is the rotation
+        # ceremony's subject and its candidate set is exact.
+        RELAY_DISPATCHER_PATH,
     }
     assert all(
         set(client.records[path]) == fields for path, fields in SECRET_FIELDS.items()
@@ -134,7 +140,7 @@ def test_seed_preserves_existing_records() -> None:
 
     assert DATABASE_PATH not in created
     assert client.records[DATABASE_PATH] == original
-    assert len(created) == 3
+    assert len(created) == 4
 
 
 def test_signing_material_refuses_non_urlsafe_base64() -> None:
