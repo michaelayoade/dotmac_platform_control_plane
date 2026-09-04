@@ -36,7 +36,20 @@ from vendor_cp.readiness.service import (
 )
 from vendor_cp.relay.health import RelayHealth, RelayVerdict
 
-NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
+# Deliberately the real clock, not a literal instant.
+#
+# The route under test is an ADAPTER: it supplies `datetime.now(UTC)` to
+# `check_readiness`, which is correct production behaviour and not a seam worth
+# breaking open for tests. So a fixture heartbeat pinned to a fixed instant is
+# judged against a clock that keeps moving, and every route assertion below
+# holds only while that literal is recent. It was `datetime(2026, 9, 4, 12, 0)`,
+# and `check` went red 300 seconds after it — on a date nobody edited, on a
+# documentation-only branch.
+#
+# Nothing in this module asserts anything about a calendar date. Every property
+# here is an AGE compared against a window, so the honest fixture clock is the
+# same one the adapter reads.
+NOW = datetime.now(UTC)
 WINDOW = timedelta(seconds=300)
 
 
@@ -323,6 +336,28 @@ def test_the_route_answers_200_when_the_dependency_answers() -> None:
         response = client.get("/health/ready")
     assert response.status_code == 200
     assert response.json() == {"ready": True, "detail": "ready"}
+
+
+def test_the_healthy_fixture_is_healthy_by_the_clock_the_route_reads() -> None:
+    """The precondition every route assertion above rests on, asserted directly.
+
+    A frozen fixture clock does not fail loudly; it makes the 503 tests pass for
+    the wrong reason — an unreachable-database case and a stale-heartbeat case
+    are indistinguishable when EVERY fixture is stale — and leaves only the
+    non-vacuity test to notice. This puts the precondition under its own
+    assertion, judged by `datetime.now(UTC)` exactly as the adapter judges it,
+    so re-pinning `NOW` to a past literal fails here and immediately rather than
+    at some later hour.
+    """
+    real_now = datetime.now(UTC)
+    assert _check(_ReachableSession(), now=real_now) == ReadinessReport(
+        ready=True, detail=ReadinessDetail.READY
+    )
+    # Sensitivity: the same check, same clock, an old heartbeat — the assertion
+    # above is capable of failing, so its passing is a measurement.
+    assert not _check(
+        _ReachableSession(heartbeat_at=real_now - timedelta(days=1)), now=real_now
+    ).ready
 
 
 def test_liveness_and_readiness_are_different_answers() -> None:
