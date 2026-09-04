@@ -512,6 +512,48 @@ def licence_health(args: argparse.Namespace) -> Result:
         return Result(command="licence health", data=_fields(health))
 
 
+# ── relay ───────────────────────────────────────────────────────────────────
+
+
+def relay_drain(args: argparse.Namespace) -> Result:
+    """One drain pass.
+
+    No `platform_db()` here, deliberately: this command needs the DISPATCHER
+    credential as well as the delivery one, and `vendor_cp.relay.runner` owns
+    both connections because the kernel worker owns the transaction boundary
+    between them. An unconfigured relay raises `RelayNotConfiguredError`, which
+    `translate` carries out as a refusal — never as a pass that drained
+    nothing.
+    """
+    from vendor_cp.relay.runner import drain_once
+
+    report = drain_once(worker_id=args.worker_id)
+    return Result(command="relay drain", data=_fields(report))
+
+
+def relay_health(args: argparse.Namespace) -> Result:
+    """The full observation: counts, ages, dead letters and what is unmeasured.
+
+    The unauthenticated `/health/ready` probe publishes the verdict alone. This
+    is the authenticated peer, and it is where the numbers belong.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from vendor_cp.config import vendor_settings
+    from vendor_cp.relay.health import relay_health as observe
+
+    with platform_db() as db:
+        health = observe(
+            db,
+            now=datetime.now(UTC),
+            overdue_after=timedelta(seconds=vendor_settings.relay_overdue_seconds),
+            stale_lease_after=timedelta(
+                seconds=vendor_settings.relay_stale_lease_seconds
+            ),
+        )
+    return Result(command="relay health", data=_fields(health))
+
+
 # ── deployment ──────────────────────────────────────────────────────────────
 
 

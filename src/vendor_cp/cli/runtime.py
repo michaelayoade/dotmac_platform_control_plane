@@ -137,6 +137,11 @@ _BY_NAME: Final[tuple[tuple[str, str], ...]] = (
     ("TransportModeNotPermittedError", "owner.provider_not_permitted"),
     ("SigningKeyUnavailableError", "evidence.capability_absent"),
     ("ProductionConfigurationError", "config.invalid"),
+    # `2`, not `4`. A relay with no dispatcher credential is a deployment that
+    # was never configured to drain — nothing was attempted and nothing is
+    # missing from the database, so "unavailable evidence" would send an
+    # operator looking for a row instead of at the environment.
+    ("RelayNotConfiguredError", "config.invalid"),
     ("UnknownDeploymentProfileError", "config.invalid"),
     ("CatalogueEvidenceError", "evidence.not_found"),
     ("ReleaseEvidenceConflict", "owner.conflict"),

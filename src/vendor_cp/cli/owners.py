@@ -222,6 +222,21 @@ OWNERS: Final[tuple[Owner, ...]] = (
         False,
         "report licence delivery pipeline health",
     ),
+    # ── relay ──────────────────────────────────────────────────────────────
+    Owner(
+        "relay drain",
+        "vendor_cp.relay.runner",
+        "drain_once",
+        True,
+        "claim one platform outbox batch and deliver it",
+    ),
+    Owner(
+        "relay health",
+        "vendor_cp.relay.health",
+        "relay_health",
+        False,
+        "report whether the platform outbox is being drained",
+    ),
     # ── deployment ─────────────────────────────────────────────────────────
     Owner(
         "deployment register-target",

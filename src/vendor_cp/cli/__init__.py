@@ -70,6 +70,7 @@ GROUPS: Final[tuple[str, ...]] = (
     "approval",
     "allocation",
     "licence",
+    "relay",
     "deployment",
     "recovery",
     "diagnose",
@@ -295,6 +296,28 @@ def build_parser() -> _Parser:
         licence_sub, "licence", "health", "report delivery pipeline health"
     )
     health.set_defaults(handler=commands.licence_health)
+
+    # ── relay ──────────────────────────────────────────────────────────────
+    relay = groups.add_parser(
+        "relay", help="the platform outbox relay: activation -> allocation"
+    )
+    relay_sub = relay.add_subparsers(dest="name", parser_class=_Parser)
+
+    drain = _command(
+        relay_sub, "relay", "drain", "claim one platform outbox batch and deliver it"
+    )
+    # `--worker-id` is required rather than defaulted to a hostname. The lease
+    # is held BY this identifier, and two invocations that silently shared one
+    # would each believe they held the other's claim. No secret is accepted on
+    # argv here or anywhere: the dispatcher credential arrives through
+    # `VENDOR_RELAY_DISPATCHER_DATABASE_URL`.
+    drain.add_argument("--worker-id", required=True)
+    drain.set_defaults(handler=commands.relay_drain)
+
+    relay_health_command = _command(
+        relay_sub, "relay", "health", "report whether the outbox is being drained"
+    )
+    relay_health_command.set_defaults(handler=commands.relay_health)
 
     # ── deployment ─────────────────────────────────────────────────────────
     deployment = groups.add_parser(

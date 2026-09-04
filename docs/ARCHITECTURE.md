@@ -284,6 +284,92 @@ checked against the real database at deploy rather than only in rehearsal.
 So all five composed owners are now adopted. What remains below adopted is
 Vendor's own retained delivery path, which ADR-0010 retires rather than adopts.
 
+## The activation relay (`vendor_cp.relay`)
+
+The composed owners were adopted with a hole between two of them. Commercial
+Agreements enqueues `agreement.activated.v1` into
+`public.platform_outbox_events` atomically with the transition — history, audit
+and fact, all three or none. Entitlement Allocation stages an allocation when
+`vendor_cp.allocations.consumer.ContractEventConsumer` is handed that event. And
+nothing handed it one: that class was constructed **nowhere under `src/`**, no
+process claimed a batch, and `docker-compose.production.yml` ran no relay. The
+2026-08-30 composition census measured it directly (§ 6.3). The consequence is
+the shape worth naming — an activated agreement **looked complete while
+producing no entitlement allocation**, and no surface said otherwise.
+
+`vendor_cp.relay` closes it in two modules that are deliberately separate.
+`runner` composes the drain; `health` reports whether the drain is happening and
+writes nothing.
+
+**Nothing here is a second authority.** The kernel owns leasing, backoff,
+dead-lettering and the two connection identities
+(`dotmac_kernel.messaging.platform_worker`). Entitlement Allocation owns what a
+valid allocation is. Commercial Agreements owns whether an agreement is active.
+The consumer stays an adapter over `vendor_cp.allocations.adapter
+.stage_allocation`, and no name from the allocation module's authority surface
+appears in the relay package.
+
+**Replay is the kernel's, twice, and this adds no third mechanism.** Delivery is
+at-least-once by the relay's design — one active claim per lease, and a crash
+after delivery but before settle redelivers. Staging is idempotent on the
+delivery: `stage_allocation` keys `dotmac_kernel.idempotency
+.execute_once_platform` on `source_event_id`, which is the outbox row id the
+consumer passes through. Hard rule 21's owner is untouched.
+
+**Two connections, THREE ROLES, ONE database.** The dispatcher connection is
+`platform_outbox_dispatcher`, which kernel `0012_platform_outbox` grants
+`EXECUTE` on `claim_platform_outbox_batch` and `settle_platform_outbox_event`
+and no table privilege of any kind. The delivery connection is the ordinary
+`platform_api` runtime the assembly already holds. That is a third ROLE, not a
+second database and not a second session factory: the dispatcher's runtime is
+the kernel's own instantiable `DatabaseRuntime`, which `dotmac_starter_mt` hard
+rule 8 names as the sanctioned path for a product supplying its own credential.
+Deny case D1's connection allowlist stays empty.
+
+**An unconfigured relay refuses.** `VENDOR_RELAY_DISPATCHER_DATABASE_URL` is
+empty by default and `relay drain` raises rather than reporting a pass that
+claimed nothing, because "drained 0 events" from a relay with no credential is
+indistinguishable from "drained 0 events" from a healthy idle one.
+
+**Readiness composes the verdict.** `/health/ready` asked only whether the
+database answered, so a deployment whose outbox was not being drained reported
+ready. It now asks both questions in order — the database probe first, because
+an unreachable database and an unreadable outbox have different repairs — and
+publishes one member of a closed vocabulary. The probe is unauthenticated, so it
+carries the verdict and deliberately never a count; the depths, ages and dead
+letters are `dotmac-platform relay health`, behind a shell on the host.
+
+**What distinguishes idle from dead, and what does not.** The fault requires
+work to exist: an activated agreement writes a row, so a relay that is not
+running lets that row age past `VENDOR_RELAY_OVERDUE_SECONDS` and readiness goes
+red. An empty queue with nothing overdue is genuinely idle and genuinely ready.
+The case this does **not** cover is a relay that dies during total quiescence,
+and `RelayHealth.relay_liveness_during_quiescence_measurable` is `False` rather
+than absent — the same shape as `keyring_uptake_lag_measurable` in
+`vendor_cp.licensing.delivery_ops`. Closing it needs a durable heartbeat, a
+table and a migration, and belongs with the slice that composes the relay into
+the deployment.
+
+**Not yet deployed, and that is the honest state.** This composes the relay and
+makes its absence visible; it does not run one in production.
+`docker-compose.production.yml` defines no relay service, and
+`deploy/postgres/init-roles.sh` creates `platform_outbox_dispatcher` without
+setting a password — so no dispatcher credential exists to configure yet.
+Whether one exists on the running host is an operator measurement against a host
+Michael names (rule 17), not a claim derivable here. Production currently holds
+zero rows in every one of these tables, so readiness stays green until an
+agreement is actually activated.
+
+**Proven where the claim path exists.** The drain proof is
+`tests/migration/test_platform_relay_drain.py`, against a migrated scratch
+Postgres: a real lifecycle drives a real activation, the kernel's real
+`SECURITY DEFINER` claim leases the row, the real consumer stages, and the row
+settles to `sent`. It is not in the unit tier because
+`claim_platform_outbox_batch` does not exist on SQLite, and a test that faked
+the claim would prove the consumer transports an event it was handed — which is
+not the defect. The dispatcher's inability to read the table it drains is driven
+there too, rather than described in a migration comment.
+
 ## In-place module recomposition (ADR-0007)
 
 This repository, runtime and control-plane database remain the Vendor product
@@ -490,7 +576,7 @@ authorization step had no reachable path to a plan. **`deployment authorize`
 prints the `authorization_ref`** — the rollout id, which is the authorization
 run identity a deployment foundation binds between the canonical descriptor and
 its own execution report. Rendering, applying, observing and rolling back are
-the published Foundation CLI's; `deployment foundation -- …` forwards to
+the published Foundation CLI's; `deployment foundation — …` forwards to
 `dotmac-deploy` verbatim and returns its status unchanged.
 
 Exit codes, the secret-intake rule, the production-shape ratchet and the

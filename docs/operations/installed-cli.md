@@ -40,11 +40,54 @@ data every check reads, so it cannot drift from what the CLI actually does.
 | `approval` | approval policies, requests and decisions |
 | `allocation` | entitlement allocations |
 | `licence` | issuance, revocation, signing keys, delivery |
+| `relay` | the platform outbox relay: activation -> allocation |
 | `deployment` | the operator workflow over Deployment Control |
 | `recovery` | the catalogue capture query and the recovery bundle |
 | `diagnose` | questions about this process rather than about the fleet |
 
 Global flags: `--format json|table` (default `table`) and `--version`.
+
+## Draining the platform outbox
+
+`dotmac-platform relay drain --worker-id <id>` claims one batch of
+`public.platform_outbox_events` and delivers it. It is the drain that turns an
+activated commercial agreement into a staged entitlement allocation: the
+agreement owner enqueues `agreement.activated.v1` atomically with the
+transition, and this is what carries it to
+`vendor_cp.allocations.consumer.ContractEventConsumer`.
+
+Two credentials are involved and they are different roles on the ONE
+control-plane database. The delivery half is the ordinary `platform_api` DSN the
+process already holds. The claim half is `VENDOR_RELAY_DISPATCHER_DATABASE_URL`,
+the `platform_outbox_dispatcher` role — which holds `EXECUTE` on the kernel's
+two leasing functions and no table privilege of any kind, so it can lease and
+settle and can never read a business table.
+
+**It refuses when that variable is unset**, with `config.invalid` and exit `2`.
+That is deliberate and is the whole point of the command: "drained 0 events"
+from a relay that never had a credential is indistinguishable from "drained 0
+events" from a healthy idle relay, and one of those has to be a refusal.
+
+`--worker-id` is required rather than defaulted. The lease is held BY that
+identifier, so two invocations that silently shared one would each believe they
+held the other's claim.
+
+`dotmac-platform relay health` reports whether the drain is happening: pending
+and overdue depths, the oldest overdue age, abandoned leases, dead letters, and
+the same three counts narrowed to activation facts. A count that could not be
+TAKEN comes back as null rather than zero — a zero that means "could not query"
+reads exactly like a zero that means "nothing is wrong".
+
+It also reports `relay_liveness_during_quiescence_measurable: false`, and that
+is a real limitation rather than a placeholder. A relay that dies while nothing
+is queued is invisible from the queue alone; proving it lives during quiescence
+needs a durable heartbeat, which needs a table and a migration, and that is
+scoped to the slice that composes the relay into the deployment. Until then the
+gap is declared where a reader meets it.
+
+The unauthenticated `/health/ready` probe publishes the VERDICT alone — one
+member of a closed vocabulary, never a count. The numbers are here, behind a
+shell on the host.
 
 ## Exit codes
 
@@ -173,7 +216,7 @@ that a decision was taken.
 ## Rendering, applying, observing, rolling back
 
 Those belong to `dotmac-deployment-foundation` and are not reimplemented here.
-`dotmac-platform deployment foundation -- <args>` forwards the argument vector
+`dotmac-platform deployment foundation — <args>` forwards the argument vector
 to that project's own `dotmac-deploy` console script, verbatim, and returns its
 exit status unchanged — remapping it would invent a verdict this process did not
 compute. If the Foundation is not installed the passthrough exits `4`: the tool
