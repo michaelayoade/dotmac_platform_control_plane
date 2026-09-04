@@ -74,28 +74,73 @@ The kernel ships `dotmac_kernel.middleware.observability`, so this is a
 composition gap rather than a missing capability — but binding it while nothing
 mounts it would be exactly the inert slot the gate refuses.
 
-### `data_governance`
+### `data_governance` — RED, and `inapplicable` is refused as a route
 
-**No provider.** No consent ledger, no retention policy and no residency rule is
-composed: `dotmac_kernel.consent` has zero references here. The licensing
-delivery tables hold data but govern none of it.
+**Ruled 2026-09-04:** this requires a real `ConcernBinding`, not an
+inapplicable, and *"the binding must resolve to an implementation that actually
+enforces the platform-data rules."* So the argument I declined to make on my own
+reading — that a control plane holding no tenant data has none to govern — is
+closed off. It does not need a better proof; it needs an implementation.
 
-There is a plausible argument that a control plane holding no tenant or
-subscriber data has no data to govern — but that argument needs an
-`InapplicableConcern` with an **executable `AbsenceProof`**, not prose, and I
-have not established one. Recorded red rather than marked inapplicable on my own
-reading, because "no unjustified inapplicable" is the gate.
+There is no such implementation here. Measured against `main` at `dde5c3c`:
 
-### `integration`
+| primitive | references under `src/vendor_cp` |
+| --- | --- |
+| retention | 0 |
+| residency | 0 |
+| erasure / data subject | 0 |
+| anonymisation / pseudonymisation | 0 |
+| purge | 0 |
+| consent (`dotmac_kernel.consent`) | 0 |
+| classification | 3, none of them about data — secret custody and backfill row classification |
+
+**And the tenant data path is not used at all.** `get_platform_db` appears in 10
+files and `platform_session` in 4; `get_db`, `tenant_session` and `set_tenant`
+appear in **none**, and the single `tenant_scope` hit is a docstring. The
+kernel's RLS machinery is composed and live — 17 tables carry `tenant_id` and
+force row security — but nothing in this assembly reads or writes through a
+tenant-scoped session. It is machinery with no runtime consumer here, which is
+the inert slot the gate refuses.
+
+#### The two adjacent mechanisms, and why neither is the owner
+
+Both were measured before being set aside, because the reason they are adjacent
+is the thing that stops the next reader binding one of them.
+
+**The plane separation.** 16 vendor revisions contain a `REVOKE`, 14 of them
+`REVOKE ALL`, and PostgreSQL enforces it on every statement the tenant app role
+makes. It is real enforcement, driven by refusals in the Postgres tier rather
+than described. But what it enforces is **which principal may touch which
+table** — access control, whose concern is `authorization`, already bound. It
+says nothing about how long data may be kept, where it may live, or what may be
+erased.
+
+**The append-only audit trail.** Kernel `0026` makes `platform_audit_events`
+immutable, which is a genuine rule about data. It is the integrity half of
+`audit_telemetry`, already bound, and binding it here would put one mechanism
+under two concerns while retention, residency and erasure remained unenforced.
+
+Binding either would make the slot look filled while nothing enforces the
+platform-data rules — the exact outcome *"actually enforces"* rules out. So the
+concern stays **red**, and the finding is that this assembly has no data
+lifecycle owner at all: not one that describes the rules without enforcing them,
+but one that does neither.
+
+### `integration` — RED, and the repair is Foundation's
 
 **No provider.** `dotmac-integration` is not composed; ADR-0007 § 6 defers
 Integrator, and the Governance external-connector ratchet stands at zero.
 
-This is the strongest candidate of the three for a justified
-`InapplicableConcern`: the deferral is a checked-in decision and the ratchet at
-zero is close to an executable absence proof. Whether that ratchet satisfies
-`AbsenceProof`'s contract is the Foundation lane's call on its own type, not
-mine to assert.
+I recorded this as the strongest candidate for a justified `InapplicableConcern`
+while saying that whether the ratchet satisfies `AbsenceProof` was the
+Foundation lane's call on its own type. **Ruled 2026-09-04:** the current
+worker-specific `AbsenceProof` *cannot represent* integration at all, and the
+repair is a discriminated, concern-specific proof — an
+`IntegrationSurfaceAbsenceProofV1` with a closed inventory and installed-image
+evidence.
+
+That is a change to Foundation's type, so nothing here can close it. The
+concern stays red and the obligation sits with the Foundation lane.
 
 ## What this does not decide
 
@@ -109,3 +154,22 @@ The resolver already refuses `profile_digest` by name
 resolving with no change to its shape — and until then the refusal is the
 correct answer rather than a gap, which is what keeps the empty-string default
 from reappearing one layer up.
+
+
+## Addendum, 2026-09-04 — a refusal-code collision to resolve
+
+Two codes now spell `PURPOSE_MISMATCH` across the signing plane:
+
+* `vendor_cp.deployment.evidence_producer.EvidenceRefusal.PURPOSE_MISMATCH` —
+  raised when the **producer** is handed an identity of another purpose;
+* Foundation's machine-readable `PURPOSE_MISMATCH` on the **verifying** side.
+
+They describe the same class of mistake at opposite ends of one signature, which
+is precisely when one name for two things is worst: an operator branching on the
+string cannot tell whether signing was refused or verification was. Whichever
+way it resolves, one side moves — and this side is willing to be the one that
+does, since the producing refusal is the newer of the two.
+
+`RELEASE_EVIDENCE_PURPOSE` is declared once here for the same reason, so if
+Foundation's canonical purpose string differs from `platform_release_evidence`,
+exactly one constant moves rather than every call site.
