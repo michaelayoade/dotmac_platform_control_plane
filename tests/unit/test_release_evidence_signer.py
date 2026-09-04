@@ -59,11 +59,25 @@ def test_another_purpose_is_refused() -> None:
         _signer(purpose="deployment_authorization")
 
 
-def test_a_signer_with_no_key_id_is_refused() -> None:
-    """No key id means no policy could ever select a key to check the signature
-    against, and the refusal belongs at construction rather than at signing."""
-    with pytest.raises(SignerPointerRefused):
-        _signer(key_id="   ")
+def test_a_signer_with_no_key_id_is_permitted_here_and_refused_there() -> None:
+    """ONE OWNER for one check, and this is where that decision is recorded.
+
+    The producer has refused a blank key id as `UNUSABLE_KEY_ID` since before
+    this type existed, with its own stated reason: no policy could select a key
+    to verify against. Re-refusing it at construction would render that branch
+    unreachable — a code for something that cannot happen, and a test that could
+    no longer fail.
+
+    So the pointer permits it and the producer still refuses it. Both halves are
+    asserted here, because the decision is only safe while the second half
+    actually fires.
+    """
+    permitted = _signer(key_id="   ")
+    assert permitted.key_id == "   "
+
+    with pytest.raises(EvidenceRefused) as refused:
+        sign_release_evidence(FACTS, signer=permitted, sign=_sign)
+    assert refused.value.refusal is EvidenceRefusal.UNUSABLE_KEY_ID
 
 
 def test_the_pointer_must_be_in_this_product_s_namespace() -> None:
