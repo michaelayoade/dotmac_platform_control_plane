@@ -350,9 +350,18 @@ only where A1 replaces the host.
 
 ## Amendment, 2026-09-01 — A6: the issuer must be able to create the SUBJECT it authorizes
 
-Proposed 2026-09-01, pending Michael Ayoade's acceptance. **Nothing above is
-edited**, for the reason A2 already gave: a record quietly rewritten to look as
-though it always said the right thing teaches nobody what the mistake was.
+Proposed 2026-09-01, **A6.4 replaced 2026-09-04, and the whole amendment is
+still pending Michael Ayoade's acceptance.** Nothing here is marked accepted:
+A6.1, A6.2, A6.3 and A6.5 stand as proposed on 2026-09-01 and were accepted in
+substance without being ratified in this record; A6.4 now carries Michael's
+2026-09-04 ruling and is prepared FOR ratification, not recorded as having
+received it.
+
+**Nothing above the amendment is edited**, for the reason A2 already gave: a
+record quietly rewritten to look as though it always said the right thing
+teaches nobody what the mistake was. A6.4 follows the same rule one level down —
+it is replaced rather than overwritten, and the clause it replaces is quoted
+inside it.
 
 ### A6.1 The gap, stated as the document's own contradiction
 
@@ -419,14 +428,131 @@ decisions sit exactly on that line and none of them is taken here.
 target has no desired state, `_STATUS` maps `REGISTERED` onto delivery
 `SUSPENDED`, and the command that creates a registration says so in its output.
 
-### A6.4 The one decision the CLI does take, and why it is a transport one
+### A6.4 Every plan input derives from one immutable reference
 
-`--spec` is REQUIRED, although `DesiredDeployment.spec` defaults to an empty
-mapping upstream. An omitted spec would freeze an empty specification into an
-immutable plan digest and the approver would approve it without ever seeing that
-it was empty. Refusing to guess an argument is a decision about this surface;
-what a spec MEANS is read by nobody here and, deliberately, by nobody upstream
-either. An operator who wants an empty spec writes `{}` in a file.
+**REPLACED 2026-09-04 on Michael's ruling, pending his ratification.** A6.1,
+A6.2, A6.3 and A6.5 are accepted in substance and are not reopened; A6.4 alone
+is replaced, and what it used to say is kept below rather than deleted, for the
+reason the amendment header already gives.
+
+**Which record this is.** This is `dotmac_platform_control_plane`'s ADR-0013 —
+*the operator authorization issuer, and the one-time bootstrap that starts it* —
+and its amendment A6. `dotmac_governance` has its own, unrelated ADR 0013
+(*Repository-local claims and external oracles*), so a bare "ADR-0013 A6"
+resolves to the wrong record and means something else entirely. The Governance
+lane hit exactly that ambiguity and parked this ruling in its open decision 47
+rather than writing across the boundary. Cite this clause with its repository.
+
+#### The rule
+
+> Target, desired state, profile digest, authorized images and execution-plan
+> inputs are derived from one immutable reference. No independently supplied
+> value may silently join the plan.
+
+Five values, named individually so a reader cannot discharge the clause by
+checking one of them:
+
+1. **target**
+2. **desired state**
+3. **profile digest**
+4. **authorized images**
+5. **execution-plan inputs**
+
+Each is DERIVED — resolved from the reference — rather than accepted from
+whoever invoked the command. The reference is immutable, so the derivation is
+repeatable: the same reference yields the same five values, and a plan digest
+computed over them identifies one set of inputs rather than one invocation.
+
+#### What A6.4 said before, and why it was not enough
+
+The clause it replaces read:
+
+> `--spec` is REQUIRED, although `DesiredDeployment.spec` defaults to an empty
+> mapping upstream. An omitted spec would freeze an empty specification into an
+> immutable plan digest and the approver would approve it without ever seeing
+> that it was empty. Refusing to guess an argument is a decision about this
+> surface; what a spec MEANS is read by nobody here and, deliberately, by
+> nobody upstream either. An operator who wants an empty spec writes `{}` in a
+> file.
+
+That was right about the failure it named and too narrow about the class. It
+made the operator SUPPLY a specification rather than let one be defaulted, and
+then froze whatever was supplied into an immutable plan digest that an approver
+approves. Requiring the value does not make it derived. The sentence admits the
+gap in its own words — *what a spec MEANS is read by nobody here and,
+deliberately, by nobody upstream either* — so an operator mapping travelled into
+an authorized, digested, approved plan with no authority having read it. A
+required free value and an absent one differ in whether someone typed
+something, not in where the value came from.
+
+The replacement closes that: the operator does not submit raw specification,
+image or digest values at all. They name a reference, and the five values are
+resolved from it.
+
+#### `silently` is the enforceable half
+
+A value that joins the plan **loudly** is a different act from one that arrives
+unnoticed, and the clause forbids only the second. Written so a future guard can
+tell them apart — this clause will want one, and none exists today:
+
+- **Derived.** The value is resolved from the immutable reference, and the plan
+  records that as its provenance. This is the ordinary path.
+- **Refused.** An independently supplied value is rejected at the boundary with
+  a typed refusal naming which of the five it was. The operator learns
+  immediately; nothing reaches the digest.
+- **Recorded as an override.** The value is accepted, but only through an
+  explicit override that is itself carried into the plan and into the receipt,
+  so the plan states which of its inputs did not come from the reference. An
+  approver reading the plan sees the exception without having to reconstruct it.
+
+**Silent** is therefore the residue and is defined by what is missing rather
+than by intent: a value that was accepted, was used, was covered by the digest,
+and appears in neither the refusal path nor the plan's own record of provenance.
+An enforceable check follows directly — for each of the five values the plan
+carries a provenance, and any provenance that is not the reference must appear
+in the plan's declared overrides. A value with no provenance at all is the
+violation, and it is detectable without knowing what the value means.
+
+This is deliberately not a ban on overrides. A ceremony with no exception path
+grows one that is undeclared, which is the shape this clause exists to end.
+
+#### The profile digest is constrained by two records, and both should say so
+
+The third derived value is also governed upstream. `dotmac_governance`
+**ADR 0039 § 8** — *The digest travels, and the read-back compares* — already
+requires the profile digest to appear in the Foundation execution plan and in
+the signed release receipt, with a read-back after deployment that COMPARES the
+running system against the authorized digest and never derives the authority
+from it.
+
+The two records constrain the same value from opposite ends. Governance ADR 0039
+§ 8 says where the digest must TRAVEL and what compares it; this clause says
+where it must COME FROM. They agree, and the agreement is worth stating rather
+than leaving to be noticed: an editor of either record who does not know about
+the other can weaken this value without appearing to touch anything the other
+owns. If this clause is ever narrowed, ADR 0039 § 8 is the record to read first,
+and the reverse holds.
+
+#### The downstream consequence, named and not resolved here
+
+This clause is the record behind Michael's step 4, which requires Platform CP to
+replace free-text `authorization_ref` with resolution of a standing Control
+authorization, and to derive target, desired state, profile digest, image set
+and plan input from one immutable reference. **That work is not done here and
+this amendment does not do it.**
+
+The current state, measured 2026-09-04 in this repository rather than assumed:
+`AUTHORIZATION_REF` is operator input, validated for SHAPE alone against
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` in `.github/workflows/production-deploy.yml`
+and in `scripts/deploy_production.sh`, then carried to the remote command line.
+Nothing resolves it, and nothing checks that it names a standing authorization.
+Both files say so in their own words — the workflow: *"While the legacy path is
+frozen this is validated and carried, never acted on."* A shape check admits any
+string of the right alphabet, including one naming an authorization that was
+never issued.
+
+That is the gap this clause closes as a DECISION. Closing it in code is separate
+work, and stating it here rather than implying it discharged is the point.
 
 ### A6.5 What this does not do
 
