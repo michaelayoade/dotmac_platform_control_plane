@@ -13,6 +13,8 @@ reworded sentence stops a prose assertion discriminating, silently.
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 from dataclasses import dataclass
 
 import pytest
@@ -145,11 +147,77 @@ def test_one_pointer_cannot_serve_both_purposes() -> None:
     assert refused.value.refusal is SignerRefusal.SHARED_POINTER
 
 
+#: Class-level attributes these descriptors may carry beyond their two fields.
+#: Declared, so adding one is a reviewed change rather than a silent widening of
+#: what the seam can hold.
+DECLARED_CLASS_ATTRIBUTES = frozenset({"material"})
+
+
 def test_no_key_material_can_be_held_here() -> None:
     """The seam carries pointers. A field able to hold a secret would make this
-    module a place where one could come to rest."""
+    module a place where one could come to rest.
+
+    ## The trap, because it is not obvious and you will meet it
+
+    `__dataclass_fields__` is NOT the set of instance fields. It also carries
+    ClassVar and InitVar **pseudo-fields**, so a class constant appears in it
+    exactly as a real field does. Declaring `material: ClassVar[MaterialKind]`
+    therefore read as a new place material could rest, and the original
+    one-line assertion had no way to tell a constant from state.
+    `dataclasses.fields()` is the set that answers the question this test asks.
+
+    ## Why ClassVar is fine here and InitVar would not be
+
+    This is the distinction that matters, and it is not a technicality.
+
+    A **ClassVar** is one value on the class. It is not per-instance state and
+    it **cannot be passed to the constructor**, so no caller can hand material
+    to a descriptor through it. It is a declaration a reader consults --
+    `material` says whether the pointer names private signing material or a
+    public verification identity -- and declarations are what this module is
+    made of.
+
+    An **InitVar is an `__init__` parameter.** That is precisely a way material
+    could be handed IN, at construction, by any caller -- which is the thing
+    this test exists to refuse. The two look identical in
+    `__dataclass_fields__` and are opposites for this purpose, which is why
+    claim 3 below separates them by asking the constructor rather than by
+    trusting the annotation.
+
+    ## If you are adding one
+
+    A new ClassVar: add its name to `DECLARED_CLASS_ATTRIBUTES` and it passes.
+    That list exists so widening what the seam carries is a reviewed change
+    rather than a silent one.
+
+    A new InitVar: don't. If a descriptor genuinely needs a value at
+    construction it belongs as a normal field and this test should be argued
+    with on the merits, not amended around.
+    """
     for pointer in (AuthorizationSignerPointer(AUTH), ObservationSignerPointer(OBS)):
-        assert set(type(pointer).__dataclass_fields__) == {"pointer", "purpose"}
+        cls = type(pointer)
+
+        # 1. INSTANCE state is exactly the two pointers-only fields. This is the
+        #    original claim, now made against the set that actually answers it.
+        instance_fields = {field.name for field in dataclasses.fields(cls)}
+        assert instance_fields == {"pointer", "purpose"}, cls.__name__
+
+        # 2. Everything else on the dataclass is declared. A pseudo-field added
+        #    later fails here instead of arriving unnoticed.
+        extras = set(cls.__dataclass_fields__) - instance_fields
+        assert (
+            extras <= DECLARED_CLASS_ATTRIBUTES
+        ), f"{cls.__name__} carries undeclared dataclass entries {sorted(extras)}"
+
+        # 3. And each extra is a ClassVar, not an InitVar. The distinction is
+        #    the whole point: an InitVar IS an `__init__` parameter, so it is a
+        #    way material could be handed IN, which is exactly what this test
+        #    exists to refuse. A ClassVar cannot be passed to the constructor.
+        accepted = set(inspect.signature(cls).parameters)
+        assert not (extras & accepted), (
+            f"{cls.__name__} accepts {sorted(extras & accepted)} at construction; "
+            "an InitVar can carry material in, which a ClassVar cannot"
+        )
 
 
 def test_signer_purposes_match_the_installed_control() -> None:
