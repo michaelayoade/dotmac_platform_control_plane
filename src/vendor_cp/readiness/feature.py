@@ -4,9 +4,10 @@ The route answers on `/health/ready`, which the kernel reserves as a
 tenant-resolution-exempt probe path — see `router.py` for why that is not a
 cosmetic choice.
 
-It appears in `deployment_profile.VENDOR_SURFACE_CODES` so every profile's
-inventory has to name it, and is deliberately absent from
-`WITHHOLDABLE_SURFACES`: a readiness probe a deployment can switch off is not a
+It bears a route, so the derived surface roster picks it up and every profile's
+inventory has to name it (ADR-0019). It is also the sole member of
+`deployment_profile.NEVER_WITHHELD_SURFACES`, because derivation alone would
+make it withholdable: a readiness probe a deployment can switch off is not a
 readiness probe, it is a readiness probe plus a way to go back to the failure
 this feature exists to end.
 

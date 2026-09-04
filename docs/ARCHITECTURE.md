@@ -305,10 +305,10 @@ to build a second Vendor-local fleet or connector engine.
 
 ## Deployment profiles
 
-`src/vendor_cp/deployment_profile.py` declares which vendor SURFACES a
-deployment publishes. It is read in exactly one place — `build_spec()` — and a
-test fails the build if a second module imports the loader, because
-`dotmac_starter_mt` ADR-0003 forbids feature code branching on a profile name.
+`src/vendor_cp/deployment_profile.py` declares which SURFACES a deployment
+publishes. It is read in exactly one place — `build_spec()` — and a test fails
+the build if a second module imports the loader, because `dotmac_starter_mt`
+ADR-0003 forbids feature code branching on a profile name.
 
 `production-bootstrap` (required by `scripts/deploy_production.sh` in the host
 env file) composes and runs everything and does not mount the `licence_delivery`,
@@ -318,8 +318,8 @@ disabled subsystem: licence key custody still loads at boot, and a test asserts
 it.
 
 `production-composed-v1` is the target composition (ADR-0015): the platform-admin
-console, the read-only allocation view and the declarations-only release-evidence
-feature, and nothing else. It is DECLARED but not adopted — the deploy script
+console and the read-only allocation view, and nothing else. It is DECLARED but
+not adopted — the deploy script
 still pins `production-bootstrap`. The console is listed as an ACCEPTED surface
 because ADR-0014 gave it a single browser authentication owner.
 
@@ -344,13 +344,36 @@ production environment with no configured profile is refused rather than
 inheriting `full`, which would publish every withheld surface including that
 laboratory.
 
-A profile may never withhold a persistence owner. Every stateful module manifest
+A profile may never drop a persistence owner. Every stateful module manifest
 carries a migration lineage and owns schemas the database already contains, so
 an assembly missing one would no longer describe its own tables. The guard is
 derived from `assembly.STATEFUL_MODULES` and proves both halves per profile: the
 manifest is still registered in a `ModuleRegistry` built from that profile's
 spec, and the lineage's head revision still resolves in the composed Alembic
 graph under the branch label the surviving manifest declares.
+
+**Withholding a stateful module's ROUTES is a different act, and it is allowed
+(ADR-0019).** Until 2026-09-04 `build_spec` filtered `assembly.VENDOR_SURFACES`
+through the profile and spliced `assembly.STATEFUL_MODULES` in RAW, while the
+inventory-completeness check compared a declared tuple against a hand-written
+roster of vendor feature NAMES. A composed module's code could not enter that
+roster's universe, so "a composed module mounts a surface no profile declares"
+was not a case the guard could fail on. It is now derived: `route_bearing_codes`
+reads the composed manifests, `admit_surfaces` refuses at boot with a typed
+`AdmissionRefusal`, and every composed manifest passes through
+`_profiled_surface`, which clears route fields and only route fields — so the
+manifest, its tables, its prerequisites, its audit vocabulary and its lineage
+survive withholding untouched.
+
+Four composed modules are queued against the same hole: `dotmac-release-catalog`,
+`dotmac-entitlement-allocation`, `dotmac-commercial-agreements` and
+`dotmac-approvals` each state in their own manifest prose that the release
+shipping their routers is still ahead of them, and `dotmac-deployment-control`
+has shipped an operator browser surface — four `platform_admin` screens and two
+navigation entries — since `0.1.0a8`. The pin here is `0.1.0a6`, which is the
+only reason nothing is mounted yet. That is why the repair is derivation rather
+than a roster entry: a roster entry closes one omission, and the omission is a
+class.
 
 ## Production topology
 

@@ -93,13 +93,21 @@ def test_every_profile_publishes_readiness(profile: str) -> None:
 
 
 def test_readiness_is_not_withholdable() -> None:
+    """Route-bearing, so derivation alone would allow withholding it.
+
+    `NEVER_WITHHELD_SURFACES` is the one hand-declared set left in the profile
+    module, and this is the fact it exists for.
+    """
+    from vendor_cp.assembly import COMPOSED_MANIFESTS
     from vendor_cp.deployment_profile import (
-        VENDOR_SURFACE_CODES,
-        WITHHOLDABLE_SURFACES,
+        NEVER_WITHHELD_SURFACES,
+        route_bearing_codes,
+        withholdable_surfaces,
     )
 
-    assert "readiness" in VENDOR_SURFACE_CODES
-    assert "readiness" not in WITHHOLDABLE_SURFACES
+    assert "readiness" in route_bearing_codes(COMPOSED_MANIFESTS)
+    assert "readiness" in NEVER_WITHHELD_SURFACES
+    assert "readiness" not in withholdable_surfaces(COMPOSED_MANIFESTS)
 
 
 def test_the_route_answers_503_when_the_dependency_is_gone() -> None:
