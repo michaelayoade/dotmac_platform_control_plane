@@ -103,11 +103,16 @@ POINTER_PREFIX: Final = "secret/dotmac/platform-cp/"
 class MaterialKind(StrEnum):
     """What kind of material a pointer names — declared, never inferred.
 
-    Three of the four signing pointers name PRIVATE signing material this
+    Four of the five signing pointers name PRIVATE signing material this
     product may hold. `target_execution_observation` does not: Michael's
     custody ruling of 2026-09-04 keeps that private key on the target, so the
     path in this namespace holds the target's PUBLIC verification identity and
     nothing else.
+
+    The verdict is decided by one question rather than by a list: IS THIS
+    PRODUCT THE PARTY MAKING THE STATEMENT? It issues authorizations, dispatches
+    and recovery grants, and it produces release evidence, so it holds those
+    four. It does not apply deployments, so it does not hold the fifth.
 
     The asymmetry is DECLARED rather than left for a reader to notice, and the
     type was not split to express it. A split would say the observation pointer
@@ -230,6 +235,13 @@ POINTER_MATERIAL: Final[dict[str, MaterialKind]] = {
     EXECUTION_OBSERVATION_PURPOSE: ObservationSignerPointer.material,
     "deployment_dispatch": MaterialKind.PRIVATE,
     "platform_release_evidence": MaterialKind.PRIVATE,
+    #: Control's `RECOVERY_PURPOSE`, read from `recovery_grant.py:77`. PRIVATE
+    #: by the rule the whole table now follows: THE SIGNER IS THE PARTY MAKING
+    #: THE STATEMENT. The target signs observations because the target asserts
+    #: what it applied; the control plane signs a recovery grant because the
+    #: control plane asserts that a recovery is authorized. The opposite verdict
+    #: to `target_execution_observation`, for the same reason.
+    "deployment_recovery": MaterialKind.PRIVATE,
 }
 
 

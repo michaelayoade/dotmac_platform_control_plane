@@ -52,12 +52,28 @@ RELEASE_EVIDENCE_PURPOSE = "platform_release_evidence"
 #: that lands their descriptors.
 DISPATCH_PURPOSE = "deployment_dispatch"
 
+#: `deployment_recovery`, read from Control's `RECOVERY_PURPOSE` at
+#: `src/dotmac_deployment_control/recovery_grant.py:77`, merged commit
+#: `312e9a8227cda941f15d0e44a93c41a76332d86e`. Pinned as a literal for the same
+#: reason as the two above: no descriptor for it exists in this repository yet.
+#: Replace all three with imported constants in the change that lands their
+#: descriptors.
+RECOVERY_PURPOSE = "deployment_recovery"
+
+#: NOT a signer purpose, and named here so the difference is checkable rather
+#: than remembered: `RECOVERY_GRANT_SCHEMA` discriminates the DOCUMENT, and
+#: refuses a deployment authorization before any field is compared. A purpose
+#: constant and a schema constant are different discriminators and neither
+#: substitutes for the other.
+RECOVERY_GRANT_SCHEMA = "dotmac.deployment_control.recovery_grant"
+
 EXPECTED_PURPOSES = frozenset(
     {
         AUTHORIZATION_PURPOSE,
         EXECUTION_OBSERVATION_PURPOSE,
         DISPATCH_PURPOSE,
         RELEASE_EVIDENCE_PURPOSE,
+        RECOVERY_PURPOSE,
     }
 )
 
@@ -124,7 +140,7 @@ def test_the_dossier_is_present_and_not_empty() -> None:
 
 
 def test_the_dossier_declares_exactly_the_expected_purposes() -> None:
-    """One ceremony, four identities. A fifth would need a policy, a token, an
+    """One ceremony, five identities. A sixth would need a policy, a token, an
     enrolment line and a verification pass this document does not carry.
 
     The reader takes any purpose-shaped row, so an undeclared purpose arrives
@@ -153,7 +169,7 @@ def test_every_declared_pointer_is_admitted_by_the_shipped_descriptor() -> None:
 
     # No descriptor on `main` yet for these two; hold them to the two rules
     # that already exist, and to the same prefix every signer answers to.
-    for purpose in (DISPATCH_PURPOSE, RELEASE_EVIDENCE_PURPOSE):
+    for purpose in (DISPATCH_PURPOSE, RELEASE_EVIDENCE_PURPOSE, RECOVERY_PURPOSE):
         pointer = declared[purpose]
         assert pointer.startswith(POINTER_PREFIX), purpose
         assert pointer not in FORBIDDEN_SIGNING_POINTERS, purpose

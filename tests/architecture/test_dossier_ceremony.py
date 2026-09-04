@@ -59,6 +59,33 @@ _POLICY_PATH = re.compile(
     r'^path\s+"([^"]+)"\s*\{\s*capabilities\s*=\s*\[([^\]]*)\]\s*\}\s*$'
 )
 _GENPKEY_OUT = re.compile(r"openssl genpkey .*-out (\S+)")
+#: The `# platform-cp-<slug>-signing.hcl` header naming which identity a policy
+#: block belongs to. A grant cannot be attributed to an owner without it.
+_POLICY_OWNER = re.compile(r"^#\s*platform-cp-([a-z-]+)-signing\.hcl\s*$")
+#: A directive that would move private key material somewhere it must not go.
+#: Covers the declared exclusion surfaces in the register this extractor owns:
+#: a key printed reaches LOGS and a transcript, a key committed reaches GIT, a
+#: key copied reaches CANDIDATES and RECEIPTS.
+#: The verb must sit at a COMMAND POSITION — start of line, or after a shell
+#: separator. An unanchored alternation matched `cp` inside `platform-cp/` and
+#: refused three correct lines of step 6, which is the kind of noise that gets a
+#: guard deleted rather than fixed.
+_DISCLOSES_PRIVATE = re.compile(
+    r"(?:^|[|;&(]\s*)(?:cat|echo|print|printf|less|head|tail|base64|xxd|tee|cp|"
+    r"scp|rsync|curl|git\s+add|git\s+commit)\b[^\n]*"
+    r"(?:\.key\.pem|private_key_pem|PRIVATE KEY)"
+)
+
+#: Identities whose read policy is restricted to ONE consumer by ruling rather
+#: than by structure. Michael, 2026-09-04: *"Access is restricted to the
+#: recovery-grant issuer. The browser, relay, Foundation executor and deployment
+#: target must never receive it."*
+#:
+#: DECLARED rather than derived, because restriction is a policy decision and
+#: nothing in a manifest implies it. Ratcheted by
+#: `test_the_restricted_set_names_a_real_private_identity`, so it cannot grow or
+#: shrink without the declaration moving with it.
+RESTRICTED_IDENTITIES: frozenset[str] = frozenset({"deployment_recovery"})
 _FOR_LOOP = re.compile(r"^for \w+ in ([a-z0-9 -]+); do")
 #: Every `bao` invocation this extractor understands. Anything else is refused
 #: as unreadable rather than passing as clean — see the sensitivity test.
@@ -67,6 +94,7 @@ _KNOWN_BAO = (
     "kv get",
     "policy write",
     "policy read",
+    "policy list",
     "token create",
     "token revoke",
 )
@@ -87,6 +115,15 @@ class CeremonyRefusal(StrEnum):
     UNREADABLE_DIRECTIVE = "UNREADABLE_DIRECTIVE"
     #: The document's custody table disagrees with the code's declaration.
     CUSTODY_DISAGREES_WITH_CODE = "CUSTODY_DISAGREES_WITH_CODE"
+    #: A policy other than a restricted identity's own grants read on its path.
+    #: This is the shape each of the four never-receives would take.
+    RESTRICTED_READ_GRANTED = "RESTRICTED_READ_GRANTED"
+    #: More than one token is minted for a restricted identity. A second token
+    #: is a second holder, whoever it was meant for.
+    RESTRICTED_TOKEN_DUPLICATED = "RESTRICTED_TOKEN_DUPLICATED"
+    #: A step would print, copy or commit private key material — the five
+    #: exclusion surfaces, in the register the fenced blocks own.
+    PRIVATE_MATERIAL_DISCLOSED = "PRIVATE_MATERIAL_DISCLOSED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +203,10 @@ def scan(text: str) -> list[Finding]:
         if kind is MaterialKind.PUBLIC and purpose in slugs
     }
     by_slug = {slug: purpose for purpose, slug in slugs.items()}
+    restricted = {
+        slugs[purpose] for purpose in RESTRICTED_IDENTITIES if purpose in slugs
+    }
+    minted: dict[str, int] = {}
     findings: list[Finding] = []
 
     def flag(refusal: CeremonyRefusal, slug: str, line: str) -> None:
@@ -185,9 +226,13 @@ def scan(text: str) -> list[Finding]:
     for heading, language, body in _blocks(text):
         loop: list[str] = []
         pending: str | None = None
+        policy_owner: str | None = None
         for raw in body:
             line = raw.strip()
             if language == "hcl":
+                owner = _POLICY_OWNER.match(line)
+                if owner:
+                    policy_owner = owner.group(1)
                 if line.startswith("path "):
                     grant = _POLICY_PATH.match(line)
                     if not grant:
@@ -200,6 +245,24 @@ def scan(text: str) -> list[Finding]:
                     )
                     if slug and "read" in grant.group(2):
                         flag(CeremonyRefusal.READ_POLICY_GRANTED, slug, raw)
+                    # A RESTRICTED identity's path may be read only by its own
+                    # policy. Every other policy granting read on it is one of
+                    # the four never-receives wearing whatever name it was
+                    # given, and the check does not depend on knowing which.
+                    held = next(
+                        (
+                            s
+                            for s in restricted
+                            if f"/platform-cp/{s}-signing/" in granted
+                        ),
+                        None,
+                    )
+                    if held and "read" in grant.group(2) and policy_owner != held:
+                        flag(
+                            CeremonyRefusal.RESTRICTED_READ_GRANTED,
+                            held,
+                            raw,
+                        )
                 continue
             if line.startswith("#") or not line:
                 continue
@@ -217,6 +280,8 @@ def scan(text: str) -> list[Finding]:
                     for slug in public:
                         if slug in name:
                             flag(CeremonyRefusal.GENERATED_OFF_TARGET, slug, raw)
+            if _DISCLOSES_PRIVATE.search(line):
+                flag(CeremonyRefusal.PRIVATE_MATERIAL_DISCLOSED, "", raw)
             if line.startswith("bao "):
                 if not any(line.startswith(f"bao {verb}") for verb in _KNOWN_BAO):
                     flag(CeremonyRefusal.UNREADABLE_DIRECTIVE, "", raw)
@@ -227,6 +292,14 @@ def scan(text: str) -> list[Finding]:
                 token = _TOKEN_CREATE.match(line)
                 if token and token.group(1) in public:
                     flag(CeremonyRefusal.TOKEN_MINTED, token.group(1), raw)
+                if token and token.group(1) in restricted:
+                    minted[token.group(1)] = minted.get(token.group(1), 0) + 1
+                    if minted[token.group(1)] > 1:
+                        flag(
+                            CeremonyRefusal.RESTRICTED_TOKEN_DUPLICATED,
+                            token.group(1),
+                            raw,
+                        )
             if pending and "private_key_pem" in line:
                 for slug in public:
                     if f"/{slug}-signing/" in pending:
@@ -273,8 +346,9 @@ def _only(findings: list[Finding], refusal: CeremonyRefusal) -> Finding:
 def test_generating_the_target_key_on_the_workstation_is_refused() -> None:
     """Plant #1 of the four the merged document actually contained."""
     doctored = _plant(
-        "for id in authorization dispatch release-evidence; do",
-        "for id in authorization dispatch target-observation release-evidence; do",
+        "for id in authorization dispatch release-evidence recovery; do",
+        "for id in authorization dispatch target-observation release-evidence "
+        "recovery; do",
     )
     finding = _only(scan(doctored), CeremonyRefusal.GENERATED_OFF_TARGET)
     assert finding.identity == "target_execution_observation"
@@ -329,8 +403,9 @@ def test_the_four_defects_are_reported_separately_not_as_one() -> None:
     send an operator round the loop once per defect."""
     text = _text()
     text = text.replace(
-        "for id in authorization dispatch release-evidence; do",
-        "for id in authorization dispatch target-observation release-evidence; do",
+        "for id in authorization dispatch release-evidence recovery; do",
+        "for id in authorization dispatch target-observation release-evidence "
+        "recovery; do",
     )
     text = text.replace(
         "  key_id=platform-cp-target-observation-2026-09 \\\n",
@@ -354,6 +429,120 @@ def test_the_four_defects_are_reported_separately_not_as_one() -> None:
         CeremonyRefusal.READ_POLICY_GRANTED,
         CeremonyRefusal.TOKEN_MINTED,
     }
+
+
+def test_the_restricted_set_names_a_real_private_identity() -> None:
+    """RATCHET, both directions.
+
+    `RESTRICTED_IDENTITIES` is DECLARED, because restriction is a policy ruling
+    and nothing in a manifest implies one. A declaration that names a purpose
+    the custody table does not carry would gate nothing, and one that quietly
+    lost a member would stop gating what it used to.
+    """
+    assert RESTRICTED_IDENTITIES == {"deployment_recovery"}
+    verdicts = custody(_text())
+    for purpose in RESTRICTED_IDENTITIES:
+        assert purpose in verdicts, purpose
+        # PRIVATE is the premise of every rule below: a public-material pointer
+        # has no read to restrict and no token to duplicate.
+        assert verdicts[purpose] is MaterialKind.PRIVATE, purpose
+
+
+def test_another_policy_reading_the_restricted_path_is_refused() -> None:
+    """The four never-receives, as one check.
+
+    Michael: *"Access is restricted to the recovery-grant issuer. The browser,
+    relay, Foundation executor and deployment target must never receive it."*
+    Each of those four would arrive as a policy granting read on the recovery
+    path under some other name, so the rule is written on the SHAPE — any policy
+    that is not the identity's own — rather than on a list of four names a fifth
+    consumer would not appear on.
+    """
+    doctored = _plant(
+        "# platform-cp-dispatch-signing.hcl\n",
+        "# platform-cp-dispatch-signing.hcl\n"
+        'path "secret/data/dotmac/platform-cp/recovery-signing/primary"'
+        ' { capabilities = ["read"] }\n',
+    )
+    finding = _only(
+        doctored_scan := scan(doctored), CeremonyRefusal.RESTRICTED_READ_GRANTED
+    )
+    assert finding.identity == "deployment_recovery"
+    assert "recovery-signing" in finding.line
+    assert doctored_scan
+
+
+def test_the_restricted_identitys_own_policy_is_accepted() -> None:
+    """SENSITIVITY, the other direction. The rule must permit exactly one
+    reader, or it would refuse the ceremony it is part of — which is how a guard
+    ends up being deleted instead of obeyed."""
+    assert not [
+        f for f in scan(_text()) if f.refusal is CeremonyRefusal.RESTRICTED_READ_GRANTED
+    ]
+    assert 'path "secret/data/dotmac/platform-cp/recovery-signing/primary"' in _text()
+
+
+def test_a_second_token_for_a_restricted_identity_is_refused() -> None:
+    """A second token is a second holder, whoever it was minted for. This is the
+    shape a never-receives violation takes when it is not written as a policy."""
+    doctored = _plant(
+        "bao token create -policy=platform-cp-recovery-signing \\\n",
+        "bao token create -policy=platform-cp-recovery-signing \\\n"
+        "  -period=720h -display-name=platform-cp-recovery-signing\n"
+        "bao token create -policy=platform-cp-recovery-signing \\\n",
+    )
+    finding = _only(scan(doctored), CeremonyRefusal.RESTRICTED_TOKEN_DUPLICATED)
+    assert finding.identity == "deployment_recovery"
+
+
+def test_printing_private_material_is_refused() -> None:
+    """LOGS, and the transcript a shell leaves behind."""
+    doctored = _plant(
+        "ls -l   # four files, mode 0600. Do not cat them.",
+        "cat recovery.key.pem\nls -l   # four files, mode 0600. Do not cat them.",
+    )
+    finding = _only(scan(doctored), CeremonyRefusal.PRIVATE_MATERIAL_DISCLOSED)
+    assert "cat recovery.key.pem" in finding.line
+
+
+def test_committing_private_material_is_refused() -> None:
+    """GIT, and by extension candidates and receipts — anything built from a
+    tree that has the key in it."""
+    doctored = _plant(
+        "bao policy write platform-cp-recovery-signing           "
+        "platform-cp-recovery-signing.hcl",
+        "git add recovery.key.pem\n"
+        "bao policy write platform-cp-recovery-signing           "
+        "platform-cp-recovery-signing.hcl",
+    )
+    finding = _only(scan(doctored), CeremonyRefusal.PRIVATE_MATERIAL_DISCLOSED)
+    assert "git add" in finding.line
+
+
+def test_the_disclosure_rule_does_not_fire_on_the_ceremony_it_guards() -> None:
+    """SENSITIVITY, and a measured correction.
+
+    The first version of this rule matched its verbs anywhere in a line, so `cp`
+    inside `platform-cp/` refused three correct lines of step 6 — `openssl
+    genpkey -out /etc/dotmac/platform-cp/target-observation.key.pem` and the two
+    that chown and chmod it. A guard that refuses the document it ships with is
+    a guard someone deletes rather than fixes, so the verb is now anchored to a
+    command position and those three lines are asserted clean.
+    """
+    assert not [
+        f
+        for f in scan(_text())
+        if f.refusal is CeremonyRefusal.PRIVATE_MATERIAL_DISCLOSED
+    ]
+    for benign in (
+        "openssl genpkey -algorithm ed25519 -out "
+        "/etc/dotmac/platform-cp/target-observation.key.pem",
+        "chmod 0600      /etc/dotmac/platform-cp/target-observation.key.pem",
+        "  private_key_pem=@recovery.key.pem \\",
+    ):
+        assert not _DISCLOSES_PRIVATE.search(benign), benign
+    for offending in ("cat recovery.key.pem", "openssl x | tee recovery.key.pem"):
+        assert _DISCLOSES_PRIVATE.search(offending), offending
 
 
 def test_an_unreadable_directive_refuses_rather_than_passing_as_clean() -> None:
