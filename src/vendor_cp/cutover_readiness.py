@@ -311,8 +311,8 @@ BRAND_ADJACENT_LITERALS: Final[tuple[str, ...]] = ("src/vendor_cp/console/web.py
 #: The provisioning laboratory is NOT a deployment writer and does not retire
 #: with either cutover. It drives the kernel's `ProvisioningProvider` contract
 #: against a side-effect-free simulator and owns no table at all (deny case D3).
-#: `deployment_profile.py` selects which vendor SURFACES are mounted and nothing
-#: else. Both are named because the words invite the confusion.
+#: `deployment_profile.py` selects which composed SURFACES are mounted and
+#: nothing else. Both are named because the words invite the confusion.
 NOT_A_DEPLOYMENT_WRITER: Final[tuple[str, ...]] = (
     "src/vendor_cp/provisioning",
     "src/vendor_cp/deployment_profile.py",

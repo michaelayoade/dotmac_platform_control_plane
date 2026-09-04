@@ -28,6 +28,7 @@ from vendor_cp.console.feature import feature as console_feature
 from vendor_cp.contracts.feature import feature as contracts_feature
 from vendor_cp.deployment_profile import (
     VendorDeploymentProfile,
+    admit_surfaces,
     load_deployment_profile,
     validate_profile_for_environment,
 )
@@ -41,13 +42,19 @@ from vendor_cp.release_evidence.feature import feature as release_evidence_featu
 
 ASSEMBLY_NAME = "dotmac-vendor-control-plane"
 
-# The persistence owners. Composed under EVERY profile, because each one carries
-# a migration lineage and a schema this database already contains: withholding
-# one would leave the assembly no longer describing its own tables, and the
-# composed live-catalogue audit would be walking schemas nobody declared.
+# The persistence owners. Present under EVERY profile, because each one carries
+# a migration lineage and a schema this database already contains: an assembly
+# missing one would no longer describe its own tables, and the composed
+# live-catalogue audit would be walking schemas nobody declared.
 # `test_deployment_profile.py` derives its assertion from this tuple and proves
 # both halves per profile: the manifest is still registered, and the lineage's
 # head revision is still reachable in the composed revision graph.
+#
+# Present is not the same as unfiltered. Since ADR-0019 a profile may withhold a
+# stateful module's ROUTES — `_profiled_surface` clears route fields and nothing
+# else, so the manifest, its tables and its lineage are exactly as composed —
+# and it must be able to, or a module that ships an operator screen would
+# force-publish it into every production profile.
 STATEFUL_MODULES = (
     release_catalog_module,
     entitlement_allocation_module,
@@ -77,6 +84,12 @@ STATEFUL_MODULES = (
 # The vendor's own features, in mount order. A profile may strip a feature's
 # route/nav SURFACE; it may not remove its manifest declarations, reorder the
 # features or add one.
+#
+# Not the only route-bearing manifests this assembly composes, and the tuple's
+# name is the last place that reading survives: every manifest in
+# `COMPOSED_MANIFESTS` goes through the profile, because a composed module that
+# ships an operator surface publishes routes exactly as a vendor adapter does
+# (ADR-0019).
 VENDOR_SURFACES = (
     release_evidence_feature,
     # Composed first among the route-bearing surfaces and withheld by none. A
@@ -98,24 +111,38 @@ VENDOR_SURFACES = (
 def _profiled_surface(
     feature: FeatureManifest | ModuleManifest, profile: VendorDeploymentProfile
 ) -> FeatureManifest | ModuleManifest:
-    """Keep a feature's declarations installed while withholding its routes.
+    """Keep a manifest's declarations installed while withholding its routes.
 
-    Two manifest shapes now travel through here. A legacy `FeatureManifest`
+    Two manifest shapes travel through here, and every composed manifest does —
+    vendor adapter and composed module alike. A legacy `FeatureManifest`
     withholds `routers`/`web_routers`/`nav`; a contract-v2 `ModuleManifest`
-    withholds `api_routers`/`web_surfaces`. The distinction is not cosmetic —
-    clearing the wrong field names would leave the routes MOUNTED under a
-    profile that withholds them, which is a surface appearing where the profile
-    says it does not exist.
+    withholds `api_routers`/`web_surfaces` AND the legacy pair a contract-1
+    module may still carry. The distinction is not cosmetic — clearing the wrong
+    field names would leave the routes MOUNTED under a profile that withholds
+    them, which is a surface appearing where the profile says it does not exist,
+    and the earlier version cleared two of the four names it warned about.
 
-    Declarations are untouched in both shapes, which is the invariant a profile
-    is allowed to rely on: it selects surfaces and nothing else
-    (`dotmac_starter_mt` ADR-0003).
+    Declarations are untouched in both shapes, and that is the invariant a
+    profile is allowed to rely on: tables, prerequisites, audit vocabulary,
+    migration prefix and branch label survive withholding, because this clears
+    ROUTE FIELDS and only route fields. It is what makes withholding a stateful
+    module's surface safe (`dotmac_starter_mt` ADR-0003; ADR-0019).
     """
     if profile.exposes(feature.name):
         return feature
     if isinstance(feature, ModuleManifest):
-        return replace(feature, api_routers=(), web_surfaces=())
+        return replace(feature, api_routers=(), web_surfaces=(), web_routers=(), nav=())
     return replace(feature, routers=(), web_routers=(), nav=())
+
+
+#: Every manifest this assembly composes, in mount order — the persistence
+#: owners first, then the vendor surfaces. This is the set admission is measured
+#: against and the set the profile filters, and there is one of it precisely so
+#: those two cannot diverge again.
+COMPOSED_MANIFESTS: tuple[FeatureManifest | ModuleManifest, ...] = (
+    *STATEFUL_MODULES,
+    *VENDOR_SURFACES,
+)
 
 
 def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssemblySpec:
@@ -126,15 +153,18 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
     `provisioning` contract laboratory (fake-only).
 
     `profile` is the ONE place a deployment profile is read (see
-    `vendor_cp.deployment_profile`). It selects which vendor surfaces are
+    `vendor_cp.deployment_profile`). It selects which composed surfaces are
     mounted and nothing else — no behaviour, no persistence, no decision. Tests
     pass one explicitly; the process reads it from the environment.
 
-    Two refusals guard the production boot and they are separate checks:
-    `validate_runtime_configuration` rejects a production-unsafe MODE, and
+    Three refusals guard the boot and they are separate checks:
+    `validate_runtime_configuration` rejects a production-unsafe MODE,
     `validate_profile_for_environment` rejects a production-unsafe SURFACE SET
     — chiefly a profile mounting the simulated provisioning laboratory, and an
-    absent profile that would otherwise inherit the `full` fallback (ADR-0015).
+    absent profile that would otherwise inherit the `full` fallback (ADR-0015)
+    — and `admit_surfaces` rejects, in every environment, a profile whose
+    inventory does not describe the surfaces this composition actually bears
+    (ADR-0019).
     """
     environment = os.getenv("ENVIRONMENT", "development")
     validate_runtime_configuration(vendor_settings, environment=environment)
@@ -150,6 +180,12 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
     validate_profile_for_environment(
         effective, environment=environment, provider_mode=vendor_settings.provider_mode
     )
+    # And the profile must DESCRIBE this composition. Measured against the
+    # UNPROFILED manifests: after filtering, a withheld module bears no routes
+    # and would read as one that publishes nothing, which is the one conclusion
+    # admission must not reach from its own output. Before key custody for the
+    # same reason as the check above (ADR-0019).
+    admit_surfaces(effective, COMPOSED_MANIFESTS)
 
     # Key custody is a boot dependency, not a first-issuance surprise. The
     # installed signer objects hold their key material for this process — and
@@ -165,9 +201,11 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
         # prerequisite bindings, which truthfully record that kernel 0001
         # supplies a tenant catalogue this assembly declines to build on.
         module_planes=ASSEMBLY_MODULE_PLANES,
-        modules=(
-            *STATEFUL_MODULES,
-            *(_profiled_surface(feature, effective) for feature in VENDOR_SURFACES),
+        # EVERY composed manifest goes through the profile. Until ADR-0019 the
+        # stateful modules were spliced in raw, so a composed module's operator
+        # surface mounted under every profile and appeared in no inventory.
+        modules=tuple(
+            _profiled_surface(manifest, effective) for manifest in COMPOSED_MANIFESTS
         ),
         web_enabled=True,
     )

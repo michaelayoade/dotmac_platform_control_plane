@@ -88,8 +88,10 @@ disagree, fix the drift.
     `tests/architecture/test_shadow_overlaps.py`).
 11. **A deployment profile selects surfaces and nothing else, and production
     accepts only a profile that says so.** Read it once, in `build_spec()`. It
-    may not withhold a persistence owner and may not change behaviour; feature
+    may not DROP a persistence owner and may not change behaviour; feature
     code never branches on a profile name (`dotmac_starter_mt` ADR-0003, deny case D6).
+    Dropping the manifest and withholding its ROUTES are different acts — see
+    the fourth paragraph, which is where that distinction became load-bearing.
 
     ADR-0015 adds the production half. A profile that publishes the
     `provisioning` surface must declare `laboratory=True` and can never be
@@ -103,20 +105,52 @@ disagree, fix the drift.
     only one: it never runs on a restart.
 
     Every profile carries a `version` and an explicit `surface_inventory`
-    checked for COMPLETENESS against the composed vendor surface roster, so a
-    new feature cannot join a production profile by simply existing, and a
-    profile whose effective surface set changes is a version bump rather than
-    a silent redefinition of a name already on a host.
+    checked for COMPLETENESS, so a new surface cannot join a production profile
+    by simply existing, and a profile whose EFFECTIVE SURFACE SET changes is a
+    version bump rather than a silent redefinition of a name already on a host.
+    Neutrality is asserted, not argued: a change that reworks the declarations
+    without moving a route compares the mounted route set — path, methods and
+    route name — across every profile, and bumps the versions if it cannot.
 
-    **Withholding a route and dropping a manifest are different acts.** A
-    withheld surface keeps its declarations, its behaviour, its schema and its
-    migration lineage; only the routes go. The guard is derived from
-    `assembly.STATEFUL_MODULES` rather than listing modules by hand — the
-    earlier version named five while the assembly composed six — and proves
-    both halves per profile: the manifest is still registered in a
-    `ModuleRegistry` built from that profile's own spec, and the lineage's head
-    revision still resolves in the composed Alembic graph under the branch
-    label the surviving manifest declares
+    **Admission covers every route-bearing COMPOSED MODULE, not only the Vendor
+    adapters** (ADR-0019, 2026-09-04). `build_spec` used to filter
+    `VENDOR_SURFACES` and splice `STATEFUL_MODULES` in RAW, and the completeness
+    check compared a declared inventory against a HAND-WRITTEN roster of vendor
+    feature names — so a composed module's code could not enter the roster's
+    universe and "a module mounts a surface no profile declares" was not a case
+    the guard could express. Both hand rosters are now DERIVED from the composed
+    manifests: `route_bearing_codes` reads the five manifest route fields (the
+    complete set of places this kernel mounts from), `withholdable_surfaces`
+    subtracts the one hand-declared `NEVER_WITHHELD_SURFACES`, and
+    `admit_surfaces` refuses at boot with a typed `AdmissionRefusal` — asserted
+    as a member, never as prose, because this module refuses in four ways.
+    Admission runs against the UNPROFILED manifest set, because a profile
+    checked against its own output reads every withheld surface as one that
+    publishes nothing. The repair is derivation rather than a roster entry
+    because the omission is a CLASS: four composed modules declare in their own
+    prose that the release shipping their routers is still ahead of them, and
+    `dotmac-deployment-control` has shipped a `platform_admin` browser surface
+    since `0.1.0a8`.
+
+    **Withholding a route and dropping a manifest are different acts, and a
+    STATEFUL module's routes may be withheld.** The old rule — no profile may
+    name a persistence owner in its withheld set — was a proxy, and it had to
+    go: a module that ships an operator screen must be withholdable or it
+    force-publishes into every production profile. What replaces it is the
+    property the proxy stood for, asserted directly against an
+    a11-SHAPED PLANT: the real `deployment_control` manifest carrying the
+    surface a8 shipped, withheld, with every non-route field compared field by
+    field and the named subset — `platform_tables`, `migration_prefix`,
+    `migration_branch`, `requires`, `audit_actions`, `database_catalog` —
+    RATCHETED two-directionally against the pinned kernel's manifest field set,
+    because `database_catalog` is a11's declaration and does not exist on
+    `ModuleManifest` at the pinned kernel. An assertion that cannot run is
+    RECORDED as absent, never skipped. The same plant is proved REAL by mounting
+    its route in a built application once a profile inventories it. That plant is the LIVE coverage; the per-profile
+    registry+lineage check over `assembly.STATEFUL_MODULES` — derived from that
+    tuple rather than listing modules by hand, the earlier version named five
+    while the assembly composed six — is the coverage that ARRIVES with the
+    first real pin of a route-bearing module. They are not the same coverage
     (`tests/architecture/test_deployment_profile.py`).
 12. **An authority cutover is contracted before it is composed, and its premise
     is checked.** ADR-0005 records the Approvals switch: the estate was MEASURED

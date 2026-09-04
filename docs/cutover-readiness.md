@@ -225,7 +225,7 @@ retiring the `FleetDesiredStateService` and `DeploymentRunner` labels.
 
 `src/vendor_cp/provisioning/` drives the kernel's `ProvisioningProvider`
 contract against a side-effect-free simulator and owns no table (deny case D3).
-`src/vendor_cp/deployment_profile.py` selects which vendor SURFACES are mounted
+`src/vendor_cp/deployment_profile.py` selects which composed SURFACES are mounted
 and nothing else (hard rule 11). Neither retires with either cutover; both are
 named because the words invite the confusion.
 

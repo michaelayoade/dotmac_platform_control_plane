@@ -188,6 +188,13 @@ of the surface, and it is one of the two features production withholds.
 > laboratory, `production-composed-v1` was added, and `WITHHOLDABLE_SURFACES`
 > grew to cover the operator write surfaces. The measurement below is not
 > amended; it is what prompted the change.
+>
+> **ADR-0019 (2026-09-04) then deleted both hand rosters.** Every sentence below
+> naming `WITHHOLDABLE_SURFACES` or a per-surface withholdability describes a
+> symbol that no longer exists: withholdability is now DERIVED as the composed
+> route-bearing manifests minus `NEVER_WITHHELD_SURFACES`, and the completeness
+> check reads the composition rather than a roster of vendor feature names. The
+> row counts below stay as measured; the mechanism they cite has been replaced.
 
 Two profiles are declared, four surfaces are withholdable, and one profile
 withholds anything. `WITHHOLDABLE_SURFACES` is
