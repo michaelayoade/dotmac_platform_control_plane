@@ -321,6 +321,14 @@ def build_parser() -> _Parser:
     run_relay.add_argument("--poll-interval", type=float, default=1.0)
     run_relay.set_defaults(handler=commands.relay_run)
 
+    preflight = _command(
+        relay_sub,
+        "relay",
+        "preflight",
+        "check the relay-enablement preconditions (read-only, no host contact)",
+    )
+    preflight.set_defaults(handler=commands.relay_preflight)
+
     relay_health_command = _command(
         relay_sub, "relay", "health", "report whether the outbox is being drained"
     )

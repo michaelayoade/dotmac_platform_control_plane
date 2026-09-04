@@ -562,6 +562,46 @@ def relay_run(args: argparse.Namespace) -> Result:
     )
 
 
+def relay_preflight(args: argparse.Namespace) -> Result:
+    """Every relay-enablement precondition this repository can decide.
+
+    No `platform_db()` and no host contact: the packet is derived from files, so
+    an operator can run it before anything is dispatched and before any
+    credential exists. It cannot say the deployment will succeed; it can say
+    which preconditions are already false, which is the useful half before a
+    signed plan goes out.
+
+    A REFUSED verdict exits non-zero. A preflight that reported a problem and
+    still returned success would be a check whose result nothing acts on.
+    """
+    from vendor_cp.deployment.relay_preflight import Verdict as PreflightVerdict
+    from vendor_cp.deployment.relay_preflight import build_preflight_packet
+
+    packet = build_preflight_packet()
+    if packet.verdict is PreflightVerdict.REFUSED:
+        raise refuse(
+            "owner.readiness_refused",
+            "; ".join(
+                f"{result.precondition.value}: {result.detail}"
+                for result in packet.refused
+            ),
+        )
+    return Result(
+        command="relay preflight",
+        data={
+            "verdict": packet.verdict.value,
+            "results": [
+                {
+                    "precondition": result.precondition.value,
+                    "finding": result.finding.value,
+                    "detail": result.detail,
+                }
+                for result in packet.results
+            ],
+        },
+    )
+
+
 def relay_health(args: argparse.Namespace) -> Result:
     """The full observation: counts, ages, dead letters and what is unmeasured.
 
