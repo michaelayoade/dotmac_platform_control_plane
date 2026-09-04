@@ -88,7 +88,7 @@ def _password_present(conn: Connection, role: str) -> bool:
 def _install(conn: Connection, role: str, material: str) -> None:
     """Exactly what the effect does, through the same server-side quoting."""
     statement = conn.execute(
-        text("SELECT format('ALTER ROLE %I PASSWORD %L', :r, :m)"),
+        text("SELECT format('ALTER ROLE %I PASSWORD %L', :r::text, :m::text)"),
         {"r": role, "m": material},
     ).scalar_one()
     conn.execute(text(statement))
@@ -189,7 +189,8 @@ def test_server_side_quoting_survives_a_hostile_role_name(
     hostile = 'weird"; DROP TABLE x; --'
     with _connect(superuser_url) as conn:
         created = conn.execute(
-            text("SELECT format('CREATE ROLE %I LOGIN', :r)"), {"r": hostile}
+            text("SELECT format('CREATE ROLE %I LOGIN', :r::text)"),
+            {"r": hostile},
         ).scalar_one()
         conn.execute(text(created))
         conn.commit()
@@ -202,7 +203,8 @@ def test_server_side_quoting_survives_a_hostile_role_name(
     finally:
         with _connect(superuser_url) as conn:
             dropped = conn.execute(
-                text("SELECT format('DROP ROLE IF EXISTS %I', :r)"), {"r": hostile}
+                text("SELECT format('DROP ROLE IF EXISTS %I', :r::text)"),
+                {"r": hostile},
             ).scalar_one()
             conn.execute(text(dropped))
             conn.commit()

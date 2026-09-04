@@ -296,7 +296,16 @@ def _install(db: Session, principal: str, material: str) -> None:
     """
     db.execute(text("SET LOCAL log_statement = 'none'"))
     statement = db.execute(
-        text("SELECT format('ALTER ROLE %I PASSWORD %L', :principal, :material)"),
+        # The casts are load-bearing rather than decoration: `format` is
+        # variadic `"any"`, so PostgreSQL cannot infer a parameter's type and
+        # refuses with `could not determine data type of parameter $1`. The
+        # unit tier could not see this — a faked session returns whatever it is
+        # told to — and the Postgres measurement found it on the first run,
+        # which is the reason that measurement exists.
+        text(
+            "SELECT format('ALTER ROLE %I PASSWORD %L', "
+            ":principal::text, :material::text)"
+        ),
         {"principal": principal, "material": material},
     ).scalar_one()
     db.execute(text(statement))
