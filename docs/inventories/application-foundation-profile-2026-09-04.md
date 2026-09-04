@@ -550,10 +550,20 @@ publication path, so this cannot drift.
 
 The probe asserts a NAMED verdict, and
 `tests/architecture/test_profile_embedding.py::EXPECTED_CANDIDATE_VERDICT` must
-agree with it. It is `DOCUMENT_ABSENT` in the commit that adds the probe and
-`CONCERNS_INCOMPLETE` in the commit that embeds the document, and both move
+agree with it. This landed in TWO commits and the diff between them is the
+evidence: the first added the probe asserting `DOCUMENT_ABSENT` and CI observed
+exactly that against a real built image — the first time that verifier had ever
+run against bytes rather than a `tmp_path` fixture — and the second embedded the
+document and moved the assertion to `CONCERNS_INCOMPLETE`. Both sides move
 together or the build fails. A probe that accepted any answer would have passed
 straight through the embed and proved nothing about it.
+
+Reaching `CONCERNS_INCOMPLETE` is itself a stack of passed checks rather than a
+tolerated shortfall: the document was found, parsed, its own digest covered its
+own content, its revision matched the caller's expectation, and its wheel claim
+agreed with the image's independent per-file record. Every one of those is an
+earlier verdict in the precedence order, and any failure would have been
+reported instead.
 
 **Two honest limitations, named rather than papered over.**
 `CANDIDATE_SOURCE_REVISION` is supplied by the CALLER — the workflow's own SHA

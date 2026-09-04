@@ -88,6 +88,32 @@ pathlib.Path("/app/distributions.json").write_text(
 )
 DIGESTS
 
+# The `ApplicationFoundationProfile` document, built from the INSTALLED wheel.
+#
+# `python -m vendor_cp.deployment.profile`, not a heredoc like the block above,
+# and the difference is the whole design. The digests above are a measurement of
+# files, which a script in a build file can honestly take. A profile is a set of
+# CLAIMS about which providers this artifact carries, and a claim written into a
+# build file is a literal — the fixture-shaped binding this replaces. Running the
+# installed module instead means every concern in the document is there because
+# a provider RESOLVED in this environment, and a missing symbol fails the build
+# here rather than shipping a profile that describes an artifact which cannot
+# serve it.
+#
+# The dummy DSNs are so the kernel can construct its engine at import; nothing
+# connects, and the build has no database. `SOURCE_REVISION` must be a peeled
+# commit: `scripts/deploy_production.sh` already refuses anything else when it
+# reads the revision back off the image, so a document built from a branch name
+# would describe an artifact the deploy then rejects.
+ARG SOURCE_REVISION=unknown
+RUN DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+    PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+    python -m vendor_cp.deployment.profile \
+        --source-revision "$SOURCE_REVISION" \
+        --dist-dir /app/dist \
+        --lock /app/poetry.lock \
+        --output /app/application_foundation_profile.json
+
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 
 ARG SOURCE_REVISION=unknown
@@ -120,6 +146,13 @@ COPY --chown=10001:10001 alembic.ini ./alembic.ini
 # the receipt's claim about the wheel and the sdist can be re-derived from a
 # pulled image rather than trusted.
 COPY --from=builder --chown=10001:10001 /app/distributions.json ./distributions.json
+# The profile travels BESIDE the distribution record, and for the same reason: a
+# claim about an artifact must be re-derivable from a pulled image rather than
+# trusted from the pipeline that made it. `vendor_cp.deployment.profile_readback`
+# reads exactly this path, and until this line existed it returned
+# DOCUMENT_ABSENT against every real image — which was the honest answer.
+COPY --from=builder --chown=10001:10001 /app/application_foundation_profile.json \
+     ./application_foundation_profile.json
 
 USER 10001:10001
 

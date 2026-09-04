@@ -9,11 +9,11 @@ This module holds the wiring that makes the other three real, and the ONE
 assertion that records the transition:
 
 :data:`EXPECTED_CANDIDATE_VERDICT` is what the acceptance battery asserts the
-candidate's readback returns, and the two must agree. It is
-``DOCUMENT_ABSENT`` in the commit that adds the probe — the honest state of an
+candidate's readback returns, and the two must agree. It was
+``DOCUMENT_ABSENT`` in the commit that added the probe — the honest state of an
 artifact carrying no document, observed against real bytes for the first time —
-and it changes exactly once, in the commit that embeds the document. A verdict
-that moved with no diff here, or a diff here with no movement there, fails.
+and the embed moved it to ``CONCERNS_INCOMPLETE``. A verdict that moved with no
+diff here, or a diff here with no movement there, fails.
 
 That is the whole reason the probe asserts a NAMED verdict rather than "the
 readback ran". A step that accepted any answer would have gone on passing
@@ -26,18 +26,24 @@ import ast
 import re
 from pathlib import Path
 
-from vendor_cp.deployment.profile_readback import ProfileVerdict
+from vendor_cp.deployment.profile_readback import (
+    DEFAULT_PROFILE_PATH,
+    ProfileVerdict,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 ACCEPTANCE = ROOT / ".github" / "candidate" / "acceptance.sh"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 PUBLICATION = ROOT / ".github" / "workflows" / "production-image.yml"
+DOCKERFILE = ROOT / "Dockerfile"
 READBACK = ROOT / "src" / "vendor_cp" / "deployment" / "profile_readback.py"
 BUILDER = ROOT / "src" / "vendor_cp" / "deployment" / "profile.py"
 
-#: The verdict the candidate's own readback must currently return. Changes once,
-#: in the commit that embeds the document — see this module's docstring.
-EXPECTED_CANDIDATE_VERDICT = ProfileVerdict.DOCUMENT_ABSENT
+#: The verdict the candidate's own readback must currently return. It was
+#: `DOCUMENT_ABSENT` in the commit that added the probe and CI observed exactly
+#: that against a real image; the embed moved it here, and the two sides moved
+#: together — see this module's docstring.
+EXPECTED_CANDIDATE_VERDICT = ProfileVerdict.CONCERNS_INCOMPLETE
 
 #: The caller-supplied expectation. Named here so the two workflows and the
 #: script cannot disagree about the variable that carries it.
@@ -143,3 +149,49 @@ def test_the_builder_is_runnable_as_a_module_entry_point() -> None:
     builder = BUILDER.read_text(encoding="utf-8")
     assert 'if __name__ == "__main__":' in builder
     assert "def main(" in builder
+
+
+# ── the embed: the document is part of the image ────────────────────────────
+
+
+def test_the_image_builds_the_document_from_the_installed_wheel() -> None:
+    """`python -m vendor_cp.deployment.profile`, not an inline build script.
+
+    The Dockerfile takes per-file DIGESTS with a heredoc, and that is fine: a
+    measurement of files is something a build script can honestly make. A
+    profile is a set of CLAIMS about which providers this artifact carries, and
+    a claim written into a build file is a literal. Running the installed module
+    is what makes every concern in the document there because a provider
+    RESOLVED in this environment.
+    """
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert "python -m vendor_cp.deployment.profile" in dockerfile
+    assert '--source-revision "$SOURCE_REVISION"' in dockerfile
+    assert "--lock /app/poetry.lock" in dockerfile
+
+
+def test_the_runtime_stage_carries_the_document_where_the_verifier_reads_it() -> None:
+    """The path is DERIVED from the verifier's own constant, not written twice.
+
+    An embed that landed the document one directory over would produce an image
+    the verifier reports `DOCUMENT_ABSENT` for while the build log says it was
+    written — a disagreement no test comparing two literals could see.
+    """
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert str(DEFAULT_PROFILE_PATH.parent) == "/app"
+    assert "WORKDIR /app" in dockerfile
+    assert f"/app/{DEFAULT_PROFILE_PATH.name}" in dockerfile
+    assert f"./{DEFAULT_PROFILE_PATH.name}" in dockerfile
+
+
+def test_the_probe_names_the_concerns_it_expects_to_be_unsatisfied() -> None:
+    """By NAME, so it fails the day either one lands.
+
+    A probe asserting only "two are missing" would keep passing when
+    `request_evidence_context` bound and something else silently broke. Naming
+    them is what makes the next state a decision rather than a drift.
+    """
+    step = _acceptance().split('step "18 ', 1)[1]
+    assert "request_evidence_context" in step
+    assert "integration" in step
+    assert re.search(r"len\(bound\) != 11", step), step[:0] or "no bound-count check"

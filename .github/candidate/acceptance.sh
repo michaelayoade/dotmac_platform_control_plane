@@ -922,22 +922,42 @@ import json, sys
 observed = json.loads(sys.argv[1])
 verdict = observed["verdict"]
 
-# THE ARTIFACT CARRIES NO PROFILE DOCUMENT YET, and this asserts exactly that,
-# against real bytes rather than against a fixture. It is the state
-# `profile_readback`'s own docstring calls "the honest state of the artifact
-# today", and it has never actually been observed.
+# THE DOCUMENT IS NOW EMBEDDED, and the verdict moved. One commit ago this block
+# asserted `document_absent` and CI observed exactly that against a real image;
+# that observation is what this assertion is measured against. A verdict that
+# moved with no diff here, or a diff here with no movement there, is caught by
+# `tests/architecture/test_profile_embedding.py::EXPECTED_CANDIDATE_VERDICT`.
 #
-# The commit that embeds the document REPLACES this block. Do not soften it into
-# "any verdict is fine": a step that accepts every answer would go on passing
-# through the embed and prove nothing about it.
-if verdict != "document_absent":
-    print(f"expected document_absent, got {verdict}: {observed['detail']}", file=sys.stderr)
+# `concerns_incomplete` is the CORRECT verdict for this artifact, not a
+# shortfall being tolerated. Reaching it means the document was found, parsed,
+# its own digest covered its own content, its revision matched what the caller
+# expected, and its wheel claim agreed with the image's independent per-file
+# record — every one of those is an earlier verdict in the precedence order and
+# any of them would have been reported instead.
+#
+# Two concerns are genuinely unsatisfied and are named: `request_evidence_context`
+# belongs to `dotmac-kernel` and must not be declared from this side, and
+# `integration` needs a proof type that deliberately is not in this image (step
+# 17 proves that). Asserting them BY NAME is what makes this fail the day either
+# one lands — at which point the expectation becomes `admitted`, not a wider net.
+if verdict != "concerns_incomplete":
+    print(f"expected concerns_incomplete, got {verdict}: {observed['detail']}", file=sys.stderr)
     raise SystemExit(1)
-if observed["bound"]:
-    print(f"an absent document bound {observed['bound']}", file=sys.stderr)
+bound = set(observed["bound"])
+if len(bound) != 11:
+    print(f"expected 11 bound concerns, got {sorted(bound)}", file=sys.stderr)
     raise SystemExit(1)
+unsatisfied = {"request_evidence_context", "integration"}
+if bound & unsatisfied:
+    print(f"{sorted(bound & unsatisfied)} must not be bound from this side", file=sys.stderr)
+    raise SystemExit(1)
+for concern in sorted(unsatisfied):
+    if concern not in observed["detail"]:
+        print(f"the verdict does not name {concern}", file=sys.stderr)
+        raise SystemExit(1)
 PROFILE
-pass "the foundation profile readback ran against the artifact and refused it: document_absent"
-pass "and the refusal is now an OBSERVATION, which is what the embed will be measured against"
+pass "the foundation profile readback ran against the artifact and ADMITTED its document"
+pass "11 of 13 concerns bound; request_evidence_context and integration named unsatisfied"
+pass "the verdict moved from document_absent to concerns_incomplete, which is the proof it is READ"
 
 printf '\nCANDIDATE ACCEPTED\n'
