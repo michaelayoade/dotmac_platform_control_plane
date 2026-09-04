@@ -29,17 +29,33 @@ external `psql` path put its ledger and its password change in DIFFERENT
 transactions, leaving a window where one was true and the other was not — that
 is the thing being replaced, not extended.
 
-## The session is RECEIVED, and it cannot be one of ours
+## The privileged act is ONE NAMED OPERATION, not a role grant
 
 `ALTER ROLE <other> PASSWORD` requires superuser or CREATEROLE, and reading
 `pg_authid.rolpassword` requires superuser: `pg_roles` renders it as `********`
 for everyone. This assembly's own roles have neither — `app_admin` is
-explicitly `NOSUPERUSER NOCREATEROLE`, and that is not an oversight to route
-around but the reason the application cannot rewrite its own principals.
+explicitly `NOSUPERUSER NOCREATEROLE` — and widening that was refused, correctly.
 
-So the executor supplies a privileged session, reached on the target the same
-way `init-roles.sh` was. This module never constructs it, never holds a DSN for
-it, and deny case D1's connection allowlist stays empty.
+So steps 1 to 5 live in `public.bootstrap_dispatcher_credential`, a
+SECURITY DEFINER operation that alters exactly one role named as a constant in
+its own body. The kernel's `0012_platform_outbox` is the precedent for the
+shape; what does NOT carry over is its ownership, and the kernel says so itself:
+those functions are `OWNER TO app_admin` because app_admin has the TABLE
+privileges they need. It has no CREATEROLE, so an app_admin-owned function
+cannot alter a role whatever its body says. This one is therefore owned by a
+superuser and installed by one — `deploy/postgres/bootstrap-credential-function.sql`,
+applied at cluster initialisation, deliberately not an Alembic revision because
+migrations run as app_admin and a role cannot create an object owned by a
+superuser.
+
+Two things the caller gains beyond least privilege. It needs no standing
+superuser at run time — EXECUTE on one operation that can touch one role is the
+whole capability. And the material travels as a BIND PARAMETER rather than
+inside DDL text, so it never reaches `log_statement`; the `ALTER ROLE` is built
+inside plpgsql, which `log_statement` does not log.
+
+This module still receives its session and constructs none, so deny case D1's
+connection allowlist stays empty.
 
 ## The plan carries a reference; the material is resolved here
 
@@ -52,7 +68,6 @@ vector.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -102,6 +117,25 @@ REFUSAL_CODES: Final[frozenset[str]] = frozenset(
         "credential.authentication_not_enforced",
     }
 )
+
+
+#: The operation's SQLSTATE for each refusal it can raise, mapped back to the
+#: name this module reports. Custom codes rather than PostgreSQL's own, because
+#: three of these would otherwise share `invalid_parameter_value` and collapse
+#: into one answer — and "cannot log in" and "is a superuser" need opposite
+#: responses.
+#:
+#: Checked in BOTH directions against the SQL file, so a code raised there
+#: without a mapping here, or a mapping for a code nothing raises, fails the
+#: build.
+SQLSTATE_REFUSALS: Final[dict[str, str]] = {
+    "DM101": "principal.not_allowlisted",
+    "DM102": "principal.absent",
+    "DM103": "principal.not_login",
+    "DM104": "principal.is_superuser",
+    "DM105": "credential.already_present",
+    "DM106": "material.unresolvable",
+}
 
 
 class BootstrapRefused(Exception):
@@ -182,18 +216,14 @@ class BootstrapReceipt:
     authenticated: bool
 
 
-def _advisory_key(principal: str) -> int:
-    """A stable 63-bit lock key derived from the principal name.
+def _precheck_principal(principal: str) -> None:
+    """The two checks this module can make WITHOUT the database.
 
-    Derived rather than allocated, so two executors bootstrapping the same
-    principal contend on the same key without a registry to keep in step.
+    Shape and allowlist only. Everything about the role itself — that it exists,
+    can log in, is not a superuser, and holds no credential yet — is checked by
+    the operation, under its own lock, because that is where the answer is both
+    authoritative and readable. `pg_authid` is not visible to this caller at all.
     """
-    digest = hashlib.sha256(principal.encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "big") >> 1
-
-
-def _validate_principal(db: Session, principal: str) -> None:
-    """Step 1. Four separate refusals, because they need four different fixes."""
     if _PRINCIPAL_NAME.fullmatch(principal) is None:
         raise BootstrapRefused(
             "principal.malformed", f"{principal!r} is not a role name"
@@ -204,42 +234,49 @@ def _validate_principal(db: Session, principal: str) -> None:
             f"{principal!r} is not a principal this effect may install a "
             "credential for",
         )
-    row = db.execute(
-        text("SELECT rolcanlogin, rolsuper FROM pg_roles WHERE rolname = :principal"),
-        {"principal": principal},
-    ).one_or_none()
-    if row is None:
-        raise BootstrapRefused(
-            "principal.absent",
-            f"role {principal!r} does not exist; this effect installs a "
-            "credential for a role, it does not create one",
-        )
-    if not row[0]:
-        raise BootstrapRefused(
-            "principal.not_login",
-            f"role {principal!r} cannot log in, so a password would give it "
-            "nothing and hide that fact",
-        )
-    if row[1]:
-        raise BootstrapRefused(
-            "principal.is_superuser",
-            f"role {principal!r} is a superuser; this effect does not install "
-            "credentials for roles that can rewrite every other one",
-        )
 
 
-def _credential_present(db: Session, principal: str) -> bool:
-    """Whether `rolpassword` is set. Requires superuser — `pg_roles` renders it
-    as `********` for everyone, so a non-privileged reader cannot answer."""
-    return bool(
+def _sqlstate(error: BaseException) -> str | None:
+    """The SQLSTATE the operation raised, if this is one of its refusals."""
+    for candidate in (error, getattr(error, "orig", None)):
+        code = getattr(candidate, "sqlstate", None) or getattr(
+            candidate, "pgcode", None
+        )
+        if isinstance(code, str):
+            return code
+    return None
+
+
+def _install(db: Session, principal: str, material: str) -> None:
+    """Steps 2 to 5, performed by the operation rather than by this session.
+
+    The lock, the re-read under it, the refusal and the single `ALTER ROLE` all
+    live inside `public.bootstrap_dispatcher_credential`. Moving them there did
+    not lose the ordering — it moved the ordering to the only place that can
+    both read `pg_authid` and alter a role.
+
+    The material is a BIND PARAMETER. It is not interpolated into any statement
+    this module composes, and the operation builds its `ALTER ROLE` inside
+    plpgsql where `log_statement` does not reach.
+    """
+    try:
         db.execute(
             text(
-                "SELECT rolpassword IS NOT NULL FROM pg_authid WHERE "
-                "rolname = :principal"
+                "SELECT public.bootstrap_dispatcher_credential("
+                "CAST(:principal AS text), CAST(:material AS text))"
             ),
-            {"principal": principal},
-        ).scalar_one()
-    )
+            {"principal": principal, "material": material},
+        )
+    except Exception as error:  # noqa: BLE001 - re-raised as a named refusal
+        code = _sqlstate(error)
+        refusal = SQLSTATE_REFUSALS.get(code or "")
+        if refusal is None:
+            raise
+        db.rollback()
+        raise BootstrapRefused(
+            refusal,
+            f"the credential bootstrap operation refused {principal!r} " f"({code})",
+        ) from error
 
 
 def _resolve_material(
@@ -279,41 +316,6 @@ def _resolve_material(
             f"{instruction.secret_path} carries no {instruction.secret_field!r}",
         )
     return material, version
-
-
-def _install(db: Session, principal: str, material: str) -> None:
-    """Step 5. Exactly one `ALTER ROLE`, quoted by PostgreSQL itself.
-
-    Neither half of `ALTER ROLE <name> PASSWORD <literal>` can be a bind
-    parameter — one is an identifier and the other is a DDL literal — so the
-    statement is built by `format(%I, %L)` ON THE SERVER, from bound values.
-    That is PostgreSQL's own quoting rather than this module's idea of it, which
-    is the only injection-safe construction available here.
-
-    `log_statement` is silenced for this transaction because the rendered
-    statement necessarily contains the material, and a server configured to log
-    DDL would write it to a file nobody is treating as a secret store. This
-    requires superuser, which the caller already is.
-    """
-    db.execute(text("SET LOCAL log_statement = 'none'"))
-    statement = db.execute(
-        # The casts are load-bearing rather than decoration: `format` is
-        # variadic `"any"`, so PostgreSQL cannot infer a parameter's type and
-        # refuses with `could not determine data type of parameter $1`.
-        #
-        # `CAST(:x AS text)` rather than `:x::text`, because SQLAlchemy's own
-        # `:name` bind syntax collides with PostgreSQL's `::` cast operator and
-        # the statement reaches the server with a stray colon. Both mistakes
-        # were found by the Postgres measurement on consecutive runs, and
-        # neither was visible to the unit tier: a faked session returns whatever
-        # it is told to, so the rendered statement never met a parser.
-        text(
-            "SELECT format('ALTER ROLE %I PASSWORD %L', "
-            "CAST(:principal AS text), CAST(:material AS text))"
-        ),
-        {"principal": principal, "material": material},
-    ).scalar_one()
-    db.execute(text(statement))
 
 
 def _prove_authentication(
@@ -389,26 +391,12 @@ def bootstrap_principal_credential(
     connection, so an authentication proof taken inside it would prove nothing
     and would pass for the wrong reason.
     """
-    _validate_principal(admin_db, instruction.principal)
+    _precheck_principal(instruction.principal)
     material, version = _resolve_material(instruction, secrets)
 
-    # Step 2, then step 3. The lock is transaction-scoped, so it is released by
-    # the commit below or by any rollback — there is no path that leaks it.
-    admin_db.execute(
-        text("SELECT pg_advisory_xact_lock(:key)"),
-        {"key": _advisory_key(instruction.principal)},
-    )
-    if _credential_present(admin_db, instruction.principal):
-        # Step 4. Refuse. The caller reconciles with `verify_credential` if it
-        # believes a previous run of ITS OWN plan committed.
-        admin_db.rollback()
-        raise BootstrapRefused(
-            "credential.already_present",
-            f"role {instruction.principal!r} already holds a credential. This "
-            "effect installs once; altering again would rotate a credential "
-            "other systems now hold",
-        )
-
+    # Steps 2 to 5, inside the operation. It takes the advisory lock, re-reads
+    # presence under it, refuses if a credential is already there, and performs
+    # exactly one `ALTER ROLE`.
     _install(admin_db, instruction.principal, material)
     admin_db.commit()  # Step 6a. The proof below is meaningless before this.
 

@@ -18,6 +18,7 @@ services:
     volumes:
       - vendor_postgres_data:/var/lib/postgresql/data
       - ./deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/001-vendor-roles.sh:ro
+      - ./deploy/postgres/bootstrap-credential-function.sql:/docker-entrypoint-initdb.d/002-bootstrap-credential-function.sql:ro
     restart: unless-stopped
     healthcheck:
       test:

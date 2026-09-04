@@ -86,6 +86,30 @@ transcript or a command line — `/proc/<pid>/cmdline` is world-readable for as
 long as a process lives, and a registration token leaked on this fleet exactly
 that way. Every verification below is satisfied without reading the password.
 
+### The privileged act is one named operation, not a role grant
+
+`app_admin` stays `NOSUPERUSER NOCREATEROLE`. The ability to install the
+dispatcher's credential arrives as
+`public.bootstrap_dispatcher_credential(text, text)` — a SECURITY DEFINER
+operation that alters exactly one role, named as a constant in its own body,
+and refuses every other principal.
+
+**It is not an Alembic revision, and cannot be.** Migrations run as `app_admin`,
+a role cannot create an object owned by a superuser, and an app_admin-owned
+definer cannot `ALTER ROLE` whatever its body says — app_admin has no
+CREATEROLE. That is measured in
+`tests/migration/test_credential_bootstrap_atomicity.py` rather than argued
+here. So `deploy/postgres/bootstrap-credential-function.sql` is applied BY a
+superuser: automatically at cluster initialisation (mounted as an init script),
+and **on an already-initialised host as a one-time operator act**, exactly like
+the credential itself and for the same reason.
+
+Granting `EXECUTE` on it to the executor's principal is the act that delegates
+the capability. A superuser caller needs no grant; a non-superuser executor gets
+exactly this one operation on exactly one role, and nothing else. `PUBLIC`,
+`app_user` and `platform_api` are revoked by name in the file, so the absence is
+stated rather than inherited.
+
 ### The six steps, in order
 
 Steps 1–3 need nothing from the relay. Steps 4–6 need the relay service to

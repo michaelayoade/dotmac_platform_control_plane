@@ -30,6 +30,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 from sqlalchemy import Connection, create_engine, text
@@ -89,8 +90,41 @@ def _password_present(conn: Connection, role: str) -> bool:
     )
 
 
+#: The checked-in operation, applied by a superuser exactly as a cluster
+#: initialisation would apply it.
+_OPERATION = (
+    Path(__file__).resolve().parents[2]
+    / "deploy"
+    / "postgres"
+    / "bootstrap-credential-function.sql"
+)
+
+
+@pytest.fixture
+def operation(superuser_url: str) -> Iterator[None]:
+    """Install the real operation, then drop it.
+
+    Applied from the checked-in file rather than from a copy in this test: a
+    test that installed its own version would measure a function nothing
+    deploys.
+    """
+    with _connect(superuser_url) as conn:
+        conn.execute(text(_OPERATION.read_text(encoding="utf-8")))
+        conn.commit()
+    yield
+    with _connect(superuser_url) as conn:
+        conn.execute(
+            text(
+                "DROP FUNCTION IF EXISTS "
+                "public.bootstrap_dispatcher_credential(text, text)"
+            )
+        )
+        conn.commit()
+
+
 def _install(conn: Connection, role: str, material: str) -> None:
-    """Exactly what the effect does, through the same server-side quoting."""
+    """Install a credential the direct way, for the premises that are about
+    PostgreSQL rather than about the operation."""
     statement = conn.execute(
         text(
             "SELECT format('ALTER ROLE %I PASSWORD %L', "
@@ -99,6 +133,18 @@ def _install(conn: Connection, role: str, material: str) -> None:
         {"r": role, "m": material},
     ).scalar_one()
     conn.execute(text(statement))
+
+
+def _call(conn: Connection, principal: str, material: str) -> str:
+    return str(
+        conn.execute(
+            text(
+                "SELECT public.bootstrap_dispatcher_credential("
+                "CAST(:p AS text), CAST(:m AS text))"
+            ),
+            {"p": principal, "m": material},
+        ).scalar_one()
+    )
 
 
 # ── premise 1 and 2: atomicity, in both directions ──────────────────────────
@@ -359,3 +405,150 @@ def test_the_advisory_lock_is_transaction_scoped(superuser_url: str) -> None:
             )
         ).scalar_one()
         assert after == 0, "a rolled back transaction must not keep the lock"
+
+
+# ── the operation itself ────────────────────────────────────────────────────
+
+
+def test_an_app_admin_owned_definer_cannot_alter_a_role(
+    superuser_url: str, role: str
+) -> None:
+    """THE MEASUREMENT THAT DECIDED THE DESIGN.
+
+    The kernel's `0012_platform_outbox` creates SECURITY DEFINER functions and
+    sets `OWNER TO app_admin`, which works because app_admin has the TABLE
+    privileges those functions need. It has no CREATEROLE, so an app_admin-owned
+    function cannot alter a role — and that is why this operation is owned and
+    installed by a superuser instead of arriving as an Alembic revision.
+
+    Asserted against a real server rather than reasoned from the manual, because
+    the whole design turns on it.
+    """
+    with _connect(superuser_url) as conn:
+        conn.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION public.canary_alter(p text, m text) "
+                "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' "
+                "AS $fn$ BEGIN EXECUTE pg_catalog.format("
+                "'ALTER ROLE %I PASSWORD %L', p, m); END $fn$"
+            )
+        )
+        conn.execute(
+            text("ALTER FUNCTION public.canary_alter(text, text) OWNER TO app_admin")
+        )
+        conn.commit()
+    try:
+        with _connect(superuser_url) as conn:
+            with pytest.raises(Exception) as refused:
+                conn.execute(
+                    text(
+                        "SELECT public.canary_alter(CAST(:p AS text), CAST(:m AS text))"
+                    ),
+                    {"p": role, "m": HOSTILE},
+                )
+            assert "permission denied" in str(refused.value).lower()
+    finally:
+        with _connect(superuser_url) as conn:
+            conn.execute(
+                text("DROP FUNCTION IF EXISTS public.canary_alter(text, text)")
+            )
+            conn.commit()
+
+
+def test_the_operation_refuses_every_principal_but_its_own(
+    superuser_url: str, operation: None, role: str
+) -> None:
+    """Restricted BY NAME, not by convention. A definer function that altered
+    whatever principal it was handed would be a CREATEROLE grant with extra
+    steps, reachable by anything holding EXECUTE."""
+    with _connect(superuser_url) as conn:
+        for other in (role, "app_admin", "app_user", "platform_api", "postgres"):
+            with pytest.raises(Exception) as refused:
+                _call(conn, other, HOSTILE)
+            assert "DM101" in str(refused.value) or "not bootstrappable" in str(
+                refused.value
+            )
+            conn.rollback()
+
+
+def test_the_operation_installs_once_and_then_refuses(
+    superuser_url: str, operation: None
+) -> None:
+    """The one-time property survives the move into SQL: absent means install,
+    present means refuse. No ledger — the database's own state is the record."""
+    with _connect(superuser_url) as conn:
+        already = _password_present(conn, "platform_outbox_dispatcher")
+    if already:
+        pytest.skip(
+            "the dispatcher already holds a credential on this cluster, so the "
+            "install-once transition cannot be observed here"
+        )
+    try:
+        with _connect(superuser_url) as conn:
+            assert _call(conn, "platform_outbox_dispatcher", HOSTILE) == "installed"
+            conn.commit()
+        with _connect(superuser_url) as conn:
+            assert _password_present(conn, "platform_outbox_dispatcher") is True
+            with pytest.raises(Exception) as refused:
+                _call(conn, "platform_outbox_dispatcher", HOSTILE)
+            assert "DM105" in str(refused.value) or "installs once" in str(
+                refused.value
+            )
+            conn.rollback()
+    finally:
+        with _connect(superuser_url) as conn:
+            conn.execute(text("ALTER ROLE platform_outbox_dispatcher PASSWORD NULL"))
+            conn.commit()
+
+
+def test_the_operation_is_not_executable_by_the_application_roles(
+    superuser_url: str, operation: None, url_for: Callable[..., str]
+) -> None:
+    """Executor-only. PUBLIC gets nothing and the application's own roles are
+    revoked by name, so the absence is stated rather than inherited."""
+    with _connect(superuser_url) as conn:
+        database = conn.execute(text("SELECT current_database()")).scalar_one()
+    for principal in ("app_user", "platform_api"):
+        with _connect(url_for(superuser_url, database, user=principal)) as conn:
+            with pytest.raises(Exception) as refused:
+                _call(conn, "platform_outbox_dispatcher", HOSTILE)
+            assert "permission denied" in str(refused.value).lower()
+            conn.rollback()
+
+
+def test_the_operation_holds_its_lock_only_for_the_transaction(
+    superuser_url: str, operation: None
+) -> None:
+    """The lock moved inside the operation and stayed transaction-scoped.
+
+    Driven through a refusal that TAKES the lock first. The principal check runs
+    before the lock, so a DM101 refusal would never have held one and asserting
+    on it would prove nothing — the already-present refusal (DM105) is the one
+    that locks, reads under it, and then raises.
+    """
+    from sqlalchemy.exc import DBAPIError
+
+    with _connect(superuser_url) as conn:
+        if _password_present(conn, "platform_outbox_dispatcher"):
+            pytest.skip("the dispatcher already holds a credential on this cluster")
+        _install(conn, "platform_outbox_dispatcher", HOSTILE)
+        conn.commit()
+    try:
+        with _connect(superuser_url) as conn:
+            with pytest.raises(DBAPIError) as refused:
+                _call(conn, "platform_outbox_dispatcher", HOSTILE)
+            assert "DM105" in str(refused.value) or "installs once" in str(
+                refused.value
+            )
+            conn.rollback()
+            held = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                    "AND pid = pg_backend_pid()"
+                )
+            ).scalar_one()
+            assert held == 0, "a refusing executor must not keep the lock"
+    finally:
+        with _connect(superuser_url) as conn:
+            conn.execute(text("ALTER ROLE platform_outbox_dispatcher PASSWORD NULL"))
+            conn.commit()
