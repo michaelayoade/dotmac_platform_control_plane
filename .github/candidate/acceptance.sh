@@ -956,7 +956,7 @@ for concern in sorted(unsatisfied):
         print(f"the verdict does not name {concern}", file=sys.stderr)
         raise SystemExit(1)
 PROFILE
-pass "the foundation profile readback ran against the artifact and ADMITTED its document"
+pass "the foundation profile readback found, parsed and bound-checked the artifact's document"
 pass "11 of 13 concerns bound; request_evidence_context and integration named unsatisfied"
 pass "the verdict moved from document_absent to concerns_incomplete, which is the proof it is READ"
 
