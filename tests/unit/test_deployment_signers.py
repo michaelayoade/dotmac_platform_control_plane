@@ -257,9 +257,11 @@ def test_signer_purposes_match_the_installed_control() -> None:
 class _Signer:
     """A purpose-bound pointer whose class this module does not ship yet.
 
-    `deployment_dispatch` and `platform_release_evidence` have no descriptor on
-    `main`, and distinctness must be checkable for them before their classes
-    land -- otherwise the guard arrives after the ceremony it exists to protect.
+    `deployment_dispatch` has no descriptor anywhere and `deployment_recovery`
+    is Control's, so distinctness must be checkable for them before their
+    classes land -- otherwise the guard arrives after the ceremony it exists to
+    protect. `platform_release_evidence` was in this list until it gained
+    `ReleaseEvidenceSignerPointer`; each purpose that gains a type leaves it.
     Structural typing is what makes that possible.
     """
 
