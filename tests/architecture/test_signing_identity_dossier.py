@@ -13,7 +13,10 @@ against the real descriptors, and every check here is proved to bite.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -257,3 +260,454 @@ def test_an_undeclared_purpose_row_is_read_rather_than_skipped() -> None:
         "assertion can never see a new one"
     )
     assert set(declared) != EXPECTED_PURPOSES
+
+
+# --- the purpose-misuse matrix, derived rather than counted by hand ----------
+#
+# Step 7b's matrix is the document's statement that every DIRECTED pair of
+# identities has been considered: identity A's key, offered for identity B's
+# purpose, must refuse. With N identities that is N*(N-1) cells, and the count
+# has now moved twice — three identities to four, four to five — while the
+# sentence naming it moved separately, by hand, in a different paragraph.
+#
+# So nothing below states a number. The axes are compared with the identity
+# table's own declared short labels, the cell count is DERIVED from how many
+# identities that table declares, and the prose count is checked against the
+# derivation rather than trusted. A fifth identity therefore turns this red
+# until the matrix carries all twenty directed pairs and each one is attributed
+# to a mechanism that refuses it.
+#
+# `each demonstrably able to refuse` is the last rule and the one that stops the
+# matrix being decoration: a numbered cell nobody attributed to a named refusing
+# mechanism is a pair that was drawn, not checked.
+
+_NUMBER_WORDS: Final[dict[str, int]] = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+}
+
+_SHORT_LABEL_HEADER = "short label"
+_MATRIX_CORNER = re.compile(r"holder\s*\\?\s*used as", re.IGNORECASE)
+_CELL_NUMBER = re.compile(r"^\((\d+)\)$")
+_MECHANISM_BULLET = re.compile(r"^- \*\*\(")
+_STATED_PAIRS = re.compile(r"\*?\*?([a-z]+|\d+)\*?\*? ordered pairs", re.IGNORECASE)
+#: "four identities", "three purpose-bound Ed25519 identities". The count token
+#: is restricted to the known words so `the authorization and observation
+#: identities` — a phrase with no count in it — is not read as one.
+_STATED_IDENTITIES = re.compile(
+    r"\b(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\b"
+    r"(?: [\w-]+){0,3}? identities",
+    re.IGNORECASE,
+)
+_MUST_SUCCEED = "must succeed"
+
+
+class MatrixRefusal(StrEnum):
+    """Why the purpose-misuse matrix does not cover the identities declared."""
+
+    #: The matrix axes are not the identity table's declared short labels.
+    AXES_DISAGREE_WITH_IDENTITIES = "AXES_DISAGREE_WITH_IDENTITIES"
+    #: A diagonal cell — an identity used for its OWN purpose — does not say it
+    #: must succeed. A matrix of refusals with no successes proves nothing about
+    #: whether the identities work at all.
+    DIAGONAL_NOT_REQUIRED_TO_SUCCEED = "DIAGONAL_NOT_REQUIRED_TO_SUCCEED"
+    #: Fewer numbered cells than there are directed pairs.
+    ORDERED_PAIR_MISSING = "ORDERED_PAIR_MISSING"
+    #: One number used for two cells, which hides a missing one behind a count.
+    ORDERED_PAIR_NUMBERED_TWICE = "ORDERED_PAIR_NUMBERED_TWICE"
+    #: A numbered cell no mechanism bullet claims. Drawn, not checked.
+    PAIR_HAS_NO_REFUSING_MECHANISM = "PAIR_HAS_NO_REFUSING_MECHANISM"
+    #: The prose pair count disagrees with the derived one.
+    STATED_COUNT_DISAGREES = "STATED_COUNT_DISAGREES"
+    #: The document says it covers a different number of identities than it
+    #: declares. The merged title said THREE while the table declared four.
+    STATED_IDENTITY_COUNT_DISAGREES = "STATED_IDENTITY_COUNT_DISAGREES"
+    #: A cell or table the reader cannot parse. Never a pass.
+    MATRIX_UNREADABLE = "MATRIX_UNREADABLE"
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixFinding:
+    refusal: MatrixRefusal
+    detail: str
+
+
+def _norm(cell: str) -> str:
+    return " ".join(cell.replace("**", "").replace("`", "").split()).lower()
+
+
+def _row_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def identity_labels(text: str) -> tuple[str, ...]:
+    """The identity table's declared short labels, in declaration order.
+
+    Located by HEADER rather than by position, so adding a column to the
+    identity table cannot silently shift which one this reads.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith("|"):
+            continue
+        header = [_norm(cell) for cell in _row_cells(line)]
+        if _SHORT_LABEL_HEADER not in header:
+            continue
+        column = header.index(_SHORT_LABEL_HEADER)
+        labels: list[str] = []
+        for row in lines[index + 2 :]:
+            if not row.lstrip().startswith("|"):
+                break
+            cells = _row_cells(row)
+            if len(cells) <= column:
+                break
+            labels.append(_norm(cells[column]))
+        return tuple(labels)
+    return ()
+
+
+def misuse_matrix(text: str) -> tuple[tuple[str, ...], list[tuple[str, list[str]]]]:
+    """(column labels, [(row label, cells)]) for step 7b's matrix."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = _row_cells(line)
+        if not cells or not _MATRIX_CORNER.search(cells[0]):
+            continue
+        columns = tuple(_norm(cell) for cell in cells[1:])
+        rows: list[tuple[str, list[str]]] = []
+        for row in lines[index + 2 :]:
+            if not row.lstrip().startswith("|"):
+                break
+            row_cells = _row_cells(row)
+            rows.append((_norm(row_cells[0]), [_norm(c) for c in row_cells[1:]]))
+        return columns, rows
+    return (), []
+
+
+def attributed_pairs(text: str) -> set[int]:
+    """Every cell number a mechanism bullet claims to refuse."""
+    claimed: set[int] = set()
+    for line in text.splitlines():
+        if not _MECHANISM_BULLET.match(line.strip()):
+            continue
+        head = line.split("—")[0]
+        claimed.update(int(n) for n in re.findall(r"\((\d+)\)", head))
+    return claimed
+
+
+def stated_pair_counts(text: str) -> list[tuple[str, int | None]]:
+    """Every "<n> ordered pairs" the prose states, with its parsed value."""
+    found: list[tuple[str, int | None]] = []
+    for match in _STATED_PAIRS.finditer(text):
+        token = match.group(1).lower()
+        if token.isdigit():
+            found.append((match.group(0), int(token)))
+        else:
+            found.append((match.group(0), _NUMBER_WORDS.get(token)))
+    return found
+
+
+def stated_identity_counts(text: str) -> list[tuple[str, int | None]]:
+    """Every "<n> identities" the prose states, with its parsed value."""
+    found: list[tuple[str, int | None]] = []
+    for match in _STATED_IDENTITIES.finditer(text):
+        token = match.group(1).lower()
+        found.append(
+            (
+                match.group(0),
+                int(token) if token.isdigit() else _NUMBER_WORDS.get(token),
+            )
+        )
+    return found
+
+
+def scan_matrix(text: str) -> list[MatrixFinding]:
+    """Every way the matrix fails to cover the identities that were declared."""
+    labels = identity_labels(text)
+    columns, rows = misuse_matrix(text)
+    findings: list[MatrixFinding] = []
+
+    def flag(refusal: MatrixRefusal, detail: str) -> None:
+        findings.append(MatrixFinding(refusal, detail))
+
+    if not labels:
+        flag(MatrixRefusal.MATRIX_UNREADABLE, "no identity short labels parsed")
+        return findings
+    for phrase, value in stated_identity_counts(text):
+        if value != len(labels):
+            flag(
+                MatrixRefusal.STATED_IDENTITY_COUNT_DISAGREES,
+                f"prose says {phrase!r}; the identity table declares " f"{len(labels)}",
+            )
+
+    if not columns or not rows:
+        flag(MatrixRefusal.MATRIX_UNREADABLE, "no purpose-misuse matrix parsed")
+        return findings
+
+    row_labels = tuple(label for label, _ in rows)
+    # The two axes must be the same sequence as each other — a matrix whose rows
+    # and columns are ordered differently makes every cell mean something other
+    # than it appears to. Against the IDENTITY TABLE the comparison is by SET,
+    # deliberately: the cells are self-describing through their own row and
+    # column labels, so a different ordering costs a reader nothing, while a
+    # missing or extra identity is the defect this exists to catch. The merged
+    # document already ordered the two tables differently — observation and
+    # dispatch are swapped — and requiring agreement there would have failed on
+    # a difference that misleads nobody.
+    if row_labels != columns:
+        flag(
+            MatrixRefusal.AXES_DISAGREE_WITH_IDENTITIES,
+            f"rows {list(row_labels)} are not the same sequence as columns "
+            f"{list(columns)}; every cell would mean something other than it "
+            "appears to",
+        )
+    if len(set(row_labels)) != len(row_labels):
+        flag(
+            MatrixRefusal.AXES_DISAGREE_WITH_IDENTITIES,
+            f"the matrix repeats an axis label: {list(row_labels)}",
+        )
+    if set(columns) != set(labels):
+        flag(
+            MatrixRefusal.AXES_DISAGREE_WITH_IDENTITIES,
+            f"matrix axes {sorted(columns)} do not cover the declared "
+            f"identities {sorted(labels)}",
+        )
+    if findings:
+        return findings
+
+    size = len(labels)
+    numbered: dict[int, list[str]] = {}
+    for row_index, (row_label, cells) in enumerate(rows):
+        if len(cells) != size:
+            flag(
+                MatrixRefusal.MATRIX_UNREADABLE,
+                f"row {row_label!r} has {len(cells)} cells, expected {size}",
+            )
+            continue
+        for column_index, cell in enumerate(cells):
+            where = f"{row_label} used as {columns[column_index]}"
+            if row_index == column_index:
+                if cell != _MUST_SUCCEED:
+                    flag(
+                        MatrixRefusal.DIAGONAL_NOT_REQUIRED_TO_SUCCEED,
+                        f"{where}: {cell!r}",
+                    )
+                continue
+            match = _CELL_NUMBER.match(cell)
+            if not match:
+                flag(MatrixRefusal.MATRIX_UNREADABLE, f"{where}: {cell!r}")
+                continue
+            numbered.setdefault(int(match.group(1)), []).append(where)
+
+    expected = size * (size - 1)
+    for number, places in sorted(numbered.items()):
+        if len(places) > 1:
+            flag(
+                MatrixRefusal.ORDERED_PAIR_NUMBERED_TWICE,
+                f"({number}) used by {places}",
+            )
+    missing = sorted(set(range(1, expected + 1)) - set(numbered))
+    if missing:
+        flag(
+            MatrixRefusal.ORDERED_PAIR_MISSING,
+            f"{size} identities are {expected} directed pairs; the matrix is "
+            f"missing {missing}",
+        )
+
+    claimed = attributed_pairs(text)
+    unattributed = sorted(set(numbered) - claimed)
+    if unattributed:
+        flag(
+            MatrixRefusal.PAIR_HAS_NO_REFUSING_MECHANISM,
+            f"cells {unattributed} are numbered but no mechanism bullet says "
+            "what refuses them",
+        )
+
+    for phrase, value in stated_pair_counts(text):
+        if value != expected:
+            flag(
+                MatrixRefusal.STATED_COUNT_DISAGREES,
+                f"prose says {phrase!r}; {size} identities are {expected}",
+            )
+    return findings
+
+
+def test_the_matrix_covers_every_directed_pair_of_declared_identities() -> None:
+    """The document as it stands. Everything below plants a defect into THIS."""
+    assert scan_matrix(DOSSIER.read_text(encoding="utf-8")) == []
+
+
+def test_the_matrix_reader_is_not_reading_an_empty_document() -> None:
+    """POSITIVE CONTROL. Every rule in `scan_matrix` passes by finding nothing,
+    so a reader that parsed no labels and no cells would report a clean matrix
+    over a document that has neither."""
+    text = DOSSIER.read_text(encoding="utf-8")
+    labels = identity_labels(text)
+    columns, rows = misuse_matrix(text)
+
+    assert len(labels) >= 4, labels
+    assert set(labels) == {label for label, _ in rows} == set(columns)
+    assert len(rows) == len(labels)
+    # The derived count is what every rule is measured against, so it is
+    # asserted directly rather than left implicit in a green scan.
+    assert sum(
+        1
+        for row_index, (_, cells) in enumerate(rows)
+        for column_index, _ in enumerate(cells)
+        if row_index != column_index
+    ) == len(labels) * (len(labels) - 1)
+    assert attributed_pairs(text) == set(range(1, len(labels) * (len(labels) - 1) + 1))
+    assert stated_pair_counts(text), "the prose states no pair count to check"
+
+
+# --- sensitivity: every matrix rule is shown to bite ------------------------
+
+
+def _dossier_with(old: str, new: str) -> str:
+    text = DOSSIER.read_text(encoding="utf-8")
+    assert text.count(old) == 1, f"anchor is not unique: {old[:60]!r}"
+    return text.replace(old, new)
+
+
+def _matrix_only(text: str, refusal: MatrixRefusal) -> MatrixFinding:
+    findings = scan_matrix(text)
+    matching = [f for f in findings if f.refusal is refusal]
+    assert len(matching) == 1, f"expected exactly one {refusal}, got {findings}"
+    return matching[0]
+
+
+def test_an_identity_the_matrix_does_not_cover_is_refused() -> None:
+    """THE PLANT THIS GUARD EXISTS FOR.
+
+    A fifth identity added to the table while the matrix keeps its four axes is
+    precisely the drift Michael's five-identity ruling names: the count of
+    ordered pairs moves from twelve to twenty, and nothing in a hand-written
+    matrix notices. The document must go red until the matrix covers it.
+    """
+    doctored = _dossier_with(
+        "| 4 | `platform_release_evidence` | release evidence |",
+        "| 5 | `recovery_probe_purpose` | recovery | "
+        "`secret/dotmac/platform-cp/recovery-signing/primary` | a holder | "
+        "a verifier |\n| 4 | `platform_release_evidence` | release evidence |",
+    )
+    finding = _matrix_only(doctored, MatrixRefusal.AXES_DISAGREE_WITH_IDENTITIES)
+    assert "recovery" in finding.detail
+
+
+def test_a_directed_pair_the_matrix_omits_is_refused() -> None:
+    """A cell reusing another's number hides the missing one behind a count."""
+    doctored = _dossier_with("| (10) | (11) | (12) |", "| (10) | (11) | (11) |")
+    findings = scan_matrix(doctored)
+    assert {f.refusal for f in findings} == {
+        MatrixRefusal.ORDERED_PAIR_NUMBERED_TWICE,
+        MatrixRefusal.ORDERED_PAIR_MISSING,
+    }, findings
+
+
+def test_a_pair_no_mechanism_claims_is_refused() -> None:
+    """`each demonstrably able to refuse`: a numbered cell nobody attributed to
+    a refusing mechanism was drawn, not checked."""
+    doctored = _dossier_with(
+        "- **(2), (6), (7), (9), (12) — the same Control types, other direction.**",
+        "- **(2), (6), (7), (9) — the same Control types, other direction.**",
+    )
+    finding = _matrix_only(doctored, MatrixRefusal.PAIR_HAS_NO_REFUSING_MECHANISM)
+    assert "[12]" in finding.detail
+
+
+def test_a_diagonal_that_is_not_required_to_succeed_is_refused() -> None:
+    """A matrix of refusals with no successes never proves the identities work.
+
+    This is the same failure as a readiness probe that only ever returns 503:
+    every refusal cell would pass against identities that refuse everything,
+    including their own purpose.
+    """
+    doctored = _dossier_with(
+        "| **authorization** | must succeed |", "| **authorization** | (13) |"
+    )
+    finding = _matrix_only(doctored, MatrixRefusal.DIAGONAL_NOT_REQUIRED_TO_SUCCEED)
+    assert "authorization used as authorization" in finding.detail
+
+
+def test_a_prose_count_that_disagrees_with_the_matrix_is_refused() -> None:
+    """The sentence and the table are two registers, and the sentence is the one
+    a reader believes. It moved by hand twice; now it cannot move alone."""
+    doctored = _dossier_with(
+        "### 7b — purpose: the twelve ordered pairs",
+        "### 7b — purpose: the thirteen ordered pairs",
+    )
+    finding = _matrix_only(doctored, MatrixRefusal.STATED_COUNT_DISAGREES)
+    assert "thirteen" in finding.detail
+
+
+def test_a_stated_identity_count_that_disagrees_is_refused() -> None:
+    """The title said THREE while the table declared four, and had since the
+    fourth identity landed. Nothing could see it: the count lived in prose and
+    the identities lived in a table, and no check read both.
+
+    This is the rule that found it, so it is planted rather than assumed.
+    """
+    doctored = _dossier_with(
+        "# Signing identity mint dossier — four purpose-bound Ed25519 identities",
+        "# Signing identity mint dossier — three purpose-bound Ed25519 identities",
+    )
+    finding = _matrix_only(doctored, MatrixRefusal.STATED_IDENTITY_COUNT_DISAGREES)
+    assert "three purpose-bound" in finding.detail
+
+
+def test_the_identity_count_reader_ignores_a_phrase_with_no_count() -> None:
+    """SENSITIVITY, the other direction. `the authorization and observation
+    identities` states no number, and a reader that treated the preceding word
+    as one would refuse a correct sentence — noise that gets a guard disabled."""
+    assert stated_identity_counts("the authorization and observation identities") == []
+    assert stated_identity_counts("four identities") == [("four identities", 4)]
+
+
+def test_an_unreadable_cell_refuses_rather_than_passing_as_clean() -> None:
+    """ABSENT must be distinguishable from UNPARSED.
+
+    Every rule above passes by finding nothing, so a cell the reader cannot
+    parse would otherwise read exactly like a cell with nothing wrong with it.
+    """
+    doctored = _dossier_with("| (4) | must succeed |", "| see below | must succeed |")
+    findings = scan_matrix(doctored)
+    # TWO distinct findings, and reporting them separately is the point: the
+    # cell cannot be read AND the directed pair it should have carried is now
+    # uncovered. An aggregate would send an editor round the loop twice.
+    assert {f.refusal for f in findings} == {
+        MatrixRefusal.MATRIX_UNREADABLE,
+        MatrixRefusal.ORDERED_PAIR_MISSING,
+    }, findings
+    unreadable = _matrix_only(doctored, MatrixRefusal.MATRIX_UNREADABLE)
+    assert "see below" in unreadable.detail
+
+
+def test_a_document_with_no_matrix_at_all_is_refused() -> None:
+    """The strongest form of the same point: deleting the matrix must not read
+    as a matrix with no problems in it."""
+    text = DOSSIER.read_text(encoding="utf-8")
+    without = text.replace("| holder \\ used as |", "| holder and use |")
+    assert without != text
+    finding = _matrix_only(without, MatrixRefusal.MATRIX_UNREADABLE)
+    assert "no purpose-misuse matrix parsed" in finding.detail

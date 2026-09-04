@@ -1,4 +1,4 @@
-# Signing identity mint dossier — three purpose-bound Ed25519 identities
+# Signing identity mint dossier — four purpose-bound Ed25519 identities
 
 > **Status: ready to execute, nothing created yet.** Every command below is
 > Michael's to paste. This repository holds **pointers only** — no key material
@@ -16,12 +16,18 @@
 One ceremony, four identities. They are not interchangeable and they do not
 live in the same place — that separation is the whole point.
 
-| # | purpose constant | pointer (OpenBao KV v2) | private half lives with | public half verified by |
-|---|---|---|---|---|
-| 1 | `deployment_authorization` | `secret/dotmac/platform-cp/authorization-signing/primary` | the Platform CP authorization issuer | the **target**, at `/etc/dotmac/platform-cp/authorization-verification.json` |
-| 2 | `target_execution_observation` | `secret/dotmac/platform-cp/target-observation-signing/primary` | the **target host** (it signs what it applied) | Platform CP / Deployment Control |
-| 3 | `deployment_dispatch` | `secret/dotmac/platform-cp/dispatch-signing/primary` | the Platform CP dispatcher (the caller injects it) | the **executor**, through `verify_dispatch_envelope` |
-| 4 | `platform_release_evidence` | `secret/dotmac/platform-cp/release-evidence-signing/primary` | the release-evidence producer (Platform CP release path) | the **target**, at `/etc/dotmac/platform-cp/release-evidence-verification.json` |
+The **short label** column is not decoration. The purpose-misuse matrix in
+step 7b is indexed by these labels, and a matrix whose axes are spelled by hand
+can drift from the identity set it claims to cover — which is how a count stays
+at twelve while the document declares a fifth identity. The labels are declared
+HERE, once, and the matrix is checked against them.
+
+| # | purpose constant | short label | pointer (OpenBao KV v2) | private half lives with | public half verified by |
+|---|---|---|---|---|---|
+| 1 | `deployment_authorization` | authorization | `secret/dotmac/platform-cp/authorization-signing/primary` | the Platform CP authorization issuer | the **target**, at `/etc/dotmac/platform-cp/authorization-verification.json` |
+| 2 | `target_execution_observation` | observation | `secret/dotmac/platform-cp/target-observation-signing/primary` | the **target host** (it signs what it applied) | Platform CP / Deployment Control |
+| 3 | `deployment_dispatch` | dispatch | `secret/dotmac/platform-cp/dispatch-signing/primary` | the Platform CP dispatcher (the caller injects it) | the **executor**, through `verify_dispatch_envelope` |
+| 4 | `platform_release_evidence` | release evidence | `secret/dotmac/platform-cp/release-evidence-signing/primary` | the release-evidence producer (Platform CP release path) | the **target**, at `/etc/dotmac/platform-cp/release-evidence-verification.json` |
 
 > **CUSTODY RULING — Michael, 2026-09-04.** *"Keep the target-observation
 > private key on the target. Platform CP must not be able to manufacture target
