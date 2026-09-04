@@ -136,6 +136,7 @@ docker run -d --name "$DB_CONTAINER" \
     --env VENDOR_DB_PLATFORM_API_PASSWORD=platform \
     --env VENDOR_DB_DISPATCHER_PASSWORD=dispatcher \
     --volume "$PWD/deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/001-vendor-roles.sh:ro" \
+    --volume "$PWD/deploy/postgres/bootstrap-credential-function.sql:/docker-entrypoint-initdb.d/003-bootstrap-credential-function.sql:ro" \
     --volume "$PWD/.github/candidate/postgres-hba.sh:/docker-entrypoint-initdb.d/002-candidate-hba.sh:ro" \
     --publish "127.0.0.1:${DB_PORT}:5432" \
     "$PG_IMAGE" >/dev/null

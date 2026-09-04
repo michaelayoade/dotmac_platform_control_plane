@@ -30,6 +30,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 from sqlalchemy import Connection, create_engine, text
@@ -89,8 +90,41 @@ def _password_present(conn: Connection, role: str) -> bool:
     )
 
 
+#: The checked-in operation, applied by a superuser exactly as a cluster
+#: initialisation would apply it.
+_OPERATION = (
+    Path(__file__).resolve().parents[2]
+    / "deploy"
+    / "postgres"
+    / "bootstrap-credential-function.sql"
+)
+
+
+@pytest.fixture
+def operation(superuser_url: str) -> Iterator[None]:
+    """Install the real operation, then drop it.
+
+    Applied from the checked-in file rather than from a copy in this test: a
+    test that installed its own version would measure a function nothing
+    deploys.
+    """
+    with _connect(superuser_url) as conn:
+        conn.execute(text(_OPERATION.read_text(encoding="utf-8")))
+        conn.commit()
+    yield
+    with _connect(superuser_url) as conn:
+        conn.execute(
+            text(
+                "DROP FUNCTION IF EXISTS "
+                "public.bootstrap_dispatcher_credential(text, text)"
+            )
+        )
+        conn.commit()
+
+
 def _install(conn: Connection, role: str, material: str) -> None:
-    """Exactly what the effect does, through the same server-side quoting."""
+    """Install a credential the direct way, for the premises that are about
+    PostgreSQL rather than about the operation."""
     statement = conn.execute(
         text(
             "SELECT format('ALTER ROLE %I PASSWORD %L', "
@@ -99,6 +133,18 @@ def _install(conn: Connection, role: str, material: str) -> None:
         {"r": role, "m": material},
     ).scalar_one()
     conn.execute(text(statement))
+
+
+def _call(conn: Connection, principal: str, material: str) -> str:
+    return str(
+        conn.execute(
+            text(
+                "SELECT public.bootstrap_dispatcher_credential("
+                "CAST(:p AS text), CAST(:m AS text))"
+            ),
+            {"p": principal, "m": material},
+        ).scalar_one()
+    )
 
 
 # ── premise 1 and 2: atomicity, in both directions ──────────────────────────
@@ -268,26 +314,33 @@ def test_this_cluster_does_not_enforce_password_authentication(
 
 
 def test_the_effect_refuses_a_host_that_accepts_anything(
-    superuser_url: str, role: str, url_for: Callable[..., str]
+    superuser_url: str, url_for: Callable[..., str]
 ) -> None:
-    """THE GUARD, DRIVEN AGAINST A REAL SERVER THAT CANNOT REFUSE.
+    """THE GUARD, DRIVEN END TO END AGAINST A SERVER THAT CANNOT REFUSE.
 
     Step 6 proves authentication in both directions, and the second direction is
-    what makes the first mean anything. Here the host accepts every password, so
+    what makes the first mean anything. This cluster accepts every password, so
     the effect must refuse rather than report a credential it cannot verify —
-    and the refusal must name that reason rather than a generic failure.
+    and name that reason rather than a generic failure.
 
-    The role is allowlisted for the duration, because the point under test is
-    the authentication proof rather than the allowlist.
+    The real principal is used, because the operation hardcodes it: patching the
+    Python allowlist would be refused by the operation (DM101) long before
+    authentication was ever attempted, and the test would pass for the wrong
+    reason.
     """
+    from sqlalchemy.orm import Session
+
     from vendor_cp.deployment import credential_bootstrap as effect
 
+    dispatcher = "platform_outbox_dispatcher"
     with _connect(superuser_url) as conn:
+        conn.execute(text(_OPERATION.read_text(encoding="utf-8")))
+        conn.execute(text(f"ALTER ROLE {dispatcher} PASSWORD NULL"))
         database = conn.execute(text("SELECT current_database()")).scalar_one()
-        conn.execute(text(f"GRANT CONNECT ON DATABASE {database} TO {role}"))
+        conn.execute(text(f"GRANT CONNECT ON DATABASE {database} TO {dispatcher}"))
         conn.commit()
 
-    base = url_for(superuser_url, database, user=role)
+    base = url_for(superuser_url, database, user=dispatcher)
 
     class _Record:
         version = 1
@@ -302,60 +355,188 @@ def test_the_effect_refuses_a_host_that_accepts_anything(
 
     instruction = effect.PrincipalCredentialBootstrap(
         database=database,
-        principal=role,
+        principal=dispatcher,
         secret_path="secret/dotmac/vendor-control-plane/production/relay-dispatcher",
         secret_field="dispatcher_password",
         expected_version=1,
     )
 
-    from sqlalchemy.orm import Session
-
     engine = create_engine(superuser_url)
     try:
         with Session(engine) as session:
-            with pytest.MonkeyPatch.context() as patch:
-                patch.setattr(effect, "ALLOWED_PRINCIPALS", frozenset({role}))
-                with pytest.raises(effect.BootstrapRefused) as refused:
-                    effect.bootstrap_principal_credential(
-                        session,
-                        instruction,
-                        secrets=_Secrets(),
-                        authenticate=_authenticate,
-                    )
+            with pytest.raises(effect.BootstrapRefused) as refused:
+                effect.bootstrap_principal_credential(
+                    session,
+                    instruction,
+                    secrets=_Secrets(),
+                    authenticate=_authenticate,
+                )
         assert refused.value.code == "credential.authentication_not_enforced"
     finally:
         engine.dispose()
 
-    # And the credential IS committed, which is the state the refusal describes:
-    # the install happened, the proof did not.
+    # The credential IS committed, which is exactly the state the refusal
+    # describes: the install happened, the proof did not.
     with _connect(superuser_url) as conn:
-        assert _password_present(conn, role) is True
+        assert _password_present(conn, dispatcher) is True
+        conn.execute(text(f"ALTER ROLE {dispatcher} PASSWORD NULL"))
+        conn.execute(
+            text(
+                "DROP FUNCTION IF EXISTS "
+                "public.bootstrap_dispatcher_credential(text, text)"
+            )
+        )
+        conn.commit()
 
 
-# ── the lock the effect takes is released by the transaction ────────────────
+DISPATCHER = "platform_outbox_dispatcher"
 
 
-def test_the_advisory_lock_is_transaction_scoped(superuser_url: str) -> None:
-    """The effect takes `pg_advisory_xact_lock`, so a refusing executor must not
-    hold it against the next one. Measured by observing `pg_locks` rather than
-    by trusting the function's name."""
-    from vendor_cp.deployment.credential_bootstrap import _advisory_key
+@pytest.fixture
+def uncredentialed_dispatcher(superuser_url: str) -> Iterator[None]:
+    """Guarantee the dispatcher holds no credential, and restore afterwards.
 
-    key = _advisory_key("platform_outbox_dispatcher")
+    The test cluster's `init-roles.sh` now SETS this password — that arrived
+    with the relay service — so the absent-to-present transition cannot be
+    observed without clearing it first. Clearing it rather than SKIPPING is the
+    point: a suite that skips the one transition this operation exists to
+    perform is green about nothing, and this repository's Postgres gate exists
+    because skips pass silently.
+
+    Safe on this cluster: it authenticates with `trust`, so nothing here depends
+    on that password being set.
+    """
     with _connect(superuser_url) as conn:
-        conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+        conn.execute(text(f"ALTER ROLE {DISPATCHER} PASSWORD NULL"))
+        conn.commit()
+    yield
+    with _connect(superuser_url) as conn:
+        conn.execute(text(f"ALTER ROLE {DISPATCHER} PASSWORD NULL"))
+        conn.commit()
+
+
+# ── the operation itself ────────────────────────────────────────────────────
+
+
+def test_an_app_admin_owned_definer_cannot_alter_a_role(
+    superuser_url: str, role: str
+) -> None:
+    """THE MEASUREMENT THAT DECIDED THE DESIGN.
+
+    The kernel's `0012_platform_outbox` creates SECURITY DEFINER functions and
+    sets `OWNER TO app_admin`, which works because app_admin has the TABLE
+    privileges those functions need. It has no CREATEROLE, so an app_admin-owned
+    function cannot alter a role — and that is why this operation is owned and
+    installed by a superuser instead of arriving as an Alembic revision.
+
+    Asserted against a real server rather than reasoned from the manual, because
+    the whole design turns on it.
+    """
+    with _connect(superuser_url) as conn:
+        conn.execute(
+            text(
+                "CREATE OR REPLACE FUNCTION public.canary_alter(p text, m text) "
+                "RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' "
+                "AS $fn$ BEGIN EXECUTE pg_catalog.format("
+                "'ALTER ROLE %I PASSWORD %L', p, m); END $fn$"
+            )
+        )
+        conn.execute(
+            text("ALTER FUNCTION public.canary_alter(text, text) OWNER TO app_admin")
+        )
+        conn.commit()
+    try:
+        with _connect(superuser_url) as conn:
+            with pytest.raises(Exception) as refused:
+                conn.execute(
+                    text(
+                        "SELECT public.canary_alter(CAST(:p AS text), CAST(:m AS text))"
+                    ),
+                    {"p": role, "m": HOSTILE},
+                )
+            assert "permission denied" in str(refused.value).lower()
+    finally:
+        with _connect(superuser_url) as conn:
+            conn.execute(
+                text("DROP FUNCTION IF EXISTS public.canary_alter(text, text)")
+            )
+            conn.commit()
+
+
+def test_the_operation_refuses_every_principal_but_its_own(
+    superuser_url: str, operation: None, role: str
+) -> None:
+    """Restricted BY NAME, not by convention. A definer function that altered
+    whatever principal it was handed would be a CREATEROLE grant with extra
+    steps, reachable by anything holding EXECUTE."""
+    with _connect(superuser_url) as conn:
+        for other in (role, "app_admin", "app_user", "platform_api", "postgres"):
+            with pytest.raises(Exception) as refused:
+                _call(conn, other, HOSTILE)
+            assert "DM101" in str(refused.value) or "not bootstrappable" in str(
+                refused.value
+            )
+            conn.rollback()
+
+
+def test_the_operation_installs_once_and_then_refuses(
+    superuser_url: str, operation: None, uncredentialed_dispatcher: None
+) -> None:
+    """The one-time property survives the move into SQL: absent means install,
+    present means refuse. No ledger — the database's own state is the record."""
+    from sqlalchemy.exc import DBAPIError
+
+    with _connect(superuser_url) as conn:
+        assert _password_present(conn, DISPATCHER) is False
+        assert _call(conn, DISPATCHER, HOSTILE) == "installed"
+        conn.commit()
+    with _connect(superuser_url) as conn:
+        assert _password_present(conn, DISPATCHER) is True
+        with pytest.raises(DBAPIError) as refused:
+            _call(conn, DISPATCHER, HOSTILE)
+        assert "DM105" in str(refused.value) or "installs once" in str(refused.value)
+        conn.rollback()
+
+
+def test_the_operation_is_not_executable_by_the_application_roles(
+    superuser_url: str, operation: None, url_for: Callable[..., str]
+) -> None:
+    """Executor-only. PUBLIC gets nothing and the application's own roles are
+    revoked by name, so the absence is stated rather than inherited."""
+    with _connect(superuser_url) as conn:
+        database = conn.execute(text("SELECT current_database()")).scalar_one()
+    for principal in ("app_user", "platform_api"):
+        with _connect(url_for(superuser_url, database, user=principal)) as conn:
+            with pytest.raises(Exception) as refused:
+                _call(conn, "platform_outbox_dispatcher", HOSTILE)
+            assert "permission denied" in str(refused.value).lower()
+            conn.rollback()
+
+
+def test_the_operation_holds_its_lock_only_for_the_transaction(
+    superuser_url: str, operation: None, uncredentialed_dispatcher: None
+) -> None:
+    """The lock moved inside the operation and stayed transaction-scoped.
+
+    Driven through a refusal that TAKES the lock first. The principal check runs
+    before the lock, so a DM101 refusal would never have held one and asserting
+    on it would prove nothing — the already-present refusal (DM105) is the one
+    that locks, reads under it, and then raises.
+    """
+    from sqlalchemy.exc import DBAPIError
+
+    with _connect(superuser_url) as conn:
+        _install(conn, DISPATCHER, HOSTILE)
+        conn.commit()
+    with _connect(superuser_url) as conn:
+        with pytest.raises(DBAPIError) as refused:
+            _call(conn, DISPATCHER, HOSTILE)
+        assert "DM105" in str(refused.value) or "installs once" in str(refused.value)
+        conn.rollback()
         held = conn.execute(
             text(
                 "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
                 "AND pid = pg_backend_pid()"
             )
         ).scalar_one()
-        assert held == 1
-        conn.rollback()
-        after = conn.execute(
-            text(
-                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
-                "AND pid = pg_backend_pid()"
-            )
-        ).scalar_one()
-        assert after == 0, "a rolled back transaction must not keep the lock"
+        assert held == 0, "a refusing executor must not keep the lock"

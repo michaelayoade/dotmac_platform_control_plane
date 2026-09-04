@@ -11,6 +11,8 @@ real one. Documentation of what PostgreSQL does is not a measurement of it.
 from __future__ import annotations
 
 import dataclasses
+import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,6 +20,7 @@ import pytest
 from vendor_cp.deployment.credential_bootstrap import (
     ALLOWED_PRINCIPALS,
     REFUSAL_CODES,
+    SQLSTATE_REFUSALS,
     BootstrapOutcome,
     BootstrapRefused,
     PrincipalCredentialBootstrap,
@@ -70,35 +73,38 @@ class _Result:
         return self._value
 
 
-class _AdminSession:
-    """A privileged session, faked at the statement level.
+class _OperationRefused(Exception):
+    """What the driver raises when the operation's RAISE reaches it."""
 
-    Records every statement in order, so the tests can assert the SEQUENCE —
-    which is the part of this effect that is the design.
+    def __init__(self, sqlstate: str) -> None:
+        super().__init__(f"operation refused ({sqlstate})")
+        self.sqlstate = sqlstate
+
+
+class _AdminSession:
+    """A session that can call the operation. Faked at the statement level.
+
+    Steps 2 to 5 live in `public.bootstrap_dispatcher_credential` now, so this
+    tier sees ONE statement and cannot observe the lock, the presence re-read or
+    the ordering between them. Those are measured against a real server in
+    `tests/migration/test_credential_bootstrap_atomicity.py`, which is the only
+    place they are observable at all — a faked session can be told to answer
+    anything, including in the wrong order.
     """
 
-    def __init__(
-        self,
-        *,
-        role: tuple[bool, bool] | None = (True, False),
-        present: bool = False,
-    ) -> None:
+    def __init__(self, *, refuses: str | None = None) -> None:
         self.statements: list[str] = []
+        self.params: list[object] = []
         self.committed = False
         self.rolled_back = False
-        self._role = role
-        self._present = present
+        self._refuses = refuses
 
     def execute(self, statement: object, params: object = None) -> _Result:
-        rendered = str(statement)
-        self.statements.append(rendered)
-        if "pg_roles" in rendered:
-            return _Result(self._role)
-        if "pg_authid" in rendered:
-            return _Result(self._present)
-        if "format(" in rendered:
-            return _Result(f"ALTER ROLE {PRINCIPAL} PASSWORD 'quoted-by-postgres'")
-        return _Result(None)
+        self.statements.append(str(statement))
+        self.params.append(params)
+        if self._refuses is not None:
+            raise _OperationRefused(self._refuses)
+        return _Result("installed")
 
     def commit(self) -> None:
         self.committed = True
@@ -128,93 +134,44 @@ def _authenticator(result: bool = True, *, enforces: bool = True) -> Any:
     return _authenticate
 
 
-# ── step 1: four separate refusals, because they need four different fixes ──
+# ── what this tier can still decide: the two checks made without a database ─
 
 
 @pytest.mark.parametrize(
-    ("instruction", "role", "code"),
+    ("principal", "code"),
     [
-        (
-            dataclasses.replace(INSTRUCTION, principal="Robert'); DROP ROLE--"),
-            (True, False),
-            "principal.malformed",
-        ),
-        (
-            dataclasses.replace(INSTRUCTION, principal="app_user"),
-            (True, False),
-            "principal.not_allowlisted",
-        ),
-        (INSTRUCTION, None, "principal.absent"),
-        (INSTRUCTION, (False, False), "principal.not_login"),
-        (INSTRUCTION, (True, True), "principal.is_superuser"),
+        ("Robert'); DROP ROLE--", "principal.malformed"),
+        ("app_user", "principal.not_allowlisted"),
     ],
-    ids=["malformed", "not-allowlisted", "absent", "not-login", "superuser"],
 )
-def test_each_principal_check_refuses_with_its_own_code(
-    instruction: PrincipalCredentialBootstrap,
-    role: tuple[bool, bool] | None,
-    code: str,
-) -> None:
-    """Five plants, five codes. An aggregate refusal cannot tell "not on the
-    list" from "is a superuser", and those need opposite responses."""
-    with pytest.raises(BootstrapRefused) as refused:
-        bootstrap_principal_credential(
-            _AdminSession(role=role),  # type: ignore[arg-type]
-            instruction,
-            secrets=_secrets(),
-            authenticate=_authenticator(),
-        )
-    assert refused.value.code == code
-
-
-def test_a_malformed_principal_is_refused_before_the_allowlist() -> None:
-    """ORDER. A name that cannot be a role should be reported as malformed
-    rather than as unlisted — the second answer sends the reader to the wrong
-    file."""
+def test_the_prechecks_refuse_before_any_statement(principal: str, code: str) -> None:
+    """Shape and allowlist are decidable here, so they are decided here — and
+    before the session is touched, so a malformed name never reaches a server."""
     session = _AdminSession()
     with pytest.raises(BootstrapRefused) as refused:
         bootstrap_principal_credential(
             session,  # type: ignore[arg-type]
-            dataclasses.replace(INSTRUCTION, principal="NOT A ROLE"),
+            dataclasses.replace(INSTRUCTION, principal=principal),
             secrets=_secrets(),
             authenticate=_authenticator(),
         )
-    assert refused.value.code == "principal.malformed"
-    assert session.statements == [], "it must refuse before querying anything"
+    assert refused.value.code == code
+    assert session.statements == []
 
 
-# ── steps 2 to 4: the lock comes BEFORE the presence read ───────────────────
+# ── the operation's refusals arrive as SQLSTATEs and keep their names ───────
 
 
-def test_the_presence_check_is_taken_under_the_lock() -> None:
-    """THE REASON STEP 2 EXISTS.
-
-    A presence check taken before the lock is a check of a state that can change
-    before the write, so two executors could both read "absent" and both
-    install. Asserted on the statement ORDER, which is the only place this
-    property is visible.
-    """
-    session = _AdminSession()
-    bootstrap_principal_credential(
-        session,  # type: ignore[arg-type]
-        INSTRUCTION,
-        secrets=_secrets(),
-        authenticate=_authenticator(),
-    )
-    lock = next(i for i, s in enumerate(session.statements) if "advisory" in s)
-    presence = next(i for i, s in enumerate(session.statements) if "pg_authid" in s)
-    alter = next(i for i, s in enumerate(session.statements) if "format(" in s)
-    assert lock < presence < alter
-
-
-def test_an_existing_credential_is_refused_and_nothing_is_altered() -> None:
-    """Step 4. Install once; present means refuse.
-
-    The rollback matters as much as the refusal: it releases the
-    transaction-scoped lock, so a refusing executor does not hold it against the
-    next one.
-    """
-    session = _AdminSession(present=True)
+@pytest.mark.parametrize(
+    ("sqlstate", "code"),
+    sorted(SQLSTATE_REFUSALS.items()),
+)
+def test_each_operation_refusal_keeps_its_own_name(sqlstate: str, code: str) -> None:
+    """One SQLSTATE per refusal, so moving steps 1 to 5 into SQL did not
+    collapse them. Three of these would share `invalid_parameter_value` if the
+    operation used PostgreSQL's own codes, and "cannot log in" and "is a
+    superuser" need opposite responses."""
+    session = _AdminSession(refuses=sqlstate)
     with pytest.raises(BootstrapRefused) as refused:
         bootstrap_principal_credential(
             session,  # type: ignore[arg-type]
@@ -222,20 +179,46 @@ def test_an_existing_credential_is_refused_and_nothing_is_altered() -> None:
             secrets=_secrets(),
             authenticate=_authenticator(),
         )
-    assert refused.value.code == "credential.already_present"
-    assert not any("format(" in s for s in session.statements)
+    assert refused.value.code == code
     assert session.committed is False
     assert session.rolled_back is True
 
 
-# ── step 5: the statement is quoted by PostgreSQL, not by us ────────────────
+def test_an_unrecognised_database_error_is_not_swallowed() -> None:
+    """A failure that is not one of the operation's refusals must propagate. A
+    mapping that quietly turned every error into a named refusal would report a
+    connection fault as a policy decision."""
+    session = _AdminSession(refuses="08006")
+    with pytest.raises(_OperationRefused):
+        bootstrap_principal_credential(
+            session,  # type: ignore[arg-type]
+            INSTRUCTION,
+            secrets=_secrets(),
+            authenticate=_authenticator(),
+        )
 
 
-def test_the_alter_is_built_by_the_server_and_logging_is_silenced() -> None:
-    """Neither half of `ALTER ROLE <name> PASSWORD <literal>` can be a bind
-    parameter, so the statement is rendered by `format(%I, %L)` ON THE SERVER
-    from bound values. And `log_statement` is silenced first, because the
-    rendered statement necessarily contains the material."""
+def test_the_sqlstate_mapping_matches_the_operation_in_both_directions() -> None:
+    """The SQL file and this mapping are one contract in two files.
+
+    A code raised there without a mapping here would surface as an unhandled
+    driver error; a mapping here for a code nothing raises is a refusal that can
+    never happen. Both are read out of the checked-in SQL rather than trusted.
+    """
+    sql = (
+        Path(__file__).resolve().parents[2]
+        / "deploy"
+        / "postgres"
+        / "bootstrap-credential-function.sql"
+    ).read_text(encoding="utf-8")
+    raised = set(re.findall(r"ERRCODE = '(DM\d{3})'", sql))
+    assert raised == set(SQLSTATE_REFUSALS), sorted(raised ^ set(SQLSTATE_REFUSALS))
+    assert len(set(SQLSTATE_REFUSALS.values())) == len(SQLSTATE_REFUSALS)
+
+
+def test_the_operation_is_called_with_bound_parameters() -> None:
+    """The material is a BIND PARAMETER, so it never enters a statement this
+    module composes and never reaches `log_statement`."""
     session = _AdminSession()
     bootstrap_principal_credential(
         session,  # type: ignore[arg-type]
@@ -243,14 +226,13 @@ def test_the_alter_is_built_by_the_server_and_logging_is_silenced() -> None:
         secrets=_secrets(),
         authenticate=_authenticator(),
     )
-    silenced = next(i for i, s in enumerate(session.statements) if "log_statement" in s)
-    rendered = next(i for i, s in enumerate(session.statements) if "format(" in s)
-    assert silenced < rendered
-    assert any("%I" in s and "%L" in s for s in session.statements)
-    # The material never appears in a statement this module composed. The one
-    # statement that contains it is the one the SERVER rendered.
-    composed = [s for s in session.statements if "format(" not in s]
-    assert all(MATERIAL not in s for s in composed)
+    assert len(session.statements) == 1
+    assert "bootstrap_dispatcher_credential" in session.statements[0]
+    assert MATERIAL not in session.statements[0]
+    assert session.params[0] == {"principal": PRINCIPAL, "material": MATERIAL}
+
+
+# ── step 5: the statement is quoted by PostgreSQL, not by us ────────────────
 
 
 # ── step 6: the proof happens, and it happens AFTER the commit ──────────────

@@ -18,6 +18,7 @@ services:
       - "${TEST_DB_PORT:-5439}:5432"
     volumes:
       - ./deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/001-vendor-roles.sh:ro
+      - ./deploy/postgres/bootstrap-credential-function.sql:/docker-entrypoint-initdb.d/002-bootstrap-credential-function.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U app_admin -d ${TEST_DB_NAME:-vendor_cp_test}"]
       interval: 2s
