@@ -151,6 +151,37 @@ def _bundle(
     )
 
 
+def _unbound_bundle(
+    tmp_path: Path,
+    process: _Process,
+    *,
+    spec: _Spec | None = None,
+) -> PlatformCpRecoveryBundle:
+    """A bundle built the way the facility builds one: no authorized facts yet.
+
+    Same fixture as `_bundle`, minus `target` and `incumbent_roles` — the two
+    the execution plan freezes and stage two supplies.
+    """
+    deploy = tmp_path / "deploy-root"
+    (deploy / "deploy").mkdir(parents=True, exist_ok=True)
+    (deploy / "docker-compose.production.yml").write_text("name: x\n")
+    (deploy / ".env").write_text("APP_ENV=production\n")
+    (deploy / "deploy/product.toml").write_text("schema = 'ProductDeploymentSpec.v1'\n")
+    host = tmp_path / "host-id"
+    host.write_text("vendor-cp-prod\n")
+    return PlatformCpRecoveryBundle(
+        spec or _Spec(),
+        deploy,
+        host_id_file=host,
+        backup_dir=tmp_path / "backups",
+        docker_bin="/usr/bin/docker",
+        process=process,
+        clock=lambda: datetime(2026, 9, 3, 8, 30, tzinfo=UTC),
+        result_factory=_result,
+        error_factory=_error,
+    )
+
+
 def test_the_bundle_is_atomic_complete_and_reverified(tmp_path: Path) -> None:
     process = _Process()
     bundle = _bundle(tmp_path, process)
@@ -542,3 +573,138 @@ def test_an_unsorted_or_repeated_incumbent_is_refused(tmp_path: Path) -> None:
         )
     with pytest.raises(ValueError, match="not pinned to a sha256 digest"):
         _bundle(tmp_path, _Process(), incumbent=(("app", "latest"),))
+
+
+# ── stage one / stage two ───────────────────────────────────────────────────
+#
+# Foundation's published binding contract is
+# `build_effects(spec, deploy_dir) -> Effects` — two positional arguments and no
+# keywords (`dotmac_deployment_foundation.execution_bindings.ExecutionBindings`,
+# whose `build_effects` field documents that shape, and `cli._build_effects`,
+# which calls `bindings.build_effects(spec, Path(args.deploy_dir))`).
+#
+# While `target` and `incumbent_roles` were REQUIRED keyword-only arguments of
+# the factory, that call could not be made at all: it raised `TypeError: missing
+# a required keyword-only argument: 'target'` before any deployment logic ran.
+# Every test in this file passed throughout, because every one of them called
+# the factory the way the factory wanted to be called instead of the way the
+# facility actually calls it.
+
+
+def _unbound_effects(tmp_path: Path) -> object:
+    """Effects built exactly as the facility builds them: two positionals."""
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+
+    class Delegate:
+        pass
+
+    return build_platform_cp_effects(
+        _Spec(), deploy, compose_effects_factory=lambda *a, **k: Delegate()
+    )
+
+
+def test_the_factory_is_callable_through_the_published_binding_contract(
+    tmp_path: Path,
+) -> None:
+    """The regression for the defect above, driven as the real caller drives it.
+
+    `signature().bind` is the contract check — it fails on exactly the argument
+    shape the facility uses — and the construction that follows proves the call
+    is not merely well-formed but actually builds the provider.
+    """
+    import inspect
+
+    inspect.signature(build_platform_cp_effects).bind(_Spec(), tmp_path)
+    assert _unbound_effects(tmp_path) is not None
+
+
+def test_capture_refuses_until_the_authorized_execution_is_bound(
+    tmp_path: Path,
+) -> None:
+    """Refusing is the whole design. The two alternatives are both corruptions:
+    observing the host here would be a second authority over a fact the plan
+    froze, and defaulting the incumbent to empty would label the previous
+    release's bytes a first deployment."""
+    bundle = _unbound_bundle(tmp_path, _Process())
+
+    with pytest.raises(PlatformRecoveryError, match="never bound"):
+        bundle.capture("primary", timeout_seconds=300)
+
+    assert not list((tmp_path / "backups").glob("bundle-*"))
+    assert not list((tmp_path / "backups").glob(".bundle-*"))
+
+
+def test_unbound_is_not_the_first_deployment_claim(tmp_path: Path) -> None:
+    """The reason "not yet supplied" has its own type instead of being `()`.
+
+    An empty incumbent already MEANS something: a positive claim that the target
+    had no role containers. If unbound collapsed into it, a bundle captured
+    before binding would record the incumbent's own data as a first deployment —
+    a lie that only surfaces during a restore.
+    """
+    with pytest.raises(PlatformRecoveryError, match="never bound"):
+        _unbound_bundle(tmp_path, _Process()).capture("primary", timeout_seconds=300)
+
+    # SENSITIVITY: a bundle BOUND to an empty incumbent does make that claim, so
+    # the refusal above is about boundness and not about emptiness.
+    bound = _unbound_bundle(tmp_path, _Process())
+    bound.bind_authorized_execution(target="vendor-cp-prod", incumbent_roles=())
+    result = bound.capture("primary", timeout_seconds=300)
+    manifest = json.loads((Path(result.path) / "manifest.json").read_text())
+    assert manifest["first_deployment"] is True
+    assert manifest["incumbent_roles"] == []
+
+
+def test_binding_records_the_prestate_the_plan_froze(tmp_path: Path) -> None:
+    """Stage two supplies the frozen facts, and they reach the manifest."""
+    bundle = _unbound_bundle(tmp_path, _Process())
+    bundle.bind_authorized_execution(target="vendor-cp-prod", incumbent_roles=INCUMBENT)
+    result = bundle.capture("primary", timeout_seconds=300)
+
+    manifest = json.loads((Path(result.path) / "manifest.json").read_text())
+    assert manifest["target"] == "vendor-cp-prod"
+    assert manifest["incumbent_roles"] == [
+        {"role": "app", "image_digest": "sha256:" + "e" * 64}
+    ]
+    assert manifest["first_deployment"] is False
+
+
+def test_rebinding_the_same_facts_is_accepted_and_different_facts_refused(
+    tmp_path: Path,
+) -> None:
+    """A retry inside one authorized run is not a contradiction; two different
+    answers to one frozen fact is exactly the drift the plan exists to catch."""
+    bundle = _unbound_bundle(tmp_path, _Process())
+    bundle.bind_authorized_execution(target="vendor-cp-prod", incumbent_roles=INCUMBENT)
+    bundle.bind_authorized_execution(target="vendor-cp-prod", incumbent_roles=INCUMBENT)
+
+    with pytest.raises(ValueError, match="already bound to a different"):
+        bundle.bind_authorized_execution(
+            target="vendor-cp-prod", incumbent_roles=(("app", "sha256:" + "f" * 64),)
+        )
+    with pytest.raises(ValueError, match="already bound to a different"):
+        bundle.bind_authorized_execution(
+            target="somewhere-else", incumbent_roles=INCUMBENT
+        )
+
+
+def test_bind_validates_the_prestate_it_is_handed(tmp_path: Path) -> None:
+    """The same shape rules the constructor applied; a later supply is not a
+    quieter one."""
+    bundle = _unbound_bundle(tmp_path, _Process())
+
+    with pytest.raises(ValueError, match="sorted by role code"):
+        bundle.bind_authorized_execution(
+            target="vendor-cp-prod",
+            incumbent_roles=(
+                ("web", "sha256:" + "e" * 64),
+                ("app", "sha256:" + "e" * 64),
+            ),
+        )
+    with pytest.raises(ValueError, match="not pinned to a sha256 digest"):
+        bundle.bind_authorized_execution(
+            target="vendor-cp-prod", incumbent_roles=(("app", "latest"),)
+        )
+    with pytest.raises(ValueError, match="target is empty"):
+        bundle.bind_authorized_execution(target="", incumbent_roles=INCUMBENT)

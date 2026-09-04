@@ -53,7 +53,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 if TYPE_CHECKING:
     from dotmac_deployment_foundation.engine import CommandResult, RoleObservation
@@ -298,6 +298,25 @@ def _incumbent_is_well_formed(manifest: Mapping[str, object]) -> bool:
     return codes == sorted(codes) and len(set(codes)) == len(codes)
 
 
+@dataclass(frozen=True, slots=True)
+class _UnboundAuthorization:
+    """The authorized facts have not been supplied yet — NOT a claim about them.
+
+    Deliberately its own type rather than ``None`` or ``()``. An empty
+    ``incumbent_roles`` already MEANS something here: it is a positive claim
+    that the target had no role containers, recorded beside ``first_deployment``
+    (see this module's docstring). If "not yet bound" were spelled as the empty
+    tuple, a bundle captured before binding would silently label the incumbent's
+    bytes as a first deployment — a lie discovered only during a restore.
+
+    Same rule the table inventory enforces per table: an unknown is a member of
+    the type, never a zero.
+    """
+
+
+UNBOUND: Final[_UnboundAuthorization] = _UnboundAuthorization()
+
+
 def _checked_incumbent(
     roles: Sequence[tuple[str, str]],
 ) -> tuple[tuple[str, str], ...]:
@@ -340,8 +359,8 @@ class PlatformCpRecoveryBundle:
         spec: ProductSpec,
         deploy_dir: Path | str,
         *,
-        target: str,
-        incumbent_roles: Sequence[tuple[str, str]],
+        target: str | _UnboundAuthorization = UNBOUND,
+        incumbent_roles: Sequence[tuple[str, str]] | _UnboundAuthorization = UNBOUND,
         host_id_file: Path | str = "/etc/dotmac-host-id",
         compose_file: Path | str | None = None,
         env_file: Path | str | None = None,
@@ -361,7 +380,7 @@ class PlatformCpRecoveryBundle:
             raise ValueError("docker_bin must be absolute")
         self._spec = spec
         self._deploy_dir = Path(deploy_dir)
-        self._target = target
+        self._target: str | _UnboundAuthorization = target
         self._host_id_file = Path(host_id_file)
         self._compose_file = Path(
             compose_file or self._deploy_dir / "docker-compose.production.yml"
@@ -374,7 +393,11 @@ class PlatformCpRecoveryBundle:
         self._descriptor_digest = spec.to_canonical_document().sha256_digest()
         if not _DIGEST.fullmatch(self._descriptor_digest):
             raise ValueError("the Platform CP descriptor digest is malformed")
-        self._incumbent_roles = _checked_incumbent(incumbent_roles)
+        self._incumbent_roles: tuple[tuple[str, str], ...] | _UnboundAuthorization = (
+            UNBOUND
+            if isinstance(incumbent_roles, _UnboundAuthorization)
+            else _checked_incumbent(incumbent_roles)
+        )
         self._backup_dir = Path(backup_dir)
         self._docker_bin = str(docker)
         self._process = process or SubprocessExecutor()
@@ -407,18 +430,91 @@ class PlatformCpRecoveryBundle:
     def _error(self, step: str, message: str) -> Exception:
         return self._error_factory(step, message)
 
+    def bind_authorized_execution(
+        self,
+        *,
+        target: str,
+        incumbent_roles: Sequence[tuple[str, str]],
+    ) -> None:
+        """Supply the two facts only the AUTHORIZED PLAN knows. Stage two.
+
+        The facility builds effects from ``(spec, deploy_dir)`` and then renders
+        the execution plan through ``observe_roles()`` on those same effects, so
+        neither the target identity nor the frozen prestate can be known at
+        construction: the plan that carries them does not exist yet, and it
+        cannot exist until these effects do. That circularity is real, and it is
+        why this is a second call rather than four more constructor arguments.
+
+        Binding is not re-observing. The caller passes what the plan FROZE; this
+        object never reads the host to fill the gap. A second bind carrying
+        identical facts is accepted, because a retry within one authorized run
+        is not a contradiction — a second bind carrying DIFFERENT facts is
+        refused, since that is precisely the drift the frozen prestate exists to
+        catch, arriving from inside the process instead of from the host.
+        """
+        checked = _checked_incumbent(incumbent_roles)
+        named = str(target)
+        if not named:
+            raise ValueError(
+                "target is empty; the authorized target identity is what the "
+                "host-identity file is checked against, so an unnamed target "
+                "would make that check vacuous"
+            )
+        bound_target = self._target
+        bound_roles = self._incumbent_roles
+        already = not isinstance(bound_target, _UnboundAuthorization) or not isinstance(
+            bound_roles, _UnboundAuthorization
+        )
+        if already and (bound_target, bound_roles) != (named, checked):
+            raise ValueError(
+                "these effects are already bound to a different authorized "
+                f"execution: target {bound_target!r} with incumbent "
+                f"{bound_roles!r}, now offered target {named!r} with incumbent "
+                f"{checked!r}. Two answers to one frozen fact is the drift the "
+                "execution plan exists to refuse"
+            )
+        self._target = named
+        self._incumbent_roles = checked
+
+    def _authorized(self, step: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+        """The bound facts, or a loud refusal naming what never called bind.
+
+        Refusing is the whole point. Every alternative is worse: observing the
+        host here would install a second authority over a fact the plan froze,
+        and defaulting the incumbent to empty would record the incumbent's own
+        bytes as a first deployment.
+        """
+        target = self._target
+        roles = self._incumbent_roles
+        if isinstance(target, _UnboundAuthorization) or isinstance(
+            roles, _UnboundAuthorization
+        ):
+            raise self._error(
+                step,
+                "the authorized execution was never bound to these effects: "
+                "`bind_authorized_execution(target=..., incumbent_roles=...)` "
+                "must be called with the target and the host prestate the "
+                "execution plan froze, after the plan is rendered and before "
+                "anything is mutated. Refusing rather than observing the host: "
+                "a prestate read here would be a second authority over a fact "
+                "the plan already fixed, and an empty incumbent would label "
+                "the previous release's data a first deployment",
+            )
+        return target, roles
+
     def _require_host(self) -> None:
+        target, _ = self._authorized("backup")
         try:
             observed = self._host_id_file.read_text(encoding="utf-8").strip()
         except OSError as error:
             raise self._error(
                 "backup", f"host identity is unreadable: {error}"
             ) from error
-        if observed != self._target:
+        if observed != target:
             raise self._error(
                 "backup",
                 f"host identity {observed!r} does not match authorized target "
-                f"{self._target!r}",
+                f"{target!r}",
             )
 
     def _checked(
@@ -642,11 +738,12 @@ class PlatformCpRecoveryBundle:
                 for name in HASHED_COMPONENTS
             )
             (temporary / "SHA256SUMS").write_text(sums, encoding="ascii")
+            authorized_target, incumbent = self._authorized("backup")
             manifest = {
                 "schema": BUNDLE_SCHEMA,
                 "product": self._spec.product,
                 "environment": self._spec.environment,
-                "target": self._target,
+                "target": authorized_target,
                 "postgres_major": int(pg_version) // 10000,
                 "cluster_system_identifier": cluster_id,
                 "database_name": database_name,
@@ -659,10 +756,9 @@ class PlatformCpRecoveryBundle:
                 # first deployment, which `first_deployment` states outright so
                 # no later reader has to infer it from an absence.
                 "incumbent_roles": [
-                    {"role": role, "image_digest": digest}
-                    for role, digest in self._incumbent_roles
+                    {"role": role, "image_digest": digest} for role, digest in incumbent
                 ],
-                "first_deployment": not self._incumbent_roles,
+                "first_deployment": not incumbent,
                 "descriptor_sha256": self._descriptor_digest,
                 "migration_heads": sorted(
                     line for line in heads.splitlines() if line.strip()
@@ -730,11 +826,12 @@ class PlatformCpRecoveryBundle:
         expected_files = {
             name: f"sha256:{_sha256(root / name)}" for name in HASHED_COMPONENTS
         }
+        verify_target, _ = self._authorized("verify_backup")
         required = {
             "schema": BUNDLE_SCHEMA,
             "product": self._spec.product,
             "environment": self._spec.environment,
-            "target": self._target,
+            "target": verify_target,
             "taken_for_image_digest": self._spec.image.rsplit("@", 1)[-1],
             "taken_for_source_revision": self._spec.source_revision,
             "descriptor_sha256": self._descriptor_digest,
@@ -952,6 +1049,22 @@ class PlatformCpComposeHostEffects:
     def read_evidence(self, path: str) -> Mapping[str, object]:
         return cast(Mapping[str, object], self._delegate_call("read_evidence", path))
 
+    def bind_authorized_execution(
+        self,
+        *,
+        target: str,
+        incumbent_roles: Sequence[tuple[str, str]],
+    ) -> None:
+        """Stage two, forwarded to the recovery bundle that needs it.
+
+        On the decorator because the facility holds this object, not the bundle
+        inside it. The general effects need nothing bound: only the
+        product-owned recovery bundle records the incumbent identity.
+        """
+        self._recovery.bind_authorized_execution(
+            target=target, incumbent_roles=incumbent_roles
+        )
+
     def prune_images(self, *, retain: int) -> None:
         self._delegate_call("prune_images", retain=retain)
 
@@ -966,16 +1079,38 @@ def build_platform_cp_effects(
     spec: ProductDeploymentSpec,
     deploy_dir: Path | str,
     *,
-    target: str,
-    incumbent_roles: Sequence[tuple[str, str]],
+    target: str | _UnboundAuthorization = UNBOUND,
+    incumbent_roles: Sequence[tuple[str, str]] | _UnboundAuthorization = UNBOUND,
     docker_bin: str = "/usr/bin/docker",
     git_bin: str = "/usr/bin/git",
     compose_effects_factory: ComposeEffectsFactory | None = None,
 ) -> PlatformCpComposeHostEffects:
     """Build the product decorator from Foundation's published provider API.
 
-    Foundation a5 reaches this function through the assembly distribution's
-    execution-bindings entry point.
+    Foundation reaches this function through the assembly distribution's
+    execution-bindings entry point, whose published contract is
+    ``build_effects(spec, deploy_dir) -> Effects`` — two positional arguments
+    and no keywords.
+
+    ``target`` and ``incumbent_roles`` therefore CANNOT be required here, and
+    while they were, this factory could not be called through the binding at
+    all: the call raised ``TypeError: missing a required keyword-only argument:
+    'target'`` before any deployment logic ran. Both facts come from the
+    authorized execution plan, and that plan does not exist when the facility
+    builds effects — it is rendered from ``observe_roles()`` on these very
+    effects, so requiring it at construction is circular, not merely awkward.
+
+    The split is therefore load-bearing rather than cosmetic:
+
+    * **stage one, here** — everything derivable from the descriptor and the
+      filesystem, satisfiable with ``(spec, deploy_dir)`` alone;
+    * **stage two** — :meth:`PlatformCpComposeHostEffects.
+      bind_authorized_execution`, called by the holder of the frozen plan after
+      it is rendered and before anything is mutated.
+
+    Passing the facts here directly is still supported and is what a test or an
+    embedder that already holds them should do; omitting them yields effects
+    that refuse to capture or verify a bundle until stage two supplies them.
     """
     if compose_effects_factory is None:
         from dotmac_deployment_foundation.providers import (  # noqa: PLC0415
