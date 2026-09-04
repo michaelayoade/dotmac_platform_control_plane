@@ -23,6 +23,48 @@ live in the same place — that separation is the whole point.
 | 3 | `deployment_dispatch` | `secret/dotmac/platform-cp/dispatch-signing/primary` | the Platform CP dispatcher (the caller injects it) | the **executor**, through `verify_dispatch_envelope` |
 | 4 | `platform_release_evidence` | `secret/dotmac/platform-cp/release-evidence-signing/primary` | the release-evidence producer (Platform CP release path) | the **target**, at `/etc/dotmac/platform-cp/release-evidence-verification.json` |
 
+> **CUSTODY RULING — Michael, 2026-09-04.** *"Keep the target-observation
+> private key on the target. Platform CP must not be able to manufacture target
+> observations."* This approves the four-identity DESIGN; nothing is minted.
+>
+> **The version of this document merged as #134/#142 contradicted that rule**,
+> and the contradiction was in the ceremony rather than in the table. The table
+> said the observation private half lives with the target host — correct — while
+> Step 1 generated it on the workstation, Step 4 wrote `private_key_pem` into
+> `secret/dotmac/platform-cp/target-observation-signing/primary`, Step 3 granted
+> a Platform-CP policy `read` on that exact path, and Step 5 minted a Platform CP
+> token to use it. Following the document as written would have produced exactly
+> the capability the ruling forbids. The steps below are corrected.
+
+## Where each private half lives
+
+Custody is the whole point of the separation, so it is stated per identity
+rather than left to be inferred from a pointer name. **A pointer is a spelling;
+the key is the thing**, and which machine holds the thing is what decides
+whether a signature can be manufactured.
+
+| purpose | private half is generated and held | can Platform CP obtain it? |
+|---|---|---|
+| `deployment_authorization` | Michael's workstation -> OpenBao, read by the Platform CP issuer | **yes, by design** — it issues authorizations |
+| `deployment_dispatch` | Michael's workstation -> OpenBao, read by the Platform CP dispatcher | **yes, by design** — the caller injects it |
+| `target_execution_observation` | **on the target, and never leaves it** | **NO — structurally** |
+| `platform_release_evidence` | Michael's workstation -> OpenBao, read by the release path | **yes, by design** |
+
+The third row is the ruling. An observation Platform CP could produce cannot
+contradict the authorization Platform CP issued, and an observation that cannot
+contradict is an echo rather than evidence — which is the reason there are two
+signers at all. So the key is not generated on the workstation, is never written
+to this namespace, has no Platform CP policy granting read, and has no Platform
+CP token. **The custody rule is made structural, not procedural:** Platform CP
+cannot manufacture observations because the material was never somewhere it
+could reach, not because a runbook told it not to.
+
+What lives at `secret/dotmac/platform-cp/target-observation-signing/primary` is
+the target's **public** verification identity — what Platform CP and Control need
+in order to VERIFY. Control's own contract already works this way: it enrols a
+target's public verification identity as PENDING and admits it only after the
+caller proves possession.
+
 Identities 1 and 2 answer two different questions — *may this happen* and *this
 is what happened*. One key answering both would make the observation unable to
 contradict the authorization, and an observation that cannot contradict is an
@@ -168,15 +210,21 @@ the `## App Tokens (` heading still reads as described before relying on the
 automatic pickup; if it has changed, the enrolment step changes with it and
 nothing else here does.
 
-## Step 1 — generate the four keypairs (trusted workstation, offline)
+## Step 1 — generate THREE keypairs (trusted workstation, offline)
 
 Ed25519, 32-byte public keys, as `PublicVerificationIdentity` requires.
+
+**Three, not four.** `target_execution_observation` is generated ON THE
+TARGET in step 6 and never reaches this workstation. Generating it here —
+even with the intention of copying it across and deleting it — would put the
+material somewhere Platform CP's operator can reach, and "and then delete
+it" is a procedure, not a property.
 
 ```sh
 umask 077
 mkdir -p ~/dotmac-platform-cp-mint && cd ~/dotmac-platform-cp-mint
 
-for id in authorization dispatch target-observation release-evidence; do
+for id in authorization dispatch release-evidence; do
   openssl genpkey -algorithm ed25519 -out "${id}.key.pem"
 done
 ls -l   # three files, mode 0600. Do not cat them.
@@ -191,12 +239,7 @@ python3 - <<'PY'
 import base64, pathlib
 from cryptography.hazmat.primitives import serialization
 
-for name in (
-        "authorization",
-        "dispatch",
-        "target-observation",
-        "release-evidence",
-    ):
+for name in ("authorization", "dispatch", "release-evidence"):
     priv = serialization.load_pem_private_key(
         pathlib.Path(f"{name}.key.pem").read_bytes(), password=None
     )
@@ -223,7 +266,7 @@ print(PublicKeyFingerprintV1.from_public_key_b64('<public_key_b64url>').canonica
 where the fingerprint does not identify the key, so a transcription slip fails
 at load rather than at verification time.
 
-## Step 3 — four least-privilege policies
+## Step 3 — three least-privilege policies
 
 One policy per identity. Each grants read on its own path and **explicitly
 denies** the other two and the licensing key.
@@ -255,16 +298,13 @@ path "secret/data/dotmac/licensing/*"                                        { c
 path "secret/metadata/dotmac/licensing/*"                                    { capabilities = ["deny"] }
 ```
 
-```hcl
-# platform-cp-target-observation-signing.hcl
-path "secret/data/dotmac/platform-cp/target-observation-signing/primary"     { capabilities = ["read"] }
-path "secret/metadata/dotmac/platform-cp/target-observation-signing/primary" { capabilities = ["read"] }
-path "secret/data/dotmac/platform-cp/authorization-signing/*"                { capabilities = ["deny"] }
-path "secret/data/dotmac/platform-cp/dispatch-signing/*"                     { capabilities = ["deny"] }
-path "secret/data/dotmac/platform-cp/release-evidence-signing/*"             { capabilities = ["deny"] }
-path "secret/data/dotmac/licensing/*"                                        { capabilities = ["deny"] }
-path "secret/metadata/dotmac/licensing/*"                                    { capabilities = ["deny"] }
-```
+**There is deliberately NO `platform-cp-target-observation-signing` policy.**
+A policy granting read on that path would only be needed if private observation
+material lived there, and none does. Minting one anyway would create the
+capability the custody ruling forbids and leave a reader assuming the key is
+where the policy points. The other three policies still DENY the observation
+path, which now protects a public record from being written rather than a
+private one from being read — cheap, and correct in both worlds.
 
 ```hcl
 # platform-cp-release-evidence-signing.hcl
@@ -279,12 +319,11 @@ path "secret/metadata/dotmac/licensing/*"                                    { c
 
 ```sh
 bao policy write platform-cp-authorization-signing      platform-cp-authorization-signing.hcl
-bao policy write platform-cp-target-observation-signing platform-cp-target-observation-signing.hcl
 bao policy write platform-cp-dispatch-signing           platform-cp-dispatch-signing.hcl
 bao policy write platform-cp-release-evidence-signing   platform-cp-release-evidence-signing.hcl
 ```
 
-## Step 4 — write the four records
+## Step 4 — write the records (three private, one public-only)
 
 `key=@file` reads the value from the file. Do **not** use command substitution:
 that puts the private key in `argv`, where `ps` can read it.
@@ -298,13 +337,15 @@ bao kv put secret/dotmac/platform-cp/authorization-signing/primary \
   public_key_b64url='<from step 2>' \
   public_key_fingerprint='<from step 2>'
 
+# PUBLIC MATERIAL ONLY. No `private_key_pem` line, and adding one would defeat
+# the custody ruling. These values come from step 6, where the key is generated
+# on the target -- they do not exist yet at this point in the ceremony.
 bao kv put secret/dotmac/platform-cp/target-observation-signing/primary \
   algorithm=ed25519 \
   purpose=target_execution_observation \
   key_id=platform-cp-target-observation-2026-09 \
-  private_key_pem=@target-observation.key.pem \
-  public_key_b64url='<from step 2>' \
-  public_key_fingerprint='<from step 2>'
+  public_key_b64url='<from step 6, generated on the target>' \
+  public_key_fingerprint='<from step 6, generated on the target>'
 
 bao kv put secret/dotmac/platform-cp/dispatch-signing/primary \
   algorithm=ed25519 \
@@ -338,7 +379,6 @@ Append three lines under `## App Tokens (` in `/opt/openbao/CREDENTIALS.md`:
 
 ```
 - platform-cp-authorization-signing: <token>
-- platform-cp-target-observation-signing: <token>
 - platform-cp-dispatch-signing: <token>
 - platform-cp-release-evidence-signing: <token>
 ```
@@ -348,8 +388,6 @@ Then mint, periodic:
 ```sh
 bao token create -policy=platform-cp-authorization-signing \
   -period=720h -display-name=platform-cp-authorization-signing
-bao token create -policy=platform-cp-target-observation-signing \
-  -period=720h -display-name=platform-cp-target-observation-signing
 bao token create -policy=platform-cp-dispatch-signing \
   -period=720h -display-name=platform-cp-dispatch-signing
 bao token create -policy=platform-cp-release-evidence-signing \
@@ -365,7 +403,24 @@ because of three pre-existing invalid labels; healthy means `degraded` **and**
 `invalid` equal to exactly those three **and** `failed == []`. Three new labels
 appearing under `invalid` is a failed enrolment, not the known baseline.
 
-## Step 6 — publish the public halves to the target
+## Step 6 — generate the observation key ON the target, and publish the rest to it
+
+**First, on the target host, generate the identity that never leaves it:**
+
+```sh
+umask 077
+openssl genpkey -algorithm ed25519 -out /etc/dotmac/platform-cp/target-observation.key.pem
+chown root:root /etc/dotmac/platform-cp/target-observation.key.pem
+chmod 0600      /etc/dotmac/platform-cp/target-observation.key.pem
+```
+
+Export only its PUBLIC half and fingerprint — the same derivation as step 2 —
+and carry those two values back for step 4's public-only record and for
+Control's target-identity enrolment. **Nothing carries the private key off this
+host.** If it is ever needed again it is re-generated here and re-enrolled;
+a key that can be copied out is a key Platform CP can eventually hold.
+
+## Step 6b — publish the verification files to the target
 
 Root-owned, regular files, under 16 KiB, schema
 `PlatformCpPublicVerificationIdentity.v1`:
@@ -400,8 +455,22 @@ what it needs rather than quietly skipped.
 
 ### 7a — reach: each token reads its own path and no other
 
-Four successes and **sixteen denials** (each token against the other three
-pointers and the licensing path). For each token in turn, as that token:
+**Three tokens, not four** — there is no observation token, because there is no
+private observation material for one to read. Three successes and **twelve
+denials**: each token against the other two private pointers, the observation
+pointer, and the licensing path.
+
+The absent fourth token is itself part of the proof. A ceremony that produced
+one would have produced the capability the custody ruling forbids, so its
+absence is checked rather than assumed:
+
+```sh
+bao policy read platform-cp-target-observation-signing >/dev/null 2>&1 \
+  && echo "REFUSE THE CEREMONY: an observation signing policy exists" \
+  || echo "no observation signing policy (expected)"
+```
+
+For each of the three tokens in turn, as that token:
 
 ```sh
 export BAO_TOKEN=<the authorization token>
@@ -424,11 +493,11 @@ do
 done
 ```
 
-Repeat with each of the other three tokens, rotating which path is the permitted
-one. **Count the successes: exactly four, and sixteen denials.** Twenty
-successes means the policies did not attach; twenty denials means the KV v2 path
-form is wrong (constraint 1) and proves nothing about isolation. Both failure
-modes look like "it did not blow up", so counting is the check.
+Repeat with each of the other two tokens, rotating which path is the permitted
+one. **Count the successes: exactly three, and twelve denials.** Fifteen
+successes means the policies did not attach; fifteen denials means the KV v2
+path form is wrong (constraint 1) and proves nothing about isolation. Both
+failure modes look like "it did not blow up", so counting is the check.
 
 ### 7b — purpose: the twelve ordered pairs
 
@@ -442,6 +511,13 @@ enforced in three places depending on which purpose is being misused:
 | **dispatch** | (4) | must succeed | (5) | (6) |
 | **observation** | (7) | (8) | must succeed | (9) |
 | **release evidence** | (10) | (11) | (12) | must succeed |
+
+**All twelve remain demonstrable in this ceremony, including the three that hold
+the observation identity — and that is worth stating because it is not the
+obvious answer.** These cells compare a PURPOSE DECLARATION against a verifier;
+they need each identity's public half and its declared purpose, never a private
+key. The ceremony has all four public halves, so keeping the observation private
+key on the target costs nothing here.
 
 Each numbered cell must REFUSE. The mechanism that refuses it, and what that
 mechanism needs to be present:
@@ -480,37 +556,36 @@ passes just as happily when nothing was refused.
 
 ### 7c — what this step does NOT prove
 
-`require_distinct_signers` in `vendor_cp.deployment.signers` compares **two
-pointers**. It was written for a pair and has not been widened for four, so it
-does not see dispatch or release evidence at all, and it cannot see the shapes
-four identities make available: three sharing one pointer, two disjoint pairs,
-or two identities at different pointers holding the **same key material**.
+**Custody is proved by absence, not by comparison.** The twelve pairs establish
+that no identity can be USED for another's purpose. They say nothing about who
+can HOLD a key, and the custody ruling is entirely about holding. What stands in
+for it is the absence checked in 7a: no observation record with private
+material, no policy granting read on one, no token minted for it. Absence is a
+weaker instrument than a comparison and should be read as such — it proves the
+ceremony did not create the capability, not that the capability cannot exist.
 
-Control refuses exactly one of those collisions, for exactly one pair, by
-comparing public-key **fingerprints** (`dispatch_signer_purpose_reused`). Do not
-read that as covering the rest, and do not read a green pointer check as
-Control's guarantee. Widening it is a code change, deliberately not made inside
-a document.
+**And this ceremony cannot prove the target key stayed on the target.** It can
+show the key was generated there and never written to this namespace. It cannot
+show that nobody copied it out afterwards, because that is a property of the
+host over time and not of a ceremony performed once. That belongs to the
+target's own access controls, and naming it here keeps it from being assumed
+discharged by a green verification pass.
 
-## If something goes wrong
+**`require_distinct_signers` compares pointers, and one identity now has no
+pointer to private material.** The observation key has no OpenBao private record
+at all, so a pointer comparison cannot see it — there is nothing on this side to
+compare. Its distinctness from the other three is established by the fingerprint
+comparison, when fingerprints are supplied, and by Control's own
+`dispatch_signer_purpose_reused` at signing time. The function's ownership
+boundary — ours always / ours when told / Control's / nobody's — is unchanged by
+the custody ruling; what changed is that for one of the four, "ours always" now
+has nothing to look at.
 
-Revoke and re-mint; do not repair in place. `bao token revoke`, delete the KV
-record, remove the `CREDENTIALS.md` line, then start at step 1 with a new
-`key_id` (the date suffix makes the replacement distinguishable in every log
-that ever recorded the old one). A partially-completed ceremony that is
-*adjusted* leaves a record whose `key_id` no longer identifies what verifies
-against it.
+**One open question this document does not settle.** `ObservationSignerPointer`
+in `vendor_cp.deployment.signers` is a descriptor for where the observation key
+lives. Under this ruling, the path it names holds the target's PUBLIC identity
+and no private material, which is a different thing from what the other three
+descriptors name. That may be fine — a pointer descriptor does not assert what
+kind of material sits at the end of it — or the type may want splitting. It is
+a code question, deliberately not decided inside a documentation change.
 
-Shred the workstation directory when the ceremony completes and the target files
-verify:
-
-```sh
-cd ~ && rm -P -r ~/dotmac-platform-cp-mint   # -P overwrites before unlinking
-```
-
-## What this dossier is not
-
-It does not authorize a deployment, name an operation, or assert that anything
-was minted. Until step 5 completes, the readiness packet's `signed authorization
-envelope` and `verified target signer` terms refuse by name, and that refusal is
-correct rather than a defect to work around.
