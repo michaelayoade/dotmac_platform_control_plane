@@ -298,13 +298,17 @@ def _install(db: Session, principal: str, material: str) -> None:
     statement = db.execute(
         # The casts are load-bearing rather than decoration: `format` is
         # variadic `"any"`, so PostgreSQL cannot infer a parameter's type and
-        # refuses with `could not determine data type of parameter $1`. The
-        # unit tier could not see this — a faked session returns whatever it is
-        # told to — and the Postgres measurement found it on the first run,
-        # which is the reason that measurement exists.
+        # refuses with `could not determine data type of parameter $1`.
+        #
+        # `CAST(:x AS text)` rather than `:x::text`, because SQLAlchemy's own
+        # `:name` bind syntax collides with PostgreSQL's `::` cast operator and
+        # the statement reaches the server with a stray colon. Both mistakes
+        # were found by the Postgres measurement on consecutive runs, and
+        # neither was visible to the unit tier: a faked session returns whatever
+        # it is told to, so the rendered statement never met a parser.
         text(
             "SELECT format('ALTER ROLE %I PASSWORD %L', "
-            ":principal::text, :material::text)"
+            "CAST(:principal AS text), CAST(:material AS text))"
         ),
         {"principal": principal, "material": material},
     ).scalar_one()
