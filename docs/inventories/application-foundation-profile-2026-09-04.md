@@ -173,3 +173,139 @@ does, since the producing refusal is the newer of the two.
 `RELEASE_EVIDENCE_PURPOSE` is declared once here for the same reason, so if
 Foundation's canonical purpose string differs from `platform_release_evidence`,
 exactly one constant moves rather than every call site.
+
+---
+
+## Addendum, 2026-09-04 (second) — two counts, and where the three red concerns now stand
+
+### The count, stated as two numbers because it is two claims
+
+| what is being counted | figure |
+| --- | --- |
+| **concerns bound in something a deployment executes** | **0 of 13** |
+| **concerns with an implementation present in the assembly** | **10 of 13** |
+
+These are different claims and the programme has already confounded them once.
+The second is what the table above this addendum measures: ten providers exist in
+the composed distributions, with real runtime consumers. The first is zero, and
+each of the three reasons is independent:
+
+* **no profile document exists** — nothing writes
+  `/app/application_foundation_profile.json`, so `verify_embedded_profile`
+  returns `DOCUMENT_ABSENT` against a real Platform image;
+* **no `ApplicationFoundationProfile` type exists under `src/`** — the document
+  has no producer here;
+* **the merged verifier has test callers only** — no workflow, script or
+  runtime path calls it.
+
+A field, a module, a test fixture or a package pin is none of these. The route
+from ten to thirteen is a different route from the route from zero to thirteen,
+and only the second one is about a deployment.
+
+The accepted ordering is unchanged: **readback refusal → embed the canonical
+document → wire image admission, and the last only once `DOCUMENT_ABSENT` has
+become a verified admission.** Step 1 is merged in code (#165) and has **never
+run against a real image** — its refusal is asserted only against `tmp_path`
+fixtures.
+
+### `integration` — the Foundation repair landed, and this side now consumes it
+
+`IntegrationSurfaceAbsenceProofV1` merged in Starter #625 (`908f3c70`), and
+`profile_readback` now accepts a proven absence as SATISFYING `integration` —
+**bound to the exact installed artifact and to the closed surface inventory**.
+
+Ruled 2026-09-04: *"This is not a general 'nothing applies' escape hatch."* Four
+things stop it becoming one, and the fourth is the one that is usually left out:
+
+1. a closed schema-to-concern map with **one** entry, so a proof of this schema
+   naming another concern is REFUSED rather than ignored;
+2. `observed_inventory_digest` must equal a digest this repository derives from
+   `distributions.json` — the builder stage's independent per-file record. A
+   caller may write any string; it cannot make that string equal one derived
+   from the image;
+3. `source_revision` and the installed-artifact digest, checked against the
+   caller's release-receipt expectation rather than against the document;
+4. **the producing type's own refusals, re-checked here.**
+   `IntegrationSurfaceAbsenceProofV1.__post_init__` enforces complete
+   enumeration, emptiness and a positive control *in the producing process*.
+   What arrives is JSON, and **a constructor's refusals do not travel in a
+   document**. A verifier trusting the `schema` string would accept a two-key
+   object with no families at all.
+
+This does **not** move the concern to satisfied. There is still no document, so
+there is still no proof in one. It means the seam is ready and the refusal is
+specific.
+
+**No release → pin → consume chain exists for this type, and that is not an
+oversight.** `profile_readback.py` imports no Foundation type — it is
+stdlib-only and reads the profile as a document. The seam is the emitted
+document, and `IntegrationSurfaceAbsenceProofV1.as_document()` carries
+`source_revision`, `image_digest`, `observed_inventory_digest`, `families`,
+`positive_control` and `state`, which is every field checked above. Verified by
+reading both sides rather than assumed.
+
+**One inference is recorded as an inference.** The proof's `image_digest` is
+compared against the caller's `wheel_sha256` — the INSTALLED ARTIFACT. That
+reading is forced rather than chosen: the proof travels inside the profile
+document, the profile document is baked into the container image, and a
+container digest computed over layers that include the document cannot appear in
+the document. The two alternatives are self-contradictory. If Foundation settles
+on a different meaning the check fails LOUDLY rather than admitting wrongly,
+which is the safe direction for an inference about another repository's type —
+but it is Foundation's field and this is not a shared contract until Foundation
+says so.
+
+**A new local specification, published rather than assumed.**
+`canonical_inventory_digest` defines what `observed_inventory_digest` must equal:
+the `(filename, sha256)` pairs of every distribution the builder stage recorded,
+sorted, as UTF-8 JSON with no insignificant whitespace. Foundation defines no
+computation for it — `satisfies()` takes whatever the verifier supplies — so a
+producer must implement this separately. Sharing an encoder would make the
+comparison a statement that one function agrees with itself.
+
+### `data_governance` — still RED, and this lane did not build it
+
+**Ruled 2026-09-04:** control-plane data still needs retention/disposition
+governance; *"no tenant data"* is insufficient, `inapplicable` was already
+refused by an earlier ruling, and an absence proof does not repair it either —
+the schema-to-concern map above closes that route by construction.
+
+`PlatformDataGovernanceV1` is **not implemented here, and this lane declined to
+invent it.** What the ruling settles is *that* it must exist and *what it is
+about*. What it does not settle is the substance, and the substance is not an
+engineering choice:
+
+* **the retention periods and dispositions themselves** — how long a platform
+  audit event, a rotation record, an outbox row or a recovery bundle may be
+  kept, and what happens at the end. These are business, contractual and legal
+  determinations. Picking "365 days" to make a slot go green is exactly the
+  placeholder the gate refuses, wearing a type;
+* **what enforcement means** — a declaration checked at admission, a reconciler
+  that disposes, or a refusal that blocks a deploy. These are three different
+  owners with three different failure modes;
+* **where it is composed.** This document's own rule is that a binding whose
+  only consumer is a test is absent. A new module with no runtime consumer would
+  be the inert slot the gate refuses, and creating that consumer touches the
+  deployment path that the accepted ordering puts LAST.
+
+`table_inventory.py` is honest about being an **input** to a future owner rather
+than an owner, and that remains true: a cardinality per table informs retirement
+decisions and is not a retention rule. It is a starting point, not the
+implementation.
+
+So the concern stays red, and what it is now blocked on is a decision rather
+than a keystroke.
+
+### `request_evidence_context` — an owner exists, and it is not this repository
+
+**Ruled 2026-09-04:** implementation ownership goes to **`dotmac-kernel`**,
+extracted **product-first from ERP's trusted-proxy behaviour**. **Foundation
+owns the profile/verifier contract; ERP is the first adopter and Sub follows.**
+
+That work is not dispatched and is not this lane's. What is this lane's is that
+the profile can express the binding and this verifier can judge it the day it
+arrives — the concern is an ordinary slot in `FOUNDATION_CONCERNS`, blocked by
+name when unbound and satisfied when declared, and unreachable by the absence
+route. Both are held by
+`tests/unit/test_profile_readback.py::test_request_evidence_context_is_a_slot_this_verifier_already_judges`
+and `::test_request_evidence_context_cannot_be_reached_by_the_absence_route`.
