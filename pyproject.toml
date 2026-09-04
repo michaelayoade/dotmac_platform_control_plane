@@ -29,7 +29,7 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a98", extras = [
+dotmac-kernel = { version = "0.1.0a100", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
@@ -109,29 +109,66 @@ dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # a5's artifact identity and behaviour both passed; only its declared floor was
 # wrong. It remains published and is refused BY NAME by the release guard.
 #
-# a6 carries `Requires-Dist: dotmac-kernel (>=0.1.0a98)` — read out of the
+# a12 carries `Requires-Dist: dotmac-kernel (>=0.1.0a100)` — read out of the
 # PUBLISHED WHEEL rather than from a source tree — and a canary that installs
 # the wheel against exactly that declared minimum and drives a real collision
-# through `conflict_savepoint`, with a paired mutation forcing a97 and
-# requiring both a resolver conflict and a behavioural failure. The floor can
-# now fail in both directions, which is what makes it a contract rather than a
+# through `conflict_savepoint`, with a paired mutation forcing the version below
+# and requiring both a resolver conflict and a behavioural failure. The floor
+# can fail in both directions, which is what makes it a contract rather than a
 # claim.
 #
-# Oracles (AGENTS.md rule 17). Pinnable — `peeled_tag`
-# `dotmac-deployment-control-v0.1.0a6`, peeled commit
-# `518711c36e9e5774e11b02c6ab35ec0c9c7b75b9`, tag object
-# `553c2bb014a9c2a3d8ebecafa06c4166bc94be1b`. Published and installable —
-# `release_run` 33322980430, verified by run 33323067886 (VERIFIED 7/7), which
-# wrote the tag. The resolved artifacts were compared against that evidence
-# before this pin was accepted: wheel `9b02cf33…7b8fc0`, sdist `68871c24…1adad0`.
+# THE PIN IS NOT COPIED FROM THAT LINE. `scripts/kernel_floor.py` reads every
+# composed distribution's floor out of INSTALLED metadata and takes the maximum;
+# a12's `>=0.1.0a100` is merely the one that currently wins, and
+# `binding_distribution()` names it so the bump is attributable. The equality
+# `pin == max(floors)` is asserted as an equality, not a `>=`: an assembly that
+# pinned higher than anything asked for would have taken a kernel upgrade on
+# nobody's behalf. Note the ordering trap this move walks straight into — a
+# naive string comparison ranks `0.1.0a100` BELOW `0.1.0a98`, which is why the
+# floor module parses the alpha number instead of comparing text.
 #
-# The kernel pin moves a77 -> a98 BECAUSE a6 requires it, and it is pinned
-# EXACTLY here rather than left to the resolver. Twenty-one alphas of kernel is
-# not a bump whose consequences are discovered at boot — which is the lesson a5
-# just taught at lower cost. This pin is not deployment authorization: the
-# a77->a98 migration still owes a rehearsal against a RESTORED isolated
-# database before it reaches the running deployment.
-dotmac-deployment-control = { version = "0.1.0a6", source = "forgejo" }
+# Oracles (AGENTS.md rule 17). Pinnable — `peeled_tag`
+# `dotmac-deployment-control-v0.1.0a12`, peeled commit
+# `8e8342bcbefc7d25f2877c440552a276c1226ba4`, tag object
+# `2df5b0b8d18a61dd0802b11c3502d01d44222a66`. Published and installable —
+# `release_run` 33854964978, verified by INDEPENDENT run 33855190724
+# (VERIFIED 7/7), which wrote the tag; the publishing run holds the credential
+# and the bytes and never witnesses itself. The resolved artifacts were compared
+# against that evidence before this pin was accepted: wheel
+# `8646a300e69ebf34042086e747d9b448426f79287c208b890ea1b3538f6d4e8e`, sdist
+# `765d7ae39fc2149301d0e70f15f1527ae70cfdd7b26a7982b639ba7c63bd35fd`.
+#
+# a12 is the first Control this assembly composes that BEARS ROUTES: it declares
+# `web_surfaces`, which a6 did not. That is why the profile change lands in this
+# same commit — see `vendor_cp.deployment_profile`, where each profile states
+# whether it publishes the deployment surface and why.
+#
+# The kernel pin moves a98 -> a100 BECAUSE a12 requires it, and it is pinned
+# EXACTLY here rather than left to the resolver. Two alphas is a smaller move
+# than the a77 -> a98 that preceded it, and the size is not the argument: a
+# kernel bump whose consequences are discovered at boot is the lesson a5 taught
+# at lower cost, at any distance.
+#
+# ── PRE-CUTOVER GATE, not a caveat ──────────────────────────────────────────
+#
+# This pin is not deployment authorization. The a77 -> a98 migration was
+# recorded here as still owing a rehearsal against a RESTORED isolated database;
+# that debt is NOT discharged by this change and is NOT extended by it. It is
+# now a named gate that must be cleared BEFORE cutover rather than an
+# open-ended note read afterwards.
+#
+# The debt is CUMULATIVE, not per-move. What must be rehearsed is the path a
+# restored production database will actually take — from the revision production
+# is on NOW to the new composed head — not the a98 -> a100 leg alone. This
+# repository cannot measure production's current revision: that is a host-side
+# read, and no artifact in this tree is evidence of it. What settles it is a
+# revision read from a restored copy of the production database, which is the
+# same act that supplies the rehearsal's starting point.
+#
+# The discharge must be checkable by someone other than whoever performed it,
+# on the same independence rule as `verify_profile_against_candidate`. Until
+# it is recorded, this pin is composed and tested but not cleared to deploy.
+dotmac-deployment-control = { version = "0.1.0a12", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor

@@ -68,7 +68,7 @@ from pathlib import Path
 
 import pytest
 from alembic.script import ScriptDirectory
-from dotmac_kernel import ProductAssemblySpec, create_app
+from dotmac_kernel import create_app
 from dotmac_kernel.features import FeatureManifest
 from dotmac_kernel.modules import ModuleManifest, ModuleRegistry
 from dotmac_kernel.web_surfaces import WebSurfaceContribution
@@ -113,6 +113,11 @@ PROVISIONING_PREFIX = "/platform/vendor/provisioning"
 ALLOCATIONS_PREFIX = "/platform/vendor/allocations"
 ACCOUNTS_PREFIX = "/platform/vendor/accounts"
 APPROVALS_PREFIX = "/platform/vendor/approvals"
+#: Control's own surface, and note it is NOT under `/platform/vendor/`: the
+#: module contributes facet-relative routes to the kernel's `platform_admin`
+#: facet, which owns the prefix. Spelling a vendor path here would assert a
+#: layout this assembly does not control.
+DEPLOYMENTS_PREFIX = "/platform/deployments"
 
 #: The facet-relative path the planted browser surface mounts. Facet-relative
 #: exactly as a11's own screens are, so the composed path carries the
@@ -491,79 +496,35 @@ def test_the_planted_surface_genuinely_mounts_once_it_is_inventoried(
     assert PLANTED_FULL_PATH not in withheld_paths, sorted(withheld_paths)
 
 
-# ── ADR-0019 was surface-neutral, and that is asserted, not argued ──────────
-
-
-def _legacy_spec(profile: VendorDeploymentProfile) -> ProductAssemblySpec:
-    """The composition ADR-0019 replaced: vendor adapters filtered, persistence
-    owners spliced in RAW.
-
-    `_profiled_surface` is shared with the current code rather than re-copied.
-    The only thing that changed inside it is that the `ModuleManifest` branch
-    now also clears `web_routers`/`nav`, and no composed manifest carries
-    either, so the two are the same function for every input this comparison
-    feeds them.
-    """
-    return ProductAssemblySpec(
-        name=assembly.ASSEMBLY_NAME,
-        module_planes=assembly.ASSEMBLY_MODULE_PLANES,
-        modules=(
-            *assembly.STATEFUL_MODULES,
-            *(
-                assembly._profiled_surface(feature, profile)
-                for feature in assembly.VENDOR_SURFACES
-            ),
-        ),
-        web_enabled=True,
-    )
-
-
-def _route_signatures(spec: ProductAssemblySpec) -> set[tuple[str, str, str]]:
-    return {
-        (
-            getattr(route, "path", ""),
-            ",".join(sorted(getattr(route, "methods", None) or ())),
-            getattr(route, "name", "") or "",
-        )
-        for route in create_app(spec).routes
-    }
-
-
-def test_extending_admission_to_composed_modules_mounted_and_removed_no_route() -> None:
-    """C — the neutrality claim, measured rather than reasoned.
-
-    ADR-0019 changed which manifests the profile filters and dropped
-    `release_evidence` from three inventories. Neither is allowed to have moved
-    a route, and the profile versions were deliberately NOT bumped on exactly
-    that ground: rule 11 ties a bump to the effective surface set, and a bump
-    that signalled a change nobody made would be its own kind of lie.
-
-    The premise assertion comes first on purpose. This test certifies a change
-    that is already history; it holds only while no composed module bears a
-    route. When one does, DELETE it rather than repairing it — the comparison
-    would then be measuring the new module, not this change.
-    """
-    assert route_bearing_codes(assembly.STATEFUL_MODULES) == frozenset(), (
-        "the premise changed; this test certified that extending profile "
-        "admission to composed modules mounted and removed no route, which was "
-        "true only while no composed module bore one. Delete it — the change it "
-        "certifies is historical — rather than repairing it."
-    )
-    for profile in PROFILES:
-        assert _route_signatures(assembly.build_spec(profile)) == _route_signatures(
-            _legacy_spec(profile)
-        ), profile.code
-
-
-def test_the_neutrality_comparison_can_see_a_route() -> None:
-    """NON-VACUITY. Two empty sets compare equal, so the comparison above means
-    nothing unless it is measuring something."""
-    signatures = _route_signatures(assembly.build_spec(deployment_profile(FULL)))
-    assert len(signatures) > 20, len(signatures)
-    assert any(path == "/health/ready" for path, _, _ in signatures), sorted(signatures)
-    # A signature is a triple, so a comparison that had degenerated to paths
-    # alone would stop noticing a method or a route name changing.
-    assert all(len(signature) == 3 for signature in signatures)
+# ── ADR-0019's surface-neutrality proof, RETIRED ────────────────────────────
+#
+# Two tests stood here: `test_extending_admission_to_composed_modules_mounted_
+# and_removed_no_route`, which compared the ADR-0019 composition against the one
+# it replaced and required identical route signatures, and its non-vacuity
+# partner `test_the_neutrality_comparison_can_see_a_route`.
+#
+# They are deleted rather than repaired, on their own written instruction:
+#
+#     it holds only while no composed module bears a route. When one does,
+#     DELETE it rather than repairing it — the comparison would then be
+#     measuring the new module, not this change.
+#
+# Pinning `dotmac-deployment-control` a12 is that moment. a12 declares
+# `web_surfaces`; a6 declared none, which is exactly the premise the test
+# asserted first so it would fail loudly instead of quietly measuring something
+# else. Repairing it — excluding `deployment_control` from the comparison — would
+# have kept a green test whose subject had changed underneath it.
+#
+# The claim it certified is history and stays true: extending profile admission
+# to composed modules moved no route ON THE COMPOSITION THAT EXISTED THEN. What
+# replaces it going forward is not a re-run of that comparison but the admission
+# gate itself — `admit_surfaces` now has a route-bearing composed module to rule
+# on, and `test_the_admission_gate_rules_on_a_composed_module` below exercises
+# it against the real one rather than against a planted probe.
+#
+# `_legacy_spec` and `_route_signatures` went with them: nothing else used
+# either, and a helper kept for a deleted comparison is the next reader's
+# false lead.
 
 
 # ── 2: the production profiles withhold what they say they withhold ─────────
@@ -577,6 +538,10 @@ def test_production_bootstrap_withholds_licensing_offers_and_the_laboratory() ->
     # The correction this profile version exists for: versions 1 and 2
     # published a simulated provisioning API on the production host.
     assert not _under(paths, PROVISIONING_PREFIX), paths
+    # Control a12 arrives route-bearing and is withheld here; the rationale
+    # states why (a plan-freezing WRITE route, before the restored-database
+    # rehearsal is discharged).
+    assert not _under(paths, DEPLOYMENTS_PREFIX), paths
     # SENSITIVITY: the check must be able to see a mounted vendor surface, or it
     # would pass just as well against an assembly that mounted nothing at all.
     assert _under(paths, CONTRACTS_PREFIX), paths
@@ -613,6 +578,9 @@ def test_production_composed_v1_publishes_exactly_its_declared_inventory() -> No
         CONTRACTS_PREFIX,
         ACCOUNTS_PREFIX,
         APPROVALS_PREFIX,
+        # Control a12's fleet surface: withheld on the same operator-WRITE rule
+        # as its neighbours above, not on a new one.
+        DEPLOYMENTS_PREFIX,
     ):
         assert not _under(paths, prefix), (prefix, paths)
 
@@ -630,6 +598,11 @@ def test_the_full_profile_mounts_what_the_production_profiles_withhold() -> None
         ACCOUNTS_PREFIX,
         APPROVALS_PREFIX,
         ALLOCATIONS_PREFIX,
+        # Added with the Control a12 pin. Without it, the two production
+        # profiles' new `deployment_control` withholding would be asserted
+        # against routes that might never have mounted under any profile —
+        # which is precisely what this test exists to rule out.
+        DEPLOYMENTS_PREFIX,
     ):
         assert _under(paths, prefix), (prefix, paths)
 
@@ -808,6 +781,58 @@ def test_the_roster_is_derived_and_holds_no_silent_surface() -> None:
         assert set(profile.surface_inventory) == (
             route_bearing - profile.withheld_surfaces
         ), profile.code
+
+
+def test_the_admission_gate_rules_on_a_composed_module() -> None:
+    """The first COMPOSED module that bears a route, ruled on for real.
+
+    Every other admission test here plants a probe, because until Control a12
+    no composed module carried one: a6 declared no `web_surfaces`. A gate whose
+    only subjects are plants has never been shown to rule on the thing it was
+    built for, so this drives the real manifest through the real profiles.
+
+    The premise is asserted first and names the module, so that a future pin
+    which stopped shipping the surface fails here rather than turning the three
+    assertions below into three tautologies about an absent name.
+    """
+    route_bearing = route_bearing_codes(assembly.COMPOSED_MANIFESTS)
+    assert "deployment_control" in route_bearing, sorted(route_bearing)
+
+    published = {
+        profile.code: set(profile.surface_inventory) for profile in PROFILES
+    }
+    withheld = {profile.code: profile.withheld_surfaces for profile in PROFILES}
+
+    # `full` publishes it; both production profiles withhold it. This is the
+    # per-profile decision recorded in each rationale, asserted rather than
+    # trusted to prose.
+    assert "deployment_control" in published[FULL]
+    assert "deployment_control" not in withheld[FULL]
+    for code in (PRODUCTION_BOOTSTRAP, PRODUCTION_COMPOSED_V1):
+        assert "deployment_control" in withheld[code], code
+        assert "deployment_control" not in published[code], code
+
+
+def test_the_composed_module_admission_can_actually_refuse() -> None:
+    """SENSITIVITY. The three assertions above are satisfied by the current
+    declarations; this proves the GATE behind them still bites on this module.
+
+    Dropping `deployment_control` from `full`'s inventory while it still mounts
+    must be refused as uninventoried — the exact failure the pin would otherwise
+    have produced silently, and the reason the profile change had to land in the
+    same commit as the pin.
+    """
+    full = next(profile for profile in PROFILES if profile.code == FULL)
+    uninventoried = replace(
+        full,
+        surface_inventory=tuple(
+            name for name in full.surface_inventory if name != "deployment_control"
+        ),
+    )
+    with pytest.raises(SurfaceAdmissionError) as refusal:
+        admit_surfaces(uninventoried, assembly.COMPOSED_MANIFESTS)
+    assert refusal.value.refusal is AdmissionRefusal.SURFACE_NOT_INVENTORIED
+    assert refusal.value.surfaces == ("deployment_control",)
 
 
 def test_bears_routes_sees_every_route_field() -> None:
