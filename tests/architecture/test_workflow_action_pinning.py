@@ -11,9 +11,20 @@ commit (AGENTS.md rule 9, which names mutable tags as an unacceptable
 substitute). The rule simply had not reached the workflows enforcing it: two
 `snok/install-poetry@v1` call sites ran unpinned until 2026-08-04.
 
-Local composite actions (`./.github/actions/...`) are exempt — they are this
-repository's own code at this commit, so there is no external reference that
-can move under them.
+Local composite actions (`./.github/actions/...`) are exempt from the SHA rule,
+because there is no external reference that can move under them.
+
+The premise behind that exemption is narrower than it reads, and one workflow
+broke it. `./...` resolves against `$GITHUB_WORKSPACE`, so a local action is
+this repository's own code at this commit ONLY while the workspace holds this
+commit. `.github/workflows/kernel-lock.yml` checked out a caller-supplied
+`inputs.ref` and then loaded `./.github/actions/setup-poetry` from it, in a job
+holding `FORGEJO_READ_TOKEN` — the dispatched ref's own code, running with the
+credential. The repair puts the trusted commit at the workspace root and the
+ref under resolution at `work/`; `test_kernel_lock_workflow.py` holds that
+shape. This module's exemption still stands for every workflow whose workspace
+root is its own commit, which is every other one here — it is an exemption with
+a premise, not a blanket.
 """
 
 from __future__ import annotations

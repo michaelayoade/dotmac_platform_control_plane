@@ -9,11 +9,46 @@
 # catastrophic.
 #
 # So the credential lives here and the resolution happens here. The job UPLOADS
-# a lock and its evidence; it never commits, never opens a pull request, and
-# never hands the credential to the lane that will apply the artifact.
+# a manifest/lock PAIR and its evidence; it never commits, never opens a pull
+# request, and never hands the credential to the lane that will apply them.
 #
 # It is `workflow_dispatch` only. Nothing schedules it and no push triggers it:
 # a lock move is an authored act.
+#
+# ── TWO CHECKOUTS, AND WHY ──────────────────────────────────────────────────
+#
+# The ref under resolution is caller-supplied and is not trusted. It supplies
+# the MANIFEST TO RESOLVE. It must never supply THE CODE THAT RESOLVES.
+#
+# The first version of this workflow checked out that ref alone and then ran
+# `uses: ./.github/actions/setup-poetry` — a local composite action loaded from
+# the checked-out tree. That is the ref's own code, executing in a job where
+# `FORGEJO_READ_TOKEN` is present, before anything has looked at it. It also
+# read `.github/bootstrap/poetry-requirements.txt` from that tree, so even the
+# hash-pinned bootstrap was pinned by whoever wrote the ref.
+#
+# So: the workspace ROOT is `github.sha` — the commit that defines this file,
+# the code an operator approved by dispatching it — and every local action,
+# every script and every bootstrap file resolves from there. The ref under
+# resolution is checked out BESIDE it, at `work/`, and is only ever read as
+# data or resolved against by Poetry.
+#
+# WHAT THIS DOES NOT CLOSE. `poetry lock` still runs against a manifest the ref
+# owns, in a step that holds the credential, and resolution can execute a build
+# backend when a candidate has no wheel metadata. `manifest-guard` narrows that
+# to packages the declared index serves — it refuses an off-index `path`, `git`
+# or `url` dependency, a second source, a `forgejo` source whose URL has moved
+# (Poetry keys the credential by source NAME, so that alone would post it to
+# another host with nothing untrusted executing), and `requires-plugins`. What
+# remains is: a published package on the declared index whose sdist build
+# backend runs code. That is the same exposure `poetry install` already has in
+# CI, and this workflow does not reduce it.
+#
+# Nor does the reachability check below make the ref trustworthy. It proves the
+# commit is reachable from a branch of THIS repository — which excludes a fork
+# pull request's head commit, still checkoutable by SHA — and nothing more. A
+# branch here can be attacker-authored, and a pin change IS a branch. It is
+# defence in depth, and it is not the fix.
 
 name: Kernel lock
 
@@ -57,11 +92,52 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # THE TRUSTED CHECKOUT — the workspace root, and the only place a local
+      # action, a script or the Poetry bootstrap may come from. `github.sha` is
+      # the commit carrying this workflow file, so the resolver code and the
+      # rules it enforces are the same revision an operator dispatched.
+      - name: Check out the tooling from the commit that defines this workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: The requested ref is reachable from a branch of this repository
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # Defence in depth, with a stated premise. This excludes a commit
+          # that exists in this repository's object store but is on no branch
+          # — a fork pull request's head, which `actions/checkout` will happily
+          # resolve by SHA. It does NOT establish that anyone reviewed the
+          # commit: a branch here can be attacker-authored, and the pin change
+          # this workflow serves arrives as one.
+          git fetch --quiet --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if ! git rev-parse --quiet --verify "${REF}^{commit}" > /dev/null; then
+            echo "::error::${REF} is not present in this repository after fetching"
+            echo "::error::every branch head. It is either not a commit here at all, or"
+            echo "::error::reachable only as a pull-request head — neither is dispatchable."
+            exit 1
+          fi
+          BRANCHES=$(git branch --remotes --contains "${REF}" --format='%(refname:short)')
+          if [ -z "${BRANCHES}" ]; then
+            echo "::error::${REF} is on no branch of this repository. A commit"
+            echo "::error::reachable only as a pull-request head is not dispatchable here."
+            exit 1
+          fi
+          echo "reachable from:"
+          printf '  %s\n' ${BRANCHES}
+
+      # THE UNTRUSTED CHECKOUT. Data, beside the tooling — never above it.
+      - name: Check out the ref under resolution, beside the tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          path: work
 
       - name: The checkout is the commit that was asked for
+        working-directory: work
         env:
           REF: ${{ inputs.ref }}
         run: |
@@ -81,79 +157,67 @@ jobs:
 
       # The repository-prescribed Poetry, hash-locked from
       # .github/bootstrap/poetry-requirements.txt. Naming a version here would
-      # be a second declaration free to disagree with that one.
+      # be a second declaration free to disagree with that one. Resolved from
+      # the workspace root, which is the TRUSTED checkout — see the header.
       - uses: ./.github/actions/setup-poetry
 
-      - name: Keep the pre-resolution lock for comparison
-        run: cp poetry.lock /tmp/poetry.lock.before
-
-      - name: Resolve the kernel pin, and nothing else
+      - name: Move the pin, and refuse a manifest that would misdirect the credential
         env:
-          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
-          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
           KERNEL_VERSION: ${{ inputs.kernel_version }}
         run: |
           set -euo pipefail
-          # Edit only the version inside the dotmac-kernel declaration. The
-          # extras and the source stay exactly as the tree has them: a lock
-          # resolved against different extras is a different lock.
-          python - <<'PY'
-          import os, pathlib, re
-          version = os.environ["KERNEL_VERSION"]
-          path = pathlib.Path("pyproject.toml")
-          text = path.read_text()
-          pattern = re.compile(r'(dotmac-kernel = \{ version = ")[^"]+(")')
-          text, count = pattern.subn(rf'\g<1>{version}\g<2>', text)
-          if count != 1:
-              raise SystemExit(
-                  f"expected exactly one dotmac-kernel version declaration, edited {count}. "
-                  "Refusing rather than guessing which one the pin is."
-              )
-          path.write_text(text)
-          PY
+          # Both steps run the TRUSTED module against the untrusted manifest.
+          # The edit moves only the version inside the dotmac-kernel
+          # declaration: the extras and the source stay exactly as the tree has
+          # them, because a lock resolved against different extras is a
+          # different lock.
+          python scripts/kernel_lock.py set-kernel-version \
+            --manifest work/pyproject.toml --kernel-version "${KERNEL_VERSION}"
+          python scripts/kernel_lock.py manifest-guard \
+            --manifest work/pyproject.toml --kernel-version "${KERNEL_VERSION}"
+
+      - name: There is a credential to resolve with
+        env:
+          FORGEJO_CREDENTIAL: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Deliberately AFTER the manifest guard: no step holds the
+          # credential until the untrusted manifest has been judged.
+          #
+          # An unconfigured secret interpolates to the empty string. Everything
+          # downstream then fails for a reason that reads like an index fault,
+          # and the evidence scan — which has nothing to look for — would have
+          # reported the evidence clean. Say it here instead.
+          if [ -z "${FORGEJO_CREDENTIAL:-}" ]; then
+            echo "::error::FORGEJO_READ_TOKEN is unset or empty in this repository."
+            echo "::error::Its owner is OpenBao secret/dotmac/forgejo/read-token#value;"
+            echo "::error::this workflow consumes the projection, it does not fetch it."
+            exit 1
+          fi
+          echo "the credential is present"
+
+      - name: Keep the pre-resolution lock for comparison
+        run: cp work/poetry.lock /tmp/poetry.lock.before
+
+      - name: Resolve the kernel pin, and nothing else
+        working-directory: work
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
           poetry lock 2>&1 | tee /tmp/resolver.log
 
       - name: Only dotmac-kernel moved
         run: |
           set -euo pipefail
-          # The drift gate. `poetry lock` is free to re-resolve the whole graph,
-          # and a lock carrying an unrelated bump is a dependency change nobody
+          # The drift gate, and it is the WHOLE lock. `poetry lock` is free to
+          # re-resolve the entire graph, and a lock carrying an unrelated bump
+          # — or an unrelated package quietly repointed at a different index,
+          # same name, same version, same files — is a dependency change nobody
           # asked for arriving inside a pin change nobody would re-read.
-          python - <<'PY'
-          import sys, tomllib
-
-          def packages(path):
-              with open(path, "rb") as handle:
-                  data = tomllib.load(handle)
-              return {
-                  (entry["name"], entry["version"]): tuple(
-                      sorted(f["hash"] for f in entry.get("files", []))
-                  )
-                  for entry in data["package"]
-              }
-
-          before = packages("/tmp/poetry.lock.before")
-          after = packages("poetry.lock")
-
-          moved = {
-              name
-              for name, _ in set(before) ^ set(after)
-          }
-          changed_files = {
-              name
-              for key in set(before) & set(after)
-              if before[key] != after[key]
-              for name, _ in [key]
-          }
-          drifted = (moved | changed_files) - {"dotmac-kernel"}
-          if drifted:
-              print("::error::unrelated dependency drift: " + ", ".join(sorted(drifted)))
-              sys.exit(1)
-          if "dotmac-kernel" not in moved:
-              print("::error::dotmac-kernel did not move; this lock says nothing")
-              sys.exit(1)
-          print("only dotmac-kernel moved")
-          PY
+          python scripts/kernel_lock.py drift \
+            --before /tmp/poetry.lock.before --after work/poetry.lock
 
       - name: The lock's hashes are the index's bytes
         env:
@@ -221,7 +285,7 @@ jobs:
               observed[name] = f"sha256:{digest}"
               print(f"{name}  {digest}")
 
-          with open("poetry.lock", "rb") as handle:
+          with open("work/poetry.lock", "rb") as handle:
               data = tomllib.load(handle)
           entry = next(
               item for item in data["package"] if item["name"] == "dotmac-kernel"
@@ -248,6 +312,7 @@ jobs:
           PY
 
       - name: The lock and the pyproject edit agree
+        working-directory: work
         run: |
           set -euo pipefail
           # A lock carries a content-hash derived from pyproject. Applying this
@@ -257,42 +322,36 @@ jobs:
           # the evidence rather than from a red pipeline.
           poetry check --lock
 
-      - name: Sanitize the evidence
+      - name: Assemble the evidence — the manifest and the lock, bound together
         env:
-          TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+          FORGEJO_CREDENTIAL: ${{ secrets.FORGEJO_READ_TOKEN }}
+          REF: ${{ inputs.ref }}
+          KERNEL_VERSION: ${{ inputs.kernel_version }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          mkdir -p /tmp/evidence
-          # Belt and braces. Poetry does not echo the credential, but this file
-          # leaves the runner as a downloadable artifact and "does not today" is
-          # not a property anyone should have to re-verify.
-          python - <<'PY'
-          import os, pathlib
-          token = os.environ["TOKEN"]
-          text = pathlib.Path("/tmp/resolver.log").read_text()
-          if token and token in text:
-              text = text.replace(token, "***REDACTED***")
-          pathlib.Path("/tmp/evidence/resolver.log").write_text(text)
-          PY
-          cp poetry.lock /tmp/evidence/poetry.lock
-          {
-            echo "ref              ${{ inputs.ref }}"
-            echo "kernel_version   ${{ inputs.kernel_version }}"
-            echo "workflow_run     ${{ github.run_id }}"
-            echo "resolved_at      $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo ""
-            echo "This lock is valid ONLY alongside the same pyproject.toml edit"
-            echo "this job made: dotmac-kernel version -> ${{ inputs.kernel_version }},"
-            echo "extras and source untouched. The lock's content-hash is derived"
-            echo "from that manifest, so applying one without the other leaves a"
-            echo "tree whose lock does not describe itself."
-            echo "content-hash     $(python -c \
-              'import tomllib;print(tomllib.load(open("poetry.lock","rb"))["metadata"]["content-hash"])')"
-          } > /tmp/evidence/coordinates.txt
-          if grep -q -- "${TOKEN}" /tmp/evidence/* 2>/dev/null; then
-            echo "::error::the credential reached the evidence; refusing to upload"
-            exit 1
-          fi
+          # Every coordinate crosses as a shell variable, never as a `${{ }}`
+          # interpolation into this script. Both inputs are regex-validated in
+          # step 1, so the old direct interpolation was not exploitable — but it
+          # was one deleted validation away from being a script-injection sink,
+          # and a sink whose safety rests on a check somewhere else is a sink.
+          #
+          # The lock and the manifest leave together, digested, with a binding
+          # over the pair: the lock's content-hash comes from the manifest, so
+          # either one applied alone describes a tree that does not exist.
+          python scripts/kernel_lock.py evidence \
+            --out /tmp/evidence \
+            --manifest work/pyproject.toml \
+            --lock work/poetry.lock \
+            --resolver-log /tmp/resolver.log \
+            --coordinate "ref=${REF}" \
+            --coordinate "kernel_version=${KERNEL_VERSION}" \
+            --coordinate "repository=${REPOSITORY}" \
+            --coordinate "workflow_run=${RUN_ID}" \
+            --coordinate "run_attempt=${RUN_ATTEMPT}" \
+            --coordinate "resolved_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -303,6 +362,7 @@ jobs:
       - name: Say plainly that nothing was committed
         run: |
           echo "Resolved and verified. NOTHING was committed and no pull request"
-          echo "was opened: download the artifact and apply poetry.lock in the"
-          echo "pull request that moves the pin, so one reviewer sees the lock"
-          echo "and the change that needs it together."
+          echo "was opened: download the artifact and apply BOTH pyproject.toml and"
+          echo "poetry.lock in the pull request that moves the pin, so one reviewer"
+          echo "sees the lock and the manifest it describes together. coordinates.txt"
+          echo "says how to verify the pair before you apply it."
