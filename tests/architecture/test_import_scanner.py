@@ -173,3 +173,39 @@ def test_possible_targets_are_a_superset_of_unambiguous_ones(tmp_path: Path) -> 
     )
     assert module_targets(refs) == {"a.b", "c.d"}
     assert possible_module_targets(refs) == {"a.b", "c.d", "c.d.e"}
+
+
+# ── the surface, not just the parser ────────────────────────────────────────
+
+
+def test_source_files_reads_a_payload_that_is_not_named_dot_py() -> None:
+    """SENSITIVITY for the widened surface, in the real tree.
+
+    Five guards ask "does any source file reach for X?" through `source_files`,
+    and while it globbed `*.py` all five were blind to
+    `src/vendor_cp/rotation_runtime_oracle.pyprogram` — Python, executed by the
+    deployed application's interpreter, and named something else. This fails if
+    the surface is narrowed back.
+    """
+
+    from import_scanner import SRC, source_files
+
+    found = {path.relative_to(SRC).as_posix() for path in source_files(SRC)}
+    payloads = sorted(name for name in found if not name.endswith(".py"))
+    assert payloads, (
+        "`source_files` is `.py`-only again. A file the product's interpreter "
+        "executes is Python whatever it is named."
+    )
+    assert "vendor_cp/rotation_runtime_oracle.pyprogram" in payloads
+
+
+def test_source_files_refuses_what_no_python_interpreter_runs() -> None:
+    """NEAR-MISS, permanent. Widening must not turn every file into `source`:
+    the shell oracle and the SQL catalogue live in the same directory tree and
+    must stay out, or a guard reports having checked text it cannot parse."""
+
+    from import_scanner import SRC, source_files
+
+    found = {path.relative_to(SRC).as_posix() for path in source_files(SRC)}
+    assert "vendor_cp/rotation_database_auth_oracle.shprogram" not in found
+    assert "vendor_cp/recovery/capture_catalog.sql" not in found

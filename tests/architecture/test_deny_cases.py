@@ -15,6 +15,7 @@ import dotmac_kernel
 import pytest
 from dotmac_kernel import create_app
 from dotmac_kernel.platform_auth import require_platform_admin
+from python_entrypoints import is_python_source
 from route_dependency_graph import (
     api_routes,
     bearer_authentication_owners,
@@ -32,11 +33,45 @@ ENTRYPOINTS = ROOT / "scripts"
 
 
 def _py_files() -> list[Path]:
+    """The `.py` surface, BY NAME — and deliberately so, for D1 alone.
+
+    D1 forbids constructing a connection *in this assembly's runtime*.
+    `src/vendor_cp/rotation_runtime_oracle.pyprogram` calls `create_engine` and
+    is excluded here on a premise that is stated and enforced rather than
+    assumed: it is not imported by anything in this assembly, and it opens its
+    connection in a DIFFERENT process, in a different image, for the sole
+    purpose of proving that deliberately invalid credentials are refused. The
+    premise is held by
+    `tests/unit/test_production_secret_rotation.py::test_the_oracle_payload_is_not_part_of_the_python_surface`,
+    which requires the payload to keep its non-`.py` name and requires the
+    constructor to stay out of `production_secrets`. If that test goes, this
+    exclusion goes with it.
+
+    Every check here that is about IMPORTS uses `_executed_python()` instead —
+    an import reaches the same code whichever interpreter runs the file.
+    """
+
     return [
         p
         for root in (SRC, ENTRYPOINTS)
         for p in root.rglob("*.py")
         if "__pycache__" not in p.parts
+    ]
+
+
+def _executed_python() -> list[Path]:
+    """Everything this product's Python interpreter runs, by property.
+
+    `.py` is a naming convention, not an execution boundary. See
+    `python_entrypoints` for the property and for the ratchet that keeps the
+    classification honest.
+    """
+
+    return [
+        p
+        for root in (SRC, ENTRYPOINTS)
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and "__pycache__" not in p.parts and is_python_source(p)
     ]
 
 
@@ -176,10 +211,36 @@ def test_d1_session_authority_guard_covers_every_entrypoint_family(
         probe.unlink()
 
 
+def test_the_two_surfaces_really_differ() -> None:
+    """NON-VACUITY for the split. If `_executed_python()` returned the same
+    files as `_py_files()`, every widened check above would be exactly as blind
+    as it was, and this file would read as if it had been repaired.
+
+    It also pins the D1 exclusion to something real: the payload D1 does not
+    read is a file the import checks DO read, which is the whole shape of the
+    argument — a connection opened in another image is not this assembly's
+    engine, but an import is an import wherever it runs.
+    """
+
+    named = {p.resolve() for p in _py_files()}
+    executed = {p.resolve() for p in _executed_python()}
+    extra = sorted(p.name for p in executed - named)
+    assert extra, (
+        "`_executed_python()` sees nothing `_py_files()` misses. Either the "
+        "payloads were retired — say so in the change that retired them — or "
+        "the property stopped recognising them."
+    )
+    assert "rotation_runtime_oracle.pyprogram" in extra
+    assert not named - executed, (
+        "a `.py` file is no longer recognised as executed Python; the widened "
+        f"surface must be a superset: {sorted(p.name for p in named - executed)}"
+    )
+
+
 def test_d1_no_product_database_dsns() -> None:
     bad = [
         f"{p.name}: {m}"
-        for p in _py_files()
+        for p in _executed_python()
         for m in re.findall(
             r"[A-Z0-9_]*(?:SUB|CRM|ERP|PRODUCT)[A-Z0-9_]*DATABASE_URL", p.read_text()
         )
@@ -194,7 +255,7 @@ _PRODUCT_ROOTS = {"dotmac_sub", "dotmac_crm", "dotmac_erp", "crm", "erp", "app"}
 def test_d2_no_product_domain_imports() -> None:
     bad = [
         f"{p.name}: import {mod}"
-        for p in _py_files()
+        for p in _executed_python()
         for mod, _ in _imports(p)
         if mod.split(".")[0] in _PRODUCT_ROOTS
     ]
@@ -220,7 +281,7 @@ _REAL_PROVIDER_SDKS = {
 def test_d3_no_real_provider_sdk_imports() -> None:
     bad = [
         f"{p.name}: import {mod}"
-        for p in _py_files()
+        for p in _executed_python()
         for mod, _ in _imports(p)
         if mod.split(".")[0] in _REAL_PROVIDER_SDKS
     ]
@@ -289,7 +350,7 @@ def test_d4_the_vendor_re_implements_no_authentication() -> None:
     """
     planted = [
         f"{path.relative_to(ROOT)}: {name}"
-        for path in _py_files()
+        for path in _executed_python()
         for name in _AUTHENTICATION_DEFINITION.findall(path.read_text())
     ]
     assert not planted, (
@@ -322,7 +383,7 @@ def test_d5_only_public_kernel_surface_is_imported() -> None:
     internal = set(dotmac_kernel.INTERNAL_MODULES)
     top_level = set(dotmac_kernel.__all__)
     bad: list[str] = []
-    for p in _py_files():
+    for p in _executed_python():
         for mod, name in _imports(p):
             if not (mod == "dotmac_kernel" or mod.startswith("dotmac_kernel.")):
                 continue
