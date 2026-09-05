@@ -29,6 +29,11 @@ workflow — never from the ref under resolution.
   the duration of a SECRET-FREE resolution, then put the real index URL back
   and recompute the lock's `content-hash` with Poetry's own `Locker`, so the
   pair that leaves describes the manifest a consumer will actually apply.
+* `wheel-only` — every release the resolution reads metadata for offers a
+  parseable wheel, so Poetry's sdist branch — and the PEP 517 build backend at
+  the end of it — is unreachable. Run BEFORE `poetry lock` it is a gate; run
+  after, a closing observation. A dependency with no usable wheel is named and
+  refused, not silently built.
 * `verify` — the lock's hashes are the bytes the index published.
 * `drift` — the whole lock outside the `dotmac-kernel` entry must be
   identical, and the kernel entry itself may differ only in `version` and
@@ -37,6 +42,26 @@ workflow — never from the ref under resolution.
 * `evidence` — assemble what leaves the runner: the manifest/lock PAIR bound
   to each other and to this run, and a scan that refuses rather than passes
   when there is no credential to look for.
+
+## The resolver is wheel-only, and that is checked rather than configured
+
+Splitting the credential out of the resolver job removed the credential from
+the build backend's reach. It did not remove the build backend. `resolve` still
+reaches public PyPI, so a release with no usable wheel could still have its
+sdist backend executed — and the answer to that was a scan for the
+CONSEQUENCES of an execution that had already happened.
+
+Preventing the execution is stronger than scanning for its results, so the
+resolution is now wheel-only: `wheel_only_problems` refuses any release that
+offers no parseable wheel, at three points — while the private bundle is being
+laid out, over the pre-resolution lock BEFORE Poetry starts, and over the lock
+that leaves. The predicate is not a Poetry flag; it is the exact condition
+under which `HTTPRepository._get_info_from_sdist` is unreachable. See that
+function's docstring for what it is conservative about and what it does not
+cover.
+
+The credential-encoding scans stay exactly where they were, at exactly the
+strength they had. They are defence in depth. They were never the defence.
 
 ## Nothing scanned-only is uploaded
 
@@ -120,12 +145,23 @@ PAIR = ("pyproject.toml", "poetry.lock")
 #: Poetry configuration a candidate checkout may not carry. `poetry.toml` is
 #: read from the project directory and configures the resolver that is about to
 #: run against it — `certificates.<source>.cert = false` turns off TLS
-#: verification for a named repository, `installer.no-binary` forces source
-#: distributions and therefore build-backend execution, and `keyring.enabled`
-#: changes where credentials come from. This module REFUSES the file rather
-#: than reasoning about which keys are safe: an allowlist of settings is a
-#: second thing to keep in sync with Poetry, and the tree under resolution has
-#: no legitimate need to configure the tool that judges it.
+#: verification for a named repository, `keyring.enabled` changes where
+#: credentials come from, and `solver.lazy-wheel` changes how a wheel's
+#: metadata is obtained. This module REFUSES the file rather than reasoning
+#: about which keys are safe: an allowlist of settings is a second thing to
+#: keep in sync with Poetry, and the tree under resolution has no legitimate
+#: need to configure the tool that judges it.
+#:
+#: NOT for the reason an earlier revision of this comment gave. It claimed
+#: `installer.no-binary` "forces source distributions and therefore
+#: build-backend execution". That is false of the command this workflow runs.
+#: In the pinned Poetry (2.4.1) `installer.no-binary` and `installer.only-binary`
+#: are read in exactly one place — `poetry/installation/chooser.py` — which is
+#: the INSTALLER's link chooser. `poetry lock` never constructs one. Neither
+#: setting can make `poetry lock` execute a build backend, and neither can stop
+#: it: what decides that is whether a release offers a parseable wheel, which
+#: is what `wheel_only_problems` below judges. Refusing the file is still
+#: right; the reason is TLS, keyring and metadata transport, not no-binary.
 CANDIDATE_CONFIG_FILES = ("poetry.toml",)
 
 _KERNEL_DECLARATION = re.compile(r'(dotmac-kernel = \{ version = ")[^"]+(")')
@@ -786,6 +822,126 @@ def kernel_artifact_names(version: str) -> set[str]:
     }
 
 
+# ── wheel-only: the resolver is never handed something it must build ────────
+
+#: A wheel filename as POETRY parses one. This is `poetry.utils.patterns
+#: .wheel_file_re` from 2.4.1 — the version `.github/bootstrap/
+#: poetry-requirements.txt` pins — copied deliberately rather than imported,
+#: because this module runs in `acquire`, a job that installs no Poetry at all.
+#:
+#: NOT `endswith(".whl")`. `HTTPRepository._get_info_from_links` sorts links
+#: into wheels and sdists by extension, but then reads each wheel with THIS
+#: pattern and `continue`s past any filename it cannot parse. A release whose
+#: only ".whl" files are unparseable therefore leaves all four wheel slots
+#: empty and falls through to the sdist branch exactly as if it had offered no
+#: wheel at all — so a check on the extension would admit precisely the case
+#: that still builds.
+_WHEEL_FILENAME = re.compile(
+    r"^(?P<namever>(?P<name>.+?)-(?P<ver>\d[^-]*))"
+    r"(-(?P<build>\d[^-]*))?"
+    r"-(?P<pyver>[^-]+)"
+    r"-(?P<abi>[^-]+)"
+    r"-(?P<plat>[^-]+)"
+    r"\.whl$"
+)
+
+
+def parseable_wheels(filenames: Iterable[str]) -> list[str]:
+    """The subset of these filenames Poetry would accept as a metadata source."""
+
+    return sorted(name for name in filenames if _WHEEL_FILENAME.match(name))
+
+
+def wheel_only_problems(
+    offers: Iterable[tuple[str, str, Iterable[str]]],
+) -> list[str]:
+    """Every release here offers a wheel, so no build backend can run.
+
+    THE MECHANISM, stated as the condition it actually is. Poetry decides where
+    a release's metadata comes from in `HTTPRepository._get_info_from_links`:
+    if the release offers at least one parseable wheel it returns from a wheel
+    branch, always, and `_get_info_from_sdist` is unreachable. Only when no
+    parseable wheel is present does it reach
+    `_get_info_from_metadata(sdists[0]) or _get_info_from_sdist(sdists[0])`,
+    and `_get_info_from_sdist` is `PackageInfo.from_sdist`, which unpacks the
+    archive and — when its PKG-INFO carries no `Requires-Dist` — calls
+    `get_pep517_metadata`, which runs the project's own build backend in a
+    subprocess. That is arbitrary published code executing inside the resolver.
+
+    So "a wheel is offered" is not a preference or a flag. It is the exact
+    predicate under which that code path cannot be taken, and this refuses
+    every release that fails it, BY NAME, rather than letting the resolver
+    discover the answer by running the thing.
+
+    There is no Poetry setting that does this. `installer.no-binary` and
+    `installer.only-binary` are the INSTALLER's link chooser and have no
+    bearing on `poetry lock` — see `CANDIDATE_CONFIG_FILES`.
+
+    WHAT THIS IS CONSERVATIVE ABOUT, and it errs towards refusing:
+
+    * A sdist-only release whose index serves PEP 658 core metadata would be
+      read by `_get_info_from_metadata` without any build. This refuses it
+      anyway. Admitting it would mean trusting an index-supplied `.metadata`
+      link to exist at resolution time, which is a promise about a remote
+      server, not a fact about these files.
+
+    WHAT IT DOES NOT COVER, which is a smaller set but not empty:
+
+    * A YANKED wheel. `_get_info_from_links` drops yanked links before it
+      classifies them, and a lock's `files` list does not record yanked state.
+      A release whose only wheel is yanked passes this and still builds. The
+      answer is not available from the artifacts this workflow holds.
+    * A candidate VERSION the solver considers and discards. Metadata is
+      fetched for candidates that never reach a lock, and no check over the
+      locks before and after can see one. That region is unmonitored, not
+      covered — `drift_problems` refuses any package that appears or
+      disappears, so the SET is pinned, but the versions explored inside it
+      are not.
+    """
+
+    problems: list[str] = []
+    for name, version, filenames in offers:
+        files = sorted(filenames)
+        if not files:
+            problems.append(
+                f"{name} {version} offers no published files at all. Nothing "
+                "here can say where its metadata would come from, and a "
+                "release with no files is not an index release — it is a "
+                "directory, a git clone or a URL, every one of which resolves "
+                "by running a build backend."
+            )
+        elif not parseable_wheels(files):
+            problems.append(
+                f"{name} {version} offers {files} and not one usable wheel "
+                "among them. Resolution would have to take its metadata from "
+                "the source distribution, which unpacks the archive and, when "
+                "PKG-INFO carries no `Requires-Dist`, EXECUTES that project's "
+                "PEP 517 build backend inside this job. A dependency with no "
+                "usable wheel is refused; there is no fallback that builds it."
+            )
+    return problems
+
+
+def lock_wheel_problems(lock: dict[str, Any]) -> list[str]:
+    """`wheel_only_problems` over every package a lock names.
+
+    Run on the PRE-resolution lock this is a gate: it refuses before Poetry
+    starts, which is the only position from which refusing prevents anything.
+    Run again on the produced lock it is the closing observation, and together
+    with `drift_problems` — which refuses any package that appeared or
+    disappeared — the two describe the same set of packages.
+    """
+
+    return wheel_only_problems(
+        (
+            str(entry.get("name")),
+            str(entry.get("version")),
+            [str(item.get("file")) for item in entry.get("files", [])],
+        )
+        for entry in lock.get("package", [])
+    )
+
+
 def acquire(plan: dict[str, str], out: Path) -> dict[str, str]:
     """Download the closed bundle and lay it out as a local PEP 503 index.
 
@@ -814,6 +970,16 @@ def acquire(plan: dict[str, str], out: Path) -> dict[str, str]:
                 "it as a lock problem rather than as 'it was never published', "
                 "which is the fact that matters."
             )
+        offered = wheel_only_problems([(package, version, list(wanted))])
+        if offered:
+            # THE SDIST IS STILL ACQUIRED AND STILL HASHED. What this refuses
+            # is a private release that offers the resolver NOTHING BUT an
+            # sdist — because the mirror page written below is the resolver's
+            # whole view of this package, and a page with no wheel on it is a
+            # build. A page carrying both is not: the wheel's presence is what
+            # makes the sdist unreachable as a metadata source, which is why
+            # both links stay and the lock keeps both hashes.
+            raise Refusal(offered[0])
         if package == KERNEL:
             expected = kernel_artifact_names(version)
             if set(wanted) != expected:
@@ -1269,6 +1435,9 @@ def _build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--digests", type=Path, required=True)
     verify.add_argument("--kernel-version", required=True)
 
+    wheel_only = subcommands.add_parser("wheel-only")
+    wheel_only.add_argument("--lock", type=Path, required=True)
+
     drift = subcommands.add_parser("drift")
     drift.add_argument("--before", type=Path, required=True)
     drift.add_argument("--after", type=Path, required=True)
@@ -1339,6 +1508,11 @@ def _run(args: argparse.Namespace) -> int:
         return _report(
             "the lock against the published bytes",
             hash_problems(_load_toml(args.lock), digests, args.kernel_version),
+        )
+    if args.command == "wheel-only":
+        return _report(
+            "the resolution is wheel-only",
+            lock_wheel_problems(_load_toml(args.lock)),
         )
     if args.command == "drift":
         return _report(

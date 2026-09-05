@@ -34,7 +34,14 @@ tests did not reach, and this file grew the plants for them:
 10. the simple-index links the job downloaded were index-controlled and
     unvalidated, with `--netrc` in play;
 11. the credential and the resolver shared a job, so a package build backend
-    executed with the credential in reach.
+    executed with the credential in reach;
+12. and splitting them removed the credential from the backend's reach without
+    removing the backend. The resolver still reached public PyPI, so what stood
+    between a published sdist's build backend and this runner was a scan for
+    what its execution left behind. `wheel_only_problems` prevents the
+    execution instead, at three points, and `_wheel_only_gate_problems` plants
+    both its removal and — the subtler defect — its demotion to a check that
+    runs after `poetry lock` and can only report a build that already happened.
 
 `test_the_comparison_this_replaced_could_not_see_a_repointed_source` keeps
 defect 2 as a permanent negative control: it re-implements the old gate and
@@ -58,6 +65,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "kernel-lock.yml"
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import kernel_lock  # noqa: E402
 from kernel_lock import (  # noqa: E402
     ARTIFACT_ORIGIN,
     INDEX_SOURCE_NAME,
@@ -66,6 +74,7 @@ from kernel_lock import (  # noqa: E402
     KERNEL,
     OFF_INDEX_DEPENDENCY_KEYS,
     Refusal,
+    acquire,
     acquisition_plan,
     approved_artifact_url,
     artifact_belongs_to,
@@ -78,8 +87,10 @@ from kernel_lock import (  # noqa: E402
     hash_problems,
     index_links,
     kernel_artifact_names,
+    lock_wheel_problems,
     manifest_problems,
     pair_binding,
+    parseable_wheels,
     point_at_mirror,
     replace_kernel_version,
     restore_index_url,
@@ -87,6 +98,7 @@ from kernel_lock import (  # noqa: E402
     sha256_hex,
     sha256sums,
     transfer_problems,
+    wheel_only_problems,
 )
 
 # ── fixtures for the lock comparison ────────────────────────────────────────
@@ -903,6 +915,287 @@ def test_the_content_hash_line_is_replaced_exactly_once() -> None:
         set_content_hash("[metadata]\n", "new")
 
 
+# ── AMENDMENT 8: the resolver is never handed something it must build ──────
+#
+# Defect 12. Splitting the credential out of the resolver removed the
+# credential from the build backend's reach; it did not remove the backend.
+# `resolve` still reaches public PyPI, so a release with no usable wheel could
+# still have its PEP 517 backend executed there, and what stood against that
+# was a scan for the CONSEQUENCES of an execution that had already happened.
+#
+# The gates below are the prevention. Each of them plants the defect it exists
+# to name, and each of them is paired with an ADMIT case, because a rule
+# observed only refusing is indistinguishable from one that refuses
+# everything.
+
+
+def _release(name: str, version: str, *files: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "version": version,
+        "files": [{"file": f, "hash": f"sha256:{f}"} for f in files],
+    }
+
+
+def _wheel(name: str, version: str) -> str:
+    return f"{name.replace('-', '_')}-{version}-py3-none-any.whl"
+
+
+def _sdist(name: str, version: str) -> str:
+    return f"{name.replace('-', '_')}-{version}.tar.gz"
+
+
+def test_a_dependency_available_only_as_an_sdist_is_refused_by_name() -> None:
+    """THE PLANT. `waitress` publishes no wheel in this lock.
+
+    Poetry would take its metadata from the sdist, and `PackageInfo.from_sdist`
+    runs the project's own build backend when PKG-INFO carries no
+    `Requires-Dist`. The refusal has to say WHICH package and that it would
+    have required a build — a bare resolver error leaves the reader to work
+    that out from a traceback in a job that has already run the code.
+    """
+
+    lock = {
+        "package": [
+            _release("anyio", "4.14.2", _wheel("anyio", "4.14.2")),
+            _release("waitress", "3.0.2", _sdist("waitress", "3.0.2")),
+        ]
+    }
+    problems = lock_wheel_problems(lock)
+    assert len(problems) == 1, problems
+    named = problems[0]
+    assert named.startswith("waitress 3.0.2 "), named
+    assert "waitress-3.0.2.tar.gz" in named
+    assert "no usable wheel" in named
+    assert "PEP 517 build backend" in named
+    # And it names the package RATHER THAN the whole resolution: the clean
+    # dependency beside it is not implicated.
+    assert "anyio" not in named
+
+
+def test_a_fully_wheel_available_resolution_is_admitted() -> None:
+    """THE ADMIT CASE. Every release offers a wheel, so nothing is refused."""
+
+    lock = {
+        "package": [
+            _release("anyio", "4.14.2", _wheel("anyio", "4.14.2")),
+            _release(
+                "waitress",
+                "3.0.2",
+                _wheel("waitress", "3.0.2"),
+                _sdist("waitress", "3.0.2"),
+            ),
+            _release(
+                KERNEL,
+                "0.1.0a99",
+                "dotmac_kernel-0.1.0a99-py3-none-any.whl",
+                "dotmac_kernel-0.1.0a99.tar.gz",
+            ),
+        ]
+    }
+    assert lock_wheel_problems(lock) == []
+
+
+def test_a_platform_specific_wheel_is_a_wheel() -> None:
+    """The admit case must not be narrower than Poetry's own reading.
+
+    `_get_info_from_links` falls back to `platform_specific_wheels[0]` when
+    there is no universal wheel, so a manylinux-only release is still read from
+    a wheel and still runs no backend. A gate that refused it would refuse a
+    correct resolution.
+    """
+
+    lock = {
+        "package": [
+            _release(
+                "greenlet",
+                "3.1.1",
+                "greenlet-3.1.1-cp312-cp312-manylinux_2_24_x86_64.whl",
+                "greenlet-3.1.1.tar.gz",
+            )
+        ]
+    }
+    assert lock_wheel_problems(lock) == []
+
+
+def test_a_whl_poetry_cannot_parse_is_not_a_wheel_here_either() -> None:
+    """THE NEAR-MISS, and it is the one a `.whl` suffix check would admit.
+
+    `_get_info_from_links` sorts links by extension but then reads each wheel
+    with `wheel_file_re` and `continue`s past any filename that does not match.
+    A release offering only unparseable `.whl` files leaves every wheel slot
+    empty and falls through to the sdist branch — so it builds, while looking
+    from a distance exactly like a wheel-available release.
+    """
+
+    assert parseable_wheels(["thing-1.0.whl"]) == []
+    assert parseable_wheels(["thing-1.0-py3-none-any.whl"]) == [
+        "thing-1.0-py3-none-any.whl"
+    ]
+
+    lock = {"package": [_release("thing", "1.0", "thing-1.0.whl", "thing-1.0.tar.gz")]}
+    problems = lock_wheel_problems(lock)
+    assert len(problems) == 1, problems
+    assert problems[0].startswith("thing 1.0 ")
+
+
+def test_a_release_with_no_files_at_all_is_refused() -> None:
+    """A lock entry with no published files is not an index release — it is a
+    directory, a git clone or a URL, and every one of those resolves by running
+    a build backend. Nothing here can say otherwise, so it refuses."""
+
+    problems = lock_wheel_problems({"package": [_release("local-thing", "0.1")]})
+    assert len(problems) == 1, problems
+    assert "local-thing 0.1 offers no published files at all" in problems[0]
+
+
+def test_the_sdists_presence_in_the_lock_is_not_its_availability_to_the_resolver() -> (
+    None
+):
+    """The distinction this whole amendment turns on, stated as a test.
+
+    CHECKED HERE: that a release carrying BOTH a wheel and an sdist is
+    ADMITTED, and that the sdist's hash is untouched by the gate. The sdist is
+    downloaded, hashed, recorded in the evidence and written into the lock —
+    it is PRESENT. What it is not is AVAILABLE as a metadata source, because
+    `_get_info_from_links` returns from a wheel branch whenever a parseable
+    wheel exists and never reaches `_get_info_from_sdist`.
+
+    NOT CHECKED HERE: that Poetry behaves that way. That is a property of
+    Poetry 2.4.1, read from its source and recorded in `wheel_only_problems`'s
+    docstring, and it is why the gate's predicate is "a wheel is offered"
+    rather than "an sdist is absent".
+    """
+
+    both = _release(
+        "waitress", "3.0.2", _wheel("waitress", "3.0.2"), _sdist("waitress", "3.0.2")
+    )
+    assert lock_wheel_problems({"package": [both]}) == []
+    assert [item["file"] for item in both["files"]] == [
+        "waitress-3.0.2-py3-none-any.whl",
+        "waitress-3.0.2.tar.gz",
+    ]
+
+    # Remove the wheel and the same entry refuses. The sdist did not change;
+    # what changed is whether anything else could answer for the metadata.
+    sdist_only = _release("waitress", "3.0.2", _sdist("waitress", "3.0.2"))
+    assert len(lock_wheel_problems({"package": [sdist_only]})) == 1
+
+
+def test_the_predicate_is_the_same_one_the_bundle_uses() -> None:
+    """`acquire` judges a mirror page's filenames with the very function a lock
+    is judged with, so the private half and the public half cannot drift into
+    two different definitions of "wheel-available"."""
+
+    offer = ("dotmac-approvals", "0.1.0a5", ["dotmac_approvals-0.1.0a5.tar.gz"])
+    assert len(wheel_only_problems([offer])) == 1
+    with_wheel = (
+        offer[0],
+        offer[1],
+        [*offer[2], "dotmac_approvals-0.1.0a5-py3-none-any.whl"],
+    )
+    assert wheel_only_problems([with_wheel]) == []
+
+
+def test_this_repositorys_own_lock_is_already_wheel_only() -> None:
+    """THE MEASUREMENT, not an assertion.
+
+    The public-PyPI residual used to be "could a backend run", which nothing
+    could establish. Under wheel-only it becomes "is every dependency
+    wheel-available", which is a question about these files. This answers it
+    for the real lock: if a dependency ever stops publishing a wheel, the
+    workflow stops, and this test says so at review time rather than at
+    dispatch time.
+    """
+
+    with (ROOT / "poetry.lock").open("rb") as handle:
+        lock = tomllib.load(handle)
+    assert len(lock["package"]) > 20, len(lock["package"])
+    assert lock_wheel_problems(lock) == []
+
+
+# ── the same gate, on the bundle: an sdist may be acquired, not resolved ────
+
+
+def _fake_index(monkeypatch: pytest.MonkeyPatch, offered: dict[str, list[str]]) -> None:
+    """Stand in for the private index. No network, no credential.
+
+    `acquire` is driven for real — its link validation, its `artifact_belongs_
+    to` matching, its page writing and its hashing all run — with only the
+    transfer replaced.
+    """
+
+    def _fetch(url: str, target: Path) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        package = url.rstrip("/").rsplit("/", 1)[-1]
+        if url.endswith("/"):
+            rows = "\n".join(
+                f'<a href="{name}">{name}</a><br>' for name in offered[package]
+            )
+            target.write_text(f"<html><body>{rows}</body></html>", encoding="utf-8")
+        else:
+            target.write_bytes(f"bytes of {target.name}".encode())
+
+    monkeypatch.setattr(kernel_lock, "fetch", _fetch)
+
+
+def test_the_bundle_refuses_a_private_release_that_offers_only_an_sdist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE PLANT, on the half of the index this workflow writes itself.
+
+    The mirror page `acquire` writes IS the resolver's whole view of a private
+    package. A page with no wheel on it is a build, in a job with no credential
+    but with public network access — so it is refused while the credential is
+    still in hand and the failure can name the package.
+    """
+
+    _fake_index(monkeypatch, {"dotmac-approvals": ["dotmac_approvals-0.1.0a5.tar.gz"]})
+    with pytest.raises(Refusal) as refusal:
+        acquire({"dotmac-approvals": "0.1.0a5"}, tmp_path / "bundle")
+    message = str(refusal.value)
+    assert message.startswith("dotmac-approvals 0.1.0a5 ")
+    assert "no usable wheel" in message
+    assert "PEP 517 build backend" in message
+
+
+def test_the_bundle_still_acquires_and_hashes_the_sdist_beside_the_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ADMIT CASE, and the property the plant above must not have broken.
+
+    Wheel-only is about what the RESOLVER may use, not about what acquisition
+    may hold. The sdist is still downloaded, still hashed into `digests.json`
+    and still linked from the mirror page — which is what keeps both file
+    hashes in the lock `verify` then checks. Its presence there is not its
+    availability as a metadata source; the wheel beside it is what makes it
+    unreachable.
+    """
+
+    _fake_index(
+        monkeypatch,
+        {
+            KERNEL: [
+                "dotmac_kernel-0.1.0a99-py3-none-any.whl",
+                "dotmac_kernel-0.1.0a99.tar.gz",
+            ]
+        },
+    )
+    out = tmp_path / "bundle"
+    digests = acquire({KERNEL: "0.1.0a99"}, out)
+
+    assert set(digests) == kernel_artifact_names("0.1.0a99")
+    assert (out / "files" / "dotmac_kernel-0.1.0a99.tar.gz").exists()
+
+    page = (out / "simple" / KERNEL / "index.html").read_text()
+    for name in sorted(kernel_artifact_names("0.1.0a99")):
+        assert f"#sha256={digests[name]}" in page
+        assert name in page
+
+    recorded = json.loads((out / "digests.json").read_text())
+    assert recorded == digests
+
+
 # ── the manifest edit ───────────────────────────────────────────────────────
 
 
@@ -1256,6 +1549,120 @@ def test_there_is_no_authenticated_online_fallback() -> None:
     # is absent. `machine ... login ... password` is how the acquiring job
     # writes one, and it appears nowhere in this job.
     assert "machine %s login %s password %s" not in commands
+
+
+# ── AMENDMENT 8: the gate's POSITION is the mechanism ───────────────────────
+
+
+def _wheel_only_gate_problems(steps: list[str]) -> list[str]:
+    """Judge a resolver job's steps for where its wheel-only gate sits.
+
+    Written over an arbitrary step list rather than over the file, so the tests
+    below can plant the gate's REMOVAL and its DEMOTION and watch this fire. A
+    check that only ever reads the real workflow proves nothing about itself.
+
+    Position is the whole mechanism here. A wheel-only check after `poetry
+    lock` reports a build backend that has already executed; only one before it
+    prevents anything. Both are wanted — the second answers for the artifact
+    that leaves — but the first is the one that is load-bearing.
+    """
+
+    commands = [_commands(step) for step in steps]
+    gates = [i for i, c in enumerate(commands) if "kernel_lock.py wheel-only" in c]
+    resolutions = [
+        i for i, c in enumerate(commands) if re.search(r"^\s*poetry lock\b", c, re.M)
+    ]
+    problems: list[str] = []
+    if not gates:
+        problems.append("no step runs the wheel-only gate at all")
+    if not resolutions:
+        problems.append("no step runs `poetry lock`")
+    if not gates or not resolutions:
+        return problems
+    if not any(gate < min(resolutions) for gate in gates):
+        problems.append(
+            "every wheel-only check runs AFTER `poetry lock`, so none of them "
+            "prevents a build backend running — they only report one that did"
+        )
+    if not any(gate > max(resolutions) for gate in gates):
+        problems.append(
+            "nothing re-checks the lock that leaves, so the artifact cannot "
+            "say on its own that no entry in it needs a build"
+        )
+    return problems
+
+
+def test_the_wheel_only_gate_runs_before_poetry_lock() -> None:
+    """The real workflow, judged."""
+
+    assert _wheel_only_gate_problems(_jobs()["resolve"]) == []
+
+
+def test_removing_the_wheel_only_gate_entirely_is_named() -> None:
+    """SENSITIVITY 1 — plant the mechanism's removal."""
+
+    steps = [
+        step
+        for step in _jobs()["resolve"]
+        if "kernel_lock.py wheel-only" not in _commands(step)
+    ]
+    assert len(steps) == len(_jobs()["resolve"]) - 2, "the plant removed nothing"
+    assert _wheel_only_gate_problems(steps) == [
+        "no step runs the wheel-only gate at all"
+    ]
+
+
+def test_demoting_the_gate_to_an_after_the_fact_report_is_named() -> None:
+    """SENSITIVITY 2 — the subtler plant, and the one a presence check misses.
+
+    Keep the wheel-only step; move it after `poetry lock`. Every assertion of
+    the form "the workflow mentions wheel-only" still passes, and the build
+    backend has already run by the time it speaks.
+    """
+
+    steps = _jobs()["resolve"]
+    pre = next(
+        i
+        for i, step in enumerate(steps)
+        if "kernel_lock.py wheel-only" in _commands(step)
+    )
+    demoted = steps[:pre] + steps[pre + 1 :]
+    problems = _wheel_only_gate_problems(demoted)
+    assert problems == [
+        "every wheel-only check runs AFTER `poetry lock`, so none of them "
+        "prevents a build backend running — they only report one that did"
+    ], problems
+
+
+def test_dropping_the_closing_check_on_the_lock_that_leaves_is_named() -> None:
+    """SENSITIVITY 3 — the other end."""
+
+    steps = _jobs()["resolve"]
+    last = max(
+        i
+        for i, step in enumerate(steps)
+        if "kernel_lock.py wheel-only" in _commands(step)
+    )
+    problems = _wheel_only_gate_problems(steps[:last] + steps[last + 1 :])
+    assert problems == [
+        "nothing re-checks the lock that leaves, so the artifact cannot "
+        "say on its own that no entry in it needs a build"
+    ], problems
+
+
+def test_no_poetry_binary_setting_is_relied_on_for_this() -> None:
+    """`installer.no-binary` and `installer.only-binary` do NOT do this.
+
+    They are read in exactly one place in the pinned Poetry (2.4.1) —
+    `poetry/installation/chooser.py`, the INSTALLER's link chooser — and
+    `poetry lock` never constructs one. A workflow that set either of them and
+    called itself wheel-only would be configured, not checked. Nothing here
+    sets one, and this says so rather than leaving the absence to chance.
+    """
+
+    executed = "\n".join(_commands(step) for step in _steps())
+    for setting in ("no-binary", "only-binary", "no_binary", "only_binary"):
+        assert setting not in executed, setting
 
 
 # ── AMENDMENT 3: no checkout persists the workflow token ───────────────────

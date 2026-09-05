@@ -44,15 +44,47 @@
 # to keep both properties. It is the same class as `acquire`: trusted tooling,
 # no Poetry, no package code.
 #
-# WHAT THIS DOES NOT CLOSE, stated exactly. `resolve` is not network-isolated.
-# It reaches PUBLIC PyPI, because the manifest's implicit PyPI source is not
-# mirrored — only the private `forgejo` source is. A public package whose
-# candidate has no usable wheel metadata can therefore still have its sdist
-# build backend executed by Poetry, with network access. What it does NOT have
-# is the credential: `secrets.FORGEJO_READ_TOKEN` is never referenced in that
-# job, no `.netrc` is written there, and `POETRY_HTTP_BASIC_*` is asserted
-# absent. Closing the remaining half would mean mirroring every public package
-# and replacing PyPI itself, which is a larger change than this one.
+# ── AND THE RESOLVER IS NEVER HANDED SOMETHING IT MUST BUILD ─────────────────
+#
+# The split above put the credential out of the build backend's reach. It did
+# not stop the backend running. `resolve` is not network-isolated — it reaches
+# PUBLIC PyPI, because the manifest's implicit PyPI source is not mirrored,
+# only the private `forgejo` source is — so a release with no usable wheel
+# could still have its sdist backend executed here.
+#
+# Scanning for what such an execution left behind is weaker than not running
+# it, so the resolution is WHEEL-ONLY:
+#
+#   * `acquire` refuses a private release whose index page would offer the
+#     resolver nothing but an sdist. The sdist is still downloaded, still
+#     hashed and still linked, so the lock keeps both file hashes — what is
+#     required is that a WHEEL is there too, because the wheel's presence is
+#     what makes the sdist unreachable as a metadata source.
+#   * `resolve` refuses, BEFORE Poetry starts, any package in the
+#     pre-resolution lock that offers no usable wheel. This is the gate. A
+#     check after `poetry lock` would be a report on a build that already ran.
+#   * `resolve` runs the same check again over the lock that leaves.
+#
+# The predicate is not a Poetry setting. `installer.no-binary` and
+# `installer.only-binary` are the INSTALLER's link chooser and have no effect
+# on `poetry lock` at all. What decides whether a build backend runs is whether
+# a release offers a parseable wheel — `HTTPRepository._get_info_from_links`
+# returns from a wheel branch whenever one exists, and only reaches
+# `_get_info_from_sdist` when none does. `wheel_only_problems` checks exactly
+# that condition and names the package that fails it.
+#
+# WHAT REMAINS. The residual is now a question with an answer: "is every
+# dependency wheel-available", which these gates measure, rather than "could a
+# backend run", which nothing could establish. Two things are still outside
+# them, and are named rather than claimed: a release whose only wheel has been
+# YANKED (a lock does not record yanked state), and a candidate VERSION the
+# solver considers and discards without it reaching either lock.
+#
+# None of this weakens the split above, which still holds independently:
+# `secrets.FORGEJO_READ_TOKEN` is never referenced in the resolver job, no
+# `.netrc` is written there, and `POETRY_HTTP_BASIC_*` is asserted absent
+# before Poetry starts. The credential-encoding scans are likewise unchanged,
+# and remain defence in depth. They were never the defence.
 #
 # ── TWO CHECKOUTS PER JOB, AND WHY ──────────────────────────────────────────
 #
@@ -388,6 +420,21 @@ jobs:
             --manifest work/pyproject.toml \
             --mirror-url "http://127.0.0.1:${MIRROR_PORT}/simple"
 
+      - name: Nothing in this resolution would have to be built
+        run: |
+          set -euo pipefail
+          # THE GATE, and its position is the point. Every package the
+          # resolution starts from must offer a parseable wheel, because that
+          # is the exact condition under which Poetry cannot take metadata
+          # from a source distribution — and taking it from a source
+          # distribution means running that project's PEP 517 build backend
+          # here. A package that fails is named, with the fact that it would
+          # have required a build. This runs BEFORE `poetry lock`: the same
+          # check afterwards would be a report on an execution that already
+          # happened.
+          python scripts/kernel_lock.py wheel-only \
+            --lock /tmp/poetry.lock.before
+
       - name: Resolve the kernel pin, with no way to ask for more
         working-directory: work
         env:
@@ -443,6 +490,16 @@ jobs:
           # `files` may differ on it either.
           python scripts/kernel_lock.py drift \
             --before /tmp/poetry.lock.before --after work/poetry.lock
+
+      - name: And nothing in the resolved lock would have to be built either
+        run: |
+          set -euo pipefail
+          # The closing observation. `drift` has just established that the set
+          # of packages is unchanged, so this and the gate before `poetry lock`
+          # describe the same set — but the lock that LEAVES is the artifact a
+          # consumer applies, and it is the one that has to be able to say, on
+          # its own, that no entry in it needs a build.
+          python scripts/kernel_lock.py wheel-only --lock work/poetry.lock
 
       - name: The lock's hashes are the bytes the index published
         env:
