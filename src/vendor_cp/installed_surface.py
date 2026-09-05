@@ -237,6 +237,12 @@ BASELINE: Final[dict[tuple[str, str], tuple[str, ...]]] = {
         "docs/operations/production-deployment.md",
     ): ("cd /opt/dotmac/vendor-control-plane",),
     ("python_scripts", ".github/workflows/ci.yml"): ("python scripts/kernel_floor.py",),
+    ("python_scripts", ".github/workflows/kernel-lock.yml"): (
+        "python scripts/kernel_lock.py",
+    ),
+    ("python_scripts", "tests/architecture/test_kernel_lock_workflow.py"): (
+        'python scripts/kernel_lock.py"',
+    ),
     ("python_scripts", ".github/workflows/engineering-standards.yml"): (
         "python3 scripts/check_governance_pin.py",
     ),
@@ -293,6 +299,24 @@ BASELINE_REASONS: Final[dict[str, str]] = {
         "operator surface. (That script is deliberately not named here: this "
         "module may not hold its name as a literal, because the checks that "
         "need it read it from installed metadata.)"
+    ),
+    ".github/workflows/kernel-lock.yml": (
+        "These checks decide whether the credential may be held at all, so they "
+        "must run BEFORE anything is installed and from the TRUSTED checkout. An "
+        "installed console script would have to be installed first, and installing "
+        "it means resolving the manifest the dispatched ref owns — which is the "
+        "exact ordering defect this workflow was repaired to close. The script "
+        "therefore runs from the workspace root, which is `github.sha`, not from "
+        "the ref under resolution at `work/`. Hosted CI with a checkout by "
+        "definition; no operator runs it and no deployment depends on it. Retires "
+        "when the guard can be reached from a console script installable from the "
+        "trusted commit alone, without resolving the untrusted manifest."
+    ),
+    "tests/architecture/test_kernel_lock_workflow.py": (
+        "Not an invocation. This file matches because it ASSERTS that the workflow "
+        "carries that exact command, and the assertion has to hold the literal: "
+        "building it from shared parts would let the test and the workflow drift "
+        "together and stop noticing. Retires with the workflow line it asserts."
     ),
     ".github/workflows/production-deploy.yml": (
         "The host-side leg runs on the TARGET, outside any container, against an "
