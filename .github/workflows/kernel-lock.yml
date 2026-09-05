@@ -1,0 +1,308 @@
+# Resolve a `dotmac-kernel` lock entry against the private index, and prove the
+# bytes it names are the bytes the index actually publishes.
+#
+# This exists because a lock entry is the one part of a pin change that CANNOT
+# be written by hand or by a workstation. Its two sha256 values are facts about
+# published artifacts, and the only honest way to obtain them is to resolve
+# against the index that holds them. An implementation lane asked to produce
+# them offline has exactly two options — refuse, or invent — and one of those is
+# catastrophic.
+#
+# So the credential lives here and the resolution happens here. The job UPLOADS
+# a lock and its evidence; it never commits, never opens a pull request, and
+# never hands the credential to the lane that will apply the artifact.
+#
+# It is `workflow_dispatch` only. Nothing schedules it and no push triggers it:
+# a lock move is an authored act.
+
+name: Kernel lock
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: >-
+          The EXACT commit SHA to resolve against. A branch name is refused —
+          a branch moves, and a lock resolved against "whatever main was" names
+          a tree nobody reviewed.
+        required: true
+        type: string
+      kernel_version:
+        description: The dotmac-kernel version to pin, e.g. 0.1.0a102.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse anything but an exact commit
+        env:
+          REF: ${{ inputs.ref }}
+          KERNEL_VERSION: ${{ inputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          # A 40-hex ref is the only input that cannot mean something different
+          # tomorrow. `main`, a branch, a tag and a short SHA are all refused by
+          # the same rule rather than by four special cases.
+          if ! printf '%s' "${REF}" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::ref must be a full 40-character commit SHA, got '${REF}'"
+            exit 1
+          fi
+          if ! printf '%s' "${KERNEL_VERSION}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$'; then
+            echo "::error::kernel_version is not a PEP 440 release, got '${KERNEL_VERSION}'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: The checkout is the commit that was asked for
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # `actions/checkout` resolving something other than what was requested
+          # would be silent, and every downstream fact would describe the wrong
+          # tree. One comparison closes that.
+          ACTUAL=$(git rev-parse HEAD)
+          if [ "${ACTUAL}" != "${REF}" ]; then
+            echo "::error::checked out ${ACTUAL}, asked for ${REF}"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # The repository-prescribed Poetry, hash-locked from
+      # .github/bootstrap/poetry-requirements.txt. Naming a version here would
+      # be a second declaration free to disagree with that one.
+      - uses: ./.github/actions/setup-poetry
+
+      - name: Keep the pre-resolution lock for comparison
+        run: cp poetry.lock /tmp/poetry.lock.before
+
+      - name: Resolve the kernel pin, and nothing else
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+          KERNEL_VERSION: ${{ inputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          # Edit only the version inside the dotmac-kernel declaration. The
+          # extras and the source stay exactly as the tree has them: a lock
+          # resolved against different extras is a different lock.
+          python - <<'PY'
+          import os, pathlib, re
+          version = os.environ["KERNEL_VERSION"]
+          path = pathlib.Path("pyproject.toml")
+          text = path.read_text()
+          pattern = re.compile(r'(dotmac-kernel = \{ version = ")[^"]+(")')
+          text, count = pattern.subn(rf'\g<1>{version}\g<2>', text)
+          if count != 1:
+              raise SystemExit(
+                  f"expected exactly one dotmac-kernel version declaration, edited {count}. "
+                  "Refusing rather than guessing which one the pin is."
+              )
+          path.write_text(text)
+          PY
+          poetry lock 2>&1 | tee /tmp/resolver.log
+
+      - name: Only dotmac-kernel moved
+        run: |
+          set -euo pipefail
+          # The drift gate. `poetry lock` is free to re-resolve the whole graph,
+          # and a lock carrying an unrelated bump is a dependency change nobody
+          # asked for arriving inside a pin change nobody would re-read.
+          python - <<'PY'
+          import sys, tomllib
+
+          def packages(path):
+              with open(path, "rb") as handle:
+                  data = tomllib.load(handle)
+              return {
+                  (entry["name"], entry["version"]): tuple(
+                      sorted(f["hash"] for f in entry.get("files", []))
+                  )
+                  for entry in data["package"]
+              }
+
+          before = packages("/tmp/poetry.lock.before")
+          after = packages("poetry.lock")
+
+          moved = {
+              name
+              for name, _ in set(before) ^ set(after)
+          }
+          changed_files = {
+              name
+              for key in set(before) & set(after)
+              if before[key] != after[key]
+              for name, _ in [key]
+          }
+          drifted = (moved | changed_files) - {"dotmac-kernel"}
+          if drifted:
+              print("::error::unrelated dependency drift: " + ", ".join(sorted(drifted)))
+              sys.exit(1)
+          if "dotmac-kernel" not in moved:
+              print("::error::dotmac-kernel did not move; this lock says nothing")
+              sys.exit(1)
+          print("only dotmac-kernel moved")
+          PY
+
+      - name: The lock's hashes are the index's bytes
+        env:
+          TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+          KERNEL_VERSION: ${{ inputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          trap 'rm -f -- "${HOME}/.netrc"' EXIT HUP INT TERM
+          umask 077
+          : > "${HOME}/.netrc"
+          chmod 600 "${HOME}/.netrc"
+          printf 'machine %s login %s password %s\n' \
+            "registry.dotmac.io" "ci-reader" "${TOKEN}" >> "${HOME}/.netrc"
+
+          # Download the artifacts and hash them. Comparing the lock against the
+          # index's own advertised hashes would compare the index with itself;
+          # this compares the lock against BYTES.
+          mkdir -p /tmp/artifacts
+          curl --netrc -sS --fail -o /tmp/index.html \
+            "https://registry.dotmac.io/api/packages/dotmac/pypi/simple/dotmac-kernel/"
+
+          python - <<'PY'
+          import hashlib, html.parser, os, pathlib, subprocess, sys, tomllib
+
+          version = os.environ["KERNEL_VERSION"]
+
+          class Links(html.parser.HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.hrefs = []
+              def handle_starttag(self, tag, attrs):
+                  if tag == "a":
+                      for key, value in attrs:
+                          if key == "href" and value:
+                              self.hrefs.append(value)
+
+          parser = Links()
+          parser.feed(pathlib.Path("/tmp/index.html").read_text())
+
+          wanted = {
+              f"dotmac_kernel-{version}-py3-none-any.whl",
+              f"dotmac_kernel-{version}.tar.gz",
+          }
+          urls = {}
+          for href in parser.hrefs:
+              name = href.split("#", 1)[0].rsplit("/", 1)[-1]
+              if name in wanted:
+                  urls[name] = href.split("#", 1)[0]
+
+          missing = wanted - set(urls)
+          if missing:
+              # An absent artifact is a refusal. A resolver error later would
+              # report this as a lock problem rather than as "it was never
+              # published", which is the fact that matters.
+              print("::error::not published on the index: " + ", ".join(sorted(missing)))
+              sys.exit(1)
+
+          observed = {}
+          for name, url in sorted(urls.items()):
+              target = f"/tmp/artifacts/{name}"
+              subprocess.run(
+                  ["curl", "--netrc", "-sS", "--fail", "-o", target, url], check=True
+              )
+              digest = hashlib.sha256(pathlib.Path(target).read_bytes()).hexdigest()
+              observed[name] = f"sha256:{digest}"
+              print(f"{name}  {digest}")
+
+          with open("poetry.lock", "rb") as handle:
+              data = tomllib.load(handle)
+          entry = next(
+              item for item in data["package"] if item["name"] == "dotmac-kernel"
+          )
+          if entry["version"] != version:
+              print(f"::error::lock resolved {entry['version']}, asked for {version}")
+              sys.exit(1)
+          locked = {f["file"]: f["hash"] for f in entry.get("files", [])}
+
+          for name, digest in observed.items():
+              if locked.get(name) != digest:
+                  print(
+                      f"::error::{name}: lock says {locked.get(name)!r}, "
+                      f"the published bytes hash to {digest}"
+                  )
+                  sys.exit(1)
+          if set(locked) != set(observed):
+              print(
+                  "::error::lock names files the index does not publish, or omits one: "
+                  f"lock={sorted(locked)} index={sorted(observed)}"
+              )
+              sys.exit(1)
+          print("the lock's two hashes are the published bytes")
+          PY
+
+      - name: The lock and the pyproject edit agree
+        run: |
+          set -euo pipefail
+          # A lock carries a content-hash derived from pyproject. Applying this
+          # lock WITHOUT the identical version edit produces a tree whose lock
+          # does not describe its own manifest, and `poetry check --lock` is the
+          # thing that says so. Proving it here means the lane learns it from
+          # the evidence rather than from a red pipeline.
+          poetry check --lock
+
+      - name: Sanitize the evidence
+        env:
+          TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/evidence
+          # Belt and braces. Poetry does not echo the credential, but this file
+          # leaves the runner as a downloadable artifact and "does not today" is
+          # not a property anyone should have to re-verify.
+          python - <<'PY'
+          import os, pathlib
+          token = os.environ["TOKEN"]
+          text = pathlib.Path("/tmp/resolver.log").read_text()
+          if token and token in text:
+              text = text.replace(token, "***REDACTED***")
+          pathlib.Path("/tmp/evidence/resolver.log").write_text(text)
+          PY
+          cp poetry.lock /tmp/evidence/poetry.lock
+          {
+            echo "ref              ${{ inputs.ref }}"
+            echo "kernel_version   ${{ inputs.kernel_version }}"
+            echo "workflow_run     ${{ github.run_id }}"
+            echo "resolved_at      $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo ""
+            echo "This lock is valid ONLY alongside the same pyproject.toml edit"
+            echo "this job made: dotmac-kernel version -> ${{ inputs.kernel_version }},"
+            echo "extras and source untouched. The lock's content-hash is derived"
+            echo "from that manifest, so applying one without the other leaves a"
+            echo "tree whose lock does not describe itself."
+            echo "content-hash     $(python -c \
+              'import tomllib;print(tomllib.load(open("poetry.lock","rb"))["metadata"]["content-hash"])')"
+          } > /tmp/evidence/coordinates.txt
+          if grep -q -- "${TOKEN}" /tmp/evidence/* 2>/dev/null; then
+            echo "::error::the credential reached the evidence; refusing to upload"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kernel-lock-${{ inputs.kernel_version }}
+          path: /tmp/evidence
+          if-no-files-found: error
+
+      - name: Say plainly that nothing was committed
+        run: |
+          echo "Resolved and verified. NOTHING was committed and no pull request"
+          echo "was opened: download the artifact and apply poetry.lock in the"
+          echo "pull request that moves the pin, so one reviewer sees the lock"
+          echo "and the change that needs it together."
