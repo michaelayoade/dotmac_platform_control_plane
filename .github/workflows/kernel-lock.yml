@@ -15,7 +15,46 @@
 # It is `workflow_dispatch` only. Nothing schedules it and no push triggers it:
 # a lock move is an authored act.
 #
-# ── TWO CHECKOUTS, AND WHY ──────────────────────────────────────────────────
+# ── THE CREDENTIAL AND THE RESOLVER NEVER SHARE A JOB ────────────────────────
+#
+# Poetry can execute an sdist build backend during resolution when a candidate's
+# packaged metadata is insufficient (GHSA-73h3-mf4w-8647). While that ran in the
+# same job as `FORGEJO_READ_TOKEN`, the credential was in that code's reach: its
+# environment, its `.netrc`, its process tree. No guard on the manifest closes
+# that, because the executing code is a PUBLISHED package's, not the manifest's.
+#
+# The repair is structural, and it is the shape of this file:
+#
+#   acquire  — holds the credential. Downloads the private index's pages and
+#              artifacts, validates every index-supplied link against an
+#              approved origin and path prefix, records digests, and lays the
+#              bytes out as a local PEP 503 index. Runs NO Poetry and NO
+#              package code: curl, sha256, and writing HTML.
+#   resolve  — holds NO secret, and asserts it holds none. Runs Poetry against
+#              the acquired bundle, served over loopback. The private index is
+#              unreachable from here by construction — there is no credential
+#              to reach it with and no fallback that would ask for one. A
+#              package missing from the bundle REFUSES.
+#   attest   — holds the credential again, to scan the produced pair for it.
+#              Runs no Poetry and no package code.
+#
+# WHY THREE JOBS AND NOT TWO. `attest` exists because the evidence scan needs
+# the credential's VALUE to look for it, and the job that produced the lock is
+# the one job that must never have it. Splitting the scan out is the only way
+# to keep both properties. It is the same class as `acquire`: trusted tooling,
+# no Poetry, no package code.
+#
+# WHAT THIS DOES NOT CLOSE, stated exactly. `resolve` is not network-isolated.
+# It reaches PUBLIC PyPI, because the manifest's implicit PyPI source is not
+# mirrored — only the private `forgejo` source is. A public package whose
+# candidate has no usable wheel metadata can therefore still have its sdist
+# build backend executed by Poetry, with network access. What it does NOT have
+# is the credential: `secrets.FORGEJO_READ_TOKEN` is never referenced in that
+# job, no `.netrc` is written there, and `POETRY_HTTP_BASIC_*` is asserted
+# absent. Closing the remaining half would mean mirroring every public package
+# and replacing PyPI itself, which is a larger change than this one.
+#
+# ── TWO CHECKOUTS PER JOB, AND WHY ──────────────────────────────────────────
 #
 # The ref under resolution is caller-supplied and is not trusted. It supplies
 # the MANIFEST TO RESOLVE. It must never supply THE CODE THAT RESOLVES.
@@ -23,9 +62,7 @@
 # The first version of this workflow checked out that ref alone and then ran
 # `uses: ./.github/actions/setup-poetry` — a local composite action loaded from
 # the checked-out tree. That is the ref's own code, executing in a job where
-# `FORGEJO_READ_TOKEN` is present, before anything has looked at it. It also
-# read `.github/bootstrap/poetry-requirements.txt` from that tree, so even the
-# hash-pinned bootstrap was pinned by whoever wrote the ref.
+# `FORGEJO_READ_TOKEN` is present, before anything has looked at it.
 #
 # So: the workspace ROOT is `github.sha` — the commit that defines this file,
 # the code an operator approved by dispatching it — and every local action,
@@ -33,16 +70,11 @@
 # resolution is checked out BESIDE it, at `work/`, and is only ever read as
 # data or resolved against by Poetry.
 #
-# WHAT THIS DOES NOT CLOSE. `poetry lock` still runs against a manifest the ref
-# owns, in a step that holds the credential, and resolution can execute a build
-# backend when a candidate has no wheel metadata. `manifest-guard` narrows that
-# to packages the declared index serves — it refuses an off-index `path`, `git`
-# or `url` dependency, a second source, a `forgejo` source whose URL has moved
-# (Poetry keys the credential by source NAME, so that alone would post it to
-# another host with nothing untrusted executing), and `requires-plugins`. What
-# remains is: a published package on the declared index whose sdist build
-# backend runs code. That is the same exposure `poetry install` already has in
-# CI, and this workflow does not reduce it.
+# Every checkout sets `persist-credentials: false`. `actions/checkout` writes
+# the workflow token into `.git/config` by default, and on the UNTRUSTED
+# checkout that token sits inside a tree a resolution may reach — a git-sourced
+# dependency would use it. It is off on the trusted checkout too: nothing here
+# pushes, and a token nobody needs is a token nobody should have.
 #
 # Nor does the reachability check below make the ref trustworthy. It proves the
 # commit is reachable from a branch of THIS repository — which excludes a fork
@@ -70,8 +102,15 @@ on:
 permissions:
   contents: read
 
+env:
+  # The loopback port the acquired bundle is served on during resolution.
+  # Overridable, with a documented default, like every other environment value
+  # in this repository — nothing about the number is load-bearing.
+  MIRROR_PORT: ${{ vars.KERNEL_LOCK_MIRROR_PORT || '8899' }}
+
 jobs:
-  resolve:
+  # ── THE ONLY JOB THAT HOLDS THE CREDENTIAL WHILE FETCHING ─────────────────
+  acquire:
     runs-on: ubuntu-latest
     steps:
       - name: Refuse anything but an exact commit
@@ -93,14 +132,13 @@ jobs:
           fi
 
       # THE TRUSTED CHECKOUT — the workspace root, and the only place a local
-      # action, a script or the Poetry bootstrap may come from. `github.sha` is
-      # the commit carrying this workflow file, so the resolver code and the
-      # rules it enforces are the same revision an operator dispatched.
+      # action, a script or the Poetry bootstrap may come from.
       - name: Check out the tooling from the commit that defines this workflow
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: The requested ref is reachable from a branch of this repository
         env:
@@ -135,6 +173,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           path: work
+          persist-credentials: false
 
       - name: The checkout is the commit that was asked for
         working-directory: work
@@ -155,26 +194,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The repository-prescribed Poetry, hash-locked from
-      # .github/bootstrap/poetry-requirements.txt. Naming a version here would
-      # be a second declaration free to disagree with that one. Resolved from
-      # the workspace root, which is the TRUSTED checkout — see the header.
-      - uses: ./.github/actions/setup-poetry
-
-      - name: Move the pin, and refuse a manifest that would misdirect the credential
+      - name: Move the pin, and refuse a tree that would misdirect the credential
         env:
           KERNEL_VERSION: ${{ inputs.kernel_version }}
         run: |
           set -euo pipefail
-          # Both steps run the TRUSTED module against the untrusted manifest.
-          # The edit moves only the version inside the dotmac-kernel
-          # declaration: the extras and the source stay exactly as the tree has
-          # them, because a lock resolved against different extras is a
-          # different lock.
+          # Both steps run the TRUSTED module against the untrusted tree. The
+          # edit moves only the version inside the dotmac-kernel declaration:
+          # the extras and the source stay exactly as the tree has them,
+          # because a lock resolved against different extras is a different
+          # lock. The guard then reads EVERY dependency form Poetry accepts and
+          # refuses `work/poetry.toml`, which would configure the resolver.
           python scripts/kernel_lock.py set-kernel-version \
             --manifest work/pyproject.toml --kernel-version "${KERNEL_VERSION}"
           python scripts/kernel_lock.py manifest-guard \
-            --manifest work/pyproject.toml --kernel-version "${KERNEL_VERSION}"
+            --manifest work/pyproject.toml --checkout work \
+            --kernel-version "${KERNEL_VERSION}"
 
       - name: There is a credential to resolve with
         env:
@@ -196,35 +231,18 @@ jobs:
           fi
           echo "the credential is present"
 
-      - name: Keep the pre-resolution lock for comparison
-        run: cp work/poetry.lock /tmp/poetry.lock.before
-
-      - name: Resolve the kernel pin, and nothing else
-        working-directory: work
-        env:
-          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
-          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
-        run: |
-          set -euo pipefail
-          poetry lock 2>&1 | tee /tmp/resolver.log
-
-      - name: Only dotmac-kernel moved
-        run: |
-          set -euo pipefail
-          # The drift gate, and it is the WHOLE lock. `poetry lock` is free to
-          # re-resolve the entire graph, and a lock carrying an unrelated bump
-          # — or an unrelated package quietly repointed at a different index,
-          # same name, same version, same files — is a dependency change nobody
-          # asked for arriving inside a pin change nobody would re-read.
-          python scripts/kernel_lock.py drift \
-            --before /tmp/poetry.lock.before --after work/poetry.lock
-
-      - name: The lock's hashes are the index's bytes
+      - name: Download the closed bundle from the private index
         env:
           TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
           KERNEL_VERSION: ${{ inputs.kernel_version }}
         run: |
           set -euo pipefail
+          # The netrc exists for the length of this ONE step. curl offers it
+          # only to the machine named in it, never follows a redirect (see
+          # `curl_argv`), and every URL it is handed came out of
+          # `approved_artifact_url` — https, the approved authority, under the
+          # approved path prefix. A simple index page is index-controlled data;
+          # its links are validated before a transfer, not after.
           trap 'rm -f -- "${HOME}/.netrc"' EXIT HUP INT TERM
           umask 077
           : > "${HOME}/.netrc"
@@ -232,95 +250,243 @@ jobs:
           printf 'machine %s login %s password %s\n' \
             "registry.dotmac.io" "ci-reader" "${TOKEN}" >> "${HOME}/.netrc"
 
-          # Download the artifacts and hash them. Comparing the lock against the
-          # index's own advertised hashes would compare the index with itself;
-          # this compares the lock against BYTES.
-          mkdir -p /tmp/artifacts
-          curl --netrc -sS --fail -o /tmp/index.html \
-            "https://registry.dotmac.io/api/packages/dotmac/pypi/simple/dotmac-kernel/"
+          python scripts/kernel_lock.py acquire \
+            --manifest work/pyproject.toml \
+            --lock work/poetry.lock \
+            --kernel-version "${KERNEL_VERSION}" \
+            --out /tmp/bundle
 
-          python - <<'PY'
-          import hashlib, html.parser, os, pathlib, subprocess, sys, tomllib
-
-          version = os.environ["KERNEL_VERSION"]
-
-          class Links(html.parser.HTMLParser):
-              def __init__(self):
-                  super().__init__()
-                  self.hrefs = []
-              def handle_starttag(self, tag, attrs):
-                  if tag == "a":
-                      for key, value in attrs:
-                          if key == "href" and value:
-                              self.hrefs.append(value)
-
-          parser = Links()
-          parser.feed(pathlib.Path("/tmp/index.html").read_text())
-
-          wanted = {
-              f"dotmac_kernel-{version}-py3-none-any.whl",
-              f"dotmac_kernel-{version}.tar.gz",
-          }
-          urls = {}
-          for href in parser.hrefs:
-              name = href.split("#", 1)[0].rsplit("/", 1)[-1]
-              if name in wanted:
-                  urls[name] = href.split("#", 1)[0]
-
-          missing = wanted - set(urls)
-          if missing:
-              # An absent artifact is a refusal. A resolver error later would
-              # report this as a lock problem rather than as "it was never
-              # published", which is the fact that matters.
-              print("::error::not published on the index: " + ", ".join(sorted(missing)))
-              sys.exit(1)
-
-          observed = {}
-          for name, url in sorted(urls.items()):
-              target = f"/tmp/artifacts/{name}"
-              subprocess.run(
-                  ["curl", "--netrc", "-sS", "--fail", "-o", target, url], check=True
-              )
-              digest = hashlib.sha256(pathlib.Path(target).read_bytes()).hexdigest()
-              observed[name] = f"sha256:{digest}"
-              print(f"{name}  {digest}")
-
-          with open("work/poetry.lock", "rb") as handle:
-              data = tomllib.load(handle)
-          entry = next(
-              item for item in data["package"] if item["name"] == "dotmac-kernel"
-          )
-          if entry["version"] != version:
-              print(f"::error::lock resolved {entry['version']}, asked for {version}")
-              sys.exit(1)
-          locked = {f["file"]: f["hash"] for f in entry.get("files", [])}
-
-          for name, digest in observed.items():
-              if locked.get(name) != digest:
-                  print(
-                      f"::error::{name}: lock says {locked.get(name)!r}, "
-                      f"the published bytes hash to {digest}"
-                  )
-                  sys.exit(1)
-          if set(locked) != set(observed):
-              print(
-                  "::error::lock names files the index does not publish, or omits one: "
-                  f"lock={sorted(locked)} index={sorted(observed)}"
-              )
-              sys.exit(1)
-          print("the lock's two hashes are the published bytes")
-          PY
-
-      - name: The lock and the pyproject edit agree
-        working-directory: work
+      - name: The bundle carries no credential out of this job
+        env:
+          FORGEJO_CREDENTIAL: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: |
           set -euo pipefail
-          # A lock carries a content-hash derived from pyproject. Applying this
-          # lock WITHOUT the identical version edit produces a tree whose lock
-          # does not describe its own manifest, and `poetry check --lock` is the
-          # thing that says so. Proving it here means the lane learns it from
-          # the evidence rather than from a red pipeline.
+          # The bundle is package bytes and an index page this module wrote.
+          # Neither should contain the credential, and this is the last moment
+          # anything downstream is in a job that can look for it.
+          if grep -rqF -- "${FORGEJO_CREDENTIAL}" /tmp/bundle; then
+            echo "::error::the credential appears in the bundle; refusing to upload it"
+            exit 1
+          fi
+          echo "the bundle is clean"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kernel-lock-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/bundle
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── THE RESOLVER. NO SECRET IS REFERENCED ANYWHERE IN THIS JOB ────────────
+  resolve:
+    runs-on: ubuntu-latest
+    needs: acquire
+    steps:
+      - name: Check out the tooling from the commit that defines this workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Check out the ref under resolution, beside the tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          path: work
+          persist-credentials: false
+
+      - name: The checkout is the commit that was asked for
+        working-directory: work
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          ACTUAL=$(git rev-parse HEAD)
+          if [ "${ACTUAL}" != "${REF}" ]; then
+            echo "::error::checked out ${ACTUAL}, asked for ${REF}"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # The repository-prescribed Poetry, hash-locked from
+      # .github/bootstrap/poetry-requirements.txt. Naming a version here would
+      # be a second declaration free to disagree with that one. Resolved from
+      # the workspace root, which is the TRUSTED checkout — see the header.
+      - uses: ./.github/actions/setup-poetry
+
+      - name: Move the pin, and refuse a tree that would misdirect the credential
+        env:
+          KERNEL_VERSION: ${{ inputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          # Re-derived here rather than carried from `acquire` as an artifact.
+          # An artifact would be a second thing to trust; the guard is cheap,
+          # is the same trusted module, and this job must not resolve a tree it
+          # has not itself judged.
+          python scripts/kernel_lock.py set-kernel-version \
+            --manifest work/pyproject.toml --kernel-version "${KERNEL_VERSION}"
+          python scripts/kernel_lock.py manifest-guard \
+            --manifest work/pyproject.toml --checkout work \
+            --kernel-version "${KERNEL_VERSION}"
+
+      - name: This job holds no credential, and says so before it resolves
+        run: |
+          set -euo pipefail
+          # A property, asserted, not a comment. If a future edit reintroduces
+          # `POETRY_HTTP_BASIC_FORGEJO_PASSWORD` here — the whole exposure this
+          # split removes — the job stops before Poetry starts.
+          if env | grep -qiE '^(FORGEJO|POETRY_HTTP_BASIC|NETRC|TWINE)'; then
+            echo "::error::a credential-shaped variable is set in the resolver job."
+            echo "::error::Resolution runs package build backends; it may not hold one."
+            env | grep -oiE '^(FORGEJO|POETRY_HTTP_BASIC|NETRC|TWINE)[A-Z_]*' || true
+            exit 1
+          fi
+          if [ -e "${HOME}/.netrc" ]; then
+            echo "::error::${HOME}/.netrc exists in the resolver job"
+            exit 1
+          fi
+          echo "no credential is present in this job"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: kernel-lock-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/bundle
+
+      - name: Serve the acquired bundle as the private index, read-only
+        run: |
+          set -euo pipefail
+          # READ-ONLY INPUTS. Resolution runs build backends; the bytes they
+          # were resolved from must not be rewritable by them.
+          chmod -R a-w /tmp/bundle
+          cp work/poetry.lock /tmp/poetry.lock.before
+          nohup python -m http.server "${MIRROR_PORT}" --bind 127.0.0.1 \
+            --directory /tmp/bundle > /tmp/mirror.log 2>&1 &
+          for _ in $(seq 1 50); do
+            if curl -sS -o /dev/null --fail \
+              "http://127.0.0.1:${MIRROR_PORT}/simple/dotmac-kernel/"; then
+              echo "the bundle is being served on 127.0.0.1:${MIRROR_PORT}"
+              exit 0
+            fi
+            sleep 0.2
+          done
+          echo "::error::the local bundle index never came up"
+          exit 1
+
+      - name: Aim the private source at the bundle
+        run: |
+          set -euo pipefail
+          # The private source now points at loopback. There is NO authenticated
+          # online fallback: this job has no credential, so a package missing
+          # from the bundle cannot be fetched from anywhere — the resolution
+          # fails, which is the intended answer. `acquisition_plan` closes the
+          # bundle over every private package the manifest pins and every one
+          # the pre-resolution lock already resolved from that source.
+          python scripts/kernel_lock.py mirror-manifest \
+            --manifest work/pyproject.toml \
+            --mirror-url "http://127.0.0.1:${MIRROR_PORT}/simple"
+
+      - name: Resolve the kernel pin, with no way to ask for more
+        working-directory: work
+        env:
+          # A clean, trusted Poetry configuration: directories this job created,
+          # not ones a previous step or a candidate `poetry.toml` could have
+          # written. `poetry.toml` in the candidate tree is separately REFUSED
+          # by `manifest-guard` — this is the belt beside that brace.
+          POETRY_CONFIG_DIR: /tmp/poetry-config
+          POETRY_DATA_DIR: /tmp/poetry-data
+          POETRY_CACHE_DIR: /tmp/poetry-cache
+        run: |
+          set -euo pipefail
+          poetry lock
+
+      - name: Put the real index URL back, and let Poetry re-derive the hash
+        run: |
+          set -euo pipefail
+          # `source` is one of the keys Poetry's content-hash covers, so the
+          # hash the offline resolution wrote describes the MIRROR manifest.
+          # `restore` puts the real URL back in both files and asks Poetry's own
+          # Locker for the hash of the restored manifest. Without this the pair
+          # would fail `poetry check --lock` in the consumer's pull request
+          # instead — a corruption nothing here would have noticed.
+          python scripts/kernel_lock.py restore \
+            --manifest work/pyproject.toml --lock work/poetry.lock \
+            --mirror-url "http://127.0.0.1:${MIRROR_PORT}/simple"
+
+      - name: The lock and the pyproject edit agree, in Poetry's own words
+        working-directory: work
+        env:
+          POETRY_CONFIG_DIR: /tmp/poetry-config
+          POETRY_DATA_DIR: /tmp/poetry-data
+          POETRY_CACHE_DIR: /tmp/poetry-cache
+        run: |
+          set -euo pipefail
+          # This is what PROVES the step above, offline: `poetry check --lock`
+          # is Poetry's own answer to "does this lock describe this manifest".
+          # It is also the original reason the pair travels together — applying
+          # this lock WITHOUT the identical version edit produces a tree whose
+          # lock does not describe its own manifest, and this command is the
+          # thing that says so.
           poetry check --lock
+
+      - name: Only dotmac-kernel moved, and only its version and files
+        run: |
+          set -euo pipefail
+          # The drift gate, and it is the WHOLE lock. `poetry lock` is free to
+          # re-resolve the entire graph, and a lock carrying an unrelated bump
+          # — or an unrelated package quietly repointed at a different index,
+          # same name, same version, same files — is a dependency change nobody
+          # asked for arriving inside a pin change nobody would re-read. The
+          # kernel entry is no longer exempt from that: only `version` and
+          # `files` may differ on it either.
+          python scripts/kernel_lock.py drift \
+            --before /tmp/poetry.lock.before --after work/poetry.lock
+
+      - name: The lock's hashes are the bytes the index published
+        env:
+          KERNEL_VERSION: ${{ inputs.kernel_version }}
+        run: |
+          set -euo pipefail
+          # The bytes were downloaded from the index in `acquire` and hashed
+          # there. Comparing the lock against the index's own ADVERTISED hashes
+          # would compare the index with itself; this compares it against what
+          # those bytes hash to. An artifact the index never published was
+          # already refused in `acquire`, by name.
+          python scripts/kernel_lock.py verify \
+            --lock work/poetry.lock \
+            --digests /tmp/bundle/digests.json \
+            --kernel-version "${KERNEL_VERSION}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kernel-lock-pair-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            work/pyproject.toml
+            work/poetry.lock
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── THE SCAN AND THE BINDING. NO POETRY, NO PACKAGE CODE ──────────────────
+  attest:
+    runs-on: ubuntu-latest
+    needs: resolve
+    steps:
+      - name: Check out the tooling from the commit that defines this workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: kernel-lock-pair-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/pair
 
       - name: Assemble the evidence — the manifest and the lock, bound together
         env:
@@ -334,18 +500,26 @@ jobs:
           set -euo pipefail
           # Every coordinate crosses as a shell variable, never as a `${{ }}`
           # interpolation into this script. Both inputs are regex-validated in
-          # step 1, so the old direct interpolation was not exploitable — but it
-          # was one deleted validation away from being a script-injection sink,
-          # and a sink whose safety rests on a check somewhere else is a sink.
+          # the first job, so the old direct interpolation was not exploitable
+          # — but it was one deleted validation away from being a script-
+          # injection sink, and a sink whose safety rests on a check somewhere
+          # else is a sink.
           #
           # The lock and the manifest leave together, digested, with a binding
           # over the pair: the lock's content-hash comes from the manifest, so
           # either one applied alone describes a tree that does not exist.
+          #
+          # The resolver log is NOT here. It was uploaded once, scrubbed of the
+          # credential's known encodings, and the scrubber could not see a
+          # credential split across lines, compressed, hex-rendered, or base64
+          # at a non-zero offset. Uploading a file whose scan is known to be
+          # incomplete is the wrong resolution of that finding. What remains is
+          # the manifest and the lock, and for those the answer to a sighting
+          # is REFUSAL, not redaction.
           python scripts/kernel_lock.py evidence \
             --out /tmp/evidence \
-            --manifest work/pyproject.toml \
-            --lock work/poetry.lock \
-            --resolver-log /tmp/resolver.log \
+            --manifest /tmp/pair/pyproject.toml \
+            --lock /tmp/pair/poetry.lock \
             --coordinate "ref=${REF}" \
             --coordinate "kernel_version=${KERNEL_VERSION}" \
             --coordinate "repository=${REPOSITORY}" \
