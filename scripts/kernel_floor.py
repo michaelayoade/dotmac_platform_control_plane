@@ -145,10 +145,14 @@ Four deliberate limits, stated rather than implied:
 * a name the scan finds and the declaration does not carry is REFUSED, not
   counted. Its first-shipping version is unestablished, and an unestablished
   floor must not exit the same way as an established one.
-* it sees the imports of `src/vendor_cp` only. A kernel symbol reached from a
-  test, a script or a migration is UNMONITORED by this check rather than
-  exempt — those do not run in the deployed artifact, and saying so is cheaper
-  than implying a coverage this does not have.
+* it sees EVERY tracked executable Python source under a declared Python
+  entry-point family — the assembly, the console script, the relay worker, the
+  operator scripts and the Alembic migrations — plus the transitive repository
+  import closure of those files. Scope is a PROPERTY of the bytes and of
+  reachability, never a suffix and never a directory list.
+* nothing is excluded by name. A file outside those families contributes iff
+  something inside them imports it, so "build/test-only" is a computed answer
+  a plant can falsify rather than a claim a comment asserts.
 """
 
 from __future__ import annotations
@@ -157,10 +161,12 @@ import argparse
 import ast
 import importlib.metadata
 import re
+import subprocess
 import sys
 import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from types import ModuleType
 from typing import Final
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[1]
@@ -368,7 +374,7 @@ def binding_distribution(floors: dict[str, str] | None = None) -> tuple[str, str
 #: The name the assembly travels under when IT is the binding contributor.
 #: Deliberately unlike a distribution name, because the whole point is that this
 #: floor comes from a source tree rather than from an artifact's metadata.
-ASSEMBLY_FLOOR_KEY: Final = "src/vendor_cp (this assembly)"
+ASSEMBLY_FLOOR_KEY: Final = "this repository's executable Python surface"
 
 
 def composed_distribution_maximum() -> tuple[str, str]:
@@ -385,9 +391,10 @@ def composed_distribution_maximum() -> tuple[str, str]:
     return binding_distribution()
 
 
-#: Every `dotmac_kernel` module the assembly's own executable source imports,
-#: and every top-level name it binds out of each. A CLOSED declaration: the
-#: property-based scan below must equal this EXACTLY, in both directions.
+#: Every `dotmac_kernel` module this repository's executable source imports, and
+#: every top-level name it binds out of each — across every declared entry-point
+#: family, not just `src/vendor_cp`. A CLOSED declaration: the scan below must
+#: equal this EXACTLY, in both directions.
 #:
 #: Set equality, never a count. A symbol swapped for another symbol leaves the
 #: count identical and the set different, and a count-based ratchet would pass
@@ -419,9 +426,15 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
             "UndeclaredCapabilityError",
             "WebNavItem",
             "WebSurfaceContribution",
+            # `audit`, `models_platform` and `settings_models` are SUBMODULES
+            # bound by `alembic/env.py` to populate `Base.metadata` before a
+            # migration runs. Invisible to the old `src/vendor_cp` scan.
+            "audit",
             "create_app",
             "currency",
             "hash_password",
+            "models_platform",
+            "settings_models",
             "uuid_pk",
             "write_platform_audit_event",
         }
@@ -451,6 +464,8 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
             "PlatformOutboxEvent",
             "RelayPolicy",
             "enqueue_platform_event",
+            # Bound by `alembic/env.py` as `messaging_models`, for its metadata.
+            "models",
             "process_once_platform",
         }
     ),
@@ -463,7 +478,13 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
     ),
     "dotmac_kernel.models": frozenset({"Base", "TimestampMixin", "uuid_pk"}),
     "dotmac_kernel.planes": frozenset(
-        {"MODULE_PLANES_ENV_VAR", "ModulePlane", "ModulePlaneSelection"}
+        {
+            "MODULE_PLANES_ENV_VAR",
+            "ModulePlane",
+            "ModulePlaneSelection",
+            # Called by `alembic/env.py` before the migration context opens.
+            "install_module_plane_selections",
+        }
     ),
     "dotmac_kernel.platform_auth": frozenset({"require_platform_admin"}),
     "dotmac_kernel.prerequisites": frozenset(
@@ -475,6 +496,8 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
             "PLATFORM_AUDIT_LOG_V1",
             "PrerequisiteBinding",
             "TENANT_SCOPE_CATALOG_V1",
+            # Called by `alembic/env.py` before the migration context opens.
+            "install_prerequisite_bindings",
         }
     ),
     "dotmac_kernel.providers.provisioning": frozenset(
@@ -513,19 +536,15 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
 ASSEMBLY_SYMBOL_FLOORS: Final[dict[str, str]] = {}
 
 
-def _entrypoint_classifier() -> (
-    tuple[
-        Callable[[Path], bool],
-        Callable[[Path], tuple[tuple[str, str | None, int], ...]],
-    ]
-):
-    """`is_python_source` and `imports_of`, from the module that owns them.
+def _entrypoints_module() -> ModuleType:
+    """The module that owns "what does this product's interpreter execute".
 
     Imported from `tests/architecture/python_entrypoints.py` rather than
-    reimplemented. That module is the repository's ONE answer to "what does this
-    product's Python interpreter execute", it is itself ratcheted, and a second
-    copy of the classifier here would be a second writer that drifts — which is
-    the defect this whole file exists to police, in miniature.
+    reimplemented. That module is the repository's ONE answer to the question,
+    it is itself ratcheted, and a second copy of the classifier here would be a
+    second writer that drifts — which is the defect this whole file exists to
+    police, in miniature. Its FAMILY TABLE is taken from there for the same
+    reason: a family list maintained twice is a family missed once.
     """
 
     location = REPO_ROOT / "tests" / "architecture"
@@ -539,50 +558,351 @@ def _entrypoint_classifier() -> (
             f"{exc}. Falling back to a `*.py` glob would silently reintroduce "
             "the extension blindness it exists to repair, so this refuses."
         ) from exc
-    return python_entrypoints.is_python_source, python_entrypoints.imports_of
+    return python_entrypoints
+
+
+def _entrypoint_classifier() -> (
+    tuple[
+        Callable[[Path], bool],
+        Callable[[Path], tuple[tuple[str, str | None, int], ...]],
+    ]
+):
+    """`is_python_source` and `imports_of`, from the module that owns them."""
+
+    module = _entrypoints_module()
+    return module.is_python_source, module.imports_of
+
+
+#: Files OUTSIDE every declared Python entry-point family that a file INSIDE one
+#: nevertheless imports, each with the reason it is reached. Absorbed into the
+#: floor's scope, because a module that runs when an entry point runs is part of
+#: what that entry point needs, whatever directory it is filed under.
+#:
+#: This is the visible half of the exclusion premise, and the half a reviewer can
+#: argue with. The premise is NOT "tests are excluded" — that is a claim about a
+#: directory and nothing can check it. The premise is "a file outside the
+#: families contributes iff something inside them imports it", which is computed
+#: from the same parsed imports the floor is built from, and this table is the
+#: answer that computation gives today. `test_kernel_floor.py` holds it as a
+#: two-directional ratchet: a newly reached module fails, and a module that stops
+#: being reached fails too, so the set cannot rot in either direction.
+ABSORBED_EXTERNAL_MODULES: Final[dict[str, str]] = {
+    "tests/architecture/python_entrypoints.py": (
+        "imported by `scripts/kernel_floor.py` (the operator-scripts family) as "
+        "the repository's single Python-source classifier"
+    ),
+}
+
+#: Regions holding tracked files that no entry-point family reaches, and for
+#: which a STRONGER premise than unreachability is available and asserted: they
+#: contain no `dotmac_kernel` import at all, so they cannot contribute to a
+#: kernel floor even if reachability were mis-computed.
+#:
+#: `tests/` is deliberately NOT here. It imports the kernel constantly and
+#: legitimately, so the only honest premise for it is the reachability one
+#: above — which is exactly why that premise had to be computed rather than
+#: asserted, and why the near-miss proof plants a kernel import into the one
+#: test module that IS reached.
+INERT_NON_FAMILY_REGIONS: Final[tuple[str, ...]] = (
+    ".dotmac",
+    ".github",
+    "deploy",
+    "docs",
+)
+
+
+def _tracked_files() -> tuple[str, ...]:
+    """Every present, non-ignored path in the repository.
+
+    `--cached --others --exclude-standard`, matching the classifier's own
+    enumeration: a sensitivity proof plants a file that has never been
+    committed, and a scan that could not see it would prove nothing about the
+    scan that runs in CI.
+    """
+
+    result = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        (
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return tuple(
+        line
+        for line in result.stdout.splitlines()
+        if line and "__pycache__" not in Path(line).parts
+    )
+
+
+def _importable_index() -> dict[str, Path]:
+    """Repository-local Python sources, keyed by every name they import AS.
+
+    Three keys per file, because this repository is imported three ways: the
+    dotted path from the root (`tests.architecture.python_entrypoints`), the
+    same with a `src.` source root stripped (`vendor_cp.accounts.models`), and
+    the bare module name for a directory something puts on `sys.path` —
+    which `scripts/kernel_floor.py` does to reach the classifier.
+
+    A bare name is only ever consulted for a single-component import, and never
+    for a name the standard library owns. Without that guard a repository file
+    called `types.py` would capture every `import types` in the tree and drag an
+    unrelated module into the floor's scope.
+    """
+
+    return importable_index(
+        (relative, REPO_ROOT / relative) for relative in _tracked_files()
+    )
+
+
+def importable_index(entries: Iterable[tuple[str, Path]]) -> dict[str, Path]:
+    """`_importable_index` over an explicit `(relative path, file)` sequence.
+
+    Separated so the closure's sensitivity proof can run over a synthetic tree.
+    Planting into the REAL classifier module is not an option: `kernel_floor`
+    imports that file for execution, so a planted line changes the behaviour of
+    the very machinery under test rather than the tree it reads.
+    """
+
+    is_python_source, _ = _entrypoint_classifier()
+    index: dict[str, Path] = {}
+    for relative, path in entries:
+        if not path.is_file() or not is_python_source(path):
+            continue
+        parts = Path(relative).parts
+        if parts[-1] == "__init__.py":
+            names = [".".join(parts[:-1])]
+        else:
+            names = [Path(relative).with_suffix("").as_posix().replace("/", ".")]
+        names.append(Path(relative).stem if parts[-1] != "__init__.py" else parts[-2])
+        names += [name[len("src.") :] for name in names if name.startswith("src.")]
+        for name in names:
+            if name:
+                index.setdefault(name, path)
+    return index
+
+
+def _repo_local_target(module: str, index: dict[str, Path]) -> Path | None:
+    """The repository file an import names, or `None` if it names something else.
+
+    Longest dotted prefix wins, so `vendor_cp.accounts.models` resolves to that
+    module and `dotmac_kernel.db` — whose top-level component this repository
+    does not own — resolves to nothing.
+    """
+
+    parts = module.split(".")
+    if parts[0] in sys.stdlib_module_names:
+        return None
+    for size in range(len(parts), 0, -1):
+        candidate = ".".join(parts[:size])
+        if size == 1 and len(parts) > 1 and candidate not in index:
+            continue
+        found = index.get(candidate)
+        if found is not None:
+            return found
+    return None
+
+
+def import_closure(seeds: Iterable[Path], index: dict[str, Path]) -> tuple[Path, ...]:
+    """`seeds` plus every repository-local module they transitively import.
+
+    The whole exclusion premise, as one pure function. A file outside the
+    entry-point families is in scope IFF it appears here, so "build/test-only"
+    is never asserted about a directory — it is the computed absence of a path
+    from an entry point, and a single new import is enough to overturn it.
+    """
+
+    _, imports_of = _entrypoint_classifier()
+    surface: dict[Path, None] = dict.fromkeys(sorted(path.resolve() for path in seeds))
+    frontier = list(surface)
+    while frontier:
+        for name, _bound, _line in imports_of(frontier.pop()):
+            target = _repo_local_target(name, index)
+            if target is None:
+                continue
+            resolved = target.resolve()
+            if resolved in surface:
+                continue
+            surface[resolved] = None
+            frontier.append(resolved)
+    return tuple(sorted(surface))
+
+
+def executable_python_surface() -> tuple[Path, ...]:
+    """Every tracked Python source that runs under the Platform lock or image.
+
+    Two inputs, both computed:
+
+    * every file under a declared Python ENTRY-POINT FAMILY whose bytes parse as
+      a Python module — the assembly, the console script, the relay worker, the
+      operator scripts and the Alembic migrations. The family table and the
+      property test both come from `tests/architecture/python_entrypoints.py`;
+      neither is restated here.
+    * the transitive repository-local IMPORT CLOSURE of those files. A module
+      that runs when an entry point runs is part of what that entry point needs,
+      and filing it under a directory named `tests` does not change when it is
+      executed.
+
+    Scope therefore contains no path list to go stale. The old scan looked at
+    `src/vendor_cp` alone and so could not see that `alembic/env.py` binds six
+    kernel names — six requirements of the deployed image that the floor, whose
+    entire job is to know what the image requires, was not measuring.
+    """
+
+    module = _entrypoints_module()
+    seeds = tuple(module.python_sources())
+    if not seeds:
+        raise FloorError(
+            "no Python entry-point family yielded a single source file. An "
+            "empty surface makes every later check pass by finding nothing, "
+            "which reads as a proof and is the absence of one."
+        )
+    return import_closure(seeds, _importable_index())
+
+
+def kernel_import_sites() -> tuple[tuple[str, str, str | None, int], ...]:
+    """`(file, kernel module, bound name, line)` for every kernel import in scope.
+
+    The floor's inputs, with their addresses. `undeclared_assembly_symbols`
+    answers WHICH coordinate is undeclared; without this, a reviewer told that
+    `dotmac_kernel.planes:install_module_plane_selections` is undeclared still
+    has to find it, and the whole reason the old scan was wrong is that nobody
+    looked outside `src/vendor_cp`. A refusal that cannot name the file it came
+    from teaches the next reader the same blind spot.
+    """
+
+    _, imports_of = _entrypoint_classifier()
+    sites: list[tuple[str, str, str | None, int]] = []
+    for path in executable_python_surface():
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        for module, name, line in imports_of(path):
+            if module != KERNEL_PACKAGE and not module.startswith(f"{KERNEL_PACKAGE}."):
+                continue
+            sites.append((relative, module, name, line))
+    return tuple(sorted(sites))
+
+
+def sites_naming(coordinate: str) -> tuple[str, ...]:
+    """`file:line` for every place a `module:name` coordinate is imported."""
+
+    module, _, name = coordinate.partition(":")
+    return tuple(
+        f"{relative}:{line}"
+        for relative, found, bound, line in kernel_import_sites()
+        if found == module and (not name or bound == name)
+    )
+
+
+def absorbed_external_modules() -> tuple[str, ...]:
+    """Which files the closure pulled in from OUTSIDE the entry-point families.
+
+    The computed counterpart of `ABSORBED_EXTERNAL_MODULES`. Comparing the two
+    is what makes the exclusion falsifiable: a test-only module that becomes
+    reachable from a shipping entry point appears here, and appears in the floor
+    scan alongside it, so its kernel imports are refused as undeclared rather
+    than quietly excluded by a directory name.
+    """
+
+    module = _entrypoints_module()
+    families = {path.resolve() for path in module.python_sources()}
+    return tuple(
+        sorted(
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in executable_python_surface()
+            if path not in families
+        )
+    )
+
+
+def kernel_importers_in_inert_regions(
+    regions: Iterable[str] | None = None,
+) -> tuple[str, ...]:
+    """Files in a supposedly inert region that import the kernel after all.
+
+    The premise `INERT_NON_FAMILY_REGIONS` asserts, checked rather than stated.
+    Non-empty means a region documented as unable to affect the kernel floor now
+    can, and the claim has to be withdrawn or the region brought into a family.
+    """
+
+    is_python_source, imports_of = _entrypoint_classifier()
+    roots = INERT_NON_FAMILY_REGIONS if regions is None else tuple(regions)
+    offenders: list[str] = []
+    for relative in _tracked_files():
+        if not any(
+            relative == root or relative.startswith(f"{root}/") for root in roots
+        ):
+            continue
+        path = REPO_ROOT / relative
+        if not path.is_file() or not is_python_source(path):
+            continue
+        for name, _bound, line in imports_of(path):
+            if name == KERNEL_PACKAGE or name.startswith(f"{KERNEL_PACKAGE}."):
+                offenders.append(f"{relative}:{line} imports {name}")
+    return tuple(sorted(offenders))
 
 
 def assembly_source_symbols(
-    root: Path = ASSEMBLY_PACKAGE,
+    root: Path | None = None,
 ) -> dict[str, frozenset[str]]:
-    """Every kernel module and name the assembly's EXECUTABLE source imports.
+    """Every kernel module and name this product's EXECUTABLE source imports.
 
-    By PROPERTY, not by suffix. `src/vendor_cp` carries four tracked payloads
-    that are not named `.py`, and two of them are Python that this product's own
-    interpreter executes:
+    By PROPERTY and by REACHABILITY — never by suffix, and no longer by
+    directory. With `root` unset this reads `executable_python_surface()`: every
+    tracked Python source under a declared entry-point family, plus the closure
+    of what those files import. Passing a `root` scans that directory alone and
+    exists for the sensitivity proofs, which need a tree they can plant into.
 
-    * `rotation_runtime_oracle.pyprogram` binds four more names out of
-      `dotmac_kernel.db` than any `.py` file does;
-    * `rotation_runtime_material_oracle.pyprogram` imports
-      `dotmac_kernel.security`, an ENTIRE MODULE that a `*.py` glob of this tree
-      never sees at all.
+    Suffix blindness came first. `src/vendor_cp` carries four tracked payloads
+    not named `.py`, two of them Python this product's interpreter executes:
+    `rotation_runtime_oracle.pyprogram` binds four names out of
+    `dotmac_kernel.db` that no `.py` file binds, and
+    `rotation_runtime_material_oracle.pyprogram` imports `dotmac_kernel.security`,
+    an ENTIRE MODULE a `*.py` glob never sees.
 
-    A floor computed from a `*.py` glob is therefore a floor computed from an
-    inventory known to be short — and short in the direction that matters, since
-    an unseen import is an unseen requirement. `is_python_source` answers the
-    question actually being asked.
+    DIRECTORY blindness came second and was larger. Scanning `src/vendor_cp`
+    alone missed `alembic/env.py`, which binds six kernel names — `audit`,
+    `models_platform`, `settings_models`, `messaging.models`,
+    `install_module_plane_selections` and `install_prerequisite_bindings`. Those
+    run inside the deployed image, under the same lock, on every migration. A
+    floor that could not see them was computed from an inventory known to be
+    short, and short in the only direction that matters: an unseen import is an
+    unseen requirement.
 
     Parsed, never grepped: `cli/commands.py` names `dotmac_kernel.db` in prose
     explaining why its real import is deferred, and a substring census counts
     that paragraph as an importer.
     """
 
-    if not root.is_dir():
-        raise FloorError(
-            f"{root} is not a directory, so the assembly's own kernel imports "
-            "cannot be read. An empty answer would read as 'the assembly needs "
-            "nothing', which is the absent-as-success shape this refuses."
+    if root is None:
+        paths: tuple[Path, ...] = executable_python_surface()
+        subject = "the executable Python surface"
+    else:
+        if not root.is_dir():
+            raise FloorError(
+                f"{root} is not a directory, so the kernel imports under it "
+                "cannot be read. An empty answer would read as 'this needs "
+                "nothing', which is the absent-as-success shape this refuses."
+            )
+        is_python_source, _ = _entrypoint_classifier()
+        prefix = f"{root.as_posix()}/"
+        paths = tuple(
+            path
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.as_posix().startswith(prefix)
+            and is_python_source(path)
         )
-    is_python_source, imports_of = _entrypoint_classifier()
-    prefix = f"{root.as_posix()}/"
+        subject = str(root)
+    _, imports_of = _entrypoint_classifier()
     found: dict[str, set[str]] = {}
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or "__pycache__" in path.parts:
-            continue
-        if not path.as_posix().startswith(prefix):
-            continue
-        if not is_python_source(path):
-            continue
+    for path in paths:
         for module, name, _line in imports_of(path):
             if module != KERNEL_PACKAGE and not module.startswith(f"{KERNEL_PACKAGE}."):
                 continue
@@ -591,7 +911,7 @@ def assembly_source_symbols(
                 found[module].add(name)
     if not found:
         raise FloorError(
-            f"no {KERNEL_PACKAGE} import was found anywhere under {root}. An "
+            f"no {KERNEL_PACKAGE} import was found anywhere under {subject}. An "
             "empty scan is satisfied by every kernel ever published, which "
             "reads as a proof and is the absence of one."
         )
@@ -803,10 +1123,10 @@ def absent_from_kernel(kernel_root: Path, imported: Iterable[str]) -> tuple[str,
 
 
 def assembly_kernel_requirements(
-    root: Path = ASSEMBLY_PACKAGE,
+    root: Path | None = None,
 ) -> dict[str, frozenset[str]]:
-    """Every kernel module THIS ASSEMBLY'S OWN source imports, and the names it
-    binds out of each.
+    """Every kernel module THIS REPOSITORY'S OWN executable source imports, and
+    the names it binds out of each.
 
     The second input to the effective floor (Governance ADR 0021 § 10.1).
     `kernel_imports()` above answers "what does the COMPOSITION import", which is
@@ -971,6 +1291,7 @@ def main(argv: list[str] | None = None) -> int:
             "assembly-needs",
             "assembly-satisfied",
             "assembly-floor",
+            "surface",
         ),
     )
     parser.add_argument("--pyproject", type=Path, default=PYPROJECT)
@@ -1006,6 +1327,18 @@ def main(argv: list[str] | None = None) -> int:
             name, floor = binding_distribution()
             print(f"{name} {floor}")
             return 0
+        if args.what == "surface":
+            module = _entrypoints_module()
+            families = {path.resolve() for path in module.python_sources()}
+            for path in executable_python_surface():
+                relative = path.relative_to(REPO_ROOT).as_posix()
+                origin = (
+                    module.family_of(relative)
+                    if path in families
+                    else "absorbed-by-import"
+                )
+                print(f"{origin}\t{relative}")
+            return 0
         if args.what == "assembly-needs":
             for module, names in assembly_kernel_requirements().items():
                 print(f"{module}: {' '.join(sorted(names)) or '(module only)'}")
@@ -1039,10 +1372,40 @@ def main(argv: list[str] | None = None) -> int:
                     "of that floor."
                 )
 
-            # 1. Scan the assembly's executable source BY PROPERTY. A `*.py`
-            #    glob here was short by `dotmac_kernel.security` and by four
-            #    names out of `dotmac_kernel.db`, all reached from `.pyprogram`
-            #    payloads this product's own interpreter executes.
+            # 0. Hold the SCOPE premise before measuring anything with it. The
+            #    floor covers every entry-point family plus the closure of what
+            #    they import; a file outside those families is out of scope only
+            #    because nothing in them reaches it. Both halves of that claim
+            #    are checked here, so the exclusion cannot quietly become a
+            #    directory name nobody re-evaluates.
+            absorbed = absorbed_external_modules()
+            if set(absorbed) != set(ABSORBED_EXTERNAL_MODULES):
+                raise FloorError(
+                    "the set of files reached from an entry point but filed "
+                    "outside every entry-point family has changed: scanned "
+                    f"{list(absorbed)}, declared "
+                    f"{sorted(ABSORBED_EXTERNAL_MODULES)}. A newly reached "
+                    "module now runs under this product's lock, so its kernel "
+                    "imports belong to the floor; a module that stopped being "
+                    "reached should stop being carried. Update "
+                    "`ABSORBED_EXTERNAL_MODULES` with the reason it is reached."
+                )
+            intruders = kernel_importers_in_inert_regions()
+            if intruders:
+                raise FloorError(
+                    f"{list(intruders)} import {KERNEL_PACKAGE} from a region "
+                    "`INERT_NON_FAMILY_REGIONS` claims cannot affect the kernel "
+                    "floor. Either the region is now executable and belongs in "
+                    "a `PYTHON_ENTRYPOINT_FAMILIES` entry, or the import is a "
+                    "mistake. The claim may not simply be withdrawn in silence."
+                )
+
+            # 1. Scan the executable Python surface BY PROPERTY and by
+            #    REACHABILITY. A `*.py` glob was short by
+            #    `dotmac_kernel.security` and four names out of
+            #    `dotmac_kernel.db`, all reached from `.pyprogram` payloads; a
+            #    `src/vendor_cp` glob was short by the six names
+            #    `alembic/env.py` binds on every migration.
             scanned = assembly_source_symbols()
 
             # 2 & 3. Compare with the CLOSED declaration, both directions. An
@@ -1053,8 +1416,12 @@ def main(argv: list[str] | None = None) -> int:
             #    its call site.
             undeclared, stale = undeclared_assembly_symbols(scanned)
             if undeclared:
+                located = ", ".join(
+                    f"{coordinate} ({', '.join(sites_naming(coordinate)) or 'no site'})"
+                    for coordinate in undeclared
+                )
                 raise FloorError(
-                    f"the assembly imports {list(undeclared)}, which "
+                    f"the executable surface imports {located}, which "
                     "`ASSEMBLY_KERNEL_SYMBOLS` does not declare. The kernel "
                     "version each of these first shipped at is therefore "
                     "unestablished, and an unestablished floor is a refusal "

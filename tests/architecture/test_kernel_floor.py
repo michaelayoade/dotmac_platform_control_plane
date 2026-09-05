@@ -48,11 +48,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from kernel_floor import (  # noqa: E402
+    ABSORBED_EXTERNAL_MODULES,
     ASSEMBLY_KERNEL_SYMBOLS,
     ASSEMBLY_SYMBOL_FLOORS,
     DEPENDENCY,
+    INERT_NON_FAMILY_REGIONS,
     FloorError,
     absent_from_kernel,
+    absorbed_external_modules,
     assembly_import_floor,
     assembly_kernel_requirements,
     assembly_source_symbols,
@@ -62,10 +65,16 @@ from kernel_floor import (  # noqa: E402
     declared_kernel_floors,
     declared_pin,
     effective_kernel_floor,
+    executable_python_surface,
+    import_closure,
+    importable_index,
     index_versions,
+    kernel_import_sites,
+    kernel_importers_in_inert_regions,
     kernel_imports,
     newest_excluded,
     parse,
+    sites_naming,
     undeclared_assembly_symbols,
     unsatisfied_kernel_requirements,
 )
@@ -548,6 +557,357 @@ def test_every_declared_floor_names_a_symbol_the_assembly_actually_imports() -> 
         assert module in ASSEMBLY_KERNEL_SYMBOLS, coordinate
         if name:
             assert name in ASSEMBLY_KERNEL_SYMBOLS[module], coordinate
+
+
+# ── the scope: every entry-point family, and an exclusion that is computed ──
+#
+# The floor used to be measured over `src/vendor_cp` alone. `alembic/env.py`
+# binds six kernel names on every migration inside the same image, under the
+# same lock, and none of them were inputs to the number that decides which
+# kernel this product may run on.
+#
+# Michael's ruling (2026-09-04): the floor covers every tracked executable
+# Python source running under the Platform lock or image, and build/test-only
+# tooling may be excluded ONLY through a machine-checkable execution-environment
+# classification. The classification chosen is REACHABILITY: a file outside the
+# declared entry-point families is in scope iff something inside them imports
+# it. That is computed from the same parsed imports the floor is built from, so
+# it has no list to go stale — and the plant below shows it changing its answer.
+
+
+def _families() -> tuple[str, ...]:
+    """The family names the classifier declares, read from the classifier."""
+
+    sys.path.insert(0, str(ROOT / "tests" / "architecture"))
+    import python_entrypoints
+
+    return tuple(
+        family for family, _prefix in python_entrypoints.PYTHON_ENTRYPOINT_FAMILIES
+    )
+
+
+def test_every_declared_entry_point_family_contributes_to_the_surface() -> None:
+    """Non-vacuity, per family: the widened scan cannot pass by finding nothing.
+
+    A scan that silently lost a family would still return a large inventory —
+    `src/vendor_cp` alone is 110 files — and every set comparison downstream
+    would keep agreeing with it. The count is not the check; the presence of
+    each named family is.
+    """
+
+    sys.path.insert(0, str(ROOT / "tests" / "architecture"))
+    import python_entrypoints
+
+    surface = {
+        path.relative_to(ROOT).as_posix() for path in executable_python_surface()
+    }
+    assert surface, "the executable Python surface is empty"
+
+    seen = {python_entrypoints.family_of(relative) for relative in surface}
+    for family in _families():
+        assert family in seen, (
+            f"the entry-point family {family!r} contributes no file to the "
+            "floor's inputs, so a kernel import introduced there would be "
+            "UNMONITORED while the gate reported success"
+        )
+
+
+def test_the_alembic_migration_environment_is_an_input_to_the_floor() -> None:
+    """The six names the old `src/vendor_cp` scan could not see, by name.
+
+    Asserted individually rather than by count. These run inside the deployed
+    image on every migration, and a floor that did not include them was computed
+    from an inventory known to be short.
+    """
+
+    scanned = assembly_source_symbols()
+    for module, name in (
+        ("dotmac_kernel", "audit"),
+        ("dotmac_kernel", "models_platform"),
+        ("dotmac_kernel", "settings_models"),
+        ("dotmac_kernel.messaging", "models"),
+        ("dotmac_kernel.planes", "install_module_plane_selections"),
+        ("dotmac_kernel.prerequisites", "install_prerequisite_bindings"),
+    ):
+        assert name in scanned.get(module, frozenset()), (
+            f"{module}:{name} is not in the floor's inputs, so the scan has "
+            "narrowed back to a directory and `alembic/` is unmonitored again"
+        )
+        assert any(
+            site.startswith("alembic/") for site in sites_naming(f"{module}:{name}")
+        ), f"{module}:{name} is no longer attributed to an Alembic source file"
+
+
+def test_an_operator_script_is_an_input_to_the_floor() -> None:
+    """The `scripts/` family reaches the kernel too, and is named."""
+
+    sites = {relative for relative, _m, _n, _l in kernel_import_sites()}
+    assert any(relative.startswith("scripts/") for relative in sites), (
+        "no operator script contributes a kernel import to the floor; if that "
+        "is genuinely true the family is inert, but it was not true when this "
+        "was written and a silent change is the failure mode"
+    )
+
+
+@pytest.fixture()
+def planted() -> Iterator[Callable[[str, str], None]]:
+    """Write a file into the real tree and remove it again.
+
+    Untracked on purpose: the classifier enumerates `--others`, so a plant that
+    was never committed is still seen — which is what makes this a proof about
+    the scan CI runs rather than about a fixture.
+    """
+
+    written: list[Path] = []
+
+    def plant(relative: str, body: str) -> None:
+        path = ROOT / relative
+        assert not path.exists(), f"{relative} already exists; pick another name"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+        written.append(path)
+
+    try:
+        yield plant
+    finally:
+        for path in written:
+            path.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize(
+    ("relative", "family"),
+    (
+        ("alembic/_floor_canary_plant.py", "an Alembic migration"),
+        ("scripts/_floor_canary_plant.py", "an operator script"),
+        ("src/vendor_cp/relay/_floor_canary_plant.py", "a relay worker module"),
+        ("src/vendor_cp/cli/_floor_canary_plant.py", "a console-script module"),
+        ("src/vendor_cp/_floor_canary_plant.pyprogram", "a payload not named .py"),
+    ),
+)
+def test_a_kernel_import_in_any_runnable_family_is_named(
+    planted: Callable[[str, str], None], relative: str, family: str
+) -> None:
+    """One plant per family, each named with FILE, module and symbol.
+
+    The `.pyprogram` case is the property classifier rather than a suffix list,
+    and it is the reason there is deliberately no extension list anywhere here.
+    """
+
+    planted(relative, "from dotmac_kernel.planted import PlantedSymbol\n")
+
+    undeclared, _stale = undeclared_assembly_symbols()
+    assert "dotmac_kernel.planted:PlantedSymbol" in undeclared, (
+        f"a kernel import in {family} ({relative}) is invisible to the floor, "
+        f"so that family is UNMONITORED: {list(undeclared)}"
+    )
+    # The EXACT `file:line`, not the file with the line stripped off. The line
+    # number is half of what makes a finding actionable, and an assertion that
+    # discards it stops noticing on the day it goes wrong. The plant is a
+    # single-line file, so its only import is on line 1.
+    assert sites_naming("dotmac_kernel.planted:PlantedSymbol") == (f"{relative}:1",), (
+        "the refusal does not name the file and line the import came from, "
+        "which is the information a reviewer needs and was the old scan's "
+        f"blind spot: {list(sites_naming('dotmac_kernel.planted:PlantedSymbol'))}"
+    )
+
+
+def test_the_plant_fixture_leaves_no_trace() -> None:
+    """The canaries above mutate the real tree; prove the tree comes back.
+
+    Without this the whole file is one crashed test away from committing a
+    planted kernel import, and the next run would measure the plant.
+    """
+
+    undeclared, stale = undeclared_assembly_symbols()
+    assert undeclared == (), undeclared
+    assert stale == (), stale
+    assert not (ROOT / "alembic" / "_floor_canary_plant.py").exists()
+
+
+# ── the exclusion premise: reachability, and the near miss ──────────────────
+
+
+def _synthetic(tmp_path: Path, entry_imports_helper: bool) -> tuple[Path, Path, dict]:
+    """An entry point, a test-only helper, and whether one reaches the other."""
+
+    (tmp_path / "src" / "vendor_cp").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    entry = tmp_path / "src" / "vendor_cp" / "entry.py"
+    entry.write_text(
+        ("from helper import assist\n" if entry_imports_helper else "")
+        + "from dotmac_kernel.db import engine\n"
+    )
+    helper = tmp_path / "tests" / "helper.py"
+    helper.write_text(
+        "from dotmac_kernel.planted import PlantedSymbol\n\n"
+        "def assist():\n    return PlantedSymbol\n"
+    )
+    index = importable_index(
+        (("src/vendor_cp/entry.py", entry), ("tests/helper.py", helper))
+    )
+    return entry, helper, index
+
+
+def test_a_test_only_module_reachable_from_shipping_code_is_pulled_into_scope(
+    tmp_path: Path,
+) -> None:
+    """THE near-miss pair, first half: the exclusion has to be able to fail.
+
+    A module under `tests/` that a shipping entry point imports runs whenever
+    that entry point runs. Excluding it because of the directory it sits in
+    would be exactly the unenforceable premise ADR-0018 forbids, so the premise
+    is reachability and this plant overturns it.
+    """
+
+    entry, helper, index = _synthetic(tmp_path, entry_imports_helper=True)
+
+    closure = import_closure([entry], index)
+
+    assert helper.resolve() in closure, (
+        "a test-only module imported by an entry point stayed out of scope, so "
+        "the exclusion is a directory name rather than a checkable premise"
+    )
+
+
+def test_a_test_only_module_nothing_imports_stays_out_of_scope(
+    tmp_path: Path,
+) -> None:
+    """Second half: the same module, same kernel import, simply not reached.
+
+    Without this the first half is satisfied by a check that pulls in every
+    file it can find, which would prove nothing about the exclusion at all.
+    """
+
+    entry, helper, index = _synthetic(tmp_path, entry_imports_helper=False)
+
+    closure = import_closure([entry], index)
+
+    assert closure == (entry.resolve(),), closure
+    assert helper.resolve() not in closure, (
+        "an unreachable test-only module was absorbed anyway, so the closure "
+        "is not measuring reachability and the exclusion means nothing"
+    )
+
+
+def test_the_absorbed_set_is_a_two_directional_ratchet() -> None:
+    """Which non-family files the closure reaches, held as a closed declaration.
+
+    Today: the Python-source classifier itself, imported by
+    `scripts/kernel_floor.py`. It contributes no kernel import, so it moves no
+    floor — but it is the LIVE proof that the reachability premise is not
+    vacuous, because one real file already crosses the boundary the premise
+    describes. Both directions fail: a newly reached module, and one that
+    stopped being reached.
+    """
+
+    assert set(absorbed_external_modules()) == set(ABSORBED_EXTERNAL_MODULES), (
+        f"scanned {list(absorbed_external_modules())} but declared "
+        f"{sorted(ABSORBED_EXTERNAL_MODULES)}"
+    )
+    assert ABSORBED_EXTERNAL_MODULES, (
+        "no file outside the entry-point families is reached from inside one, "
+        "so the reachability premise has no live subject and this ratchet "
+        "would pass over an empty set"
+    )
+    for relative, reason in ABSORBED_EXTERNAL_MODULES.items():
+        assert (ROOT / relative).is_file(), relative
+        assert reason.strip(), f"{relative} is absorbed for no stated reason"
+
+
+def test_a_newly_reached_module_breaks_the_absorbed_declaration(
+    planted: Callable[[str, str], None],
+) -> None:
+    """Sensitivity for the ratchet above, planted in the real tree.
+
+    A new operator script that imports a module under `tests/` makes that module
+    part of what runs, and the declaration must stop agreeing with the scan.
+    """
+
+    planted(
+        "tests/architecture/_floor_canary_reached.py",
+        "from dotmac_kernel.planted import PlantedSymbol\n",
+    )
+    planted(
+        "scripts/_floor_canary_reacher.py",
+        "import _floor_canary_reached\n\nprint(_floor_canary_reached)\n",
+    )
+
+    absorbed = absorbed_external_modules()
+
+    assert "tests/architecture/_floor_canary_reached.py" in absorbed, absorbed
+    assert set(absorbed) != set(ABSORBED_EXTERNAL_MODULES), (
+        "a test-only module became reachable from an operator script and the "
+        "declaration did not notice"
+    )
+    undeclared, _stale = undeclared_assembly_symbols()
+    assert "dotmac_kernel.planted:PlantedSymbol" in undeclared, (
+        "the newly reachable module's kernel import did not reach the floor, "
+        "so absorbing it was cosmetic"
+    )
+
+
+def test_an_unreached_test_module_with_a_kernel_import_changes_nothing(
+    planted: Callable[[str, str], None],
+) -> None:
+    """The real-tree near miss: same file, same import, nobody imports it.
+
+    `tests/` is full of kernel imports and always will be. If merely existing
+    were enough to move the floor, the pin would track the test suite.
+    """
+
+    planted(
+        "tests/architecture/_floor_canary_unreached.py",
+        "from dotmac_kernel.planted import PlantedSymbol\n",
+    )
+
+    assert "tests/architecture/_floor_canary_unreached.py" not in (
+        absorbed_external_modules()
+    )
+    undeclared, stale = undeclared_assembly_symbols()
+    assert undeclared == (), undeclared
+    assert stale == (), stale
+
+
+# ── the regions with a stronger premise than reachability ───────────────────
+
+
+def test_the_inert_regions_import_no_kernel_at_all() -> None:
+    """`deploy`, `.github`, `docs` and `.dotmac`, checked rather than asserted.
+
+    These hold tracked Python that no entry-point family reaches. Reachability
+    alone would already exclude them, but a stronger claim is available and
+    therefore made: they contain no `dotmac_kernel` import whatsoever, so they
+    cannot move the floor even if reachability were mis-computed.
+    """
+
+    assert (
+        kernel_importers_in_inert_regions() == ()
+    ), kernel_importers_in_inert_regions()
+
+
+def test_the_inert_region_check_bites(planted: Callable[[str, str], None]) -> None:
+    """A check that has only ever passed over a clean tree proves nothing."""
+
+    planted(
+        "deploy/_floor_canary_plant.py",
+        "from dotmac_kernel.db import engine\n",
+    )
+
+    offenders = kernel_importers_in_inert_regions()
+
+    assert any(
+        "deploy/_floor_canary_plant.py" in entry for entry in offenders
+    ), f"a kernel import planted in an inert region was not named: {offenders}"
+
+
+def test_the_inert_regions_are_real_and_hold_tracked_files() -> None:
+    """A region that does not exist is not a region this guard covers."""
+
+    for region in INERT_NON_FAMILY_REGIONS:
+        assert (ROOT / region).is_dir(), (
+            f"{region} is declared inert but is not present; a premise about "
+            "an absent directory passes for the wrong reason"
+        )
 
 
 # ── the assembly's own imports, the other half of the maximum ───────────────
