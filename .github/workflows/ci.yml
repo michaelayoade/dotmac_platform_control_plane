@@ -218,6 +218,15 @@ jobs:
           # declares it - and if it ever is not, this refuses to reason rather
           # than recording an environment gap as a missing kernel symbol.
           poetry run python scripts/kernel_floor.py assembly-needs
+          # The three values the equality ranges over, printed side by side so a
+          # reviewer reading the log can see WHICH input established the floor
+          # rather than inferring it from the pin.
+          poetry run python scripts/kernel_floor.py assembly-floor
+          # `assembly-satisfied` ends by importing `vendor_cp.main`, which is
+          # `create_app(build_spec())` at module scope: the same boot the
+          # mutation lane drives below. A name-level sweep cannot see a symbol
+          # that survived with a changed signature or field set, and that is
+          # where a pin move actually breaks.
           DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
           PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
             poetry run python scripts/kernel_floor.py assembly-satisfied
