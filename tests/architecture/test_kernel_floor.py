@@ -14,11 +14,18 @@ Two directions, and both have to be able to fail:
   rehearsal a kernel upgrade owes. `missing-from` refuses when every module the
   composition imports is already present in the excluded kernel, and the pin is
   held equal to the highest floor anything composed declares.
-* the EQUALITY ITSELF wrong — `pin == max(composed floors)` is only the whole
-  rule while the assembly's own imports are satisfied by that maximum. That was
-  a coincidence nothing checked. `assembly-satisfied` executes it, and a planted
-  assembly import of a kernel name first shipped above the maximum turns the
-  lane red.
+* the EQUALITY ITSELF wrong — `pin == max(composed floors)` was only the whole
+  rule while the assembly's own imports were satisfied by that maximum. That was
+  a coincidence nothing checked. The subject is named now:
+  `effective_kernel_floor() = max(composed_distribution_maximum(),
+  assembly_import_floor())`, and the pin equals THAT. The comparison is still
+  `==`; only what it ranges over moved.
+
+The assembly's half is a property-based scan of its executable source compared
+with a CLOSED declaration, and five plants prove the comparison bites: an added
+symbol, a removed symbol, an unknown symbol, a floor entry that raises nothing,
+and — the one that motivated the shape — a SAME-COUNT SUBSTITUTION, where one
+symbol is swapped for another and the inventory size is unchanged.
 
 Every refusal path here is executed against a planted violation. A parser whose
 error branch has never run is prose.
@@ -41,18 +48,25 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from kernel_floor import (  # noqa: E402
+    ASSEMBLY_KERNEL_SYMBOLS,
+    ASSEMBLY_SYMBOL_FLOORS,
     DEPENDENCY,
     FloorError,
     absent_from_kernel,
+    assembly_import_floor,
     assembly_kernel_requirements,
+    assembly_source_symbols,
     binding_distribution,
+    composed_distribution_maximum,
     composed_distributions,
     declared_kernel_floors,
     declared_pin,
+    effective_kernel_floor,
     index_versions,
     kernel_imports,
     newest_excluded,
     parse,
+    undeclared_assembly_symbols,
     unsatisfied_kernel_requirements,
 )
 
@@ -93,23 +107,28 @@ def test_the_pin_is_exactly_the_highest_floor_anything_composed_declares() -> No
     premise was "recorded ... as a condition to be added in the same change that
     first breaks it"; it is executed now instead, without waiting to be broken.
 
-    Equality with the composed maximum alone is therefore correct only while
-    the assembly's own imports are satisfied by that maximum — true
-    today, and true by coincidence. `assembly-satisfied` in the `kernel-pin` job
-    executes exactly that premise against the installed kernel, so an assembly
-    import of a kernel name first shipped above the maximum turns the lane red
-    instead of quietly making this assertion drag the pin down to a kernel this
-    assembly cannot run on. When that day comes the answer is to record the
-    assembly as a floor contributor and move the pin — never to loosen this.
+    THE SUBJECT IS NOW NAMED. This used to compare the pin with
+    `binding_distribution()` — the composed distributions alone — and the
+    assembly's own contribution was an unstated premise. It is
+    `effective_kernel_floor()` now: `max(composed_distribution_maximum(),
+    assembly_import_floor())`. THE EQUALITY IS UNCHANGED — still `==`, still
+    "neither under- nor over-constrained", still naming who asked. Only what the
+    maximum ranges over moved, which is the repair § 10.1 prescribes; loosening
+    this to `>=` is the one thing the rule forbids.
+
+    Today `assembly_import_floor()` is `None` and the two subjects agree. That
+    agreement is asserted separately below rather than relied on here, because
+    an equality that holds for two different reasons proves neither.
     """
 
     pin = declared_pin()
-    name, floor = binding_distribution()
+    name, floor = effective_kernel_floor()
 
     assert pin == floor, (
-        f"this assembly pins {DEPENDENCY} {pin} while the highest floor any "
-        f"composed distribution declares is {floor}, from {name}. Declared "
-        f"floors: {sorted(declared_kernel_floors().items())}."
+        f"this assembly pins {DEPENDENCY} {pin} while the effective floor is "
+        f"{floor}, from {name}. Composed floors: "
+        f"{sorted(declared_kernel_floors().items())}; assembly-declared "
+        f"floors: {sorted(ASSEMBLY_SYMBOL_FLOORS.items())}."
     )
 
 
@@ -280,6 +299,255 @@ def test_comparing_against_a_directory_that_is_not_a_kernel_is_refused(
 
     with pytest.raises(FloorError, match="reads as a proof"):
         absent_from_kernel(tmp_path / "nowhere", ("dotmac_kernel.db",))
+
+
+# ── the three values, and the five canaries that prove the gate bites ───────
+#
+# The gate is: `declared_pin() == effective_kernel_floor()`, where the effective
+# floor is the maximum of a value read from composed artifacts' metadata and a
+# value read from this repository's own executable source against a CLOSED
+# declaration.
+#
+# A gate over a clean tree proves nothing about itself, so each of the five ways
+# it can be wrong is planted and shown to be NAMED:
+#
+#   1. added symbol            — an import the declaration does not carry
+#   2. removed symbol          — a declaration entry with no import behind it
+#   3. unknown symbol          — a whole module the declaration never mentions
+#   4. too-low declared floor  — a floor entry that raises nothing
+#   5. same-count substitution — one symbol swapped for another; the COUNT is
+#                                identical and it must still fail
+#
+# (5) is the shape that motivated all of this. A ratchet that compares sizes
+# passes over exactly the edit most likely to change what the kernel must
+# provide, and #174 already had to repair that once for the `.db` importer
+# census.
+
+
+def test_the_three_values_are_distinct_and_the_pin_equals_the_maximum() -> None:
+    """The rule, read as three named things rather than one implied one."""
+
+    composed_name, composed_floor = composed_distribution_maximum()
+    own = assembly_import_floor()
+    contributor, effective = effective_kernel_floor()
+
+    assert parse(effective) >= parse(composed_floor)
+    if own is None:
+        assert (contributor, effective) == (composed_name, composed_floor), (
+            "the assembly contributes no floor, so the effective floor must be "
+            "the composed maximum exactly"
+        )
+    else:
+        assert parse(effective) == max(parse(own), parse(composed_floor))
+    assert declared_pin() == effective
+
+
+def test_the_assembly_is_not_smuggled_into_the_composed_distribution_floors() -> None:
+    """Two kinds of input, kept apart.
+
+    `declared_kernel_floors()` means the composed distributions' installed
+    `Requires-Dist` and nothing else. A source-tree number sitting in that dict
+    would read as a claim an artifact had made about itself.
+    """
+
+    composed = declared_kernel_floors()
+    assert set(composed) == set(composed_distributions())
+    assert not any("vendor_cp" in name for name in composed), composed
+    assert not any("assembly" in name for name in composed), composed
+
+
+def test_todays_agreement_between_the_two_subjects_is_stated_not_relied_on() -> None:
+    """Pinned at a98 the old and new subjects agree — say so, do not assume it.
+
+    The gate was rebuilt while the pin was already correct, deliberately: it
+    means these canaries are the only thing exercising the new machinery, rather
+    than an in-flight pin move masking a defect in it. That is a fact about
+    TODAY, so it is asserted where a future change can see it break.
+    """
+
+    assert assembly_import_floor() is None, (
+        "the assembly now declares a floor of its own, so the two subjects have "
+        "parted company — which is fine and expected, but this test's premise "
+        "is gone and the sentence above should be rewritten rather than the "
+        "assertion deleted"
+    )
+    assert effective_kernel_floor() == binding_distribution()
+
+
+# ── canary 1: an added symbol ───────────────────────────────────────────────
+
+
+def test_an_added_symbol_is_named_as_undeclared() -> None:
+    """A new import must not be able to arrive without a provenance decision."""
+
+    scanned = dict(assembly_source_symbols())
+    scanned["dotmac_kernel.db"] = scanned["dotmac_kernel.db"] | {"a_brand_new_name"}
+
+    undeclared, stale = undeclared_assembly_symbols(scanned)
+    assert "dotmac_kernel.db:a_brand_new_name" in undeclared, undeclared
+    assert stale == (), stale
+
+
+# ── canary 2: a removed symbol ──────────────────────────────────────────────
+
+
+def test_a_removed_symbol_is_named_as_stale() -> None:
+    """The downward direction, which is the one that rots quietly.
+
+    A declaration outliving its import keeps a floor raised on a surface nothing
+    uses. A one-directional ratchet would pass here forever.
+    """
+
+    scanned = dict(assembly_source_symbols())
+    scanned["dotmac_kernel.db"] = scanned["dotmac_kernel.db"] - {"conflict_savepoint"}
+
+    undeclared, stale = undeclared_assembly_symbols(scanned)
+    assert undeclared == (), undeclared
+    assert "dotmac_kernel.db:conflict_savepoint" in stale, stale
+
+
+# ── canary 3: an unknown symbol, in a module nothing declares ───────────────
+
+
+def test_an_entirely_undeclared_module_is_named_rather_than_ignored() -> None:
+    """The `dotmac_kernel.security` shape, which is not hypothetical.
+
+    Until this change the scanner globbed `*.py` and could not see
+    `rotation_runtime_material_oracle.pyprogram`, so `dotmac_kernel.security`
+    was imported by the deployed assembly and absent from every inventory. A
+    module nobody declared has no established first-shipping version, so it is
+    refused rather than assumed satisfied.
+    """
+
+    scanned = dict(assembly_source_symbols())
+    scanned["dotmac_kernel.nobody_declared_this"] = frozenset({"whatever"})
+
+    undeclared, _stale = undeclared_assembly_symbols(scanned)
+    assert "dotmac_kernel.nobody_declared_this:" in undeclared, undeclared
+    assert "dotmac_kernel.nobody_declared_this:whatever" in undeclared, undeclared
+
+
+# ── canary 4: a declared floor that raises nothing ──────────────────────────
+
+
+def test_a_declared_floor_at_or_below_the_composed_maximum_is_refused() -> None:
+    """A floor entry that changes no answer must not be able to sit there.
+
+    It would be indistinguishable from a floor that had gone stale DOWNWARD, and
+    it would let a reviewer believe the assembly was contributing when it was
+    not.
+    """
+
+    _name, composed_floor = composed_distribution_maximum()
+
+    with pytest.raises(FloorError, match="at or below the composed maximum"):
+        assembly_import_floor(
+            {"dotmac_kernel.db:conflict_savepoint": composed_floor},
+            composed_maximum=composed_floor,
+        )
+    with pytest.raises(FloorError, match="at or below the composed maximum"):
+        assembly_import_floor(
+            {"dotmac_kernel.db:conflict_savepoint": "0.1.0a1"},
+            composed_maximum=composed_floor,
+        )
+
+    # And the positive half: a floor genuinely above it is returned, so the
+    # refusal above is a refusal and not a function that never returns.
+    assert (
+        assembly_import_floor(
+            {"dotmac_kernel.somewhere:later": "0.1.0a999"},
+            composed_maximum=composed_floor,
+        )
+        == "0.1.0a999"
+    )
+
+
+# ── canary 5: a same-count substitution ─────────────────────────────────────
+
+
+def test_swapping_one_symbol_for_another_fails_even_though_the_count_holds() -> None:
+    """THE canary. Identical size, different set, and it must still be named.
+
+    #174 had to repair exactly this for the kernel-database importer census: a
+    ratchet that compares counts is satisfied by any edit that removes one thing
+    and adds another, which is what a refactor looks like. Set equality is the
+    only comparison that survives it, and this proves the comparison is a set
+    comparison rather than prose claiming to be one.
+    """
+
+    scanned = dict(assembly_source_symbols())
+    original = scanned["dotmac_kernel.db"]
+    swapped = (original - {"conflict_savepoint"}) | {"savepoint_for_conflicts"}
+    scanned["dotmac_kernel.db"] = swapped
+
+    assert len(swapped) == len(original), "the plant must not change the count"
+    assert sum(len(v) for v in scanned.values()) == sum(
+        len(v) for v in assembly_source_symbols().values()
+    ), "the whole-inventory count must be identical too, or this proves nothing"
+
+    undeclared, stale = undeclared_assembly_symbols(scanned)
+    assert "dotmac_kernel.db:savepoint_for_conflicts" in undeclared, undeclared
+    assert "dotmac_kernel.db:conflict_savepoint" in stale, stale
+
+
+# ── the scan itself: by property, not by suffix ─────────────────────────────
+
+
+def test_the_scan_reads_payloads_that_are_not_named_dot_py() -> None:
+    """The blindness this change repairs, asserted against the real tree.
+
+    `src/vendor_cp/rotation_runtime_material_oracle.pyprogram` imports
+    `dotmac_kernel.security`; `rotation_runtime_oracle.pyprogram` binds names out
+    of `dotmac_kernel.db` that no `.py` file in the tree binds. Both run under
+    this product's own interpreter. If the scanner ever reverts to a `*.py`
+    glob, these disappear from the inventory silently — so their presence is
+    asserted by name rather than left to a count.
+    """
+
+    scanned = assembly_source_symbols()
+
+    assert "dotmac_kernel.security" in scanned, (
+        "the scan no longer sees `rotation_runtime_material_oracle.pyprogram`, "
+        "so an entire kernel module the deployed assembly imports is missing "
+        "from the floor's inputs"
+    )
+    assert {"decode_access_token", "hash_token"} <= scanned["dotmac_kernel.security"]
+
+    # Reached only from `rotation_runtime_oracle.pyprogram`.
+    assert {"engine", "platform_engine", "SessionLocal", "PlatformSessionLocal"} <= (
+        scanned["dotmac_kernel.db"]
+    )
+
+
+def test_the_declaration_matches_the_tree_exactly_in_both_directions() -> None:
+    """The closed declaration is closed, on the real source, right now."""
+
+    undeclared, stale = undeclared_assembly_symbols()
+    assert undeclared == (), (
+        "the assembly imports kernel names nobody declared; their first-shipping "
+        f"version is unestablished: {list(undeclared)}"
+    )
+    assert stale == (), (
+        f"`ASSEMBLY_KERNEL_SYMBOLS` declares imports that no longer exist: "
+        f"{list(stale)}"
+    )
+    assert ASSEMBLY_KERNEL_SYMBOLS == assembly_source_symbols()
+
+
+def test_every_declared_floor_names_a_symbol_the_assembly_actually_imports() -> None:
+    """A floor for an import that does not exist is a number with no subject.
+
+    Vacuously true today — `ASSEMBLY_SYMBOL_FLOORS` is empty — and that is
+    exactly why it is written as a loop over the declaration rather than as a
+    literal: it starts biting on the day the first entry lands, without anyone
+    having to remember to add it then.
+    """
+
+    for coordinate in ASSEMBLY_SYMBOL_FLOORS:
+        module, _, name = coordinate.partition(":")
+        assert module in ASSEMBLY_KERNEL_SYMBOLS, coordinate
+        if name:
+            assert name in ASSEMBLY_KERNEL_SYMBOLS[module], coordinate
 
 
 # ── the assembly's own imports, the other half of the maximum ───────────────

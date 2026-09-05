@@ -41,7 +41,9 @@ Both halves are derived, and neither is copied into a document:
 * `declared_kernel_floors()` — every composed distribution's `Requires-Dist`
   lower bound, read from INSTALLED METADATA. Not from a source tree, not from a
   changelog and not from the census's prose: the artifact's own declaration is
-  the thing that binds a resolver.
+  the thing that binds a resolver. The assembly is never added to this dict: one
+  number comes from an artifact's metadata and the other from a source tree, and
+  conflating them would make a source-tree number read as an artifact's claim.
 * `newest_excluded()` — the highest version the private index actually lists
   below the pin. That is the mutation target, and reading it from the index
   rather than computing "the pin minus one" matters: the index has gaps
@@ -92,32 +94,57 @@ binding text is therefore ahead of the pin. Repinning is a deliberate change
 under rule 15 — it would also pull in every other decision accepted since — and
 is not taken here.
 
-Today those two happen to agree, and the equality `pin == max(composed floors)`
-holds only because of a coincidence: nothing in `src/vendor_cp` imports a kernel
-symbol its composed modules do not already require. That coincidence was an
-UNSTATED PREMISE — the equality assertion was true for a reason nothing checked,
-and the day somebody imports `dotmac_kernel.<something first shipped above the
-pin>` here, the equality rule would drag the pin DOWN to a version this assembly
-cannot run on, and would do it silently. That is a5's defect wearing the
-assembly's clothes.
+Today those two agree, and the equality held only because of a coincidence:
+nothing in `src/vendor_cp` imported a kernel symbol its composed modules did not
+already require. That coincidence was an UNSTATED PREMISE — the equality
+assertion was true for a reason nothing checked, and the day somebody imports
+`dotmac_kernel.<something first shipped above the pin>` here, the equality rule
+would drag the pin DOWN to a version this assembly cannot run on, and would do
+it silently. That is a5's defect wearing the assembly's clothes.
 
-`unsatisfied_kernel_requirements()` states that premise where a lane holds it:
-every kernel module and every top-level name `src/vendor_cp` imports must be
-provided by an installation of the composed maximum. An unsatisfied name means
-the assembly's own floor is ABOVE that maximum, and the answer is to record the
-assembly as a floor contributor and move the pin — never to loosen the equality.
+## The three values
 
-Two deliberate limits, stated rather than implied:
+The rule's subject is now NAMED rather than implied, in three values instead of
+one, because a reader could not previously tell whether the assembly had been
+considered and found to contribute nothing or simply never asked:
 
+* `composed_distribution_maximum()` — the highest floor any composed
+  distribution's installed metadata declares, and which one.
+* `assembly_import_floor()` — the floor this repository's OWN source
+  establishes, from a closed declaration of every kernel name it imports.
+  `None` when every one of them sits at or below the composed maximum, which is
+  today's state and a measured one rather than an assumption.
+* `effective_kernel_floor()` — the maximum of the two. THE PIN MUST EQUAL THIS.
+
+The equality is unchanged and stays `==`. What moved is what it ranges over.
+
+`assembly-satisfied` holds the premise where a lane can fail on it, in five
+steps that fail separately: the installed kernel must BE the effective floor;
+the assembly's executable source is scanned; the scan must equal the closed
+declaration in both directions; every declared name must resolve against the
+INSTALLED artifact; and the application must actually compose.
+
+Four deliberate limits, stated rather than implied:
+
+* the scan reads EXECUTABLE SOURCE BY PROPERTY, never by file extension. A
+  `*.py` glob of `src/vendor_cp` misses `dotmac_kernel.security` entirely and
+  four names out of `dotmac_kernel.db`, all reached from `.pyprogram` payloads
+  that this product's own interpreter executes. `is_python_source` in
+  `tests/architecture/python_entrypoints.py` is the one classifier, imported
+  rather than copied.
 * the check asks the INSTALLED kernel by importing it and reading the attribute,
   because the kernel's package root resolves its public names through a module
   `__getattr__`; a static read of the installed source would answer "absent" for
-  every lazily re-exported symbol. Importing means the environment must be able
-  to import kernel modules at all, which is a premise this module refuses on
-  rather than absorbs (see the `ModuleNotFoundError` branch below — a driver
-  missing from the ENVIRONMENT is not a symbol missing from the KERNEL, and
-  conflating the two is precisely the confusion that made a100 look like a
+  every lazily re-exported symbol, and a read of a SIBLING CHECKOUT would answer
+  about a tree this product does not run. Importing means the environment must
+  be able to import kernel modules at all, which is a premise this module
+  refuses on rather than absorbs (see the `ModuleNotFoundError` branch below —
+  a driver missing from the ENVIRONMENT is not a symbol missing from the KERNEL,
+  and conflating the two is precisely the confusion that made a100 look like a
   regression when it is not one).
+* a name the scan finds and the declaration does not carry is REFUSED, not
+  counted. Its first-shipping version is unestablished, and an unestablished
+  floor must not exit the same way as an established one.
 * it sees the imports of `src/vendor_cp` only. A kernel symbol reached from a
   test, a script or a migration is UNMONITORED by this check rather than
   exempt — those do not run in the deployed artifact, and saying so is cheaper
@@ -322,6 +349,344 @@ def binding_distribution(floors: dict[str, str] | None = None) -> tuple[str, str
     return name, resolved[name]
 
 
+# ── the assembly's own floor: scan, declaration, and the three values ───────
+#
+# Governance ADR 0021 § 10.1 makes the effective floor the maximum of TWO
+# inputs. Until now only one of them had a name in code, and the other was a
+# coincidence nothing measured. Both are named here, and so is the maximum:
+#
+#   composed_distribution_maximum()  — the composed distributions' Requires-Dist
+#   assembly_import_floor()          — what THIS repository's own source needs
+#   effective_kernel_floor()         — the maximum, and the pin must equal it
+#
+# Naming the third is the point. `pin == max(...)` was previously written
+# against the first alone, which made the rule's subject implicit and therefore
+# unreviewable: a reader could not tell whether the assembly had been considered
+# and found to contribute nothing, or simply never asked.
+
+
+#: The name the assembly travels under when IT is the binding contributor.
+#: Deliberately unlike a distribution name, because the whole point is that this
+#: floor comes from a source tree rather than from an artifact's metadata.
+ASSEMBLY_FLOOR_KEY: Final = "src/vendor_cp (this assembly)"
+
+
+def composed_distribution_maximum() -> tuple[str, str]:
+    """The highest kernel floor any COMPOSED DISTRIBUTION declares, and which.
+
+    A named alias for `binding_distribution()`, so that the three values the
+    equality rests on can be read side by side. `declared_kernel_floors()` keeps
+    its exact meaning — installed `Requires-Dist` — and the assembly is never
+    added to it: one number comes from an artifact's own metadata, the other
+    from a source tree, and letting a source-tree number sit in that dict would
+    make it read as something an artifact declared.
+    """
+
+    return binding_distribution()
+
+
+#: Every `dotmac_kernel` module the assembly's own executable source imports,
+#: and every top-level name it binds out of each. A CLOSED declaration: the
+#: property-based scan below must equal this EXACTLY, in both directions.
+#:
+#: Set equality, never a count. A symbol swapped for another symbol leaves the
+#: count identical and the set different, and a count-based ratchet would pass
+#: over exactly the edit most likely to change what the kernel has to provide.
+#:
+#: Why it is written out rather than derived: derived-from-source is what the
+#: scan already is, and a check that compares a scan with itself agrees with
+#: whatever the source happens to say. This is the half a human reviewed.
+ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
+    "dotmac_kernel": frozenset(
+        {
+            "BadRequestError",
+            "Base",
+            "CapabilityCatalogue",
+            "ConflictError",
+            "DomainError",
+            "FeatureManifest",
+            "LocalizedText",
+            "ModuleManifest",
+            "Money",
+            "MoneyError",
+            "NotFoundError",
+            "PlatformAdmin",
+            "PlatformScope",
+            "ProductAssemblySpec",
+            "ProductManifestError",
+            "ProductManifestSnapshot",
+            "TimestampMixin",
+            "UndeclaredCapabilityError",
+            "WebNavItem",
+            "WebSurfaceContribution",
+            "create_app",
+            "currency",
+            "hash_password",
+            "uuid_pk",
+            "write_platform_audit_event",
+        }
+    ),
+    "dotmac_kernel.audit": frozenset({"write_platform_audit_event"}),
+    "dotmac_kernel.db": frozenset(
+        {
+            "PlatformSessionLocal",
+            "SessionLocal",
+            "conflict_savepoint",
+            "engine",
+            "get_platform_db",
+            "platform_engine",
+            "platform_session",
+            "runtime",
+        }
+    ),
+    "dotmac_kernel.features": frozenset({"FeatureManifest"}),
+    "dotmac_kernel.idempotency": frozenset(
+        {"IdempotentOutcome", "execute_once_platform", "fingerprint_of"}
+    ),
+    "dotmac_kernel.licensing": frozenset({"LicenceKeyRing"}),
+    "dotmac_kernel.messaging": frozenset(
+        {
+            "ClaimedPlatformEvent",
+            "OutboxStatus",
+            "PlatformOutboxEvent",
+            "RelayPolicy",
+            "enqueue_platform_event",
+            "process_once_platform",
+        }
+    ),
+    "dotmac_kernel.messaging.platform_worker": frozenset(
+        {"PlatformDeliveryTransport", "SessionFactory", "run_once"}
+    ),
+    "dotmac_kernel.migrations": frozenset({"versions_dir"}),
+    "dotmac_kernel.migrations.catalog": frozenset(
+        {"ROLE_TABLE_PRIVILEGES_SQL", "TABLE_PRIVILEGES"}
+    ),
+    "dotmac_kernel.models": frozenset({"Base", "TimestampMixin", "uuid_pk"}),
+    "dotmac_kernel.planes": frozenset(
+        {"MODULE_PLANES_ENV_VAR", "ModulePlane", "ModulePlaneSelection"}
+    ),
+    "dotmac_kernel.platform_auth": frozenset({"require_platform_admin"}),
+    "dotmac_kernel.prerequisites": frozenset(
+        {
+            "BINDINGS_ENV_VAR",
+            "IDEMPOTENCY_LEDGER_V1",
+            "MODULE_DATABASE_ROLES_V1",
+            "OUTBOX_RELAY_V1",
+            "PLATFORM_AUDIT_LOG_V1",
+            "PrerequisiteBinding",
+            "TENANT_SCOPE_CATALOG_V1",
+        }
+    ),
+    "dotmac_kernel.providers.provisioning": frozenset(
+        {
+            "ApplyResult",
+            "CompensationDisposition",
+            "CompensationResult",
+            "ObserveResult",
+            "PlanResult",
+            "ProvisioningPlanError",
+            "ProvisioningProvider",
+            "ProvisioningRequest",
+            "ProvisioningStatus",
+            "ProvisioningStep",
+            "StepStatus",
+        }
+    ),
+    "dotmac_kernel.security": frozenset({"decode_access_token", "hash_token"}),
+    "dotmac_kernel.session_runtime": frozenset({"DatabaseRuntime"}),
+}
+
+#: The subset of the above whose FIRST-SHIPPING kernel version is established
+#: and lies ABOVE the composed maximum — the only symbols that can raise this
+#: assembly's own floor. Keyed `module:name`, or `module:` for a whole module.
+#:
+#: EMPTY TODAY, and that is the assembly's floor being *measured* rather than
+#: assumed: every name above is provided by the composed maximum, so this
+#: assembly contributes nothing and `effective_kernel_floor()` is the composed
+#: maximum. Empty is not "unchecked" — `assembly_import_floor()` proves the
+#: emptiness by resolving all of `ASSEMBLY_KERNEL_SYMBOLS` against the INSTALLED
+#: artifact, and an unresolvable name is a refusal.
+#:
+#: An entry here must be above the composed maximum. One at or below it would
+#: claim to raise a floor while raising nothing, and be indistinguishable from a
+#: floor that had gone stale downward; `assembly_import_floor()` refuses it.
+ASSEMBLY_SYMBOL_FLOORS: Final[dict[str, str]] = {}
+
+
+def _entrypoint_classifier() -> (
+    tuple[
+        Callable[[Path], bool],
+        Callable[[Path], tuple[tuple[str, str | None, int], ...]],
+    ]
+):
+    """`is_python_source` and `imports_of`, from the module that owns them.
+
+    Imported from `tests/architecture/python_entrypoints.py` rather than
+    reimplemented. That module is the repository's ONE answer to "what does this
+    product's Python interpreter execute", it is itself ratcheted, and a second
+    copy of the classifier here would be a second writer that drifts — which is
+    the defect this whole file exists to police, in miniature.
+    """
+
+    location = REPO_ROOT / "tests" / "architecture"
+    if str(location) not in sys.path:
+        sys.path.insert(0, str(location))
+    try:
+        import python_entrypoints  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - a broken checkout
+        raise FloorError(
+            f"cannot import the Python entry-point classifier from {location}: "
+            f"{exc}. Falling back to a `*.py` glob would silently reintroduce "
+            "the extension blindness it exists to repair, so this refuses."
+        ) from exc
+    return python_entrypoints.is_python_source, python_entrypoints.imports_of
+
+
+def assembly_source_symbols(
+    root: Path = ASSEMBLY_PACKAGE,
+) -> dict[str, frozenset[str]]:
+    """Every kernel module and name the assembly's EXECUTABLE source imports.
+
+    By PROPERTY, not by suffix. `src/vendor_cp` carries four tracked payloads
+    that are not named `.py`, and two of them are Python that this product's own
+    interpreter executes:
+
+    * `rotation_runtime_oracle.pyprogram` binds four more names out of
+      `dotmac_kernel.db` than any `.py` file does;
+    * `rotation_runtime_material_oracle.pyprogram` imports
+      `dotmac_kernel.security`, an ENTIRE MODULE that a `*.py` glob of this tree
+      never sees at all.
+
+    A floor computed from a `*.py` glob is therefore a floor computed from an
+    inventory known to be short — and short in the direction that matters, since
+    an unseen import is an unseen requirement. `is_python_source` answers the
+    question actually being asked.
+
+    Parsed, never grepped: `cli/commands.py` names `dotmac_kernel.db` in prose
+    explaining why its real import is deferred, and a substring census counts
+    that paragraph as an importer.
+    """
+
+    if not root.is_dir():
+        raise FloorError(
+            f"{root} is not a directory, so the assembly's own kernel imports "
+            "cannot be read. An empty answer would read as 'the assembly needs "
+            "nothing', which is the absent-as-success shape this refuses."
+        )
+    is_python_source, imports_of = _entrypoint_classifier()
+    prefix = f"{root.as_posix()}/"
+    found: dict[str, set[str]] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        if not path.as_posix().startswith(prefix):
+            continue
+        if not is_python_source(path):
+            continue
+        for module, name, _line in imports_of(path):
+            if module != KERNEL_PACKAGE and not module.startswith(f"{KERNEL_PACKAGE}."):
+                continue
+            found.setdefault(module, set())
+            if name is not None and name != "*":
+                found[module].add(name)
+    if not found:
+        raise FloorError(
+            f"no {KERNEL_PACKAGE} import was found anywhere under {root}. An "
+            "empty scan is satisfied by every kernel ever published, which "
+            "reads as a proof and is the absence of one."
+        )
+    return {module: frozenset(names) for module, names in sorted(found.items())}
+
+
+def undeclared_assembly_symbols(
+    scanned: dict[str, frozenset[str]] | None = None,
+    declared: dict[str, frozenset[str]] | None = None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """`(in the source but not declared, declared but not in the source)`.
+
+    Both directions, because both are defects and they fail for different
+    reasons. An UNDECLARED import is a kernel requirement whose first-shipping
+    version nobody established — refused, never passed, since "we did not look"
+    and "we looked and it is fine" must not produce the same exit code. A
+    DECLARED-BUT-ABSENT entry is a requirement that outlived its import, which
+    is how a floor stays raised on a surface nothing uses.
+    """
+
+    found = assembly_source_symbols() if scanned is None else scanned
+    known = ASSEMBLY_KERNEL_SYMBOLS if declared is None else declared
+
+    undeclared: list[str] = []
+    stale: list[str] = []
+    for module in sorted(set(found) | set(known)):
+        in_source = found.get(module)
+        in_declaration = known.get(module)
+        if in_source is None:
+            stale.append(f"{module}:")
+            continue
+        if in_declaration is None:
+            undeclared.append(f"{module}:")
+            undeclared.extend(f"{module}:{name}" for name in sorted(in_source))
+            continue
+        undeclared.extend(
+            f"{module}:{name}" for name in sorted(in_source - in_declaration)
+        )
+        stale.extend(f"{module}:{name}" for name in sorted(in_declaration - in_source))
+    return tuple(undeclared), tuple(stale)
+
+
+def assembly_import_floor(
+    floors: dict[str, str] | None = None,
+    composed_maximum: str | None = None,
+) -> str | None:
+    """The kernel floor the assembly's OWN imports establish, or `None`.
+
+    `None` means every name the assembly imports is provided at or below the
+    composed maximum, so this input does not move the answer. That is today's
+    state and it is a MEASURED one: the caller has already required the scan to
+    equal the closed declaration, and `assembly-satisfied` resolves every
+    declared name against the installed artifact.
+
+    A declared floor at or below the composed maximum is refused. It raises
+    nothing, so keeping it would be indistinguishable from a floor that had
+    silently gone stale downward — and it would let a reviewer believe the
+    assembly was contributing when it was not.
+    """
+
+    entries = ASSEMBLY_SYMBOL_FLOORS if floors is None else floors
+    if not entries:
+        return None
+    ceiling = (
+        composed_distribution_maximum()[1]
+        if composed_maximum is None
+        else composed_maximum
+    )
+    for coordinate, version in sorted(entries.items()):
+        parse(version)
+        if parse(version) <= parse(ceiling):
+            raise FloorError(
+                f"the assembly declares a floor of {version} for {coordinate}, "
+                f"which is at or below the composed maximum {ceiling}. Such an "
+                "entry raises nothing while claiming to: delete it, or correct "
+                "the version it actually needs."
+            )
+    return max(entries.values(), key=parse)
+
+
+def effective_kernel_floor() -> tuple[str, str]:
+    """The floor the pin must EQUAL, and the contributor that established it.
+
+    `max(composed_distribution_maximum, assembly_import_floor)`. Naming the
+    contributor matters as much as the number: a pin move nobody can attribute
+    is a kernel upgrade taken on nobody's behalf.
+    """
+
+    composed_name, composed_floor = composed_distribution_maximum()
+    own = assembly_import_floor(composed_maximum=composed_floor)
+    if own is not None and parse(own) > parse(composed_floor):
+        return ASSEMBLY_FLOOR_KEY, own
+    return composed_name, composed_floor
+
+
 def index_versions(html: str) -> list[str]:
     """Every kernel version the private index listing names, ordered."""
 
@@ -440,48 +805,27 @@ def absent_from_kernel(kernel_root: Path, imported: Iterable[str]) -> tuple[str,
 def assembly_kernel_requirements(
     root: Path = ASSEMBLY_PACKAGE,
 ) -> dict[str, frozenset[str]]:
-    """Every kernel module THIS ASSEMBLY'S OWN source imports, and the top-level
-    names it binds out of each.
+    """Every kernel module THIS ASSEMBLY'S OWN source imports, and the names it
+    binds out of each.
 
     The second input to the effective floor (Governance ADR 0021 § 10.1).
-    `kernel_imports()` above answers "what does the COMPOSITION
-    import", which is the question the mutation lane asks of the excluded
-    kernel; this answers "what does the ASSEMBLY ITSELF import", which is the
-    question nobody was asking of the pinned one.
+    `kernel_imports()` above answers "what does the COMPOSITION import", which is
+    the question the mutation lane asks of the excluded kernel; this answers
+    "what does the ASSEMBLY ITSELF import", which is the question nobody was
+    asking of the pinned one.
 
     Names matter here and do not in `kernel_imports`. A module that exists is
     enough to say the boot got past the import; it is not enough to say the
     assembly's floor is satisfied, because the way a kernel surface grows is
     usually a NEW NAME in an EXISTING module rather than a new module.
 
-    Parsed, never grepped, for the same reason as `kernel_imports`: a docstring
-    naming a module is not an import of it, and this file's own prose names
-    several.
+    ONE scanner, delegated. This used to `rglob("*.py")` and was short by an
+    entire kernel module as a result — see `assembly_source_symbols`. Keeping a
+    second, suffix-based implementation alive under this name would be exactly
+    the two-writers-one-answer defect this file polices.
     """
 
-    required: dict[str, set[str]] = {}
-    if not root.is_dir():
-        raise FloorError(
-            f"{root} is not a directory, so the assembly's own kernel imports "
-            "cannot be read. An empty answer would read as 'the assembly needs "
-            "nothing', which is the absent-as-success shape this refuses."
-        )
-    for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.level == 0:
-                module = node.module or ""
-                if module == KERNEL_PACKAGE or module.startswith(f"{KERNEL_PACKAGE}."):
-                    required.setdefault(module, set()).update(
-                        alias.name for alias in node.names if alias.name != "*"
-                    )
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == KERNEL_PACKAGE or alias.name.startswith(
-                        f"{KERNEL_PACKAGE}."
-                    ):
-                        required.setdefault(alias.name, set())
-    return {module: frozenset(names) for module, names in sorted(required.items())}
+    return assembly_source_symbols(root)
 
 
 def unsatisfied_kernel_requirements(
@@ -547,6 +891,59 @@ def unsatisfied_kernel_requirements(
     return tuple(unsatisfied)
 
 
+def drive_composition(
+    import_module: Callable[[str], object] = importlib.import_module,
+) -> str:
+    """Boot the real application, so the answer covers what actually runs.
+
+    A static scan plus a `hasattr` sweep proves that every name the source
+    NAMES is present. It does not prove the assembly composes: a kernel whose
+    symbol still exists but whose signature, dataclass field set or refusal
+    behaviour changed satisfies every check above and fails at boot. That gap is
+    where a pin move actually breaks, so the last step is to build the
+    application rather than to describe it.
+
+    `vendor_cp.main` is the deployed entrypoint and it is `create_app(
+    build_spec())` at module scope, so importing it IS the boot — profile
+    admission, prerequisite binding, key custody, router mounting and every
+    refusal the factory performs.
+
+    Refuses rather than absorbs. An ImportError naming something outside the
+    kernel is a property of THIS ENVIRONMENT, and recording it as a kernel
+    finding is how a boundary defect gets attributed to the wrong artifact —
+    the same distinction `unsatisfied_kernel_requirements` draws, drawn again
+    here because this step can fail for many more reasons than that one can.
+    """
+
+    try:
+        import_module("vendor_cp.main")
+    except ModuleNotFoundError as exc:
+        if exc.name is not None and (
+            exc.name == KERNEL_PACKAGE or exc.name.startswith(f"{KERNEL_PACKAGE}.")
+        ):
+            raise FloorError(
+                f"composing the application failed: {exc.name!r} is missing "
+                f"from the installed {DEPENDENCY}. The assembly's own floor is "
+                "above the kernel installed here."
+            ) from exc
+        raise FloorError(
+            f"composing the application failed because {exc.name!r} is not "
+            "installed, which is a property of THIS ENVIRONMENT and not of the "
+            "kernel's surface. Run this where the assembly's own dependencies "
+            "and configuration are present; do not let an environment gap be "
+            "recorded as a satisfied floor OR as a kernel defect."
+        ) from exc
+    except Exception as exc:
+        raise FloorError(
+            f"composing the application raised {type(exc).__name__}: {exc}. "
+            "The kernel provides every name this assembly imports and the "
+            "application still does not boot on it, which is precisely what a "
+            "name-level check cannot see. Refusing rather than reporting the "
+            "floor satisfied."
+        ) from exc
+    return "vendor_cp.main imported: create_app(build_spec()) composed"
+
+
 def installed_kernel_version() -> str:
     """The kernel version actually installed where this is running."""
 
@@ -573,6 +970,7 @@ def main(argv: list[str] | None = None) -> int:
             "missing-from",
             "assembly-needs",
             "assembly-satisfied",
+            "assembly-floor",
         ),
     )
     parser.add_argument("--pyproject", type=Path, default=PYPROJECT)
@@ -612,40 +1010,91 @@ def main(argv: list[str] | None = None) -> int:
             for module, names in assembly_kernel_requirements().items():
                 print(f"{module}: {' '.join(sorted(names)) or '(module only)'}")
             return 0
+        if args.what == "assembly-floor":
+            composed_name, composed_floor = composed_distribution_maximum()
+            own = assembly_import_floor(composed_maximum=composed_floor)
+            contributor, effective = effective_kernel_floor()
+            print(f"composed_distribution_maximum {composed_floor} ({composed_name})")
+            print(f"assembly_import_floor         {own or '(contributes nothing)'}")
+            print(f"effective_kernel_floor        {effective} ({contributor})")
+            return 0
         if args.what == "assembly-satisfied":
-            # The premise, held where it can fail. This answers "is the
-            # assembly's own floor at or below the composed maximum", so it may
-            # only be asked of an installation OF that maximum — asking a
-            # different kernel answers a different question and would report
-            # the equality rule proven on a run that never tested it.
-            binding_name, composed_maximum = binding_distribution()
+            # The premise, held where it can fail — in five steps, each of which
+            # can fail on its own.
+            #
+            # It used to ask "is the assembly's own floor at or below the
+            # COMPOSED MAXIMUM". That was the same question as the one below
+            # only while the assembly contributed nothing; the day it
+            # contributes, the old wording would make this refuse to run at all
+            # on exactly the change it exists to police. The subject is the
+            # EFFECTIVE floor now. Nothing was softened — every refusal below is
+            # new or unchanged, and two of them did not exist before.
+            contributor, effective = effective_kernel_floor()
             installed = installed_kernel_version()
-            if installed != composed_maximum:
+            if installed != effective:
                 raise FloorError(
                     f"the installed {DEPENDENCY} is {installed} while the "
-                    f"highest floor anything composed declares is "
-                    f"{composed_maximum} (from {binding_name}). This check only "
-                    "means something against an installation of that maximum."
+                    f"effective floor is {effective} (from {contributor}). "
+                    "This check only means something against an installation "
+                    "of that floor."
                 )
-            needed = assembly_kernel_requirements()
-            unsatisfied = unsatisfied_kernel_requirements(needed)
+
+            # 1. Scan the assembly's executable source BY PROPERTY. A `*.py`
+            #    glob here was short by `dotmac_kernel.security` and by four
+            #    names out of `dotmac_kernel.db`, all reached from `.pyprogram`
+            #    payloads this product's own interpreter executes.
+            scanned = assembly_source_symbols()
+
+            # 2 & 3. Compare with the CLOSED declaration, both directions. An
+            #    undeclared import is a requirement whose first-shipping version
+            #    nobody established: refused, because "we did not look" must not
+            #    exit the same way as "we looked and it is fine". A declared
+            #    entry with no import behind it is a requirement that outlived
+            #    its call site.
+            undeclared, stale = undeclared_assembly_symbols(scanned)
+            if undeclared:
+                raise FloorError(
+                    f"the assembly imports {list(undeclared)}, which "
+                    "`ASSEMBLY_KERNEL_SYMBOLS` does not declare. The kernel "
+                    "version each of these first shipped at is therefore "
+                    "unestablished, and an unestablished floor is a refusal "
+                    "rather than a pass: declare them, and record any that is "
+                    "above the composed maximum in `ASSEMBLY_SYMBOL_FLOORS`."
+                )
+            if stale:
+                raise FloorError(
+                    f"`ASSEMBLY_KERNEL_SYMBOLS` declares {list(stale)}, which "
+                    "the assembly no longer imports. A declaration that "
+                    "outlives its import keeps a floor raised on a surface "
+                    "nothing uses; delete the entries."
+                )
+
+            # 4. Resolve every DECLARED name against the INSTALLED artifact —
+            #    not against a sibling checkout's source. What this product runs
+            #    on is the wheel it installed.
+            unsatisfied = unsatisfied_kernel_requirements(dict(ASSEMBLY_KERNEL_SYMBOLS))
             if unsatisfied:
                 raise FloorError(
                     "this assembly's own source imports "
                     f"{list(unsatisfied)}, which {DEPENDENCY} {installed} does "
                     "not provide. The assembly's OWN floor is therefore ABOVE "
-                    f"the highest floor anything composed declares, so "
-                    "`pin == max(composed floors)` is no longer the rule: the "
-                    "effective floor is the maximum of the composed floors AND "
-                    "the assembly's own direct constraint (Governance ADR 0021 "
-                    "§ 10). Raise the pin to a kernel that provides these and "
-                    "record the assembly as a floor contributor. Do NOT loosen "
+                    f"the effective floor {effective}, so the maximum is wrong: "
+                    "the effective floor is the maximum of the composed floors "
+                    "AND the assembly's own direct constraint (Governance ADR "
+                    "0021 § 10). Raise the pin to a kernel that provides these "
+                    "and record them in `ASSEMBLY_SYMBOL_FLOORS`. Do NOT loosen "
                     "the equality assertion."
                 )
+
+            # 5. Boot it. Every check above is about NAMES; this is about
+            #    whether the application composes on the kernel it names.
+            composed = drive_composition()
+
             print(
-                f"{sum(len(names) for names in needed.values())} kernel names "
-                f"across {len(needed)} modules, all provided by {DEPENDENCY} "
-                f"{installed} — the composed maximum, from {binding_name}"
+                f"{sum(len(names) for names in scanned.values())} kernel names "
+                f"across {len(scanned)} modules, declared, and all provided by "
+                f"{DEPENDENCY} {installed} — the effective floor, from "
+                f"{contributor}. {composed}"
             )
             return 0
         if args.what == "imports":

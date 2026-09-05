@@ -553,13 +553,42 @@ disagree, fix the drift.
     (b) sits at or below (a) — true today, and true by COINCIDENCE. That
     coincidence may not remain an unstated premise: `assembly-satisfied`
     requires every kernel module and every top-level name `src/vendor_cp`
-    imports to be provided by an installation of the composed maximum, and a
+    imports to be provided by an installation of the effective floor, and a
     planted assembly import of a kernel name first shipped above it turns the
     lane red. When the premise dies, the answer is to record the assembly as a
     floor contributor and move the pin — never to loosen the equality. The
     refusal distinguishes a missing kernel symbol from a missing ENVIRONMENT
     dependency, because conflating those is how a boundary defect gets
     attributed to the wrong artifact.
+
+    **The rule's subject is three named values, not one implied one.**
+    `composed_distribution_maximum()`, `assembly_import_floor()` and
+    `effective_kernel_floor() = max(the two)`; the pin equals the third. Before
+    they were named, a reader could not tell whether the assembly had been
+    considered and found to contribute nothing or simply never asked.
+    `assembly_import_floor()` is `None` while every kernel name the assembly
+    imports sits at or below the composed maximum — a MEASURED emptiness, not an
+    assumed one — and a declared floor entry at or below that maximum is refused
+    because it raises nothing while claiming to.
+
+    **The assembly's import inventory is scanned BY PROPERTY and compared with a
+    CLOSED declaration.** By property because `src/vendor_cp` carries executable
+    Python that is not named `.py`: a `*.py` glob missed `dotmac_kernel.security`
+    entirely and four names out of `dotmac_kernel.db`, all reached from
+    `.pyprogram` payloads this product's interpreter runs — the same
+    extension blindness rule 25 names, in the file that computes the floor.
+    `is_python_source` is imported from `tests/architecture/python_entrypoints.py`
+    rather than copied. Closed because a scan compared only with itself agrees
+    with whatever the source says: `ASSEMBLY_KERNEL_SYMBOLS` is the reviewed
+    half, compared by SET EQUALITY in both directions, so a symbol swapped for
+    another symbol — identical count, different set — still fails. A name the
+    scan finds and the declaration lacks has no established first-shipping
+    version, and is REFUSED rather than passed: "we did not look" may not exit
+    the same way as "we looked and it is fine". Every declared name is then
+    resolved against the INSTALLED artifact, never a sibling checkout, and the
+    lane ends by importing `vendor_cp.main` — because a symbol that survived
+    with a changed signature satisfies every name-level check and still will not
+    boot.
 
     **The mutation lane installs the newest version the pin excludes and
     requires this assembly to fail on it** — and to fail for the RIGHT reason:
