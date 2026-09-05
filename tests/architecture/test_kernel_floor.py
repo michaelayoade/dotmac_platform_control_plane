@@ -880,9 +880,9 @@ def test_the_inert_regions_import_no_kernel_at_all() -> None:
     cannot move the floor even if reachability were mis-computed.
     """
 
-    assert kernel_importers_in_inert_regions() == (), (
-        kernel_importers_in_inert_regions()
-    )
+    assert (
+        kernel_importers_in_inert_regions() == ()
+    ), kernel_importers_in_inert_regions()
 
 
 def test_the_inert_region_check_bites(planted: Callable[[str, str], None]) -> None:
@@ -895,9 +895,9 @@ def test_the_inert_region_check_bites(planted: Callable[[str, str], None]) -> No
 
     offenders = kernel_importers_in_inert_regions()
 
-    assert any("deploy/_floor_canary_plant.py" in entry for entry in offenders), (
-        f"a kernel import planted in an inert region was not named: {offenders}"
-    )
+    assert any(
+        "deploy/_floor_canary_plant.py" in entry for entry in offenders
+    ), f"a kernel import planted in an inert region was not named: {offenders}"
 
 
 def test_the_inert_regions_are_real_and_hold_tracked_files() -> None:

@@ -709,9 +709,7 @@ def _repo_local_target(module: str, index: dict[str, Path]) -> Path | None:
     return None
 
 
-def import_closure(
-    seeds: Iterable[Path], index: dict[str, Path]
-) -> tuple[Path, ...]:
+def import_closure(seeds: Iterable[Path], index: dict[str, Path]) -> tuple[Path, ...]:
     """`seeds` plus every repository-local module they transitively import.
 
     The whole exclusion premise, as one pure function. A file outside the
@@ -721,9 +719,7 @@ def import_closure(
     """
 
     _, imports_of = _entrypoint_classifier()
-    surface: dict[Path, None] = dict.fromkeys(
-        sorted(path.resolve() for path in seeds)
-    )
+    surface: dict[Path, None] = dict.fromkeys(sorted(path.resolve() for path in seeds))
     frontier = list(surface)
     while frontier:
         for name, _bound, _line in imports_of(frontier.pop()):
