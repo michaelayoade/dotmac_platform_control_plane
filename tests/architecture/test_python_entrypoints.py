@@ -28,6 +28,7 @@ that actually executes it, and that claim is falsifiable by reading the file.
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -196,3 +197,117 @@ def test_the_real_tree_contains_a_non_py_python_payload() -> None:
         "genuinely retired, delete this test in that change and say so — do not "
         "leave a widened surface that widens nothing."
     )
+
+
+# ── the one place that stays `.py`-scoped, and why ──────────────────────────
+
+#: `scripts/kernel_floor.py::kernel_imports` scans `*.py` and is NOT widened.
+#: This is UNMONITORED, not exempt, and the premise is stated and enforced
+#: below rather than assumed.
+#:
+#: That function answers one question: which `dotmac_kernel.*` modules must the
+#: kernel THIS composition installs provide? The `assembly-satisfied` verb in
+#: the `kernel-pin` job turns its answer into a pass or a fail. A payload is
+#: handed as text to ANOTHER application's interpreter, in another image, whose
+#: kernel is not this pin — so its imports are not a requirement on this
+#: assembly's kernel, and folding them in would make the pin answer for a
+#: composition it does not own.
+#:
+#: THE ENFORCEABLE PREMISE: a payload is never imported by this assembly. It
+#: cannot be, and `test_no_payload_is_imported_by_this_assembly` holds it — the
+#: day one becomes an ordinary module, the premise fails here rather than
+#: silently widening what the pin has to satisfy.
+KERNEL_FLOOR_SCAN_IS_PY_SCOPED = "scripts/kernel_floor.py"
+
+#: Declared exclusions from any PYTHON-import guard, with what runs each. Stated
+#: because an unstated exclusion is the shape rule 23 refuses; `capture_catalog`
+#: is SQL executed by PostgreSQL and `rotation_database_auth_oracle` is a shell
+#: program executed by `sh` inside the label-selected database container, so
+#: neither can carry a Python import at all.
+NOT_A_PYTHON_IMPORT_SURFACE = (
+    "src/vendor_cp/recovery/capture_catalog.sql",
+    "src/vendor_cp/rotation_database_auth_oracle.shprogram",
+)
+
+
+def test_no_payload_is_imported_by_this_assembly() -> None:
+    """The premise under the one `.py`-scoped kernel scan.
+
+    Every payload is referenced by FILENAME and handed to another interpreter.
+    If one were ever imported, its kernel imports would become this
+    composition's requirement and `kernel_imports`' `.py` scope would start
+    hiding a real obligation. That is the day this must fail.
+    """
+
+    payload_modules = {
+        Path(path.relative_to(ROOT)).stem
+        for path in python_sources()
+        if not path.name.endswith(".py")
+    } | {Path(relative).stem for relative in NOT_A_PYTHON_IMPORT_SURFACE}
+    assert payload_modules, "there are no payloads, so this premise guards nothing"
+
+    importers: list[str] = []
+    for path in python_sources():
+        if not path.name.endswith(".py"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for name in names:
+                if name.split(".")[-1] in payload_modules:
+                    importers.append(
+                        f"{path.relative_to(ROOT).as_posix()}:{node.lineno} -> {name}"
+                    )
+    assert not importers, (
+        "a payload is imported as a module by this assembly, so its kernel "
+        "imports are now this composition's requirement — and "
+        f"`{KERNEL_FLOOR_SCAN_IS_PY_SCOPED}` scans `*.py` and cannot see them: "
+        f"{importers}"
+    )
+
+
+def test_the_declared_non_python_import_surface_is_still_non_python() -> None:
+    """A stated exclusion has to keep being true. Both files are declared as
+    carrying no Python import because no Python interpreter reads them; if
+    either became Python source the exclusion would be silently wrong."""
+
+    for relative in NOT_A_PYTHON_IMPORT_SURFACE:
+        path = ROOT / relative
+        assert path.exists(), f"{relative} is gone; remove the declaration with it"
+        assert not is_python_source(path), (
+            f"{relative} now parses as Python source, and is declared to carry "
+            "no Python import. One of the two is wrong."
+        )
+        assert relative in NON_PYTHON_TRACKED_SOURCE
+
+
+def test_a_payload_turned_into_an_import_is_named(
+    plant: Callable[[str, str], Path],
+) -> None:
+    """SENSITIVITY for the premise above. If it cannot see a payload becoming an
+    ordinary import, it is a comment rather than a check."""
+
+    plant(
+        "src/vendor_cp/_premise_probe.py",
+        "from vendor_cp.rotation_runtime_oracle import engine\n",
+    )
+    with pytest.raises(AssertionError, match=r"_premise_probe\.py:1"):
+        test_no_payload_is_imported_by_this_assembly()
+
+
+def test_an_ordinary_import_does_not_trip_the_premise(
+    plant: Callable[[str, str], Path],
+) -> None:
+    """NEAR-MISS. The premise must fire on a payload becoming a module, not on
+    every module whose name is vaguely adjacent."""
+
+    plant(
+        "src/vendor_cp/_premise_near_miss.py",
+        "from vendor_cp.production_secrets import ROTATION_RUNTIME_ORACLE_PAYLOAD\n"
+        "import json\n",
+    )
+    test_no_payload_is_imported_by_this_assembly()
