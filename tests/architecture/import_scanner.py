@@ -49,6 +49,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from python_entrypoints import is_python_source
+
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 
@@ -158,4 +160,19 @@ def submodule_reach_ins(refs: Iterable[ImportRef], package: str) -> frozenset[st
 
 
 def source_files(package_dir: Path) -> list[Path]:
-    return [p for p in package_dir.rglob("*.py") if "__pycache__" not in p.parts]
+    """Every file under `package_dir` this product's Python interpreter runs.
+
+    NOT `rglob("*.py")`, which is what this was. Five guards ask "does any
+    source file reach for X?" through this function, and all five were answering
+    a question about file NAMES. `src/vendor_cp/rotation_runtime_oracle.pyprogram`
+    is Python, is executed by the deployed application's interpreter, and was
+    invisible to every one of them — see `python_entrypoints.is_python_source`
+    for the property that replaces the suffix, and why the classification it
+    produces is itself ratcheted.
+    """
+
+    return [
+        path
+        for path in sorted(package_dir.rglob("*"))
+        if path.is_file() and "__pycache__" not in path.parts and is_python_source(path)
+    ]
