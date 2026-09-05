@@ -1,0 +1,657 @@
+{
+  "schema": "platform-parity-row-map/1",
+  "owner": "dotmac_platform_control_plane",
+  "joins": "docs/inventories/foundation-admission-parity-map.json (dotmac-deployment-foundation)",
+  "measured_against": {
+    "platform_main": "d7b8ca6",
+    "foundation_contract": "docs/superpowers/specs/2026-09-05-foundation-concern-contribution-contract.md revision 2"
+  },
+  "legacy_total": 53,
+  "map_states": {
+    "mapped": "a named Foundation code or stated mechanism covers the same property",
+    "migrates": "the property survives under a different Foundation mechanism, not a code",
+    "retires": "the property belonged to a producer Platform will no longer have",
+    "unmapped": "no named code and no stated mechanism — BLOCKS DELETION of the dialect"
+  },
+  "rows": [
+    {
+      "row_id": "PCP-V-01",
+      "case": "document_absent",
+      "surface": "verifier",
+      "legacy_outcome": "document_absent",
+      "map_state": "unmapped",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§3.3 · §10",
+      "note": "No code covers an artifact carrying no profile document. `missing` (N9) is per-CONCERN, and N17 requires every refusal to name the highest stage ACTUALLY attained — a document that was never read attained none, so 13x`missing` is unrepresentable. This is the state Platform's verifier was built to report first and the ONLY verdict CI has observed against a real image."
+    },
+    {
+      "row_id": "PCP-V-02",
+      "case": "document_not_utf8",
+      "surface": "verifier",
+      "legacy_outcome": "document_unreadable",
+      "map_state": "unmapped",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§4.4 · §10 N11e",
+      "note": "Documents are closed on decode, but the only named decode refusal is `unknown_key`. N11e implies a `refusal at the parse` exists; it has no code in the §3.3 closed vocabulary."
+    },
+    {
+      "row_id": "PCP-V-03",
+      "case": "document_not_json",
+      "surface": "verifier",
+      "legacy_outcome": "document_unreadable",
+      "map_state": "unmapped",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§4.4 · §10 N11e",
+      "note": "As above. Undecodable bytes and a decodable document that disagrees have different repairs, which is why Platform kept UNREADABLE and MISMATCHED distinct."
+    },
+    {
+      "row_id": "PCP-V-04",
+      "case": "document_not_an_object",
+      "surface": "verifier",
+      "legacy_outcome": "document_unreadable",
+      "map_state": "unmapped",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§4.4",
+      "note": "Valid JSON that is not an object. No named code; closed decoding implies a refusal without naming one."
+    },
+    {
+      "row_id": "PCP-V-05",
+      "case": "second_witness_absent",
+      "surface": "verifier",
+      "legacy_outcome": "document_unreadable",
+      "map_state": "migrates",
+      "foundation_code": "foreign_inventory",
+      "stage_reached": "",
+      "foundation_reference": "§5A · §10 N11c",
+      "note": "Supersession, not mapping: Platform stops supplying a digest and supplies TYPED INVENTORY, which Foundation computes over. `entries` missing becomes a required-field decode refusal rather than a second-witness comparison."
+    },
+    {
+      "row_id": "PCP-V-06",
+      "case": "second_witness_wrong_contract",
+      "surface": "verifier",
+      "legacy_outcome": "document_unreadable",
+      "map_state": "migrates",
+      "foundation_code": "foreign_inventory",
+      "stage_reached": "",
+      "foundation_reference": "§5A",
+      "note": "The independent per-file record becomes `InventoryDigest.v1` with a Foundation-owned `subject` and typed `entries`."
+    },
+    {
+      "row_id": "PCP-V-07",
+      "case": "second_witness_no_files",
+      "surface": "verifier",
+      "legacy_outcome": "document_unreadable",
+      "map_state": "migrates",
+      "foundation_code": "foreign_inventory",
+      "stage_reached": "",
+      "foundation_reference": "§5A",
+      "note": "An empty inventory. Under §5A this is an empty `entries` list; Foundation still computes a digest over it, so the emptiness must be refused where Platform refused it. NO EXPLICIT NEGATIVE ROW in §10."
+    },
+    {
+      "row_id": "PCP-V-08",
+      "case": "second_witness_entry_missing_digest",
+      "surface": "verifier",
+      "legacy_outcome": "document_unreadable",
+      "map_state": "migrates",
+      "foundation_code": "foreign_inventory",
+      "stage_reached": "",
+      "foundation_reference": "§5A",
+      "note": "One malformed entry made the WHOLE inventory unusable in Platform's dialect. §5A types `entries` as distribution identity -> version, so a missing half is a decode refusal. NO EXPLICIT NEGATIVE ROW in §10."
+    },
+    {
+      "row_id": "PCP-V-09",
+      "case": "second_witness_two_wheels",
+      "surface": "verifier",
+      "legacy_outcome": "document_unreadable",
+      "map_state": "migrates",
+      "foundation_code": "foreign_inventory",
+      "stage_reached": "",
+      "foundation_reference": "§5A",
+      "note": "Platform required exactly one wheel so there was a single second witness. §5A's `subject` names WHAT was inventoried, which is the general form. NO EXPLICIT NEGATIVE ROW in §10."
+    },
+    {
+      "row_id": "PCP-V-10",
+      "case": "second_witness_no_wheel",
+      "surface": "verifier",
+      "legacy_outcome": "document_unreadable",
+      "map_state": "migrates",
+      "foundation_code": "foreign_inventory",
+      "stage_reached": "",
+      "foundation_reference": "§5A",
+      "note": "As above, the other direction."
+    },
+    {
+      "row_id": "PCP-V-11",
+      "case": "contract_unknown",
+      "surface": "verifier",
+      "legacy_outcome": "contract_unknown",
+      "map_state": "unmapped",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§3B · §3.3 #3",
+      "note": "PARTIAL. `contract_mismatch` covers a CONSUMER naming another contract id or version — a join-key fact. A DOCUMENT declaring a schema the verifier does not know is §3B's versioning question and has no named code."
+    },
+    {
+      "row_id": "PCP-V-12",
+      "case": "profile_digest_absent",
+      "surface": "verifier",
+      "legacy_outcome": "profile_digest_mismatched",
+      "map_state": "migrates",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§8 · §9",
+      "note": "Canonical bytes and the golden fixture become Foundation's. NO NEGATIVE ROW in §10 for a document that carries no digest of its own."
+    },
+    {
+      "row_id": "PCP-V-13",
+      "case": "profile_digest_stale",
+      "surface": "verifier",
+      "legacy_outcome": "profile_digest_mismatched",
+      "map_state": "migrates",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§8 · §9",
+      "note": "THE LOAD-BEARING ROW. Content edited after sealing. It is the reason three independent encodings of one digest exist in Platform's tree, and it can only fail if producer and verifier encode independently. §9 has a golden fixture with a sensitivity pair; §10 has NO negative row for a self-digest that does not cover its content."
+    },
+    {
+      "row_id": "PCP-V-14",
+      "case": "revision_mismatch",
+      "surface": "verifier",
+      "legacy_outcome": "artifact_coordinates_mismatched",
+      "map_state": "mapped",
+      "foundation_code": "contract_mismatch",
+      "stage_reached": "resolved",
+      "foundation_reference": "§3.3 #3 · §10 N5",
+      "note": "The document describes another artifact. Exact match: N5 is `consumer names other artifact_coordinates`."
+    },
+    {
+      "row_id": "PCP-V-15",
+      "case": "wheel_claim_mismatch",
+      "surface": "verifier",
+      "legacy_outcome": "wheel_digest_mismatched",
+      "map_state": "mapped",
+      "foundation_code": "contract_mismatch",
+      "stage_reached": "resolved",
+      "foundation_reference": "§3.3 #3 · §10 N5",
+      "note": "The document's own artifact claim disagrees with the caller's expectation."
+    },
+    {
+      "row_id": "PCP-V-16",
+      "case": "wheel_carried_mismatch",
+      "surface": "verifier",
+      "legacy_outcome": "wheel_digest_mismatched",
+      "map_state": "migrates",
+      "foundation_code": "foreign_inventory",
+      "stage_reached": "",
+      "foundation_reference": "§5A · §10 N11c",
+      "note": "The image's INDEPENDENT record disagreeing. Under §5A the independent record is the typed inventory Foundation computes from, so the comparison changes shape rather than disappearing."
+    },
+    {
+      "row_id": "PCP-V-17",
+      "case": "absence_proof_foreign",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_foreign",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "resolved",
+      "foundation_reference": "§6 property 2 · §10 N13",
+      "note": "A proof produced for another artifact. N13's outcome is stated as `finding` rather than a §3.3 code — flagged, because a finding that is not a code cannot be joined on."
+    },
+    {
+      "row_id": "PCP-V-18",
+      "case": "absence_proof_unknown_schema",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_inadmissible",
+      "map_state": "mapped",
+      "foundation_code": "unknown_key",
+      "stage_reached": "declared",
+      "foundation_reference": "§4.4 · §6.1",
+      "note": "PARTIAL. Closed decoding refuses an unknown key; an unknown SCHEMA STRING is adjacent and not the same statement."
+    },
+    {
+      "row_id": "PCP-V-19",
+      "case": "absence_proof_wrong_concern",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_inadmissible",
+      "map_state": "mapped",
+      "foundation_code": "absence_proof.wrong_concern",
+      "stage_reached": "declared",
+      "foundation_reference": "§10 N14 · §6.1 property 4",
+      "note": "Exact match, and §6.1 adds the earlier, quieter defect Platform could not catch: a proof BUILT against another concern's inventory."
+    },
+    {
+      "row_id": "PCP-V-20",
+      "case": "absence_proof_shapeless_escape_hatch",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_inadmissible",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§6 property 1 · §10 N12 · §11 step 1",
+      "note": "A concern name, a revision and a sentence. Named in §11 step 1 as the surviving requirement after the retracted claim; §6's `establishes, never merely well-formed` is exactly this property."
+    },
+    {
+      "row_id": "PCP-V-21",
+      "case": "absence_proof_and_declared_binding",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_inadmissible",
+      "map_state": "mapped",
+      "foundation_code": "duplicate",
+      "stage_reached": "resolved",
+      "foundation_reference": "§10 N8 · §6",
+      "note": "PARTIAL. N8 is worded `two providers for one concern`; a provider AND a proven absence is the same class — a slot asserting two of four states — but is not the stated wording."
+    },
+    {
+      "row_id": "PCP-V-22",
+      "case": "absence_proof_wrong_state",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_unestablished",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§6 property 1",
+      "note": "A proof that does not declare the proven-absent state is not making the claim."
+    },
+    {
+      "row_id": "PCP-V-23",
+      "case": "absence_proof_inventory_digest_mismatch",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_unestablished",
+      "map_state": "migrates",
+      "foundation_code": "foreign_inventory",
+      "stage_reached": "",
+      "foundation_reference": "§5A · §10 N11c",
+      "note": "NOT A NEW CASE. `foreign_inventory` is listed among Foundation's nine ADDED cases, and this row is its legacy counterpart: a digest that is not the one the verifier independently derived."
+    },
+    {
+      "row_id": "PCP-V-24",
+      "case": "absence_proof_artifact_digest_mismatch",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_unestablished",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "resolved",
+      "foundation_reference": "§6 property 2 · §10 N13",
+      "note": "The proof must bind the application wheel. §6 property 2 is explicit that this is a DIFFERENT input from the image digest a binding is checked against."
+    },
+    {
+      "row_id": "PCP-V-25",
+      "case": "absence_proof_no_family_map",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_unestablished",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§6.1 property 2",
+      "note": "No mapping means nothing was enumerated. §10 folds all eight establish-failures into N12."
+    },
+    {
+      "row_id": "PCP-V-26",
+      "case": "absence_proof_incomplete_enumeration",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_unestablished",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§6.1 property 2",
+      "note": "A family never visited is not a family found empty."
+    },
+    {
+      "row_id": "PCP-V-27",
+      "case": "absence_proof_unregistered_family",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_unestablished",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§6.1 property 1",
+      "note": "A surface outside the closed inventory silently satisfies `none present`."
+    },
+    {
+      "row_id": "PCP-V-28",
+      "case": "absence_proof_occupied_family",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_unestablished",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§6",
+      "note": "A scan that FOUND something means the concern is unbound and needs a provider, not a proof."
+    },
+    {
+      "row_id": "PCP-V-29",
+      "case": "absence_proof_no_positive_control",
+      "surface": "verifier",
+      "legacy_outcome": "absence_proof_unestablished",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§6.1 property 3",
+      "note": "Without the instrument shown finding something known to exist, a scan that never finds anything and an artifact that has nothing are the same colour."
+    },
+    {
+      "row_id": "PCP-V-30",
+      "case": "concerns_incomplete_missing_slot",
+      "surface": "verifier",
+      "legacy_outcome": "concerns_incomplete",
+      "map_state": "mapped",
+      "foundation_code": "missing",
+      "stage_reached": "",
+      "foundation_reference": "§10 N9 · §3A",
+      "note": "Under §3A the profile verdict becomes the SET of discriminated refusals; `CONCERNS_INCOMPLETE` survives only as a derived summary (N18)."
+    },
+    {
+      "row_id": "PCP-V-31",
+      "case": "concerns_incomplete_empty_binding",
+      "surface": "verifier",
+      "legacy_outcome": "concerns_incomplete",
+      "map_state": "mapped",
+      "foundation_code": "missing",
+      "stage_reached": "",
+      "foundation_reference": "§10 N9 · §3.3 #2/#4",
+      "note": "THIS ROW SPLITS IN THE SUCCESSOR. `a placeholder is not an owner` becomes `uninjected` or `unexercised` depending on WHICH of the three facts is absent — the discrimination Platform's dialect could not make."
+    },
+    {
+      "row_id": "PCP-V-32",
+      "case": "concerns_not_a_mapping",
+      "surface": "verifier",
+      "legacy_outcome": "concerns_incomplete",
+      "map_state": "migrates",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§4.4",
+      "note": "A document whose concerns are not a mapping. Closed decoding refuses it; no named code."
+    },
+    {
+      "row_id": "PCP-V-33",
+      "case": "admitted_control",
+      "surface": "verifier",
+      "legacy_outcome": "admitted",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "admitted",
+      "foundation_reference": "§10 N16 · N9 partner",
+      "note": "NON-VACUITY. `13/13 admits` is N9's partner and N16 requires every refusal to be shown FIRING. Platform's single control becomes Foundation's per-row partner column."
+    },
+    {
+      "row_id": "PCP-B-01",
+      "case": "builder_probe_module_missing",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …does not import…",
+      "map_state": "mapped",
+      "foundation_code": "unresolvable",
+      "stage_reached": "declared",
+      "foundation_reference": "§3.3 #1 · §10 N1",
+      "note": "Exact match: an entry-point row that will not import."
+    },
+    {
+      "row_id": "PCP-B-02",
+      "case": "builder_probe_symbol_missing",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …has no…",
+      "map_state": "mapped",
+      "foundation_code": "unresolvable",
+      "stage_reached": "declared",
+      "foundation_reference": "§3.3 #1 · §10 N1",
+      "note": "A provider that moved is the same failure as one that vanished."
+    },
+    {
+      "row_id": "PCP-B-03",
+      "case": "builder_lock_unreadable",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …missing or unreadable…",
+      "map_state": "retires",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§7",
+      "note": "Platform stops building the document, so its coordinate SOURCE stops being a Foundation input. The surviving property is N15 — a coordinate must be immutable — not this row."
+    },
+    {
+      "row_id": "PCP-B-04",
+      "case": "builder_lock_has_no_packages",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …no single-wheel package…",
+      "map_state": "retires",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§7",
+      "note": "As above. The vacuous-coordinate-source defect belongs to whatever produces coordinates in the new design."
+    },
+    {
+      "row_id": "PCP-B-05",
+      "case": "builder_distribution_absent_from_lock",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …no single wheel for it…",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§10 N15",
+      "note": "A provider that is installed but has no immutable coordinate. N15's `coordinate refusal` is unnamed in §3.3 — flagged."
+    },
+    {
+      "row_id": "PCP-B-06",
+      "case": "builder_lock_version_disagrees_with_installed",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …not the one in this image…",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§10 N15 · §1.1",
+      "note": "THE STRONGEST SURVIVING BUILDER PROPERTY: a coordinate that names a wheel other than the one in the image. The five-component join key is where this lands."
+    },
+    {
+      "row_id": "PCP-B-07",
+      "case": "builder_distribution_not_installed",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …is not installed…",
+      "map_state": "mapped",
+      "foundation_code": "unresolvable",
+      "stage_reached": "declared",
+      "foundation_reference": "§3.3 #1 · §10 N1",
+      "note": "A provider the artifact does not carry."
+    },
+    {
+      "row_id": "PCP-B-08",
+      "case": "builder_revision_is_a_branch_name",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …peeled…",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§10 N15",
+      "note": "Exact match: `a moving artifact_coordinates` -> coordinate refusal."
+    },
+    {
+      "row_id": "PCP-B-09",
+      "case": "builder_revision_is_abbreviated",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …peeled…",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "declared",
+      "foundation_reference": "§10 N15",
+      "note": "An abbreviated commit is not an immutable coordinate."
+    },
+    {
+      "row_id": "PCP-B-10",
+      "case": "builder_no_wheel_built",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …exactly one…",
+      "map_state": "migrates",
+      "foundation_code": "foreign_inventory",
+      "stage_reached": "",
+      "foundation_reference": "§5A",
+      "note": "Becomes a typed-inventory question: `subject` names what was inventoried."
+    },
+    {
+      "row_id": "PCP-B-11",
+      "case": "builder_two_wheels_built",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …exactly one…",
+      "map_state": "migrates",
+      "foundation_code": "foreign_inventory",
+      "stage_reached": "",
+      "foundation_reference": "§5A",
+      "note": "As above."
+    },
+    {
+      "row_id": "PCP-B-12",
+      "case": "builder_concern_specified_twice",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …specified twice…",
+      "map_state": "mapped",
+      "foundation_code": "duplicate",
+      "stage_reached": "",
+      "foundation_reference": "§10 N8",
+      "note": "Exact match: two contributions for one concern."
+    },
+    {
+      "row_id": "PCP-B-13",
+      "case": "builder_slot_has_no_spec",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …no spec covers…",
+      "map_state": "mapped",
+      "foundation_code": "missing",
+      "stage_reached": "",
+      "foundation_reference": "§10 N9",
+      "note": "Exact match: a concern with nothing at all."
+    },
+    {
+      "row_id": "PCP-B-14",
+      "case": "builder_spec_names_an_unknown_concern",
+      "surface": "builder",
+      "legacy_outcome": "ProfileBuildRefusal: …not concerns this profile has slots for…",
+      "map_state": "mapped",
+      "foundation_code": "unknown_key",
+      "stage_reached": "",
+      "foundation_reference": "§10 N11d · §4.4",
+      "note": "NOT A NEW CASE. `unknown_key` is listed among Foundation's nine ADDED cases; this row is its legacy counterpart."
+    },
+    {
+      "row_id": "PCP-T-01",
+      "case": "expected_artifact_without_a_revision",
+      "surface": "type_boundary",
+      "legacy_outcome": "ValueError: …there is nothing to bind to…",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§10 N11 · §1.1",
+      "note": "An expectation missing a join-key component. N11 requires a join on a SUBSET of the key to be UNREPRESENTABLE, which is the stronger form of Platform's constructor refusal."
+    },
+    {
+      "row_id": "PCP-T-02",
+      "case": "expected_artifact_wheel_not_a_digest",
+      "surface": "type_boundary",
+      "legacy_outcome": "ValueError: …must be a `sha256:`-prefixed digest…",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§10 N11 · N15",
+      "note": "An expectation that is not a coordinate cannot be compared with one."
+    },
+    {
+      "row_id": "PCP-T-03",
+      "case": "concern_spec_unbound_and_provided",
+      "surface": "type_boundary",
+      "legacy_outcome": "ValueError: …has not decided which it is…",
+      "map_state": "mapped",
+      "foundation_code": "duplicate",
+      "stage_reached": "",
+      "foundation_reference": "§6 · §10 N8",
+      "note": "A slot asserting two of four states. §6 gives three constructible members for four states, which makes this shape harder to build in the first place."
+    },
+    {
+      "row_id": "PCP-T-04",
+      "case": "concern_spec_bound_without_a_probe",
+      "surface": "type_boundary",
+      "legacy_outcome": "ValueError: …at least one probe…",
+      "map_state": "mapped",
+      "foundation_code": "unresolvable",
+      "stage_reached": "declared",
+      "foundation_reference": "§3.3 #1 · §10 N1",
+      "note": "A binding with nothing to resolve."
+    },
+    {
+      "row_id": "PCP-T-05",
+      "case": "concern_spec_bound_without_a_coordinate",
+      "surface": "type_boundary",
+      "legacy_outcome": "ValueError: …needs a coordinate…",
+      "map_state": "mapped",
+      "foundation_code": "",
+      "stage_reached": "",
+      "foundation_reference": "§1.1 · §10 N11",
+      "note": "The five-component join key makes a coordinate-free binding unrepresentable rather than refused."
+    },
+    {
+      "row_id": "PCP-T-06",
+      "case": "concern_spec_bound_without_a_consumer",
+      "surface": "type_boundary",
+      "legacy_outcome": "ValueError: …runtime consumer…",
+      "map_state": "mapped",
+      "foundation_code": "uninjected",
+      "stage_reached": "resolved",
+      "foundation_reference": "§3.3 #2 · §10 N2",
+      "note": "THE MOST INFORMATIVE ROW IN THE MAP. Platform asserted `a provider nothing discovers is inert` at the TYPE BOUNDARY because it could not observe injection. `uninjected` is the same intent OBSERVED instead of DECLARED, which is why `uninjected` appears in Foundation's added list: the runtime case is genuinely new even though the intent is not."
+    }
+  ],
+  "added": [
+    {
+      "case": "uninjected",
+      "legacy": "approximated",
+      "legacy_row": "concern_spec_bound_without_a_consumer",
+      "note": "Platform asserted the requirement at construction time and could not observe it. The runtime refusal is new; the intent is not."
+    },
+    {
+      "case": "wrong_site",
+      "legacy": "no_counterpart",
+      "legacy_row": "",
+      "note": "Platform has no declared injection site, so an object present at another site cannot be stated, let alone tested."
+    },
+    {
+      "case": "nonce_only",
+      "legacy": "no_counterpart",
+      "legacy_row": "",
+      "note": "No counterpart. FLAGGED FOR FOUNDATION: §3.0 records that the nonce echo was DEFEATED and §3.1 replaces it with the scenario battery, yet `nonce_only` remains in the §11 added list. Under revision 2 this case looks like it has been absorbed by `answers_everything`. Two names for one case is the shape a two-directional count is supposed to prevent."
+    },
+    {
+      "case": "all_negative",
+      "legacy": "no_counterpart",
+      "legacy_row": "",
+      "note": "`broken_shut`. Platform never ran a provider, so it could not observe every outcome being negative."
+    },
+    {
+      "case": "answers_everything",
+      "legacy": "no_counterpart",
+      "legacy_row": "",
+      "note": "The five-line stub that satisfies both halves. THE CASE REVISION 2 EXISTS TO ADD, and no legacy counterpart is possible: Platform's import probe could not distinguish a stub from an implementation at all."
+    },
+    {
+      "case": "wrong_assembly",
+      "legacy": "no_counterpart",
+      "legacy_row": "",
+      "note": "Platform has one assembly and no assembly-scoped join components, so a verification joining another assembly is unstateable."
+    },
+    {
+      "case": "foreign_inventory",
+      "legacy": "has_counterpart",
+      "legacy_row": "absence_proof_inventory_digest_mismatch",
+      "note": "NOT NEW. Platform has two rows for this property — PCP-V-23 and PCP-V-16. What IS new is the inversion: Platform compared a caller's digest against a locally derived one; Foundation removes the caller's digest entirely."
+    },
+    {
+      "case": "unknown_key",
+      "legacy": "has_counterpart",
+      "legacy_row": "builder_spec_names_an_unknown_concern",
+      "note": "NOT NEW. Platform refuses an unknown concern key at build (PCP-B-14) and an unknown-shaped concerns block at verify (PCP-V-32). What is new is closing DECODE as well as encode."
+    },
+    {
+      "case": "retirement_round_trip",
+      "legacy": "no_counterpart",
+      "legacy_row": "",
+      "note": "Platform has no retirement concept at all (§6B, N11e)."
+    }
+  ]
+}
