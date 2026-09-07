@@ -38,6 +38,8 @@ jobs:
     steps:
       - name: Check out the evaluated product revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Enforce the accepted Dotmac engineering standards
         uses: michaelayoade/dotmac_governance/.github/actions/standards-check@f4bd3400747094c621559b88146bf7baa6a05e0a
@@ -73,10 +75,17 @@ jobs:
           ref: ${{ env.GOVERNANCE_REF }}
           path: .governance
 
-      - name: Install the composed environment
-        run: |
-          pipx install poetry
-          poetry install --no-interaction --no-root
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: ./.github/actions/setup-poetry
+
+      - name: Install (kernel from Forgejo)
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: poetry install --no-interaction --no-root
 
       # The observer reads the INSTALLED kernel's own SUPPORTED_MODULES and
       # INTERNAL_MODULES, so this step needs the composed environment above:

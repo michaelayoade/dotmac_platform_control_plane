@@ -15,6 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 PROFILE = REPO / ".dotmac" / "standards-profile.json"
 EVIDENCE = REPO / "docs" / "external-connector-surface.md"
+WORKFLOW = REPO / ".github" / "workflows" / "engineering-standards.yml"
 CATEGORIES = {
     "outbound_transport",
     "webhook_surface",
@@ -23,7 +24,7 @@ CATEGORIES = {
     "sync_checkpoint",
     "delivery_retry",
 }
-ACCEPTED_GOVERNANCE_SHA = "a19259b10568d29dc0a9617347498fea7f1e7a97"
+ACCEPTED_GOVERNANCE_SHA = "f4bd3400747094c621559b88146bf7baa6a05e0a"
 _EVIDENCE_ROW = re.compile(r"^\|\s*`(\w+)`\s*\|\s*(\d+)\s*\|", re.MULTILINE)
 
 
@@ -40,9 +41,9 @@ def _pin_checker() -> types.ModuleType:
     return module
 
 
-def test_the_profile_declares_the_accepted_schema_nine_surface() -> None:
+def test_the_profile_declares_the_accepted_schema_eleven_surface() -> None:
     profile = _profile()
-    assert profile["schema_version"] == 9
+    assert profile["schema_version"] == 11
     assert profile["enforcement_mode"] == "required"
     surface = profile["external_connector_surface"]
     assert set(surface) == {"baselines", "conserved_exclusions"}
@@ -131,3 +132,23 @@ def test_the_profile_names_the_accepted_governance_source() -> None:
         "source": "docs/adr/0006-cross-repository-engineering-conformance.md",
         "status": "accepted",
     }
+
+
+def test_kernel_adoption_uses_full_history_and_pinned_private_install() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    standards = workflow.split("\n  standards:\n", 1)[1].split(
+        "\n  kernel-adoption:\n", 1
+    )[0]
+    kernel = workflow.split("\n  kernel-adoption:\n", 1)[1]
+    standards_checkout = standards.split(
+        "      - name: Enforce the accepted Dotmac engineering standards", 1
+    )[0]
+    assert "fetch-depth: 0" in standards_checkout
+    setup = "      - uses: ./.github/actions/setup-poetry\n"
+    install = "      - name: Install (kernel from Forgejo)\n"
+    assert setup in kernel
+    assert install in kernel
+    assert kernel.index(setup) < kernel.index(install)
+    install_block = kernel[kernel.index(install) :]
+    assert "POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader" in install_block
+    assert "POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}" in install_block
