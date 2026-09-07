@@ -156,45 +156,42 @@ def _transitional_surfaces() -> list[dict[str, object]]:
     ]
 
 
-def _surface_digest(governance_root: Path) -> str:
-    """Governance's OWN rendering of the measured surface, never a local one.
+def _surface_identity_digest(governance_root: Path) -> str:
+    """Governance's OWN v2 rendering of the measured surface, never a local one.
 
-    The digest exists to bind this declaration to the source it describes, and
-    a second implementation of the canonicalization would be the one thing that
-    can make the binding lie: the product would compute one rendering, the
-    runner another, and a mismatch would report "the source moved" for a
-    document whose rendering rule moved instead. So Governance's renderer is
-    imported and used, including the non-public fact builder -- a coupling to
-    one implementation is strictly better here than a copy of it.
+    `dmg-kernel-surface-v2` -- selected explicitly, per Michael's ruling that
+    Platform must state the algorithm rather than let a stale field keep
+    naming v1. v1 recorded only the name an import binds LOCALLY, so two
+    different Kernel symbols aliased to the same local name rendered and
+    digested identically; v2 keeps both halves (the name the Kernel publishes
+    and the name this file bound it to) as separate fields.
+
+    Uses `engine.surface_identity_facts` (source -> v2 facts) and
+    `engine.observed_surface_identity` (facts -> digest) directly --
+    `observed_surface_identity` is Governance's own named seam for "the value
+    a migrating product declares" (its docstring says so explicitly). A local
+    reimplementation of the AST walk and merge rule would be the one thing
+    that can make the binding lie: the product would compute one rendering,
+    the runner another, and a mismatch would report "the source moved" for a
+    document whose rendering rule moved instead.
     """
     if str(governance_root) not in sys.path:
         sys.path.insert(0, str(governance_root))
-    import ast
-
-    from kernel_adoption_control.engine import _kernel_imports  # noqa: PLC2701
-    from kernel_adoption_control.surface import SurfaceFact, surface_digest
+    from kernel_adoption_control.engine import (
+        observed_surface_identity,
+        surface_identity_facts,
+    )
 
     entrypoints = _local("python_entrypoints")
-    merged: dict[tuple[PurePosixPath, str], tuple[set[str], bool]] = {}
+    sources: dict[PurePosixPath, str] = {}
     for path in entrypoints.python_sources():  # type: ignore[attr-defined]
         relative = PurePosixPath(
             path.relative_to(entrypoints.ROOT).as_posix()  # type: ignore[attr-defined]
         )
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-        except (SyntaxError, ValueError):
-            continue
-        for entry in _kernel_imports(tree):
-            symbols, star = merged.setdefault((relative, entry.module), (set(), False))
-            merged[(relative, entry.module)] = (
-                symbols | set(entry.bound),
-                star or entry.star,
-            )
-    facts = frozenset(
-        SurfaceFact(path=path, module=module, symbols=tuple(sorted(symbols)), star=star)
-        for (path, module), (symbols, star) in merged.items()
-    )
-    return surface_digest(facts)
+        sources[relative] = path.read_text(encoding="utf-8", errors="replace")
+    facts = surface_identity_facts(sources)
+    digest, _rendering = observed_surface_identity(facts)
+    return digest
 
 
 def build(
@@ -210,8 +207,8 @@ def build(
         "declared_at": declared_at,
         "source_predecessor": predecessor,
         "source_surface": {
-            "algorithm": "dmg-kernel-surface-v1",
-            "digest": _surface_digest(governance_root),
+            "algorithm": "dmg-kernel-surface-v2",
+            "digest": _surface_identity_digest(governance_root),
         },
         "kernel_catalogue": {
             "version": catalogue.version,
@@ -235,6 +232,7 @@ def _catalogue_digest(governance_root: Path, catalogue: object) -> str:
         revision=catalogue.revision,  # type: ignore[attr-defined]
         supported=catalogue.supported,  # type: ignore[attr-defined]
         internal=catalogue.internal,  # type: ignore[attr-defined]
+        root_exports=catalogue.root_exports,  # type: ignore[attr-defined]
     )
 
 

@@ -1,17 +1,17 @@
 {
   "contract": "KernelAdoptionDeclaration.v2",
   "applicability": "applicable",
-  "declared_at": "2026-09-06",
+  "declared_at": "2026-09-07",
   "source_predecessor": "f8865b1a43a6d6769d5fa3a3ab3eddfdf296cffb",
   "source_surface": {
-    "algorithm": "dmg-kernel-surface-v1",
-    "digest": "sha256:e6aa1f7d3046ec4d5ff55b236b60dbf9152435dda41fe5c0cc68d0c47afe0554"
+    "algorithm": "dmg-kernel-surface-v2",
+    "digest": "sha256:33c3416b83effa7a4bb78ce290016e5f75d4a358a7e00cefbb92411e1a6340aa"
   },
   "kernel_catalogue": {
     "version": "0.1.0a98",
     "revision": "ae7320876ad91d5bf4639d634d65a6e8fd36bb00",
     "artifact_digest": "sha256:27405c57c4af395224cdd2f4366c0144207e9df2eab4ca8a8ed1142c1d0859fa",
-    "catalogue_digest": "sha256:233c9c36e84d6bdf0eeae1086a0fb6603d88427fbd797c41f95a2aa5dc1b6b4a"
+    "catalogue_digest": "sha256:0352bf42b7199e98196641470d79a29fe2087ac0bbd7550633bab0b41f80e6d0"
   },
   "required_surfaces": [
     {

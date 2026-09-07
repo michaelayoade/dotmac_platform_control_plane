@@ -175,6 +175,15 @@ def _catalogue(root: Path) -> object:
         supported=frozenset(dotmac_kernel.SUPPORTED_MODULES),
         internal=frozenset(dotmac_kernel.INTERNAL_MODULES),
         artifact_digest=_artifact_digest(root, version),
+        # The root façade's own publication authority. Read off the installed
+        # distribution, exactly as `supported`/`internal` are -- never
+        # hand-typed and never derived from the module lists, which enumerate
+        # SUBMODULES and do not contain the bare `dotmac_kernel` name. Left
+        # unbound, a root-level import (this assembly has one:
+        # `src/vendor_cp/offers/catalog.py` imports `UndeclaredCapabilityError`
+        # off the bare package) would be measured against an empty set instead
+        # of the Kernel's real `__all__`.
+        root_exports=frozenset(dotmac_kernel.__all__),
     )
 
 
