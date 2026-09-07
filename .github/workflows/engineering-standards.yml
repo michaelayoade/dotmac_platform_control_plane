@@ -75,6 +75,12 @@ jobs:
           ref: ${{ env.GOVERNANCE_REF }}
           path: .governance
 
+      - name: Move pinned Governance checkout outside measured worktree
+        run: |
+          governance_path="${RUNNER_TEMP}/dotmac-governance"
+          mv .governance "$governance_path"
+          echo "GOVERNANCE_PATH=$governance_path" >> "$GITHUB_ENV"
+
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -106,7 +112,7 @@ jobs:
             --as-of "$(date -u +%F)" \
             --json kernel-adoption-report.json
         env:
-          PYTHONPATH: .governance
+          PYTHONPATH: ${{ env.GOVERNANCE_PATH }}
 
       - name: Publish the run report
         if: always()

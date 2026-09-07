@@ -149,6 +149,19 @@ def test_kernel_adoption_uses_full_history_and_pinned_private_install() -> None:
     assert setup in kernel
     assert install in kernel
     assert kernel.index(setup) < kernel.index(install)
+    move = "      - name: Move pinned Governance checkout outside measured worktree\n"
+    assert move in kernel
+    assert kernel.index(move) < kernel.index(setup)
+    move_block = kernel[kernel.index(move) : kernel.index(setup)]
+    assert 'governance_path="${RUNNER_TEMP}/dotmac-governance"' in move_block
+    assert 'mv .governance "$governance_path"' in move_block
+    assert 'echo "GOVERNANCE_PATH=$governance_path" >> "$GITHUB_ENV"' in move_block
     install_block = kernel[kernel.index(install) :]
     assert "POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader" in install_block
-    assert "POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}" in install_block
+    assert (
+        "POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}"
+        in install_block
+    )
+    measure = "      - name: Measure this assembly's Kernel adoption\n"
+    assert kernel.index(move) < kernel.index(measure)
+    assert "PYTHONPATH: ${{ env.GOVERNANCE_PATH }}" in kernel[kernel.index(measure) :]
