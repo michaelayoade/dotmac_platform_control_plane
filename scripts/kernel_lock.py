@@ -1556,11 +1556,94 @@ def _kernel_entry_problems(
 METADATA_MAX_BYTES: Final = 1 << 20
 METADATA_MAX_COMPRESSION_RATIO: Final = 200
 
+#: Bounds that apply BEFORE the archive is opened or enumerated. `zipfile`
+#: reads the whole central directory when it opens a file, so a per-member
+#: limit arrives too late to protect the reader from an archive with millions
+#: of entries: the file's own size on disk is the only bound available before
+#: any parsing happens, and it is checked first. The member count and the total
+#: uncompressed size are then checked before any member is read.
+WHEEL_MAX_BYTES: Final = 64 << 20
+ARCHIVE_MAX_MEMBERS: Final = 2_048
+ARCHIVE_MAX_TOTAL_UNCOMPRESSED: Final = 256 << 20
+
+#: Core Metadata headers that may appear AT MOST ONCE. A second `Name` or
+#: `Version` makes the file state two identities, and which one a reader
+#: believes becomes a question about parse order.
+METADATA_SINGLE_HEADERS: Final = frozenset({"metadata-version", "name", "version"})
+#: `Name: value`. A line that is not this and is not a continuation is not a
+#: header, and a file carrying one is not Core Metadata this gate will read.
+_METADATA_HEADER = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*):[ \t]*(.*)$")
+#: `2.1`, `2.4`. A Core Metadata version this gate cannot even shape-check is
+#: not one it should claim to have parsed.
+_METADATA_VERSION = re.compile(r"^\d+\.\d+$")
+
 #: The only key this gate understands inside a Poetry constraint table. A
 #: `markers`, `extras`, `optional` or `python` key changes what the constraint
 #: MEANS, and a comparison that ignored it would be comparing a version string
 #: while the real condition sat in a key it never read.
 MODELLED_CONSTRAINT_KEYS: Final = frozenset({"version"})
+
+
+def parse_core_metadata(text: str) -> dict[str, list[str]]:
+    """Core Metadata headers, parsed STRICTLY, or a refusal.
+
+    The permissive version of this read lowercased keys, kept the first value
+    it saw, stopped at the first blank line, and silently ignored any line it
+    did not understand. Malformed metadata therefore PASSED: a file with no
+    `Metadata-Version`, a second `Name`, a line with no colon, or headers
+    sitting after the body all read as acceptable, and the gate went on to
+    compare requirements it had extracted from something it had not actually
+    parsed.
+
+    So: headers end at the first blank line and nothing after it is read; every
+    line before it must be a header or an RFC 822 continuation; a continuation
+    with no preceding header is refused; `Metadata-Version`, `Name` and
+    `Version` must each appear EXACTLY once; and `Metadata-Version` must be
+    shape-checkable. Values are returned as lists, so a caller cannot silently
+    collapse a repeated header the way `setdefault` did.
+    """
+
+    headers: dict[str, list[str]] = {}
+    order: list[str] = []
+    last: str | None = None
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            break
+        if line[:1] in (" ", "\t"):
+            if last is None:
+                raise Refusal(
+                    f"METADATA line {number} is a continuation with no header "
+                    "before it"
+                )
+            headers[last][-1] += " " + line.strip()
+            continue
+        match = _METADATA_HEADER.match(line)
+        if match is None:
+            raise Refusal(
+                f"METADATA line {number} is neither a header nor a "
+                f"continuation: {line[:60]!r}"
+            )
+        key = match.group(1).lower()
+        headers.setdefault(key, []).append(match.group(2).strip())
+        order.append(key)
+        last = key
+
+    if not headers:
+        raise Refusal("METADATA carries no headers at all")
+    for key in sorted(METADATA_SINGLE_HEADERS):
+        found = headers.get(key, [])
+        if len(found) != 1:
+            raise Refusal(
+                f"METADATA declares `{key}` {len(found)} times, expected "
+                "exactly once"
+            )
+    version = headers["metadata-version"][0]
+    if not _METADATA_VERSION.match(version):
+        raise Refusal(
+            f"METADATA declares Metadata-Version {version!r}, which is not a "
+            "shape this gate can check"
+        )
+    return headers
 
 
 def sha256_of(path: Path) -> str:
@@ -1601,17 +1684,47 @@ def wheel_metadata(wheel: Path, name: str, version: str) -> str:
     """
 
     expected_dir = f"{_normalised(name)}-{version}.dist-info"
+
+    # BEFORE opening. `zipfile` reads the entire central directory on open, so
+    # every per-member bound below arrives too late to protect the reader from
+    # an archive with millions of entries. The file's size on disk is the only
+    # thing knowable before any parsing, and it bounds the central directory
+    # too, so it is checked first.
+    size = wheel.stat().st_size
+    if size > WHEEL_MAX_BYTES:
+        raise Refusal(
+            f"{wheel.name} is {size} bytes on disk, over the "
+            f"{WHEEL_MAX_BYTES} limit; refusing to open it"
+        )
+
     with zipfile.ZipFile(wheel) as archive:
+        members = archive.infolist()
+        if len(members) > ARCHIVE_MAX_MEMBERS:
+            raise Refusal(
+                f"{wheel.name} declares {len(members)} members, over the "
+                f"{ARCHIVE_MAX_MEMBERS} limit; refusing to read any of them"
+            )
+        total = sum(member.file_size for member in members)
+        if total > ARCHIVE_MAX_TOTAL_UNCOMPRESSED:
+            raise Refusal(
+                f"{wheel.name} declares {total} uncompressed bytes across its "
+                f"members, over the {ARCHIVE_MAX_TOTAL_UNCOMPRESSED} limit"
+            )
         candidates = [
             info
-            for info in archive.infolist()
+            for info in members
             if info.filename.endswith(".dist-info/METADATA")
             and info.filename.count("/") == 1
         ]
+        if not candidates:
+            raise Refusal(
+                f"{wheel.name} carries NO top-level dist-info/METADATA member"
+            )
         if len(candidates) != 1:
             raise Refusal(
                 f"{wheel.name} carries {len(candidates)} top-level "
-                "dist-info/METADATA members, expected exactly one"
+                "dist-info/METADATA members, expected exactly one; which one "
+                "describes the wheel is then a question about zip ordering"
             )
         info = candidates[0]
         directory = info.filename.split("/", 1)[0]
@@ -1642,23 +1755,26 @@ def wheel_metadata(wheel: Path, name: str, version: str) -> str:
             f"the {METADATA_MAX_BYTES} limit declared in its own header"
         )
 
-    text = raw.decode("utf-8", errors="replace")
-    headers: dict[str, str] = {}
-    for line in text.splitlines():
-        if not line.strip():
-            break
-        if ":" in line:
-            key, _, value = line.partition(":")
-            headers.setdefault(key.strip().lower(), value.strip())
-    if _normalised(headers.get("name", "")) != _normalised(name):
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise Refusal(
-            f"{wheel.name}: METADATA declares Name {headers.get('name')!r}, "
-            f"not {name!r}"
+            f"{wheel.name}: METADATA is not valid UTF-8 ({exc}); it was "
+            "previously decoded with errors replaced, which turned undecodable "
+            "bytes into characters the parser then accepted"
+        ) from exc
+
+    headers = parse_core_metadata(text)
+    declared_name = headers["name"][0]
+    declared_version = headers["version"][0]
+    if _normalised(declared_name) != _normalised(name):
+        raise Refusal(
+            f"{wheel.name}: METADATA declares Name {declared_name!r}, not {name!r}"
         )
-    if headers.get("version") != version:
+    if declared_version != version:
         raise Refusal(
-            f"{wheel.name}: METADATA declares Version "
-            f"{headers.get('version')!r}, not {version!r}"
+            f"{wheel.name}: METADATA declares Version {declared_version!r}, "
+            f"not {version!r}"
         )
     return text
 

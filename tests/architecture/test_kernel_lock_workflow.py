@@ -69,6 +69,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import kernel_lock  # noqa: E402
 from kernel_lock import (  # noqa: E402
+    ARCHIVE_MAX_MEMBERS,
     ARTIFACT_ORIGIN,
     DECLARABLE_DEPENDENCIES,
     INDEX_SOURCE_NAME,
@@ -100,6 +101,7 @@ from kernel_lock import (  # noqa: E402
     metadata_binding_problems,
     metadata_dependencies,
     pair_binding,
+    parse_core_metadata,
     parse_dependency_delta,
     parseable_wheels,
     point_at_mirror,
@@ -110,6 +112,7 @@ from kernel_lock import (  # noqa: E402
     sha256_hex,
     sha256sums,
     transfer_problems,
+    wheel_metadata,
     wheel_only_problems,
 )
 
@@ -2687,3 +2690,154 @@ def test_a_wheel_declaring_one_project_twice_is_refused() -> None:
         metadata_dependencies(
             ("dotmac-kernel (>=0.1.0a100)", "dotmac_kernel (>=0.1.0a100)")
         )
+
+
+# ── malformed Core Metadata used to PASS ────────────────────────────────────
+#
+# The permissive read lowercased keys, kept the first value, stopped at the
+# first blank line and IGNORED any line it did not understand. So a file with
+# no `Metadata-Version`, a second `Name`, or a line with no colon read as
+# acceptable, and requirements were compared that had been extracted from
+# something never actually parsed.
+
+
+_HEADERS = f"Metadata-Version: 2.1\nName: {CONTROL}\nVersion: 0.1.0a13\n"
+_REQUIRES = (
+    "Requires-Dist: dotmac-kernel (>=0.1.0a100)\n"
+    "Requires-Dist: sqlalchemy (>=2.0,<3.0)\n"
+)
+_DIST_INFO = "dotmac_deployment_control-0.1.0a13.dist-info/METADATA"
+
+
+def _archive(tmp_path: Path, members: tuple[tuple[str, str], ...]) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, body in members:
+            archive.writestr(name, body)
+    return wheel
+
+
+def test_well_formed_core_metadata_is_admitted() -> None:
+    """POSITIVE CONTROL for every refusal below."""
+
+    headers = parse_core_metadata(_HEADERS + _REQUIRES + "\nprose\n")
+    assert headers["name"] == [CONTROL]
+    assert headers["version"] == ["0.1.0a13"]
+    assert headers["requires-dist"] == [
+        "dotmac-kernel (>=0.1.0a100)",
+        "sqlalchemy (>=2.0,<3.0)",
+    ]
+
+
+def test_a_folded_header_continuation_is_joined() -> None:
+    """Second positive control: RFC 822 continuations are real metadata, so
+    refusing them outright would make this parser reject valid wheels."""
+
+    headers = parse_core_metadata(
+        _HEADERS + "Summary: one line\n  and its continuation\n"
+    )
+    assert headers["summary"] == ["one line and its continuation"]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    (
+        (f"Name: {CONTROL}\nVersion: 0.1.0a13\n", "`metadata-version` 0 times"),
+        (_HEADERS + f"Name: {CONTROL}\n", "`name` 2 times"),
+        (_HEADERS + "Version: 0.1.0a13\n", "`version` 2 times"),
+        (_HEADERS + "this is not a header\n", "neither a header nor a continuation"),
+        ("  folded with nothing before it\n" + _HEADERS, "continuation with no header"),
+        (
+            f"Metadata-Version: twenty-one\nName: {CONTROL}\nVersion: 0.1.0a13\n",
+            "not a shape this gate can check",
+        ),
+        ("", "carries no headers at all"),
+        ("\n" + _HEADERS, "carries no headers at all"),
+    ),
+)
+def test_malformed_core_metadata_is_refused(metadata: str, expected: str) -> None:
+    with pytest.raises(Refusal, match=expected):
+        parse_core_metadata(metadata)
+
+
+def test_a_requirement_after_the_body_is_not_read_as_a_requirement() -> None:
+    """Headers end at the first blank line, and the parser must STOP there.
+
+    A `Requires-Dist` sitting in the body is prose — pip does not read it
+    either, so ignoring it keeps this gate and the installer agreeing. The
+    property worth asserting is that it is not silently adopted as a
+    constraint, which is what a reader scanning the whole file would do.
+    """
+
+    headers = parse_core_metadata(
+        _HEADERS + _REQUIRES + "\nprose\nRequires-Dist: smuggled (>=1)\n"
+    )
+    assert "smuggled (>=1)" not in headers["requires-dist"]
+    assert len(headers["requires-dist"]) == 2
+
+
+def test_metadata_that_is_not_utf8_is_refused(tmp_path: Path) -> None:
+    """It was previously decoded with `errors="replace"`, which turned
+    undecodable bytes into characters the parser then accepted."""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS.encode() + b"Summary: \xff\xfe\n")
+    with pytest.raises(Refusal, match="not valid UTF-8"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_an_archive_with_no_metadata_member_is_refused(tmp_path: Path) -> None:
+    wheel = _archive(
+        tmp_path / "none",
+        (("dotmac_deployment_control-0.1.0a13.dist-info/RECORD", "x\n"),),
+    )
+    with pytest.raises(Refusal, match="carries NO top-level"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_an_archive_with_two_metadata_members_is_refused(tmp_path: Path) -> None:
+    """Which one describes the wheel would otherwise be a question about zip
+    ordering."""
+
+    wheel = _archive(
+        tmp_path / "two",
+        (
+            (_DIST_INFO, _HEADERS + _REQUIRES + "\n"),
+            ("other-0.1.0a13.dist-info/METADATA", _HEADERS + _REQUIRES + "\n"),
+        ),
+    )
+    with pytest.raises(Refusal, match="2 top-level"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_an_archive_with_too_many_members_is_refused_before_any_is_read(
+    tmp_path: Path,
+) -> None:
+    """`zipfile` reads the whole central directory when it opens a file, so a
+    per-member bound arrives too late. The member count is checked before any
+    member is read, and the file's size on disk is checked before the archive
+    is opened at all."""
+
+    members = ((_DIST_INFO, _HEADERS + _REQUIRES + "\n"),) + tuple(
+        (f"pad/{index}.txt", "x") for index in range(ARCHIVE_MAX_MEMBERS + 50)
+    )
+    wheel = _archive(tmp_path / "many", members)
+    assert len(zipfile.ZipFile(wheel).infolist()) > ARCHIVE_MAX_MEMBERS
+    with pytest.raises(Refusal, match="refusing to read any of them"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_the_wheel_size_is_bounded_before_the_archive_is_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proven by lowering the bound rather than by writing 64 MiB: the point is
+    the ORDER, and a test that needs a huge fixture to assert an order tends to
+    get deleted."""
+
+    wheel = _archive(tmp_path / "size", ((_DIST_INFO, _HEADERS + _REQUIRES + "\n"),))
+    monkeypatch.setattr(kernel_lock, "WHEEL_MAX_BYTES", 10)
+    with pytest.raises(Refusal, match="refusing to open it"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
