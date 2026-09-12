@@ -51,11 +51,13 @@ shows it silent on the plant the new one names.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import sys
 import tomllib
 import urllib.parse
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +75,7 @@ from kernel_lock import (  # noqa: E402
     INDEX_URL,
     INDEX_USERNAME,
     KERNEL,
+    METADATA_MAX_COMPRESSION_RATIO,
     OFF_INDEX_DEPENDENCY_KEYS,
     DependencyDelta,
     Refusal,
@@ -94,6 +97,8 @@ from kernel_lock import (  # noqa: E402
     kernel_artifact_names,
     lock_wheel_problems,
     manifest_problems,
+    metadata_binding_problems,
+    metadata_dependencies,
     pair_binding,
     parse_dependency_delta,
     parseable_wheels,
@@ -396,14 +401,28 @@ def _after_with_control() -> dict[str, Any]:
     return lock
 
 
-def test_a_well_formed_kernel_and_control_delta_produces_no_problems() -> None:
+def test_a_well_formed_kernel_and_control_delta_produces_no_problems(
+    tmp_path: Path,
+) -> None:
     """THE POSITIVE CONTROL. Without this, a gate that refused everything
     below would pass every plant in this section for the wrong reason."""
 
-    assert (
-        drift_problems(_before_with_control(), _after_with_control(), CONTROL_DELTA)
-        == []
+    bundle = tmp_path / "bundle"
+    (bundle / "files").mkdir(parents=True)
+    wheel = _control_wheel(bundle / "files")
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    (bundle / "digests.json").write_text(json.dumps({wheel.name: digest}))
+    control = _entry(wheel, dict(_GOOD_DEPS))
+    before_control = dict(
+        control,
+        version="0.1.0a6",
+        dependencies={"dotmac-kernel": ">=0.1.0a98", "sqlalchemy": ">=2.0,<3.0"},
     )
+    before = _lock(
+        [_package(KERNEL, "0.1.0a98", source=_INDEX_SOURCE), before_control], "A"
+    )
+    after = _lock([_package(KERNEL, "0.1.0a100", source=_INDEX_SOURCE), control], "B")
+    assert drift_problems(before, after, CONTROL_DELTA, bundle) == []
 
 
 def test_a_control_movement_with_no_delta_is_still_unrelated_drift() -> None:
@@ -2415,3 +2434,256 @@ def test_no_declared_dependency_input_is_interpolated_into_a_shell_script() -> N
         for line in text.splitlines():
             if name in line:
                 assert line.strip().startswith(("DEPENDENCY", "#")), line
+
+
+# ── the binding, and the four ways it could have been fooled ────────────────
+#
+# Every case builds its wheel in its OWN directory. An earlier version of this
+# suite reused one filename across cases, so a later wheel overwrote an earlier
+# one and four plants refused for the WRONG reason while reading as green — the
+# exact failure this file exists to prevent, reproduced inside it.
+
+
+_GOOD_DEPS = {"dotmac-kernel": ">=0.1.0a100", "sqlalchemy": ">=2.0,<3.0"}
+_A13 = "0.1.0a13"
+
+
+def _control_wheel(
+    directory: Path,
+    *,
+    filename: str | None = None,
+    dist_info: str | None = None,
+    name: str = CONTROL,
+    version: str = _A13,
+    requires: tuple[str, ...] = (
+        "dotmac-kernel (>=0.1.0a100)",
+        "sqlalchemy (>=2.0,<3.0)",
+    ),
+    body: str = "prose after the blank line\n",
+) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    wheel = directory / (
+        filename or f"dotmac_deployment_control-{_A13}-py3-none-any.whl"
+    )
+    member = (dist_info or f"dotmac_deployment_control-{_A13}.dist-info") + "/METADATA"
+    text = (
+        f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+        + "".join(f"Requires-Dist: {r}\n" for r in requires)
+        + "\n"
+        + body
+    )
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(member, text)
+    return wheel
+
+
+def _entry(
+    wheel: Path, dependencies: Any, *, lock_hash: str | None = None
+) -> dict[str, Any]:
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    return {
+        "name": CONTROL,
+        "version": _A13,
+        "source": dict(_INDEX_SOURCE),
+        "files": [{"file": wheel.name, "hash": lock_hash or f"sha256:{digest}"}],
+        "dependencies": dependencies,
+    }
+
+
+def _bind(wheel: Path, entry: dict[str, Any], digests: dict[str, str] | None = None):
+    if digests is None:
+        digests = {wheel.name: hashlib.sha256(wheel.read_bytes()).hexdigest()}
+    return metadata_binding_problems(entry, wheel, digests)
+
+
+def test_the_binding_admits_a_wheel_whose_metadata_matches(tmp_path: Path) -> None:
+    """POSITIVE CONTROL. Without it every plant below would pass against a
+    binding that refused everything."""
+
+    wheel = _control_wheel(tmp_path / "ok")
+    assert _bind(wheel, _entry(wheel, dict(_GOOD_DEPS))) == []
+
+
+def test_a_version_only_constraint_table_is_still_modelled(tmp_path: Path) -> None:
+    """Second positive control: the unmodelled-key refusal must not be so broad
+    that the ordinary `{version = ...}` table trips it."""
+
+    wheel = _control_wheel(tmp_path / "table")
+    entry = _entry(
+        wheel,
+        {"dotmac-kernel": {"version": ">=0.1.0a100"}, "sqlalchemy": ">=2.0,<3.0"},
+    )
+    assert _bind(wheel, entry) == []
+
+
+def test_bytes_changed_after_acquisition_are_refused(tmp_path: Path) -> None:
+    """The bytes are REHASHED immediately before being read. `digests.json` is a
+    claim about what was downloaded, not about the file about to be opened."""
+
+    wheel = _control_wheel(tmp_path / "tamper")
+    entry = _entry(wheel, dict(_GOOD_DEPS))
+    stale = {wheel.name: hashlib.sha256(wheel.read_bytes()).hexdigest()}
+    wheel.write_bytes(wheel.read_bytes() + b"\x00appended")
+    problems = _bind(wheel, entry, stale)
+    assert len(problems) == 1, problems
+    assert "changed after they were acquired" in problems[0], problems
+
+
+def test_metadata_is_not_read_out_of_bytes_the_lock_does_not_claim(
+    tmp_path: Path,
+) -> None:
+    wheel = _control_wheel(tmp_path / "lockhash")
+    entry = _entry(wheel, dict(_GOOD_DEPS), lock_hash="sha256:" + "0" * 64)
+    problems = _bind(wheel, entry)
+    assert len(problems) == 1, problems
+    assert "the lock does not claim" in problems[0], problems
+
+
+def test_a_wheel_filename_naming_another_version_is_refused(tmp_path: Path) -> None:
+    wheel = _control_wheel(
+        tmp_path / "fname",
+        filename="dotmac_deployment_control-0.1.0a6-py3-none-any.whl",
+    )
+    problems = _bind(wheel, _entry(wheel, dict(_GOOD_DEPS)))
+    assert len(problems) == 1 and "0.1.0a6" in problems[0], problems
+
+
+def test_a_dist_info_directory_naming_another_version_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Filename and dist-info disagreeing is an archive asserting two
+    identities, not a naming inconsistency to tidy up."""
+
+    wheel = _control_wheel(
+        tmp_path / "distinfo",
+        dist_info="dotmac_deployment_control-0.1.0a6.dist-info",
+    )
+    with pytest.raises(Refusal, match="names two identities"):
+        _bind(wheel, _entry(wheel, dict(_GOOD_DEPS)))
+
+
+def test_metadata_name_and_version_must_agree_with_the_filename(
+    tmp_path: Path,
+) -> None:
+    wrong_name = _control_wheel(tmp_path / "mname", name="something-else")
+    with pytest.raises(Refusal, match="METADATA declares Name"):
+        _bind(wrong_name, _entry(wrong_name, dict(_GOOD_DEPS)))
+    wrong_version = _control_wheel(tmp_path / "mver", version="0.1.0a6")
+    with pytest.raises(Refusal, match="METADATA declares Version"):
+        _bind(wrong_version, _entry(wrong_version, dict(_GOOD_DEPS)))
+
+
+@pytest.mark.parametrize(
+    ("dependencies", "expected"),
+    (
+        (
+            {
+                "dotmac-kernel": ">=0.1.0a100",
+                "dotmac_kernel": ">=0.1.0a100",
+                "sqlalchemy": ">=2.0,<3.0",
+            },
+            "another spelling of the same project",
+        ),
+        (
+            {
+                "dotmac-kernel": {
+                    "version": ">=0.1.0a100",
+                    "markers": "sys_platform=='linux'",
+                },
+                "sqlalchemy": ">=2.0,<3.0",
+            },
+            "carries markers",
+        ),
+        (
+            {
+                "dotmac-kernel": {"version": ">=0.1.0a100", "optional": True},
+                "sqlalchemy": ">=2.0,<3.0",
+            },
+            "carries optional",
+        ),
+        (
+            {
+                "dotmac-kernel": {"version": ">=0.1.0a100", "extras": ["testing"]},
+                "sqlalchemy": ">=2.0,<3.0",
+            },
+            "carries extras",
+        ),
+        (
+            {
+                "dotmac-kernel": [{"version": ">=0.1.0a100"}],
+                "sqlalchemy": ">=2.0,<3.0",
+            },
+            "is a LIST",
+        ),
+    ),
+)
+def test_an_unmodelled_lock_constraint_is_refused(
+    tmp_path: Path, dependencies: Any, expected: str
+) -> None:
+    """A duplicate spelling would let one entry overwrite another, making the
+    comparison an accident of table ordering. A `markers`, `optional`, `extras`
+    or list constraint means something this gate does not model, and comparing
+    only its version would ignore the real condition."""
+
+    wheel = _control_wheel(tmp_path / "deps")
+    with pytest.raises(Refusal, match=expected):
+        _bind(wheel, _entry(wheel, dependencies))
+
+
+def test_an_oversized_metadata_member_is_refused_before_decompression(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "big"
+    directory.mkdir()
+    wheel = directory / f"dotmac_deployment_control-{_A13}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            f"dotmac_deployment_control-{_A13}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: {CONTROL}\nVersion: {_A13}\n"
+            + "A" * (3 << 20),
+        )
+    with pytest.raises(Refusal, match="refusing to decompress"):
+        _bind(wheel, _entry(wheel, dict(_GOOD_DEPS)))
+
+
+def test_a_highly_compressed_metadata_member_is_refused(tmp_path: Path) -> None:
+    """Bounded by RATIO as well as size: a member that stays under the byte
+    limit while compressing absurdly is still an archive built to be expensive
+    to read."""
+
+    directory = tmp_path / "ratio"
+    directory.mkdir()
+    wheel = directory / f"dotmac_deployment_control-{_A13}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        archive.writestr(
+            f"dotmac_deployment_control-{_A13}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: {CONTROL}\nVersion: {_A13}\n\n"
+            + "A" * 900_000,
+        )
+    member = zipfile.ZipFile(wheel).infolist()[0]
+    assert (
+        member.file_size / member.compress_size > METADATA_MAX_COMPRESSION_RATIO
+    ), "the fixture must actually exceed the ratio it is testing"
+    with pytest.raises(Refusal, match="refusing to decompress"):
+        _bind(wheel, _entry(wheel, dict(_GOOD_DEPS)))
+
+
+@pytest.mark.parametrize(
+    ("requirement", "expected"),
+    (
+        ('pytest (>=8) ; extra == "testing"', "conditional requirement"),
+        ("dotmac-kernel[extra] (>=0.1.0a100)", "extras requirement"),
+    ),
+)
+def test_a_requirement_this_gate_cannot_model_is_refused(
+    requirement: str, expected: str
+) -> None:
+    with pytest.raises(Refusal, match=expected):
+        metadata_dependencies(("dotmac-kernel (>=0.1.0a100)", requirement))
+
+
+def test_a_wheel_declaring_one_project_twice_is_refused() -> None:
+    with pytest.raises(Refusal, match="twice in `Requires-Dist`"):
+        metadata_dependencies(
+            ("dotmac-kernel (>=0.1.0a100)", "dotmac_kernel (>=0.1.0a100)")
+        )
