@@ -555,9 +555,10 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          # Every coordinate crosses as a shell variable, never as a `${{ }}`
-          # interpolation into this script. Both inputs are regex-validated in
-          # the first job, so the old direct interpolation was not exploitable
+          # Every coordinate crosses as a shell variable, never as a GitHub
+          # Actions expression interpolated into this script. Both inputs are
+          # regex-validated in the first job, so the old direct interpolation
+          # was not exploitable
           # — but it was one deleted validation away from being a script-
           # injection sink, and a sink whose safety rests on a check somewhere
           # else is a sink.
