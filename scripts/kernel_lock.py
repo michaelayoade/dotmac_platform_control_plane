@@ -93,6 +93,7 @@ import re
 import subprocess
 import tomllib
 import urllib.parse
+import zipfile
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,7 +153,12 @@ DECLARABLE_DEPENDENCIES: Final = frozenset({"dotmac-deployment-control"})
 #: reasoning to `KERNEL_MUTABLE_FIELDS`: a version move changes `version` and
 #: `files` and nothing else, and this is not a second, looser allowlist for
 #: whichever package happens to be declared.
-DEPENDENCY_MUTABLE_FIELDS: Final = KERNEL_MUTABLE_FIELDS
+#: A declared movement may move these three. `dependencies` is included
+#: because a new version is entitled to require different things -- and that
+#: is the reason the kernel pin has to move at all. It is NOT free: the
+#: resolved values must equal the acquired wheel's own `Requires-Dist`,
+#: checked by `metadata_binding_problems` against rehashed bytes.
+DEPENDENCY_MUTABLE_FIELDS: Final = KERNEL_MUTABLE_FIELDS | {"dependencies"}
 
 #: The two files a consumer must apply TOGETHER. The lock's content-hash is
 #: derived from the manifest, so either one alone describes a tree that does
@@ -1542,10 +1548,410 @@ def _kernel_entry_problems(
     return problems
 
 
+#: A wheel's METADATA is a small text file. These bound what this gate will
+#: read out of an archive it did not build: a member that inflates past the
+#: first limit, or compresses better than the second, is refused rather than
+#: decompressed. The numbers are generous for real metadata and hostile to an
+#: archive designed to exhaust the reader.
+METADATA_MAX_BYTES: Final = 1 << 20
+METADATA_MAX_COMPRESSION_RATIO: Final = 200
+
+#: Bounds that apply BEFORE the archive is opened or enumerated. `zipfile`
+#: reads the whole central directory when it opens a file, so a per-member
+#: limit arrives too late to protect the reader from an archive with millions
+#: of entries: the file's own size on disk is the only bound available before
+#: any parsing happens, and it is checked first. The member count and the total
+#: uncompressed size are then checked before any member is read.
+WHEEL_MAX_BYTES: Final = 64 << 20
+ARCHIVE_MAX_MEMBERS: Final = 2_048
+ARCHIVE_MAX_TOTAL_UNCOMPRESSED: Final = 256 << 20
+
+#: Core Metadata headers that may appear AT MOST ONCE. A second `Name` or
+#: `Version` makes the file state two identities, and which one a reader
+#: believes becomes a question about parse order.
+METADATA_SINGLE_HEADERS: Final = frozenset({"metadata-version", "name", "version"})
+#: `Name: value`. A line that is not this and is not a continuation is not a
+#: header, and a file carrying one is not Core Metadata this gate will read.
+_METADATA_HEADER = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*):[ \t]*(.*)$")
+#: `2.1`, `2.4`. A Core Metadata version this gate cannot even shape-check is
+#: not one it should claim to have parsed.
+_METADATA_VERSION = re.compile(r"^\d+\.\d+$")
+
+#: The only key this gate understands inside a Poetry constraint table. A
+#: `markers`, `extras`, `optional` or `python` key changes what the constraint
+#: MEANS, and a comparison that ignored it would be comparing a version string
+#: while the real condition sat in a key it never read.
+MODELLED_CONSTRAINT_KEYS: Final = frozenset({"version"})
+
+
+def parse_core_metadata(text: str) -> dict[str, list[str]]:
+    """Core Metadata headers, parsed STRICTLY, or a refusal.
+
+    The permissive version of this read lowercased keys, kept the first value
+    it saw, stopped at the first blank line, and silently ignored any line it
+    did not understand. Malformed metadata therefore PASSED: a file with no
+    `Metadata-Version`, a second `Name`, a line with no colon, or headers
+    sitting after the body all read as acceptable, and the gate went on to
+    compare requirements it had extracted from something it had not actually
+    parsed.
+
+    So: headers end at the first blank line and nothing after it is read; every
+    line before it must be a header or an RFC 822 continuation; a continuation
+    with no preceding header is refused; `Metadata-Version`, `Name` and
+    `Version` must each appear EXACTLY once; and `Metadata-Version` must be
+    shape-checkable. Values are returned as lists, so a caller cannot silently
+    collapse a repeated header the way `setdefault` did.
+    """
+
+    headers: dict[str, list[str]] = {}
+    order: list[str] = []
+    last: str | None = None
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            break
+        if line[:1] in (" ", "\t"):
+            if last is None:
+                raise Refusal(
+                    f"METADATA line {number} is a continuation with no header "
+                    "before it"
+                )
+            headers[last][-1] += " " + line.strip()
+            continue
+        match = _METADATA_HEADER.match(line)
+        if match is None:
+            raise Refusal(
+                f"METADATA line {number} is neither a header nor a "
+                f"continuation: {line[:60]!r}"
+            )
+        key = match.group(1).lower()
+        headers.setdefault(key, []).append(match.group(2).strip())
+        order.append(key)
+        last = key
+
+    if not headers:
+        raise Refusal("METADATA carries no headers at all")
+    for key in sorted(METADATA_SINGLE_HEADERS):
+        found = headers.get(key, [])
+        if len(found) != 1:
+            raise Refusal(
+                f"METADATA declares `{key}` {len(found)} times, expected "
+                "exactly once"
+            )
+    version = headers["metadata-version"][0]
+    if not _METADATA_VERSION.match(version):
+        raise Refusal(
+            f"METADATA declares Metadata-Version {version!r}, which is not a "
+            "shape this gate can check"
+        )
+    return headers
+
+
+def sha256_of(path: Path) -> str:
+    """The digest of the bytes on disk RIGHT NOW."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def wheel_identity_problems(wheel: Path, name: str, version: str) -> list[str]:
+    """The FILENAME says which project and version these bytes are."""
+
+    match = _WHEEL_FILENAME.match(wheel.name)
+    if match is None:
+        return [f"{wheel.name} is not a parseable wheel filename"]
+    problems: list[str] = []
+    if _normalised(match.group("name")) != _normalised(name):
+        return [f"{wheel.name} names project {match.group('name')!r}, not {name!r}"]
+    if match.group("ver") != version:
+        problems.append(
+            f"{wheel.name} names version {match.group('ver')!r}, not {version!r}"
+        )
+    return problems
+
+
+def wheel_metadata(wheel: Path, name: str, version: str) -> str:
+    """The METADATA text, with the archive bound to the project it claims.
+
+    Four independent statements of identity have to agree before a single
+    requirement line is believed: the FILENAME, the `.dist-info` DIRECTORY, and
+    METADATA's own `Name` and `Version`. A wheel whose filename says a13 while
+    its dist-info says a6 is not a naming inconsistency to tidy up — it is an
+    archive asserting two identities, and the one this gate would otherwise
+    read is whichever the zip happened to list first.
+    """
+
+    expected_dir = f"{_normalised(name)}-{version}.dist-info"
+
+    # BEFORE opening. `zipfile` reads the entire central directory on open, so
+    # every per-member bound below arrives too late to protect the reader from
+    # an archive with millions of entries. The file's size on disk is the only
+    # thing knowable before any parsing, and it bounds the central directory
+    # too, so it is checked first.
+    size = wheel.stat().st_size
+    if size > WHEEL_MAX_BYTES:
+        raise Refusal(
+            f"{wheel.name} is {size} bytes on disk, over the "
+            f"{WHEEL_MAX_BYTES} limit; refusing to open it"
+        )
+
+    with zipfile.ZipFile(wheel) as archive:
+        members = archive.infolist()
+        if len(members) > ARCHIVE_MAX_MEMBERS:
+            raise Refusal(
+                f"{wheel.name} declares {len(members)} members, over the "
+                f"{ARCHIVE_MAX_MEMBERS} limit; refusing to read any of them"
+            )
+        total = sum(member.file_size for member in members)
+        if total > ARCHIVE_MAX_TOTAL_UNCOMPRESSED:
+            raise Refusal(
+                f"{wheel.name} declares {total} uncompressed bytes across its "
+                f"members, over the {ARCHIVE_MAX_TOTAL_UNCOMPRESSED} limit"
+            )
+        candidates = [
+            info
+            for info in members
+            if info.filename.endswith(".dist-info/METADATA")
+            and info.filename.count("/") == 1
+        ]
+        if not candidates:
+            raise Refusal(
+                f"{wheel.name} carries NO top-level dist-info/METADATA member"
+            )
+        if len(candidates) != 1:
+            raise Refusal(
+                f"{wheel.name} carries {len(candidates)} top-level "
+                "dist-info/METADATA members, expected exactly one; which one "
+                "describes the wheel is then a question about zip ordering"
+            )
+        info = candidates[0]
+        directory = info.filename.split("/", 1)[0]
+        if _normalised(directory) != _normalised(expected_dir):
+            raise Refusal(
+                f"{wheel.name} carries its metadata under {directory!r}, not "
+                f"{expected_dir!r}; the archive names two identities"
+            )
+        if info.file_size > METADATA_MAX_BYTES:
+            raise Refusal(
+                f"{wheel.name}: {info.filename} declares {info.file_size} "
+                f"uncompressed bytes, over the {METADATA_MAX_BYTES} limit; "
+                "refusing to decompress it"
+            )
+        if info.compress_size and (
+            info.file_size / info.compress_size > METADATA_MAX_COMPRESSION_RATIO
+        ):
+            raise Refusal(
+                f"{wheel.name}: {info.filename} compresses "
+                f"{info.file_size}:{info.compress_size}, past the "
+                f"{METADATA_MAX_COMPRESSION_RATIO}:1 limit; refusing to "
+                "decompress it"
+            )
+        raw = archive.read(info)
+    if len(raw) > METADATA_MAX_BYTES:
+        raise Refusal(
+            f"{wheel.name}: {info.filename} inflated to {len(raw)} bytes, over "
+            f"the {METADATA_MAX_BYTES} limit declared in its own header"
+        )
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Refusal(
+            f"{wheel.name}: METADATA is not valid UTF-8 ({exc}); it was "
+            "previously decoded with errors replaced, which turned undecodable "
+            "bytes into characters the parser then accepted"
+        ) from exc
+
+    headers = parse_core_metadata(text)
+    declared_name = headers["name"][0]
+    declared_version = headers["version"][0]
+    if _normalised(declared_name) != _normalised(name):
+        raise Refusal(
+            f"{wheel.name}: METADATA declares Name {declared_name!r}, not {name!r}"
+        )
+    if declared_version != version:
+        raise Refusal(
+            f"{wheel.name}: METADATA declares Version {declared_version!r}, "
+            f"not {version!r}"
+        )
+    return text
+
+
+def requires_dist(metadata: str) -> list[str]:
+    """The `Requires-Dist` header values, stopping at the body."""
+
+    requirements: list[str] = []
+    for line in metadata.splitlines():
+        if not line.strip():
+            break
+        if line.lower().startswith("requires-dist:"):
+            requirements.append(line.split(":", 1)[1].strip())
+    return requirements
+
+
+def metadata_dependencies(requirements: Iterable[str]) -> dict[str, str]:
+    """`Requires-Dist` as the mapping a lock entry records, or a refusal.
+
+    A requirement carrying an environment marker or an extra is not modelled
+    here and is REFUSED rather than skipped: quietly ignoring the part of the
+    metadata a comparison cannot model is how a comparison stops being able to
+    disagree, which is this one's entire purpose.
+    """
+
+    mapping: dict[str, str] = {}
+    for requirement in requirements:
+        if ";" in requirement:
+            raise Refusal(
+                f"the wheel declares a conditional requirement {requirement!r}; "
+                "this gate models only unconditional `Requires-Dist` and "
+                "refuses rather than ignoring the part it cannot model"
+            )
+        if "[" in requirement:
+            raise Refusal(
+                f"the wheel declares an extras requirement {requirement!r}, "
+                "which selects optional dependencies this gate does not model"
+            )
+        name = _requirement_name(requirement)
+        if name is None:
+            raise Refusal(f"cannot read a project name from {requirement!r}")
+        specifier = requirement[len(name) :].strip()
+        if specifier.startswith("(") and specifier.endswith(")"):
+            specifier = specifier[1:-1].strip()
+        key = _normalised(name)
+        if key in mapping:
+            raise Refusal(
+                f"the wheel declares {name} twice in `Requires-Dist`; which "
+                "constraint binds is then a question about zip ordering"
+            )
+        mapping[key] = re.sub(r"\s+", "", specifier)
+    return mapping
+
+
+def locked_dependencies(entry: dict[str, Any]) -> dict[str, str]:
+    """A lock entry's `dependencies`, keyed for comparison, or a refusal.
+
+    Two refusals live here rather than silent behaviour. A table whose keys
+    NORMALISE to the same project (`dotmac-kernel` beside `dotmac_kernel`)
+    would otherwise have one entry overwrite the other, so whichever the
+    comparison saw would be an accident of dict ordering. And a constraint
+    table carrying `markers`, `extras`, `optional` or `python` means something
+    this gate does not model; comparing only its `version` would compare a
+    string while the real condition sat in a key nobody read.
+    """
+
+    declared = entry.get("dependencies")
+    if declared is None:
+        return {}
+    if not isinstance(declared, dict):
+        raise Refusal("a lock entry's `dependencies` is not a table")
+    mapping: dict[str, str] = {}
+    for name, constraint in declared.items():
+        key = _normalised(str(name))
+        if key in mapping:
+            raise Refusal(
+                f"the lock entry declares {name!r} and another spelling of the "
+                "same project; which constraint binds is then a question about "
+                "table ordering"
+            )
+        if isinstance(constraint, dict):
+            unmodelled = sorted(set(constraint) - MODELLED_CONSTRAINT_KEYS)
+            if unmodelled:
+                raise Refusal(
+                    f"the lock entry's {name!r} constraint carries "
+                    f"{', '.join(unmodelled)}, which this gate does not model; "
+                    "comparing only its version would ignore the condition"
+                )
+            constraint = constraint.get("version", "")
+        elif isinstance(constraint, list):
+            raise Refusal(
+                f"the lock entry's {name!r} constraint is a LIST of "
+                "constraints, which this gate does not model"
+            )
+        mapping[key] = re.sub(r"\s+", "", str(constraint))
+    return mapping
+
+
+def metadata_binding_problems(
+    entry: dict[str, Any], wheel: Path, digests: dict[str, str]
+) -> list[str]:
+    """The moved package's locked `dependencies` ARE the acquired wheel's.
+
+    A declared movement may change `dependencies`, because a new version is
+    entitled to require different things — Control a13 requiring kernel
+    `>=0.1.0a100` is exactly why the kernel pin has to move. But that makes
+    `dependencies` the one field through which an arbitrary constraint could
+    arrive inside a reviewed pin change, so it is bound to the artifact's own
+    declaration rather than trusted.
+
+    The bytes are REHASHED here, immediately before being read, and must match
+    BOTH the acquisition record and the lock. `digests.json` is a claim about
+    what was downloaded; the lock is a claim about what was resolved; neither
+    is a statement about the file that is about to be opened.
+    """
+
+    name = str(entry.get("name"))
+    version = str(entry.get("version"))
+    problems = wheel_identity_problems(wheel, name, version)
+    if problems:
+        return problems
+
+    locked_files = {
+        item.get("file"): item.get("hash") for item in entry.get("files", [])
+    }
+    if wheel.name not in locked_files:
+        return [
+            f"{wheel.name} is not named by the lock entry for {name} {version}, "
+            "so its metadata describes bytes this lock does not claim"
+        ]
+    recorded = digests.get(wheel.name)
+    if recorded is None:
+        return [f"{wheel.name} has no acquisition digest to verify against"]
+
+    actual = sha256_of(wheel)
+    if actual != recorded:
+        return [
+            f"{wheel.name} on disk hashes to sha256:{actual}, but the "
+            f"acquisition recorded sha256:{recorded}; refusing to read metadata "
+            "out of bytes that changed after they were acquired"
+        ]
+    if locked_files[wheel.name] != f"sha256:{actual}":
+        return [
+            f"{wheel.name} on disk hashes to sha256:{actual}, but the lock says "
+            f"{locked_files[wheel.name]!r}; refusing to read metadata out of "
+            "bytes the lock does not claim"
+        ]
+
+    expected = metadata_dependencies(
+        requires_dist(wheel_metadata(wheel, name, version))
+    )
+    recorded_deps = locked_dependencies(entry)
+    for dependency in sorted(set(expected) | set(recorded_deps)):
+        if dependency not in recorded_deps:
+            problems.append(
+                f"the wheel requires {dependency} {expected[dependency]!r}, "
+                "which the lock entry does not record"
+            )
+        elif dependency not in expected:
+            problems.append(
+                f"the lock records a dependency on {dependency} "
+                f"{recorded_deps[dependency]!r} that the wheel's "
+                "`Requires-Dist` does not declare"
+            )
+        elif expected[dependency] != recorded_deps[dependency]:
+            problems.append(
+                f"{dependency}: the wheel declares {expected[dependency]!r}, "
+                f"the lock records {recorded_deps[dependency]!r}"
+            )
+    return problems
+
+
 def _declared_delta_problems(
     old: dict[tuple[str, str], dict[str, Any]],
     new: dict[tuple[str, str], dict[str, Any]],
     delta: DependencyDelta,
+    bundle: Path | None = None,
 ) -> list[str]:
     """The DECLARED dependency's entry may move its version and its files.
     Nothing else — the same rule as `_kernel_entry_problems`, for the one
@@ -1592,6 +1998,33 @@ def _declared_delta_problems(
         problems.append(
             f"{delta.name} resolved from {source.get('url')!r}, not {INDEX_URL!r}"
         )
+
+    # `dependencies` is the one field a movement may change, so it is the one
+    # field bound to something outside the lock. MANDATORY: a declared movement
+    # with no bundle would permit exactly the change this binding constrains.
+    if bundle is None:
+        problems.append(
+            f"{delta.name} declares a movement but no acquired bundle was given "
+            "to bind its `dependencies` to the published wheel's Requires-Dist"
+        )
+        return problems
+    digests_path = bundle / "digests.json"
+    if not digests_path.is_file():
+        problems.append(f"the bundle at {bundle} carries no digests.json")
+        return problems
+    digests = json.loads(digests_path.read_text(encoding="utf-8"))
+    wheels = sorted(
+        path
+        for path in (bundle / "files").glob("*.whl")
+        if artifact_belongs_to(path.name, delta.name, delta.after)
+    )
+    if len(wheels) != 1:
+        problems.append(
+            f"expected exactly one acquired {delta.name} {delta.after} wheel in "
+            f"{bundle / 'files'}, found {len(wheels)}"
+        )
+        return problems
+    problems += metadata_binding_problems(after, wheels[0], digests)
     return problems
 
 
@@ -1599,6 +2032,7 @@ def drift_problems(
     before: dict[str, Any],
     after: dict[str, Any],
     delta: DependencyDelta | None = None,
+    bundle: Path | None = None,
 ) -> list[str]:
     """Everything outside the moved pin(s) that is not identical.
 
@@ -1636,7 +2070,7 @@ def drift_problems(
 
     problems += _kernel_entry_problems(old, new)
     if delta is not None:
-        problems += _declared_delta_problems(old, new, delta)
+        problems += _declared_delta_problems(old, new, delta, bundle)
 
     old_meta = before.get("metadata", {})
     new_meta = after.get("metadata", {})
@@ -1862,6 +2296,7 @@ def _build_parser() -> argparse.ArgumentParser:
     drift.add_argument("--dependency", default="")
     drift.add_argument("--dependency-from", default="")
     drift.add_argument("--dependency-to", default="")
+    drift.add_argument("--bundle", type=Path, default=None)
 
     delta_inputs = subcommands.add_parser("delta")
     delta_inputs.add_argument("--dependency", default="")
@@ -1970,7 +2405,9 @@ def _run(args: argparse.Namespace) -> int:
         )
         return _report(
             "unrelated lock drift",
-            drift_problems(_load_toml(args.before), _load_toml(args.after), delta),
+            drift_problems(
+                _load_toml(args.before), _load_toml(args.after), delta, args.bundle
+            ),
         )
     if args.command == "delta":
         delta = parse_dependency_delta(
