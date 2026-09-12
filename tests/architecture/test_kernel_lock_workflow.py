@@ -87,6 +87,7 @@ from kernel_lock import (  # noqa: E402
     credential_sightings,
     curl_argv,
     declared_version_problems,
+    dependency_declarations,
     drift_problems,
     hash_problems,
     index_links,
@@ -415,8 +416,15 @@ def test_a_control_movement_with_no_delta_is_still_unrelated_drift() -> None:
 
 
 def test_all_three_blank_is_kernel_only_mode() -> None:
+    """EMPTY is kernel-only. Whitespace is NOT blank — it is a caller who meant
+    to supply something, and reading it as absent would silently downgrade a
+    declared movement to a kernel-only run. See
+    `test_whitespace_only_inputs_are_refused_rather_than_read_as_absent`.
+    """
+
     assert parse_dependency_delta("", "", "") is None
-    assert parse_dependency_delta("   ", "\t", "") is None
+    with pytest.raises(Refusal, match="whitespace-only"):
+        parse_dependency_delta("   ", "\t", "")
 
 
 def test_a_well_formed_delta_parses() -> None:
@@ -493,7 +501,18 @@ def test_before_equal_after_is_refused() -> None:
 
 
 def test_replace_dependency_version_moves_the_pin() -> None:
-    text = f'{CONTROL} = {{ version = "0.1.0a6", source = "forgejo" }}\n'
+    """The fixture is a REAL manifest, table header and all.
+
+    It used to be a bare `name = { ... }` line, which a regex-only rewrite was
+    happy with and which parses to a TOP-LEVEL key rather than a declaration in
+    any dependency table. A rewrite that is confirmed by reparsing cannot be
+    tested against something that was never a manifest.
+    """
+
+    text = (
+        "[tool.poetry.dependencies]\n"
+        f'{CONTROL} = {{ version = "0.1.0a6", source = "forgejo" }}\n'
+    )
     edited = replace_dependency_version(text, CONTROL_DELTA)
     assert '"0.1.0a13"' in edited
     assert "0.1.0a6" not in edited
@@ -503,7 +522,10 @@ def test_replace_dependency_version_refuses_the_wrong_declared_version() -> None
     """THE plant. The manifest declares a version other than `dependency_from`
     — caught at the SOURCE, before anything is resolved against it."""
 
-    text = f'{CONTROL} = {{ version = "0.1.0a5", source = "forgejo" }}\n'
+    text = (
+        "[tool.poetry.dependencies]\n"
+        f'{CONTROL} = {{ version = "0.1.0a5", source = "forgejo" }}\n'
+    )
     with pytest.raises(Refusal) as refusal:
         replace_dependency_version(text, CONTROL_DELTA)
     message = str(refusal.value)
@@ -512,11 +534,21 @@ def test_replace_dependency_version_refuses_the_wrong_declared_version() -> None
 
 
 def test_replace_dependency_version_refuses_two_declarations() -> None:
+    """Two declarations in two REAL tables.
+
+    This previously used the same key twice at top level, which is invalid TOML
+    — so it refused on the PARSE and never exercised the duplication rule at
+    all. A test that passes for the wrong reason is the thing this file exists
+    to prevent.
+    """
+
     text = (
-        f'{CONTROL} = {{ version = "0.1.0a6" }}\n'
-        f'{CONTROL} = {{ version = "0.1.0a6" }}\n'
+        "[tool.poetry.dependencies]\n"
+        f'{CONTROL} = {{ version = "0.1.0a6", source = "forgejo" }}\n'
+        "\n[tool.poetry.group.dev.dependencies]\n"
+        f'{CONTROL} = {{ version = "0.1.0a6", source = "forgejo" }}\n'
     )
-    with pytest.raises(Refusal):
+    with pytest.raises(Refusal, match="declared 2 times"):
         replace_dependency_version(text, CONTROL_DELTA)
 
 
@@ -2201,3 +2233,185 @@ def test_it_is_dispatch_only() -> None:
     assert "workflow_dispatch:" in text
     for trigger in ("\n  push:", "\n  pull_request:", "\n  schedule:"):
         assert trigger not in text, trigger
+
+
+# ── one declaration, or none of this is safe ────────────────────────────────
+
+
+def _toml(body: str) -> dict[str, Any]:
+    return tomllib.loads(body)
+
+
+_MAIN = (
+    "[tool.poetry.dependencies]\n"
+    f'{CONTROL} = {{ version = "0.1.0a6", source = "forgejo" }}\n'
+)
+
+
+def test_a_duplicate_main_and_group_declaration_is_refused() -> None:
+    """The defect this enumeration exists for.
+
+    With only the FIRST declaration read, the version check passed on the main
+    pin while the textual rewrite moved that same pin and left the group's at
+    the old version — a tree declaring two versions of one package, resolved
+    against without complaint.
+    """
+
+    text = _MAIN + f'\n[tool.poetry.group.dev.dependencies]\n{CONTROL} = ">=0.1.0a6"\n'
+    where = [place for place, _ in dependency_declarations(_toml(text), CONTROL)]
+    assert where == [
+        "tool.poetry.dependencies.dotmac-deployment-control",
+        "tool.poetry.group.dev.dependencies.dotmac-deployment-control",
+    ], where
+
+    problems = declared_version_problems(_toml(text), CONTROL, "0.1.0a6")
+    assert len(problems) == 1 and "declared 2 times" in problems[0], problems
+    assert "tool.poetry.group.dev.dependencies" in problems[0], problems
+
+    with pytest.raises(Refusal, match="declared 2 times"):
+        replace_dependency_version(text, CONTROL_DELTA)
+
+
+def test_a_legacy_dev_dependencies_declaration_is_refused() -> None:
+    """`tool.poetry.dev-dependencies` is the pre-groups spelling and is still a
+    real declaration; a surface this file lists in TRAVERSED_DEPENDENCY_TABLES
+    may not be invisible to the thing that rewrites pins."""
+
+    text = _MAIN + f'\n[tool.poetry.dev-dependencies]\n{CONTROL} = ">=0.1.0a6"\n'
+    problems = declared_version_problems(_toml(text), CONTROL, "0.1.0a6")
+    assert len(problems) == 1, problems
+    assert "tool.poetry.dev-dependencies" in problems[0], problems
+    with pytest.raises(Refusal, match="declared 2 times"):
+        replace_dependency_version(text, CONTROL_DELTA)
+
+
+def test_a_pep_621_project_declaration_is_refused() -> None:
+    """PEP 621 `project.dependencies` is a LIST of requirement strings, so a
+    reader that only walks Poetry's mapping tables cannot see it at all."""
+
+    text = f'[project]\ndependencies = ["{CONTROL}>=0.1.0a6"]\n\n' + _MAIN
+    where = [place for place, _ in dependency_declarations(_toml(text), CONTROL)]
+    assert "project.dependencies[0]" in where, where
+    problems = declared_version_problems(_toml(text), CONTROL, "0.1.0a6")
+    assert len(problems) == 1 and "project.dependencies[0]" in problems[0], problems
+    with pytest.raises(Refusal, match="declared 2 times"):
+        replace_dependency_version(text, CONTROL_DELTA)
+
+
+def test_an_underscore_spelling_is_the_same_declaration() -> None:
+    """`dotmac_deployment_control` and `dotmac-deployment-control` are one
+    project. A rewrite that missed the other spelling would be the duplicate
+    defect wearing different punctuation."""
+
+    text = (
+        _MAIN
+        + "\n[tool.poetry.group.dev.dependencies]\n"
+        + 'dotmac_deployment_control = ">=0.1.0a6"\n'
+    )
+    problems = declared_version_problems(_toml(text), CONTROL, "0.1.0a6")
+    assert len(problems) == 1 and "declared 2 times" in problems[0], problems
+
+
+def test_one_declaration_is_rewritten_and_the_result_is_reparsed() -> None:
+    """POSITIVE CONTROL for every refusal above, plus the reparse.
+
+    A textual edit that produced something only a regex believed in would
+    otherwise reach the resolver, so the edited bytes are parsed again and the
+    single declaration must read as the NEW version.
+    """
+
+    edited = replace_dependency_version(_MAIN, CONTROL_DELTA)
+    declarations = dependency_declarations(_toml(edited), CONTROL)
+    assert len(declarations) == 1, declarations
+    assert declarations[0][1]["version"] == "0.1.0a13", declarations
+    assert declarations[0][1]["source"] == INDEX_SOURCE_NAME, declarations
+    assert declared_version_problems(_toml(edited), CONTROL, "0.1.0a13") == []
+
+
+@pytest.mark.parametrize(
+    ("name", "before", "after"),
+    (
+        (" ", "", ""),
+        ("", " ", ""),
+        ("", "", "\t"),
+        (CONTROL, " ", "0.1.0a13"),
+        (CONTROL, "0.1.0a6", "  "),
+    ),
+)
+def test_whitespace_only_inputs_are_refused_rather_than_read_as_absent(
+    name: str, before: str, after: str
+) -> None:
+    """Stripping a whitespace-only input to nothing would silently downgrade a
+    declared movement to a kernel-only run: the dispatch would look honoured
+    and would not have been. EMPTY is the only "not supplied"."""
+
+    with pytest.raises(Refusal, match="whitespace-only"):
+        parse_dependency_delta(name, before, after)
+
+
+def test_three_empty_strings_are_still_kernel_only() -> None:
+    """Non-vacuity for the test above: the refusal must be about whitespace,
+    not about supplying nothing."""
+
+    assert parse_dependency_delta("", "", "") is None
+
+
+# ── the real workflow, structurally ─────────────────────────────────────────
+
+
+def test_the_workflow_declares_all_three_inputs_with_empty_defaults() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for name in ("dependency", "dependency_from", "dependency_to"):
+        assert f"\n      {name}:\n" in text, name
+    # Each input's block must carry `required: false` and an EMPTY default --
+    # a non-empty default would make every kernel-only dispatch declare a
+    # movement nobody asked for.
+    block = text.split("\n      dependency:\n", 1)[1].split("\njobs:", 1)[0]
+    assert block.count('default: ""') == 3, block
+    assert block.count("required: false") == 3, block
+
+
+def test_the_declared_inputs_are_judged_before_the_credential() -> None:
+    """A dispatch mistake must cost nothing and touch no secret."""
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+    judged = text.index("kernel_lock.py delta")
+    credential = text.index("FORGEJO_READ_TOKEN }}")
+    assert judged < credential, (judged, credential)
+
+
+def test_the_delta_reaches_drift_verify_and_the_rewrite() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert text.count("kernel_lock.py set-dependency-version") >= 1, text.count(
+        "kernel_lock.py set-dependency-version"
+    )
+    assert text.count("kernel_lock.py declared") >= 2, "before and after the rewrite"
+    for command in ("drift", "verify"):
+        segment = text.split(f"kernel_lock.py {command}", 1)[1][:400]
+        assert "--dependency " in segment, command
+        assert "--dependency-from " in segment, command
+        assert "--dependency-to " in segment, command
+
+
+def test_the_extra_coordinates_are_inside_the_delta_guard() -> None:
+    """A kernel-only artifact must carry exactly the six coordinates it always
+    did, so the three delta lines may only be appended under the guard."""
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+    args = text.split("COORDINATE_ARGS=(", 1)[1].split('"${COORDINATE_ARGS[@]}"', 1)[0]
+    unconditional, _, guarded = args.partition("if [ -n ")
+    assert unconditional.count("--coordinate") == 6, unconditional
+    for key in ("dependency=", "dependency_from=", "dependency_to="):
+        assert key in guarded, key
+        assert key not in unconditional, key
+
+
+def test_no_declared_dependency_input_is_interpolated_into_a_shell_script() -> None:
+    """The repository forbids a GitHub expression anywhere in a `run:` body.
+    Every new value must cross through step-level `env:`."""
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+    for name in ("inputs.dependency", "inputs.dependency_from", "inputs.dependency_to"):
+        for line in text.splitlines():
+            if name in line:
+                assert line.strip().startswith(("DEPENDENCY", "#")), line

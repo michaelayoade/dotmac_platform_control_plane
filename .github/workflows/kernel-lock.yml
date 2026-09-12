@@ -196,6 +196,25 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Judge the declared dependency inputs, before any credential
+        env:
+          DEPENDENCY: ${{ inputs.dependency }}
+          DEPENDENCY_FROM: ${{ inputs.dependency_from }}
+          DEPENDENCY_TO: ${{ inputs.dependency_to }}
+        run: |
+          set -euo pipefail
+          # FIRST, and deliberately before the ref checkout and long before
+          # this job reaches the credential. An all-or-none violation, a name
+          # outside the closed allowlist, a local version segment or a
+          # whitespace-only value is a dispatch mistake, and a dispatch mistake
+          # should cost nothing and touch no secret. One owner judges them --
+          # `parse_dependency_delta` -- rather than a bash pre-check here that
+          # could drift from it.
+          python scripts/kernel_lock.py delta \
+            --dependency "${DEPENDENCY}" \
+            --dependency-from "${DEPENDENCY_FROM}" \
+            --dependency-to "${DEPENDENCY_TO}"
+
       - name: The requested ref is reachable from a branch of this repository
         env:
           REF: ${{ inputs.ref }}

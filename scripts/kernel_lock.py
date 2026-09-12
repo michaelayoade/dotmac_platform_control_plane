@@ -339,7 +339,19 @@ def parse_dependency_delta(
     """
 
     fields = {"dependency": name, "dependency_from": before, "dependency_to": after}
-    blank = sorted(key for key, value in fields.items() if not value.strip())
+    # EMPTY STRING is the only "not supplied". A whitespace-only input is a
+    # caller who meant to supply something, and `strip()`-ing it to nothing
+    # would silently downgrade a declared movement to a kernel-only run — the
+    # dispatch would look like it had been honoured and would not have been.
+    whitespace = sorted(
+        key for key, value in fields.items() if value and not value.strip()
+    )
+    if whitespace:
+        raise Refusal(
+            "whitespace-only values are refused rather than read as absent: "
+            f"{', '.join(whitespace)}. Leave an input EMPTY to run kernel-only."
+        )
+    blank = sorted(key for key, value in fields.items() if value == "")
     if len(blank) == 3:
         return None
     if blank:
@@ -373,6 +385,21 @@ def parse_dependency_delta(
     return DependencyDelta(name=name, before=before, after=after)
 
 
+def _declared_version(declared: Any) -> Any:
+    """What a declaration says its version is, whatever shape it came in."""
+
+    return declared.get("version") if isinstance(declared, dict) else declared
+
+
+def _parse_toml_text(text: str) -> dict[str, Any]:
+    """Parse manifest BYTES. Refuses rather than returning a partial mapping."""
+
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise Refusal(f"the manifest text does not parse as TOML: {exc}") from exc
+
+
 def replace_dependency_version(text: str, delta: DependencyDelta) -> str:
     """Move the declared dependency's pin, or refuse. Mirrors
     `replace_kernel_version`, including its ambiguity refusal, and adds one
@@ -380,21 +407,64 @@ def replace_dependency_version(text: str, delta: DependencyDelta) -> str:
     was there, checked at the SOURCE, before anything is resolved against it.
     """
 
+    before_declarations = dependency_declarations(_parse_toml_text(text), delta.name)
+    if len(before_declarations) != 1:
+        raise Refusal(
+            f"{delta.name} is declared {len(before_declarations)} times"
+            + (
+                " ("
+                + ", ".join(where for where, _ in sorted(before_declarations))
+                + ")"
+                if before_declarations
+                else ""
+            )
+            + "; a movement needs exactly one. Refusing rather than rewriting "
+            "one declaration and leaving another at the old version."
+        )
+    where, declared = before_declarations[0]
+    if not isinstance(declared, dict) or declared.get("version") != delta.before:
+        raise Refusal(
+            f"{delta.name} at {where} declares {_declared_version(declared)!r}, "
+            f"not the declared `dependency_from` {delta.before!r}"
+        )
+
     anchor = re.compile(rf'({re.escape(delta.name)} = \{{ version = ")([^"]+)(")')
     matches = list(anchor.finditer(text))
     if len(matches) != 1:
         raise Refusal(
-            f"expected exactly one {delta.name} version declaration, matched "
-            f"{len(matches)}. Refusing rather than guessing which one the pin "
-            "is."
+            f"expected exactly one textual {delta.name} version declaration to "
+            f"rewrite, matched {len(matches)}. The parsed manifest names one at "
+            f"{where}, so the text and the parse disagree; refusing rather than "
+            "guessing which span to edit."
         )
-    matched_version = matches[0].group(2)
-    if matched_version != delta.before:
+    if matches[0].group(2) != delta.before:
         raise Refusal(
-            f"{delta.name} is declared at {matched_version!r}, not the "
-            f"declared `dependency_from` {delta.before!r}"
+            f"the {delta.name} span about to be rewritten holds "
+            f"{matches[0].group(2)!r}, not the declared `dependency_from` "
+            f"{delta.before!r}"
         )
-    return anchor.sub(rf"\g<1>{delta.after}\g<3>", text)
+
+    edited = anchor.sub(rf"\g<1>{delta.after}\g<3>", text, count=1)
+
+    # REPARSE. A textual edit that produced something only a regex believes in
+    # would otherwise reach the resolver. The edited bytes must parse, and must
+    # parse to exactly one declaration, at exactly the new version.
+    after_declarations = dependency_declarations(_parse_toml_text(edited), delta.name)
+    if len(after_declarations) != 1:
+        raise Refusal(
+            f"after the edit {delta.name} parses to {len(after_declarations)} "
+            "declarations, expected exactly one"
+        )
+    after_where, after_declared = after_declarations[0]
+    if (
+        not isinstance(after_declared, dict)
+        or after_declared.get("version") != delta.after
+    ):
+        raise Refusal(
+            f"after the edit {delta.name} at {after_where} declares "
+            f"{_declared_version(after_declared)!r}, not {delta.after!r}"
+        )
+    return edited
 
 
 # ── manifest-guard: the candidate checkout ──────────────────────────────────
@@ -642,19 +712,88 @@ def _kernel_declaration(manifest: dict[str, Any]) -> Any:
     return _dependency_declaration(manifest, KERNEL)
 
 
+def _requirement_name(requirement: str) -> str | None:
+    """The project name leading a PEP 508 requirement string, or `None`."""
+
+    match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", requirement)
+    return match.group(1) if match else None
+
+
+def dependency_declarations(
+    manifest: dict[str, Any], name: str
+) -> list[tuple[str, Any]]:
+    """EVERY declaration of `name`, across every surface this file supports.
+
+    `_dependency_declaration` returns the FIRST match and stops. That made the
+    validated declaration and the rewritten one able to be DIFFERENT
+    declarations: a package named in both `tool.poetry.dependencies` and a
+    group, or in PEP 621 `project.dependencies`, passed the version check on
+    one while the textual rewrite moved another, leaving a stale pin behind in
+    a tree that then declared two versions of one package. So the declaration
+    is enumerated and a movement requires EXACTLY ONE.
+
+    The surfaces are the same set `TRAVERSED_DEPENDENCY_TABLES` names, so this
+    cannot see less than the guard that refuses unrecognised tables. Names are
+    compared NORMALISED, because `dotmac_deployment_control` and
+    `dotmac-deployment-control` are one project and a rewrite that missed the
+    other spelling would be the same defect wearing different punctuation.
+    """
+
+    wanted = _normalised(name)
+    found: list[tuple[str, Any]] = []
+
+    for where, table in _poetry_constraint_tables(manifest):
+        for key, value in table.items():
+            if _normalised(str(key)) == wanted:
+                found.append((f"{where}.{key}", value))
+
+    def _scan(where: str, requirements: Any) -> None:
+        if not isinstance(requirements, list):
+            return
+        for index, requirement in enumerate(requirements):
+            if not isinstance(requirement, str):
+                continue
+            declared = _requirement_name(requirement)
+            if declared is not None and _normalised(declared) == wanted:
+                found.append((f"{where}[{index}]", requirement))
+
+    project = manifest.get("project")
+    if isinstance(project, dict):
+        _scan("project.dependencies", project.get("dependencies"))
+        extras = project.get("optional-dependencies")
+        if isinstance(extras, dict):
+            for extra, requirements in sorted(extras.items()):
+                _scan(f"project.optional-dependencies.{extra}", requirements)
+
+    groups = manifest.get("dependency-groups")
+    if isinstance(groups, dict):
+        for group, requirements in sorted(groups.items()):
+            _scan(f"dependency-groups.{group}", requirements)
+
+    return found
+
+
 def declared_version_problems(
     manifest: dict[str, Any], name: str, expected: str
 ) -> list[str]:
-    """The manifest declares `name` at exactly `expected`, from the index.
+    """The manifest declares `name` EXACTLY ONCE, at `expected`, from the index.
 
-    Reuses `_poetry_constraint_tables` and the same shape-checking as the
-    kernel's own declaration in `manifest_problems`, rather than a second
-    parser that could read the manifest a different way.
+    Exactly once is load-bearing, not tidiness. Two declarations let the
+    version check and the textual rewrite address different ones, which is how
+    a dev-group pin stayed at the old version while the main pin moved.
     """
 
-    declared = _dependency_declaration(manifest, name)
-    if declared is None:
+    declarations = dependency_declarations(manifest, name)
+    if not declarations:
         return [f"no {name} dependency to resolve"]
+    if len(declarations) > 1:
+        return [
+            f"{name} is declared {len(declarations)} times, at "
+            + ", ".join(where for where, _ in sorted(declarations))
+            + ". A movement must name exactly one declaration, or the one that "
+            "is checked and the one that is rewritten can differ."
+        ]
+    declared = declarations[0][1]
     if isinstance(declared, dict):
         problems: list[str] = []
         if declared.get("version") != expected:
@@ -1724,6 +1863,11 @@ def _build_parser() -> argparse.ArgumentParser:
     drift.add_argument("--dependency-from", default="")
     drift.add_argument("--dependency-to", default="")
 
+    delta_inputs = subcommands.add_parser("delta")
+    delta_inputs.add_argument("--dependency", default="")
+    delta_inputs.add_argument("--dependency-from", default="")
+    delta_inputs.add_argument("--dependency-to", default="")
+
     declared = subcommands.add_parser("declared")
     declared.add_argument("--manifest", type=Path, required=True)
     declared.add_argument("--name", required=True)
@@ -1828,6 +1972,15 @@ def _run(args: argparse.Namespace) -> int:
             "unrelated lock drift",
             drift_problems(_load_toml(args.before), _load_toml(args.after), delta),
         )
+    if args.command == "delta":
+        delta = parse_dependency_delta(
+            args.dependency, args.dependency_from, args.dependency_to
+        )
+        if delta is None:
+            print("no declared dependency movement: kernel-only")
+        else:
+            print(f"declared movement: {delta.name} {delta.before} -> {delta.after}")
+        return 0
     if args.command == "declared":
         manifest = _load_toml(args.manifest)
         return _report(
