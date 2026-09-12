@@ -130,6 +130,30 @@ on:
         description: The dotmac-kernel version to pin, e.g. 0.1.0a102.
         required: true
         type: string
+      dependency:
+        description: >-
+          ALL-OR-NONE with dependency_from and dependency_to: leave all three
+          blank for today's kernel-only behaviour. The name of ONE additional
+          package whose pin moves together with the kernel's in this run — it
+          must be in the CLOSED allowlist `DECLARABLE_DEPENDENCIES` in
+          `scripts/kernel_lock.py`; a name is added there only by review.
+        required: false
+        type: string
+        default: ""
+      dependency_from:
+        description: >-
+          ALL-OR-NONE with dependency and dependency_to. The exact version
+          `dependency` is declared at in the ref's manifest before this run.
+        required: false
+        type: string
+        default: ""
+      dependency_to:
+        description: >-
+          ALL-OR-NONE with dependency and dependency_from. The exact version
+          `dependency` is moved to in this run.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -229,6 +253,9 @@ jobs:
       - name: Move the pin, and refuse a tree that would misdirect the credential
         env:
           KERNEL_VERSION: ${{ inputs.kernel_version }}
+          DEPENDENCY: ${{ inputs.dependency }}
+          DEPENDENCY_FROM: ${{ inputs.dependency_from }}
+          DEPENDENCY_TO: ${{ inputs.dependency_to }}
         run: |
           set -euo pipefail
           # Both steps run the TRUSTED module against the untrusted tree. The
@@ -239,6 +266,31 @@ jobs:
           # refuses `work/poetry.toml`, which would configure the resolver.
           python scripts/kernel_lock.py set-kernel-version \
             --manifest work/pyproject.toml --kernel-version "${KERNEL_VERSION}"
+
+          # ALL-OR-NONE, and gated on that. With every one of the three inputs
+          # blank this whole block is skipped, so kernel-only dispatch touches
+          # nothing here it did not touch before this input existed. A
+          # partial supply (or a malformed one) is refused by
+          # `parse_dependency_delta` inside the commands below, before either
+          # rewrite lands.
+          if [ -n "${DEPENDENCY}" ] || [ -n "${DEPENDENCY_FROM}" ] || [ -n "${DEPENDENCY_TO}" ]; then
+            # The ref's OWN manifest declares dependency_from, checked before
+            # anything rewrites it — the same "declared at the source" premise
+            # the kernel's own edit relies on.
+            python scripts/kernel_lock.py declared \
+              --manifest work/pyproject.toml \
+              --name "${DEPENDENCY}" --version "${DEPENDENCY_FROM}"
+            python scripts/kernel_lock.py set-dependency-version \
+              --manifest work/pyproject.toml \
+              --dependency "${DEPENDENCY}" \
+              --dependency-from "${DEPENDENCY_FROM}" \
+              --dependency-to "${DEPENDENCY_TO}"
+            # And the rewritten manifest now declares dependency_to.
+            python scripts/kernel_lock.py declared \
+              --manifest work/pyproject.toml \
+              --name "${DEPENDENCY}" --version "${DEPENDENCY_TO}"
+          fi
+
           python scripts/kernel_lock.py manifest-guard \
             --manifest work/pyproject.toml --checkout work \
             --kernel-version "${KERNEL_VERSION}"
@@ -352,14 +404,34 @@ jobs:
       - name: Move the pin, and refuse a tree that would misdirect the credential
         env:
           KERNEL_VERSION: ${{ inputs.kernel_version }}
+          DEPENDENCY: ${{ inputs.dependency }}
+          DEPENDENCY_FROM: ${{ inputs.dependency_from }}
+          DEPENDENCY_TO: ${{ inputs.dependency_to }}
         run: |
           set -euo pipefail
           # Re-derived here rather than carried from `acquire` as an artifact.
           # An artifact would be a second thing to trust; the guard is cheap,
           # is the same trusted module, and this job must not resolve a tree it
-          # has not itself judged.
+          # has not itself judged. Same ALL-OR-NONE gate as `acquire`, so this
+          # job re-judges the identical pair of rewrites rather than trusting
+          # that the other job's tree was equivalent.
           python scripts/kernel_lock.py set-kernel-version \
             --manifest work/pyproject.toml --kernel-version "${KERNEL_VERSION}"
+
+          if [ -n "${DEPENDENCY}" ] || [ -n "${DEPENDENCY_FROM}" ] || [ -n "${DEPENDENCY_TO}" ]; then
+            python scripts/kernel_lock.py declared \
+              --manifest work/pyproject.toml \
+              --name "${DEPENDENCY}" --version "${DEPENDENCY_FROM}"
+            python scripts/kernel_lock.py set-dependency-version \
+              --manifest work/pyproject.toml \
+              --dependency "${DEPENDENCY}" \
+              --dependency-from "${DEPENDENCY_FROM}" \
+              --dependency-to "${DEPENDENCY_TO}"
+            python scripts/kernel_lock.py declared \
+              --manifest work/pyproject.toml \
+              --name "${DEPENDENCY}" --version "${DEPENDENCY_TO}"
+          fi
+
           python scripts/kernel_lock.py manifest-guard \
             --manifest work/pyproject.toml --checkout work \
             --kernel-version "${KERNEL_VERSION}"
@@ -479,6 +551,10 @@ jobs:
           poetry check --lock
 
       - name: Only dotmac-kernel moved, and only its version and files
+        env:
+          DEPENDENCY: ${{ inputs.dependency }}
+          DEPENDENCY_FROM: ${{ inputs.dependency_from }}
+          DEPENDENCY_TO: ${{ inputs.dependency_to }}
         run: |
           set -euo pipefail
           # The drift gate, and it is the WHOLE lock. `poetry lock` is free to
@@ -487,9 +563,15 @@ jobs:
           # same name, same version, same files — is a dependency change nobody
           # asked for arriving inside a pin change nobody would re-read. The
           # kernel entry is no longer exempt from that: only `version` and
-          # `files` may differ on it either.
+          # `files` may differ on it either. The three dependency flags are
+          # blank strings in kernel-only dispatch, and `parse_dependency_delta`
+          # reads three blanks as "no declared movement" — so this call is
+          # unconditional and its behaviour with no delta is unchanged.
           python scripts/kernel_lock.py drift \
-            --before /tmp/poetry.lock.before --after work/poetry.lock
+            --before /tmp/poetry.lock.before --after work/poetry.lock \
+            --dependency "${DEPENDENCY}" \
+            --dependency-from "${DEPENDENCY_FROM}" \
+            --dependency-to "${DEPENDENCY_TO}"
 
       - name: And nothing in the resolved lock would have to be built either
         run: |
@@ -504,17 +586,25 @@ jobs:
       - name: The lock's hashes are the bytes the index published
         env:
           KERNEL_VERSION: ${{ inputs.kernel_version }}
+          DEPENDENCY: ${{ inputs.dependency }}
+          DEPENDENCY_FROM: ${{ inputs.dependency_from }}
+          DEPENDENCY_TO: ${{ inputs.dependency_to }}
         run: |
           set -euo pipefail
           # The bytes were downloaded from the index in `acquire` and hashed
           # there. Comparing the lock against the index's own ADVERTISED hashes
           # would compare the index with itself; this compares it against what
           # those bytes hash to. An artifact the index never published was
-          # already refused in `acquire`, by name.
+          # already refused in `acquire`, by name. With a declared delta this
+          # also runs `acquired_matches_lock` for it; with three blanks
+          # `parse_dependency_delta` reads no movement and this is unchanged.
           python scripts/kernel_lock.py verify \
             --lock work/poetry.lock \
             --digests /tmp/bundle/digests.json \
-            --kernel-version "${KERNEL_VERSION}"
+            --kernel-version "${KERNEL_VERSION}" \
+            --dependency "${DEPENDENCY}" \
+            --dependency-from "${DEPENDENCY_FROM}" \
+            --dependency-to "${DEPENDENCY_TO}"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -553,6 +643,9 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
+          DEPENDENCY: ${{ inputs.dependency }}
+          DEPENDENCY_FROM: ${{ inputs.dependency_from }}
+          DEPENDENCY_TO: ${{ inputs.dependency_to }}
         run: |
           set -euo pipefail
           # Every coordinate crosses as a shell variable, never as a GitHub
@@ -574,16 +667,29 @@ jobs:
           # incomplete is the wrong resolution of that finding. What remains is
           # the manifest and the lock, and for those the answer to a sighting
           # is REFUSAL, not redaction.
+          COORDINATE_ARGS=(
+            --coordinate "ref=${REF}"
+            --coordinate "kernel_version=${KERNEL_VERSION}"
+            --coordinate "repository=${REPOSITORY}"
+            --coordinate "workflow_run=${RUN_ID}"
+            --coordinate "run_attempt=${RUN_ATTEMPT}"
+            --coordinate "resolved_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          )
+          # Nothing is added here in kernel-only dispatch: with all three
+          # blank the artifact carries exactly the six coordinates above, byte
+          # for byte as before this input existed.
+          if [ -n "${DEPENDENCY}" ] || [ -n "${DEPENDENCY_FROM}" ] || [ -n "${DEPENDENCY_TO}" ]; then
+            COORDINATE_ARGS+=(
+              --coordinate "dependency=${DEPENDENCY}"
+              --coordinate "dependency_from=${DEPENDENCY_FROM}"
+              --coordinate "dependency_to=${DEPENDENCY_TO}"
+            )
+          fi
           python scripts/kernel_lock.py evidence \
             --out /tmp/evidence \
             --manifest /tmp/pair/pyproject.toml \
             --lock /tmp/pair/poetry.lock \
-            --coordinate "ref=${REF}" \
-            --coordinate "kernel_version=${KERNEL_VERSION}" \
-            --coordinate "repository=${REPOSITORY}" \
-            --coordinate "workflow_run=${RUN_ID}" \
-            --coordinate "run_attempt=${RUN_ATTEMPT}" \
-            --coordinate "resolved_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            "${COORDINATE_ARGS[@]}"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

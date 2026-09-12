@@ -94,8 +94,9 @@ import subprocess
 import tomllib
 import urllib.parse
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 #: The private index this assembly resolves Dotmac packages from. The workflow
 #: names the same URL for its own `curl`; a drift between the two is caught by
@@ -136,6 +137,22 @@ KERNEL = "dotmac-kernel"
 #: `python-versions` or an added dependency arrived inside the one entry the
 #: change was about and nothing looked.
 KERNEL_MUTABLE_FIELDS = frozenset({"version", "files"})
+
+#: The only other package a dispatch may declare a movement for, alongside the
+#: kernel it always moves. CLOSED — not "every dependency this manifest
+#: happens to carry" — because a declared movement is exempted from the drift
+#: gate's blanket refusal, and widening the set widens what a caller can move
+#: through this workflow without a second reviewer noticing. A name is added
+#: here only by review, in the same change that states why that package's pin
+#: must move together with the kernel's (see `docs/adr` for the composed-
+#: maximum relationship `scripts/kernel_floor.py` enforces between them).
+DECLARABLE_DEPENDENCIES: Final = frozenset({"dotmac-deployment-control"})
+
+#: The only two fields a DECLARED dependency's entry may change. Identical
+#: reasoning to `KERNEL_MUTABLE_FIELDS`: a version move changes `version` and
+#: `files` and nothing else, and this is not a second, looser allowlist for
+#: whichever package happens to be declared.
+DEPENDENCY_MUTABLE_FIELDS: Final = KERNEL_MUTABLE_FIELDS
 
 #: The two files a consumer must apply TOGETHER. The lock's content-hash is
 #: derived from the manifest, so either one alone describes a tree that does
@@ -291,6 +308,93 @@ def replace_kernel_version(text: str, version: str) -> str:
             f"{count}. Refusing rather than guessing which one the pin is."
         )
     return edited
+
+
+# ── declaring one additional dependency movement ────────────────────────────
+
+
+@dataclass(frozen=True)
+class DependencyDelta:
+    """One caller-declared movement of a package in `DECLARABLE_DEPENDENCIES`.
+
+    Exists because `scripts/kernel_floor.py` makes the kernel pin EQUAL the
+    composed maximum, so a real repin can require `dotmac-deployment-control`
+    to move together with the kernel — and the drift gate, correctly, refuses
+    any movement it was not told about. This is the thing a caller tells it.
+    """
+
+    name: str
+    before: str
+    after: str
+
+
+def parse_dependency_delta(
+    name: str, before: str, after: str
+) -> DependencyDelta | None:
+    """The three `workflow_dispatch` inputs, judged, or `None` for kernel-only.
+
+    ALL-OR-NONE. Supplying none of the three preserves today's kernel-only
+    behaviour exactly; supplying some but not all is refused by name, so a
+    caller cannot half-declare a movement and have it partially exempted.
+    """
+
+    fields = {"dependency": name, "dependency_from": before, "dependency_to": after}
+    blank = sorted(key for key, value in fields.items() if not value.strip())
+    if len(blank) == 3:
+        return None
+    if blank:
+        raise Refusal(
+            "a declared dependency movement needs all three of `dependency`, "
+            "`dependency_from` and `dependency_to`, or none of them; missing: "
+            f"{', '.join(blank)}"
+        )
+    if name not in DECLARABLE_DEPENDENCIES:
+        raise Refusal(
+            f"{name!r} is not in the closed allowlist of declarable "
+            f"dependencies {sorted(DECLARABLE_DEPENDENCIES)!r}; a name is "
+            "added there only by review"
+        )
+    for label, version in (("dependency_from", before), ("dependency_to", after)):
+        if "+" in version:
+            raise Refusal(
+                f"{label} {version!r} carries a PEP 440 local version segment "
+                "(`+...`); a local segment names a version no index can "
+                "serve, so it can be neither the old nor the new immutable "
+                "coordinate"
+            )
+        if not _EXACT_VERSION.fullmatch(version):
+            raise Refusal(f"{label} {version!r} is not an exact version")
+    if before == after:
+        raise Refusal(
+            f"{name} is declared to move from {before!r} to itself; an "
+            "unchanged declared dependency is not a movement, and the "
+            "resulting lock would say nothing about it"
+        )
+    return DependencyDelta(name=name, before=before, after=after)
+
+
+def replace_dependency_version(text: str, delta: DependencyDelta) -> str:
+    """Move the declared dependency's pin, or refuse. Mirrors
+    `replace_kernel_version`, including its ambiguity refusal, and adds one
+    more: the version actually declared must be the one the caller claimed
+    was there, checked at the SOURCE, before anything is resolved against it.
+    """
+
+    anchor = re.compile(rf'({re.escape(delta.name)} = \{{ version = ")([^"]+)(")')
+    matches = list(anchor.finditer(text))
+    if len(matches) != 1:
+        raise Refusal(
+            f"expected exactly one {delta.name} version declaration, matched "
+            f"{len(matches)}. Refusing rather than guessing which one the pin "
+            "is."
+        )
+    matched_version = matches[0].group(2)
+    if matched_version != delta.before:
+        raise Refusal(
+            f"{delta.name} is declared at {matched_version!r}, not the "
+            f"declared `dependency_from` {delta.before!r}"
+        )
+    return anchor.sub(rf"\g<1>{delta.after}\g<3>", text)
 
 
 # ── manifest-guard: the candidate checkout ──────────────────────────────────
@@ -527,14 +631,54 @@ def dependency_problems(manifest: dict[str, Any]) -> list[str]:
     return problems
 
 
-def _kernel_declaration(manifest: dict[str, Any]) -> Any:
+def _dependency_declaration(manifest: dict[str, Any], name: str) -> Any:
     for _table, deps in _poetry_constraint_tables(manifest):
-        if KERNEL in deps:
-            return deps[KERNEL]
+        if name in deps:
+            return deps[name]
     return None
 
 
-def manifest_problems(manifest: dict[str, Any], kernel_version: str) -> list[str]:
+def _kernel_declaration(manifest: dict[str, Any]) -> Any:
+    return _dependency_declaration(manifest, KERNEL)
+
+
+def declared_version_problems(
+    manifest: dict[str, Any], name: str, expected: str
+) -> list[str]:
+    """The manifest declares `name` at exactly `expected`, from the index.
+
+    Reuses `_poetry_constraint_tables` and the same shape-checking as the
+    kernel's own declaration in `manifest_problems`, rather than a second
+    parser that could read the manifest a different way.
+    """
+
+    declared = _dependency_declaration(manifest, name)
+    if declared is None:
+        return [f"no {name} dependency to resolve"]
+    if isinstance(declared, dict):
+        problems: list[str] = []
+        if declared.get("version") != expected:
+            problems.append(
+                f"{name} declares {declared.get('version')!r} after the edit, "
+                f"asked for {expected!r}"
+            )
+        if declared.get("source") != INDEX_SOURCE_NAME:
+            problems.append(
+                f"{name} resolves from {declared.get('source')!r}, not "
+                f"{INDEX_SOURCE_NAME!r}"
+            )
+        return problems
+    return [
+        f"{name} is declared as a bare constraint, so nothing binds it to the "
+        f"{INDEX_SOURCE_NAME!r} index"
+    ]
+
+
+def manifest_problems(
+    manifest: dict[str, Any],
+    kernel_version: str,
+    delta: DependencyDelta | None = None,
+) -> list[str]:
     """Everything about this manifest that would misdirect the credential.
 
     The threat is not only code execution. Poetry resolves `POETRY_HTTP_BASIC_
@@ -549,6 +693,10 @@ def manifest_problems(manifest: dict[str, Any], kernel_version: str) -> list[str
     `project.dependencies` supplies dependencies and `tool.poetry.dependencies`
     only annotates them — used to be unexamined, because the traversal read
     `tool.poetry` and nothing else. `dependency_problems` reads every form.
+
+    `delta`, when supplied, additionally requires the manifest declares
+    `delta.name` at `delta.after` — the second manifest rewrite the workflow
+    performs, checked the same way the kernel's own edit is checked above.
     """
 
     problems: list[str] = []
@@ -607,6 +755,8 @@ def manifest_problems(manifest: dict[str, Any], kernel_version: str) -> list[str
             f"{KERNEL} is declared as a bare constraint, so nothing binds it "
             f"to the {INDEX_SOURCE_NAME!r} index"
         )
+    if delta is not None:
+        problems += declared_version_problems(manifest, delta.name, delta.after)
     return problems
 
 
@@ -1138,6 +1288,58 @@ def hash_problems(
     return problems
 
 
+def acquired_matches_lock(
+    acquired: dict[str, str], lock: dict[str, Any], name: str, version: str
+) -> list[str]:
+    """The bytes acquired for `name`/`version` and the lock's `files` for it
+    name exactly the same artifacts, with identical hashes.
+
+    Two distinct defects, checked in both directions: a real artifact that was
+    acquired but that the lock never names (the resolver had bytes nothing
+    downstream can verify), and a `files` entry with no acquired artifact
+    behind it (a hash for bytes this run never actually held). Collapsing the
+    two into one message would hide which direction failed.
+    """
+
+    matching = {
+        filename: digest
+        for filename, digest in acquired.items()
+        if artifact_belongs_to(filename, name, version)
+    }
+    entries = [
+        entry
+        for entry in lock.get("package", [])
+        if entry.get("name") == name and entry.get("version") == version
+    ]
+    if len(entries) != 1:
+        return [
+            f"the lock carries {len(entries)} {name} {version} entries, expected one"
+        ]
+    locked = {
+        item.get("file"): item.get("hash") for item in entries[0].get("files", [])
+    }
+
+    problems: list[str] = []
+    for filename, digest in sorted(matching.items()):
+        expected = f"sha256:{digest}"
+        if filename not in locked:
+            problems.append(
+                f"{filename} was acquired but the lock's {name} {version} "
+                "entry does not name it"
+            )
+        elif locked[filename] != expected:
+            problems.append(
+                f"{filename}: the lock says {locked[filename]!r}, the "
+                f"acquired bytes hash to {expected!r}"
+            )
+    for filename in sorted(set(locked) - set(matching)):
+        problems.append(
+            f"the lock's {name} {version} entry names {filename!r}, which is "
+            "not an artifact this run acquired"
+        )
+    return problems
+
+
 # ── drift ───────────────────────────────────────────────────────────────────
 
 
@@ -1201,22 +1403,88 @@ def _kernel_entry_problems(
     return problems
 
 
-def drift_problems(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
-    """Everything outside the moved pin that is not identical.
+def _declared_delta_problems(
+    old: dict[tuple[str, str], dict[str, Any]],
+    new: dict[tuple[str, str], dict[str, Any]],
+    delta: DependencyDelta,
+) -> list[str]:
+    """The DECLARED dependency's entry may move its version and its files.
+    Nothing else — the same rule as `_kernel_entry_problems`, for the one
+    additional package a caller declared a movement for.
+
+    Unlike the kernel, this package's presence in the lock at all is
+    conditional on the manifest, so an unexpected count on either side is
+    reported with the counts rather than assumed to be exactly one.
+    """
+
+    old_entries = {key: value for key, value in old.items() if key[0] == delta.name}
+    new_entries = {key: value for key, value in new.items() if key[0] == delta.name}
+    if len(old_entries) != 1 or len(new_entries) != 1:
+        return [
+            f"expected exactly one {delta.name} entry on each side, found "
+            f"{len(old_entries)} before and {len(new_entries)} after"
+        ]
+
+    ((old_key, before),) = old_entries.items()
+    ((new_key, after),) = new_entries.items()
+    problems: list[str] = []
+    if old_key[1] != delta.before:
+        problems.append(
+            f"{delta.name} was locked at {old_key[1]!r} before this run, not "
+            f"the declared `dependency_from` {delta.before!r}"
+        )
+    if new_key[1] != delta.after:
+        problems.append(
+            f"{delta.name} resolved to {new_key[1]!r}, not the declared "
+            f"`dependency_to` {delta.after!r}"
+        )
+    if before == after:
+        problems.append(f"{delta.name} did not move; this lock says nothing")
+        return problems
+
+    problems += [
+        f"{delta.name} changed `{field}`, which a declared movement may not "
+        f"change: {before.get(field)!r} -> {after.get(field)!r}"
+        for field in _changed_fields(before, after)
+        if field not in DEPENDENCY_MUTABLE_FIELDS
+    ]
+    source = after.get("source")
+    if isinstance(source, dict) and source.get("url") != INDEX_URL:
+        problems.append(
+            f"{delta.name} resolved from {source.get('url')!r}, not {INDEX_URL!r}"
+        )
+    return problems
+
+
+def drift_problems(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    delta: DependencyDelta | None = None,
+) -> list[str]:
+    """Everything outside the moved pin(s) that is not identical.
 
     The comparison this replaced keyed on `(name, version)` and compared file
     hashes, so a package silently repointed at a different index — a changed
     `[package.source]`, same name, same version, same files — resolved clean.
     So did changed `dependencies`, `extras`, `python-versions`, `optional`,
     `groups`, and every field of `[metadata]`. Whole entries, whole tables.
+
+    `delta`, when supplied, excludes `delta.name` from the blanket "everything
+    else must be identical" comparison exactly as `KERNEL` already is, and
+    checks it with `_declared_delta_problems` instead. Being a member of
+    `DECLARABLE_DEPENDENCIES` does not by itself exempt a package — only a
+    delta supplied to THIS call does; with `delta=None` a `dotmac-deployment-
+    control` movement is still reported as unrelated drift, unchanged from
+    before this existed.
     """
 
     problems: list[str] = []
     old = _entries(before)
     new = _entries(after)
 
-    old_other = {key: value for key, value in old.items() if key[0] != KERNEL}
-    new_other = {key: value for key, value in new.items() if key[0] != KERNEL}
+    excluded = {KERNEL} | ({delta.name} if delta is not None else set())
+    old_other = {key: value for key, value in old.items() if key[0] not in excluded}
+    new_other = {key: value for key, value in new.items() if key[0] not in excluded}
 
     for name, version in sorted(set(new_other) - set(old_other)):
         problems.append(f"{name} {version} appeared")
@@ -1228,6 +1496,8 @@ def drift_problems(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
             problems.append(f"{key[0]} {key[1]} changed {', '.join(fields)}")
 
     problems += _kernel_entry_problems(old, new)
+    if delta is not None:
+        problems += _declared_delta_problems(old, new, delta)
 
     old_meta = before.get("metadata", {})
     new_meta = after.get("metadata", {})
@@ -1410,6 +1680,12 @@ def _build_parser() -> argparse.ArgumentParser:
     edit.add_argument("--manifest", type=Path, required=True)
     edit.add_argument("--kernel-version", required=True)
 
+    set_dependency = subcommands.add_parser("set-dependency-version")
+    set_dependency.add_argument("--manifest", type=Path, required=True)
+    set_dependency.add_argument("--dependency", required=True)
+    set_dependency.add_argument("--dependency-from", required=True)
+    set_dependency.add_argument("--dependency-to", required=True)
+
     guard = subcommands.add_parser("manifest-guard")
     guard.add_argument("--manifest", type=Path, required=True)
     guard.add_argument("--checkout", type=Path, required=True)
@@ -1434,6 +1710,9 @@ def _build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--lock", type=Path, required=True)
     verify.add_argument("--digests", type=Path, required=True)
     verify.add_argument("--kernel-version", required=True)
+    verify.add_argument("--dependency", default="")
+    verify.add_argument("--dependency-from", default="")
+    verify.add_argument("--dependency-to", default="")
 
     wheel_only = subcommands.add_parser("wheel-only")
     wheel_only.add_argument("--lock", type=Path, required=True)
@@ -1441,6 +1720,14 @@ def _build_parser() -> argparse.ArgumentParser:
     drift = subcommands.add_parser("drift")
     drift.add_argument("--before", type=Path, required=True)
     drift.add_argument("--after", type=Path, required=True)
+    drift.add_argument("--dependency", default="")
+    drift.add_argument("--dependency-from", default="")
+    drift.add_argument("--dependency-to", default="")
+
+    declared = subcommands.add_parser("declared")
+    declared.add_argument("--manifest", type=Path, required=True)
+    declared.add_argument("--name", required=True)
+    declared.add_argument("--version", required=True)
 
     evidence = subcommands.add_parser("evidence")
     evidence.add_argument("--out", type=Path, required=True)
@@ -1457,6 +1744,21 @@ def _run(args: argparse.Namespace) -> int:
             replace_kernel_version(text, args.kernel_version), encoding="utf-8"
         )
         print(f"{KERNEL} -> {args.kernel_version}")
+        return 0
+    if args.command == "set-dependency-version":
+        delta = parse_dependency_delta(
+            args.dependency, args.dependency_from, args.dependency_to
+        )
+        if delta is None:
+            raise Refusal(
+                "set-dependency-version requires --dependency, "
+                "--dependency-from and --dependency-to together"
+            )
+        text = args.manifest.read_text(encoding="utf-8")
+        args.manifest.write_text(
+            replace_dependency_version(text, delta), encoding="utf-8"
+        )
+        print(f"{delta.name} -> {delta.after}")
         return 0
     if args.command == "manifest-guard":
         return _report(
@@ -1505,19 +1807,32 @@ def _run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "verify":
         digests = json.loads(args.digests.read_text(encoding="utf-8"))
-        return _report(
-            "the lock against the published bytes",
-            hash_problems(_load_toml(args.lock), digests, args.kernel_version),
+        lock = _load_toml(args.lock)
+        problems = hash_problems(lock, digests, args.kernel_version)
+        delta = parse_dependency_delta(
+            args.dependency, args.dependency_from, args.dependency_to
         )
+        if delta is not None:
+            problems += acquired_matches_lock(digests, lock, delta.name, delta.after)
+        return _report("the lock against the published bytes", problems)
     if args.command == "wheel-only":
         return _report(
             "the resolution is wheel-only",
             lock_wheel_problems(_load_toml(args.lock)),
         )
     if args.command == "drift":
+        delta = parse_dependency_delta(
+            args.dependency, args.dependency_from, args.dependency_to
+        )
         return _report(
             "unrelated lock drift",
-            drift_problems(_load_toml(args.before), _load_toml(args.after)),
+            drift_problems(_load_toml(args.before), _load_toml(args.after), delta),
+        )
+    if args.command == "declared":
+        manifest = _load_toml(args.manifest)
+        return _report(
+            f"the manifest declares {args.name}",
+            declared_version_problems(manifest, args.name, args.version),
         )
     if args.command != "evidence":
         raise Refusal(f"unknown command {args.command!r}")
