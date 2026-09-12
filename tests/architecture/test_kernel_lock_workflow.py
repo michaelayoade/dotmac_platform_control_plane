@@ -51,11 +51,13 @@ shows it silent on the plant the new one names.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import sys
 import tomllib
 import urllib.parse
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +96,8 @@ from kernel_lock import (  # noqa: E402
     kernel_artifact_names,
     lock_wheel_problems,
     manifest_problems,
+    metadata_binding_problems,
+    metadata_dependencies,
     pair_binding,
     parse_dependency_delta,
     parseable_wheels,
@@ -106,6 +110,7 @@ from kernel_lock import (  # noqa: E402
     sha256sums,
     transfer_problems,
     wheel_only_problems,
+    wheel_requires_dist,
 )
 
 # ── fixtures for the lock comparison ────────────────────────────────────────
@@ -396,14 +401,34 @@ def _after_with_control() -> dict[str, Any]:
     return lock
 
 
-def test_a_well_formed_kernel_and_control_delta_produces_no_problems() -> None:
+def test_a_well_formed_kernel_and_control_delta_produces_no_problems(
+    tmp_path: Path,
+) -> None:
     """THE POSITIVE CONTROL. Without this, a gate that refused everything
-    below would pass every plant in this section for the wrong reason."""
+    below would pass every plant in this section for the wrong reason.
 
-    assert (
-        drift_problems(_before_with_control(), _after_with_control(), CONTROL_DELTA)
-        == []
+    It now supplies a BUNDLE, because a declared movement without one is itself
+    refused: `dependencies` is the one field a movement may change, so it must
+    be bound to the acquired wheel's own `Requires-Dist` rather than trusted.
+    """
+
+    bundle = _bundle(tmp_path)
+    digest = _digest_of(bundle)
+    control = _control_entry(
+        "0.1.0a13",
+        {"dotmac-kernel": ">=0.1.0a100", "sqlalchemy": ">=2.0,<3.0"},
+        digest,
     )
+    before_control = dict(
+        control,
+        version="0.1.0a6",
+        dependencies={"dotmac-kernel": ">=0.1.0a98", "sqlalchemy": ">=2.0,<3.0"},
+    )
+    before = _lock(
+        [_package(KERNEL, "0.1.0a98", source=_INDEX_SOURCE), before_control], "A"
+    )
+    after = _lock([_package(KERNEL, "0.1.0a100", source=_INDEX_SOURCE), control], "B")
+    assert drift_problems(before, after, CONTROL_DELTA, bundle) == []
 
 
 def test_a_control_movement_with_no_delta_is_still_unrelated_drift() -> None:
@@ -2415,3 +2440,177 @@ def test_no_declared_dependency_input_is_interpolated_into_a_shell_script() -> N
         for line in text.splitlines():
             if name in line:
                 assert line.strip().startswith(("DEPENDENCY", "#")), line
+
+
+# ── the one mutable field is bound to the artifact's own metadata ───────────
+
+
+_A13_REQUIRES = ("dotmac-kernel (>=0.1.0a100)", "sqlalchemy (>=2.0,<3.0)")
+
+
+def _bundle(tmp_path: Path, requires: tuple[str, ...] = _A13_REQUIRES) -> Path:
+    """A bundle laid out as `acquire` lays one out, holding a real a13 wheel."""
+
+    bundle = tmp_path / "bundle"
+    (bundle / "files").mkdir(parents=True)
+    wheel = bundle / "files" / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    metadata = (
+        "Metadata-Version: 2.1\n"
+        f"Name: {CONTROL}\n"
+        "Version: 0.1.0a13\n"
+        + "".join(f"Requires-Dist: {requirement}\n" for requirement in requires)
+        + "\nprose body, after the blank line\n"
+    )
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "dotmac_deployment_control-0.1.0a13.dist-info/METADATA", metadata
+        )
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    (bundle / "digests.json").write_text(json.dumps({wheel.name: digest}))
+    return bundle
+
+
+def _control_entry(
+    version: str, dependencies: dict[str, str], digest: str
+) -> dict[str, Any]:
+    return {
+        "name": CONTROL,
+        "version": version,
+        "source": dict(_INDEX_SOURCE),
+        "files": [
+            {
+                "file": "dotmac_deployment_control-0.1.0a13-py3-none-any.whl",
+                "hash": f"sha256:{digest}",
+            }
+        ],
+        "dependencies": dict(dependencies),
+        "description": "",
+        "optional": False,
+        "python-versions": ">=3.12,<3.14",
+    }
+
+
+def _digest_of(bundle: Path) -> str:
+    return next(iter(json.loads((bundle / "digests.json").read_text()).values()))
+
+
+def test_the_moved_dependencies_may_equal_the_wheels_requires_dist(
+    tmp_path: Path,
+) -> None:
+    """POSITIVE CONTROL, and the reason this binding exists.
+
+    `dependencies` is the one field a declared movement may change, because a
+    new version is entitled to require different things — a13 requiring kernel
+    `>=0.1.0a100` is precisely why the kernel pin has to move. Before the
+    binding this was refused outright; it must now be permitted, but only at
+    exactly the wheel's own values.
+    """
+
+    bundle = _bundle(tmp_path)
+    digest = _digest_of(bundle)
+    entry = _control_entry(
+        "0.1.0a13",
+        {"dotmac-kernel": ">=0.1.0a100", "sqlalchemy": ">=2.0,<3.0"},
+        digest,
+    )
+    name = entry["files"][0]["file"]
+    problems = metadata_binding_problems(entry, bundle / "files" / name, {name: digest})
+    assert problems == []
+
+
+def test_a_constraint_the_wheel_does_not_declare_is_refused(tmp_path: Path) -> None:
+    """The attack this closes: `dependencies` is the one field a movement may
+    alter, so it is the field through which an arbitrary constraint could
+    otherwise arrive inside a reviewed pin change."""
+
+    bundle = _bundle(tmp_path)
+    digest = _digest_of(bundle)
+    entry = _control_entry(
+        "0.1.0a13",
+        {"dotmac-kernel": ">=0.1.0a98", "sqlalchemy": ">=2.0,<3.0"},
+        digest,
+    )
+    name = entry["files"][0]["file"]
+    problems = metadata_binding_problems(entry, bundle / "files" / name, {name: digest})
+    assert len(problems) == 1, problems
+    assert ">=0.1.0a100" in problems[0] and ">=0.1.0a98" in problems[0], problems
+
+
+def test_a_dependency_the_wheel_never_declared_is_refused(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    digest = _digest_of(bundle)
+    entry = _control_entry(
+        "0.1.0a13",
+        {"dotmac-kernel": ">=0.1.0a100", "sqlalchemy": ">=2.0,<3.0", "requests": ">=2"},
+        digest,
+    )
+    name = entry["files"][0]["file"]
+    problems = metadata_binding_problems(entry, bundle / "files" / name, {name: digest})
+    assert any("requests" in problem for problem in problems), problems
+
+
+def test_metadata_is_not_read_out_of_bytes_the_lock_does_not_match(
+    tmp_path: Path,
+) -> None:
+    """Digest first. Metadata from a file whose hash nobody checked is an
+    unverified claim, and this gate would be quoting it as evidence."""
+
+    bundle = _bundle(tmp_path)
+    digest = _digest_of(bundle)
+    entry = _control_entry(
+        "0.1.0a13",
+        {"dotmac-kernel": ">=0.1.0a100", "sqlalchemy": ">=2.0,<3.0"},
+        "0" * 64,
+    )
+    name = entry["files"][0]["file"]
+    problems = metadata_binding_problems(entry, bundle / "files" / name, {name: digest})
+    assert len(problems) == 1 and "do not match the lock" in problems[0], problems
+
+
+def test_a_declared_movement_without_a_bundle_is_refused(tmp_path: Path) -> None:
+    """The binding may not be skipped by omitting the thing it binds to."""
+
+    bundle = _bundle(tmp_path)
+    digest = _digest_of(bundle)
+    control = _control_entry(
+        "0.1.0a13",
+        {"dotmac-kernel": ">=0.1.0a100", "sqlalchemy": ">=2.0,<3.0"},
+        digest,
+    )
+    before_control = dict(control, version="0.1.0a6")
+    before_control["dependencies"] = {
+        "dotmac-kernel": ">=0.1.0a98",
+        "sqlalchemy": ">=2.0,<3.0",
+    }
+    before = _lock(
+        [_package(KERNEL, "0.1.0a98", source=_INDEX_SOURCE), before_control], "A"
+    )
+    after = _lock([_package(KERNEL, "0.1.0a100", source=_INDEX_SOURCE), control], "B")
+    problems = drift_problems(before, after, CONTROL_DELTA, None)
+    assert any("no acquired bundle" in problem for problem in problems), problems
+
+
+def test_a_conditional_requires_dist_is_refused_rather_than_ignored() -> None:
+    """Silently ignoring the part of the metadata this gate cannot model is how
+    a comparison stops being able to disagree."""
+
+    with pytest.raises(Refusal, match="conditional requirement"):
+        metadata_dependencies(
+            ("dotmac-kernel (>=0.1.0a100)", 'pytest (>=8) ; extra == "testing"')
+        )
+
+
+def test_requires_dist_is_read_from_the_wheel_and_stops_at_the_body(
+    tmp_path: Path,
+) -> None:
+    """Non-vacuity for every test above: the reader must actually find the
+    lines, and must not scrape a `Requires-Dist:` lookalike out of the prose
+    body that follows the headers."""
+
+    bundle = _bundle(tmp_path)
+    wheel = bundle / "files" / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    assert wheel_requires_dist(wheel) == list(_A13_REQUIRES)
+    assert metadata_dependencies(wheel_requires_dist(wheel)) == {
+        "dotmac_kernel": ">=0.1.0a100",
+        "sqlalchemy": ">=2.0,<3.0",
+    }
