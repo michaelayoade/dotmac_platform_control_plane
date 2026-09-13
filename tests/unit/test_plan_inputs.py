@@ -19,14 +19,13 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from dotmac_kernel import NotFoundError
-from dotmac_kernel.testing import create_test_engine, isolated_session
-from sqlalchemy.orm import Session
-
 from dotmac_deployment_control import (
     AuthorizationSignature,
     AuthorizationSignerIdentity,
 )
+from dotmac_kernel import NotFoundError
+from dotmac_kernel.testing import create_test_engine, isolated_session
+from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.deployment import adapter

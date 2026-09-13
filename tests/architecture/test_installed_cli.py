@@ -279,7 +279,9 @@ def test_deployment_authorize_with_no_signer_refuses_capability_absent(
     def _fake_platform_db():
         yield object()
 
-    monkeypatch.setattr(adapter_module, "authorize_deployment", _fake_authorize_deployment)
+    monkeypatch.setattr(
+        adapter_module, "authorize_deployment", _fake_authorize_deployment
+    )
     monkeypatch.setattr(commands, "platform_db", _fake_platform_db)
 
     args = argparse.Namespace(

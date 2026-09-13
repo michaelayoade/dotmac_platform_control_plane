@@ -84,8 +84,7 @@ COMPOSED_DISTRIBUTIONS = (
 #: not. `TRUNCATE ONLY` is the near-miss that proves this exclusion is the
 #: narrow one rather than one that happens to work on today's two triggers.
 DELETION_SQL = re.compile(
-    r"\bDELETE\s+FROM\b"
-    r"|\bTRUNCATE\s+(?!ON\b)(?:TABLE\s+)?[A-Za-z_\"{]",
+    r"\bDELETE\s+FROM\b" r"|\bTRUNCATE\s+(?!ON\b)(?:TABLE\s+)?[A-Za-z_\"{]",
     re.IGNORECASE,
 )
 
@@ -369,7 +368,7 @@ def test_the_downgrade_exclusion_rests_on_a_checkable_premise() -> None:
     assert '"downgrade"' not in cli
 
 
-def test_the_attestation_trust_registry_exclusion_rests_on_a_checkable_premise() -> None:
+def test_attestation_trust_registry_exclusion_rests_on_a_checkable_premise() -> None:
     """`repair_current_root` and `revoke_root`'s `NOT_COMPOSED` premise, made
     testable rather than asserted in prose.
 

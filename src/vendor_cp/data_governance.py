@@ -942,7 +942,7 @@ DELETION_SITES: Final[tuple[DeletionSite, ...]] = (
         premise="this assembly composes the `deployment_control` module but "
         "mounts no attestation-trust surface: zero call sites for "
         "`attestation_trust_registry` under `src/vendor_cp`, checked by "
-        "`test_the_attestation_trust_registry_exclusion_rests_on_a_checkable_"
+        "`test_attestation_trust_registry_exclusion_rests_on_a_checkable_"
         "premise` below, which scans this repository's own source the same "
         "way this file's scan does",
     ),

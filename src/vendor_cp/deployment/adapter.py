@@ -322,7 +322,9 @@ def _authorization_window_ceiling() -> timedelta:
     return timedelta(seconds=seconds)
 
 
-def _enforce_authorization_window(expires_at: datetime, *, now: datetime | None = None) -> None:
+def _enforce_authorization_window(
+    expires_at: datetime, *, now: datetime | None = None
+) -> None:
     """Refuse — never clamp — a window longer than the configured ceiling.
 
     `now` is a keyword-only seam for deterministic tests; every real caller
