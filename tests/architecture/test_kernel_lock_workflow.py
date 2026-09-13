@@ -70,6 +70,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import kernel_lock  # noqa: E402
 from kernel_lock import (  # noqa: E402
     ARCHIVE_MAX_MEMBERS,
+    ARCHIVE_MAX_NAME_BYTES,
     ARTIFACT_MAX_BYTES,
     ARTIFACT_ORIGIN,
     DECLARABLE_DEPENDENCIES,
@@ -2947,3 +2948,124 @@ def test_bytes_over_the_limit_are_measured_and_removed(
     with pytest.raises(Refusal, match="were measured and the file removed"):
         kernel_lock.fetch(f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", target)
     assert not target.exists(), "the oversized file must not be left on disk"
+
+
+# ── partial artifacts, uncontrolled exceptions, and member names ────────────
+
+
+def _wheel_with(tmp_path: Path, extra: tuple[str, ...] = ()) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\nprose\n")
+        for member in extra:
+            archive.writestr(member, "x")
+    return wheel
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "status"),
+    ((63, ""), (28, ""), (0, "404")),
+)
+def test_a_refused_transfer_leaves_no_partial_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int, status: str
+) -> None:
+    """The bounds that ABORT a transfer leave the largest partial files.
+
+    `--max-filesize` exits 63 and `--max-time` exits 28 with whatever bytes
+    arrived still on disk, and a 404 writes a body too. A later step that globs
+    the bundle would find the fragment and have no way to know it was
+    abandoned, so every refusal path removes it.
+    """
+
+    target = tmp_path / "artifact.whl"
+
+    def fake_run(*_args: Any, **_kwargs: Any) -> Any:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"partial bytes that must not survive")
+
+        class _Completed:
+            returncode = exit_code
+            stdout = status or "200"
+            stderr = "aborted"
+
+        return _Completed()
+
+    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    with pytest.raises(Refusal):
+        kernel_lock.fetch(f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", target)
+    assert not target.exists(), "a refused transfer must leave nothing behind"
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    (
+        (b"this is not a zip file", "not a readable zip archive"),
+        (b"PK\x03\x04 truncated", "not a readable zip archive"),
+        (b"", "not a readable zip archive"),
+    ),
+)
+def test_an_unreadable_archive_is_a_refusal_not_a_traceback(
+    tmp_path: Path, payload: bytes, expected: str
+) -> None:
+    """`main` catches `Refusal` and nothing else, so an uncontrolled exception
+    surfaces as a stack trace with no `::error::` line — the operator sees a
+    CRASHED gate rather than a REFUSED input and cannot tell which happened."""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    wheel.write_bytes(payload)
+    with pytest.raises(Refusal, match=expected):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_a_missing_wheel_is_a_refusal(tmp_path: Path) -> None:
+    with pytest.raises(Refusal, match="cannot be read"):
+        wheel_metadata(
+            tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl",
+            CONTROL,
+            "0.1.0a13",
+        )
+
+
+def test_a_non_string_requirement_is_a_refusal() -> None:
+    with pytest.raises(Refusal, match="not a string"):
+        metadata_dependencies([None])  # type: ignore[list-item]
+
+
+@pytest.mark.parametrize(
+    ("member", "expected"),
+    (
+        ("/etc/passwd", "absolute or non-POSIX"),
+        ("a/../../../etc/passwd", "traversing member name"),
+        ("a\\b", "absolute or non-POSIX"),
+        ("z" * (ARCHIVE_MAX_NAME_BYTES + 1), "over the"),
+    ),
+)
+def test_a_hostile_member_name_is_refused(
+    tmp_path: Path, member: str, expected: str
+) -> None:
+    """A member NAME is attacker-controlled and is read before any content is."""
+
+    wheel = _wheel_with(tmp_path / "names", (member,))
+    with pytest.raises(Refusal, match=expected):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_a_clean_archive_is_still_accepted_after_the_name_bounds(
+    tmp_path: Path,
+) -> None:
+    """POSITIVE CONTROL — and it earned its place.
+
+    The first draft of the name loop bound `name = member.filename`, SHADOWING
+    this function's own `name` parameter, so the identity check below compared
+    the project name against a member path and every archive was refused. The
+    refusals above all still passed; only this control caught it.
+    """
+
+    wheel = _wheel_with(tmp_path / "clean", ("dotmac_files/__init__.py",))
+    headers = wheel_metadata(wheel, CONTROL, "0.1.0a13")
+    assert headers["requires-dist"] == [
+        "dotmac-kernel (>=0.1.0a100)",
+        "sqlalchemy (>=2.0,<3.0)",
+    ]

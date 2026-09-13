@@ -88,16 +88,18 @@ import base64
 import hashlib
 import html.parser
 import json
+import ntpath
 import os
 import re
 import subprocess
 import tomllib
 import urllib.parse
 import zipfile
+import zlib
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
 #: The private index this assembly resolves Dotmac packages from. The workflow
 #: names the same URL for its own `curl`; a drift between the two is caught by
@@ -1046,6 +1048,20 @@ def fetch(url: str, target: Path) -> None:
     """
 
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    def refuse(message: str) -> NoReturn:
+        """Remove what landed, THEN refuse.
+
+        Every refusal below leaves a partial file otherwise, and the bounds
+        that abort a transfer are exactly the paths that leave the LARGEST one:
+        `--max-filesize` exits 63 and `--max-time` exits 28 with whatever bytes
+        arrived still on disk. A later step that globs the bundle would then
+        find an oversized fragment and have no way to know it was abandoned.
+        """
+
+        target.unlink(missing_ok=True)
+        raise Refusal(message)
+
     # S603: the argument vector is built by `curl_argv` from a fixed list, and
     # `url` has already been through `approved_artifact_url` — https, the
     # approved authority, under the approved path prefix. No shell is involved.
@@ -1056,14 +1072,16 @@ def fetch(url: str, target: Path) -> None:
         text=True,
     )
     if completed.returncode != 0:
-        raise Refusal(f"curl failed for {url}: {completed.stderr.strip()}")
+        refuse(
+            f"curl failed for {url} (exit {completed.returncode}): "
+            f"{completed.stderr.strip()}"
+        )
     problems = transfer_problems(url, completed.stdout.strip())
     if problems:
-        raise Refusal(problems[0])
+        refuse(problems[0])
     landed = target.stat().st_size if target.exists() else 0
     if landed > ARTIFACT_MAX_BYTES:
-        target.unlink(missing_ok=True)
-        raise Refusal(
+        refuse(
             f"{url} delivered {landed} bytes, over the {ARTIFACT_MAX_BYTES} "
             "limit; the declared-length bound did not catch it, so the bytes "
             "were measured and the file removed"
@@ -1598,6 +1616,12 @@ ARTIFACT_MAX_BYTES: Final = 128 << 20
 ARTIFACT_MAX_SECONDS: Final = 300
 ARCHIVE_MAX_MEMBERS: Final = 2_048
 ARCHIVE_MAX_TOTAL_UNCOMPRESSED: Final = 256 << 20
+#: A member NAME is attacker-controlled and is read before any content is. Bound
+#: its length, and bound the sum of every name — that sum IS the central
+#: directory's size, which `zipfile` has already read by the time this runs, so
+#: the bound exists to refuse the archive rather than to avoid reading it.
+ARCHIVE_MAX_NAME_BYTES: Final = 256
+ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES: Final = 1 << 20
 
 #: Core Metadata headers that may appear AT MOST ONCE. A second `Name` or
 #: `Version` makes the file state two identities, and which one a reader
@@ -1723,14 +1747,29 @@ def wheel_metadata(wheel: Path, name: str, version: str) -> dict[str, list[str]]
     # an archive with millions of entries. The file's size on disk is the only
     # thing knowable before any parsing, and it bounds the central directory
     # too, so it is checked first.
-    size = wheel.stat().st_size
+    try:
+        size = wheel.stat().st_size
+    except OSError as exc:
+        raise Refusal(f"{wheel.name} cannot be read: {exc}") from exc
     if size > WHEEL_MAX_BYTES:
         raise Refusal(
             f"{wheel.name} is {size} bytes on disk, over the "
             f"{WHEEL_MAX_BYTES} limit; refusing to open it"
         )
 
-    with zipfile.ZipFile(wheel) as archive:
+    # A corrupt, truncated or non-zip file is a REFUSAL, not a traceback. `main`
+    # catches `Refusal` and nothing else, so an uncontrolled exception here
+    # would surface as a stack trace with no `::error::` line — the operator
+    # would see a crashed gate rather than a refused input, and could not tell
+    # which of the two had happened.
+    try:
+        archive = zipfile.ZipFile(wheel)
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, EOFError) as exc:
+        raise Refusal(
+            f"{wheel.name} is not a readable zip archive: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    with archive:
         members = archive.infolist()
         if len(members) > ARCHIVE_MAX_MEMBERS:
             raise Refusal(
@@ -1743,6 +1782,38 @@ def wheel_metadata(wheel: Path, name: str, version: str) -> dict[str, list[str]]
                 f"{wheel.name} declares {total} uncompressed bytes across its "
                 f"members, over the {ARCHIVE_MAX_TOTAL_UNCOMPRESSED} limit"
             )
+        names = sum(len(member.filename.encode("utf-8")) for member in members)
+        if names > ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES:
+            raise Refusal(
+                f"{wheel.name}'s member names total {names} bytes, over the "
+                f"{ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES} central-directory limit"
+            )
+        for member in members:
+            encoded = member.filename.encode("utf-8")
+            if len(encoded) > ARCHIVE_MAX_NAME_BYTES:
+                raise Refusal(
+                    f"{wheel.name} carries a member name of {len(encoded)} "
+                    f"bytes, over the {ARCHIVE_MAX_NAME_BYTES} limit: "
+                    f"{member.filename[:60]!r}…"
+                )
+            # NOT `name` — that is this function's parameter, and binding it
+            # here made the identity check below compare the project name
+            # against a member path. Same shadowing defect as the `_wheel`
+            # helper collision, inside the function it was added to protect.
+            member_name = member.filename
+            if (
+                member_name.startswith("/")
+                or "\\" in member_name
+                or ntpath.splitdrive(member_name)[0]
+            ):
+                raise Refusal(
+                    f"{wheel.name} carries an absolute or non-POSIX member "
+                    f"name {member_name!r}"
+                )
+            if any(part == ".." for part in member_name.split("/")):
+                raise Refusal(
+                    f"{wheel.name} carries a traversing member name " f"{member_name!r}"
+                )
         candidates = [
             info
             for info in members
@@ -1781,7 +1852,19 @@ def wheel_metadata(wheel: Path, name: str, version: str) -> dict[str, list[str]]
                 f"{METADATA_MAX_COMPRESSION_RATIO}:1 limit; refusing to "
                 "decompress it"
             )
-        raw = archive.read(info)
+        try:
+            raw = archive.read(info)
+        except (
+            zipfile.BadZipFile,
+            zipfile.LargeZipFile,
+            OSError,
+            EOFError,
+            zlib.error,
+        ) as exc:
+            raise Refusal(
+                f"{wheel.name}: {info.filename} cannot be decompressed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
     if len(raw) > METADATA_MAX_BYTES:
         raise Refusal(
             f"{wheel.name}: {info.filename} inflated to {len(raw)} bytes, over "
@@ -1846,6 +1929,11 @@ def metadata_dependencies(requirements: Iterable[str]) -> dict[str, str]:
 
     mapping: dict[str, str] = {}
     for requirement in requirements:
+        if not isinstance(requirement, str):
+            raise Refusal(
+                f"a Requires-Dist value is {type(requirement).__name__}, not a "
+                "string; this gate refuses rather than coercing it"
+            )
         if ";" in requirement:
             raise Refusal(
                 f"the wheel declares a conditional requirement {requirement!r}; "
