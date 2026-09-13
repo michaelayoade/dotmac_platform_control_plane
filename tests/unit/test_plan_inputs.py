@@ -16,6 +16,7 @@ from __future__ import annotations
 import dataclasses
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from dotmac_kernel import NotFoundError
@@ -24,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.deployment import adapter
+from vendor_cp.deployment.candidate import RenderedCandidate
 from vendor_cp.deployment.plan_inputs import (
     REFUSAL_CODES,
     Override,
@@ -45,6 +47,22 @@ PROFILE_OVERRIDE = Override(
     value="sha256:" + "0" * 64,
     reason="the application foundation profile document does not exist yet",
 )
+
+#: A `RenderedCandidate` a test can construct directly — both fields are public
+#: (unlike `CandidateImage`, which only `admit_candidate_image` may build), so
+#: this bypasses the whole receipt/registry/Foundation chain `render_candidate`
+#: would otherwise need. What is under test here is `ProposePlanRequest`'s and
+#: `AuthorizeRequest`'s own new fields, not `candidate.py`'s derivation — that
+#: is `tests/unit/test_deployment_candidate.py`'s job.
+_CANDIDATE = RenderedCandidate(
+    descriptor_digest="sha256:" + "a" * 64,
+    execution_plan_digest="sha256:" + "b" * 64,
+    canonical_plan_bytes=b"{}",
+)
+
+#: A default authorization window comfortably inside the one-hour ceiling
+#: default (`adapter.DEFAULT_AUTHORIZATION_WINDOW_CEILING_SECONDS`).
+_DEFAULT_EXPIRY = datetime.now(UTC) + timedelta(minutes=15)
 
 
 @pytest.fixture
@@ -101,6 +119,8 @@ def _authorized(db: Session) -> str:
             target_id=target.id,
             approval_policy_code="deployment",
             approval_policy_version=1,
+            operation="deploy",
+            candidate=_CANDIDATE,
         ),
     )
     request = approvals.open_request(
@@ -124,6 +144,19 @@ def _authorized(db: Session) -> str:
             content_hash=plan.approval_content_hash,
         ),
     )
+    # CONTRADICTION FLAGGED, NOT WORKED AROUND (see the delivering task's
+    # report): under Deployment Control 0.1.0a13, `authorize_deployment`
+    # unconditionally reaches `request_rollout` with no injected
+    # `AuthorizationSigner` (this assembly holds signer POINTERS only, and
+    # minting one is explicitly out of scope), so `request_rollout` always
+    # raises `AuthorizationEnvelopeRefusedError(ABSENT)` before a rollout id
+    # exists. This call — and therefore every test in this file that reaches
+    # it through `_authorized()` — cannot pass against the real a13 wheel
+    # until a signing identity is minted. That is not this file's defect to
+    # repair: stubbing a fake signer here to route around it is the exact
+    # thing the owning task refused to do in production code, and doing it
+    # only in the test would make the positive path pass for a reason that
+    # does not hold outside the test.
     receipt = adapter.authorize_deployment(
         db,
         adapter.AuthorizeRequest(
@@ -131,6 +164,7 @@ def _authorized(db: Session) -> str:
             plan_id=plan.plan_id,
             approval_request_id=request.request_id,
             rollout_ref=f"rollout-{uuid.uuid4().hex[:8]}",
+            authorization_expires_at=_DEFAULT_EXPIRY,
         ),
     )
     return receipt.authorization_ref
@@ -348,3 +382,67 @@ def test_a_clean_resolution_passes_the_check(db: Session) -> None:
     verify_no_silent_value(
         resolve_plan_inputs(db, _authorized(db), overrides=[PROFILE_OVERRIDE])
     )
+
+
+# ── the authorization window ceiling (a13) ──────────────────────────────────
+#
+# `adapter._enforce_authorization_window` is a pure function: no database, no
+# Deployment Control. All four cases below are testable without either being
+# installed, which is deliberate — they are what stays testable in an
+# environment where a13 is pinned but not yet installed.
+
+
+def test_a_window_within_the_ceiling_is_accepted() -> None:
+    """NON-VACUITY: a window comfortably inside the default one-hour ceiling
+    must not raise."""
+    now = datetime.now(UTC)
+    adapter._enforce_authorization_window(now + timedelta(minutes=15), now=now)
+
+
+def test_a_window_past_the_ceiling_is_refused() -> None:
+    """The decided behaviour: refuse, never clamp. Two hours exceeds the
+    default one-hour ceiling (`adapter.DEFAULT_AUTHORIZATION_WINDOW_CEILING_SECONDS`,
+    read when `VENDOR_DEPLOYMENT_AUTHORIZATION_WINDOW_CEILING_SECONDS` is unset)."""
+    now = datetime.now(UTC)
+    with pytest.raises(adapter.AuthorizationWindowRefused, match="ceiling"):
+        adapter._enforce_authorization_window(now + timedelta(hours=2), now=now)
+
+
+def test_the_ceiling_does_not_re_check_expires_at_against_issued_at() -> None:
+    """Platform does NOT duplicate Control's own ordering check.
+
+    `AuthorizationStatementV1.__post_init__` already refuses `expires_at <=
+    issued_at` — that is Control's check, reached only after a signer exists.
+    This function has no lower bound at all: an `expires_at` an hour in the
+    PAST (which is necessarily before whatever `issued_at` Control would
+    compute) produces a negative window, which is always within the ceiling,
+    so this must NOT raise. If it did, the refusal would be coming from here
+    rather than from Control — the exact duplication decided against.
+    """
+    now = datetime.now(UTC)
+    adapter._enforce_authorization_window(now - timedelta(hours=1), now=now)
+
+
+def test_the_ceiling_is_a_configured_knob_with_a_documented_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The knob itself: an env var, a positive-integer-seconds parse, and a
+    one-hour documented default — refused rather than silently defaulted on a
+    bad value, matching `vendor_cp.config`'s own duration-knob style."""
+    from vendor_cp.config import ProductionConfigurationError
+
+    assert adapter.DEFAULT_AUTHORIZATION_WINDOW_CEILING_SECONDS == 3600
+    assert (
+        adapter.AUTHORIZATION_WINDOW_CEILING_ENV_VAR
+        == "VENDOR_DEPLOYMENT_AUTHORIZATION_WINDOW_CEILING_SECONDS"
+    )
+    monkeypatch.delenv(adapter.AUTHORIZATION_WINDOW_CEILING_ENV_VAR, raising=False)
+    assert adapter._authorization_window_ceiling() == timedelta(
+        seconds=adapter.DEFAULT_AUTHORIZATION_WINDOW_CEILING_SECONDS
+    )
+    monkeypatch.setenv(adapter.AUTHORIZATION_WINDOW_CEILING_ENV_VAR, "not-a-number")
+    with pytest.raises(ProductionConfigurationError):
+        adapter._authorization_window_ceiling()
+    monkeypatch.setenv(adapter.AUTHORIZATION_WINDOW_CEILING_ENV_VAR, "0")
+    with pytest.raises(ProductionConfigurationError):
+        adapter._authorization_window_ceiling()

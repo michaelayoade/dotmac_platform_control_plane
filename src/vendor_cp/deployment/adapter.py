@@ -86,9 +86,10 @@ from the decision it claims to describe.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 from uuid import UUID
 
@@ -120,6 +121,8 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.approvals.adapter import approved_request_evidence
 from vendor_cp.approvals_authority import bare_content_hash
+from vendor_cp.config import ProductionConfigurationError
+from vendor_cp.deployment.candidate import RenderedCandidate
 from vendor_cp.identity import (
     AUTHORITY_DISTRIBUTION,
     DISTRIBUTION,
@@ -205,12 +208,38 @@ class DeploymentIdentityMismatch(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ProposePlanRequest:
-    """Freeze a target's current desired state under a named approval policy."""
+    """Freeze a target's current desired state under a named approval policy.
+
+    ## `operation` and `candidate` — one value threaded to two places (a13)
+
+    `operation` is required and has no default, matching `ProposePlanCommand`'s
+    own refusal: DEPLOY and ROLLBACK (and RECOVER) are separately authorized
+    operations, never inferred from a caller's silence.
+
+    `candidate` carries BOTH digests `ProposePlanCommand` now requires
+    (`descriptor_digest`, `execution_plan_digest`) as the `RenderedCandidate`
+    `vendor_cp.deployment.candidate.render_candidate` produced — never as two
+    bare `str` fields. ADR-0013 A6.4 requires the plan's inputs to derive from
+    one immutable reference; a `descriptor_digest`/`execution_plan_digest` pair
+    typed as independent strings would let a caller supply either without the
+    other having been rendered from it, which is exactly the silent join A6.4
+    refuses. Typing the parameter as the rendered binding leaves an
+    operator-typed digest nowhere to go.
+
+    THE SINGLE-SOURCE INVARIANT this file enforces: the caller must pass the
+    SAME `operation` value used to produce `candidate` (via `render_candidate`)
+    as this request's own `operation`. If the two ever diverged, Platform could
+    digest a plan for operation A and authorize operation B under it — this
+    dataclass cannot see that on its own, so the CLI constructs both from one
+    local variable read once (see `cli.commands.deployment_propose`).
+    """
 
     command_id: str
     target_id: UUID
     approval_policy_code: str
     approval_policy_version: int
+    operation: str
+    candidate: RenderedCandidate
     actor_ref: str | None = None
 
 
@@ -239,6 +268,83 @@ class ProposedPlan:
     subject_type: str = PLAN_SUBJECT_TYPE
 
 
+#: The maximum span between now and `AuthorizeRequest.authorization_expires_at`
+#: this assembly will sign for, in seconds. Named in this repository's config
+#: style (an env-var knob with a documented default), rather than as a
+#: `VendorSettings` field: this knob is read exactly once, at the point of use,
+#: because it protects a per-command decision rather than a startup mode.
+#:
+#: One hour is a CONSERVATIVE DOCUMENTED DEFAULT, not an approved policy. The
+#: accepted ceiling VALUE is a decision pending the repository owner's
+#: acceptance; what is decided here is only that a ceiling exists and that
+#: crossing it is refused rather than silently clamped — clamping would sign a
+#: window different from the one the operator was shown.
+AUTHORIZATION_WINDOW_CEILING_ENV_VAR: Final[str] = (
+    "VENDOR_DEPLOYMENT_AUTHORIZATION_WINDOW_CEILING_SECONDS"
+)
+DEFAULT_AUTHORIZATION_WINDOW_CEILING_SECONDS: Final[int] = 3600
+
+
+class AuthorizationWindowRefused(ValueError):
+    """`authorization_expires_at` asks for a window longer than the ceiling.
+
+    This assembly's OWN policy, decided before Deployment Control is asked
+    anything — never a duplicate of a check the module already makes. Control
+    bounds `expires_at` only against `issued_at` (`AuthorizationStatementV1
+    .__post_init__`: `expires_at must be later than issued_at`); it accepts
+    dates decades out. This is the only place the WINDOW's length is bounded.
+    """
+
+
+def _authorization_window_ceiling() -> timedelta:
+    """The configured ceiling, or the documented default. Never silent about
+    a misconfiguration: an unparsable or non-positive value is a configuration
+    mistake, and `ProductionConfigurationError` is already mapped to
+    `config.invalid` — the same family `VendorSettings`' own duration knobs
+    raise for the identical shape of mistake.
+    """
+    raw = os.getenv(AUTHORIZATION_WINDOW_CEILING_ENV_VAR, "").strip()
+    if not raw:
+        return timedelta(seconds=DEFAULT_AUTHORIZATION_WINDOW_CEILING_SECONDS)
+    try:
+        seconds = int(raw)
+    except ValueError as error:
+        raise ProductionConfigurationError(
+            f"{AUTHORIZATION_WINDOW_CEILING_ENV_VAR}={raw!r} is not an integer "
+            "number of seconds"
+        ) from error
+    if seconds <= 0:
+        raise ProductionConfigurationError(
+            f"{AUTHORIZATION_WINDOW_CEILING_ENV_VAR}={seconds} must be "
+            "positive; a non-positive ceiling would refuse every authorization"
+        )
+    return timedelta(seconds=seconds)
+
+
+def _enforce_authorization_window(expires_at: datetime, *, now: datetime | None = None) -> None:
+    """Refuse — never clamp — a window longer than the configured ceiling.
+
+    `now` is a keyword-only seam for deterministic tests; every real caller
+    leaves it `None` and gets the wall clock. Deliberately does NOT compare
+    `expires_at` against `issued_at`: Control already refuses that ordering in
+    `AuthorizationStatementV1.__post_init__`, and a value in the PAST relative
+    to `now` produces a negative window here, which is always within the
+    ceiling — this function has no lower bound, only an upper one, because
+    bounding the past is not this policy's job.
+    """
+    reference = now if now is not None else datetime.now(UTC)
+    window = expires_at - reference
+    ceiling = _authorization_window_ceiling()
+    if window > ceiling:
+        raise AuthorizationWindowRefused(
+            f"authorization_expires_at={expires_at.isoformat()!r} is "
+            f"{window} from now, which exceeds the configured ceiling of "
+            f"{ceiling}. Refusing rather than clamping: signing a shorter "
+            "window than the one shown would authorize something the "
+            "operator did not see."
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorizeRequest:
     """Carry an approvals decision into a frozen plan, then request its rollout."""
@@ -247,6 +353,11 @@ class AuthorizeRequest:
     plan_id: UUID
     approval_request_id: UUID
     rollout_ref: str
+    #: Required, aware-UTC. a13's `RequestRolloutCommand.authorization_expires_at`
+    #: has no default: an authorization with no stated expiry is one nothing
+    #: ever revokes. A naive instant is refused at the CLI, before it reaches
+    #: this dataclass — an instant with no offset has no knowable intent.
+    authorization_expires_at: datetime
     reason: str | None = None
     actor_ref: str | None = None
     #: Optional integrity binding. When present it is compared BYTE FOR BYTE
@@ -478,6 +589,14 @@ def propose_deployment_plan(db: Session, request: ProposePlanRequest) -> Propose
         ProposePlanCommand(
             command_id=request.command_id,
             target_id=request.target_id,
+            # ONE value, read from `request.operation`, threaded to the SAME
+            # place `request.candidate` was rendered for. See
+            # `ProposePlanRequest`'s docstring for why a second, independently
+            # supplied operation here would let Platform authorize a different
+            # operation than the one it digested.
+            operation=request.operation,
+            descriptor_digest=request.candidate.descriptor_digest,
+            execution_plan_digest=request.candidate.execution_plan_digest,
             requires_approval=True,
             approval_policy_code=request.approval_policy_code,
             approval_policy_version=request.approval_policy_version,
@@ -522,7 +641,22 @@ def authorize_deployment(
     and never run, so the rollout would silently not happen and the command
     would report success. The derived suffixes keep both steps idempotent under
     the operator's single id, which is what a retry of this command needs.
+
+    ## This deployment cannot complete this command today
+
+    `request_rollout` (a13) takes an injected `AuthorizationSigner` and raises
+    `AuthorizationEnvelopeRefusedError(ABSENT)` when none is supplied. This
+    assembly holds signer POINTERS only — identities are unminted by design
+    (`vendor_cp.deployment.signers`, `readiness_packet.HELD_PENDING_MINT`) — so
+    no real signer exists here to pass, and this call always reaches that
+    refusal. Supplying one is key material and production activation, which is
+    explicitly out of scope: this function does not pre-empt Control with a
+    duplicate check, and does not stub or fake a signer. The refusal arrives
+    honestly, mapped by `cli.runtime._BY_NAME` to `evidence.capability_absent`
+    rather than `execution.failed` — a plan CAN be proposed and approved in
+    this deployment; it cannot be rolled out until a signing identity exists.
     """
+    _enforce_authorization_window(request.authorization_expires_at)
     plan = read_plan(db, request.plan_id)
     frozen = plan.plan_digest
     if not frozen:
@@ -572,6 +706,7 @@ def authorize_deployment(
             command_id=f"{request.command_id}:rollout",
             rollout_ref=request.rollout_ref,
             plan_id=plan.id,
+            authorization_expires_at=request.authorization_expires_at,
             reason=request.reason,
             actor_ref=request.actor_ref,
         ),
@@ -600,8 +735,11 @@ def authorize_deployment(
 
 
 __all__ = [
+    "AUTHORIZATION_WINDOW_CEILING_ENV_VAR",
+    "DEFAULT_AUTHORIZATION_WINDOW_CEILING_SECONDS",
     "PLAN_SUBJECT_TYPE",
     "AuthorizationReceipt",
+    "AuthorizationWindowRefused",
     "AuthorizeRequest",
     "DeploymentIdentityMismatch",
     "DeploymentTargetFacts",

@@ -26,6 +26,7 @@ import argparse
 import json
 import tomllib
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from uuid import UUID
 
 from vendor_cp.cli.exits import ExitCode, refuse
@@ -743,20 +744,71 @@ def deployment_targets(args: argparse.Namespace) -> Result:
 
 
 def deployment_propose(args: argparse.Namespace) -> Result:
-    """Freeze the target's desired state, and print what an approval must bind to."""
+    """Freeze the target's desired state, and print what an approval must bind to.
+
+    `--operation` is read ONCE, into a local variable, and passed to BOTH
+    `render_candidate` (below) and `ProposePlanRequest.operation`. That single
+    read is the whole single-source invariant: if this command instead read
+    `args.operation` twice at two call sites, a future edit could let them
+    drift, and Platform would digest a plan for one operation while
+    authorizing another under it.
+    """
     from vendor_cp.deployment.adapter import (
         ProposePlanRequest,
         propose_deployment_plan,
+        read_target,
+    )
+    from vendor_cp.deployment.candidate import (
+        RegistryObservation,
+        ReleaseReceiptV1,
+        admit_candidate_image,
+        render_candidate,
     )
 
+    operation = args.operation
+    receipt_raw = read_bytes(args.release_receipt, what="release receipt")
+    try:
+        receipt_document = json.loads(receipt_raw)
+    except json.JSONDecodeError as error:
+        raise refuse(
+            "usage.invalid_argument",
+            f"{args.release_receipt} is not readable JSON ({error})",
+        ) from error
+    if not isinstance(receipt_document, dict):
+        raise refuse(
+            "usage.invalid_argument",
+            f"{args.release_receipt} does not hold a JSON object, so there is "
+            "no release receipt to read",
+        )
+    receipt = ReleaseReceiptV1.from_document(receipt_document)
+    observation = RegistryObservation(
+        manifest_digest=args.registry_manifest_digest,
+        revision_label=args.registry_revision_label,
+    )
+    image = admit_candidate_image(receipt, observation)
+
     with platform_db() as db:
+        target_id = UUID(args.target_id)
+        # `target` is Control's OWN registered fact for this id, read here
+        # rather than taken as a second CLI-typed value — the same
+        # single-source reasoning as `operation` above, applied to the other
+        # value `render_candidate` needs that this assembly already knows.
+        target = read_target(db, target_id)
+        candidate = render_candidate(
+            args.descriptor,
+            image,
+            target=target.target_ref,
+            operation=operation,
+        )
         plan = propose_deployment_plan(
             db,
             ProposePlanRequest(
                 command_id=args.command_id,
-                target_id=UUID(args.target_id),
+                target_id=target_id,
                 approval_policy_code=args.policy_code,
                 approval_policy_version=args.policy_version,
+                operation=operation,
+                candidate=candidate,
                 actor_ref=args.actor_ref,
             ),
         )
@@ -778,6 +830,33 @@ def deployment_propose(args: argparse.Namespace) -> Result:
         )
 
 
+def _parse_authorization_expires_at(value: str) -> datetime:
+    """An aware UTC instant, or a `usage.invalid_argument` refusal.
+
+    A NAIVE instant is refused HERE, at parse time, before any database
+    session opens: it has no offset, so it has no knowable intent. This is
+    syntax validation — commands.py's own "validate" responsibility — not the
+    window-ceiling POLICY, which is `vendor_cp.deployment.adapter`'s and is
+    checked once this value reaches `authorize_deployment`.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise refuse(
+            "usage.invalid_argument",
+            f"--authorization-expires-at {value!r} is not a readable ISO-8601 "
+            f"instant ({error})",
+        ) from error
+    if parsed.tzinfo is None:
+        raise refuse(
+            "usage.invalid_argument",
+            f"--authorization-expires-at {value!r} has no UTC offset. An "
+            "instant with no offset has no knowable intent; state it as e.g. "
+            f"{value}+00:00",
+        )
+    return parsed
+
+
 def deployment_authorize(args: argparse.Namespace) -> Result:
     """Carry the approval into the frozen plan and request the rollout.
 
@@ -785,8 +864,21 @@ def deployment_authorize(args: argparse.Namespace) -> Result:
     identity — the middle term a deployment foundation binds between the
     canonical descriptor and its own execution report. It is the reason this
     command exists.
+
+    ## This deployment cannot finish this command today
+
+    Signer identities are unminted by design (`vendor_cp.deployment.signers`),
+    so `authorize_deployment` always reaches Deployment Control's
+    `AuthorizationEnvelopeRefusedError(ABSENT)` — mapped to exit 4
+    (`evidence.capability_absent`), not a 5. The plan CAN be proposed and
+    approved in this deployment; it cannot be rolled out until a signing
+    identity is minted. That is not this command's failure to hide: it is
+    stated in `message` below, on the one path that reaches it — a refusal
+    that arrives honestly is not silent about what's missing.
     """
     from vendor_cp.deployment.adapter import AuthorizeRequest, authorize_deployment
+
+    expires_at = _parse_authorization_expires_at(args.authorization_expires_at)
 
     with platform_db() as db:
         receipt = authorize_deployment(
@@ -796,6 +888,7 @@ def deployment_authorize(args: argparse.Namespace) -> Result:
                 plan_id=UUID(args.plan_id),
                 approval_request_id=UUID(args.approval_request_id),
                 rollout_ref=args.rollout_ref,
+                authorization_expires_at=expires_at,
                 reason=args.reason,
                 actor_ref=args.actor_ref,
                 expected_plan_digest=args.expect_plan_digest,

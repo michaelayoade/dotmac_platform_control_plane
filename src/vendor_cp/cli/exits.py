@@ -123,6 +123,10 @@ REFUSAL_CODES: Final[dict[str, ExitCode]] = {
     # vocabulary fault (that is `usage.invalid_argument`, below) — the word is
     # valid and the counterparty cannot honour it.
     "owner.operation_not_executable": ExitCode.REFUSED,
+    # This assembly's OWN policy, decided before Control is asked anything: an
+    # `authorization_expires_at` requesting a window longer than the
+    # configured ceiling. Retrying with the same window is refused again.
+    "owner.authorization_window_refused": ExitCode.REFUSED,
     # ── absent or unreachable evidence (4) ─────────────────────────────────
     "evidence.not_found": ExitCode.UNAVAILABLE,
     "evidence.tool_absent": ExitCode.UNAVAILABLE,

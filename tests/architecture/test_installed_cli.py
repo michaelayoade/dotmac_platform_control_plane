@@ -203,6 +203,35 @@ def test_every_raised_refusal_code_is_declared() -> None:
     assert undeclared == [], undeclared
 
 
+def test_a_naive_authorization_expiry_is_refused_at_parse_time() -> None:
+    """`deployment authorize --authorization-expires-at` refuses a NAIVE
+    instant before any database session opens.
+
+    An instant with no UTC offset has no knowable intent. This is syntax
+    validation (commands.py's own "validate" responsibility), never the
+    window-ceiling POLICY, which is `vendor_cp.deployment.adapter`'s and is
+    checked only once a value reaches `authorize_deployment` — this test
+    proves the naive case never gets that far.
+    """
+    from vendor_cp.cli import commands
+    from vendor_cp.cli.exits import Refusal
+
+    with pytest.raises(Refusal) as caught:
+        commands._parse_authorization_expires_at("2026-01-01T00:00:00")
+    assert caught.value.code == "usage.invalid_argument"
+
+
+def test_an_aware_authorization_expiry_parses_cleanly() -> None:
+    """NON-VACUITY: a value that IS aware must not be refused."""
+    from datetime import UTC
+
+    from vendor_cp.cli import commands
+
+    parsed = commands._parse_authorization_expires_at("2026-01-01T00:00:00+00:00")
+    assert parsed.tzinfo is not None
+    assert parsed.astimezone(UTC).year == 2026
+
+
 def test_no_option_accepts_a_secret_as_its_value() -> None:
     """`/proc/<pid>/cmdline` is world-readable for as long as a process lives.
 

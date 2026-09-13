@@ -388,6 +388,40 @@ def build_parser() -> _Parser:
     propose.add_argument("--target-id", required=True)
     propose.add_argument("--policy-code", required=True)
     propose.add_argument("--policy-version", type=int, required=True)
+    propose.add_argument(
+        "--operation",
+        required=True,
+        help=(
+            "what this plan authorizes (deploy, rollback, recover). No "
+            "--choices list here: Deployment Control's require_operation owns "
+            "the closed vocabulary, and a Platform copy of it would drift"
+        ),
+    )
+    # DERIVATION inputs only — never a digest flag. See
+    # `vendor_cp.deployment.adapter.ProposePlanRequest`'s docstring: the two
+    # digests `ProposePlanCommand` now requires are carried as the
+    # `RenderedCandidate` this command renders from these four, not as
+    # operator-typed strings.
+    propose.add_argument(
+        "--descriptor",
+        required=True,
+        help="path to the accepted deployment descriptor (deploy/product.toml)",
+    )
+    propose.add_argument(
+        "--release-receipt",
+        required=True,
+        help="path to the release receipt JSON production-image.yml emitted",
+    )
+    propose.add_argument(
+        "--registry-manifest-digest",
+        required=True,
+        help="the registry's current resolution of the receipt's reference",
+    )
+    propose.add_argument(
+        "--registry-revision-label",
+        required=True,
+        help="the registry's current revision label for that reference",
+    )
     propose.add_argument("--actor-ref")
     propose.set_defaults(handler=commands.deployment_propose)
 
@@ -395,12 +429,24 @@ def build_parser() -> _Parser:
         deployment_sub,
         "deployment",
         "authorize",
-        "carry an approval into a frozen plan and request its rollout",
+        "carry an approval into a frozen plan and request its rollout — a "
+        "plan can be proposed and approved in this deployment, but this "
+        "command cannot complete: no signing identity is minted here yet "
+        "(exits 4, evidence.capability_absent)",
     )
     authorize.add_argument("--command-id", required=True)
     authorize.add_argument("--plan-id", required=True)
     authorize.add_argument("--approval-request-id", required=True)
     authorize.add_argument("--rollout-ref", required=True)
+    authorize.add_argument(
+        "--authorization-expires-at",
+        required=True,
+        help=(
+            "an aware ISO-8601 instant (with a UTC offset); a naive instant "
+            "is refused, and a window longer than the configured ceiling is "
+            "refused rather than clamped"
+        ),
+    )
     authorize.add_argument("--reason")
     authorize.add_argument("--actor-ref")
     authorize.add_argument(

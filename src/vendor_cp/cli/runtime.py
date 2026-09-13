@@ -183,6 +183,22 @@ _BY_NAME: Final[tuple[tuple[str, str], ...]] = (
     # is not what it claims to be" shape `DeploymentIdentityMismatch` above
     # already carries `integrity.digest_mismatch` for.
     ("CandidateArtifactRefusedError", "integrity.digest_mismatch"),
+    # ── `vendor_cp.deployment.candidate`'s own refusals. `render_candidate`
+    # had ZERO callers before the a13 repin gave `deployment propose` one, so
+    # neither of these could previously reach this CLI at all.
+    #
+    # `candidate.py`'s own docstring names the code for this one: "its
+    # absence is a runtime answer (`evidence.tool_absent`) ... exactly as
+    # `vendor_cp.recovery.bundle` already treats it."
+    ("FoundationAbsent", "evidence.tool_absent"),
+    # `CandidateRefused`'s own docstring: "This assembly compared what it was
+    # handed against what the receipt and the registry say, and stopped
+    # first" — word for word the same shape `DeploymentIdentityMismatch`
+    # above is mapped for, so it gets the same code.
+    ("CandidateRefused", "integrity.digest_mismatch"),
+    # `vendor_cp.deployment.adapter`'s own policy: an `authorization_expires_at`
+    # requesting a window longer than the configured ceiling.
+    ("AuthorizationWindowRefused", "owner.authorization_window_refused"),
 )
 
 
