@@ -490,6 +490,49 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
     ),
     _retain("mod_approvals", "platform_approval_requests", "what was asked for"),
     # ── `mod_deploy` (dotmac-deployment-control) ─────────────────────────
+    TablePolicy(
+        "mod_deploy",
+        "attestation_current_roots",
+        Disposition.LIFECYCLE_DELETE,
+        "the ONE genuinely mutable table `dc_0011_attestation_registry` adds "
+        "— its own docstring's phrase. `dc_0011` grants `platform_api` "
+        "`SELECT, INSERT` AND, separately, `UPDATE, DELETE` on it: rotation "
+        "moves the pointer with a compare-and-swap UPDATE, and revoking the "
+        "currently-trusted fingerprint for a `(custody_domain, subject)` "
+        "pair DELETEs the row, because there is no valid current root until "
+        "a new signed attempt recovers one. It is a PROJECTION, not a "
+        "record — the records are `attestation_enrolments` and "
+        "`attestation_fingerprint_closures`, both append-only, and "
+        "`dotmac_deployment_control.attestation_trust_registry`'s own "
+        "`repair_current_root` rebuilds this projection from that "
+        "append-only truth whenever it disagrees. ENFORCED_RETAIN would be "
+        "wrong here: it would make this enforcement REVOKE the DELETE that "
+        "`dc_0011` deliberately granted, so revocation would fail against "
+        "this database",
+        deleting_owner="dotmac_deployment_control.attestation_trust_registry's "
+        "revoke_root and repair_current_root",
+        trigger="revocation of the currently-trusted fingerprint for a "
+        "(custody_domain, subject) pair, and reconciliation repair when the "
+        "projection disagrees with the append-only truth",
+    ),
+    _retain(
+        "mod_deploy",
+        "attestation_enrolments",
+        "append-only: one row per signed enrolment or rotation statement, "
+        "never edited. `dc_0011_attestation_registry` grants `platform_api` "
+        "`SELECT, INSERT` only, and attaches `refuse_evidence_rewrite` plus "
+        "the truncate guard",
+    ),
+    _retain(
+        "mod_deploy",
+        "attestation_fingerprint_closures",
+        "the append-only ordering arbiter, `fingerprint` PRIMARY KEY: "
+        "whichever of a revocation and a supersession commits first for one "
+        "fingerprint wins that slot permanently, and there is no UPDATE path "
+        "to this table at all — no un-revoke and no un-supersede is "
+        "expressible. `dc_0011_attestation_registry` grants `platform_api` "
+        "`SELECT, INSERT` only",
+    ),
     _retain("mod_deploy", "deployment_plans", "what a deployment was told to do"),
     _retain(
         "mod_deploy",
@@ -502,6 +545,25 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "mod_deploy",
         "observation_receipts",
         "the signed observation of what a target actually ran",
+    ),
+    _retain(
+        "mod_deploy",
+        "recovery_grants",
+        "the signed recovery-authority record. `dc_0008_recovery_grants` "
+        "grants `platform_api` `SELECT, INSERT` and `UPDATE` — no DELETE. "
+        "Revocation is a state change (`revoked_at`), and the row stays: an "
+        "authorization trail that erases its own withdrawn entries cannot "
+        "answer who revoked this and when. `grant_envelope` is the verbatim "
+        "signed document",
+    ),
+    _retain(
+        "mod_deploy",
+        "rollout_attempt_settlements",
+        "one append-only terminal settlement row per attempt. "
+        "`dc_0010_attempt_settlements` grants `platform_api` `SELECT, "
+        "INSERT` only, and the unique `attempt_id` is both the "
+        "one-terminal-outcome invariant and the database arbiter when "
+        "different command ids race to settle one delivery",
     ),
     _retain("mod_deploy", "rollout_attempts", "every attempt, including failures"),
     _retain("mod_deploy", "rollouts", "what was rolled out, where, and when"),
@@ -870,6 +932,29 @@ DELETION_SITES: Final[tuple[DeletionSite, ...]] = (
         reachability=Reachability.NOT_COMPOSED,
         premise="a prune an operator schedules; this deployment schedules none, "
         "and the period it would need is a decision nobody has taken",
+    ),
+    DeletionSite(
+        distribution="dotmac-deployment-control",
+        module="dotmac_deployment_control.attestation_trust_registry",
+        symbol="repair_current_root",
+        target="mod_deploy.attestation_current_roots",
+        reachability=Reachability.NOT_COMPOSED,
+        premise="this assembly composes the `deployment_control` module but "
+        "mounts no attestation-trust surface: zero call sites for "
+        "`attestation_trust_registry` under `src/vendor_cp`, checked by "
+        "`test_the_attestation_trust_registry_exclusion_rests_on_a_checkable_"
+        "premise` below, which scans this repository's own source the same "
+        "way this file's scan does",
+    ),
+    DeletionSite(
+        distribution="dotmac-deployment-control",
+        module="dotmac_deployment_control.attestation_trust_registry",
+        symbol="revoke_root",
+        target="mod_deploy.attestation_current_roots",
+        reachability=Reachability.NOT_COMPOSED,
+        premise="as `repair_current_root`: zero call sites for "
+        "`attestation_trust_registry` under `src/vendor_cp`, same checked "
+        "premise",
     ),
 )
 

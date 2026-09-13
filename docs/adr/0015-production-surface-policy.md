@@ -95,6 +95,7 @@ and withholds:
 | `accounts` | An operator WRITE surface. § 4. |
 | `contracts` | An operator WRITE surface, nine mutating routes. § 4. |
 | `vendor_approvals` | An operator WRITE surface. § 4. |
+| `deployment_control` | The `dotmac-deployment-control` 0.1.0a13 repin newly published an operator WRITE surface that proposes deployment plans; publishing it is a production decision this repin does not make. Under a13 a browser-originated proposal cannot succeed at all: `ProposePlanCommand` requires a Foundation-rendered `execution_plan_digest`, and the module's own admin surface refuses any digest-shaped value arriving in a browser request — so the POST can only refuse, and publishing a page whose write action is structurally unable to succeed would be publishing a broken surface. |
 
 Every profile now carries an explicit `surface_inventory` stating what it
 publishes, checked at construction against the full roster of composed vendor

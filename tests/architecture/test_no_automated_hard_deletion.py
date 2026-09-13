@@ -58,8 +58,21 @@ COMPOSED_DISTRIBUTIONS = (
 #: A row deletion written as SQL. `TRUNCATE` needs a following identifier so the
 #: bare privilege NAME — which appears in every grant-verification helper in the
 #: vendor lineage — is not mistaken for a statement.
+#:
+#: The three negative lookbehinds exclude a trigger EVENT clause —
+#: `BEFORE`/`AFTER`/`INSTEAD OF ... TRUNCATE ON <table>` — from matching as a
+#: deletion statement. `dc_0010_attempt_settlements` and
+#: `dc_0011_attestation_registry` each install
+#: `CREATE TRIGGER ... BEFORE TRUNCATE ON mod_deploy.<table>`, a guard that
+#: REFUSES truncation, and without this exclusion the bare `TRUNCATE\s+...` half
+#: of this pattern reads the clause's own `ON` keyword as though it were the
+#: identifier a real `TRUNCATE` targets. A real `TRUNCATE TABLE x` / `TRUNCATE x`
+#: is never preceded by one of these three keywords, so the exclusion costs
+#: nothing in the direction that matters.
 DELETION_SQL = re.compile(
-    r"\bDELETE\s+FROM\b|\bTRUNCATE\s+(?:TABLE\s+)?[A-Za-z_\"{]", re.IGNORECASE
+    r"\bDELETE\s+FROM\b"
+    r"|(?<!BEFORE )(?<!AFTER )(?<!INSTEAD OF )\bTRUNCATE\s+(?:TABLE\s+)?[A-Za-z_\"{]",
+    re.IGNORECASE,
 )
 
 
@@ -235,6 +248,50 @@ def test_the_detector_names_a_planted_deletion() -> None:
     assert deletion_sites_in(PLANTED, "planted") == {("planted", "purge_the_audit_log")}
 
 
+PLANTED_TRUNCATE = '''
+"""A module docstring about a migration that truncates a table."""
+
+
+def wipe_rollout_attempts(op):
+    op.execute("TRUNCATE TABLE mod_deploy.rollout_attempts")
+'''
+
+PLANTED_TRIGGER_EVENT = '''
+"""A migration that installs a guard refusing truncation, not a deletion."""
+
+
+def upgrade(op):
+    op.execute(
+        """
+        CREATE TRIGGER refuse_evidence_truncate
+        BEFORE TRUNCATE ON mod_deploy.rollout_attempt_settlements
+        FOR EACH STATEMENT EXECUTE FUNCTION mod_deploy.refuse_evidence_rewrite();
+        """
+    )
+'''
+
+
+def test_the_detector_still_names_a_real_truncate_statement() -> None:
+    """The narrowing in Task 3 must not blind the scan to an actual `TRUNCATE`.
+
+    Same shape as a real migration body: a bare `TRUNCATE TABLE <table>`, with
+    no `BEFORE`/`AFTER`/`INSTEAD OF` anywhere near it.
+    """
+    assert deletion_sites_in(PLANTED_TRUNCATE, "planted") == {
+        ("planted", "wipe_rollout_attempts")
+    }
+
+
+def test_the_detector_does_not_name_a_trigger_event_clause() -> None:
+    """`dc_0010`'s and `dc_0011`'s own `BEFORE TRUNCATE ON <table>` shape.
+
+    This is the opposite of a deletion: it installs a guard that REFUSES
+    truncation. A ledger row describing a trigger definition would be a
+    classification describing nothing.
+    """
+    assert deletion_sites_in(PLANTED_TRIGGER_EVENT, "planted") == set()
+
+
 def test_the_detector_does_not_name_a_near_miss() -> None:
     """Prose, a comment, a privilege NAME in a tuple, a `REVOKE` statement and a
     call merely spelled like a deletion. Every one of these appears in real
@@ -278,6 +335,27 @@ def test_the_downgrade_exclusion_rests_on_a_checkable_premise() -> None:
 
     cli = (ROOT / "src" / "vendor_cp" / "cli" / "__init__.py").read_text()
     assert '"downgrade"' not in cli
+
+
+def test_the_attestation_trust_registry_exclusion_rests_on_a_checkable_premise() -> None:
+    """`repair_current_root` and `revoke_root`'s `NOT_COMPOSED` premise, made
+    testable rather than asserted in prose.
+
+    This assembly composes the `deployment_control` module (`vendor_cp.assembly`
+    imports it), but mounts no attestation-trust surface: nothing under
+    `src/vendor_cp` imports or calls
+    `dotmac_deployment_control.attestation_trust_registry`. The only file naming
+    the module is this repository's own ledger entry in
+    `vendor_cp/data_governance.py`, which declares the site rather than calling
+    it. If a future change wires an attestation-trust surface into this
+    assembly, this fails and the two sites must be reclassified.
+    """
+    hits = {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "src" / "vendor_cp").rglob("*.py")
+        if "attestation_trust_registry" in path.read_text(encoding="utf-8")
+    }
+    assert hits <= {"src/vendor_cp/data_governance.py"}, hits
 
 
 def test_every_declared_site_names_a_composed_distribution() -> None:

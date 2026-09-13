@@ -492,30 +492,17 @@ def test_the_planted_surface_genuinely_mounts_once_it_is_inventoried(
 
 
 # ── ADR-0019 was surface-neutral, and that is asserted, not argued ──────────
-
-
-def _legacy_spec(profile: VendorDeploymentProfile) -> ProductAssemblySpec:
-    """The composition ADR-0019 replaced: vendor adapters filtered, persistence
-    owners spliced in RAW.
-
-    `_profiled_surface` is shared with the current code rather than re-copied.
-    The only thing that changed inside it is that the `ModuleManifest` branch
-    now also clears `web_routers`/`nav`, and no composed manifest carries
-    either, so the two are the same function for every input this comparison
-    feeds them.
-    """
-    return ProductAssemblySpec(
-        name=assembly.ASSEMBLY_NAME,
-        module_planes=assembly.ASSEMBLY_MODULE_PLANES,
-        modules=(
-            *assembly.STATEFUL_MODULES,
-            *(
-                assembly._profiled_surface(feature, profile)
-                for feature in assembly.VENDOR_SURFACES
-            ),
-        ),
-        web_enabled=True,
-    )
+#
+# `test_extending_admission_to_composed_modules_mounted_and_removed_no_route`
+# lived here. Its own docstring pre-authorized exactly this: "it holds only
+# while no composed module bears a route. When one does, DELETE it rather than
+# repairing it — the comparison would then be measuring the new module, not
+# this change." The `dotmac-deployment-control` 0.1.0a13 repin is that event —
+# `deployment_control` is now route-bearing (three `platform_admin` GET pages,
+# one POST, two nav items) — so the premise it certified,
+# `route_bearing_codes(assembly.STATEFUL_MODULES) == frozenset()`, no longer
+# holds and the test is removed rather than repaired, per its own instruction.
+# `_legacy_spec`, its only caller, is removed with it.
 
 
 def _route_signatures(spec: ProductAssemblySpec) -> set[tuple[str, str, str]]:
@@ -527,32 +514,6 @@ def _route_signatures(spec: ProductAssemblySpec) -> set[tuple[str, str, str]]:
         )
         for route in create_app(spec).routes
     }
-
-
-def test_extending_admission_to_composed_modules_mounted_and_removed_no_route() -> None:
-    """C — the neutrality claim, measured rather than reasoned.
-
-    ADR-0019 changed which manifests the profile filters and dropped
-    `release_evidence` from three inventories. Neither is allowed to have moved
-    a route, and the profile versions were deliberately NOT bumped on exactly
-    that ground: rule 11 ties a bump to the effective surface set, and a bump
-    that signalled a change nobody made would be its own kind of lie.
-
-    The premise assertion comes first on purpose. This test certifies a change
-    that is already history; it holds only while no composed module bears a
-    route. When one does, DELETE it rather than repairing it — the comparison
-    would then be measuring the new module, not this change.
-    """
-    assert route_bearing_codes(assembly.STATEFUL_MODULES) == frozenset(), (
-        "the premise changed; this test certified that extending profile "
-        "admission to composed modules mounted and removed no route, which was "
-        "true only while no composed module bore one. Delete it — the change it "
-        "certifies is historical — rather than repairing it."
-    )
-    for profile in PROFILES:
-        assert _route_signatures(assembly.build_spec(profile)) == _route_signatures(
-            _legacy_spec(profile)
-        ), profile.code
 
 
 def test_the_neutrality_comparison_can_see_a_route() -> None:

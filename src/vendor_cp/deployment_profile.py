@@ -363,13 +363,14 @@ class VendorDeploymentProfile:
 PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     VendorDeploymentProfile(
         code=FULL,
-        version="3",
+        version="4",
         withheld_surfaces=frozenset(),
         surface_inventory=(
             "accounts",
             "allocations",
             "console",
             "contracts",
+            "deployment_control",
             "licence_delivery",
             "offers",
             "provisioning",
@@ -384,13 +385,18 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "the fake provisioning laboratory, which is why this profile is "
             "declared a laboratory and can never be production-accepted. "
             "Version 3 adds the readiness surface, which every profile "
-            "publishes and none may withhold."
+            "publishes and none may withhold. Version 4 admits the "
+            "deployment-control surface that the `dotmac-deployment-control` "
+            "0.1.0a13 repin made route-bearing: three `platform_admin` GET "
+            "pages and one POST, plus two nav items."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_BOOTSTRAP,
-        version="4",
-        withheld_surfaces=frozenset({"licence_delivery", "offers", "provisioning"}),
+        version="5",
+        withheld_surfaces=frozenset(
+            {"deployment_control", "licence_delivery", "offers", "provisioning"}
+        ),
         surface_inventory=(
             "accounts",
             "allocations",
@@ -414,16 +420,27 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "surface: until it existed, `docker compose up -d app --wait` was "
             "satisfied by a liveness route that does not touch the database, "
             "so a deploy could be declared successful while the application "
-            "could not serve a single request."
+            "could not serve a single request. Version 5 withholds "
+            "`deployment_control`: the `dotmac-deployment-control` 0.1.0a13 "
+            "repin newly published an operator WRITE surface that proposes "
+            "deployment plans, and publishing it is a production decision this "
+            "repin does not make. Independently, under a13 a browser-originated "
+            "proposal cannot succeed at all — `ProposePlanCommand` requires a "
+            "Foundation-rendered `execution_plan_digest`, and the module's own "
+            "admin surface refuses any digest-shaped value arriving in a "
+            "browser request, so the POST can only refuse. Publishing a page "
+            "whose write action is structurally unable to succeed would be "
+            "publishing a broken surface."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_COMPOSED_V1,
-        version="2",
+        version="3",
         withheld_surfaces=frozenset(
             {
                 "accounts",
                 "contracts",
+                "deployment_control",
                 "licence_delivery",
                 "offers",
                 "provisioning",
@@ -466,7 +483,17 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "Version 2 adds the readiness surface, published "
             "here for the same reason it is published everywhere: a "
             "dependency-aware probe is what makes a successful deploy mean the "
-            "application can serve."
+            "application can serve. Version 3 withholds `deployment_control`: "
+            "the `dotmac-deployment-control` 0.1.0a13 repin newly published an "
+            "operator WRITE surface that proposes deployment plans, and "
+            "publishing it is a production decision this repin does not make. "
+            "Independently, under a13 a browser-originated proposal cannot "
+            "succeed at all — `ProposePlanCommand` requires a "
+            "Foundation-rendered `execution_plan_digest`, and the module's own "
+            "admin surface refuses any digest-shaped value arriving in a "
+            "browser request, so the POST can only refuse. Publishing a page "
+            "whose write action is structurally unable to succeed would be "
+            "publishing a broken surface."
         ),
     ),
 )
