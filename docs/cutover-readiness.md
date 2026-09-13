@@ -89,7 +89,7 @@ amendment at the owning source. Six slices, three landed.
 
 | Distribution | Pinned here | Released | Position |
 | --- | --- | --- | --- |
-| `dotmac-kernel` | `0.1.0a98` | a100 | the pin IS the highest floor anything composed declares, and `kernel-pin` executes that both ways; a100 is published and not adopted — it shares this pin's import boundary rather than regressing it, and the repair is a101, which is not yet published — see `docs/operations/kernel-a100-assessment-2026-09-01.md` |
+| `dotmac-kernel` | `0.1.0a100` | — | the pin IS the highest floor anything composed declares, and `kernel-pin` executes that both ways. `dotmac-deployment-control` a13 declares `>=0.1.0a100`, so a100 became that floor and the pin moved to meet it — not because a100 was the newest artifact. a101+ stay unpinned for exactly that reason: nothing composed requires them. a100 shares a98's under-declared `create_app` import boundary rather than regressing it — see `docs/operations/kernel-a100-assessment-2026-09-01.md`, whose "no pin move is possible yet" is now satisfied by a13 rather than by a101 |
 | `dotmac-approvals` | `0.1.0a5` | a5 | current |
 | `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current (a5 unpublished; never pin it) |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
