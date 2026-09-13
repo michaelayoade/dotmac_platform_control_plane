@@ -1,14 +1,15 @@
 """`.github/workflows/product-manifest-regenerate.yml`'s refusals, each
 planted against.
 
-This workflow holds `FORGEJO_READ_TOKEN` in its `acquire` job to fetch the two
-distributions this branch repins, and its `regenerate` job then installs them
-offline and runs `scripts/generate_product_manifest.py` against them. It is
-new, protected, and never dispatched by this change, so every property below
-is checked STATICALLY, the same way
-`tests/architecture/test_kernel_lock_workflow.py` checks its sibling: a
-hand-rolled parser over the YAML text, with a synthetic plant showing each
-checker actually fires rather than passing over an empty set.
+This workflow holds `FORGEJO_READ_TOKEN` in its `acquire` job to fetch every
+distribution the candidate ref binds to the private index, and its
+`regenerate` job then installs them and runs
+`scripts/generate_product_manifest.py` against them. It is new, protected,
+and never dispatched by this change, so every property below is checked
+STATICALLY, the same way `tests/architecture/test_kernel_lock_workflow.py`
+checks its sibling: a hand-rolled parser over the YAML text, with a synthetic
+plant showing each checker actually fires rather than passing over an empty
+set.
 
 The `${{ ... }}` expression-opener check exists because GitHub Actions
 templates a `run:` body BEFORE bash ever sees it — an unexpected expression
@@ -19,17 +20,34 @@ its own hand-rolled parser here rather than a single string search: a search
 for `"${{ inputs."` would miss a value that reached a `run:` body some other
 way, and only a parser that isolates what bash actually receives can tell the
 two apart.
+
+Two things in this file are NOT about the YAML at all: `private_distributions`
+and `bundle_problems` are ordinary Python in `scripts/product_manifest_acquire
+.py` and `scripts/product_manifest_bundle_check.py`, and the security property
+that matters — every declared private distribution is acquired, derived from
+the manifest rather than a name someone hardcoded — lives in that logic, not
+in the workflow text. Those get ordinary unit tests, same style as
+`test_kernel_lock_workflow.py`'s coverage of `kernel_lock.py`'s own functions.
 """
 
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "product-manifest-regenerate.yml"
 TEXT = WORKFLOW.read_text(encoding="utf-8")
 
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import kernel_lock  # noqa: E402
+import product_manifest_acquire as pma  # noqa: E402
+import product_manifest_bundle_check as pmb  # noqa: E402
 
 # ── hand-rolled parsers, over TEXT so a plant can be built against a variant ─
 
@@ -242,16 +260,246 @@ def test_poetry_or_pip_in_the_acquiring_job_would_be_named() -> None:
     assert re.search(r"(^|\s)poetry\s", planted_poetry)
 
 
-def test_the_regenerate_job_installs_offline_with_no_index_reachable() -> None:
-    """The load-bearing clause for `regenerate`: no credential, and no index
-    it could reach even if one leaked — `--no-index` plus a local
-    `--find-links` directory, never an authenticated or public index URL."""
+def _install_step(steps: list[str], marker: str) -> str:
+    return next(step for step in steps if marker in step)
 
-    commands = "\n".join(_commands(step) for step in _jobs(TEXT)["regenerate"])
+
+def test_the_private_distribution_install_is_no_index_and_find_links_only() -> None:
+    """The load-bearing clause for the PRIVATE half: a private name can never
+    be satisfied from anywhere but the bundle `acquire` verified."""
+
+    step = _install_step(
+        _jobs(TEXT)["regenerate"], "Install the private distributions from"
+    )
+    commands = _commands(step)
     assert "--no-index" in commands
     assert "--find-links" in commands
-    assert "pip config" not in commands
-    assert "PIP_INDEX_URL" not in commands
+    assert "--no-deps" in commands
+
+
+def test_dropping_no_index_from_the_private_install_would_be_caught() -> None:
+    """SENSITIVITY. A private install without `--no-index` could, in
+    principle, satisfy a private name from a reachable public index instead —
+    exactly the substitution this step exists to rule out."""
+
+    steps = _jobs(TEXT)["regenerate"]
+    step = _install_step(steps, "Install the private distributions from")
+    stripped = step.replace("--no-index \\\n", "").replace("--no-index", "")
+    assert "--no-index" not in _commands(stripped)
+
+
+def test_the_public_dependency_install_is_wheel_only_and_can_reach_an_index() -> None:
+    """The load-bearing clause for the PUBLIC half: `--only-binary=:all:`
+    keeps a PyPI sdist's PEP 517 build backend from executing here, and —
+    unlike the private install — this step carries no `--no-index`, because
+    public PyPI reachability is exactly what this job is allowed to use."""
+
+    step = _install_step(_jobs(TEXT)["regenerate"], "Install the public dependencies")
+    commands = _commands(step)
+    assert "--only-binary=:all:" in commands
+    assert "--no-index" not in commands
+    assert "--find-links" not in commands
+
+
+def test_dropping_wheel_only_from_the_public_install_would_be_caught() -> None:
+    """SENSITIVITY. Without `--only-binary=:all:`, a PyPI release with no
+    wheel would have its PEP 517 build backend executed in this job."""
+
+    steps = _jobs(TEXT)["regenerate"]
+    step = _install_step(steps, "Install the public dependencies")
+    stripped = step.replace("--only-binary=:all: ", "")
+    assert "--only-binary=:all:" not in _commands(stripped)
+
+
+# ── no configuration in `regenerate` names the private index host ──────────
+
+
+def test_the_regenerate_job_asserts_the_private_host_is_absent_from_its_config() -> (
+    None
+):
+    steps = _jobs(TEXT)["regenerate"]
+    assertion = next(
+        index
+        for index, step in enumerate(steps)
+        if "names nothing in this job's configuration" in step
+    )
+    private_install = next(
+        index
+        for index, step in enumerate(steps)
+        if "Install the private distributions from" in step
+    )
+    assert assertion < private_install, (assertion, private_install)
+    body = steps[assertion]
+    assert kernel_lock.ARTIFACT_ORIGIN.split("//")[1] in body  # "registry.dotmac.io"
+    assert "pip config list" in body
+
+
+def test_removing_the_private_host_assertion_would_be_caught() -> None:
+    """SENSITIVITY. The assertion step's absence must be distinguishable from
+    its presence — a `next()` over an empty match raises, which is itself the
+    failure this guards against if the step is ever deleted."""
+
+    steps = [
+        step
+        for step in _jobs(TEXT)["regenerate"]
+        if "names nothing in this job's configuration" not in step
+    ]
+    with pytest.raises(StopIteration):
+        next(
+            index
+            for index, step in enumerate(steps)
+            if "names nothing in this job's configuration" in step
+        )
+
+
+def test_no_other_regenerate_step_configures_an_index_at_the_private_host() -> None:
+    """The assertion step above legitimately NAMES the host to check for it;
+    every OTHER step in this job must not name it at all — naming it would be
+    exactly the kind of configuration the assertion exists to rule out."""
+
+    host = kernel_lock.ARTIFACT_ORIGIN.split("//")[1]
+    for step in _jobs(TEXT)["regenerate"]:
+        if "names nothing in this job's configuration" in step:
+            continue
+        assert host not in _commands(step), step
+
+
+def test_a_private_index_url_elsewhere_in_regenerate_would_be_named() -> None:
+    """THE plant. A future edit wiring `--index-url` at the private host into
+    some OTHER step must be catchable by the check above."""
+
+    host = kernel_lock.ARTIFACT_ORIGIN.split("//")[1]
+    steps = _jobs(TEXT)["regenerate"]
+    planted = [
+        step + f"\n        run: pip install --index-url https://{host}/x\n"
+        for step in steps
+        if "names nothing in this job's configuration" not in step
+    ]
+    assert any(host in _commands(step) for step in planted)
+
+
+# ── the private distribution list is DERIVED from the manifest ─────────────
+
+
+def _forgejo_manifest(**dependencies: dict[str, str] | str) -> dict[str, Any]:
+    return {"tool": {"poetry": {"dependencies": dependencies}}}
+
+
+def test_private_distributions_derives_every_forgejo_bound_dependency() -> None:
+    manifest = _forgejo_manifest(
+        python=">=3.12,<3.14",
+        **{
+            "dotmac-kernel": {"version": "0.1.0a100", "source": "forgejo"},
+            "dotmac-approvals": {"version": "0.1.0a5", "source": "forgejo"},
+            "fastapi": ">=0.111",
+        },
+    )
+    assert pma.private_distributions(manifest) == {
+        "dotmac-kernel": "0.1.0a100",
+        "dotmac-approvals": "0.1.0a5",
+    }
+
+
+def test_a_newly_added_private_dependency_is_picked_up_without_a_code_change() -> None:
+    """SENSITIVITY, and the whole point of Gap 1's repair: a THIRD forgejo
+    dependency appears in the derived plan with no change to this module —
+    the earlier, hardcoded-name version of this function could never have
+    passed this test."""
+
+    manifest = _forgejo_manifest(
+        **{
+            "dotmac-kernel": {"version": "0.1.0a100", "source": "forgejo"},
+            "dotmac-brand-new-module": {"version": "0.1.0a1", "source": "forgejo"},
+        }
+    )
+    plan = pma.private_distributions(manifest)
+    assert plan["dotmac-brand-new-module"] == "0.1.0a1"
+    assert len(plan) == 2
+
+
+def test_private_distributions_refuses_a_non_exact_version() -> None:
+    manifest = _forgejo_manifest(
+        **{"dotmac-kernel": {"version": "^0.1.0a100", "source": "forgejo"}}
+    )
+    with pytest.raises(kernel_lock.Refusal):
+        pma.private_distributions(manifest)
+
+
+def test_private_distributions_refuses_a_bare_string_bound_to_nothing() -> None:
+    """A bare version string (no table, so no `source` at all) is not bound to
+    the private index and must not be silently included."""
+
+    manifest = _forgejo_manifest(**{"fastapi": ">=0.111"})
+    with pytest.raises(kernel_lock.Refusal, match="nothing to acquire"):
+        pma.private_distributions(manifest)
+
+
+def test_private_distributions_against_the_repositorys_real_manifest() -> None:
+    """NON-VACUITY, against the two real files. The seven distributions named
+    in this repository's own report are exactly what this derives — not a
+    hardcoded set repeated here, but the real `pyproject.toml` read fresh."""
+
+    import tomllib
+
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        manifest = tomllib.load(handle)
+    plan = pma.private_distributions(manifest)
+    assert plan["dotmac-kernel"] == "0.1.0a100"
+    assert plan["dotmac-deployment-control"] == "0.1.0a13"
+    assert len(plan) >= 7, plan
+
+
+# ── job 2 refuses if the bundle does not cover every declared distribution ──
+
+
+def _touch(directory: Path, name: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_bytes(b"not a real wheel, just a name to match")
+
+
+def test_bundle_problems_admits_a_complete_bundle(tmp_path: Path) -> None:
+    """POSITIVE CONTROL. Without this, every plant below would pass against a
+    checker that refuses everything."""
+
+    plan = {"dotmac-kernel": "0.1.0a100", "dotmac-approvals": "0.1.0a5"}
+    bundle = tmp_path / "files"
+    _touch(bundle, "dotmac_kernel-0.1.0a100-py3-none-any.whl")
+    _touch(bundle, "dotmac_approvals-0.1.0a5.tar.gz")
+    assert pmb.bundle_problems(plan, bundle) == []
+
+
+def test_bundle_problems_names_a_missing_distribution() -> None:
+    """THE plant. `acquire` acquired one of two declared distributions; job 2
+    must refuse rather than let a later `pip install` fail illegibly."""
+
+    plan = {"dotmac-kernel": "0.1.0a100", "dotmac-approvals": "0.1.0a5"}
+    bundle_dir = Path("/nonexistent-in-this-test")
+    problems = pmb.bundle_problems(plan, bundle_dir)
+    assert problems and "does not exist" in problems[0]
+
+
+def test_bundle_problems_names_a_distribution_missing_from_an_existing_bundle(
+    tmp_path: Path,
+) -> None:
+    plan = {"dotmac-kernel": "0.1.0a100", "dotmac-approvals": "0.1.0a5"}
+    bundle = tmp_path / "files"
+    _touch(bundle, "dotmac_kernel-0.1.0a100-py3-none-any.whl")
+    # dotmac-approvals is missing entirely.
+    problems = pmb.bundle_problems(plan, bundle)
+    assert any("dotmac-approvals" in problem for problem in problems), problems
+
+
+def test_bundle_problems_does_not_confuse_a_different_version_for_a_match(
+    tmp_path: Path,
+) -> None:
+    """SENSITIVITY. A stale artifact for the WRONG version must not be read as
+    covering the declared one."""
+
+    plan = {"dotmac-kernel": "0.1.0a100"}
+    bundle = tmp_path / "files"
+    _touch(bundle, "dotmac_kernel-0.1.0a99-py3-none-any.whl")
+    problems = pmb.bundle_problems(plan, bundle)
+    assert any("dotmac-kernel" in problem for problem in problems), problems
 
 
 # ── zero GitHub expression openers in any `run:` body ───────────────────────
