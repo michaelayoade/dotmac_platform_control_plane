@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import inspect
 import json
 import re
 import struct
@@ -84,6 +83,7 @@ from kernel_lock import (  # noqa: E402
     METADATA_MAX_COMPRESSION_RATIO,
     OFF_INDEX_DEPENDENCY_KEYS,
     DependencyDelta,
+    PublishedArtifactUnrecorded,
     Refusal,
     acquire,
     acquired_matches_lock,
@@ -3431,6 +3431,7 @@ def _zip64_archive(
     locator_disks: int = 1,
     record_size: int = 44,
     overlap: bool = False,
+    record_gap: int = 0,
 ) -> Path:
     """A GENUINE, well-formed ZIP64 tail appended to a real archive.
 
@@ -3481,7 +3482,9 @@ def _zip64_archive(
         + struct.pack("<H", 0)
     )
     wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
-    wheel.write_bytes(body + record + locator + (b"\x00" * gap) + eocd)
+    wheel.write_bytes(
+        body + record + (b"\x00" * record_gap) + locator + (b"\x00" * gap) + eocd
+    )
     return wheel
 
 
@@ -3506,6 +3509,7 @@ def test_a_well_formed_zip64_archive_is_accepted(tmp_path: Path) -> None:
             "short of its own",
         ),
         ("directory overlaps the record", {"overlap": True}, "runs past"),
+        ("bytes between record and locator", {"record_gap": 8}, "must be adjacent"),
     ),
 )
 def test_zip64_linkage_is_validated(
@@ -3525,7 +3529,7 @@ def test_zip64_linkage_is_validated(
         zip_central_directory(wheel)
 
 
-def test_staging_is_0700_while_it_exists_and_cleanup_is_not_silenced(
+def test_staging_is_0700_while_it_exists_and_is_removed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The mode is observed WHILE staging exists, not inferred afterwards.
@@ -3560,5 +3564,119 @@ def test_staging_is_0700_while_it_exists_and_cleanup_is_not_silenced(
     )
     assert observed["mode"] == 0o700, oct(observed["mode"])
     assert not observed["dir"].exists(), "staging must not survive"
-    source = inspect.getsource(kernel_lock.fetch)
-    assert "ignore_errors=False" in source, source
+    # Deliberately NOT `assert "ignore_errors=False" in getsource(...)`. That
+    # restated an implementation literal and went stale the moment the success
+    # path stopped passing the keyword at all — the same defect class as a test
+    # asserting a version string it could derive. That cleanup is not silenced
+    # is proven BEHAVIOURALLY by the transaction plants, which break cleanup
+    # after publication and require a typed failure.
+
+
+# ── the cleanup transaction, after the artifact is already published ─────────
+
+
+def _published_then(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cleanup_fails: bool,
+    rollback_fails: bool,
+    target: Path,
+) -> None:
+    """Publish successfully, then break cleanup (and optionally rollback)."""
+
+    def fake_run(*args: Any, **_kwargs: Any) -> Any:
+        argv = args[0]
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"payload")
+
+        class _Completed:
+            returncode = 0
+            stdout = "200"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    if cleanup_fails:
+
+        def boom(path: Any, *_args: Any, **kwargs: Any) -> None:
+            if kwargs.get("ignore_errors"):
+                return
+            raise PermissionError(f"cannot remove {path}")
+
+        monkeypatch.setattr(kernel_lock.shutil, "rmtree", boom)
+    if rollback_fails:
+        original = Path.unlink
+
+        def refuse_unlink(self: Path, *args: Any, **kwargs: Any) -> None:
+            if self == target:
+                raise PermissionError("cannot unlink published artifact")
+            original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", refuse_unlink)
+
+
+def test_a_cleanup_failure_after_publication_rolls_the_publication_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup is part of the TRANSACTION, not a `finally`.
+
+    A cleanup failure after `os.link` used to let an untyped `PermissionError`
+    escape while the artifact sat at its final path and no digest was ever
+    returned — and because publication is no-overwrite, the retry then wedged on
+    a destination that already existed. The publication is now rolled back so
+    the transfer CAN be retried.
+    """
+
+    target = tmp_path / "dest" / "artifact.whl"
+    _published_then(
+        monkeypatch, cleanup_fails=True, rollback_fails=False, target=target
+    )
+    with pytest.raises(Refusal, match="rolled back so this transfer can be retried"):
+        kernel_lock.fetch(
+            f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/artifact.whl", target
+        )
+    assert not target.exists(), "the publication must be rolled back"
+
+
+def test_a_failed_rollback_raises_a_distinct_fatal_not_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `Refusal` says nothing happened. This says the opposite.
+
+    The artifact IS at its final path, no digest was returned for it, and the
+    rollback failed too. It must NOT be a `Refusal`, because a caller that
+    treats every refusal as "nothing happened, retry" would be wrong here: the
+    destination is occupied and publication is no-overwrite.
+    """
+
+    target = tmp_path / "dest" / "artifact.whl"
+    _published_then(monkeypatch, cleanup_fails=True, rollback_fails=True, target=target)
+    with pytest.raises(PublishedArtifactUnrecorded) as raised:
+        kernel_lock.fetch(
+            f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/artifact.whl", target
+        )
+    assert not isinstance(
+        raised.value, Refusal
+    ), "it must not be catchable as an ordinary refusal"
+    assert "NOT usable" in str(raised.value), str(raised.value)
+    assert target.exists(), "the artifact really is published; the message says so"
+
+
+def test_a_clean_transfer_still_returns_its_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSITIVE CONTROL for the transaction: with cleanup working, the digest
+    comes back and nothing is left behind."""
+
+    target = tmp_path / "dest" / "artifact.whl"
+    _published_then(
+        monkeypatch, cleanup_fails=False, rollback_fails=False, target=target
+    )
+    digest = kernel_lock.fetch(
+        f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/artifact.whl", target
+    )
+    assert digest == hashlib.sha256(b"payload").hexdigest()
+    assert target.read_bytes() == b"payload"
+    assert [c.name for c in (tmp_path / "dest").iterdir()] == ["artifact.whl"]

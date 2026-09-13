@@ -291,6 +291,19 @@ workflow has not taken.
 """
 
 
+class PublishedArtifactUnrecorded(Exception):
+    """Published, then neither recorded nor rolled back. DELIBERATELY not a
+    `Refusal`.
+
+    A `Refusal` says "this input is not acceptable, nothing happened". This says
+    the opposite: an artifact IS at its final path, no digest was returned for
+    it, and the rollback that would have removed it also failed. Nothing
+    downstream may treat the bundle as usable, and a retry cannot simply be
+    re-run because publication is no-overwrite and the destination is occupied.
+    It is reported separately from every refusal for that reason.
+    """
+
+
 class Refusal(Exception):
     """A condition this module refuses to proceed past."""
 
@@ -1158,10 +1171,16 @@ def zip_central_directory(path: Path) -> CentralDirectory:
                 "short of its own fixed 44-byte remainder"
             )
         record_end = record_offset + 12 + record_size
-        if record_end > base + locator_at:
+        locator_offset = base + locator_at
+        if record_end != locator_offset:
+            # EXACT, not merely "not past". Bytes between the record's declared
+            # end and its locator are a region no reader accounts for, and the
+            # record's own length field is what would have to be trusted to skip
+            # them. The format puts the locator immediately after the record.
             raise Refusal(
-                f"{path.name}'s ZIP64 end record runs to {record_end}, past the "
-                f"locator at {base + locator_at} that points at it"
+                f"{path.name}'s ZIP64 end record declares it ends at "
+                f"{record_end} but its locator begins at {locator_offset}; the "
+                "two must be adjacent with nothing between them"
             )
         record_disk = int.from_bytes(record[16:20], "little")
         record_cd_disk = int.from_bytes(record[20:24], "little")
@@ -1307,15 +1326,37 @@ def fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
                 f"sha256:{expected_sha256}"
             )
         publish_atomically(staged, target)
-        return digest
-    finally:
-        # NOT `ignore_errors=True`. Swallowing the error would let this function
-        # claim staging is always removed while leaving a directory behind, and
-        # the claim is the point: a later step globbing the bundle must not find
-        # a fragment. A cleanup that genuinely cannot complete is reported.
-        shutil.rmtree(staging, ignore_errors=False)
-        if staging.exists():  # pragma: no cover - defensive
-            raise Refusal(f"staging directory {staging} could not be removed")
+    except BaseException:
+        # The refusal that brought us here is what matters, so removal is
+        # BEST EFFORT on this path and this function does not claim it
+        # succeeded. Nothing was published, so there is nothing to roll back.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    # Published. Cleanup is now part of the TRANSACTION, not a `finally`: a
+    # cleanup failure after `os.link` used to let an untyped `PermissionError`
+    # escape while the artifact sat at its final path and no digest was ever
+    # returned -- and because publication is no-overwrite, the retry then
+    # wedged on a destination that already existed.
+    try:
+        shutil.rmtree(staging)
+    except OSError as cleanup_failure:
+        try:
+            target.unlink()
+        except OSError as rollback_failure:
+            raise PublishedArtifactUnrecorded(
+                f"{target} was published, its staging directory {staging} could "
+                f"not be removed ({cleanup_failure}), and the published artifact "
+                f"could not be rolled back either ({rollback_failure}). The "
+                "bundle is NOT usable and a retry cannot overwrite the "
+                "destination; this needs a human."
+            ) from rollback_failure
+        raise Refusal(
+            f"{target.name} was published but its staging directory {staging} "
+            f"could not be removed ({cleanup_failure}); the publication was "
+            "rolled back so this transfer can be retried"
+        ) from cleanup_failure
+    return digest
 
 
 # ── acquire: a closed bundle, downloaded once, by the only job with a key ───
@@ -2850,6 +2891,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         return _run(args)
+    except PublishedArtifactUnrecorded as fatal:
+        # Reported separately from every refusal: a refusal means nothing
+        # happened, this means something did and was not recorded.
+        print(f"::error::PUBLISHED BUT UNRECORDED: {fatal}")
+        return 2
     except Refusal as refusal:
         print(f"::error::{refusal}")
         return 1
