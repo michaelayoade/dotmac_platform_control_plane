@@ -1,7 +1,16 @@
+<!-- kernel-pin: snapshot -->
+
 # Product database catalogue readiness
 
-**Status:** held on 2026-08-31. This checkout publishes no product database
-catalogue and its descriptor binds no such digest.
+**Status:** held on 2026-09-13, when the Kernel a100 / Deployment Control a13
+paragraph below was last measured against the exact pins in `pyproject.toml`
+(the readiness blockers themselves were first held on 2026-08-31 and remain
+unchanged since). This checkout publishes no product database catalogue and
+its descriptor binds no such digest. Like
+`docs/operations/kernel-a100-assessment-2026-09-01.md`, this is an as-of
+observation carrying its coordinates, not a release claim or a live pin
+assertion — a future repin does not make this record false, it makes it due
+for a fresh measurement.
 
 The product database catalogue is a build-once declaration composed from typed
 facts supplied by their owners. A running database is comparison evidence only;
