@@ -143,7 +143,7 @@ disagree, fix the drift.
     field and the named subset — `platform_tables`, `migration_prefix`,
     `migration_branch`, `requires`, `audit_actions`, `database_catalog` —
     RATCHETED two-directionally against the pinned kernel's manifest field set.
-    Kernel a100 carries `database_catalog`, and the exact-pinned Control a13
+    Kernel a100 carries `database_catalog`, and the exact-pinned Control
     manifest populates it; an assertion that cannot run is RECORDED as absent,
     never skipped. The same plant is proved REAL by mounting
     its route in a built application once a profile inventories it. That plant is the LIVE coverage; the per-profile
@@ -605,9 +605,13 @@ disagree, fix the drift.
     as the pin had been `0.1.0a98`; nothing broke and nothing could see it.
 
     **A published version is not blamed for a boundary its predecessors share.**
-    Kernel a98, a99 and a100 reach a product-owned PostgreSQL driver on the
-    public `create_app` symbol identically; a100 regressed nothing, a98 is what
-    runs in production, and the repair is a101. Operational functionality and
+    Kernel a100 shares a long-standing under-declared public import boundary
+    with the published versions immediately before it — the public
+    `create_app` symbol reaches a product-owned PostgreSQL driver no declared
+    dependency supplies, identically across them (full detail, dated:
+    `docs/operations/kernel-a100-assessment-2026-09-01.md`); a100 regressed
+    nothing, this repository now pins a100, and the repair is still a101.
+    Operational functionality and
     independent artifact adoptability are different properties with different
     oracles, and a pin may not name a version that has not been published
     (`scripts/kernel_floor.py`, `tests/architecture/test_kernel_floor.py`, CI job
