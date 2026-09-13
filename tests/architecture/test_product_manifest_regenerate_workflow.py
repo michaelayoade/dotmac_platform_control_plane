@@ -435,17 +435,29 @@ def test_private_distributions_refuses_a_bare_string_bound_to_nothing() -> None:
 
 
 def test_private_distributions_against_the_repositorys_real_manifest() -> None:
-    """NON-VACUITY, against the two real files. The seven distributions named
-    in this repository's own report are exactly what this derives — not a
-    hardcoded set repeated here, but the real `pyproject.toml` read fresh."""
+    """NON-VACUITY, against the real file. The expected name-to-version
+    mapping is derived directly from the freshly parsed `tool.poetry
+    .dependencies` entries bound to the Forgejo source — not a hardcoded
+    set repeated here, so `pyproject.toml` stays the sole version
+    authority and a drifted or missing acquisition is caught by exact
+    mapping equality rather than a couple of spot checks."""
 
     import tomllib
 
     with (ROOT / "pyproject.toml").open("rb") as handle:
         manifest = tomllib.load(handle)
+    dependencies = manifest["tool"]["poetry"]["dependencies"]
+    expected = {
+        name: spec["version"]
+        for name, spec in dependencies.items()
+        if isinstance(spec, dict) and spec.get("source") == kernel_lock.INDEX_SOURCE_NAME
+    }
+
     plan = pma.private_distributions(manifest)
-    assert plan["dotmac-kernel"] == "0.1.0a100"
-    assert plan["dotmac-deployment-control"] == "0.1.0a13"
+
+    assert plan == expected
+    assert "dotmac-kernel" in plan
+    assert "dotmac-deployment-control" in plan
     assert len(plan) >= 7, plan
 
 
