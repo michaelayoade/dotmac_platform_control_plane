@@ -204,8 +204,8 @@ def test_the_deploy_path_is_what_withholds_delete(scratch_db: str) -> None:
 
     The subjects are derived from the catalogue. Only the two decisions are
     written down: that a rehearsal really does leave DELETE widely granted (or
-    the after-state would prove nothing), and that what survives is exactly the
-    one table classified for it.
+    the after-state would prove nothing), and that what survives is exactly
+    what the classification permits.
     """
     _rehearse(scratch_db)
     with _connect(scratch_db) as connection:
@@ -222,7 +222,23 @@ def test_the_deploy_path_is_what_withholds_delete(scratch_db: str) -> None:
     with _connect(scratch_db) as connection:
         after = _delete_holders(connection)
 
-    assert after == {(role, TRANSIENT) for role in ONLINE_ROLES}, sorted(after)
+    # Derived, not counted: a literal `{(role, TRANSIENT) for role in
+    # ONLINE_ROLES}` encoded "there is exactly one LIFECYCLE_DELETE table and
+    # every online role holds DELETE on it", which stopped being true once
+    # `mod_deploy.attestation_current_roots` was correctly classified — `dc_0011`
+    # grants `platform_api` (not `app_user`) DELETE there, a per-role decision
+    # this catalogue does not carry. The enforcement never touches a permitting
+    # table (it only revokes from `tables_withholding_online_deletion()`), so
+    # whatever DELETE a permitting table held BEFORE the deploy is exactly what
+    # it must hold AFTER — that equality is what is asserted, without
+    # hardcoding which roles hold which permitting table.
+    permitting = set(tables_permitting_online_deletion())
+    expected_after = {(role, table) for role, table in before if table in permitting}
+    assert expected_after, (
+        "no (role, table) pair in the rehearsal before-state permits online "
+        "deletion; the comparison below would be vacuous"
+    )
+    assert after == expected_after, sorted(after)
 
 
 def test_no_online_role_may_truncate_a_governed_table(scratch_db: str) -> None:
