@@ -33,6 +33,7 @@ error branch has never run is prose.
 
 from __future__ import annotations
 
+import importlib
 import re
 import subprocess
 import sys
@@ -1070,6 +1071,49 @@ def _executable_workflow() -> str:
     )
 
 
+#: The ONE literal submodule import this guard permits, and only this one.
+#: `test_production_deployment.py
+#: ::test_image_smokes_prove_the_built_bytes_publish_no_api_documentation`
+#: requires this exact literal, verbatim, in both `ci.yml` and
+#: `acceptance.sh` — it is a boot smoke proving the DEPLOYED image reads the
+#: kernel's own `PRODUCTION` constant, not a copy of it (ADR-0016). That is a
+#: different guard with a different subject (the artifact, not the source
+#: tree), and the two are reconciled by naming the exception here rather than
+#: by either guard silently losing.
+_API_DOCUMENTATION_LITERAL_EXEMPTION = "dotmac_kernel.api_documentation"
+
+
+def _production_is_unreachable_at_kernel_root() -> bool:
+    """The ENFORCEABLE premise behind the one exemption above.
+
+    `PRODUCTION` is not re-exported from the `dotmac_kernel` package root
+    today, which is the only reason the boot smoke has no honest way to read
+    it except by naming the submodule that defines it — every OTHER symbol
+    that smoke uses (`classify_environment`, `api_documentation_policy`,
+    `audit_api_documentation`) already resolves at root. This is checked
+    against a real installation, not assumed: the day a kernel re-exports
+    `PRODUCTION` at root, this returns `False`, the exemption below expires,
+    and the literal submodule import must be retired for the root import
+    every other symbol already takes.
+
+    An uninstalled kernel cannot answer this question at all, so it refuses
+    rather than reporting the premise held by default — an unmeasured premise
+    is not a satisfied one.
+    """
+
+    try:
+        kernel = importlib.import_module("dotmac_kernel")
+    except ModuleNotFoundError as exc:
+        raise FloorError(
+            "dotmac_kernel is not installed here, so whether PRODUCTION is "
+            "re-exported at its root cannot be measured. The exemption for "
+            "dotmac_kernel.api_documentation in the mutation-lane guard rests "
+            "on this premise; run this where the kernel is installed rather "
+            "than let the premise go unchecked."
+        ) from exc
+    return not hasattr(kernel, "PRODUCTION")
+
+
 def test_the_mutation_lane_derives_its_versions_and_module_names() -> None:
     """A literal here is how a lane stops testing anything and says nothing.
 
@@ -1088,6 +1132,16 @@ def test_the_mutation_lane_derives_its_versions_and_module_names() -> None:
         "tracking what they claim to test."
     )
     named = re.findall(r"dotmac_kernel\.[a-z_]+", executable)
+    if _API_DOCUMENTATION_LITERAL_EXEMPTION in named:
+        assert _production_is_unreachable_at_kernel_root(), (
+            f"{_API_DOCUMENTATION_LITERAL_EXEMPTION} is exempted from this "
+            "guard only while PRODUCTION is unreachable from the dotmac_kernel "
+            "package root. That premise no longer holds: PRODUCTION is now "
+            "reachable at root, so this exemption has expired and the literal "
+            "submodule import in the workflow must be retired for the root "
+            "import, the same as every other symbol the boot smoke reads."
+        )
+        named = [name for name in named if name != _API_DOCUMENTATION_LITERAL_EXEMPTION]
     assert not named, (
         f"the workflow names {named} literally. The module the mutation's "
         "failure must carry is derived from the composition's real imports, for "
