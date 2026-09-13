@@ -1249,7 +1249,11 @@ CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
         },
     ),
     "docs/cutover-readiness.md": CurrentVersionClaim(
-        assertions=("| `dotmac-kernel` | `{pin}` |",),
+        # Bare form: the bare-reader control below
+        # (`test_the_bare_reader_still_bites_over_the_real_tree`) requires
+        # `0.1.0a100` NOT appear anywhere in this document, so the pin-state
+        # row's own "Pinned here" cell spells the pin bare too.
+        assertions=("| `dotmac-kernel` | `{bare}` |",),
         other_kernel_versions={
             "0.1.0a100": "the newest PUBLISHED kernel, in the table's `Released` "
             "column — a different fact from the pin, and stating it is the point",
@@ -1260,19 +1264,22 @@ CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
         },
     ),
     # No assertion: the hard-rules file states kernel versions only as the
-    # worked example behind a rule ("a98, a99 and a100 reach a product-owned
-    # driver identically"). It claims nothing about what this checkout runs, so
-    # there is no sentence for a repin to make stale — but it is monitored, so
-    # a pin claim cannot be added to it without being declared.
+    # worked example behind a rule ("Kernel a100 shares a long-standing
+    # under-declared public import boundary with the published versions
+    # immediately before it"). It claims nothing about what this checkout runs
+    # beyond naming the current pin, so there is no full sentence for a repin
+    # to make stale — but it is monitored, so a pin claim cannot be added to
+    # it without being declared.
     "AGENTS.md": CurrentVersionClaim(
         other_kernel_versions={
-            # `0.1.0a98` is deliberately NOT declared here. It equals the pin
-            # today, so nothing consults it — and the sentence around it says
-            # "a98 is what runs in production", which a repin makes FALSE.
-            # Declaring it would suppress exactly the failure that should
-            # happen on the day the pin moves.
-            "0.1.0a99": "a published kernel the example compares against",
-            "0.1.0a100": "a published kernel the example compares against",
+            # `0.1.0a98` is deliberately NOT declared here, even though it was
+            # a real prior pin the rule 17 paragraph used to name explicitly.
+            # Declaring it would let a version this document no longer states
+            # sit here forever; the repin that retired the "a98 is what runs
+            # in production" sentence (now false) removed a98 from the prose
+            # instead, and this entry mirrors that — nothing to declare.
+            "0.1.0a100": "a published kernel the example compares against, and "
+            "the current pin",
         },
     ),
 }
@@ -1370,6 +1377,15 @@ def snapshot_premise(relative: str, text: str) -> str | None:
 # ── the inventory: a positive check that cannot pass by finding nothing ─────
 
 
+def _bare_pin(pin: str) -> str:
+    """`0.1.0a100` -> `a100`. The second spelling `stated_kernel_versions` reads
+    and the only one `docs/cutover-readiness.md`'s pin-state row is allowed to
+    carry, per the bare-reader control below — an assertion template that
+    needs the bare form renders against this, never against `pin` directly."""
+
+    return pin.removeprefix("0.1.0")
+
+
 def test_every_recorded_current_version_assertion_is_present() -> None:
     """The pin moved a77 -> a98 and two as-built documents kept saying a77.
 
@@ -1381,11 +1397,12 @@ def test_every_recorded_current_version_assertion_is_present() -> None:
     """
 
     pin = declared_pin()
+    rendered = {"pin": pin, "bare": _bare_pin(pin)}
     missing = [
-        f"{relative}: `{template.format(pin=pin)}`"
+        f"{relative}: `{template.format(**rendered)}`"
         for relative, claim in CURRENT_VERSION_ASSERTIONS.items()
         for template in claim.assertions
-        if template.format(pin=pin) not in (ROOT / relative).read_text()
+        if template.format(**rendered) not in (ROOT / relative).read_text()
     ]
     assert not missing, (
         f"pyproject.toml pins dotmac-kernel {pin} and these recorded "
@@ -1410,7 +1427,11 @@ def test_the_inventory_is_derived_and_non_empty() -> None:
             "pin nor declares a version — it does not belong here"
         )
         for template in claim.assertions:
-            assert "{pin}" in template, (
+            # `{bare}` renders the SAME derived pin as `{pin}`, just spelled the
+            # way `docs/cutover-readiness.md`'s pin-state row is required to
+            # (the bare-reader control forbids the full form there). Either
+            # placeholder keeps the template derived rather than literal.
+            assert "{pin}" in template or "{bare}" in template, (
                 f"{relative} records `{template}`, which states a version "
                 "literally. Then it agrees with itself and tracks nothing."
             )
