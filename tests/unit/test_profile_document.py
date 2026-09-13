@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -176,16 +177,33 @@ def test_a_lock_that_disagrees_with_the_installed_version_refuses(
     A lock recording a version the environment does not have would hand every
     binding a hash for some other build, and every check downstream would then
     be comparing this image against a different one while reporting agreement.
+
+    The version to disagree WITH is read out of the real lock rather than
+    hardcoded: a hardcoded `0.1.0a98` stopped matching this repository's own
+    `poetry.lock` the moment the kernel was repinned to `0.1.0a100`, which
+    made `.replace()` a silent no-op — the "mutated" lock was then byte-
+    identical to the real one, nothing disagreed, and this test could no
+    longer raise the refusal it exists to prove. Reading the real locked
+    version first and appending a suffix nothing could ever legitimately
+    install keeps the mismatch true regardless of which version is pinned.
     """
+    lock_text = LOCK.read_text(encoding="utf-8")
+    match = re.search(r'name = "dotmac-kernel"\nversion = "([^"]+)"', lock_text)
+    assert match, (
+        "poetry.lock no longer records a dotmac-kernel version in the shape "
+        "this test parses it in; the pattern below needs to move with it"
+    )
+    locked_version = match.group(1)
+    disagreeing_version = f"{locked_version}+not-what-is-installed"
     lock = tmp_path / "poetry.lock"
     lock.write_text(
-        LOCK.read_text(encoding="utf-8").replace(
-            'name = "dotmac-kernel"\nversion = "0.1.0a98"',
-            'name = "dotmac-kernel"\nversion = "0.1.0a97"',
+        lock_text.replace(
+            f'name = "dotmac-kernel"\nversion = "{locked_version}"',
+            f'name = "dotmac-kernel"\nversion = "{disagreeing_version}"',
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ProfileBuildRefusal, match="0.1.0a97"):
+    with pytest.raises(ProfileBuildRefusal, match=re.escape(disagreeing_version)):
         build_profile_document(
             source_revision=REVISION, dist_dir=dist_dir, lock_path=lock
         )
