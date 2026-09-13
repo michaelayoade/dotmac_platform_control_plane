@@ -69,6 +69,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import kernel_lock  # noqa: E402
 from kernel_lock import (  # noqa: E402
+    ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES,
     ARCHIVE_MAX_MEMBERS,
     ARCHIVE_MAX_NAME_BYTES,
     ARTIFACT_MAX_BYTES,
@@ -117,6 +118,7 @@ from kernel_lock import (  # noqa: E402
     transfer_problems,
     wheel_metadata,
     wheel_only_problems,
+    zip_central_directory_bytes,
 )
 
 # ── fixtures for the lock comparison ────────────────────────────────────────
@@ -2931,10 +2933,15 @@ def test_bytes_over_the_limit_are_measured_and_removed(
     """
 
     target = tmp_path / "artifact.whl"
+    # curl writes to the `.part`, never to `target` — `target` is created only
+    # by the final rename. A fake that writes to `target` would exercise the
+    # "delivered no file" refusal instead of the size bound, and pass for the
+    # wrong reason.
+    part = target.with_name(target.name + ".part")
 
     def fake_run(*_args: Any, **_kwargs: Any) -> Any:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"x" * 4096)
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"x" * 4096)
 
         class _Completed:
             returncode = 0
@@ -2945,9 +2952,10 @@ def test_bytes_over_the_limit_are_measured_and_removed(
 
     monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
     monkeypatch.setattr(kernel_lock, "ARTIFACT_MAX_BYTES", 1024)
-    with pytest.raises(Refusal, match="were measured and the file removed"):
+    with pytest.raises(Refusal, match="the bytes were measured"):
         kernel_lock.fetch(f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", target)
-    assert not target.exists(), "the oversized file must not be left on disk"
+    assert not target.exists(), "a refusal must not create the target"
+    assert not part.exists(), "the .part must be removed"
 
 
 # ── partial artifacts, uncontrolled exceptions, and member names ────────────
@@ -2964,45 +2972,96 @@ def _wheel_with(tmp_path: Path, extra: tuple[str, ...] = ()) -> Path:
 
 
 @pytest.mark.parametrize(
-    ("exit_code", "status"),
-    ((63, ""), (28, ""), (0, "404")),
+    ("label", "exit_code", "status", "expected"),
+    (
+        ("max-filesize abort", 63, "200", None),
+        ("max-time abort", 28, "200", None),
+        ("not found", 0, "404", None),
+        ("digest mismatch", 0, "200", "0" * 64),
+    ),
 )
-def test_a_refused_transfer_leaves_no_partial_artifact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int, status: str
+def test_a_refused_transfer_creates_no_target_and_leaves_no_part(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    exit_code: int,
+    status: str,
+    expected: str | None,
 ) -> None:
-    """The bounds that ABORT a transfer leave the largest partial files.
+    """`target` is only ever created by the final rename.
 
-    `--max-filesize` exits 63 and `--max-time` exits 28 with whatever bytes
-    arrived still on disk, and a 404 writes a body too. A later step that globs
-    the bundle would find the fragment and have no way to know it was
-    abandoned, so every refusal path removes it.
+    An earlier version wrote straight to `target` and deleted it on refusal,
+    so a refused transfer still briefly produced a file at the real path and an
+    unexpected exception left it there. The bytes now land in a `.part`, which
+    `finally` removes on every exit — including the two bounds that ABORT a
+    transfer, which leave the largest fragments.
     """
 
     target = tmp_path / "artifact.whl"
+    part = target.with_name(target.name + ".part")
 
     def fake_run(*_args: Any, **_kwargs: Any) -> Any:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"partial bytes that must not survive")
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"partial bytes that must not survive")
 
         class _Completed:
             returncode = exit_code
-            stdout = status or "200"
+            stdout = status
             stderr = "aborted"
 
         return _Completed()
 
     monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
     with pytest.raises(Refusal):
-        kernel_lock.fetch(f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", target)
-    assert not target.exists(), "a refused transfer must leave nothing behind"
+        kernel_lock.fetch(
+            f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl",
+            target,
+            expected_sha256=expected,
+        )
+    assert not target.exists(), f"{label}: a refusal must not create the target"
+    assert not part.exists(), f"{label}: the .part must be removed"
+
+
+def test_a_successful_transfer_renames_and_returns_the_verified_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSITIVE CONTROL for the transfer family. Without it, a `fetch` that
+    refused everything would pass every plant above."""
+
+    payload = b"a real artifact"
+    target = tmp_path / "artifact.whl"
+    part = target.with_name(target.name + ".part")
+
+    def fake_run(*_args: Any, **_kwargs: Any) -> Any:
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(payload)
+
+        class _Completed:
+            returncode = 0
+            stdout = "200"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    digest = kernel_lock.fetch(
+        f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl",
+        target,
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert target.read_bytes() == payload
+    assert not part.exists(), "the .part must not survive a success either"
 
 
 @pytest.mark.parametrize(
     ("payload", "expected"),
     (
-        (b"this is not a zip file", "not a readable zip archive"),
-        (b"PK\x03\x04 truncated", "not a readable zip archive"),
-        (b"", "not a readable zip archive"),
+        # These never reach `zipfile` at all: the EOCD bound reads the tail
+        # FIRST, because opening an archive is what reads its central directory.
+        (b"this is not a zip file", "End Of Central Directory"),
+        (b"PK\x03\x04 truncated", "End Of Central Directory"),
+        (b"", "End Of Central Directory"),
     ),
 )
 def test_an_unreadable_archive_is_a_refusal_not_a_traceback(
@@ -3016,6 +3075,26 @@ def test_an_unreadable_archive_is_a_refusal_not_a_traceback(
     wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
     wheel.write_bytes(payload)
     with pytest.raises(Refusal, match=expected):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_an_archive_with_a_valid_eocd_but_corrupt_body_is_a_refusal(
+    tmp_path: Path,
+) -> None:
+    """The EOCD bound cannot be the only archive check: a file can carry a
+    well-formed tail and still be unopenable, and that path must refuse too
+    rather than raising `BadZipFile` through `main`."""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\n")
+    raw = bytearray(wheel.read_bytes())
+    # Corrupt the local file header, leaving the central directory and EOCD
+    # intact, so the tail still parses and the open or read does not.
+    raw[0:4] = b"XXXX"
+    wheel.write_bytes(bytes(raw))
+    with pytest.raises(Refusal):
         wheel_metadata(wheel, CONTROL, "0.1.0a13")
 
 
@@ -3069,3 +3148,59 @@ def test_a_clean_archive_is_still_accepted_after_the_name_bounds(
         "dotmac-kernel (>=0.1.0a100)",
         "sqlalchemy (>=2.0,<3.0)",
     ]
+
+
+# ── the central directory the ARCHIVE declares ──────────────────────────────
+
+
+def test_the_declared_central_directory_exceeds_summed_filenames(
+    tmp_path: Path,
+) -> None:
+    """Why summing filenames was never the bound.
+
+    A central directory carries a 46-byte header per member plus per-member
+    extra fields and file comments, none of which appear in a filename. On even
+    a one-member archive the declared size is several times the summed names, so
+    an archive can declare a vast directory while its names total almost
+    nothing.
+    """
+
+    wheel = tmp_path / "a.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("a.txt", "x")
+    declared = zip_central_directory_bytes(wheel)
+    assert declared > len(b"a.txt") * 5, declared
+
+
+def test_a_declared_central_directory_over_the_bound_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Tampering with the EOCD's own declared size must be refused BEFORE the
+    archive is opened, because opening it is what reads that directory."""
+
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\n")
+    raw = bytearray(wheel.read_bytes())
+    end = raw.rfind(b"PK\x05\x06")
+    raw[end + 12 : end + 16] = (ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES + 1).to_bytes(
+        4, "little"
+    )
+    wheel.write_bytes(bytes(raw))
+    with pytest.raises(Refusal, match="central directory"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_an_archive_with_no_eocd_is_refused(tmp_path: Path) -> None:
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    wheel.write_bytes(b"no end of central directory record anywhere in here")
+    with pytest.raises(Refusal, match="End Of Central Directory"):
+        zip_central_directory_bytes(wheel)
+
+
+def test_a_valid_wheel_passes_the_central_directory_bound(tmp_path: Path) -> None:
+    """POSITIVE CONTROL for the archive-bounds family."""
+
+    wheel = _wheel_with(tmp_path / "ok", ("dotmac_files/__init__.py",))
+    assert zip_central_directory_bytes(wheel) <= ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES
+    assert wheel_metadata(wheel, CONTROL, "0.1.0a13")["requires-dist"]

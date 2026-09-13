@@ -99,7 +99,7 @@ import zlib
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, NoReturn
+from typing import Any, Final
 
 #: The private index this assembly resolves Dotmac packages from. The workflow
 #: names the same URL for its own `curl`; a drift between the two is caught by
@@ -1037,55 +1037,112 @@ def transfer_problems(url: str, status: str) -> list[str]:
     return [f"{url} answered {status}, not 200"]
 
 
-def fetch(url: str, target: Path) -> None:
-    """Download `url` to `target`, or refuse. Never follows a redirect.
+def zip_central_directory_bytes(path: Path) -> int:
+    """The central directory's size AS THE ARCHIVE DECLARES IT, from the EOCD.
 
-    The transfer is bounded twice, deliberately. `curl` is told a maximum
-    declared length and a maximum duration; then the bytes that actually landed
-    are MEASURED, because `--max-filesize` believes `Content-Length` and a
-    chunked response declares none. An oversized file is deleted rather than
-    left on disk for a later step to find and trust.
+    Summing member filenames is not this number. A central directory carries a
+    46-byte header per member plus per-member EXTRA FIELDS and FILE COMMENTS,
+    none of which appear in a filename, so an archive can declare a vast
+    directory while its names total almost nothing. The End Of Central
+    Directory record states the real size, and ZIP64 states it again in 8
+    bytes when the 32-bit field saturates.
+
+    Read from the tail, before `zipfile` is asked to open anything, because
+    opening is what reads the whole directory.
+    """
+
+    size = path.stat().st_size
+    window = min(size, 65_557 + 64)
+    with path.open("rb") as handle:
+        handle.seek(size - window)
+        tail = handle.read(window)
+
+    end = tail.rfind(b"PK\x05\x06")
+    if end < 0:
+        raise Refusal(f"{path.name} has no End Of Central Directory record")
+    if end + 22 > len(tail):
+        raise Refusal(f"{path.name} has a truncated End Of Central Directory record")
+    declared = int.from_bytes(tail[end + 12 : end + 16], "little")
+    offset = int.from_bytes(tail[end + 16 : end + 20], "little")
+
+    if declared == 0xFFFFFFFF or offset == 0xFFFFFFFF:
+        zip64 = tail.rfind(b"PK\x06\x06")
+        if zip64 < 0:
+            raise Refusal(
+                f"{path.name} saturates the 32-bit central-directory fields but "
+                "carries no ZIP64 End Of Central Directory record"
+            )
+        if zip64 + 56 > len(tail):
+            raise Refusal(
+                f"{path.name} has a truncated ZIP64 End Of Central Directory record"
+            )
+        declared = int.from_bytes(tail[zip64 + 40 : zip64 + 48], "little")
+    return declared
+
+
+def fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
+    """Download `url` to `target` atomically, or refuse. Returns the digest.
+
+    The bytes land in a fresh `.part` FILE and `target` is not touched until
+    every check has passed. That ordering is the point: an earlier version
+    wrote straight to `target` and deleted it on refusal, which meant a refused
+    transfer still briefly produced a file at the real path, and an unexpected
+    exception left it there. Now a refusal cannot produce `target` at all,
+    because `target` is only ever created by the final rename.
+
+    The `.part` is removed in `finally`, so every exit removes it -- the two
+    bounds that ABORT a transfer, a bad status, a size overage, a digest
+    mismatch, and anything unforeseen. After a successful rename the `.part` no
+    longer exists and the cleanup is a no-op.
+
+    Status, then size, then DIGEST, then rename. The digest is computed over the
+    complete bytes and returned, so the value recorded downstream is the value
+    that was verified rather than a second read of the file. `expected_sha256`
+    is compared when a caller has an independent expectation; the INDEX's own
+    advertised `#sha256=` is deliberately not that expectation -- it is stripped
+    in `approved_artifact_url`, because comparing the index against itself
+    proves nothing.
     """
 
     target.parent.mkdir(parents=True, exist_ok=True)
-
-    def refuse(message: str) -> NoReturn:
-        """Remove what landed, THEN refuse.
-
-        Every refusal below leaves a partial file otherwise, and the bounds
-        that abort a transfer are exactly the paths that leave the LARGEST one:
-        `--max-filesize` exits 63 and `--max-time` exits 28 with whatever bytes
-        arrived still on disk. A later step that globs the bundle would then
-        find an oversized fragment and have no way to know it was abandoned.
-        """
-
-        target.unlink(missing_ok=True)
-        raise Refusal(message)
-
-    # S603: the argument vector is built by `curl_argv` from a fixed list, and
-    # `url` has already been through `approved_artifact_url` — https, the
-    # approved authority, under the approved path prefix. No shell is involved.
-    completed = subprocess.run(  # noqa: S603
-        curl_argv(url, target),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        refuse(
-            f"curl failed for {url} (exit {completed.returncode}): "
-            f"{completed.stderr.strip()}"
+    part = target.with_name(target.name + ".part")
+    try:
+        # S603: the argument vector is built by `curl_argv` from a fixed list,
+        # and `url` has already been through `approved_artifact_url` — https,
+        # the approved authority, under the approved path prefix. No shell.
+        completed = subprocess.run(  # noqa: S603
+            curl_argv(url, part),
+            check=False,
+            capture_output=True,
+            text=True,
         )
-    problems = transfer_problems(url, completed.stdout.strip())
-    if problems:
-        refuse(problems[0])
-    landed = target.stat().st_size if target.exists() else 0
-    if landed > ARTIFACT_MAX_BYTES:
-        refuse(
-            f"{url} delivered {landed} bytes, over the {ARTIFACT_MAX_BYTES} "
-            "limit; the declared-length bound did not catch it, so the bytes "
-            "were measured and the file removed"
-        )
+        if completed.returncode != 0:
+            raise Refusal(
+                f"curl failed for {url} (exit {completed.returncode}): "
+                f"{completed.stderr.strip()}"
+            )
+        problems = transfer_problems(url, completed.stdout.strip())
+        if problems:
+            raise Refusal(problems[0])
+        if not part.exists():
+            raise Refusal(f"{url} reported success but delivered no file")
+        landed = part.stat().st_size
+        if landed > ARTIFACT_MAX_BYTES:
+            raise Refusal(
+                f"{url} delivered {landed} bytes, over the {ARTIFACT_MAX_BYTES} "
+                "limit; the declared-length bound did not catch it, so the "
+                "bytes were measured"
+            )
+        digest = sha256_of(part)
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise Refusal(
+                f"{url} hashes to sha256:{digest}, not the expected "
+                f"sha256:{expected_sha256}"
+            )
+        part.replace(target)
+        return digest
+    finally:
+        part.unlink(missing_ok=True)
 
 
 # ── acquire: a closed bundle, downloaded once, by the only job with a key ───
@@ -1328,8 +1385,11 @@ def acquire(plan: dict[str, str], out: Path) -> dict[str, str]:
                 )
         for filename, url in sorted(wanted.items()):
             target = files_dir / filename
-            fetch(url, target)
-            digests[filename] = sha256_hex(target.read_bytes())
+            # The digest RETURNED by `fetch` is the one it verified before it
+            # renamed the file into place. Re-reading the file here would record
+            # a second measurement of bytes that could, in principle, differ
+            # from the ones that passed the size and digest checks.
+            digests[filename] = fetch(url, target)
 
         page_dir = simple_dir / package
         page_dir.mkdir(parents=True, exist_ok=True)
@@ -1757,6 +1817,16 @@ def wheel_metadata(wheel: Path, name: str, version: str) -> dict[str, list[str]]
             f"{WHEEL_MAX_BYTES} limit; refusing to open it"
         )
 
+    # The declared central-directory size, read from the EOCD before anything
+    # opens the archive — because opening it is what reads that directory.
+    declared_directory = zip_central_directory_bytes(wheel)
+    if declared_directory > ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES:
+        raise Refusal(
+            f"{wheel.name} declares a {declared_directory}-byte central "
+            f"directory, over the {ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES} limit; "
+            "refusing to open it"
+        )
+
     # A corrupt, truncated or non-zip file is a REFUSAL, not a traceback. `main`
     # catches `Refusal` and nothing else, so an uncontrolled exception here
     # would surface as a stack trace with no `::error::` line — the operator
@@ -1782,11 +1852,16 @@ def wheel_metadata(wheel: Path, name: str, version: str) -> dict[str, list[str]]
                 f"{wheel.name} declares {total} uncompressed bytes across its "
                 f"members, over the {ARCHIVE_MAX_TOTAL_UNCOMPRESSED} limit"
             )
+        # A secondary check, and deliberately not the central-directory bound:
+        # summed filenames exclude the 46-byte per-member header, every extra
+        # field and every file comment, so an archive can declare a vast
+        # directory while its names total almost nothing. The real bound is
+        # `zip_central_directory_bytes` above, read from the EOCD.
         names = sum(len(member.filename.encode("utf-8")) for member in members)
         if names > ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES:
             raise Refusal(
-                f"{wheel.name}'s member names total {names} bytes, over the "
-                f"{ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES} central-directory limit"
+                f"{wheel.name}'s member names alone total {names} bytes, over "
+                f"the {ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES} limit"
             )
         for member in members:
             encoded = member.filename.encode("utf-8")
