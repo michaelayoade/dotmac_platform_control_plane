@@ -154,8 +154,9 @@ def test_every_refusal_code_maps_to_a_declared_exit_code() -> None:
 
 def test_every_declared_refusal_code_is_raised_somewhere() -> None:
     """A vocabulary entry nobody raises is a promise to an operator that no code
-    keeps. Two-directional against the source, so a retired raiser fails until
-    its code is retired too."""
+    keeps. This is ONE direction only — declared -> raised. The other direction
+    is `test_every_raised_refusal_code_is_declared` below; together they are
+    two-directional against the source."""
     sources = "\n".join(
         path.read_text(encoding="utf-8")
         for path in sorted((ROOT / "src" / "vendor_cp").rglob("*.py"))
@@ -163,6 +164,43 @@ def test_every_declared_refusal_code_is_raised_somewhere() -> None:
     )
     unused = sorted(code for code in REFUSAL_CODES if f'"{code}"' not in sources)
     assert unused == [], unused
+
+
+#: A refusal code as it appears at a raise site: `refuse("code", ...)`,
+#: `_BY_NAME`'s `("ClassName", "code")` tuples, and `refusal_code="code"` on a
+#: `Result` built directly (bypassing `refuse()`, as `deployment
+#: readiness-packet` does at `commands.py:884`). Three call shapes, one code
+#: position each.
+_RAISED_CODE = re.compile(r'refuse\(\s*"([a-z_]+\.[a-z_]+)"')
+_BY_NAME_CODE = re.compile(r'\(\s*"[A-Za-z_]+"\s*,\s*"([a-z_]+\.[a-z_]+)"\s*\)')
+_REFUSAL_CODE_KEYWORD = re.compile(r'refusal_code\s*=\s*"([a-z_]+\.[a-z_]+)"')
+
+
+def test_every_raised_refusal_code_is_declared() -> None:
+    """The direction `test_every_declared_refusal_code_is_raised_somewhere`'s
+    own docstring used to claim to cover and did not.
+
+    `owner.readiness_refused` was raised at `commands.py:583` and `:884` and
+    mapped in `runtime._BY_NAME`, but absent from `REFUSAL_CODES` — so
+    `refuse()`'s `except KeyError` fired `AssertionError: undeclared refusal
+    code` instead of exiting 3, and the declared-only direction above could
+    never catch it: a code missing from `REFUSAL_CODES` is vacuously "used"
+    by that test's own definition of unused. This scans every raise SHAPE for
+    a code and asserts each is declared, so a raiser with no declaration fails
+    here instead of at an operator's terminal.
+    """
+    sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "src" / "vendor_cp").rglob("*.py"))
+        if path.name != "exits.py"
+    )
+    raised = (
+        set(_RAISED_CODE.findall(sources))
+        | set(_BY_NAME_CODE.findall(sources))
+        | set(_REFUSAL_CODE_KEYWORD.findall(sources))
+    )
+    undeclared = sorted(raised - set(REFUSAL_CODES))
+    assert undeclared == [], undeclared
 
 
 def test_no_option_accepts_a_secret_as_its_value() -> None:

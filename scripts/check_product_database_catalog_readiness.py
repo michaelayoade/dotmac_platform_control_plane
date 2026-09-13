@@ -14,17 +14,12 @@ register.  A reviewer may remove an entry only with the integration that makes
 its retirement machine-provable.  Merely publishing every module contribution
 can never make this command report product readiness.
 
-The module half of that ratchet is currently DORMANT, and saying so is the
-point.  ``missing_module_database_catalogs`` asks each composed manifest for a
-``database_catalog`` attribute, and the EXACT-PINNED kernel's ``ModuleManifest``
-declares no such field — so no module could carry one even if its own release
-published it.  Today the probe therefore reports all six for a reason about the
-KERNEL rather than about the modules, and only its composition half can fail.
-``pinned_manifest_declares_contribution_field`` states that premise so a test
-can hold it: when the pin moves to a kernel carrying the field, the premise dies
-and the review that raised the pin has to confirm the probe now measures the
-thing its name claims (``AGENTS.md`` rule 13 — a guard premise is enforceable or
-the region is unmonitored rather than exempt).
+The module half of that ratchet is live under the exact-pinned kernel: its
+``ModuleManifest`` declares ``database_catalog``. Deployment Control a13 is the
+first composed release to populate it, while the other five stateful modules
+remain named debt. ``pinned_manifest_declares_contribution_field`` holds that
+premise so a later kernel cannot silently remove the field and turn the live
+measurement back into a blanket absence report.
 """
 
 from __future__ import annotations
@@ -46,7 +41,7 @@ ACCEPTED_DESCRIPTOR: Final = ROOT / "deploy" / "product.toml"
 
 #: The manifest attribute a module publishes its typed database-catalogue
 #: contribution through.  Named ONCE: the probe below and the premise check
-#: that says why the probe is dormant have to be asking about one attribute,
+#: that says why the probe is live have to be asking about one attribute,
 #: and two literals is exactly how they would stop being about the same one.
 CONTRIBUTION_FIELD: Final = "database_catalog"
 
@@ -54,7 +49,6 @@ MODULE_DATABASE_CATALOG_DEBT: Final[frozenset[str]] = frozenset(
     {
         "approvals",
         "commercial_agreements",
-        "deployment_control",
         "entitlement_allocation",
         "licensing",
         "release_catalog",
@@ -191,18 +185,11 @@ def missing_module_database_catalogs(
 def pinned_manifest_declares_contribution_field(
     manifest: type = ModuleManifest,
 ) -> bool:
-    """Whether the EXACT-PINNED kernel's manifest type can carry a contribution.
+    """Whether the EXACT-PINNED manifest type can carry a contribution.
 
-    This is the premise the module probe above rests on, made observable.  While
-    it is False, ``missing_module_database_catalogs`` cannot report anything but
-    every composed stateful module, because the attribute it reads is one no
-    manifest of this generation has: a module release that published a
-    contribution could not even be constructed against this kernel.  The probe is
-    a FORWARD probe, and its "all six" is not evidence about the six.
-
-    Kept next to the probe rather than in the test, so the two read the same
-    ``CONTRIBUTION_FIELD`` and cannot drift into asking about different
-    attributes.
+    Kept next to the probe rather than in the test, so the live premise and the
+    measurement read the same ``CONTRIBUTION_FIELD`` and cannot drift into
+    asking about different attributes.
     """
 
     return CONTRIBUTION_FIELD in {field.name for field in dataclasses.fields(manifest)}
@@ -235,11 +222,12 @@ def main(
     else:
         print("all composed stateful modules publish database catalogue contributions")
 
-    if not pinned_manifest_declares_contribution_field():
+    field_available = pinned_manifest_declares_contribution_field()
+    if not field_available:
         print(
-            "note: the pinned kernel's ModuleManifest declares no "
-            f"{CONTRIBUTION_FIELD!r} field, so the line above reports the "
-            "composition and not any module's publication state"
+            "refused: the pinned kernel's ModuleManifest declares no "
+            f"{CONTRIBUTION_FIELD!r} field, so module contribution absence "
+            "cannot be measured"
         )
 
     identity = accepted_descriptor_identity(descriptor)
@@ -253,7 +241,7 @@ def main(
     )
     for blocker in blockers:
         print(f"blocked: {blocker.code.value}: {blocker.retire_when}")
-    return 2 if missing or blockers else 0
+    return 2 if missing or blockers or not field_available else 0
 
 
 if __name__ == "__main__":

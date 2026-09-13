@@ -95,6 +95,7 @@ and withholds:
 | `accounts` | An operator WRITE surface. § 4. |
 | `contracts` | An operator WRITE surface, nine mutating routes. § 4. |
 | `vendor_approvals` | An operator WRITE surface. § 4. |
+| `deployment_control` | An operator WRITE surface that proposes deployment plans. This profile never published it: `dotmac-deployment-control` bore no routes until 0.1.0a13 made it route-bearing, so a pin — not a decision — is what put it in front of the admission check. § 4 applies unchanged. Under a13 its one mutating route cannot succeed from a browser in any case: a proposal requires a Foundation-rendered `execution_plan_digest`, and the module's own surface refuses a digest-shaped value arriving in a browser request. |
 
 Every profile now carries an explicit `surface_inventory` stating what it
 publishes, checked at construction against the full roster of composed vendor

@@ -105,10 +105,33 @@ REFUSAL_CODES: Final[dict[str, ExitCode]] = {
     "owner.forbidden": ExitCode.REFUSED,
     "owner.migration_target_refused": ExitCode.REFUSED,
     "owner.provider_not_permitted": ExitCode.REFUSED,
+    # A relay-readiness or deployment-readiness preflight looked and said no.
+    # Raised at `commands.py:583` (`relay_preflight`) and `:884`
+    # (`deployment_readiness_packet`) and already mapped in `runtime._BY_NAME`
+    # (`PacketRefused`) — it was simply never declared here, so `refuse()`
+    # raised `AssertionError: undeclared refusal code` instead of exiting 3.
+    "owner.readiness_refused": ExitCode.REFUSED,
+    # Deployment Control 0.1.0a13's execution-plan and descriptor bindings: the
+    # module looked at a PLAN's or ROLLOUT's own stored state and refused to
+    # act on it. Distinct codes because an operator repairs them differently —
+    # one needs a re-proposed plan bound to an execution plan digest, the other
+    # a re-proposed plan bound to a descriptor digest.
+    "owner.execution_plan_binding_refused": ExitCode.REFUSED,
+    "owner.descriptor_binding_refused": ExitCode.REFUSED,
+    # The operation IS a member of the closed vocabulary and the signing fence
+    # refused it anyway: the executor has not published support for it. Not a
+    # vocabulary fault (that is `usage.invalid_argument`, below) — the word is
+    # valid and the counterparty cannot honour it.
+    "owner.operation_not_executable": ExitCode.REFUSED,
     # ── absent or unreachable evidence (4) ─────────────────────────────────
     "evidence.not_found": ExitCode.UNAVAILABLE,
     "evidence.tool_absent": ExitCode.UNAVAILABLE,
     "evidence.capability_absent": ExitCode.UNAVAILABLE,
+    # `ImageSetRefusedError`'s own docstring: "None of those is a statement
+    # about a target's state or a plan's standing" — the fault is in a
+    # manifest, not a decision, so this is absent/unreadable evidence rather
+    # than an owner refusal.
+    "evidence.image_set_unreadable": ExitCode.UNAVAILABLE,
     # ── execution failure (5) ──────────────────────────────────────────────
     "execution.failed": ExitCode.FAILED,
     "execution.delegate_failed": ExitCode.FAILED,
@@ -134,7 +157,13 @@ def refuse(code: str, message: str) -> Refusal:
     """
     try:
         exit_code = REFUSAL_CODES[code]
-    except KeyError:  # pragma: no cover - guarded by test_installed_cli
+    except KeyError:
+        # NOT guarded by a coverage-proof test today: `owner.readiness_refused`
+        # was raised and mapped in `runtime._BY_NAME` for months while absent
+        # from `REFUSAL_CODES`, and this branch is exactly how that surfaced —
+        # an `AssertionError` instead of exit 3. The pragma here used to claim
+        # a guard `test_installed_cli.py` did not have;
+        # `test_every_raised_refusal_code_is_declared` is that guard now.
         raise AssertionError(f"undeclared refusal code {code!r}") from None
     return Refusal(code, message, exit_code=exit_code)
 

@@ -67,9 +67,15 @@ V017 = ROOT / "alembic" / "versions" / "v017_deployment_target_authority.py"
 #: When a prospective descriptor lands, `deploy/product.toml` moves to
 #: `promotion_ledger` and the prospective file takes `composed_lineages`. Both
 #: predicates already exist, so that is a data edit and nothing goes uncovered.
+PROSPECTIVE_CONTROL_A13_RELATIVE: Final[str] = (
+    "deploy/candidates/2026-09-13-control-a13-kernel-a100.toml"
+)
 DESCRIPTOR_HEADS_AUTHORITY: Final[dict[str, str]] = {
-    "deploy/product.toml": "composed_lineages",
+    "deploy/product.toml": "promotion_ledger",
+    PROSPECTIVE_CONTROL_A13_RELATIVE: "composed_lineages",
 }
+
+PROSPECTIVE_CONTROL_A13: Final[Path] = ROOT / PROSPECTIVE_CONTROL_A13_RELATIVE
 
 #: Authorities this file actually exercises, maintained by hand beside the tests
 #: that exercise them and ratcheted against the map in both directions.
@@ -285,6 +291,61 @@ def test_the_declared_heads_are_the_composed_effective_heads() -> None:
             f"{path.relative_to(ROOT)} declares heads that are not the composed "
             "effective heads"
         )
+
+
+def test_the_accepted_heads_are_the_heads_the_ledger_promoted() -> None:
+    """The accepted descriptor remains historical truth until a promotion.
+
+    Byte equality already guards today's accepted file, but this assertion is
+    the consumer of the `promotion_ledger` authority itself. Without it the map
+    could claim that authority was exercised while no predicate ever selected
+    its subjects.
+    """
+    subjects = _descriptors_answering("promotion_ledger")
+    assert subjects, (
+        "no descriptor answers to promotion_ledger, so accepted migration "
+        "heads have no authority"
+    )
+    latest = _ledger()[-1]
+    candidate = ROOT / str(latest["candidate"])
+    promoted = tomllib.loads(candidate.read_text(encoding="utf-8"))["migration"]
+    assert isinstance(promoted, dict)
+    for path in subjects:
+        migration = tomllib.loads(path.read_text(encoding="utf-8"))["migration"]
+        assert isinstance(migration, dict)
+        assert tuple(migration["expected_heads"]) == tuple(
+            promoted["expected_heads"]
+        ), (
+            f"{path.relative_to(ROOT)} declares migration heads other than "
+            f"the last promoted candidate {candidate.relative_to(ROOT)}"
+        )
+
+
+def test_the_control_a13_candidate_moves_only_the_prospective_head() -> None:
+    """A future database state must not smuggle an application-state claim."""
+    accepted = _descriptor()
+    prospective = tomllib.loads(PROSPECTIVE_CONTROL_A13.read_text(encoding="utf-8"))
+    moved_sections = {
+        section
+        for section in set(accepted) | set(prospective)
+        if accepted.get(section) != prospective.get(section)
+    }
+    assert moved_sections == {"migration"}
+
+    accepted_migration = accepted["migration"]
+    prospective_migration = prospective["migration"]
+    assert isinstance(accepted_migration, dict)
+    assert isinstance(prospective_migration, dict)
+    moved_fields = {
+        field
+        for field in set(accepted_migration) | set(prospective_migration)
+        if accepted_migration.get(field) != prospective_migration.get(field)
+    }
+    assert moved_fields == {"expected_heads"}
+    old_heads = set(accepted_migration["expected_heads"])
+    new_heads = set(prospective_migration["expected_heads"])
+    assert old_heads - new_heads == {"dc_0002_canonical_plan_digest"}
+    assert new_heads - old_heads == {"dc_0011_attestation_registry"}
 
 
 def test_the_effective_head_derivation_is_not_the_graph_heads() -> None:

@@ -44,6 +44,7 @@ from vendor_cp.data_governance import (
     admission_refusal,
     enforce_retention,
     tables_permitting_online_deletion,
+    tables_withholding_online_deletion,
 )
 from vendor_cp.migrations import deploy_config, make_alembic_config
 
@@ -57,6 +58,20 @@ LIVE_TABLES = (
 HOLDS = "SELECT has_table_privilege(:role, :table, :privilege)"
 
 TRANSIENT = "public.feature_flag_overrides"
+
+#: The attestation trust registry's current-root PROJECTION, and the second
+#: table an online role may delete from. `dc_0011` grants `platform_api`
+#: `UPDATE, DELETE` deliberately: revoking the currently-trusted fingerprint
+#: removes the row, because there is no valid current root until a new signed
+#: attempt recovers one, and the append-only enrolments and closures beside it
+#: remain the records.
+ATTESTED_CURRENT_ROOTS = "mod_deploy.attestation_current_roots"
+
+#: EVERY table an online role may still delete from, in the catalogue order
+#: `tables_permitting_online_deletion()` returns. Compared exactly, so a table
+#: quietly becoming deletable is a failure rather than a silent widening; a row
+#: joining this tuple is a governance decision and costs a line here.
+PERMITTING_ONLINE_DELETION = (ATTESTED_CURRENT_ROOTS, TRANSIENT)
 
 #: Which `(role, table)` pairs may delete, read from the catalogue rather than
 #: listed. A hand-picked set of tables is the regression `AGENTS.md` rule 10
@@ -189,8 +204,8 @@ def test_the_deploy_path_is_what_withholds_delete(scratch_db: str) -> None:
 
     The subjects are derived from the catalogue. Only the two decisions are
     written down: that a rehearsal really does leave DELETE widely granted (or
-    the after-state would prove nothing), and that what survives is exactly the
-    one table classified for it.
+    the after-state would prove nothing), and that what survives is exactly
+    what the classification permits.
     """
     _rehearse(scratch_db)
     with _connect(scratch_db) as connection:
@@ -207,7 +222,23 @@ def test_the_deploy_path_is_what_withholds_delete(scratch_db: str) -> None:
     with _connect(scratch_db) as connection:
         after = _delete_holders(connection)
 
-    assert after == {(role, TRANSIENT) for role in ONLINE_ROLES}, sorted(after)
+    # Derived, not counted: a literal `{(role, TRANSIENT) for role in
+    # ONLINE_ROLES}` encoded "there is exactly one LIFECYCLE_DELETE table and
+    # every online role holds DELETE on it", which stopped being true once
+    # `mod_deploy.attestation_current_roots` was correctly classified — `dc_0011`
+    # grants `platform_api` (not `app_user`) DELETE there, a per-role decision
+    # this catalogue does not carry. The enforcement never touches a permitting
+    # table (it only revokes from `tables_withholding_online_deletion()`), so
+    # whatever DELETE a permitting table held BEFORE the deploy is exactly what
+    # it must hold AFTER — that equality is what is asserted, without
+    # hardcoding which roles hold which permitting table.
+    permitting = set(tables_permitting_online_deletion())
+    expected_after = {(role, table) for role, table in before if table in permitting}
+    assert expected_after, (
+        "no (role, table) pair in the rehearsal before-state permits online "
+        "deletion; the comparison below would be vacuous"
+    )
+    assert after == expected_after, sorted(after)
 
 
 def test_no_online_role_may_truncate_a_governed_table(scratch_db: str) -> None:
@@ -251,9 +282,16 @@ def test_the_transient_table_stays_deletable_by_the_online_role(
     kernel's platform console clears an override by deleting the row. A
     governance run that took `DELETE` here would leave that action failing
     against the database, and every denial test above would still pass.
+
+    The set is compared EXACTLY rather than by membership, and that is the
+    point: a table quietly becoming deletable by an online role is the change
+    this assertion exists to catch, so widening it to `TRANSIENT in ...` would
+    trade a real property for the convenience of not maintaining a list.
+    Adding a row to `PERMITTING_ONLINE_DELETION` is a deliberate governance
+    decision and should cost a line here.
     """
     _deploy(scratch_db)
-    assert tables_permitting_online_deletion() == (TRANSIENT,)
+    assert tables_permitting_online_deletion() == PERMITTING_ONLINE_DELETION
     database = scratch_db.rpartition("/")[2]
     online = url_for(scratch_db, database, user="platform_api")
 
@@ -267,9 +305,14 @@ def test_the_transient_table_stays_deletable_by_the_online_role(
 def test_a_transient_policy_nothing_can_act_on_is_refused(scratch_db: str) -> None:
     """SENSITIVITY for the non-vacuity check itself.
 
-    `DELETE` is taken away from the one table classified `LIFECYCLE_DELETE`, and
-    the enforcement must refuse rather than report a clean run. Without this, the
-    positive-direction check could be a function that never fails.
+    `DELETE` is taken away from `public.feature_flag_overrides`, one of the
+    tables classified `LIFECYCLE_DELETE`, and the enforcement must refuse rather
+    than report a clean run. Without this, the positive-direction check could be
+    a function that never fails.
+
+    Revoking from ONE such table is enough and is deliberate: the refusal must
+    name the specific table it found unactionable, so a test that stripped every
+    transient table at once would not prove the message identifies which one.
     """
     _deploy(scratch_db)
     with _connect(scratch_db) as connection:
@@ -298,10 +341,27 @@ def test_the_enforcement_is_idempotent_and_reports_what_it_examined(
         with connection.begin():
             second = enforce_retention(connection)
 
+    # Derived from the classification itself, not a hand-counted constant: a
+    # `1` or a `- 1` here encodes "there is exactly one LIFECYCLE_DELETE
+    # table", which stopped being true the moment a second one (Deployment
+    # Control's `mod_deploy.attestation_current_roots`) was correctly
+    # classified. The next correctly-classified transient table must not fail
+    # this test again.
+    withholding = tables_withholding_online_deletion()
+    permitting = tables_permitting_online_deletion()
     assert first == second
     assert first.tables_examined == len(POLICY_BY_TABLE)
-    assert first.tables_withheld == len(POLICY_BY_TABLE) - 1
-    assert first.tables_permitting_deletion == 1
+    assert first.tables_withheld == len(withholding)
+    assert first.tables_permitting_deletion == len(permitting)
+    # NON-VACUITY FLOOR. Replacing the constant above with a derivation from
+    # the same classification would let both sides drift to zero together —
+    # every table withheld, none permitting deletion — and this assertion
+    # would still pass while the enforcement had revoked everything. That is
+    # precisely the failure `_verify_still_permitted`'s own docstring exists
+    # to catch ("a transient policy nothing can act on is a retained table
+    # wearing the wrong label"); this floor is what keeps this test able to
+    # notice it too. Do not simplify this line away.
+    assert permitting, "no table permits online deletion; the check above is vacuous"
     assert first.revocations_issued == first.tables_withheld
     assert first.cascade_edges_examined > 0
     assert first.definer_functions_examined > 0

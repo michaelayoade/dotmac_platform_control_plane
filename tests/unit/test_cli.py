@@ -212,6 +212,58 @@ def test_the_foundation_passthrough_reports_an_absent_tool_as_unavailable(
     assert FOUNDATION_COMMAND in envelope["message"]
 
 
+def test_deployment_propose_refuses_without_counterpart_derived_evidence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The real operator command cannot fabricate Control a13's required facts."""
+    code = main(
+        [
+            "--format",
+            "json",
+            "deployment",
+            "propose",
+            "--command-id",
+            "proposal-without-foundation",
+            "--target-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--policy-code",
+            "deployment",
+            "--policy-version",
+            "1",
+        ]
+    )
+    assert code == int(ExitCode.UNAVAILABLE)
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["refusal_code"] == "evidence.capability_absent"
+    assert "counterpart-derived" in envelope["message"]
+
+
+def test_deployment_authorize_refuses_without_a_composed_signer(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The real command refuses before a database can mask the missing seam."""
+    code = main(
+        [
+            "--format",
+            "json",
+            "deployment",
+            "authorize",
+            "--command-id",
+            "authorization-without-signer",
+            "--plan-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--approval-request-id",
+            "00000000-0000-0000-0000-000000000002",
+            "--rollout-ref",
+            "rollout-0001",
+        ]
+    )
+    assert code == int(ExitCode.UNAVAILABLE)
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["refusal_code"] == "evidence.capability_absent"
+    assert "authorization signer" in envelope["message"]
+
+
 def test_the_passthrough_forwards_the_vector_untouched_past_one_separator() -> None:
     """Only a LEADING `--` is this parser's; everything after it is the
     delegate's, including a second `--`. Rewriting the vector would defeat the

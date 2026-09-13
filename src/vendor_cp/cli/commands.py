@@ -743,75 +743,22 @@ def deployment_targets(args: argparse.Namespace) -> Result:
 
 
 def deployment_propose(args: argparse.Namespace) -> Result:
-    """Freeze the target's desired state, and print what an approval must bind to."""
-    from vendor_cp.deployment.adapter import (
-        ProposePlanRequest,
-        propose_deployment_plan,
+    """Refuse until the CLI can obtain counterpart-derived plan evidence."""
+    raise refuse(
+        "evidence.capability_absent",
+        "the operator CLI cannot render the Deployment Foundation descriptor "
+        "and execution plan; use the composition adapter with counterpart-derived "
+        "evidence instead of accepting hand-typed digest fields",
     )
-
-    with platform_db() as db:
-        plan = propose_deployment_plan(
-            db,
-            ProposePlanRequest(
-                command_id=args.command_id,
-                target_id=UUID(args.target_id),
-                approval_policy_code=args.policy_code,
-                approval_policy_version=args.policy_version,
-                actor_ref=args.actor_ref,
-            ),
-        )
-        return Result(
-            command="deployment propose",
-            data=_fields(plan),
-            references={
-                "plan_id": str(plan.plan_id),
-                "plan_digest": plan.plan_digest,
-                "approval_subject_type": plan.subject_type,
-                "approval_subject_id": str(plan.plan_id),
-                "approval_content_hash": plan.approval_content_hash,
-            },
-            message=(
-                "open an approval request against approval_subject_type / "
-                "approval_subject_id / approval_content_hash, have it decided, "
-                "then run `deployment authorize`"
-            ),
-        )
 
 
 def deployment_authorize(args: argparse.Namespace) -> Result:
-    """Carry the approval into the frozen plan and request the rollout.
-
-    The `authorization_ref` this prints is the fleet's authorization run
-    identity — the middle term a deployment foundation binds between the
-    canonical descriptor and its own execution report. It is the reason this
-    command exists.
-    """
-    from vendor_cp.deployment.adapter import AuthorizeRequest, authorize_deployment
-
-    with platform_db() as db:
-        receipt = authorize_deployment(
-            db,
-            AuthorizeRequest(
-                command_id=args.command_id,
-                plan_id=UUID(args.plan_id),
-                approval_request_id=UUID(args.approval_request_id),
-                rollout_ref=args.rollout_ref,
-                reason=args.reason,
-                actor_ref=args.actor_ref,
-                expected_plan_digest=args.expect_plan_digest,
-                expected_plan_version=args.expect_plan_version,
-            ),
-        )
-        return Result(
-            command="deployment authorize",
-            data=_fields(receipt),
-            references={
-                "authorization_ref": receipt.authorization_ref,
-                "rollout_ref": receipt.rollout_ref,
-                "plan_digest": receipt.plan_digest,
-                "approval_decision_ref": receipt.approval_decision_ref,
-            },
-        )
+    """Refuse until the CLI composition supplies an authorization signer."""
+    raise refuse(
+        "evidence.capability_absent",
+        "the operator CLI has no composed authorization signer; use the "
+        "composition adapter with an injected Control a13 AuthorizationSigner",
+    )
 
 
 def deployment_plan(args: argparse.Namespace) -> Result:

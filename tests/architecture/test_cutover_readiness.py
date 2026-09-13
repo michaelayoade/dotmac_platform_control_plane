@@ -58,6 +58,11 @@ LEDGERS = frozenset(
     {
         SRC / "vendor_cp" / "cutover_readiness.py",
         Path(__file__).resolve(),
+        # A second closed declaration of names imported from Control's facade.
+        # Counting its quoted keys as runtime uses would turn a coverage ledger
+        # into a production call site and force both inventories to drift in
+        # lockstep for no behavioural reason.
+        ROOT / "tests" / "architecture" / "test_control_facade_installed_view.py",
     }
 )
 

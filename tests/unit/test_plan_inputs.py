@@ -16,8 +16,13 @@ from __future__ import annotations
 import dataclasses
 import uuid
 from collections.abc import Iterator
+from datetime import timedelta
 
 import pytest
+from dotmac_deployment_control import (
+    AuthorizationSignature,
+    AuthorizationSignerIdentity,
+)
 from dotmac_kernel import NotFoundError
 from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy.orm import Session
@@ -45,6 +50,33 @@ PROFILE_OVERRIDE = Override(
     value="sha256:" + "0" * 64,
     reason="the application foundation profile document does not exist yet",
 )
+
+OPERATION = "deploy"
+DESCRIPTOR_DIGEST = "sha256:" + "2" * 64
+EXECUTION_PLAN_DIGEST = "sha256:" + "3" * 64
+AUTHORIZED_IMAGE = {
+    "service": "vendor-control-plane",
+    "repository": "ghcr.io/example",
+    "digest": "sha256:" + "a" * 64,
+}
+
+
+class _TestAuthorizationSigner:
+    """A purpose-bound signer double for the direct adapter path only."""
+
+    identity = AuthorizationSignerIdentity(
+        key_id="test-platform-authorizer",
+        algorithm="ed25519",
+        public_key_fingerprint="sha256:" + "0" * 64,
+    )
+
+    def sign(self, canonical_bytes: bytes) -> AuthorizationSignature:
+        return AuthorizationSignature(
+            key_id=self.identity.key_id,
+            algorithm=self.identity.algorithm,
+            public_key_fingerprint=self.identity.public_key_fingerprint,
+            signature="test-signature",
+        )
 
 
 @pytest.fixture
@@ -82,6 +114,7 @@ def _authorized(db: Session) -> str:
             target_id=target.id,
             release_ref="ghcr.io/example@sha256:" + "a" * 64,
             spec={"replicas": 1},
+            images=(AUTHORIZED_IMAGE,),
         ),
     )
     approvals.publish_policy_version(
@@ -101,6 +134,9 @@ def _authorized(db: Session) -> str:
             target_id=target.id,
             approval_policy_code="deployment",
             approval_policy_version=1,
+            operation=OPERATION,
+            descriptor_digest=DESCRIPTOR_DIGEST,
+            execution_plan_digest=EXECUTION_PLAN_DIGEST,
         ),
     )
     request = approvals.open_request(
@@ -132,6 +168,7 @@ def _authorized(db: Session) -> str:
             approval_request_id=request.request_id,
             rollout_ref=f"rollout-{uuid.uuid4().hex[:8]}",
         ),
+        signer=_TestAuthorizationSigner(),
     )
     return receipt.authorization_ref
 
@@ -160,6 +197,40 @@ def test_a_derivable_reference_resolves_every_input_with_provenance(
     assert all(isinstance(v.provenance, Provenance) for v in resolved.values)
     assert resolved.of(PlanInput.TARGET).value.startswith("vendor-cp-")
     assert resolved.of(PlanInput.AUTHORIZED_IMAGES).value.startswith("ghcr.io/")
+    assert resolved.of(PlanInput.EXECUTION_PLAN_INPUTS).value == EXECUTION_PLAN_DIGEST
+
+
+def test_the_execution_input_is_the_foundations_digest_not_controls_plan_digest(
+    db: Session,
+) -> None:
+    """The two digests are different facts and may never substitute for one another."""
+    reference = _authorized(db)
+    rollout = adapter.read_rollout(db, uuid.UUID(reference))
+    plan = adapter.read_plan(db, rollout.plan_id)
+    assert plan.plan_digest != EXECUTION_PLAN_DIGEST
+
+    resolved = resolve_plan_inputs(db, reference, overrides=[PROFILE_OVERRIDE])
+    assert resolved.of(PlanInput.EXECUTION_PLAN_INPUTS).value == EXECUTION_PLAN_DIGEST
+    assert resolved.of(PlanInput.EXECUTION_PLAN_INPUTS).value != plan.plan_digest
+
+
+def test_authorization_carries_the_plan_facts_signer_and_platform_window(
+    db: Session,
+) -> None:
+    """The direct adapter path proves the policy and injected signing seam work."""
+    rollout = adapter.read_rollout(db, uuid.UUID(_authorized(db)))
+    envelope = rollout.authorization_envelope
+    assert envelope is not None
+    statement = envelope.statement
+
+    assert statement.operation == OPERATION
+    assert statement.descriptor_digest == DESCRIPTOR_DIGEST
+    assert statement.execution_plan_digest == EXECUTION_PLAN_DIGEST
+    assert statement.key_id == _TestAuthorizationSigner.identity.key_id
+    assert statement.approved_at is not None
+    assert statement.expires_at - statement.approved_at == timedelta(minutes=30)
+    assert statement.expires_at - statement.issued_at <= timedelta(minutes=30)
+    assert adapter.MAX_AUTHORIZATION_WINDOW == timedelta(minutes=30)
 
 
 # ── five inputs, five distinct codes ────────────────────────────────────────
@@ -185,11 +256,18 @@ def test_the_profile_digest_refuses_by_name_and_is_never_an_empty_string(
     ("input", "field", "broken"),
     [
         (PlanInput.TARGET, "target_ref", ""),
-        (PlanInput.EXECUTION_PLAN_INPUTS, "plan_digest", None),
+        (PlanInput.EXECUTION_PLAN_INPUTS, "execution_plan_digest", None),
+        (PlanInput.EXECUTION_PLAN_INPUTS, "operation", "   "),
         (PlanInput.AUTHORIZED_IMAGES, "snapshot", {"replicas": 1}),
         (PlanInput.DESIRED_STATE, "snapshot", {}),
     ],
-    ids=["target", "execution-plan-inputs", "authorized-images", "desired-state"],
+    ids=[
+        "target",
+        "execution-plan-digest",
+        "operation",
+        "authorized-images",
+        "desired-state",
+    ],
 )
 def test_each_input_refuses_with_its_own_code(
     db: Session,

@@ -224,3 +224,13 @@ rewritten, when the kernel field exists — the declared policies move to
   cannot publish its API by omission.
 * This change alters no data, no migration, no privilege and no module
   composition. It removes routes and adds one guarded route.
+
+## Amendment — 2026-09-13: kernel ownership consumed at a100
+
+Kernel a100 ships the exact typed policy and constructor-time composition seam
+specified in section 6. Platform now supplies
+`ProductAssemblySpec.api_documentation` from
+`environment_api_documentation_policy()`, deletes its local policy module, and
+returns `vendor_cp.main` to `create_app(build_spec())`. The environment mapping
+and live-route audit are unchanged; their single owner is now
+`dotmac_kernel.api_documentation`.

@@ -504,6 +504,44 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "the signed observation of what a target actually ran",
     ),
     _retain("mod_deploy", "rollout_attempts", "every attempt, including failures"),
+    TablePolicy(
+        "mod_deploy",
+        "attestation_current_roots",
+        Disposition.LIFECYCLE_DELETE,
+        "the current attestation root is mutable state; revocation and repair "
+        "remove a pointer, never the enrolment or closure evidence it names",
+        deleting_owner=(
+            "dotmac_deployment_control.attestation_trust_registry.revoke_root / "
+            "repair_current_root"
+        ),
+        trigger=(
+            "revocation closes the active fingerprint, or reconciliation finds "
+            "that no open enrolment remains"
+        ),
+    ),
+    _retain(
+        "mod_deploy",
+        "attestation_enrolments",
+        "append-only attestation enrolment bindings; deleting one would erase "
+        "why later target evidence was trusted",
+    ),
+    _retain(
+        "mod_deploy",
+        "attestation_fingerprint_closures",
+        "append-only closed attestation fingerprints and terminal evidence",
+    ),
+    _retain(
+        "mod_deploy",
+        "recovery_grants",
+        "recovery authorization evidence, including signer and execution "
+        "binding; deleting it would erase a high-consequence exception",
+    ),
+    _retain(
+        "mod_deploy",
+        "rollout_attempt_settlements",
+        "terminal settlement evidence for rollout attempts; failed and replayed "
+        "outcomes remain part of deployment history",
+    ),
     _retain("mod_deploy", "rollouts", "what was rolled out, where, and when"),
     _retain(
         "mod_deploy",
@@ -870,6 +908,25 @@ DELETION_SITES: Final[tuple[DeletionSite, ...]] = (
         reachability=Reachability.NOT_COMPOSED,
         premise="a prune an operator schedules; this deployment schedules none, "
         "and the period it would need is a decision nobody has taken",
+    ),
+    DeletionSite(
+        distribution="dotmac-deployment-control",
+        module="dotmac_deployment_control.attestation_trust_registry",
+        symbol="repair_current_root",
+        target="mod_deploy.attestation_current_roots",
+        reachability=Reachability.NOT_COMPOSED,
+        premise="Control owns this explicit reconciliation writer, but no route, "
+        "job or adapter in this assembly invokes it; the projection remains "
+        "rebuildable from retained enrolments and closures",
+    ),
+    DeletionSite(
+        distribution="dotmac-deployment-control",
+        module="dotmac_deployment_control.attestation_trust_registry",
+        symbol="revoke_root",
+        target="mod_deploy.attestation_current_roots",
+        reachability=Reachability.NOT_COMPOSED,
+        premise="Control owns revocation and conditionally removes only the "
+        "current pointer, but this assembly exposes no caller for that command",
     ),
 )
 

@@ -1,7 +1,16 @@
+<!-- kernel-pin: snapshot -->
+
 # Product database catalogue readiness
 
-**Status:** held on 2026-08-31. This checkout publishes no product database
-catalogue and its descriptor binds no such digest.
+**Status:** held on 2026-09-13, when the Kernel a100 / Deployment Control a13
+paragraph below was last measured against the exact pins in `pyproject.toml`
+(the readiness blockers themselves were first held on 2026-08-31 and remain
+unchanged since). This checkout publishes no product database catalogue and
+its descriptor binds no such digest. Like
+`docs/operations/kernel-a100-assessment-2026-09-01.md`, this is an as-of
+observation carrying its coordinates, not a release claim or a live pin
+assertion — a future repin does not make this record false, it makes it due
+for a fresh measurement.
 
 The product database catalogue is a build-once declaration composed from typed
 facts supplied by their owners. A running database is comparison evidence only;
@@ -9,12 +18,11 @@ it is never an authoring source.
 
 ## Repository-local blockers
 
-The exact pins in `pyproject.toml` currently compose six stateful module
+The exact pins in `pyproject.toml` currently compose five stateful module
 manifests without a database-catalogue contribution:
 
 - `approvals`
 - `commercial_agreements`
-- `deployment_control`
 - `entitlement_allocation`
 - `licensing`
 - `release_catalog`
@@ -27,18 +35,14 @@ not duplicate any module's schema contract. Presence is all this part proves: a
 non-null attribute is not proof that canonical bytes parse, cover the selected
 plane or agree with a live observation.
 
-**The other direction — a module adopting a contribution — is dormant, and this
-is the honest statement of it.** The probe reads a `database_catalog` attribute,
-and the exact-pinned kernel's `ModuleManifest` declares no such field, so no
-module release of this generation could publish one even in principle. Today the
-six therefore record a fact about the kernel generation, not about six module
-owners, and only the composition half of the ratchet can fail.
-`pinned_manifest_declares_contribution_field` states that premise and
-`test_the_module_probe_is_dormant_because_the_pinned_kernel_carries_no_field`
-holds it, so the premise dies with the pin that established it rather than
-outliving it in silence (`AGENTS.md` rule 13). Had the kernel named the field
-anything else, the set would have sat at six for ever and a repin would have
-passed over it without a word.
+**The other direction — a module adopting a contribution — is now live.** The
+exact-pinned Kernel a100 declares `ModuleManifest.database_catalog`, and
+Deployment Control a13 supplies a non-null contribution. The debt set therefore
+names the five module releases that still lack one, rather than a limitation of
+the kernel generation. `pinned_manifest_declares_contribution_field` and
+`test_the_module_probe_is_live_at_the_pinned_kernel` hold the enabling premise;
+if a future pin removes the field, the check refuses instead of relabelling all
+modules as debt (`AGENTS.md` rule 13).
 
 The command itself is now executed by
 `test_the_commands_exit_code_is_observed_in_both_directions` rather than only
@@ -46,10 +50,9 @@ described here. Nothing else calls it — not CI, not the `Makefile` — so its
 documented exit 2 had never been run and its zero branch had never been reached
 by anything at all.
 
-Deployment Control's candidate source contribution is not evidence available to
-this assembly. It becomes usable only after its kernel dependency exists in a
-published version, Deployment Control publishes a verified artifact carrying
-the contribution, and this repository exact-pins that artifact.
+Deployment Control's contribution is evidence available to this assembly from
+the exact-pinned a13 artifact. Its presence retires only that module-level debt;
+it does not satisfy the product-level obligations below.
 
 ## Fail-closed product-level register
 
@@ -93,8 +96,8 @@ their truth without unpublished APIs or release-time held bytes:
 
 The blocker register is fail-closed review debt, not a claim that those checks
 already exist. An entry is removed only in the same review that installs its
-machine proof. Consequently the command continues to exit 2 even after all six
-module owners publish contributions.
+machine proof. Consequently the command continues to exit 2 even after all
+composed module owners publish contributions.
 
 ## Further required publication
 

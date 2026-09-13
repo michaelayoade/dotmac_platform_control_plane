@@ -78,23 +78,29 @@ into the APPROVALS module's vocabulary, through the declared
 `vendor_cp.approvals_authority.bare_content_hash`, and its result never travels
 back the other way.
 
-**No `approved_by`.** `ApprovalEvidence.approver_refs` stays empty. Approver
-identity lives once, in `dotmac-approvals`, reachable through `decision_ref`; a
-name copied alongside a reference is a second copy of an identity that can drift
-from the decision it claims to describe.
+**No `approved_by`, and no equivalent.** Control a13 accepts an
+`ApprovalEvidence.approver_refs` input but neither persists it nor places it in
+the signed authorization statement. This adapter therefore leaves the field
+empty rather than claiming transient input became portable evidence. Approver
+identity remains reachable through the decision reference owned by
+`dotmac-approvals`; adding participants to the signed statement requires a new
+versioned Control contract.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 from uuid import UUID
 
 from dotmac_deployment_control import (
+    ApprovalDecisionStatus,
     ApprovalEvidence,
     ApprovePlanCommand,
+    AuthorizationSigner,
+    AuthorizedImage,
     DesiredDeployment,
     PlanView,
     ProposePlanCommand,
@@ -191,6 +197,18 @@ def resolve_target(db: Session, target_id: UUID) -> DeploymentTargetFacts:
 #: spellings of it would make the second check pass for the wrong reason.
 PLAN_SUBJECT_TYPE: Final[str] = "deployment_plan"
 
+# Platform policy, deliberately owned here rather than inferred from Control.
+# The upstream module validates the resulting expiry; it does not set this
+# assembly's authorization window.
+MAX_AUTHORIZATION_WINDOW: Final[timedelta] = timedelta(minutes=30)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Restore UTC lost by SQLite tests; preserve aware production timestamps."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
 
 class DeploymentIdentityMismatch(ValueError):
     """The caller bound this authorization to something the module did not freeze.
@@ -211,6 +229,9 @@ class ProposePlanRequest:
     target_id: UUID
     approval_policy_code: str
     approval_policy_version: int
+    operation: str
+    descriptor_digest: str
+    execution_plan_digest: str
     actor_ref: str | None = None
 
 
@@ -396,6 +417,10 @@ class DesiredStateRequest:
     target_id: UUID
     release_ref: str
     spec: Mapping[str, object] = field(default_factory=dict)
+    # A first-class image set rendered by the deployment counterpart. `None`
+    # means no set was supplied; it is never inferred from the opaque spec or
+    # from `release_ref`, because that would invent service/repository identity.
+    images: Sequence[AuthorizedImage | Mapping[str, object]] | None = None
     licence_ref: str | None = None
     #: Optional optimistic-concurrency binding, compared upstream against the
     #: target's `record_version`. A mismatch is the MODULE's refusal, not ours.
@@ -457,6 +482,7 @@ def set_target_desired_state(db: Session, request: DesiredStateRequest) -> Targe
                 release_ref=request.release_ref,
                 spec=dict(request.spec),
                 licence_ref=request.licence_ref,
+                images=request.images,
                 # No brand reference: see `DesiredStateRequest` above.
             ),
             expected_version=request.expected_version,
@@ -481,6 +507,9 @@ def propose_deployment_plan(db: Session, request: ProposePlanRequest) -> Propose
             requires_approval=True,
             approval_policy_code=request.approval_policy_code,
             approval_policy_version=request.approval_policy_version,
+            operation=request.operation,
+            descriptor_digest=request.descriptor_digest,
+            execution_plan_digest=request.execution_plan_digest,
             actor_ref=request.actor_ref,
         ),
     )
@@ -505,7 +534,10 @@ def propose_deployment_plan(db: Session, request: ProposePlanRequest) -> Propose
 
 
 def authorize_deployment(
-    db: Session, request: AuthorizeRequest
+    db: Session,
+    request: AuthorizeRequest,
+    *,
+    signer: AuthorizationSigner,
 ) -> AuthorizationReceipt:
     """Approve a frozen plan on carried evidence, then request its rollout.
 
@@ -545,6 +577,7 @@ def authorize_deployment(
         subject_id=str(plan.id),
         content_hash=bare_content_hash(frozen),
     )
+    decided_at = _as_utc(evidence.decided_at)
 
     approved = approve_plan(
         db,
@@ -557,9 +590,10 @@ def authorize_deployment(
                 decision_ref=str(evidence.request_id),
                 # The module's own frozen string, carried across untouched.
                 content_digest=frozen,
-                decided_at=evidence.decided_at,
-                # Stays empty. ADR-0013 § 3: approver identity lives once, in
-                # `dotmac-approvals`, reachable through `decision_ref`.
+                decided_at=decided_at,
+                decision_status=ApprovalDecisionStatus.GRANTED.value,
+                operation=plan.operation,
+                execution_plan_digest=plan.execution_plan_digest,
             ),
             expected_version=request.expected_plan_version,
             actor_ref=request.actor_ref,
@@ -574,10 +608,12 @@ def authorize_deployment(
             plan_id=plan.id,
             reason=request.reason,
             actor_ref=request.actor_ref,
+            authorization_expires_at=decided_at + MAX_AUTHORIZATION_WINDOW,
         ),
+        signer=signer,
     )
 
-    approved_at = approved.approved_at or evidence.decided_at
+    approved_at = approved.approved_at or decided_at
     return AuthorizationReceipt(
         authorization_ref=str(rollout.id),
         rollout_id=rollout.id,
@@ -601,6 +637,7 @@ def authorize_deployment(
 
 __all__ = [
     "PLAN_SUBJECT_TYPE",
+    "MAX_AUTHORIZATION_WINDOW",
     "AuthorizationReceipt",
     "AuthorizeRequest",
     "DeploymentIdentityMismatch",

@@ -347,7 +347,7 @@ step "2  the application imports, and publishes the production documentation sur
 # No ENVIRONMENT is set on purpose: `classify_environment` fails closed, so an
 # image with nothing declared must already serve the production inventory.
 SCRIPT="
-from vendor_cp.main import app; import vendor_cp.api_documentation as policy; assert app is not None; assert policy.classify_environment(None) == policy.PRODUCTION; paths = {getattr(route, 'path', '') for route in app.routes}; assert not paths & {'/docs', '/docs/oauth2-redirect', '/redoc'}, paths; assert not policy.audit_api_documentation( app, policy.api_documentation_policy(policy.PRODUCTION)); assert '/openapi.json' in paths, 'the document plane must be served, not merely declared'
+from vendor_cp.main import app; import dotmac_kernel.api_documentation as policy; assert app is not None; assert policy.classify_environment(None) == policy.PRODUCTION; paths = {getattr(route, 'path', '') for route in app.routes}; assert not paths & {'/docs', '/docs/oauth2-redirect', '/redoc'}, paths; assert not policy.audit_api_documentation( app, policy.api_documentation_policy(policy.PRODUCTION)); assert '/openapi.json' in paths, 'the document plane must be served, not merely declared'
 "
 in_image || fail "the built bytes do not serve the production documentation policy"
 pass "app imports; /docs, /docs/oauth2-redirect and /redoc are ABSENT from the live inventory"
@@ -359,7 +359,7 @@ step "10 the documentation gate refuses an omission too, in the artifact"
 # development policy is applied to the same app to prove the gate can still
 # object in the other direction.
 SCRIPT="
-import vendor_cp.api_documentation as policy
+import dotmac_kernel.api_documentation as policy
 from vendor_cp.main import app
 findings = policy.audit_api_documentation(app, policy.api_documentation_policy(policy.DEVELOPMENT))
 assert findings, 'the production artifact satisfied the DEVELOPMENT policy, so the gate is not discriminating'
@@ -576,7 +576,8 @@ pass "$tenant_scoped tables carry tenant_id; all but the declared resolver input
 
 step "9  the exact UI assets this artifact serves"
 SCRIPT="
-import hashlib, pathlib
+import hashlib, json, pathlib, re
+from importlib.metadata import version
 from dotmac_kernel.templating import static_dir
 root = pathlib.Path(static_dir())
 entries = sorted(
@@ -584,19 +585,34 @@ entries = sorted(
     for p in root.rglob('*') if p.is_file()
 )
 manifest = '\n'.join(f'{name}  {digest}' for name, digest in entries)
+profile = json.load(open('/app/application_foundation_profile.json'))
+assert profile['contract'] == 'dotmac-application-foundation-profile/1'
+kernel_coordinates = {
+    (provider['version'], provider['coordinate'])
+    for concern in profile['concerns'].values()
+    for provider in concern['providers']
+    if provider['distribution'] == 'dotmac-kernel'
+    and provider['coordinate_kind'] == 'wheel_sha256'
+}
+assert len(kernel_coordinates) == 1, kernel_coordinates
+profile_version, profile_wheel = kernel_coordinates.pop()
+installed_version = version('dotmac-kernel')
+assert profile_version == installed_version, (profile_version, installed_version)
+assert re.fullmatch(r'sha256:[0-9a-f]{64}', profile_wheel), profile_wheel
 print(len(entries))
 print(hashlib.sha256(manifest.encode()).hexdigest())
+print(installed_version)
+print(profile_wheel.removeprefix('sha256:'))
 "
 asset_report="$(in_image)"
-asset_count="$(printf '%s\n' "$asset_report" | sed -n '1p')"
-asset_digest="$(printf '%s\n' "$asset_report" | sed -n '2p')"
-expected_count="$(sed -n '1p' .github/candidate/ui-assets.expected)"
-expected_digest="$(sed -n '2p' .github/candidate/ui-assets.expected)"
-test "$asset_count" = "$expected_count" \
-    || fail "the artifact serves $asset_count UI assets, declared $expected_count"
-test "$asset_digest" = "$expected_digest" \
-    || fail "UI asset manifest digest $asset_digest does not match the declared $expected_digest"
-pass "$asset_count UI assets, manifest digest matches .github/candidate/ui-assets.expected"
+if ! asset_verification="$(printf '%s\n' "$asset_report" | python3 \
+    .github/candidate/ui_asset_contract.py \
+    --expectation .github/candidate/ui-assets.expected \
+    --pyproject pyproject.toml \
+    --lock poetry.lock)"; then
+    fail "the installed UI assets do not match their locked Kernel coordinate"
+fi
+pass "$asset_verification"
 
 # ── The running application ─────────────────────────────────────────────────
 step "6  dependency-aware readiness, against liveness as the control"

@@ -26,7 +26,10 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a98)
+KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a100)
+# a98 and a100 carry the SAME kernel migration head: both ship 28 revisions
+# ending at 0028. The kernel half of this repin therefore owes no migration
+# rehearsal -- only the comment moved, and that is the whole change here.
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 
@@ -58,7 +61,14 @@ LICENSING_HEAD = "li_0001_licensing"
 # module head IS depended on by a vendor revision — `v017` names it — so it
 # is an ancestor and NOT a version row, the same shape `ap_0001` had before
 # a5 moved that lineage past it.
-DEPLOYMENT_CONTROL_HEAD = "dc_0002_canonical_plan_digest"
+# a6 -> a13 advances this lineage by NINE revisions, and they are not
+# cosmetic: five new tables, roughly nineteen added columns, and
+# `op.execute` privilege blocks. That is why this repin owes a rehearsal
+# against a RESTORED isolated database before it reaches any deployment,
+# and why the head is stated here rather than derived -- a derived head
+# would move silently with the pin and the rehearsal obligation would
+# never be visible in a diff.
+DEPLOYMENT_CONTROL_HEAD = "dc_0011_attestation_registry"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v019_relay_heartbeat"

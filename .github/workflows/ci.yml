@@ -290,7 +290,7 @@ jobs:
             --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
             dotmac-vendor-control-plane:ci \
             -c "from vendor_cp.main import app; \
-                import vendor_cp.api_documentation as policy; \
+                import dotmac_kernel.api_documentation as policy; \
                 assert app is not None; \
                 assert policy.classify_environment(None) == policy.PRODUCTION; \
                 paths = {getattr(route, 'path', '') for route in app.routes}; \

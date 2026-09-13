@@ -89,13 +89,13 @@ amendment at the owning source. Six slices, three landed.
 
 | Distribution | Pinned here | Released | Position |
 | --- | --- | --- | --- |
-| `dotmac-kernel` | `0.1.0a98` | a100 | the pin IS the highest floor anything composed declares, and `kernel-pin` executes that both ways; a100 is published and not adopted — it shares this pin's import boundary rather than regressing it, and the repair is a101, which is not yet published — see `docs/operations/kernel-a100-assessment-2026-09-01.md` |
+| `dotmac-kernel` | `a100` | — | the pin IS the highest floor anything composed declares, and `kernel-pin` executes that both ways. `dotmac-deployment-control`'s own declared floor (see its row below) is `>=a100`, so a100 became that floor and the pin moved to meet it — not because a100 was the newest artifact. a101+ stay unpinned for exactly that reason: nothing composed requires them. a100 shares its immediate predecessor's under-declared `create_app` import boundary rather than regressing it — see `docs/operations/kernel-a100-assessment-2026-09-01.md`, whose "no pin move is possible yet" is now satisfied by this repin rather than by a101 |
 | `dotmac-approvals` | `0.1.0a5` | a5 | current |
 | `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current (a5 unpublished; never pin it) |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
 | `dotmac-commercial-agreements` | `0.1.0a2` | a2 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
-| `dotmac-deployment-control` | `0.1.0a2` | a2 | current |
+| `dotmac-deployment-control` | `0.1.0a13` | a13 | current |
 | `dotmac-brand-profiles` | not pinned | a1, tagged | deferred by local decision (ADR-0007 § 6) |
 
 ADR-0007's rule is that a package enters with the coherent slice that consumes

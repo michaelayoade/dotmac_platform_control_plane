@@ -148,6 +148,41 @@ _BY_NAME: Final[tuple[tuple[str, str], ...]] = (
     ("ReleaseEvidenceError", "usage.bad_request"),
     ("ProductionSecretError", "config.invalid"),
     ("PacketRefused", "owner.readiness_refused"),
+    # ── Deployment Control 0.1.0a13's new DIRECT `DeploymentControlError`
+    # siblings (`ports.py` ~157-256, `authorization.py`'s
+    # `AuthorizationEnvelopeRefusedError`). None subclasses `PlanRefusedError`
+    # or any other class already listed, so every one of these fell through to
+    # `execution.failed` — "Execution began and failed" — reporting a refusal
+    # where nothing executed, which is the worst failure shape this CLI has.
+    #
+    # `OperationRefusedError` is the one case with an EXISTING code that
+    # already says the right thing: it is refused at `ProposePlanCommand`
+    # construction, before any state is read — a vocabulary fault, not a
+    # decision about a target or a plan — so it is `usage.invalid_argument`
+    # exactly like any other malformed argument.
+    ("OperationRefusedError", "usage.invalid_argument"),
+    # `OperationNotExecutableError` is deliberately NOT a subclass of
+    # `OperationRefusedError` (the module's own docstring: the two say
+    # opposite things about the same word), so it needs its own code rather
+    # than inheriting `usage.invalid_argument` by MRO. Raised only at the
+    # signing fence, where the word IS a member of the vocabulary and the
+    # executor has not published support for it — an owner decision.
+    ("OperationNotExecutableError", "owner.operation_not_executable"),
+    ("ExecutionPlanBindingError", "owner.execution_plan_binding_refused"),
+    ("DescriptorBindingError", "owner.descriptor_binding_refused"),
+    ("ImageSetRefusedError", "evidence.image_set_unreadable"),
+    # "the capability is absent" is exactly what `SigningKeyUnavailableError`
+    # already means above, and it is exactly what `AuthorizationEnvelopeRefusedError`
+    # means on the only path this assembly can reach: `authorize_deployment`
+    # never supplies a signer (signer identities are unminted by design,
+    # `vendor_cp.deployment.signers`), so `request_rollout` always raises this
+    # with code ABSENT.
+    ("AuthorizationEnvelopeRefusedError", "evidence.capability_absent"),
+    # Two independently-sourced digest readings disagree, or the evidence
+    # document is not trustworthy enough to hand one out of — the same "this
+    # is not what it claims to be" shape `DeploymentIdentityMismatch` above
+    # already carries `integrity.digest_mismatch` for.
+    ("CandidateArtifactRefusedError", "integrity.digest_mismatch"),
 )
 
 

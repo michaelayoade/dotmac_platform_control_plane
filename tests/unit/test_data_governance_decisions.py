@@ -137,13 +137,23 @@ def test_the_transient_table_is_named_with_its_owner_and_trigger() -> None:
     assert policy.deleting_owner == "dotmac_kernel.platform_web.set_flag"
     assert "action=clear" in policy.trigger
 
+    current_root = policy_for("mod_deploy.attestation_current_roots")
+    assert current_root is not None
+    assert current_root.disposition is Disposition.LIFECYCLE_DELETE
+    assert "revoke_root" in current_root.deleting_owner
+    assert "repair_current_root" in current_root.deleting_owner
+    assert "no open enrolment" in current_root.trigger
 
-def test_only_the_transient_table_permits_an_online_deletion() -> None:
+
+def test_only_the_two_lifecycle_tables_permit_an_online_deletion() -> None:
     """The two halves partition the enumeration, so a table cannot fall out of
     both and be governed by nothing."""
     withheld = set(tables_withholding_online_deletion())
     permitted = set(tables_permitting_online_deletion())
-    assert permitted == {"public.feature_flag_overrides"}
+    assert permitted == {
+        "public.feature_flag_overrides",
+        "mod_deploy.attestation_current_roots",
+    }
     assert not (withheld & permitted)
     assert withheld | permitted == set(POLICY_BY_TABLE)
 

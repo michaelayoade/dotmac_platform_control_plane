@@ -576,3 +576,27 @@ NAMED `resolve_target`: the count is over occurrences, and raising a declared
 call-site count to accommodate prose would have left room underneath it for a
 real new caller. The prose was reworded instead. Both are recorded because the
 tempting repair in each case was to edit the ledger.
+
+## Amendment, 2026-09-13 — Control a13 portable authorization evidence
+
+Control a13 does **not** supersede § 3's empty-`approver_refs` rule. Its
+`ApprovalEvidence` input exposes an approver-reference tuple, but `approve_plan`
+does not persist that tuple and the signed authorization statement has no
+approver field. Platform therefore leaves the transient input empty and never
+accepts an independently supplied `approved_by` or approver list. The portable
+statement carries the owner-derived decision reference, standing and decision
+time; portable participant evidence requires a later, versioned Control storage
+and envelope contract rather than an assembly-side claim.
+
+The same boundary carries Control's now-required `operation`, descriptor digest,
+execution-plan digest and authorized image set. The operator CLI cannot derive
+the Foundation descriptor or execution plan today, so `deployment propose`
+refuses with `evidence.capability_absent` rather than accepting free digest
+fields. A composition adapter may call the typed seam with counterpart-derived
+values.
+
+Authorization signing is an injected assembly dependency; no private material
+or signer implementation lives in Control or in the adapter. Platform owns one
+explicit policy value: an authorization expires 30 minutes after the approval's
+recorded decision time. Control validates and signs that bounded statement but
+does not choose the window for this assembly.
