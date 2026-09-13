@@ -363,13 +363,14 @@ class VendorDeploymentProfile:
 PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     VendorDeploymentProfile(
         code=FULL,
-        version="3",
+        version="4",
         withheld_surfaces=frozenset(),
         surface_inventory=(
             "accounts",
             "allocations",
             "console",
             "contracts",
+            "deployment_control",
             "licence_delivery",
             "offers",
             "provisioning",
@@ -384,13 +385,24 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "the fake provisioning laboratory, which is why this profile is "
             "declared a laboratory and can never be production-accepted. "
             "Version 3 adds the readiness surface, which every profile "
-            "publishes and none may withhold."
+            "publishes and none may withhold. Version 4 adds "
+            "`deployment_control`: pinning Control a12 composes the first module "
+            "in this assembly that bears routes, and this profile's whole "
+            "premise is that the tests exercise what the code actually offers — "
+            "a surface withheld here would be a surface no test drives."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_BOOTSTRAP,
         version="4",
-        withheld_surfaces=frozenset({"licence_delivery", "offers", "provisioning"}),
+        withheld_surfaces=frozenset(
+            {
+                "deployment_control",
+                "licence_delivery",
+                "offers",
+                "provisioning",
+            }
+        ),
         surface_inventory=(
             "accounts",
             "allocations",
@@ -414,7 +426,17 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "surface: until it existed, `docker compose up -d app --wait` was "
             "satisfied by a liveness route that does not touch the database, "
             "so a deploy could be declared successful while the application "
-            "could not serve a single request."
+            "could not serve a single request. `deployment_control` arrives "
+            "route-bearing with Control a12 and is WITHHELD here, at the same "
+            "version: its surface carries `POST /deployments/{id}/plans`, which "
+            "freezes a real execution plan, and the pin that composes it is "
+            "explicitly not deployment authorization until the restored-database "
+            "rehearsal is discharged. Publishing a plan-freezing route on the "
+            "running host before that gate clears would let an operator author "
+            "deployment intent through a path no rehearsal has covered. The "
+            "version does not move because the EFFECTIVE surface set does not: "
+            "nothing was mounted here before and nothing is mounted now, and a "
+            "bump signalling a change nobody made would be its own kind of lie."
         ),
     ),
     VendorDeploymentProfile(
@@ -424,6 +446,7 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             {
                 "accounts",
                 "contracts",
+                "deployment_control",
                 "licence_delivery",
                 "offers",
                 "provisioning",
@@ -448,7 +471,15 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "approvals are operator WRITE surfaces whose production evidence is "
             "the empty estate recorded in the 2026-08-30 composition census, so "
             "publishing them now would create the first production data through "
-            "a path nobody has exercised end to end. The console is listed "
+            "a path nobody has exercised end to end. `deployment_control` is "
+            "withheld on exactly that rule and not on a new one: its "
+            "`POST /deployments/{id}/plans` freezes a real execution plan, which "
+            "is operator WRITE, and the pin composing it states it is not "
+            "deployment authorization until the restored-database rehearsal is "
+            "discharged. Publishing it here would be the first production "
+            "deployment intent authored through an unrehearsed path. The version "
+            "does not move: this profile mounted nothing of Control's before and "
+            "mounts nothing now, so the effective surface set is unchanged. The console is listed "
             "because ADR-0014 gave it exactly one browser authentication owner. "
             "The login path now WORKS, and that is a measured correction rather "
             "than a re-reading: this rationale used to say no session could be "

@@ -23,11 +23,21 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
     dependencies = config["tool"]["poetry"]["dependencies"]
 
-    assert dependencies["dotmac-kernel"]["version"] == "0.1.0a98"
+    assert dependencies["dotmac-kernel"]["version"] == "0.1.0a100"
     assert dependencies["dotmac-kernel"]["source"] == "forgejo"
     # Every authority module pin is asserted. Only the release catalogue was, which is
     # how the entitlement-allocation pin could have drifted to a range or to a
     # path dependency without a single test noticing.
+    #
+    # `dotmac-deployment-control` was the exception that outlived the comment:
+    # the one authority pin this programme actually moves had no literal guard,
+    # under a sentence claiming there were none left. Asserted now, exactly like
+    # its siblings — the shape matters as much as the number, because a dict
+    # comparison refuses a caret, a range and a path dependency in one assertion.
+    assert dependencies["dotmac-deployment-control"] == {
+        "version": "0.1.0a12",
+        "source": "forgejo",
+    }
     assert dependencies["dotmac-release-catalog"] == {
         "version": "0.1.0a4",
         "source": "forgejo",
