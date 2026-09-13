@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -644,6 +645,35 @@ files = [
 #: A syntactically valid lock with no packages at all.
 LOCK_WITH_NO_PACKAGES: Final = 'lock-version = "2.1"\n'
 
+_KERNEL_LOCK_ENTRY = re.compile(r'name = "dotmac-kernel"\nversion = "([^"]+)"')
+
+
+def _disagreeing_kernel_lock(lock_text: str) -> str:
+    """The real lock, with its `dotmac-kernel` version replaced by one nothing
+    could legitimately have installed.
+
+    Reads the CURRENT locked version out of `lock_text` rather than a
+    hardcoded literal: a literal here goes stale exactly the way
+    `builder_lock_version_disagrees_with_installed` already did once — the
+    kernel repin moved the real lock past a hardcoded `0.1.0a98`, the old
+    `.replace()` matched nothing, and the "disagreeing" lock came out
+    byte-identical to the real one, so nothing disagreed and the refusal this
+    row exists to prove never fired. Asserting the pattern still matches
+    keeps a future lock-format change loud instead of silent.
+    """
+
+    match = _KERNEL_LOCK_ENTRY.search(lock_text)
+    assert match, (
+        "the lock text no longer records a dotmac-kernel version in the shape "
+        "this plant parses it in; the pattern above needs to move with it"
+    )
+    locked_version = match.group(1)
+    disagreeing_version = f"{locked_version}+not-what-is-installed"
+    return lock_text.replace(
+        f'name = "dotmac-kernel"\nversion = "{locked_version}"',
+        f'name = "dotmac-kernel"\nversion = "{disagreeing_version}"',
+    )
+
 
 BUILDER_CASES: Final[tuple[BuilderCase, ...]] = (
     BuilderCase(
@@ -689,12 +719,7 @@ BUILDER_CASES: Final[tuple[BuilderCase, ...]] = (
     BuilderCase(
         "builder_lock_version_disagrees_with_installed",
         lambda inputs: setattr(
-            inputs,
-            "lock_text",
-            inputs.lock_text.replace(
-                'name = "dotmac-kernel"\nversion = "0.1.0a98"',
-                'name = "dotmac-kernel"\nversion = "0.1.0a97"',
-            ),
+            inputs, "lock_text", _disagreeing_kernel_lock(inputs.lock_text)
         ),
         "not the one in this image",
         "a lock/image disagreement would hand every binding a hash for some "
