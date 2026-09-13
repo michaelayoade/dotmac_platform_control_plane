@@ -17,6 +17,7 @@ from dotmac_commercial_agreements import module as commercial_agreements_module
 from dotmac_deployment_control import module as deployment_control_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import FeatureManifest, ModuleManifest, ProductAssemblySpec
+from dotmac_kernel.api_documentation import environment_api_documentation_policy
 from dotmac_licensing import module as licensing_module
 from dotmac_release_catalog import module as release_catalog_module
 
@@ -208,4 +209,14 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
             _profiled_surface(manifest, effective) for manifest in COMPOSED_MANIFESTS
         ),
         web_enabled=True,
+        # Kernel a100 adoption requirement: FastAPI publishes `/docs`, `/redoc`
+        # and `/openapi.json` by default, and there is no safe fallback for the
+        # kernel to choose on this assembly's behalf. Resolved from
+        # `ENVIRONMENT` and fails closed to production — a literal was
+        # deliberately NOT declared here, because the exposure follows the
+        # DEPLOYMENT rather than the code. Its production policy disables the
+        # interactive browser pages and gates the OpenAPI document itself
+        # behind a platform-admin bearer token. Read ONCE, here, at
+        # composition time — never on a request path.
+        api_documentation=environment_api_documentation_policy(),
     )
