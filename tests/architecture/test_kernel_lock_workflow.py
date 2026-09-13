@@ -108,6 +108,7 @@ from kernel_lock import (  # noqa: E402
     parse_dependency_delta,
     parseable_wheels,
     point_at_mirror,
+    publish_atomically,
     replace_dependency_version,
     replace_kernel_version,
     requires_dist,
@@ -118,6 +119,7 @@ from kernel_lock import (  # noqa: E402
     transfer_problems,
     wheel_metadata,
     wheel_only_problems,
+    zip_central_directory,
     zip_central_directory_bytes,
 )
 
@@ -1511,7 +1513,14 @@ def _fake_index(monkeypatch: pytest.MonkeyPatch, offered: dict[str, list[str]]) 
     transfer replaced.
     """
 
-    def _fetch(url: str, target: Path) -> None:
+    def _fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
+        """Honours the REAL contract: it RETURNS the digest it verified.
+
+        It used to return `None`, which meant `acquire` recorded `None` as every
+        artifact's digest and no test noticed — the fake was proving the call
+        happened, not that the evidence was right.
+        """
+
         target.parent.mkdir(parents=True, exist_ok=True)
         package = url.rstrip("/").rsplit("/", 1)[-1]
         if url.endswith("/"):
@@ -1521,6 +1530,10 @@ def _fake_index(monkeypatch: pytest.MonkeyPatch, offered: dict[str, list[str]]) 
             target.write_text(f"<html><body>{rows}</body></html>", encoding="utf-8")
         else:
             target.write_bytes(f"bytes of {target.name}".encode())
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise Refusal(f"{url} hashes to sha256:{digest}")
+        return digest
 
     monkeypatch.setattr(kernel_lock, "fetch", _fetch)
 
@@ -2831,7 +2844,7 @@ def test_an_archive_with_too_many_members_is_refused_before_any_is_read(
     )
     wheel = _archive(tmp_path / "many", members)
     assert len(zipfile.ZipFile(wheel).infolist()) > ARCHIVE_MAX_MEMBERS
-    with pytest.raises(Refusal, match="refusing to read any of them"):
+    with pytest.raises(Refusal, match="refusing to open it"):
         wheel_metadata(wheel, CONTROL, "0.1.0a13")
 
 
@@ -2881,7 +2894,7 @@ def test_requires_dist_reads_the_parsed_headers_not_raw_text() -> None:
     """Non-vacuity for the test above: `requires_dist` must be INCAPABLE of
     rescanning, so the defect cannot return by someone passing text again."""
 
-    with pytest.raises((AttributeError, TypeError)):
+    with pytest.raises(Refusal, match="not a mapping"):
         requires_dist(  # type: ignore[arg-type]
             "Requires-Dist: dotmac-kernel (>=0.1.0a100)\n"
         )
@@ -2924,38 +2937,18 @@ def test_the_transfer_is_bounded_in_the_argument_vector(tmp_path: Path) -> None:
     assert "--location" not in argv, argv
 
 
-def test_bytes_over_the_limit_are_measured_and_removed(
+def test_bytes_over_the_limit_are_measured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`--max-filesize` believes `Content-Length`, so a chunked response that
-    declares nothing slips past it. The landed bytes are measured, and the file
-    is DELETED rather than left for a later step to find and trust.
-    """
+    declares nothing slips past it. The landed bytes are measured."""
 
     target = tmp_path / "artifact.whl"
-    # curl writes to the `.part`, never to `target` — `target` is created only
-    # by the final rename. A fake that writes to `target` would exercise the
-    # "delivered no file" refusal instead of the size bound, and pass for the
-    # wrong reason.
-    part = target.with_name(target.name + ".part")
-
-    def fake_run(*_args: Any, **_kwargs: Any) -> Any:
-        part.parent.mkdir(parents=True, exist_ok=True)
-        part.write_bytes(b"x" * 4096)
-
-        class _Completed:
-            returncode = 0
-            stdout = "200"
-            stderr = ""
-
-        return _Completed()
-
-    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    monkeypatch.setattr(kernel_lock.subprocess, "run", _staging_writer(b"x" * 4096))
     monkeypatch.setattr(kernel_lock, "ARTIFACT_MAX_BYTES", 1024)
     with pytest.raises(Refusal, match="the bytes were measured"):
         kernel_lock.fetch(f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", target)
     assert not target.exists(), "a refusal must not create the target"
-    assert not part.exists(), "the .part must be removed"
 
 
 # ── partial artifacts, uncontrolled exceptions, and member names ────────────
@@ -2971,6 +2964,33 @@ def _wheel_with(tmp_path: Path, extra: tuple[str, ...] = ()) -> Path:
     return wheel
 
 
+def _staging_writer(payload: bytes, *, returncode: int = 0, status: str = "200") -> Any:
+    """A `subprocess.run` fake that writes where curl was TOLD to write.
+
+    Deriving the path from the argument vector's `-o` keeps every test free of
+    the staging layout. An earlier version hard-coded `target.name + ".part"`,
+    which stopped being the staged path the moment staging moved into a private
+    directory -- and those tests then exercised the "left no regular file"
+    refusal while appearing to test something else.
+    """
+
+    def fake_run(*args: Any, **_kwargs: Any) -> Any:
+        argv = args[0]
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(payload)
+
+        class _Completed:
+            pass
+
+        _Completed.returncode = returncode  # type: ignore[attr-defined]
+        _Completed.stdout = status  # type: ignore[attr-defined]
+        _Completed.stderr = "aborted"  # type: ignore[attr-defined]
+        return _Completed()
+
+    return fake_run
+
+
 @pytest.mark.parametrize(
     ("label", "exit_code", "status", "expected"),
     (
@@ -2980,7 +3000,7 @@ def _wheel_with(tmp_path: Path, extra: tuple[str, ...] = ()) -> Path:
         ("digest mismatch", 0, "200", "0" * 64),
     ),
 )
-def test_a_refused_transfer_creates_no_target_and_leaves_no_part(
+def test_a_refused_transfer_creates_no_target_and_leaves_no_staging(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     label: str,
@@ -2988,30 +3008,14 @@ def test_a_refused_transfer_creates_no_target_and_leaves_no_part(
     status: str,
     expected: str | None,
 ) -> None:
-    """`target` is only ever created by the final rename.
-
-    An earlier version wrote straight to `target` and deleted it on refusal,
-    so a refused transfer still briefly produced a file at the real path and an
-    unexpected exception left it there. The bytes now land in a `.part`, which
-    `finally` removes on every exit — including the two bounds that ABORT a
-    transfer, which leave the largest fragments.
-    """
+    """`target` is created only by publication, and staging never survives."""
 
     target = tmp_path / "artifact.whl"
-    part = target.with_name(target.name + ".part")
-
-    def fake_run(*_args: Any, **_kwargs: Any) -> Any:
-        part.parent.mkdir(parents=True, exist_ok=True)
-        part.write_bytes(b"partial bytes that must not survive")
-
-        class _Completed:
-            returncode = exit_code
-            stdout = status
-            stderr = "aborted"
-
-        return _Completed()
-
-    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        kernel_lock.subprocess,
+        "run",
+        _staging_writer(b"partial bytes", returncode=exit_code, status=status),
+    )
     with pytest.raises(Refusal):
         kernel_lock.fetch(
             f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl",
@@ -3019,31 +3023,18 @@ def test_a_refused_transfer_creates_no_target_and_leaves_no_part(
             expected_sha256=expected,
         )
     assert not target.exists(), f"{label}: a refusal must not create the target"
-    assert not part.exists(), f"{label}: the .part must be removed"
+    leftovers = [c for c in tmp_path.iterdir() if c.name != "artifact.whl"]
+    assert leftovers == [], f"{label}: staging must not survive, found {leftovers}"
 
 
-def test_a_successful_transfer_renames_and_returns_the_verified_digest(
+def test_a_successful_transfer_publishes_and_returns_the_verified_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """POSITIVE CONTROL for the transfer family. Without it, a `fetch` that
-    refused everything would pass every plant above."""
+    """POSITIVE CONTROL for the transfer family."""
 
     payload = b"a real artifact"
     target = tmp_path / "artifact.whl"
-    part = target.with_name(target.name + ".part")
-
-    def fake_run(*_args: Any, **_kwargs: Any) -> Any:
-        part.parent.mkdir(parents=True, exist_ok=True)
-        part.write_bytes(payload)
-
-        class _Completed:
-            returncode = 0
-            stdout = "200"
-            stderr = ""
-
-        return _Completed()
-
-    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    monkeypatch.setattr(kernel_lock.subprocess, "run", _staging_writer(payload))
     digest = kernel_lock.fetch(
         f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl",
         target,
@@ -3051,17 +3042,35 @@ def test_a_successful_transfer_renames_and_returns_the_verified_digest(
     )
     assert digest == hashlib.sha256(payload).hexdigest()
     assert target.read_bytes() == payload
-    assert not part.exists(), "the .part must not survive a success either"
+    leftovers = [c for c in tmp_path.iterdir() if c.name != "artifact.whl"]
+    assert leftovers == [], leftovers
 
 
+# ── one reader of the bytes, and a bounded transfer ─────────────────────────
+
+
+# ── partial artifacts, uncontrolled exceptions, and member names ────────────
+
+
+@pytest.mark.parametrize(
+    ("label", "exit_code", "status", "expected"),
+    (
+        ("max-filesize abort", 63, "200", None),
+        ("max-time abort", 28, "200", None),
+        ("not found", 0, "404", None),
+        ("digest mismatch", 0, "200", "0" * 64),
+    ),
+)
 @pytest.mark.parametrize(
     ("payload", "expected"),
     (
         # These never reach `zipfile` at all: the EOCD bound reads the tail
         # FIRST, because opening an archive is what reads its central directory.
+        # Each refuses at the FIRST bound that applies, which is the ordering's
+        # whole point: the tail is read before anything opens the archive.
         (b"this is not a zip file", "End Of Central Directory"),
-        (b"PK\x03\x04 truncated", "End Of Central Directory"),
-        (b"", "End Of Central Directory"),
+        (b"PK\x03\x04 truncated", "too short to hold an EOCD"),
+        (b"", "too short to hold an EOCD"),
     ),
 )
 def test_an_unreadable_archive_is_a_refusal_not_a_traceback(
@@ -3204,3 +3213,216 @@ def test_a_valid_wheel_passes_the_central_directory_bound(tmp_path: Path) -> Non
     wheel = _wheel_with(tmp_path / "ok", ("dotmac_files/__init__.py",))
     assert zip_central_directory_bytes(wheel) <= ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES
     assert wheel_metadata(wheel, CONTROL, "0.1.0a13")["requires-dist"]
+
+
+def test_acquire_records_the_digest_fetch_RETURNED(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recorded evidence is the VERIFIED value, not a second read.
+
+    `fetch` hashes the staged bytes before publishing them and returns that
+    digest; `acquire` records what it returned. Proven with a fake that returns
+    a digest DELIBERATELY different from the file's own hash: if `acquire` were
+    re-reading the file, the recorded value would be the file's hash and this
+    test would fail. A fake that merely returned the correct digest could not
+    tell the two implementations apart.
+    """
+
+    sentinel = "5" * 64
+    written: dict[str, bytes] = {}
+
+    def _fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if url.endswith("/"):
+            name = "dotmac_kernel-0.1.0a100-py3-none-any.whl"
+            sdist = "dotmac_kernel-0.1.0a100.tar.gz"
+            rows = "".join(f'<a href="{each}">{each}</a><br>' for each in (name, sdist))
+            target.write_text(f"<html><body>{rows}</body></html>", encoding="utf-8")
+            return sentinel
+        target.write_bytes(b"these bytes hash to something else entirely")
+        written[target.name] = target.read_bytes()
+        return sentinel
+
+    monkeypatch.setattr(kernel_lock, "fetch", _fetch)
+    out = tmp_path / "bundle"
+    digests = acquire({KERNEL: "0.1.0a100"}, out)
+
+    assert digests, "the fake must have been driven at all"
+    for name, digest in digests.items():
+        assert digest == sentinel, (name, digest)
+        actual = hashlib.sha256(written[name]).hexdigest()
+        assert digest != actual, (
+            "the fixture must differ from the file's own hash, or this test "
+            "cannot tell a returned digest from a re-read one"
+        )
+
+    page = (out / "simple" / KERNEL / "index.html").read_text(encoding="utf-8")
+    assert f"#sha256={sentinel}" in page, page
+
+
+# ── staging, publication, and the end records' own framing ──────────────────
+
+
+def test_publication_refuses_an_existing_destination(tmp_path: Path) -> None:
+    """`Path.replace` silently overwrites. A second transfer for one filename, a
+    stale file from an earlier run, or a planted symlink would all be replaced
+    without a word, and the bundle would hold bytes nobody verified under a name
+    something else had claimed."""
+
+    staged = tmp_path / "stage" / "a.whl"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"new")
+    target = tmp_path / "dest" / "a.whl"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"pre-existing")
+    with pytest.raises(Refusal, match="refusing to overwrite"):
+        publish_atomically(staged, target)
+    assert target.read_bytes() == b"pre-existing", "the existing file must survive"
+
+
+def test_publication_refuses_a_symlinked_destination(tmp_path: Path) -> None:
+    staged = tmp_path / "stage" / "a.whl"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"new")
+    target = tmp_path / "dest" / "a.whl"
+    target.parent.mkdir(parents=True)
+    target.symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(Refusal, match="refusing to overwrite"):
+        publish_atomically(staged, target)
+
+
+def test_publication_places_the_bytes_when_nothing_is_there(tmp_path: Path) -> None:
+    """POSITIVE CONTROL for the publication family."""
+
+    staged = tmp_path / "stage" / "a.whl"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"new")
+    target = tmp_path / "dest" / "a.whl"
+    target.parent.mkdir(parents=True)
+    publish_atomically(staged, target)
+    assert target.read_bytes() == b"new"
+
+
+def test_staging_is_private_and_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A predictable `target.part` could be stale or symlinked and would be
+    written through. Each call stages in its own randomly named directory,
+    created 0700, and removes it on every exit."""
+
+    observed: list[Path] = []
+
+    def fake_run(*args: Any, **_kwargs: Any) -> Any:
+        staged = Path(args[0][args[0].index("-o") + 1])
+        observed.append(staged.parent)
+        staged.write_bytes(b"payload")
+
+        class _Completed:
+            returncode = 0
+            stdout = "200"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    target = tmp_path / "artifact.whl"
+    kernel_lock.fetch(f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", target)
+    assert len(observed) == 1
+    staging = observed[0]
+    assert staging != target.parent, "staging must not be the destination itself"
+    assert staging.name.startswith(".staging-"), staging.name
+    assert not staging.exists(), "staging must be removed"
+    assert target.read_bytes() == b"payload"
+
+
+def _tampered_eocd(tmp_path: Path, offset: int, value: int, width: int) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\n")
+    raw = bytearray(wheel.read_bytes())
+    end = raw.rfind(b"PK\x05\x06")
+    raw[end + offset : end + offset + width] = value.to_bytes(width, "little")
+    wheel.write_bytes(bytes(raw))
+    return wheel
+
+
+@pytest.mark.parametrize(
+    ("label", "offset", "value", "width", "expected"),
+    (
+        ("comment length", 20, 99, 2, "framing does not close"),
+        ("this disk", 4, 3, 2, "single-disk archives only"),
+        ("entries on this disk", 8, 7, 2, "must agree with itself"),
+        ("directory offset", 16, 10**9, 4, "runs past"),
+    ),
+)
+def test_the_end_records_framing_is_validated(
+    tmp_path: Path, label: str, offset: int, value: int, width: int, expected: str
+) -> None:
+    """Reading only the directory SIZE was not enough: these records are the
+    archive's self-description and every bound is computed from them."""
+
+    wheel = _tampered_eocd(tmp_path / label.replace(" ", "_"), offset, value, width)
+    with pytest.raises(Refusal, match=expected):
+        zip_central_directory(wheel)
+
+
+def test_a_declared_entry_count_must_match_what_is_enumerated(
+    tmp_path: Path,
+) -> None:
+    """Both count fields are set consistently, so the end record agrees with
+    ITSELF and only `ZipFile`'s own enumeration can disagree. Without setting
+    both, the self-consistency check fires first and this path is never
+    reached — which is how the earlier version of this test passed without
+    exercising the comparison at all.
+    """
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\n")
+    raw = bytearray(wheel.read_bytes())
+    end = raw.rfind(b"PK\x05\x06")
+    raw[end + 8 : end + 10] = (5).to_bytes(2, "little")
+    raw[end + 10 : end + 12] = (5).to_bytes(2, "little")
+    wheel.write_bytes(bytes(raw))
+    assert zip_central_directory(wheel).entries == 5
+    assert len(zipfile.ZipFile(wheel).infolist()) == 1
+    with pytest.raises(Refusal, match="describe a different archive"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_zip64_is_believed_only_through_its_locator(tmp_path: Path) -> None:
+    """A ZIP64 record found by scanning the tail is not a LINKED record."""
+
+    wheel = _tampered_eocd(tmp_path / "zip64", 12, 0xFFFFFFFF, 4)
+    with pytest.raises(Refusal, match="no ZIP64 EOCD locator"):
+        zip_central_directory(wheel)
+
+
+def test_a_valid_archives_end_records_are_accepted(tmp_path: Path) -> None:
+    """POSITIVE CONTROL for the end-records family."""
+
+    wheel = _wheel_with(tmp_path / "ok", ("dotmac_files/__init__.py",))
+    directory = zip_central_directory(wheel)
+    assert directory.entries == len(zipfile.ZipFile(wheel).infolist())
+    assert not directory.zip64
+    assert directory.offset + directory.size <= wheel.stat().st_size
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    (
+        ("Requires-Dist: x", "not a mapping"),
+        ({"requires-dist": 7}, "not a list"),
+        ({"requires-dist": [None]}, "not a string"),
+    ),
+)
+def test_requires_dist_refuses_an_invalid_header_shape(
+    headers: Any, expected: str
+) -> None:
+    """It crashed on these instead of refusing, so `main` would have shown a
+    traceback with no `::error::` line."""
+
+    with pytest.raises(Refusal, match=expected):
+        requires_dist(headers)

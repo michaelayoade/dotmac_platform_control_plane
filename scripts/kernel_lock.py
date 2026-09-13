@@ -91,7 +91,9 @@ import json
 import ntpath
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import tomllib
 import urllib.parse
 import zipfile
@@ -1037,81 +1039,204 @@ def transfer_problems(url: str, status: str) -> list[str]:
     return [f"{url} answered {status}, not 200"]
 
 
-def zip_central_directory_bytes(path: Path) -> int:
-    """The central directory's size AS THE ARCHIVE DECLARES IT, from the EOCD.
+@dataclass(frozen=True)
+class CentralDirectory:
+    """What an archive's own end records CLAIM about its central directory."""
 
-    Summing member filenames is not this number. A central directory carries a
-    46-byte header per member plus per-member EXTRA FIELDS and FILE COMMENTS,
-    none of which appear in a filename, so an archive can declare a vast
-    directory while its names total almost nothing. The End Of Central
-    Directory record states the real size, and ZIP64 states it again in 8
-    bytes when the 32-bit field saturates.
+    size: int
+    offset: int
+    entries: int
+    zip64: bool
 
-    Read from the tail, before `zipfile` is asked to open anything, because
-    opening is what reads the whole directory.
+
+def zip_central_directory(path: Path) -> CentralDirectory:
+    """Validate and return the end records' claims, or refuse.
+
+    Reading only the directory SIZE was not enough. These records are the
+    archive's self-description and everything downstream trusts them, so the
+    framing is checked too:
+
+    * the EOCD comment length must account for EXACTLY the bytes after it — a
+      short count leaves trailing bytes a reader ignores, and a long one points
+      past the end;
+    * single disk only. `this disk`, `disk with the central directory` and
+      `entries on this disk` must agree with a one-disk archive; a multi-disk
+      claim is not something this gate resolves;
+    * the directory must LIE INSIDE the file, before the EOCD, and
+      `offset + size` must not run past where the directory has to end;
+    * the entry count must be consistent between the two count fields, and is
+      compared with what `ZipFile` actually enumerates by the caller;
+    * ZIP64 is only believed through its LOCATOR: the `PK\x06\x07` locator must
+      be present, point at an offset inside the file, and that offset must
+      actually hold a `PK\x06\x06` record. A ZIP64 record found by scanning the
+      tail without its locator is not a linked record.
     """
 
     size = path.stat().st_size
-    window = min(size, 65_557 + 64)
+    if size < 22:
+        raise Refusal(f"{path.name} is {size} bytes, too short to hold an EOCD")
+    window = min(size, 22 + 0xFFFF + 20)
     with path.open("rb") as handle:
         handle.seek(size - window)
         tail = handle.read(window)
+    base = size - len(tail)
 
     end = tail.rfind(b"PK\x05\x06")
     if end < 0:
         raise Refusal(f"{path.name} has no End Of Central Directory record")
     if end + 22 > len(tail):
         raise Refusal(f"{path.name} has a truncated End Of Central Directory record")
+
+    this_disk = int.from_bytes(tail[end + 4 : end + 6], "little")
+    cd_disk = int.from_bytes(tail[end + 6 : end + 8], "little")
+    here = int.from_bytes(tail[end + 8 : end + 10], "little")
+    total = int.from_bytes(tail[end + 10 : end + 12], "little")
     declared = int.from_bytes(tail[end + 12 : end + 16], "little")
     offset = int.from_bytes(tail[end + 16 : end + 20], "little")
+    comment = int.from_bytes(tail[end + 20 : end + 22], "little")
 
-    if declared == 0xFFFFFFFF or offset == 0xFFFFFFFF:
-        zip64 = tail.rfind(b"PK\x06\x06")
-        if zip64 < 0:
+    trailing = len(tail) - (end + 22)
+    if comment != trailing:
+        raise Refusal(
+            f"{path.name} declares a {comment}-byte EOCD comment but carries "
+            f"{trailing} bytes after the record; the framing does not close"
+        )
+
+    saturated = 0xFFFF, 0xFFFFFFFF
+    zip64 = (
+        declared == saturated[1]
+        or offset == saturated[1]
+        or total == saturated[0]
+        or here == saturated[0]
+    )
+    if zip64:
+        locator = tail.rfind(b"PK\x06\x07", 0, end)
+        if locator < 0:
             raise Refusal(
-                f"{path.name} saturates the 32-bit central-directory fields but "
-                "carries no ZIP64 End Of Central Directory record"
+                f"{path.name} saturates a 32-bit end-record field but carries no "
+                "ZIP64 EOCD locator; an unlinked ZIP64 record is not evidence"
             )
-        if zip64 + 56 > len(tail):
+        if locator + 20 > len(tail):
+            raise Refusal(f"{path.name} has a truncated ZIP64 EOCD locator")
+        record_offset = int.from_bytes(tail[locator + 8 : locator + 16], "little")
+        if not 0 <= record_offset <= size - 56:
             raise Refusal(
-                f"{path.name} has a truncated ZIP64 End Of Central Directory record"
+                f"{path.name}'s ZIP64 locator points at offset {record_offset}, "
+                "which is not inside this file"
             )
-        declared = int.from_bytes(tail[zip64 + 40 : zip64 + 48], "little")
-    return declared
+        if record_offset < base:
+            with path.open("rb") as handle:
+                handle.seek(record_offset)
+                record = handle.read(56)
+        else:
+            record = tail[record_offset - base : record_offset - base + 56]
+        if not record.startswith(b"PK\x06\x06"):
+            raise Refusal(
+                f"{path.name}'s ZIP64 locator points at {record_offset}, which "
+                "does not hold a ZIP64 End Of Central Directory record"
+            )
+        here = int.from_bytes(record[24:32], "little")
+        total = int.from_bytes(record[32:40], "little")
+        declared = int.from_bytes(record[40:48], "little")
+        offset = int.from_bytes(record[48:56], "little")
+
+    if this_disk != 0 or cd_disk != 0:
+        raise Refusal(
+            f"{path.name} claims disk {this_disk} with its directory on disk "
+            f"{cd_disk}; this gate reads single-disk archives only"
+        )
+    if here != total:
+        raise Refusal(
+            f"{path.name} declares {here} directory entries on this disk but "
+            f"{total} in total; a single-disk archive must agree with itself"
+        )
+    directory_end = base + end if not zip64 else size
+    if offset < 0 or declared < 0:
+        raise Refusal(f"{path.name} declares a negative directory offset or size")
+    if offset + declared > size:
+        raise Refusal(
+            f"{path.name} places its {declared}-byte central directory at "
+            f"{offset}, which runs past the {size}-byte file"
+        )
+    if offset + declared > directory_end:
+        raise Refusal(
+            f"{path.name} places its central directory so that it overlaps its "
+            "own end records"
+        )
+    return CentralDirectory(size=declared, offset=offset, entries=total, zip64=zip64)
+
+
+def zip_central_directory_bytes(path: Path) -> int:
+    """The validated directory size, for callers that want only the bound."""
+
+    return zip_central_directory(path).size
+
+
+def publish_atomically(staged: Path, target: Path) -> None:
+    """Put `staged` at `target`, REFUSING if anything is already there.
+
+    `Path.replace` is the wrong primitive: it silently overwrites. A second
+    transfer for the same filename, a stale file from an earlier run, or a
+    symlink an attacker planted at the destination would all be replaced
+    without a word, and the bundle would then contain bytes nobody verified
+    under a name something else had already claimed.
+
+    `os.link` is the no-overwrite primitive: it raises `FileExistsError` if the
+    destination exists, and on one filesystem it is atomic. The staged file is
+    then unlinked, so the inode ends up at exactly one path.
+    """
+
+    if target.is_symlink() or target.exists():
+        raise Refusal(
+            f"{target.name} already exists at the destination; refusing to "
+            "overwrite a file this run did not create"
+        )
+    try:
+        os.link(staged, target)
+    except FileExistsError as exc:
+        raise Refusal(
+            f"{target.name} appeared at the destination while this transfer was "
+            "in flight; refusing to overwrite it"
+        ) from exc
+    except OSError as exc:
+        raise Refusal(f"{target.name} could not be published: {exc}") from exc
 
 
 def fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
     """Download `url` to `target` atomically, or refuse. Returns the digest.
 
-    The bytes land in a fresh `.part` FILE and `target` is not touched until
-    every check has passed. That ordering is the point: an earlier version
-    wrote straight to `target` and deleted it on refusal, which meant a refused
-    transfer still briefly produced a file at the real path, and an unexpected
-    exception left it there. Now a refusal cannot produce `target` at all,
-    because `target` is only ever created by the final rename.
+    The bytes land in a PRIVATE, RANDOMLY NAMED staging directory, created mode
+    0700 beside the destination, and `target` is not touched until every check
+    has passed. A predictable `target.part` was the wrong staging name: a stale
+    one from an earlier run, or a symlink planted at that path, would have been
+    written through, and two transfers for one filename would have raced on it.
+    A fresh directory per call cannot collide and cannot be pre-created by
+    anything that does not already control the parent.
 
-    The `.part` is removed in `finally`, so every exit removes it -- the two
-    bounds that ABORT a transfer, a bad status, a size overage, a digest
-    mismatch, and anything unforeseen. After a successful rename the `.part` no
-    longer exists and the cleanup is a no-op.
+    The staging directory is removed in `finally`, so every exit removes it --
+    the two bounds that ABORT a transfer, a bad status, a size overage, a digest
+    mismatch, and anything unforeseen.
 
-    Status, then size, then DIGEST, then rename. The digest is computed over the
-    complete bytes and returned, so the value recorded downstream is the value
-    that was verified rather than a second read of the file. `expected_sha256`
-    is compared when a caller has an independent expectation; the INDEX's own
-    advertised `#sha256=` is deliberately not that expectation -- it is stripped
-    in `approved_artifact_url`, because comparing the index against itself
-    proves nothing.
+    Status, then size, then DIGEST, then publication -- and publication REFUSES
+    rather than overwriting. The digest is computed over the complete bytes and
+    returned, so the value recorded downstream is the value that was verified
+    rather than a second read of the file. `expected_sha256` is compared when a
+    caller has an independent expectation; the INDEX's advertised `#sha256=` is
+    deliberately not that expectation, being stripped in
+    `approved_artifact_url`, because comparing the index against itself proves
+    nothing.
     """
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    part = target.with_name(target.name + ".part")
+    staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=target.parent))
     try:
+        staging.chmod(0o700)
+        staged = staging / target.name
         # S603: the argument vector is built by `curl_argv` from a fixed list,
         # and `url` has already been through `approved_artifact_url` — https,
         # the approved authority, under the approved path prefix. No shell.
         completed = subprocess.run(  # noqa: S603
-            curl_argv(url, part),
+            curl_argv(url, staged),
             check=False,
             capture_output=True,
             text=True,
@@ -1124,25 +1249,25 @@ def fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
         problems = transfer_problems(url, completed.stdout.strip())
         if problems:
             raise Refusal(problems[0])
-        if not part.exists():
-            raise Refusal(f"{url} reported success but delivered no file")
-        landed = part.stat().st_size
+        if staged.is_symlink() or not staged.is_file():
+            raise Refusal(f"{url} reported success but left no regular file in staging")
+        landed = staged.stat().st_size
         if landed > ARTIFACT_MAX_BYTES:
             raise Refusal(
                 f"{url} delivered {landed} bytes, over the {ARTIFACT_MAX_BYTES} "
                 "limit; the declared-length bound did not catch it, so the "
                 "bytes were measured"
             )
-        digest = sha256_of(part)
+        digest = sha256_of(staged)
         if expected_sha256 is not None and digest != expected_sha256:
             raise Refusal(
                 f"{url} hashes to sha256:{digest}, not the expected "
                 f"sha256:{expected_sha256}"
             )
-        part.replace(target)
+        publish_atomically(staged, target)
         return digest
     finally:
-        part.unlink(missing_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 # ── acquire: a closed bundle, downloaded once, by the only job with a key ───
@@ -1819,12 +1944,17 @@ def wheel_metadata(wheel: Path, name: str, version: str) -> dict[str, list[str]]
 
     # The declared central-directory size, read from the EOCD before anything
     # opens the archive — because opening it is what reads that directory.
-    declared_directory = zip_central_directory_bytes(wheel)
-    if declared_directory > ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES:
+    directory = zip_central_directory(wheel)
+    if directory.size > ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES:
         raise Refusal(
-            f"{wheel.name} declares a {declared_directory}-byte central "
+            f"{wheel.name} declares a {directory.size}-byte central "
             f"directory, over the {ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES} limit; "
             "refusing to open it"
+        )
+    if directory.entries > ARCHIVE_MAX_MEMBERS:
+        raise Refusal(
+            f"{wheel.name} declares {directory.entries} directory entries, over "
+            f"the {ARCHIVE_MAX_MEMBERS} limit; refusing to open it"
         )
 
     # A corrupt, truncated or non-zip file is a REFUSAL, not a traceback. `main`
@@ -1841,6 +1971,16 @@ def wheel_metadata(wheel: Path, name: str, version: str) -> dict[str, list[str]]
         ) from exc
     with archive:
         members = archive.infolist()
+        # The declared count, compared with what was actually enumerated. A
+        # directory that claims one number and yields another is describing an
+        # archive other than the one being read, and every bound above was
+        # computed from the claim.
+        if len(members) != directory.entries:
+            raise Refusal(
+                f"{wheel.name} declares {directory.entries} directory entries "
+                f"but enumerates {len(members)}; its end records describe a "
+                "different archive"
+            )
         if len(members) > ARCHIVE_MAX_MEMBERS:
             raise Refusal(
                 f"{wheel.name} declares {len(members)} members, over the "
@@ -1990,7 +2130,24 @@ def requires_dist(headers: dict[str, list[str]]) -> list[str]:
     is what the comparison uses.
     """
 
-    return list(headers.get("requires-dist", []))
+    if not isinstance(headers, dict):
+        raise Refusal(
+            f"parsed headers are a {type(headers).__name__}, not a mapping; "
+            "this function reads `parse_core_metadata`'s output and refuses "
+            "anything else rather than coercing it"
+        )
+    values = headers.get("requires-dist", [])
+    if not isinstance(values, list):
+        raise Refusal(
+            f"`requires-dist` is a {type(values).__name__}, not a list of "
+            "header values"
+        )
+    for value in values:
+        if not isinstance(value, str):
+            raise Refusal(
+                f"a `requires-dist` value is {type(value).__name__}, not a string"
+            )
+    return list(values)
 
 
 def metadata_dependencies(requirements: Iterable[str]) -> dict[str, str]:
