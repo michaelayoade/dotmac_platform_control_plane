@@ -40,6 +40,13 @@ from typing import Final
 import pytest
 
 ROOT: Final = Path(__file__).resolve().parents[2]
+#: This repository's own SOURCE tree — the thing an installed view must not
+#: resolve to. Narrower than `ROOT`: CI installs into an in-project
+#: virtualenv at `<repo>/.venv`, so the installed distribution legitimately
+#: resolves under `ROOT` (inside `.venv/.../site-packages`) without that being
+#: this repository's own source. `<repo>/src` is where this repository's own
+#: code lives; that is the path a checkout-resolved import would run under.
+SOURCE_TREE: Final = ROOT / "src"
 DISTRIBUTION: Final = "dotmac-deployment-control"
 PACKAGE: Final = "dotmac_deployment_control"
 
@@ -177,10 +184,10 @@ def test_the_facade_is_imported_from_site_packages_not_the_repository() -> None:
 
     facade = importlib.import_module(PACKAGE)
     origin = Path(facade.__file__ or "").resolve()
-    assert ROOT not in origin.parents, (
-        f"{PACKAGE} resolved to {origin}, inside this repository. The installed "
-        "view is then this repository's own source and proves nothing about the "
-        "published distribution."
+    assert SOURCE_TREE not in origin.parents, (
+        f"{PACKAGE} resolved to {origin}, inside this repository's own source "
+        f"tree ({SOURCE_TREE}). The installed view is then this repository's "
+        "own source and proves nothing about the published distribution."
     )
     recorded = metadata.files(DISTRIBUTION) or []
     assert recorded, (
