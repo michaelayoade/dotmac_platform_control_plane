@@ -59,7 +59,8 @@ COMPOSED_DISTRIBUTIONS = (
 #: bare privilege NAME — which appears in every grant-verification helper in the
 #: vendor lineage — is not mistaken for a statement.
 DELETION_SQL = re.compile(
-    r"\bDELETE\s+FROM\b|\bTRUNCATE\s+(?:TABLE\s+)?[A-Za-z_\"{]", re.IGNORECASE
+    r"\bDELETE\s+FROM\b|\bTRUNCATE\s+(?:TABLE\s+)?(?!ON\b)[A-Za-z_\"{]",
+    re.IGNORECASE,
 )
 
 
@@ -226,6 +227,10 @@ def describe(db):
     """Explains that v017 withheld DELETE FROM the projection."""
     db.delete_later("public.platform_audit_events")
     return f"REVOKE {', '.join(REVOKED)} ON public.platform_audit_events"
+
+
+def install_refusal_trigger(op):
+    op.execute("BEFORE TRUNCATE ON public.platform_audit_events")
 '''
 
 

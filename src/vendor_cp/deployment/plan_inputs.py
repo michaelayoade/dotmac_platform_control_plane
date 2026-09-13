@@ -277,7 +277,7 @@ def resolve_plan_inputs(
         # and specifically never the empty string.
         PlanInput.PROFILE_DIGEST: None,
         PlanInput.AUTHORIZED_IMAGES: _snapshot_string(snapshot, "release_ref"),
-        PlanInput.EXECUTION_PLAN_INPUTS: plan.plan_digest,
+        PlanInput.EXECUTION_PLAN_INPUTS: plan.execution_plan_digest,
     }
 
     reasons: Final[dict[PlanInput, str]] = {
@@ -299,12 +299,19 @@ def resolve_plan_inputs(
             f"plan {plan.id}'s frozen snapshot names no release reference"
         ),
         PlanInput.EXECUTION_PLAN_INPUTS: (
-            f"plan {plan.id} has no frozen digest, so what it authorizes is not "
-            "identified"
+            f"plan {plan.id} has no operation or execution-plan digest, so what "
+            "it authorizes is not identified"
         ),
     }
 
     values: list[ResolvedValue] = []
+    if plan.operation is None or not plan.operation.strip():
+        raise PlanInputRefused(
+            "plan_input.execution_plan_inputs_underivable",
+            f"plan {plan.id} has no operation, so its execution cannot be "
+            "identified",
+            input=PlanInput.EXECUTION_PLAN_INPUTS,
+        )
     for member in PlanInput:
         override = declared.get(member)
         if override is not None:

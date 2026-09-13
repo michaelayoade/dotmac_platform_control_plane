@@ -16,7 +16,12 @@ from dotmac_approvals import module as approvals_module
 from dotmac_commercial_agreements import module as commercial_agreements_module
 from dotmac_deployment_control import module as deployment_control_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
-from dotmac_kernel import FeatureManifest, ModuleManifest, ProductAssemblySpec
+from dotmac_kernel import (
+    FeatureManifest,
+    ModuleManifest,
+    ProductAssemblySpec,
+    environment_api_documentation_policy,
+)
 from dotmac_licensing import module as licensing_module
 from dotmac_release_catalog import module as release_catalog_module
 
@@ -207,5 +212,9 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
         modules=tuple(
             _profiled_surface(manifest, effective) for manifest in COMPOSED_MANIFESTS
         ),
+        # Kernel a100 owns the constructor-time policy this product previously
+        # applied by deleting FastAPI routes after construction. Unset, blank
+        # and unknown environments fail closed to the production policy.
+        api_documentation=environment_api_documentation_policy(),
         web_enabled=True,
     )

@@ -363,13 +363,14 @@ class VendorDeploymentProfile:
 PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     VendorDeploymentProfile(
         code=FULL,
-        version="3",
+        version="4",
         withheld_surfaces=frozenset(),
         surface_inventory=(
             "accounts",
             "allocations",
             "console",
             "contracts",
+            "deployment_control",
             "licence_delivery",
             "offers",
             "provisioning",
@@ -381,16 +382,23 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
         rationale=(
             "Development, CI and the migration rehearsals compose every surface "
             "so the tests exercise what the code actually offers. That includes "
+            "the Deployment Control operator surface, which is published only "
+            "in this full profile; production profiles explicitly withhold it "
+            "until its operator acceptance is complete. It also includes "
             "the fake provisioning laboratory, which is why this profile is "
             "declared a laboratory and can never be production-accepted. "
-            "Version 3 adds the readiness surface, which every profile "
-            "publishes and none may withhold."
+            "Version 3 added the readiness surface, which every profile "
+            "publishes and none may withhold. Version 4 adds Deployment "
+            "Control to this profile alone; the production-effective sets do "
+            "not change."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_BOOTSTRAP,
         version="4",
-        withheld_surfaces=frozenset({"licence_delivery", "offers", "provisioning"}),
+        withheld_surfaces=frozenset(
+            {"deployment_control", "licence_delivery", "offers", "provisioning"}
+        ),
         surface_inventory=(
             "accounts",
             "allocations",
@@ -424,6 +432,7 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             {
                 "accounts",
                 "contracts",
+                "deployment_control",
                 "licence_delivery",
                 "offers",
                 "provisioning",

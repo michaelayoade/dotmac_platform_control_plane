@@ -369,7 +369,7 @@ def test_image_smokes_prove_the_built_bytes_publish_no_api_documentation() -> No
         ".github/candidate/acceptance.sh",
     ):
         source = _text(path)
-        assert "import vendor_cp.api_documentation as policy" in source
+        assert "import dotmac_kernel.api_documentation as policy" in source
         assert "policy.classify_environment(None) == policy.PRODUCTION" in source
         assert "'/docs', '/docs/oauth2-redirect', '/redoc'" in source
         assert "policy.audit_api_documentation(" in source
@@ -1066,6 +1066,7 @@ def test_no_dispatcher_material_is_committed_anywhere() -> None:
         ".env.production.example",
         "deploy/product.toml",
         "deploy/candidates/2026-09-04-activation-relay-service.toml",
+        "deploy/candidates/2026-09-13-control-a13-kernel-a100.toml",
         "deploy/descriptor-promotions.json",
     ):
         text = _text(relative)

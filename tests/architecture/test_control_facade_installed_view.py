@@ -60,7 +60,12 @@ def _pinned_version() -> str:
 IMPORTED_FACADE_NAMES: Final = frozenset(
     {
         "ApprovalEvidence",
+        "ApprovalDecisionStatus",
         "ApprovePlanCommand",
+        "AuthorizationSignature",
+        "AuthorizationSigner",
+        "AuthorizationSignerIdentity",
+        "AuthorizedImage",
         "DesiredDeployment",
         "DriftReport",
         "PlanView",
