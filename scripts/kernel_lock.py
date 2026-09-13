@@ -1109,16 +1109,29 @@ def zip_central_directory(path: Path) -> CentralDirectory:
         or total == saturated[0]
         or here == saturated[0]
     )
+    zip64_span: tuple[int, int] | None = None
     if zip64:
-        locator = tail.rfind(b"PK\x06\x07", 0, end)
-        if locator < 0:
+        # ADJACENCY. The locator must sit IMMEDIATELY before the EOCD -- the
+        # format puts it there, and `rfind` anywhere in the tail would accept a
+        # locator buried in member data or in the archive comment, which is an
+        # attacker-supplied region.
+        locator_at = end - 20
+        if locator_at < 0 or tail[locator_at : locator_at + 4] != b"PK\x06\x07":
             raise Refusal(
                 f"{path.name} saturates a 32-bit end-record field but carries no "
-                "ZIP64 EOCD locator; an unlinked ZIP64 record is not evidence"
+                "ZIP64 EOCD locator immediately before its EOCD; an unlinked or "
+                "misplaced record is not evidence"
             )
-        if locator + 20 > len(tail):
-            raise Refusal(f"{path.name} has a truncated ZIP64 EOCD locator")
-        record_offset = int.from_bytes(tail[locator + 8 : locator + 16], "little")
+        locator_disks = int.from_bytes(
+            tail[locator_at + 16 : locator_at + 20], "little"
+        )
+        locator_disk = int.from_bytes(tail[locator_at + 4 : locator_at + 8], "little")
+        if locator_disk != 0 or locator_disks != 1:
+            raise Refusal(
+                f"{path.name}'s ZIP64 locator names disk {locator_disk} of "
+                f"{locator_disks}; this gate reads single-disk archives only"
+            )
+        record_offset = int.from_bytes(tail[locator_at + 8 : locator_at + 16], "little")
         if not 0 <= record_offset <= size - 56:
             raise Refusal(
                 f"{path.name}'s ZIP64 locator points at offset {record_offset}, "
@@ -1130,15 +1143,38 @@ def zip_central_directory(path: Path) -> CentralDirectory:
                 record = handle.read(56)
         else:
             record = tail[record_offset - base : record_offset - base + 56]
-        if not record.startswith(b"PK\x06\x06"):
+        if len(record) < 56 or not record.startswith(b"PK\x06\x06"):
             raise Refusal(
                 f"{path.name}'s ZIP64 locator points at {record_offset}, which "
-                "does not hold a ZIP64 End Of Central Directory record"
+                "does not hold a complete ZIP64 End Of Central Directory record"
+            )
+        # RECORD LENGTH. The record declares its own remaining size; it must be
+        # at least the fixed 44 bytes that follow the field, and must not run
+        # past the locator that points at it.
+        record_size = int.from_bytes(record[4:12], "little")
+        if record_size < 44:
+            raise Refusal(
+                f"{path.name}'s ZIP64 end record declares {record_size} bytes, "
+                "short of its own fixed 44-byte remainder"
+            )
+        record_end = record_offset + 12 + record_size
+        if record_end > base + locator_at:
+            raise Refusal(
+                f"{path.name}'s ZIP64 end record runs to {record_end}, past the "
+                f"locator at {base + locator_at} that points at it"
+            )
+        record_disk = int.from_bytes(record[16:20], "little")
+        record_cd_disk = int.from_bytes(record[20:24], "little")
+        if record_disk != 0 or record_cd_disk != 0:
+            raise Refusal(
+                f"{path.name}'s ZIP64 end record claims disk {record_disk} with "
+                f"its directory on disk {record_cd_disk}; single disk only"
             )
         here = int.from_bytes(record[24:32], "little")
         total = int.from_bytes(record[32:40], "little")
         declared = int.from_bytes(record[40:48], "little")
         offset = int.from_bytes(record[48:56], "little")
+        zip64_span = (record_offset, base + locator_at + 20)
 
     if this_disk != 0 or cd_disk != 0:
         raise Refusal(
@@ -1150,7 +1186,12 @@ def zip_central_directory(path: Path) -> CentralDirectory:
             f"{path.name} declares {here} directory entries on this disk but "
             f"{total} in total; a single-disk archive must agree with itself"
         )
-    directory_end = base + end if not zip64 else size
+    # The directory must end before the FIRST end record, whichever that is: the
+    # ZIP64 record and its locator sit before the EOCD, so with ZIP64 present
+    # the earliest boundary is the ZIP64 record, not the EOCD.
+    directory_end = base + end
+    if zip64_span is not None:
+        directory_end = min(directory_end, zip64_span[0])
     if offset < 0 or declared < 0:
         raise Refusal(f"{path.name} declares a negative directory offset or size")
     if offset + declared > size:
@@ -1160,8 +1201,9 @@ def zip_central_directory(path: Path) -> CentralDirectory:
         )
     if offset + declared > directory_end:
         raise Refusal(
-            f"{path.name} places its central directory so that it overlaps its "
-            "own end records"
+            f"{path.name} places its {declared}-byte central directory at "
+            f"{offset}, overlapping its own end records, which begin at "
+            f"{directory_end}"
         )
     return CentralDirectory(size=declared, offset=offset, entries=total, zip64=zip64)
 
@@ -1267,7 +1309,13 @@ def fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
         publish_atomically(staged, target)
         return digest
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        # NOT `ignore_errors=True`. Swallowing the error would let this function
+        # claim staging is always removed while leaving a directory behind, and
+        # the claim is the point: a later step globbing the bundle must not find
+        # a fragment. A cleanup that genuinely cannot complete is reported.
+        shutil.rmtree(staging, ignore_errors=False)
+        if staging.exists():  # pragma: no cover - defensive
+            raise Refusal(f"staging directory {staging} could not be removed")
 
 
 # ── acquire: a closed bundle, downloaded once, by the only job with a key ───

@@ -52,8 +52,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 import re
+import struct
 import sys
 import tomllib
 import urllib.parse
@@ -3053,15 +3055,6 @@ def test_a_successful_transfer_publishes_and_returns_the_verified_digest(
 
 
 @pytest.mark.parametrize(
-    ("label", "exit_code", "status", "expected"),
-    (
-        ("max-filesize abort", 63, "200", None),
-        ("max-time abort", 28, "200", None),
-        ("not found", 0, "404", None),
-        ("digest mismatch", 0, "200", "0" * 64),
-    ),
-)
-@pytest.mark.parametrize(
     ("payload", "expected"),
     (
         # These never reach `zipfile` at all: the EOCD bound reads the tail
@@ -3426,3 +3419,146 @@ def test_requires_dist_refuses_an_invalid_header_shape(
 
     with pytest.raises(Refusal, match=expected):
         requires_dist(headers)
+
+
+# ── ZIP64 is believed only through a complete, adjacent, linked locator ──────
+
+
+def _zip64_archive(
+    tmp_path: Path,
+    *,
+    gap: int = 0,
+    locator_disks: int = 1,
+    record_size: int = 44,
+    overlap: bool = False,
+) -> Path:
+    """A GENUINE, well-formed ZIP64 tail appended to a real archive.
+
+    Built by hand because `zipfile` only emits ZIP64 end records when an archive
+    actually needs them -- over 65535 entries or past 4 GiB -- and `force_zip64`
+    on a small member does not produce them. A fixture that merely *claims* to
+    be ZIP64 would leave the positive path through this branch untested, so the
+    records here are constructed correctly and the keyword arguments break
+    exactly one property each.
+    """
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    base = tmp_path / "base.whl"
+    with zipfile.ZipFile(base, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\n")
+    raw = bytearray(base.read_bytes())
+    end = raw.rfind(b"PK\x05\x06")
+    here = int.from_bytes(raw[end + 8 : end + 10], "little")
+    total = int.from_bytes(raw[end + 10 : end + 12], "little")
+    cd_size = int.from_bytes(raw[end + 12 : end + 16], "little")
+    cd_offset = int.from_bytes(raw[end + 16 : end + 20], "little")
+    body = bytes(raw[:end])
+    record_at = len(body)
+    record = (
+        b"PK\x06\x06"
+        + struct.pack("<Q", record_size)
+        + struct.pack("<HH", 45, 45)
+        + struct.pack("<II", 0, 0)
+        + struct.pack(
+            "<QQQQ",
+            here,
+            total,
+            cd_size,
+            record_at + 8 if overlap else cd_offset,
+        )
+    )
+    locator = (
+        b"PK\x06\x07"
+        + struct.pack("<I", 0)
+        + struct.pack("<Q", record_at)
+        + struct.pack("<I", locator_disks)
+    )
+    eocd = (
+        b"PK\x05\x06"
+        + struct.pack("<HHHH", 0, 0, here, total)
+        + struct.pack("<I", 0xFFFFFFFF)
+        + struct.pack("<I", cd_offset)
+        + struct.pack("<H", 0)
+    )
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    wheel.write_bytes(body + record + locator + (b"\x00" * gap) + eocd)
+    return wheel
+
+
+def test_a_well_formed_zip64_archive_is_accepted(tmp_path: Path) -> None:
+    """POSITIVE CONTROL for the ZIP64 branch. Without it every refusal below
+    could pass against a branch that rejected all ZIP64 archives."""
+
+    directory = zip_central_directory(_zip64_archive(tmp_path / "ok"))
+    assert directory.zip64 is True
+    assert directory.entries == 1
+    assert directory.size > 0
+
+
+@pytest.mark.parametrize(
+    ("label", "kwargs", "expected"),
+    (
+        ("locator not adjacent", {"gap": 4}, "immediately before its EOCD"),
+        ("locator names two disks", {"locator_disks": 2}, "single-disk archives only"),
+        (
+            "record shorter than its own remainder",
+            {"record_size": 10},
+            "short of its own",
+        ),
+        ("directory overlaps the record", {"overlap": True}, "runs past"),
+    ),
+)
+def test_zip64_linkage_is_validated(
+    tmp_path: Path, label: str, kwargs: dict[str, Any], expected: str
+) -> None:
+    """A `PK\x06\x06` found by scanning the tail is not a LINKED record.
+
+    The locator must sit immediately before the EOCD, because `rfind` over the
+    whole tail would accept one buried in member data or in the archive comment
+    -- both attacker-supplied regions. It must name a single disk, the record it
+    points at must declare at least its own fixed remainder and must not run
+    past the locator, and the central directory must not overlap either record.
+    """
+
+    wheel = _zip64_archive(tmp_path / label.replace(" ", "_"), **kwargs)
+    with pytest.raises(Refusal, match=expected):
+        zip_central_directory(wheel)
+
+
+def test_staging_is_0700_while_it_exists_and_cleanup_is_not_silenced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mode is observed WHILE staging exists, not inferred afterwards.
+
+    A test that only checked the directory was gone could not tell 0700 from
+    0777. And cleanup uses `ignore_errors=False`: swallowing the error would let
+    `fetch` claim staging is always removed while leaving a directory behind,
+    and that claim is the whole point — a later step globbing the bundle must
+    not find a fragment.
+    """
+
+    observed: dict[str, Any] = {}
+
+    def fake_run(*args: Any, **_kwargs: Any) -> Any:
+        argv = args[0]
+        staged = Path(argv[argv.index("-o") + 1])
+        observed["dir"] = staged.parent
+        observed["mode"] = staged.parent.stat().st_mode & 0o777
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"payload")
+
+        class _Completed:
+            returncode = 0
+            stdout = "200"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    kernel_lock.fetch(
+        f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/a.whl", tmp_path / "a.whl"
+    )
+    assert observed["mode"] == 0o700, oct(observed["mode"])
+    assert not observed["dir"].exists(), "staging must not survive"
+    source = inspect.getsource(kernel_lock.fetch)
+    assert "ignore_errors=False" in source, source
