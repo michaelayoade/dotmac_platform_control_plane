@@ -990,6 +990,13 @@ def curl_argv(url: str, target: Path) -> list[str]:
     any other scheme even if something upstream rewrote the URL, and
     `--max-redirs 0` declares the same intention a second way. `-w` makes the
     status code observable so a 3xx cannot be mistaken for a download.
+
+    BOUNDED. `--max-filesize` refuses a transfer whose DECLARED length is over
+    the limit, and `--max-time` refuses one that never ends. Neither is
+    sufficient alone: `--max-filesize` believes `Content-Length`, so a chunked
+    response that declares nothing slips past it. The bytes on disk are
+    therefore measured again after the transfer, by `fetch`, which is the check
+    that does not depend on the server being honest.
     """
 
     return [
@@ -999,6 +1006,10 @@ def curl_argv(url: str, target: Path) -> list[str]:
         "=https",
         "--max-redirs",
         "0",
+        "--max-filesize",
+        str(ARTIFACT_MAX_BYTES),
+        "--max-time",
+        str(ARTIFACT_MAX_SECONDS),
         "--silent",
         "--show-error",
         "-w",
@@ -1025,7 +1036,14 @@ def transfer_problems(url: str, status: str) -> list[str]:
 
 
 def fetch(url: str, target: Path) -> None:
-    """Download `url` to `target`, or refuse. Never follows a redirect."""
+    """Download `url` to `target`, or refuse. Never follows a redirect.
+
+    The transfer is bounded twice, deliberately. `curl` is told a maximum
+    declared length and a maximum duration; then the bytes that actually landed
+    are MEASURED, because `--max-filesize` believes `Content-Length` and a
+    chunked response declares none. An oversized file is deleted rather than
+    left on disk for a later step to find and trust.
+    """
 
     target.parent.mkdir(parents=True, exist_ok=True)
     # S603: the argument vector is built by `curl_argv` from a fixed list, and
@@ -1042,6 +1060,14 @@ def fetch(url: str, target: Path) -> None:
     problems = transfer_problems(url, completed.stdout.strip())
     if problems:
         raise Refusal(problems[0])
+    landed = target.stat().st_size if target.exists() else 0
+    if landed > ARTIFACT_MAX_BYTES:
+        target.unlink(missing_ok=True)
+        raise Refusal(
+            f"{url} delivered {landed} bytes, over the {ARTIFACT_MAX_BYTES} "
+            "limit; the declared-length bound did not catch it, so the bytes "
+            "were measured and the file removed"
+        )
 
 
 # ── acquire: a closed bundle, downloaded once, by the only job with a key ───
@@ -1563,6 +1589,13 @@ METADATA_MAX_COMPRESSION_RATIO: Final = 200
 #: any parsing happens, and it is checked first. The member count and the total
 #: uncompressed size are then checked before any member is read.
 WHEEL_MAX_BYTES: Final = 64 << 20
+
+#: Bounds on a TRANSFER from the index, applied while it happens and again to
+#: the bytes that landed. An unbounded download is unbounded regardless of what
+#: the later per-file limits say, because those run after the disk has already
+#: been filled.
+ARTIFACT_MAX_BYTES: Final = 128 << 20
+ARTIFACT_MAX_SECONDS: Final = 300
 ARCHIVE_MAX_MEMBERS: Final = 2_048
 ARCHIVE_MAX_TOTAL_UNCOMPRESSED: Final = 256 << 20
 
@@ -1672,7 +1705,7 @@ def wheel_identity_problems(wheel: Path, name: str, version: str) -> list[str]:
     return problems
 
 
-def wheel_metadata(wheel: Path, name: str, version: str) -> str:
+def wheel_metadata(wheel: Path, name: str, version: str) -> dict[str, list[str]]:
     """The METADATA text, with the archive bound to the project it claims.
 
     Four independent statements of identity have to agree before a single
@@ -1776,19 +1809,30 @@ def wheel_metadata(wheel: Path, name: str, version: str) -> str:
             f"{wheel.name}: METADATA declares Version {declared_version!r}, "
             f"not {version!r}"
         )
-    return text
+    return headers
 
 
-def requires_dist(metadata: str) -> list[str]:
-    """The `Requires-Dist` header values, stopping at the body."""
+def requires_dist(headers: dict[str, list[str]]) -> list[str]:
+    """The `Requires-Dist` values, taken from the PARSED headers.
 
-    requirements: list[str] = []
-    for line in metadata.splitlines():
-        if not line.strip():
-            break
-        if line.lower().startswith("requires-dist:"):
-            requirements.append(line.split(":", 1)[1].strip())
-    return requirements
+    This used to rescan the raw text itself, which made it a SECOND reader of
+    the same bytes — and the wrong one. `parse_core_metadata` joins RFC 822
+    continuations; a raw line scan cannot, so a folded requirement lost its
+    continuation and arrived here truncated:
+
+        Requires-Dist: dotmac-kernel
+          (>=0.1.0a100)
+
+        strict parser -> {"dotmac_kernel": ">=0.1.0a100"}
+        raw scanner   -> {"dotmac_kernel": ""}
+
+    An EMPTY constraint, from a wheel that plainly declared one. The strict
+    parser's correct result was computed and then thrown away. So the scanner
+    is gone and there is one reader: whatever `parse_core_metadata` understood
+    is what the comparison uses.
+    """
+
+    return list(headers.get("requires-dist", []))
 
 
 def metadata_dependencies(requirements: Iterable[str]) -> dict[str, str]:

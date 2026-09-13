@@ -70,6 +70,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import kernel_lock  # noqa: E402
 from kernel_lock import (  # noqa: E402
     ARCHIVE_MAX_MEMBERS,
+    ARTIFACT_MAX_BYTES,
     ARTIFACT_ORIGIN,
     DECLARABLE_DEPENDENCIES,
     INDEX_SOURCE_NAME,
@@ -107,6 +108,7 @@ from kernel_lock import (  # noqa: E402
     point_at_mirror,
     replace_dependency_version,
     replace_kernel_version,
+    requires_dist,
     restore_index_url,
     set_content_hash,
     sha256_hex,
@@ -2841,3 +2843,107 @@ def test_the_wheel_size_is_bounded_before_the_archive_is_opened(
     monkeypatch.setattr(kernel_lock, "WHEEL_MAX_BYTES", 10)
     with pytest.raises(Refusal, match="refusing to open it"):
         wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+# ── one reader of the bytes, and a bounded transfer ─────────────────────────
+
+
+def test_a_folded_requirement_keeps_its_constraint() -> None:
+    """THE defect: two readers of the same bytes, and the wrong one won.
+
+    `requires_dist` rescanned the raw text, so an RFC 822 continuation was
+    dropped and a folded requirement arrived truncated — `dotmac-kernel` with
+    its `(>=0.1.0a100)` gone, which `metadata_dependencies` then read as an
+    EMPTY constraint from a wheel that plainly declared one. The strict
+    parser's correct result was computed and discarded.
+    """
+
+    metadata = (
+        f"Metadata-Version: 2.1\nName: {CONTROL}\nVersion: 0.1.0a13\n"
+        "Requires-Dist: dotmac-kernel\n  (>=0.1.0a100)\n"
+        "Requires-Dist: sqlalchemy (>=2.0,<3.0)\n\nprose\n"
+    )
+    headers = parse_core_metadata(metadata)
+    assert requires_dist(headers) == [
+        "dotmac-kernel (>=0.1.0a100)",
+        "sqlalchemy (>=2.0,<3.0)",
+    ]
+    assert metadata_dependencies(requires_dist(headers)) == {
+        "dotmac_kernel": ">=0.1.0a100",
+        "sqlalchemy": ">=2.0,<3.0",
+    }
+
+
+def test_requires_dist_reads_the_parsed_headers_not_raw_text() -> None:
+    """Non-vacuity for the test above: `requires_dist` must be INCAPABLE of
+    rescanning, so the defect cannot return by someone passing text again."""
+
+    with pytest.raises((AttributeError, TypeError)):
+        requires_dist(  # type: ignore[arg-type]
+            "Requires-Dist: dotmac-kernel (>=0.1.0a100)\n"
+        )
+
+
+def test_a_folded_requirement_binds_end_to_end(tmp_path: Path) -> None:
+    """The folded value must survive all the way to the lock comparison, not
+    merely to the parser."""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            _DIST_INFO,
+            f"Metadata-Version: 2.1\nName: {CONTROL}\nVersion: 0.1.0a13\n"
+            "Requires-Dist: dotmac-kernel\n  (>=0.1.0a100)\n"
+            "Requires-Dist: sqlalchemy (>=2.0,<3.0)\n\nprose\n",
+        )
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    entry = {
+        "name": CONTROL,
+        "version": "0.1.0a13",
+        "source": dict(_INDEX_SOURCE),
+        "files": [{"file": wheel.name, "hash": f"sha256:{digest}"}],
+        "dependencies": dict(_GOOD_DEPS),
+    }
+    assert metadata_binding_problems(entry, wheel, {wheel.name: digest}) == []
+
+
+def test_the_transfer_is_bounded_in_the_argument_vector(tmp_path: Path) -> None:
+    """An unbounded download is unbounded regardless of the per-file limits
+    that run after the disk has already been filled."""
+
+    argv = curl_argv(
+        f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", tmp_path / "x.whl"
+    )
+    assert "--max-filesize" in argv, argv
+    assert argv[argv.index("--max-filesize") + 1] == str(ARTIFACT_MAX_BYTES), argv
+    assert "--max-time" in argv, argv
+    assert "--location" not in argv, argv
+
+
+def test_bytes_over_the_limit_are_measured_and_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--max-filesize` believes `Content-Length`, so a chunked response that
+    declares nothing slips past it. The landed bytes are measured, and the file
+    is DELETED rather than left for a later step to find and trust.
+    """
+
+    target = tmp_path / "artifact.whl"
+
+    def fake_run(*_args: Any, **_kwargs: Any) -> Any:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x" * 4096)
+
+        class _Completed:
+            returncode = 0
+            stdout = "200"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    monkeypatch.setattr(kernel_lock, "ARTIFACT_MAX_BYTES", 1024)
+    with pytest.raises(Refusal, match="were measured and the file removed"):
+        kernel_lock.fetch(f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", target)
+    assert not target.exists(), "the oversized file must not be left on disk"
