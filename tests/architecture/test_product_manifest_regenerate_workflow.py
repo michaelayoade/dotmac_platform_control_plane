@@ -450,7 +450,8 @@ def test_private_distributions_against_the_repositorys_real_manifest() -> None:
     expected = {
         name: spec["version"]
         for name, spec in dependencies.items()
-        if isinstance(spec, dict) and spec.get("source") == kernel_lock.INDEX_SOURCE_NAME
+        if isinstance(spec, dict)
+        and spec.get("source") == kernel_lock.INDEX_SOURCE_NAME
     }
 
     plan = pma.private_distributions(manifest)
