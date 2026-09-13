@@ -576,7 +576,8 @@ pass "$tenant_scoped tables carry tenant_id; all but the declared resolver input
 
 step "9  the exact UI assets this artifact serves"
 SCRIPT="
-import hashlib, pathlib
+import hashlib, json, pathlib, re
+from importlib.metadata import version
 from dotmac_kernel.templating import static_dir
 root = pathlib.Path(static_dir())
 entries = sorted(
@@ -584,19 +585,34 @@ entries = sorted(
     for p in root.rglob('*') if p.is_file()
 )
 manifest = '\n'.join(f'{name}  {digest}' for name, digest in entries)
+profile = json.load(open('/app/application_foundation_profile.json'))
+assert profile['contract'] == 'dotmac-application-foundation-profile/1'
+kernel_coordinates = {
+    (provider['version'], provider['coordinate'])
+    for concern in profile['concerns'].values()
+    for provider in concern['providers']
+    if provider['distribution'] == 'dotmac-kernel'
+    and provider['coordinate_kind'] == 'wheel_sha256'
+}
+assert len(kernel_coordinates) == 1, kernel_coordinates
+profile_version, profile_wheel = kernel_coordinates.pop()
+installed_version = version('dotmac-kernel')
+assert profile_version == installed_version, (profile_version, installed_version)
+assert re.fullmatch(r'sha256:[0-9a-f]{64}', profile_wheel), profile_wheel
 print(len(entries))
 print(hashlib.sha256(manifest.encode()).hexdigest())
+print(installed_version)
+print(profile_wheel.removeprefix('sha256:'))
 "
 asset_report="$(in_image)"
-asset_count="$(printf '%s\n' "$asset_report" | sed -n '1p')"
-asset_digest="$(printf '%s\n' "$asset_report" | sed -n '2p')"
-expected_count="$(sed -n '1p' .github/candidate/ui-assets.expected)"
-expected_digest="$(sed -n '2p' .github/candidate/ui-assets.expected)"
-test "$asset_count" = "$expected_count" \
-    || fail "the artifact serves $asset_count UI assets, declared $expected_count"
-test "$asset_digest" = "$expected_digest" \
-    || fail "UI asset manifest digest $asset_digest does not match the declared $expected_digest"
-pass "$asset_count UI assets, manifest digest matches .github/candidate/ui-assets.expected"
+if ! asset_verification="$(printf '%s\n' "$asset_report" | python3 \
+    .github/candidate/ui_asset_contract.py \
+    --expectation .github/candidate/ui-assets.expected \
+    --pyproject pyproject.toml \
+    --lock poetry.lock)"; then
+    fail "the installed UI assets do not match their locked Kernel coordinate"
+fi
+pass "$asset_verification"
 
 # ── The running application ─────────────────────────────────────────────────
 step "6  dependency-aware readiness, against liveness as the control"

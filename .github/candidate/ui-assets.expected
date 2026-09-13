@@ -1,2 +1,8 @@
-16
-8948d746933c0fe3331b1bd69b116369b2123a5d1b7133bc92c491c75581ebaf
+{
+  "asset_count": 16,
+  "asset_manifest_sha256": "8aec3c020b804cecc417cd67b70d39a75c9c25af0abfc36decca1715009e2ccc",
+  "distribution": "dotmac-kernel",
+  "schema": "dotmac-platform-ui-assets/1",
+  "version": "0.1.0a100",
+  "wheel_sha256": "60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c"
+}

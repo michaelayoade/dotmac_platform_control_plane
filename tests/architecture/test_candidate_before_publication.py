@@ -13,6 +13,8 @@ correct step and still be wrong.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,8 @@ ACCEPTANCE = ROOT / ".github" / "candidate" / "acceptance.sh"
 VERIFIER = ROOT / ".github" / "candidate" / "verify_source_revision.py"
 GATES = ROOT / ".github" / "candidate" / "required-gates.json"
 UI_EXPECTED = ROOT / ".github" / "candidate" / "ui-assets.expected"
+UI_CONTRACT = ROOT / ".github" / "candidate" / "ui_asset_contract.py"
+DOCKERFILE = ROOT / "Dockerfile"
 
 
 def _text(path: Path) -> str:
@@ -550,7 +554,9 @@ REQUIRED_CHECKS: dict[str, str] = {
     "cli journey": "a read reaches the same owner the browser and API just used",
     "wrong credential": "a wrong password returned $bad_code",
     "wrong standing": "an inactive administrator with the CORRECT password",
-    "exact UI assets": "UI asset manifest digest",
+    "exact UI assets": (
+        "the installed UI assets do not match their locked Kernel coordinate"
+    ),
     "documentation routes absent": "'/docs', '/docs/oauth2-redirect', '/redoc'",
     "documentation gate bidirectional": "the gate is not discriminating",
     "no fake provisioning surface": "/platform/vendor/provisioning",
@@ -625,7 +631,133 @@ def test_the_acceptance_battery_is_not_under_scripts() -> None:
 
 
 def test_the_declared_ui_asset_expectation_is_exact() -> None:
-    lines = _text(UI_EXPECTED).split()
-    assert len(lines) == 2, "expected a count and a digest"
-    assert lines[0].isdigit() and int(lines[0]) > 0
-    assert len(lines[1]) == 64 and all(c in "0123456789abcdef" for c in lines[1])
+    expected = json.loads(_text(UI_EXPECTED))
+    assert set(expected) == {
+        "schema",
+        "distribution",
+        "version",
+        "wheel_sha256",
+        "asset_count",
+        "asset_manifest_sha256",
+    }
+    assert expected["schema"] == "dotmac-platform-ui-assets/1"
+    assert expected["distribution"] == "dotmac-kernel"
+    assert expected["asset_count"] > 0
+    for field in ("wheel_sha256", "asset_manifest_sha256"):
+        assert len(expected[field]) == 64
+        assert all(character in "0123456789abcdef" for character in expected[field])
+
+
+def _ui_contract(
+    tmp_path: Path,
+    *,
+    expected: dict[str, object] | None = None,
+    report: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    record = expected if expected is not None else json.loads(_text(UI_EXPECTED))
+    expectation = tmp_path / "ui-assets.expected"
+    expectation.write_text(json.dumps(record), encoding="utf-8")
+    if report is None:
+        report = "\n".join(
+            (
+                str(record["asset_count"]),
+                str(record["asset_manifest_sha256"]),
+                str(record["version"]),
+                str(record["wheel_sha256"]),
+            )
+        )
+    return subprocess.run(  # noqa: S603 - fixed interpreter and repository script
+        (
+            sys.executable,
+            str(UI_CONTRACT),
+            "--expectation",
+            str(expectation),
+            "--pyproject",
+            str(ROOT / "pyproject.toml"),
+            "--lock",
+            str(ROOT / "poetry.lock"),
+        ),
+        input=report,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_the_ui_asset_expectation_is_bound_to_the_locked_kernel(
+    tmp_path: Path,
+) -> None:
+    expected = json.loads(_text(UI_EXPECTED))
+    result = _ui_contract(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert f"dotmac-kernel {expected['version']}" in result.stdout
+    acceptance = _text(ACCEPTANCE)
+    assert "ui_asset_contract.py" in acceptance
+    assert "application_foundation_profile.json" in acceptance
+    assert "print(profile_wheel.removeprefix('sha256:'))" in acceptance
+    dockerfile = _text(DOCKERFILE)
+    install = "poetry install --only main --no-root --no-interaction --no-ansi"
+    profile = "\n    python -m vendor_cp.deployment.profile"
+    assert dockerfile.count(install) == 1
+    assert dockerfile.count(profile) == 1
+    assert dockerfile.index(install) < dockerfile.index(profile)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "diagnostic"),
+    (
+        ("version", "0.1.0a98", "versions disagree"),
+        ("wheel_sha256", "0" * 64, "wheel coordinate disagrees"),
+    ),
+)
+def test_a_stale_kernel_coordinate_cannot_bless_ui_assets(
+    tmp_path: Path, field: str, value: object, diagnostic: str
+) -> None:
+    expected = json.loads(_text(UI_EXPECTED))
+    expected[field] = value
+    result = _ui_contract(tmp_path, expected=expected)
+    assert result.returncode == 1
+    assert diagnostic in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("report", "diagnostic"),
+    (
+        (
+            "15\n{asset_digest}\n{version}\n{wheel_digest}",
+            "serves 15 UI assets",
+        ),
+        (
+            "16\n" + "0" * 64 + "\n{version}\n{wheel_digest}",
+            "asset manifest disagrees",
+        ),
+        (
+            "16\n{asset_digest}\n0.1.0a98\n{wheel_digest}",
+            "versions disagree",
+        ),
+        (
+            "16\n{asset_digest}\n{version}\n" + "0" * 64,
+            "wheel provenance disagrees",
+        ),
+    ),
+)
+def test_changed_installed_ui_facts_are_refused(
+    tmp_path: Path, report: str, diagnostic: str
+) -> None:
+    expected = json.loads(_text(UI_EXPECTED))
+    report = report.format(
+        version=expected["version"],
+        asset_digest=expected["asset_manifest_sha256"],
+        wheel_digest=expected["wheel_sha256"],
+    )
+    result = _ui_contract(tmp_path, report=report)
+    assert result.returncode == 1
+    assert diagnostic in result.stderr
+
+
+def test_the_ui_asset_record_shape_is_closed(tmp_path: Path) -> None:
+    expected = json.loads(_text(UI_EXPECTED))
+    expected["unreviewed"] = True
+    result = _ui_contract(tmp_path, expected=expected)
+    assert result.returncode == 1
+    assert "non-closed shape" in result.stderr
