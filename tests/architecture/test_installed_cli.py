@@ -232,6 +232,77 @@ def test_an_aware_authorization_expiry_parses_cleanly() -> None:
     assert parsed.astimezone(UTC).year == 2026
 
 
+def test_deployment_authorize_with_no_signer_refuses_capability_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The REAL CLI path — not `tests/unit/test_plan_inputs.py`'s injected
+    `_TestAuthorizationSigner` double — refuses `evidence.capability_absent`
+    when no signer exists.
+
+    `cli.commands.deployment_authorize` always calls
+    `authorize_deployment(..., signer=None)`: this deployment holds signer
+    POINTERS only (`vendor_cp.deployment.signers`), so it has no capability to
+    inject. A suite that only ever exercised the injected double would prove
+    nothing about the deployment an operator actually runs — that is the
+    failure mode this repository names repeatedly, and this is the
+    non-vacuity half of it.
+
+    `authorize_deployment` and `platform_db` are monkeypatched because
+    reaching Deployment Control's OWN refusal needs the real distribution and
+    a real database — proved instead by the full chain in
+    `test_plan_inputs.py`. What THIS test proves, narrower and independent of
+    either: `deployment_authorize` passes `signer=None` (not a signer, not an
+    omitted argument), and whatever Control names that refusal — the double
+    below is named EXACTLY `AuthorizationEnvelopeRefusedError`, the same
+    MRO-by-name convention `tests/unit/test_cli.py` already relies on for
+    `translate()` — is carried through the REAL `runtime._BY_NAME` table to
+    `evidence.capability_absent`, never `execution.failed`.
+    """
+    import argparse
+    from contextlib import contextmanager
+
+    import vendor_cp.deployment.adapter as adapter_module
+    from vendor_cp.cli import commands
+    from vendor_cp.cli.runtime import translate
+
+    class AuthorizationEnvelopeRefusedError(Exception):
+        """Named exactly like Control's own class. `translate()` matches by
+        class NAME across the MRO, not by import identity."""
+
+    captured: dict[str, object] = {}
+
+    def _fake_authorize_deployment(db, request, *, signer):
+        captured["signer"] = signer
+        raise AuthorizationEnvelopeRefusedError("no injected AuthorizationSigner")
+
+    @contextmanager
+    def _fake_platform_db():
+        yield object()
+
+    monkeypatch.setattr(adapter_module, "authorize_deployment", _fake_authorize_deployment)
+    monkeypatch.setattr(commands, "platform_db", _fake_platform_db)
+
+    args = argparse.Namespace(
+        command_id="c1",
+        plan_id="00000000-0000-0000-0000-000000000000",
+        approval_request_id="00000000-0000-0000-0000-000000000001",
+        rollout_ref="rollout-1",
+        authorization_expires_at="2026-01-01T00:00:00+00:00",
+        reason=None,
+        actor_ref=None,
+        expect_plan_digest=None,
+        expect_plan_version=None,
+    )
+
+    with pytest.raises(AuthorizationEnvelopeRefusedError) as caught:
+        commands.deployment_authorize(args)
+
+    assert "signer" in captured and captured["signer"] is None
+    refusal = translate(caught.value)
+    assert refusal.code == "evidence.capability_absent"
+    assert refusal.exit_code is ExitCode.UNAVAILABLE
+
+
 def test_no_option_accepts_a_secret_as_its_value() -> None:
     """`/proc/<pid>/cmdline` is world-readable for as long as a process lives.
 

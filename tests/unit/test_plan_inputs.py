@@ -182,19 +182,13 @@ def _authorized(db: Session) -> str:
             content_hash=plan.approval_content_hash,
         ),
     )
-    # CONTRADICTION FLAGGED, NOT WORKED AROUND (see the delivering task's
-    # report): under Deployment Control 0.1.0a13, `authorize_deployment`
-    # unconditionally reaches `request_rollout` with no injected
-    # `AuthorizationSigner` (this assembly holds signer POINTERS only, and
-    # minting one is explicitly out of scope), so `request_rollout` always
-    # raises `AuthorizationEnvelopeRefusedError(ABSENT)` before a rollout id
-    # exists. This call — and therefore every test in this file that reaches
-    # it through `_authorized()` — cannot pass against the real a13 wheel
-    # until a signing identity is minted. That is not this file's defect to
-    # repair: stubbing a fake signer here to route around it is the exact
-    # thing the owning task refused to do in production code, and doing it
-    # only in the test would make the positive path pass for a reason that
-    # does not hold outside the test.
+    # `authorize_deployment` requires a signer explicitly (a13:
+    # `request_rollout` raises `AuthorizationEnvelopeRefusedError(ABSENT)`
+    # with none). This deployment's real signing identities are unminted by
+    # design, so the REAL chain this helper drives injects the throwaway
+    # `_TestAuthorizationSigner` double above — test infrastructure, not a
+    # minted identity — which is what makes the rest of this file's
+    # authorization-dependent resolution reachable again.
     receipt = adapter.authorize_deployment(
         db,
         adapter.AuthorizeRequest(
@@ -204,6 +198,7 @@ def _authorized(db: Session) -> str:
             rollout_ref=f"rollout-{uuid.uuid4().hex[:8]}",
             authorization_expires_at=_DEFAULT_EXPIRY,
         ),
+        signer=_TestAuthorizationSigner(),
     )
     return receipt.authorization_ref
 
