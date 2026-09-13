@@ -588,6 +588,7 @@ jobs:
           # unconditional and its behaviour with no delta is unchanged.
           python scripts/kernel_lock.py drift \
             --before /tmp/poetry.lock.before --after work/poetry.lock \
+            --bundle /tmp/bundle \
             --dependency "${DEPENDENCY}" \
             --dependency-from "${DEPENDENCY_FROM}" \
             --dependency-to "${DEPENDENCY_TO}"

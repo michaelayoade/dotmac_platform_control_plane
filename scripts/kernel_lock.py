@@ -88,11 +88,16 @@ import base64
 import hashlib
 import html.parser
 import json
+import ntpath
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import tomllib
 import urllib.parse
+import zipfile
+import zlib
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,7 +157,12 @@ DECLARABLE_DEPENDENCIES: Final = frozenset({"dotmac-deployment-control"})
 #: reasoning to `KERNEL_MUTABLE_FIELDS`: a version move changes `version` and
 #: `files` and nothing else, and this is not a second, looser allowlist for
 #: whichever package happens to be declared.
-DEPENDENCY_MUTABLE_FIELDS: Final = KERNEL_MUTABLE_FIELDS
+#: A declared movement may move these three. `dependencies` is included
+#: because a new version is entitled to require different things -- and that
+#: is the reason the kernel pin has to move at all. It is NOT free: the
+#: resolved values must equal the acquired wheel's own `Requires-Dist`,
+#: checked by `metadata_binding_problems` against rehashed bytes.
+DEPENDENCY_MUTABLE_FIELDS: Final = KERNEL_MUTABLE_FIELDS | {"dependencies"}
 
 #: The two files a consumer must apply TOGETHER. The lock's content-hash is
 #: derived from the manifest, so either one alone describes a tree that does
@@ -279,6 +289,19 @@ log carries. It is not cryptographically signed: attesting it would need
 `id-token: write` and `attestations: write`, a permission expansion this
 workflow has not taken.
 """
+
+
+class PublishedArtifactUnrecorded(Exception):
+    """Published, then neither recorded nor rolled back. DELIBERATELY not a
+    `Refusal`.
+
+    A `Refusal` says "this input is not acceptable, nothing happened". This says
+    the opposite: an artifact IS at its final path, no digest was returned for
+    it, and the rollback that would have removed it also failed. Nothing
+    downstream may treat the bundle as usable, and a retry cannot simply be
+    re-run because publication is no-overwrite and the destination is occupied.
+    It is reported separately from every refusal for that reason.
+    """
 
 
 class Refusal(Exception):
@@ -984,6 +1007,13 @@ def curl_argv(url: str, target: Path) -> list[str]:
     any other scheme even if something upstream rewrote the URL, and
     `--max-redirs 0` declares the same intention a second way. `-w` makes the
     status code observable so a 3xx cannot be mistaken for a download.
+
+    BOUNDED. `--max-filesize` refuses a transfer whose DECLARED length is over
+    the limit, and `--max-time` refuses one that never ends. Neither is
+    sufficient alone: `--max-filesize` believes `Content-Length`, so a chunked
+    response that declares nothing slips past it. The bytes on disk are
+    therefore measured again after the transfer, by `fetch`, which is the check
+    that does not depend on the server being honest.
     """
 
     return [
@@ -993,6 +1023,10 @@ def curl_argv(url: str, target: Path) -> list[str]:
         "=https",
         "--max-redirs",
         "0",
+        "--max-filesize",
+        str(ARTIFACT_MAX_BYTES),
+        "--max-time",
+        str(ARTIFACT_MAX_SECONDS),
         "--silent",
         "--show-error",
         "-w",
@@ -1018,24 +1052,311 @@ def transfer_problems(url: str, status: str) -> list[str]:
     return [f"{url} answered {status}, not 200"]
 
 
-def fetch(url: str, target: Path) -> None:
-    """Download `url` to `target`, or refuse. Never follows a redirect."""
+@dataclass(frozen=True)
+class CentralDirectory:
+    """What an archive's own end records CLAIM about its central directory."""
+
+    size: int
+    offset: int
+    entries: int
+    zip64: bool
+
+
+def zip_central_directory(path: Path) -> CentralDirectory:
+    """Validate and return the end records' claims, or refuse.
+
+    Reading only the directory SIZE was not enough. These records are the
+    archive's self-description and everything downstream trusts them, so the
+    framing is checked too:
+
+    * the EOCD comment length must account for EXACTLY the bytes after it — a
+      short count leaves trailing bytes a reader ignores, and a long one points
+      past the end;
+    * single disk only. `this disk`, `disk with the central directory` and
+      `entries on this disk` must agree with a one-disk archive; a multi-disk
+      claim is not something this gate resolves;
+    * the directory must LIE INSIDE the file, before the EOCD, and
+      `offset + size` must not run past where the directory has to end;
+    * the entry count must be consistent between the two count fields, and is
+      compared with what `ZipFile` actually enumerates by the caller;
+    * ZIP64 is only believed through its LOCATOR: the `PK\x06\x07` locator must
+      be present, point at an offset inside the file, and that offset must
+      actually hold a `PK\x06\x06` record. A ZIP64 record found by scanning the
+      tail without its locator is not a linked record.
+    """
+
+    size = path.stat().st_size
+    if size < 22:
+        raise Refusal(f"{path.name} is {size} bytes, too short to hold an EOCD")
+    window = min(size, 22 + 0xFFFF + 20)
+    with path.open("rb") as handle:
+        handle.seek(size - window)
+        tail = handle.read(window)
+    base = size - len(tail)
+
+    end = tail.rfind(b"PK\x05\x06")
+    if end < 0:
+        raise Refusal(f"{path.name} has no End Of Central Directory record")
+    if end + 22 > len(tail):
+        raise Refusal(f"{path.name} has a truncated End Of Central Directory record")
+
+    this_disk = int.from_bytes(tail[end + 4 : end + 6], "little")
+    cd_disk = int.from_bytes(tail[end + 6 : end + 8], "little")
+    here = int.from_bytes(tail[end + 8 : end + 10], "little")
+    total = int.from_bytes(tail[end + 10 : end + 12], "little")
+    declared = int.from_bytes(tail[end + 12 : end + 16], "little")
+    offset = int.from_bytes(tail[end + 16 : end + 20], "little")
+    comment = int.from_bytes(tail[end + 20 : end + 22], "little")
+
+    trailing = len(tail) - (end + 22)
+    if comment != trailing:
+        raise Refusal(
+            f"{path.name} declares a {comment}-byte EOCD comment but carries "
+            f"{trailing} bytes after the record; the framing does not close"
+        )
+
+    saturated = 0xFFFF, 0xFFFFFFFF
+    zip64 = (
+        declared == saturated[1]
+        or offset == saturated[1]
+        or total == saturated[0]
+        or here == saturated[0]
+    )
+    zip64_span: tuple[int, int] | None = None
+    if zip64:
+        # ADJACENCY. The locator must sit IMMEDIATELY before the EOCD -- the
+        # format puts it there, and `rfind` anywhere in the tail would accept a
+        # locator buried in member data or in the archive comment, which is an
+        # attacker-supplied region.
+        locator_at = end - 20
+        if locator_at < 0 or tail[locator_at : locator_at + 4] != b"PK\x06\x07":
+            raise Refusal(
+                f"{path.name} saturates a 32-bit end-record field but carries no "
+                "ZIP64 EOCD locator immediately before its EOCD; an unlinked or "
+                "misplaced record is not evidence"
+            )
+        locator_disks = int.from_bytes(
+            tail[locator_at + 16 : locator_at + 20], "little"
+        )
+        locator_disk = int.from_bytes(tail[locator_at + 4 : locator_at + 8], "little")
+        if locator_disk != 0 or locator_disks != 1:
+            raise Refusal(
+                f"{path.name}'s ZIP64 locator names disk {locator_disk} of "
+                f"{locator_disks}; this gate reads single-disk archives only"
+            )
+        record_offset = int.from_bytes(tail[locator_at + 8 : locator_at + 16], "little")
+        if not 0 <= record_offset <= size - 56:
+            raise Refusal(
+                f"{path.name}'s ZIP64 locator points at offset {record_offset}, "
+                "which is not inside this file"
+            )
+        if record_offset < base:
+            with path.open("rb") as handle:
+                handle.seek(record_offset)
+                record = handle.read(56)
+        else:
+            record = tail[record_offset - base : record_offset - base + 56]
+        if len(record) < 56 or not record.startswith(b"PK\x06\x06"):
+            raise Refusal(
+                f"{path.name}'s ZIP64 locator points at {record_offset}, which "
+                "does not hold a complete ZIP64 End Of Central Directory record"
+            )
+        # RECORD LENGTH. The record declares its own remaining size; it must be
+        # at least the fixed 44 bytes that follow the field, and must not run
+        # past the locator that points at it.
+        record_size = int.from_bytes(record[4:12], "little")
+        if record_size < 44:
+            raise Refusal(
+                f"{path.name}'s ZIP64 end record declares {record_size} bytes, "
+                "short of its own fixed 44-byte remainder"
+            )
+        record_end = record_offset + 12 + record_size
+        locator_offset = base + locator_at
+        if record_end != locator_offset:
+            # EXACT, not merely "not past". Bytes between the record's declared
+            # end and its locator are a region no reader accounts for, and the
+            # record's own length field is what would have to be trusted to skip
+            # them. The format puts the locator immediately after the record.
+            raise Refusal(
+                f"{path.name}'s ZIP64 end record declares it ends at "
+                f"{record_end} but its locator begins at {locator_offset}; the "
+                "two must be adjacent with nothing between them"
+            )
+        record_disk = int.from_bytes(record[16:20], "little")
+        record_cd_disk = int.from_bytes(record[20:24], "little")
+        if record_disk != 0 or record_cd_disk != 0:
+            raise Refusal(
+                f"{path.name}'s ZIP64 end record claims disk {record_disk} with "
+                f"its directory on disk {record_cd_disk}; single disk only"
+            )
+        here = int.from_bytes(record[24:32], "little")
+        total = int.from_bytes(record[32:40], "little")
+        declared = int.from_bytes(record[40:48], "little")
+        offset = int.from_bytes(record[48:56], "little")
+        zip64_span = (record_offset, base + locator_at + 20)
+
+    if this_disk != 0 or cd_disk != 0:
+        raise Refusal(
+            f"{path.name} claims disk {this_disk} with its directory on disk "
+            f"{cd_disk}; this gate reads single-disk archives only"
+        )
+    if here != total:
+        raise Refusal(
+            f"{path.name} declares {here} directory entries on this disk but "
+            f"{total} in total; a single-disk archive must agree with itself"
+        )
+    # The directory must end before the FIRST end record, whichever that is: the
+    # ZIP64 record and its locator sit before the EOCD, so with ZIP64 present
+    # the earliest boundary is the ZIP64 record, not the EOCD.
+    directory_end = base + end
+    if zip64_span is not None:
+        directory_end = min(directory_end, zip64_span[0])
+    if offset < 0 or declared < 0:
+        raise Refusal(f"{path.name} declares a negative directory offset or size")
+    if offset + declared > size:
+        raise Refusal(
+            f"{path.name} places its {declared}-byte central directory at "
+            f"{offset}, which runs past the {size}-byte file"
+        )
+    if offset + declared > directory_end:
+        raise Refusal(
+            f"{path.name} places its {declared}-byte central directory at "
+            f"{offset}, overlapping its own end records, which begin at "
+            f"{directory_end}"
+        )
+    return CentralDirectory(size=declared, offset=offset, entries=total, zip64=zip64)
+
+
+def zip_central_directory_bytes(path: Path) -> int:
+    """The validated directory size, for callers that want only the bound."""
+
+    return zip_central_directory(path).size
+
+
+def publish_atomically(staged: Path, target: Path) -> None:
+    """Put `staged` at `target`, REFUSING if anything is already there.
+
+    `Path.replace` is the wrong primitive: it silently overwrites. A second
+    transfer for the same filename, a stale file from an earlier run, or a
+    symlink an attacker planted at the destination would all be replaced
+    without a word, and the bundle would then contain bytes nobody verified
+    under a name something else had already claimed.
+
+    `os.link` is the no-overwrite primitive: it raises `FileExistsError` if the
+    destination exists, and on one filesystem it is atomic. The staged file is
+    then unlinked, so the inode ends up at exactly one path.
+    """
+
+    if target.is_symlink() or target.exists():
+        raise Refusal(
+            f"{target.name} already exists at the destination; refusing to "
+            "overwrite a file this run did not create"
+        )
+    try:
+        os.link(staged, target)
+    except FileExistsError as exc:
+        raise Refusal(
+            f"{target.name} appeared at the destination while this transfer was "
+            "in flight; refusing to overwrite it"
+        ) from exc
+    except OSError as exc:
+        raise Refusal(f"{target.name} could not be published: {exc}") from exc
+
+
+def fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
+    """Download `url` to `target` atomically, or refuse. Returns the digest.
+
+    The bytes land in a PRIVATE, RANDOMLY NAMED staging directory, created mode
+    0700 beside the destination, and `target` is not touched until every check
+    has passed. A predictable `target.part` was the wrong staging name: a stale
+    one from an earlier run, or a symlink planted at that path, would have been
+    written through, and two transfers for one filename would have raced on it.
+    A fresh directory per call cannot collide and cannot be pre-created by
+    anything that does not already control the parent.
+
+    The staging directory is removed in `finally`, so every exit removes it --
+    the two bounds that ABORT a transfer, a bad status, a size overage, a digest
+    mismatch, and anything unforeseen.
+
+    Status, then size, then DIGEST, then publication -- and publication REFUSES
+    rather than overwriting. The digest is computed over the complete bytes and
+    returned, so the value recorded downstream is the value that was verified
+    rather than a second read of the file. `expected_sha256` is compared when a
+    caller has an independent expectation; the INDEX's advertised `#sha256=` is
+    deliberately not that expectation, being stripped in
+    `approved_artifact_url`, because comparing the index against itself proves
+    nothing.
+    """
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    # S603: the argument vector is built by `curl_argv` from a fixed list, and
-    # `url` has already been through `approved_artifact_url` — https, the
-    # approved authority, under the approved path prefix. No shell is involved.
-    completed = subprocess.run(  # noqa: S603
-        curl_argv(url, target),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise Refusal(f"curl failed for {url}: {completed.stderr.strip()}")
-    problems = transfer_problems(url, completed.stdout.strip())
-    if problems:
-        raise Refusal(problems[0])
+    staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=target.parent))
+    try:
+        staging.chmod(0o700)
+        staged = staging / target.name
+        # S603: the argument vector is built by `curl_argv` from a fixed list,
+        # and `url` has already been through `approved_artifact_url` — https,
+        # the approved authority, under the approved path prefix. No shell.
+        completed = subprocess.run(  # noqa: S603
+            curl_argv(url, staged),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise Refusal(
+                f"curl failed for {url} (exit {completed.returncode}): "
+                f"{completed.stderr.strip()}"
+            )
+        problems = transfer_problems(url, completed.stdout.strip())
+        if problems:
+            raise Refusal(problems[0])
+        if staged.is_symlink() or not staged.is_file():
+            raise Refusal(f"{url} reported success but left no regular file in staging")
+        landed = staged.stat().st_size
+        if landed > ARTIFACT_MAX_BYTES:
+            raise Refusal(
+                f"{url} delivered {landed} bytes, over the {ARTIFACT_MAX_BYTES} "
+                "limit; the declared-length bound did not catch it, so the "
+                "bytes were measured"
+            )
+        digest = sha256_of(staged)
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise Refusal(
+                f"{url} hashes to sha256:{digest}, not the expected "
+                f"sha256:{expected_sha256}"
+            )
+        publish_atomically(staged, target)
+    except BaseException:
+        # The refusal that brought us here is what matters, so removal is
+        # BEST EFFORT on this path and this function does not claim it
+        # succeeded. Nothing was published, so there is nothing to roll back.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    # Published. Cleanup is now part of the TRANSACTION, not a `finally`: a
+    # cleanup failure after `os.link` used to let an untyped `PermissionError`
+    # escape while the artifact sat at its final path and no digest was ever
+    # returned -- and because publication is no-overwrite, the retry then
+    # wedged on a destination that already existed.
+    try:
+        shutil.rmtree(staging)
+    except OSError as cleanup_failure:
+        try:
+            target.unlink()
+        except OSError as rollback_failure:
+            raise PublishedArtifactUnrecorded(
+                f"{target} was published, its staging directory {staging} could "
+                f"not be removed ({cleanup_failure}), and the published artifact "
+                f"could not be rolled back either ({rollback_failure}). The "
+                "bundle is NOT usable and a retry cannot overwrite the "
+                "destination; this needs a human."
+            ) from rollback_failure
+        raise Refusal(
+            f"{target.name} was published but its staging directory {staging} "
+            f"could not be removed ({cleanup_failure}); the publication was "
+            "rolled back so this transfer can be retried"
+        ) from cleanup_failure
+    return digest
 
 
 # ── acquire: a closed bundle, downloaded once, by the only job with a key ───
@@ -1278,8 +1599,11 @@ def acquire(plan: dict[str, str], out: Path) -> dict[str, str]:
                 )
         for filename, url in sorted(wanted.items()):
             target = files_dir / filename
-            fetch(url, target)
-            digests[filename] = sha256_hex(target.read_bytes())
+            # The digest RETURNED by `fetch` is the one it verified before it
+            # renamed the file into place. Re-reading the file here would record
+            # a second measurement of bytes that could, in principle, differ
+            # from the ones that passed the size and digest checks.
+            digests[filename] = fetch(url, target)
 
         page_dir = simple_dir / package
         page_dir.mkdir(parents=True, exist_ok=True)
@@ -1542,10 +1866,545 @@ def _kernel_entry_problems(
     return problems
 
 
+#: A wheel's METADATA is a small text file. These bound what this gate will
+#: read out of an archive it did not build: a member that inflates past the
+#: first limit, or compresses better than the second, is refused rather than
+#: decompressed. The numbers are generous for real metadata and hostile to an
+#: archive designed to exhaust the reader.
+METADATA_MAX_BYTES: Final = 1 << 20
+METADATA_MAX_COMPRESSION_RATIO: Final = 200
+
+#: Bounds that apply BEFORE the archive is opened or enumerated. `zipfile`
+#: reads the whole central directory when it opens a file, so a per-member
+#: limit arrives too late to protect the reader from an archive with millions
+#: of entries: the file's own size on disk is the only bound available before
+#: any parsing happens, and it is checked first. The member count and the total
+#: uncompressed size are then checked before any member is read.
+WHEEL_MAX_BYTES: Final = 64 << 20
+
+#: Bounds on a TRANSFER from the index, applied while it happens and again to
+#: the bytes that landed. An unbounded download is unbounded regardless of what
+#: the later per-file limits say, because those run after the disk has already
+#: been filled.
+ARTIFACT_MAX_BYTES: Final = 128 << 20
+ARTIFACT_MAX_SECONDS: Final = 300
+ARCHIVE_MAX_MEMBERS: Final = 2_048
+ARCHIVE_MAX_TOTAL_UNCOMPRESSED: Final = 256 << 20
+#: A member NAME is attacker-controlled and is read before any content is. Bound
+#: its length, and bound the sum of every name — that sum IS the central
+#: directory's size, which `zipfile` has already read by the time this runs, so
+#: the bound exists to refuse the archive rather than to avoid reading it.
+ARCHIVE_MAX_NAME_BYTES: Final = 256
+ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES: Final = 1 << 20
+
+#: Core Metadata headers that may appear AT MOST ONCE. A second `Name` or
+#: `Version` makes the file state two identities, and which one a reader
+#: believes becomes a question about parse order.
+METADATA_SINGLE_HEADERS: Final = frozenset({"metadata-version", "name", "version"})
+#: `Name: value`. A line that is not this and is not a continuation is not a
+#: header, and a file carrying one is not Core Metadata this gate will read.
+_METADATA_HEADER = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*):[ \t]*(.*)$")
+#: `2.1`, `2.4`. A Core Metadata version this gate cannot even shape-check is
+#: not one it should claim to have parsed.
+_METADATA_VERSION = re.compile(r"^\d+\.\d+$")
+
+#: The only key this gate understands inside a Poetry constraint table. A
+#: `markers`, `extras`, `optional` or `python` key changes what the constraint
+#: MEANS, and a comparison that ignored it would be comparing a version string
+#: while the real condition sat in a key it never read.
+MODELLED_CONSTRAINT_KEYS: Final = frozenset({"version"})
+
+
+def parse_core_metadata(text: str) -> dict[str, list[str]]:
+    """Core Metadata headers, parsed STRICTLY, or a refusal.
+
+    The permissive version of this read lowercased keys, kept the first value
+    it saw, stopped at the first blank line, and silently ignored any line it
+    did not understand. Malformed metadata therefore PASSED: a file with no
+    `Metadata-Version`, a second `Name`, a line with no colon, or headers
+    sitting after the body all read as acceptable, and the gate went on to
+    compare requirements it had extracted from something it had not actually
+    parsed.
+
+    So: headers end at the first blank line and nothing after it is read; every
+    line before it must be a header or an RFC 822 continuation; a continuation
+    with no preceding header is refused; `Metadata-Version`, `Name` and
+    `Version` must each appear EXACTLY once; and `Metadata-Version` must be
+    shape-checkable. Values are returned as lists, so a caller cannot silently
+    collapse a repeated header the way `setdefault` did.
+    """
+
+    headers: dict[str, list[str]] = {}
+    order: list[str] = []
+    last: str | None = None
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            break
+        if line[:1] in (" ", "\t"):
+            if last is None:
+                raise Refusal(
+                    f"METADATA line {number} is a continuation with no header "
+                    "before it"
+                )
+            headers[last][-1] += " " + line.strip()
+            continue
+        match = _METADATA_HEADER.match(line)
+        if match is None:
+            raise Refusal(
+                f"METADATA line {number} is neither a header nor a "
+                f"continuation: {line[:60]!r}"
+            )
+        key = match.group(1).lower()
+        headers.setdefault(key, []).append(match.group(2).strip())
+        order.append(key)
+        last = key
+
+    if not headers:
+        raise Refusal("METADATA carries no headers at all")
+    for key in sorted(METADATA_SINGLE_HEADERS):
+        found = headers.get(key, [])
+        if len(found) != 1:
+            raise Refusal(
+                f"METADATA declares `{key}` {len(found)} times, expected "
+                "exactly once"
+            )
+    version = headers["metadata-version"][0]
+    if not _METADATA_VERSION.match(version):
+        raise Refusal(
+            f"METADATA declares Metadata-Version {version!r}, which is not a "
+            "shape this gate can check"
+        )
+    return headers
+
+
+def sha256_of(path: Path) -> str:
+    """The digest of the bytes on disk RIGHT NOW."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def wheel_identity_problems(wheel: Path, name: str, version: str) -> list[str]:
+    """The FILENAME says which project and version these bytes are."""
+
+    match = _WHEEL_FILENAME.match(wheel.name)
+    if match is None:
+        return [f"{wheel.name} is not a parseable wheel filename"]
+    problems: list[str] = []
+    if _normalised(match.group("name")) != _normalised(name):
+        return [f"{wheel.name} names project {match.group('name')!r}, not {name!r}"]
+    if match.group("ver") != version:
+        problems.append(
+            f"{wheel.name} names version {match.group('ver')!r}, not {version!r}"
+        )
+    return problems
+
+
+def wheel_metadata(wheel: Path, name: str, version: str) -> dict[str, list[str]]:
+    """The METADATA text, with the archive bound to the project it claims.
+
+    Four independent statements of identity have to agree before a single
+    requirement line is believed: the FILENAME, the `.dist-info` DIRECTORY, and
+    METADATA's own `Name` and `Version`. A wheel whose filename says a13 while
+    its dist-info says a6 is not a naming inconsistency to tidy up — it is an
+    archive asserting two identities, and the one this gate would otherwise
+    read is whichever the zip happened to list first.
+    """
+
+    expected_dir = f"{_normalised(name)}-{version}.dist-info"
+
+    # BEFORE opening. `zipfile` reads the entire central directory on open, so
+    # every per-member bound below arrives too late to protect the reader from
+    # an archive with millions of entries. The file's size on disk is the only
+    # thing knowable before any parsing, and it bounds the central directory
+    # too, so it is checked first.
+    try:
+        size = wheel.stat().st_size
+    except OSError as exc:
+        raise Refusal(f"{wheel.name} cannot be read: {exc}") from exc
+    if size > WHEEL_MAX_BYTES:
+        raise Refusal(
+            f"{wheel.name} is {size} bytes on disk, over the "
+            f"{WHEEL_MAX_BYTES} limit; refusing to open it"
+        )
+
+    # The declared central-directory size, read from the EOCD before anything
+    # opens the archive — because opening it is what reads that directory.
+    directory = zip_central_directory(wheel)
+    if directory.size > ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES:
+        raise Refusal(
+            f"{wheel.name} declares a {directory.size}-byte central "
+            f"directory, over the {ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES} limit; "
+            "refusing to open it"
+        )
+    if directory.entries > ARCHIVE_MAX_MEMBERS:
+        raise Refusal(
+            f"{wheel.name} declares {directory.entries} directory entries, over "
+            f"the {ARCHIVE_MAX_MEMBERS} limit; refusing to open it"
+        )
+
+    # A corrupt, truncated or non-zip file is a REFUSAL, not a traceback. `main`
+    # catches `Refusal` and nothing else, so an uncontrolled exception here
+    # would surface as a stack trace with no `::error::` line — the operator
+    # would see a crashed gate rather than a refused input, and could not tell
+    # which of the two had happened.
+    try:
+        archive = zipfile.ZipFile(wheel)
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, EOFError) as exc:
+        raise Refusal(
+            f"{wheel.name} is not a readable zip archive: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    with archive:
+        members = archive.infolist()
+        # The declared count, compared with what was actually enumerated. A
+        # directory that claims one number and yields another is describing an
+        # archive other than the one being read, and every bound above was
+        # computed from the claim.
+        if len(members) != directory.entries:
+            raise Refusal(
+                f"{wheel.name} declares {directory.entries} directory entries "
+                f"but enumerates {len(members)}; its end records describe a "
+                "different archive"
+            )
+        if len(members) > ARCHIVE_MAX_MEMBERS:
+            raise Refusal(
+                f"{wheel.name} declares {len(members)} members, over the "
+                f"{ARCHIVE_MAX_MEMBERS} limit; refusing to read any of them"
+            )
+        total = sum(member.file_size for member in members)
+        if total > ARCHIVE_MAX_TOTAL_UNCOMPRESSED:
+            raise Refusal(
+                f"{wheel.name} declares {total} uncompressed bytes across its "
+                f"members, over the {ARCHIVE_MAX_TOTAL_UNCOMPRESSED} limit"
+            )
+        # A secondary check, and deliberately not the central-directory bound:
+        # summed filenames exclude the 46-byte per-member header, every extra
+        # field and every file comment, so an archive can declare a vast
+        # directory while its names total almost nothing. The real bound is
+        # `zip_central_directory_bytes` above, read from the EOCD.
+        names = sum(len(member.filename.encode("utf-8")) for member in members)
+        if names > ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES:
+            raise Refusal(
+                f"{wheel.name}'s member names alone total {names} bytes, over "
+                f"the {ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES} limit"
+            )
+        for member in members:
+            encoded = member.filename.encode("utf-8")
+            if len(encoded) > ARCHIVE_MAX_NAME_BYTES:
+                raise Refusal(
+                    f"{wheel.name} carries a member name of {len(encoded)} "
+                    f"bytes, over the {ARCHIVE_MAX_NAME_BYTES} limit: "
+                    f"{member.filename[:60]!r}…"
+                )
+            # NOT `name` — that is this function's parameter, and binding it
+            # here made the identity check below compare the project name
+            # against a member path. Same shadowing defect as the `_wheel`
+            # helper collision, inside the function it was added to protect.
+            member_name = member.filename
+            if (
+                member_name.startswith("/")
+                or "\\" in member_name
+                or ntpath.splitdrive(member_name)[0]
+            ):
+                raise Refusal(
+                    f"{wheel.name} carries an absolute or non-POSIX member "
+                    f"name {member_name!r}"
+                )
+            if any(part == ".." for part in member_name.split("/")):
+                raise Refusal(
+                    f"{wheel.name} carries a traversing member name " f"{member_name!r}"
+                )
+        candidates = [
+            info
+            for info in members
+            if info.filename.endswith(".dist-info/METADATA")
+            and info.filename.count("/") == 1
+        ]
+        if not candidates:
+            raise Refusal(
+                f"{wheel.name} carries NO top-level dist-info/METADATA member"
+            )
+        if len(candidates) != 1:
+            raise Refusal(
+                f"{wheel.name} carries {len(candidates)} top-level "
+                "dist-info/METADATA members, expected exactly one; which one "
+                "describes the wheel is then a question about zip ordering"
+            )
+        info = candidates[0]
+        directory = info.filename.split("/", 1)[0]
+        if _normalised(directory) != _normalised(expected_dir):
+            raise Refusal(
+                f"{wheel.name} carries its metadata under {directory!r}, not "
+                f"{expected_dir!r}; the archive names two identities"
+            )
+        if info.file_size > METADATA_MAX_BYTES:
+            raise Refusal(
+                f"{wheel.name}: {info.filename} declares {info.file_size} "
+                f"uncompressed bytes, over the {METADATA_MAX_BYTES} limit; "
+                "refusing to decompress it"
+            )
+        if info.compress_size and (
+            info.file_size / info.compress_size > METADATA_MAX_COMPRESSION_RATIO
+        ):
+            raise Refusal(
+                f"{wheel.name}: {info.filename} compresses "
+                f"{info.file_size}:{info.compress_size}, past the "
+                f"{METADATA_MAX_COMPRESSION_RATIO}:1 limit; refusing to "
+                "decompress it"
+            )
+        try:
+            raw = archive.read(info)
+        except (
+            zipfile.BadZipFile,
+            zipfile.LargeZipFile,
+            OSError,
+            EOFError,
+            zlib.error,
+        ) as exc:
+            raise Refusal(
+                f"{wheel.name}: {info.filename} cannot be decompressed: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+    if len(raw) > METADATA_MAX_BYTES:
+        raise Refusal(
+            f"{wheel.name}: {info.filename} inflated to {len(raw)} bytes, over "
+            f"the {METADATA_MAX_BYTES} limit declared in its own header"
+        )
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Refusal(
+            f"{wheel.name}: METADATA is not valid UTF-8 ({exc}); it was "
+            "previously decoded with errors replaced, which turned undecodable "
+            "bytes into characters the parser then accepted"
+        ) from exc
+
+    headers = parse_core_metadata(text)
+    declared_name = headers["name"][0]
+    declared_version = headers["version"][0]
+    if _normalised(declared_name) != _normalised(name):
+        raise Refusal(
+            f"{wheel.name}: METADATA declares Name {declared_name!r}, not {name!r}"
+        )
+    if declared_version != version:
+        raise Refusal(
+            f"{wheel.name}: METADATA declares Version {declared_version!r}, "
+            f"not {version!r}"
+        )
+    return headers
+
+
+def requires_dist(headers: dict[str, list[str]]) -> list[str]:
+    """The `Requires-Dist` values, taken from the PARSED headers.
+
+    This used to rescan the raw text itself, which made it a SECOND reader of
+    the same bytes — and the wrong one. `parse_core_metadata` joins RFC 822
+    continuations; a raw line scan cannot, so a folded requirement lost its
+    continuation and arrived here truncated:
+
+        Requires-Dist: dotmac-kernel
+          (>=0.1.0a100)
+
+        strict parser -> {"dotmac_kernel": ">=0.1.0a100"}
+        raw scanner   -> {"dotmac_kernel": ""}
+
+    An EMPTY constraint, from a wheel that plainly declared one. The strict
+    parser's correct result was computed and then thrown away. So the scanner
+    is gone and there is one reader: whatever `parse_core_metadata` understood
+    is what the comparison uses.
+    """
+
+    if not isinstance(headers, dict):
+        raise Refusal(
+            f"parsed headers are a {type(headers).__name__}, not a mapping; "
+            "this function reads `parse_core_metadata`'s output and refuses "
+            "anything else rather than coercing it"
+        )
+    values = headers.get("requires-dist", [])
+    if not isinstance(values, list):
+        raise Refusal(
+            f"`requires-dist` is a {type(values).__name__}, not a list of "
+            "header values"
+        )
+    for value in values:
+        if not isinstance(value, str):
+            raise Refusal(
+                f"a `requires-dist` value is {type(value).__name__}, not a string"
+            )
+    return list(values)
+
+
+def metadata_dependencies(requirements: Iterable[str]) -> dict[str, str]:
+    """`Requires-Dist` as the mapping a lock entry records, or a refusal.
+
+    A requirement carrying an environment marker or an extra is not modelled
+    here and is REFUSED rather than skipped: quietly ignoring the part of the
+    metadata a comparison cannot model is how a comparison stops being able to
+    disagree, which is this one's entire purpose.
+    """
+
+    mapping: dict[str, str] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, str):
+            raise Refusal(
+                f"a Requires-Dist value is {type(requirement).__name__}, not a "
+                "string; this gate refuses rather than coercing it"
+            )
+        if ";" in requirement:
+            raise Refusal(
+                f"the wheel declares a conditional requirement {requirement!r}; "
+                "this gate models only unconditional `Requires-Dist` and "
+                "refuses rather than ignoring the part it cannot model"
+            )
+        if "[" in requirement:
+            raise Refusal(
+                f"the wheel declares an extras requirement {requirement!r}, "
+                "which selects optional dependencies this gate does not model"
+            )
+        name = _requirement_name(requirement)
+        if name is None:
+            raise Refusal(f"cannot read a project name from {requirement!r}")
+        specifier = requirement[len(name) :].strip()
+        if specifier.startswith("(") and specifier.endswith(")"):
+            specifier = specifier[1:-1].strip()
+        key = _normalised(name)
+        if key in mapping:
+            raise Refusal(
+                f"the wheel declares {name} twice in `Requires-Dist`; which "
+                "constraint binds is then a question about zip ordering"
+            )
+        mapping[key] = re.sub(r"\s+", "", specifier)
+    return mapping
+
+
+def locked_dependencies(entry: dict[str, Any]) -> dict[str, str]:
+    """A lock entry's `dependencies`, keyed for comparison, or a refusal.
+
+    Two refusals live here rather than silent behaviour. A table whose keys
+    NORMALISE to the same project (`dotmac-kernel` beside `dotmac_kernel`)
+    would otherwise have one entry overwrite the other, so whichever the
+    comparison saw would be an accident of dict ordering. And a constraint
+    table carrying `markers`, `extras`, `optional` or `python` means something
+    this gate does not model; comparing only its `version` would compare a
+    string while the real condition sat in a key nobody read.
+    """
+
+    declared = entry.get("dependencies")
+    if declared is None:
+        return {}
+    if not isinstance(declared, dict):
+        raise Refusal("a lock entry's `dependencies` is not a table")
+    mapping: dict[str, str] = {}
+    for name, constraint in declared.items():
+        key = _normalised(str(name))
+        if key in mapping:
+            raise Refusal(
+                f"the lock entry declares {name!r} and another spelling of the "
+                "same project; which constraint binds is then a question about "
+                "table ordering"
+            )
+        if isinstance(constraint, dict):
+            unmodelled = sorted(set(constraint) - MODELLED_CONSTRAINT_KEYS)
+            if unmodelled:
+                raise Refusal(
+                    f"the lock entry's {name!r} constraint carries "
+                    f"{', '.join(unmodelled)}, which this gate does not model; "
+                    "comparing only its version would ignore the condition"
+                )
+            constraint = constraint.get("version", "")
+        elif isinstance(constraint, list):
+            raise Refusal(
+                f"the lock entry's {name!r} constraint is a LIST of "
+                "constraints, which this gate does not model"
+            )
+        mapping[key] = re.sub(r"\s+", "", str(constraint))
+    return mapping
+
+
+def metadata_binding_problems(
+    entry: dict[str, Any], wheel: Path, digests: dict[str, str]
+) -> list[str]:
+    """The moved package's locked `dependencies` ARE the acquired wheel's.
+
+    A declared movement may change `dependencies`, because a new version is
+    entitled to require different things — Control a13 requiring kernel
+    `>=0.1.0a100` is exactly why the kernel pin has to move. But that makes
+    `dependencies` the one field through which an arbitrary constraint could
+    arrive inside a reviewed pin change, so it is bound to the artifact's own
+    declaration rather than trusted.
+
+    The bytes are REHASHED here, immediately before being read, and must match
+    BOTH the acquisition record and the lock. `digests.json` is a claim about
+    what was downloaded; the lock is a claim about what was resolved; neither
+    is a statement about the file that is about to be opened.
+    """
+
+    name = str(entry.get("name"))
+    version = str(entry.get("version"))
+    problems = wheel_identity_problems(wheel, name, version)
+    if problems:
+        return problems
+
+    locked_files = {
+        item.get("file"): item.get("hash") for item in entry.get("files", [])
+    }
+    if wheel.name not in locked_files:
+        return [
+            f"{wheel.name} is not named by the lock entry for {name} {version}, "
+            "so its metadata describes bytes this lock does not claim"
+        ]
+    recorded = digests.get(wheel.name)
+    if recorded is None:
+        return [f"{wheel.name} has no acquisition digest to verify against"]
+
+    actual = sha256_of(wheel)
+    if actual != recorded:
+        return [
+            f"{wheel.name} on disk hashes to sha256:{actual}, but the "
+            f"acquisition recorded sha256:{recorded}; refusing to read metadata "
+            "out of bytes that changed after they were acquired"
+        ]
+    if locked_files[wheel.name] != f"sha256:{actual}":
+        return [
+            f"{wheel.name} on disk hashes to sha256:{actual}, but the lock says "
+            f"{locked_files[wheel.name]!r}; refusing to read metadata out of "
+            "bytes the lock does not claim"
+        ]
+
+    expected = metadata_dependencies(
+        requires_dist(wheel_metadata(wheel, name, version))
+    )
+    recorded_deps = locked_dependencies(entry)
+    for dependency in sorted(set(expected) | set(recorded_deps)):
+        if dependency not in recorded_deps:
+            problems.append(
+                f"the wheel requires {dependency} {expected[dependency]!r}, "
+                "which the lock entry does not record"
+            )
+        elif dependency not in expected:
+            problems.append(
+                f"the lock records a dependency on {dependency} "
+                f"{recorded_deps[dependency]!r} that the wheel's "
+                "`Requires-Dist` does not declare"
+            )
+        elif expected[dependency] != recorded_deps[dependency]:
+            problems.append(
+                f"{dependency}: the wheel declares {expected[dependency]!r}, "
+                f"the lock records {recorded_deps[dependency]!r}"
+            )
+    return problems
+
+
 def _declared_delta_problems(
     old: dict[tuple[str, str], dict[str, Any]],
     new: dict[tuple[str, str], dict[str, Any]],
     delta: DependencyDelta,
+    bundle: Path | None = None,
 ) -> list[str]:
     """The DECLARED dependency's entry may move its version and its files.
     Nothing else — the same rule as `_kernel_entry_problems`, for the one
@@ -1592,6 +2451,33 @@ def _declared_delta_problems(
         problems.append(
             f"{delta.name} resolved from {source.get('url')!r}, not {INDEX_URL!r}"
         )
+
+    # `dependencies` is the one field a movement may change, so it is the one
+    # field bound to something outside the lock. MANDATORY: a declared movement
+    # with no bundle would permit exactly the change this binding constrains.
+    if bundle is None:
+        problems.append(
+            f"{delta.name} declares a movement but no acquired bundle was given "
+            "to bind its `dependencies` to the published wheel's Requires-Dist"
+        )
+        return problems
+    digests_path = bundle / "digests.json"
+    if not digests_path.is_file():
+        problems.append(f"the bundle at {bundle} carries no digests.json")
+        return problems
+    digests = json.loads(digests_path.read_text(encoding="utf-8"))
+    wheels = sorted(
+        path
+        for path in (bundle / "files").glob("*.whl")
+        if artifact_belongs_to(path.name, delta.name, delta.after)
+    )
+    if len(wheels) != 1:
+        problems.append(
+            f"expected exactly one acquired {delta.name} {delta.after} wheel in "
+            f"{bundle / 'files'}, found {len(wheels)}"
+        )
+        return problems
+    problems += metadata_binding_problems(after, wheels[0], digests)
     return problems
 
 
@@ -1599,6 +2485,7 @@ def drift_problems(
     before: dict[str, Any],
     after: dict[str, Any],
     delta: DependencyDelta | None = None,
+    bundle: Path | None = None,
 ) -> list[str]:
     """Everything outside the moved pin(s) that is not identical.
 
@@ -1636,7 +2523,7 @@ def drift_problems(
 
     problems += _kernel_entry_problems(old, new)
     if delta is not None:
-        problems += _declared_delta_problems(old, new, delta)
+        problems += _declared_delta_problems(old, new, delta, bundle)
 
     old_meta = before.get("metadata", {})
     new_meta = after.get("metadata", {})
@@ -1862,6 +2749,7 @@ def _build_parser() -> argparse.ArgumentParser:
     drift.add_argument("--dependency", default="")
     drift.add_argument("--dependency-from", default="")
     drift.add_argument("--dependency-to", default="")
+    drift.add_argument("--bundle", type=Path, default=None)
 
     delta_inputs = subcommands.add_parser("delta")
     delta_inputs.add_argument("--dependency", default="")
@@ -1970,7 +2858,9 @@ def _run(args: argparse.Namespace) -> int:
         )
         return _report(
             "unrelated lock drift",
-            drift_problems(_load_toml(args.before), _load_toml(args.after), delta),
+            drift_problems(
+                _load_toml(args.before), _load_toml(args.after), delta, args.bundle
+            ),
         )
     if args.command == "delta":
         delta = parse_dependency_delta(
@@ -2001,6 +2891,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         return _run(args)
+    except PublishedArtifactUnrecorded as fatal:
+        # Reported separately from every refusal: a refusal means nothing
+        # happened, this means something did and was not recorded.
+        print(f"::error::PUBLISHED BUT UNRECORDED: {fatal}")
+        return 2
     except Refusal as refusal:
         print(f"::error::{refusal}")
         return 1

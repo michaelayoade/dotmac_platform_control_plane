@@ -51,11 +51,14 @@ shows it silent on the plant the new one names.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
+import struct
 import sys
 import tomllib
 import urllib.parse
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -67,14 +70,20 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import kernel_lock  # noqa: E402
 from kernel_lock import (  # noqa: E402
+    ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES,
+    ARCHIVE_MAX_MEMBERS,
+    ARCHIVE_MAX_NAME_BYTES,
+    ARTIFACT_MAX_BYTES,
     ARTIFACT_ORIGIN,
     DECLARABLE_DEPENDENCIES,
     INDEX_SOURCE_NAME,
     INDEX_URL,
     INDEX_USERNAME,
     KERNEL,
+    METADATA_MAX_COMPRESSION_RATIO,
     OFF_INDEX_DEPENDENCY_KEYS,
     DependencyDelta,
+    PublishedArtifactUnrecorded,
     Refusal,
     acquire,
     acquired_matches_lock,
@@ -94,18 +103,26 @@ from kernel_lock import (  # noqa: E402
     kernel_artifact_names,
     lock_wheel_problems,
     manifest_problems,
+    metadata_binding_problems,
+    metadata_dependencies,
     pair_binding,
+    parse_core_metadata,
     parse_dependency_delta,
     parseable_wheels,
     point_at_mirror,
+    publish_atomically,
     replace_dependency_version,
     replace_kernel_version,
+    requires_dist,
     restore_index_url,
     set_content_hash,
     sha256_hex,
     sha256sums,
     transfer_problems,
+    wheel_metadata,
     wheel_only_problems,
+    zip_central_directory,
+    zip_central_directory_bytes,
 )
 
 # ── fixtures for the lock comparison ────────────────────────────────────────
@@ -396,14 +413,28 @@ def _after_with_control() -> dict[str, Any]:
     return lock
 
 
-def test_a_well_formed_kernel_and_control_delta_produces_no_problems() -> None:
+def test_a_well_formed_kernel_and_control_delta_produces_no_problems(
+    tmp_path: Path,
+) -> None:
     """THE POSITIVE CONTROL. Without this, a gate that refused everything
     below would pass every plant in this section for the wrong reason."""
 
-    assert (
-        drift_problems(_before_with_control(), _after_with_control(), CONTROL_DELTA)
-        == []
+    bundle = tmp_path / "bundle"
+    (bundle / "files").mkdir(parents=True)
+    wheel = _control_wheel(bundle / "files")
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    (bundle / "digests.json").write_text(json.dumps({wheel.name: digest}))
+    control = _entry(wheel, dict(_GOOD_DEPS))
+    before_control = dict(
+        control,
+        version="0.1.0a6",
+        dependencies={"dotmac-kernel": ">=0.1.0a98", "sqlalchemy": ">=2.0,<3.0"},
     )
+    before = _lock(
+        [_package(KERNEL, "0.1.0a98", source=_INDEX_SOURCE), before_control], "A"
+    )
+    after = _lock([_package(KERNEL, "0.1.0a100", source=_INDEX_SOURCE), control], "B")
+    assert drift_problems(before, after, CONTROL_DELTA, bundle) == []
 
 
 def test_a_control_movement_with_no_delta_is_still_unrelated_drift() -> None:
@@ -1484,7 +1515,14 @@ def _fake_index(monkeypatch: pytest.MonkeyPatch, offered: dict[str, list[str]]) 
     transfer replaced.
     """
 
-    def _fetch(url: str, target: Path) -> None:
+    def _fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
+        """Honours the REAL contract: it RETURNS the digest it verified.
+
+        It used to return `None`, which meant `acquire` recorded `None` as every
+        artifact's digest and no test noticed — the fake was proving the call
+        happened, not that the evidence was right.
+        """
+
         target.parent.mkdir(parents=True, exist_ok=True)
         package = url.rstrip("/").rsplit("/", 1)[-1]
         if url.endswith("/"):
@@ -1494,6 +1532,10 @@ def _fake_index(monkeypatch: pytest.MonkeyPatch, offered: dict[str, list[str]]) 
             target.write_text(f"<html><body>{rows}</body></html>", encoding="utf-8")
         else:
             target.write_bytes(f"bytes of {target.name}".encode())
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise Refusal(f"{url} hashes to sha256:{digest}")
+        return digest
 
     monkeypatch.setattr(kernel_lock, "fetch", _fetch)
 
@@ -2415,3 +2457,1226 @@ def test_no_declared_dependency_input_is_interpolated_into_a_shell_script() -> N
         for line in text.splitlines():
             if name in line:
                 assert line.strip().startswith(("DEPENDENCY", "#")), line
+
+
+# ── the binding, and the four ways it could have been fooled ────────────────
+#
+# Every case builds its wheel in its OWN directory. An earlier version of this
+# suite reused one filename across cases, so a later wheel overwrote an earlier
+# one and four plants refused for the WRONG reason while reading as green — the
+# exact failure this file exists to prevent, reproduced inside it.
+
+
+_GOOD_DEPS = {"dotmac-kernel": ">=0.1.0a100", "sqlalchemy": ">=2.0,<3.0"}
+_A13 = "0.1.0a13"
+
+
+def _control_wheel(
+    directory: Path,
+    *,
+    filename: str | None = None,
+    dist_info: str | None = None,
+    name: str = CONTROL,
+    version: str = _A13,
+    requires: tuple[str, ...] = (
+        "dotmac-kernel (>=0.1.0a100)",
+        "sqlalchemy (>=2.0,<3.0)",
+    ),
+    body: str = "prose after the blank line\n",
+) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    wheel = directory / (
+        filename or f"dotmac_deployment_control-{_A13}-py3-none-any.whl"
+    )
+    member = (dist_info or f"dotmac_deployment_control-{_A13}.dist-info") + "/METADATA"
+    text = (
+        f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+        + "".join(f"Requires-Dist: {r}\n" for r in requires)
+        + "\n"
+        + body
+    )
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(member, text)
+    return wheel
+
+
+def _entry(
+    wheel: Path, dependencies: Any, *, lock_hash: str | None = None
+) -> dict[str, Any]:
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    return {
+        "name": CONTROL,
+        "version": _A13,
+        "source": dict(_INDEX_SOURCE),
+        "files": [{"file": wheel.name, "hash": lock_hash or f"sha256:{digest}"}],
+        "dependencies": dependencies,
+    }
+
+
+def _bind(wheel: Path, entry: dict[str, Any], digests: dict[str, str] | None = None):
+    if digests is None:
+        digests = {wheel.name: hashlib.sha256(wheel.read_bytes()).hexdigest()}
+    return metadata_binding_problems(entry, wheel, digests)
+
+
+def test_the_binding_admits_a_wheel_whose_metadata_matches(tmp_path: Path) -> None:
+    """POSITIVE CONTROL. Without it every plant below would pass against a
+    binding that refused everything."""
+
+    wheel = _control_wheel(tmp_path / "ok")
+    assert _bind(wheel, _entry(wheel, dict(_GOOD_DEPS))) == []
+
+
+def test_a_version_only_constraint_table_is_still_modelled(tmp_path: Path) -> None:
+    """Second positive control: the unmodelled-key refusal must not be so broad
+    that the ordinary `{version = ...}` table trips it."""
+
+    wheel = _control_wheel(tmp_path / "table")
+    entry = _entry(
+        wheel,
+        {"dotmac-kernel": {"version": ">=0.1.0a100"}, "sqlalchemy": ">=2.0,<3.0"},
+    )
+    assert _bind(wheel, entry) == []
+
+
+def test_bytes_changed_after_acquisition_are_refused(tmp_path: Path) -> None:
+    """The bytes are REHASHED immediately before being read. `digests.json` is a
+    claim about what was downloaded, not about the file about to be opened."""
+
+    wheel = _control_wheel(tmp_path / "tamper")
+    entry = _entry(wheel, dict(_GOOD_DEPS))
+    stale = {wheel.name: hashlib.sha256(wheel.read_bytes()).hexdigest()}
+    wheel.write_bytes(wheel.read_bytes() + b"\x00appended")
+    problems = _bind(wheel, entry, stale)
+    assert len(problems) == 1, problems
+    assert "changed after they were acquired" in problems[0], problems
+
+
+def test_metadata_is_not_read_out_of_bytes_the_lock_does_not_claim(
+    tmp_path: Path,
+) -> None:
+    wheel = _control_wheel(tmp_path / "lockhash")
+    entry = _entry(wheel, dict(_GOOD_DEPS), lock_hash="sha256:" + "0" * 64)
+    problems = _bind(wheel, entry)
+    assert len(problems) == 1, problems
+    assert "the lock does not claim" in problems[0], problems
+
+
+def test_a_wheel_filename_naming_another_version_is_refused(tmp_path: Path) -> None:
+    wheel = _control_wheel(
+        tmp_path / "fname",
+        filename="dotmac_deployment_control-0.1.0a6-py3-none-any.whl",
+    )
+    problems = _bind(wheel, _entry(wheel, dict(_GOOD_DEPS)))
+    assert len(problems) == 1 and "0.1.0a6" in problems[0], problems
+
+
+def test_a_dist_info_directory_naming_another_version_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Filename and dist-info disagreeing is an archive asserting two
+    identities, not a naming inconsistency to tidy up."""
+
+    wheel = _control_wheel(
+        tmp_path / "distinfo",
+        dist_info="dotmac_deployment_control-0.1.0a6.dist-info",
+    )
+    with pytest.raises(Refusal, match="names two identities"):
+        _bind(wheel, _entry(wheel, dict(_GOOD_DEPS)))
+
+
+def test_metadata_name_and_version_must_agree_with_the_filename(
+    tmp_path: Path,
+) -> None:
+    wrong_name = _control_wheel(tmp_path / "mname", name="something-else")
+    with pytest.raises(Refusal, match="METADATA declares Name"):
+        _bind(wrong_name, _entry(wrong_name, dict(_GOOD_DEPS)))
+    wrong_version = _control_wheel(tmp_path / "mver", version="0.1.0a6")
+    with pytest.raises(Refusal, match="METADATA declares Version"):
+        _bind(wrong_version, _entry(wrong_version, dict(_GOOD_DEPS)))
+
+
+@pytest.mark.parametrize(
+    ("dependencies", "expected"),
+    (
+        (
+            {
+                "dotmac-kernel": ">=0.1.0a100",
+                "dotmac_kernel": ">=0.1.0a100",
+                "sqlalchemy": ">=2.0,<3.0",
+            },
+            "another spelling of the same project",
+        ),
+        (
+            {
+                "dotmac-kernel": {
+                    "version": ">=0.1.0a100",
+                    "markers": "sys_platform=='linux'",
+                },
+                "sqlalchemy": ">=2.0,<3.0",
+            },
+            "carries markers",
+        ),
+        (
+            {
+                "dotmac-kernel": {"version": ">=0.1.0a100", "optional": True},
+                "sqlalchemy": ">=2.0,<3.0",
+            },
+            "carries optional",
+        ),
+        (
+            {
+                "dotmac-kernel": {"version": ">=0.1.0a100", "extras": ["testing"]},
+                "sqlalchemy": ">=2.0,<3.0",
+            },
+            "carries extras",
+        ),
+        (
+            {
+                "dotmac-kernel": [{"version": ">=0.1.0a100"}],
+                "sqlalchemy": ">=2.0,<3.0",
+            },
+            "is a LIST",
+        ),
+    ),
+)
+def test_an_unmodelled_lock_constraint_is_refused(
+    tmp_path: Path, dependencies: Any, expected: str
+) -> None:
+    """A duplicate spelling would let one entry overwrite another, making the
+    comparison an accident of table ordering. A `markers`, `optional`, `extras`
+    or list constraint means something this gate does not model, and comparing
+    only its version would ignore the real condition."""
+
+    wheel = _control_wheel(tmp_path / "deps")
+    with pytest.raises(Refusal, match=expected):
+        _bind(wheel, _entry(wheel, dependencies))
+
+
+def test_an_oversized_metadata_member_is_refused_before_decompression(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "big"
+    directory.mkdir()
+    wheel = directory / f"dotmac_deployment_control-{_A13}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            f"dotmac_deployment_control-{_A13}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: {CONTROL}\nVersion: {_A13}\n"
+            + "A" * (3 << 20),
+        )
+    with pytest.raises(Refusal, match="refusing to decompress"):
+        _bind(wheel, _entry(wheel, dict(_GOOD_DEPS)))
+
+
+def test_a_highly_compressed_metadata_member_is_refused(tmp_path: Path) -> None:
+    """Bounded by RATIO as well as size: a member that stays under the byte
+    limit while compressing absurdly is still an archive built to be expensive
+    to read."""
+
+    directory = tmp_path / "ratio"
+    directory.mkdir()
+    wheel = directory / f"dotmac_deployment_control-{_A13}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        archive.writestr(
+            f"dotmac_deployment_control-{_A13}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: {CONTROL}\nVersion: {_A13}\n\n"
+            + "A" * 900_000,
+        )
+    member = zipfile.ZipFile(wheel).infolist()[0]
+    assert (
+        member.file_size / member.compress_size > METADATA_MAX_COMPRESSION_RATIO
+    ), "the fixture must actually exceed the ratio it is testing"
+    with pytest.raises(Refusal, match="refusing to decompress"):
+        _bind(wheel, _entry(wheel, dict(_GOOD_DEPS)))
+
+
+@pytest.mark.parametrize(
+    ("requirement", "expected"),
+    (
+        ('pytest (>=8) ; extra == "testing"', "conditional requirement"),
+        ("dotmac-kernel[extra] (>=0.1.0a100)", "extras requirement"),
+    ),
+)
+def test_a_requirement_this_gate_cannot_model_is_refused(
+    requirement: str, expected: str
+) -> None:
+    with pytest.raises(Refusal, match=expected):
+        metadata_dependencies(("dotmac-kernel (>=0.1.0a100)", requirement))
+
+
+def test_a_wheel_declaring_one_project_twice_is_refused() -> None:
+    with pytest.raises(Refusal, match="twice in `Requires-Dist`"):
+        metadata_dependencies(
+            ("dotmac-kernel (>=0.1.0a100)", "dotmac_kernel (>=0.1.0a100)")
+        )
+
+
+# ── malformed Core Metadata used to PASS ────────────────────────────────────
+#
+# The permissive read lowercased keys, kept the first value, stopped at the
+# first blank line and IGNORED any line it did not understand. So a file with
+# no `Metadata-Version`, a second `Name`, or a line with no colon read as
+# acceptable, and requirements were compared that had been extracted from
+# something never actually parsed.
+
+
+_HEADERS = f"Metadata-Version: 2.1\nName: {CONTROL}\nVersion: 0.1.0a13\n"
+_REQUIRES = (
+    "Requires-Dist: dotmac-kernel (>=0.1.0a100)\n"
+    "Requires-Dist: sqlalchemy (>=2.0,<3.0)\n"
+)
+_DIST_INFO = "dotmac_deployment_control-0.1.0a13.dist-info/METADATA"
+
+
+def _archive(tmp_path: Path, members: tuple[tuple[str, str], ...]) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, body in members:
+            archive.writestr(name, body)
+    return wheel
+
+
+def test_well_formed_core_metadata_is_admitted() -> None:
+    """POSITIVE CONTROL for every refusal below."""
+
+    headers = parse_core_metadata(_HEADERS + _REQUIRES + "\nprose\n")
+    assert headers["name"] == [CONTROL]
+    assert headers["version"] == ["0.1.0a13"]
+    assert headers["requires-dist"] == [
+        "dotmac-kernel (>=0.1.0a100)",
+        "sqlalchemy (>=2.0,<3.0)",
+    ]
+
+
+def test_a_folded_header_continuation_is_joined() -> None:
+    """Second positive control: RFC 822 continuations are real metadata, so
+    refusing them outright would make this parser reject valid wheels."""
+
+    headers = parse_core_metadata(
+        _HEADERS + "Summary: one line\n  and its continuation\n"
+    )
+    assert headers["summary"] == ["one line and its continuation"]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    (
+        (f"Name: {CONTROL}\nVersion: 0.1.0a13\n", "`metadata-version` 0 times"),
+        (_HEADERS + f"Name: {CONTROL}\n", "`name` 2 times"),
+        (_HEADERS + "Version: 0.1.0a13\n", "`version` 2 times"),
+        (_HEADERS + "this is not a header\n", "neither a header nor a continuation"),
+        ("  folded with nothing before it\n" + _HEADERS, "continuation with no header"),
+        (
+            f"Metadata-Version: twenty-one\nName: {CONTROL}\nVersion: 0.1.0a13\n",
+            "not a shape this gate can check",
+        ),
+        ("", "carries no headers at all"),
+        ("\n" + _HEADERS, "carries no headers at all"),
+    ),
+)
+def test_malformed_core_metadata_is_refused(metadata: str, expected: str) -> None:
+    with pytest.raises(Refusal, match=expected):
+        parse_core_metadata(metadata)
+
+
+def test_a_requirement_after_the_body_is_not_read_as_a_requirement() -> None:
+    """Headers end at the first blank line, and the parser must STOP there.
+
+    A `Requires-Dist` sitting in the body is prose — pip does not read it
+    either, so ignoring it keeps this gate and the installer agreeing. The
+    property worth asserting is that it is not silently adopted as a
+    constraint, which is what a reader scanning the whole file would do.
+    """
+
+    headers = parse_core_metadata(
+        _HEADERS + _REQUIRES + "\nprose\nRequires-Dist: smuggled (>=1)\n"
+    )
+    assert "smuggled (>=1)" not in headers["requires-dist"]
+    assert len(headers["requires-dist"]) == 2
+
+
+def test_metadata_that_is_not_utf8_is_refused(tmp_path: Path) -> None:
+    """It was previously decoded with `errors="replace"`, which turned
+    undecodable bytes into characters the parser then accepted."""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS.encode() + b"Summary: \xff\xfe\n")
+    with pytest.raises(Refusal, match="not valid UTF-8"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_an_archive_with_no_metadata_member_is_refused(tmp_path: Path) -> None:
+    wheel = _archive(
+        tmp_path / "none",
+        (("dotmac_deployment_control-0.1.0a13.dist-info/RECORD", "x\n"),),
+    )
+    with pytest.raises(Refusal, match="carries NO top-level"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_an_archive_with_two_metadata_members_is_refused(tmp_path: Path) -> None:
+    """Which one describes the wheel would otherwise be a question about zip
+    ordering."""
+
+    wheel = _archive(
+        tmp_path / "two",
+        (
+            (_DIST_INFO, _HEADERS + _REQUIRES + "\n"),
+            ("other-0.1.0a13.dist-info/METADATA", _HEADERS + _REQUIRES + "\n"),
+        ),
+    )
+    with pytest.raises(Refusal, match="2 top-level"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_an_archive_with_too_many_members_is_refused_before_any_is_read(
+    tmp_path: Path,
+) -> None:
+    """`zipfile` reads the whole central directory when it opens a file, so a
+    per-member bound arrives too late. The member count is checked before any
+    member is read, and the file's size on disk is checked before the archive
+    is opened at all."""
+
+    members = ((_DIST_INFO, _HEADERS + _REQUIRES + "\n"),) + tuple(
+        (f"pad/{index}.txt", "x") for index in range(ARCHIVE_MAX_MEMBERS + 50)
+    )
+    wheel = _archive(tmp_path / "many", members)
+    assert len(zipfile.ZipFile(wheel).infolist()) > ARCHIVE_MAX_MEMBERS
+    with pytest.raises(Refusal, match="refusing to open it"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_the_wheel_size_is_bounded_before_the_archive_is_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proven by lowering the bound rather than by writing 64 MiB: the point is
+    the ORDER, and a test that needs a huge fixture to assert an order tends to
+    get deleted."""
+
+    wheel = _archive(tmp_path / "size", ((_DIST_INFO, _HEADERS + _REQUIRES + "\n"),))
+    monkeypatch.setattr(kernel_lock, "WHEEL_MAX_BYTES", 10)
+    with pytest.raises(Refusal, match="refusing to open it"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+# ── one reader of the bytes, and a bounded transfer ─────────────────────────
+
+
+def test_a_folded_requirement_keeps_its_constraint() -> None:
+    """THE defect: two readers of the same bytes, and the wrong one won.
+
+    `requires_dist` rescanned the raw text, so an RFC 822 continuation was
+    dropped and a folded requirement arrived truncated — `dotmac-kernel` with
+    its `(>=0.1.0a100)` gone, which `metadata_dependencies` then read as an
+    EMPTY constraint from a wheel that plainly declared one. The strict
+    parser's correct result was computed and discarded.
+    """
+
+    metadata = (
+        f"Metadata-Version: 2.1\nName: {CONTROL}\nVersion: 0.1.0a13\n"
+        "Requires-Dist: dotmac-kernel\n  (>=0.1.0a100)\n"
+        "Requires-Dist: sqlalchemy (>=2.0,<3.0)\n\nprose\n"
+    )
+    headers = parse_core_metadata(metadata)
+    assert requires_dist(headers) == [
+        "dotmac-kernel (>=0.1.0a100)",
+        "sqlalchemy (>=2.0,<3.0)",
+    ]
+    assert metadata_dependencies(requires_dist(headers)) == {
+        "dotmac_kernel": ">=0.1.0a100",
+        "sqlalchemy": ">=2.0,<3.0",
+    }
+
+
+def test_requires_dist_reads_the_parsed_headers_not_raw_text() -> None:
+    """Non-vacuity for the test above: `requires_dist` must be INCAPABLE of
+    rescanning, so the defect cannot return by someone passing text again."""
+
+    with pytest.raises(Refusal, match="not a mapping"):
+        requires_dist(  # type: ignore[arg-type]
+            "Requires-Dist: dotmac-kernel (>=0.1.0a100)\n"
+        )
+
+
+def test_a_folded_requirement_binds_end_to_end(tmp_path: Path) -> None:
+    """The folded value must survive all the way to the lock comparison, not
+    merely to the parser."""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            _DIST_INFO,
+            f"Metadata-Version: 2.1\nName: {CONTROL}\nVersion: 0.1.0a13\n"
+            "Requires-Dist: dotmac-kernel\n  (>=0.1.0a100)\n"
+            "Requires-Dist: sqlalchemy (>=2.0,<3.0)\n\nprose\n",
+        )
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    entry = {
+        "name": CONTROL,
+        "version": "0.1.0a13",
+        "source": dict(_INDEX_SOURCE),
+        "files": [{"file": wheel.name, "hash": f"sha256:{digest}"}],
+        "dependencies": dict(_GOOD_DEPS),
+    }
+    assert metadata_binding_problems(entry, wheel, {wheel.name: digest}) == []
+
+
+def test_the_transfer_is_bounded_in_the_argument_vector(tmp_path: Path) -> None:
+    """An unbounded download is unbounded regardless of the per-file limits
+    that run after the disk has already been filled."""
+
+    argv = curl_argv(
+        f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", tmp_path / "x.whl"
+    )
+    assert "--max-filesize" in argv, argv
+    assert argv[argv.index("--max-filesize") + 1] == str(ARTIFACT_MAX_BYTES), argv
+    assert "--max-time" in argv, argv
+    assert "--location" not in argv, argv
+
+
+def test_bytes_over_the_limit_are_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--max-filesize` believes `Content-Length`, so a chunked response that
+    declares nothing slips past it. The landed bytes are measured."""
+
+    target = tmp_path / "artifact.whl"
+    monkeypatch.setattr(kernel_lock.subprocess, "run", _staging_writer(b"x" * 4096))
+    monkeypatch.setattr(kernel_lock, "ARTIFACT_MAX_BYTES", 1024)
+    with pytest.raises(Refusal, match="the bytes were measured"):
+        kernel_lock.fetch(f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", target)
+    assert not target.exists(), "a refusal must not create the target"
+
+
+# ── partial artifacts, uncontrolled exceptions, and member names ────────────
+
+
+def _wheel_with(tmp_path: Path, extra: tuple[str, ...] = ()) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\nprose\n")
+        for member in extra:
+            archive.writestr(member, "x")
+    return wheel
+
+
+def _staging_writer(payload: bytes, *, returncode: int = 0, status: str = "200") -> Any:
+    """A `subprocess.run` fake that writes where curl was TOLD to write.
+
+    Deriving the path from the argument vector's `-o` keeps every test free of
+    the staging layout. An earlier version hard-coded `target.name + ".part"`,
+    which stopped being the staged path the moment staging moved into a private
+    directory -- and those tests then exercised the "left no regular file"
+    refusal while appearing to test something else.
+    """
+
+    def fake_run(*args: Any, **_kwargs: Any) -> Any:
+        argv = args[0]
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(payload)
+
+        class _Completed:
+            pass
+
+        _Completed.returncode = returncode  # type: ignore[attr-defined]
+        _Completed.stdout = status  # type: ignore[attr-defined]
+        _Completed.stderr = "aborted"  # type: ignore[attr-defined]
+        return _Completed()
+
+    return fake_run
+
+
+@pytest.mark.parametrize(
+    ("label", "exit_code", "status", "expected"),
+    (
+        ("max-filesize abort", 63, "200", None),
+        ("max-time abort", 28, "200", None),
+        ("not found", 0, "404", None),
+        ("digest mismatch", 0, "200", "0" * 64),
+    ),
+)
+def test_a_refused_transfer_creates_no_target_and_leaves_no_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    exit_code: int,
+    status: str,
+    expected: str | None,
+) -> None:
+    """`target` is created only by publication, and staging never survives."""
+
+    target = tmp_path / "artifact.whl"
+    monkeypatch.setattr(
+        kernel_lock.subprocess,
+        "run",
+        _staging_writer(b"partial bytes", returncode=exit_code, status=status),
+    )
+    with pytest.raises(Refusal):
+        kernel_lock.fetch(
+            f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl",
+            target,
+            expected_sha256=expected,
+        )
+    assert not target.exists(), f"{label}: a refusal must not create the target"
+    leftovers = [c for c in tmp_path.iterdir() if c.name != "artifact.whl"]
+    assert leftovers == [], f"{label}: staging must not survive, found {leftovers}"
+
+
+def test_a_successful_transfer_publishes_and_returns_the_verified_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSITIVE CONTROL for the transfer family."""
+
+    payload = b"a real artifact"
+    target = tmp_path / "artifact.whl"
+    monkeypatch.setattr(kernel_lock.subprocess, "run", _staging_writer(payload))
+    digest = kernel_lock.fetch(
+        f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl",
+        target,
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert target.read_bytes() == payload
+    leftovers = [c for c in tmp_path.iterdir() if c.name != "artifact.whl"]
+    assert leftovers == [], leftovers
+
+
+# ── one reader of the bytes, and a bounded transfer ─────────────────────────
+
+
+# ── partial artifacts, uncontrolled exceptions, and member names ────────────
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    (
+        # These never reach `zipfile` at all: the EOCD bound reads the tail
+        # FIRST, because opening an archive is what reads its central directory.
+        # Each refuses at the FIRST bound that applies, which is the ordering's
+        # whole point: the tail is read before anything opens the archive.
+        (b"this is not a zip file", "End Of Central Directory"),
+        (b"PK\x03\x04 truncated", "too short to hold an EOCD"),
+        (b"", "too short to hold an EOCD"),
+    ),
+)
+def test_an_unreadable_archive_is_a_refusal_not_a_traceback(
+    tmp_path: Path, payload: bytes, expected: str
+) -> None:
+    """`main` catches `Refusal` and nothing else, so an uncontrolled exception
+    surfaces as a stack trace with no `::error::` line — the operator sees a
+    CRASHED gate rather than a REFUSED input and cannot tell which happened."""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    wheel.write_bytes(payload)
+    with pytest.raises(Refusal, match=expected):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_an_archive_with_a_valid_eocd_but_corrupt_body_is_a_refusal(
+    tmp_path: Path,
+) -> None:
+    """The EOCD bound cannot be the only archive check: a file can carry a
+    well-formed tail and still be unopenable, and that path must refuse too
+    rather than raising `BadZipFile` through `main`."""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\n")
+    raw = bytearray(wheel.read_bytes())
+    # Corrupt the local file header, leaving the central directory and EOCD
+    # intact, so the tail still parses and the open or read does not.
+    raw[0:4] = b"XXXX"
+    wheel.write_bytes(bytes(raw))
+    with pytest.raises(Refusal):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_a_missing_wheel_is_a_refusal(tmp_path: Path) -> None:
+    with pytest.raises(Refusal, match="cannot be read"):
+        wheel_metadata(
+            tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl",
+            CONTROL,
+            "0.1.0a13",
+        )
+
+
+def test_a_non_string_requirement_is_a_refusal() -> None:
+    with pytest.raises(Refusal, match="not a string"):
+        metadata_dependencies([None])  # type: ignore[list-item]
+
+
+@pytest.mark.parametrize(
+    ("member", "expected"),
+    (
+        ("/etc/passwd", "absolute or non-POSIX"),
+        ("a/../../../etc/passwd", "traversing member name"),
+        ("a\\b", "absolute or non-POSIX"),
+        ("z" * (ARCHIVE_MAX_NAME_BYTES + 1), "over the"),
+    ),
+)
+def test_a_hostile_member_name_is_refused(
+    tmp_path: Path, member: str, expected: str
+) -> None:
+    """A member NAME is attacker-controlled and is read before any content is."""
+
+    wheel = _wheel_with(tmp_path / "names", (member,))
+    with pytest.raises(Refusal, match=expected):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_a_clean_archive_is_still_accepted_after_the_name_bounds(
+    tmp_path: Path,
+) -> None:
+    """POSITIVE CONTROL — and it earned its place.
+
+    The first draft of the name loop bound `name = member.filename`, SHADOWING
+    this function's own `name` parameter, so the identity check below compared
+    the project name against a member path and every archive was refused. The
+    refusals above all still passed; only this control caught it.
+    """
+
+    wheel = _wheel_with(tmp_path / "clean", ("dotmac_files/__init__.py",))
+    headers = wheel_metadata(wheel, CONTROL, "0.1.0a13")
+    assert headers["requires-dist"] == [
+        "dotmac-kernel (>=0.1.0a100)",
+        "sqlalchemy (>=2.0,<3.0)",
+    ]
+
+
+# ── the central directory the ARCHIVE declares ──────────────────────────────
+
+
+def test_the_declared_central_directory_exceeds_summed_filenames(
+    tmp_path: Path,
+) -> None:
+    """Why summing filenames was never the bound.
+
+    A central directory carries a 46-byte header per member plus per-member
+    extra fields and file comments, none of which appear in a filename. On even
+    a one-member archive the declared size is several times the summed names, so
+    an archive can declare a vast directory while its names total almost
+    nothing.
+    """
+
+    wheel = tmp_path / "a.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("a.txt", "x")
+    declared = zip_central_directory_bytes(wheel)
+    assert declared > len(b"a.txt") * 5, declared
+
+
+def test_a_declared_central_directory_over_the_bound_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Tampering with the EOCD's own declared size must be refused BEFORE the
+    archive is opened, because opening it is what reads that directory."""
+
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\n")
+    raw = bytearray(wheel.read_bytes())
+    end = raw.rfind(b"PK\x05\x06")
+    raw[end + 12 : end + 16] = (ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES + 1).to_bytes(
+        4, "little"
+    )
+    wheel.write_bytes(bytes(raw))
+    with pytest.raises(Refusal, match="central directory"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_an_archive_with_no_eocd_is_refused(tmp_path: Path) -> None:
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    wheel.write_bytes(b"no end of central directory record anywhere in here")
+    with pytest.raises(Refusal, match="End Of Central Directory"):
+        zip_central_directory_bytes(wheel)
+
+
+def test_a_valid_wheel_passes_the_central_directory_bound(tmp_path: Path) -> None:
+    """POSITIVE CONTROL for the archive-bounds family."""
+
+    wheel = _wheel_with(tmp_path / "ok", ("dotmac_files/__init__.py",))
+    assert zip_central_directory_bytes(wheel) <= ARCHIVE_MAX_CENTRAL_DIRECTORY_BYTES
+    assert wheel_metadata(wheel, CONTROL, "0.1.0a13")["requires-dist"]
+
+
+def test_acquire_records_the_digest_fetch_RETURNED(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recorded evidence is the VERIFIED value, not a second read.
+
+    `fetch` hashes the staged bytes before publishing them and returns that
+    digest; `acquire` records what it returned. Proven with a fake that returns
+    a digest DELIBERATELY different from the file's own hash: if `acquire` were
+    re-reading the file, the recorded value would be the file's hash and this
+    test would fail. A fake that merely returned the correct digest could not
+    tell the two implementations apart.
+    """
+
+    sentinel = "5" * 64
+    written: dict[str, bytes] = {}
+
+    def _fetch(url: str, target: Path, *, expected_sha256: str | None = None) -> str:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if url.endswith("/"):
+            name = "dotmac_kernel-0.1.0a100-py3-none-any.whl"
+            sdist = "dotmac_kernel-0.1.0a100.tar.gz"
+            rows = "".join(f'<a href="{each}">{each}</a><br>' for each in (name, sdist))
+            target.write_text(f"<html><body>{rows}</body></html>", encoding="utf-8")
+            return sentinel
+        target.write_bytes(b"these bytes hash to something else entirely")
+        written[target.name] = target.read_bytes()
+        return sentinel
+
+    monkeypatch.setattr(kernel_lock, "fetch", _fetch)
+    out = tmp_path / "bundle"
+    digests = acquire({KERNEL: "0.1.0a100"}, out)
+
+    assert digests, "the fake must have been driven at all"
+    for name, digest in digests.items():
+        assert digest == sentinel, (name, digest)
+        actual = hashlib.sha256(written[name]).hexdigest()
+        assert digest != actual, (
+            "the fixture must differ from the file's own hash, or this test "
+            "cannot tell a returned digest from a re-read one"
+        )
+
+    page = (out / "simple" / KERNEL / "index.html").read_text(encoding="utf-8")
+    assert f"#sha256={sentinel}" in page, page
+
+
+# ── staging, publication, and the end records' own framing ──────────────────
+
+
+def test_publication_refuses_an_existing_destination(tmp_path: Path) -> None:
+    """`Path.replace` silently overwrites. A second transfer for one filename, a
+    stale file from an earlier run, or a planted symlink would all be replaced
+    without a word, and the bundle would hold bytes nobody verified under a name
+    something else had claimed."""
+
+    staged = tmp_path / "stage" / "a.whl"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"new")
+    target = tmp_path / "dest" / "a.whl"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"pre-existing")
+    with pytest.raises(Refusal, match="refusing to overwrite"):
+        publish_atomically(staged, target)
+    assert target.read_bytes() == b"pre-existing", "the existing file must survive"
+
+
+def test_publication_refuses_a_symlinked_destination(tmp_path: Path) -> None:
+    staged = tmp_path / "stage" / "a.whl"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"new")
+    target = tmp_path / "dest" / "a.whl"
+    target.parent.mkdir(parents=True)
+    target.symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(Refusal, match="refusing to overwrite"):
+        publish_atomically(staged, target)
+
+
+def test_publication_places_the_bytes_when_nothing_is_there(tmp_path: Path) -> None:
+    """POSITIVE CONTROL for the publication family."""
+
+    staged = tmp_path / "stage" / "a.whl"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"new")
+    target = tmp_path / "dest" / "a.whl"
+    target.parent.mkdir(parents=True)
+    publish_atomically(staged, target)
+    assert target.read_bytes() == b"new"
+
+
+def test_staging_is_private_and_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A predictable `target.part` could be stale or symlinked and would be
+    written through. Each call stages in its own randomly named directory,
+    created 0700, and removes it on every exit."""
+
+    observed: list[Path] = []
+
+    def fake_run(*args: Any, **_kwargs: Any) -> Any:
+        staged = Path(args[0][args[0].index("-o") + 1])
+        observed.append(staged.parent)
+        staged.write_bytes(b"payload")
+
+        class _Completed:
+            returncode = 0
+            stdout = "200"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    target = tmp_path / "artifact.whl"
+    kernel_lock.fetch(f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/x.whl", target)
+    assert len(observed) == 1
+    staging = observed[0]
+    assert staging != target.parent, "staging must not be the destination itself"
+    assert staging.name.startswith(".staging-"), staging.name
+    assert not staging.exists(), "staging must be removed"
+    assert target.read_bytes() == b"payload"
+
+
+def _tampered_eocd(tmp_path: Path, offset: int, value: int, width: int) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\n")
+    raw = bytearray(wheel.read_bytes())
+    end = raw.rfind(b"PK\x05\x06")
+    raw[end + offset : end + offset + width] = value.to_bytes(width, "little")
+    wheel.write_bytes(bytes(raw))
+    return wheel
+
+
+@pytest.mark.parametrize(
+    ("label", "offset", "value", "width", "expected"),
+    (
+        ("comment length", 20, 99, 2, "framing does not close"),
+        ("this disk", 4, 3, 2, "single-disk archives only"),
+        ("entries on this disk", 8, 7, 2, "must agree with itself"),
+        ("directory offset", 16, 10**9, 4, "runs past"),
+    ),
+)
+def test_the_end_records_framing_is_validated(
+    tmp_path: Path, label: str, offset: int, value: int, width: int, expected: str
+) -> None:
+    """Reading only the directory SIZE was not enough: these records are the
+    archive's self-description and every bound is computed from them."""
+
+    wheel = _tampered_eocd(tmp_path / label.replace(" ", "_"), offset, value, width)
+    with pytest.raises(Refusal, match=expected):
+        zip_central_directory(wheel)
+
+
+def test_a_declared_entry_count_must_match_what_is_enumerated(
+    tmp_path: Path,
+) -> None:
+    """Both count fields are set consistently, so the end record agrees with
+    ITSELF and only `ZipFile`'s own enumeration can disagree. Without setting
+    both, the self-consistency check fires first and this path is never
+    reached — which is how the earlier version of this test passed without
+    exercising the comparison at all.
+    """
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\n")
+    raw = bytearray(wheel.read_bytes())
+    end = raw.rfind(b"PK\x05\x06")
+    raw[end + 8 : end + 10] = (5).to_bytes(2, "little")
+    raw[end + 10 : end + 12] = (5).to_bytes(2, "little")
+    wheel.write_bytes(bytes(raw))
+    assert zip_central_directory(wheel).entries == 5
+    assert len(zipfile.ZipFile(wheel).infolist()) == 1
+    with pytest.raises(Refusal, match="describe a different archive"):
+        wheel_metadata(wheel, CONTROL, "0.1.0a13")
+
+
+def test_zip64_is_believed_only_through_its_locator(tmp_path: Path) -> None:
+    """A ZIP64 record found by scanning the tail is not a LINKED record."""
+
+    wheel = _tampered_eocd(tmp_path / "zip64", 12, 0xFFFFFFFF, 4)
+    with pytest.raises(Refusal, match="no ZIP64 EOCD locator"):
+        zip_central_directory(wheel)
+
+
+def test_a_valid_archives_end_records_are_accepted(tmp_path: Path) -> None:
+    """POSITIVE CONTROL for the end-records family."""
+
+    wheel = _wheel_with(tmp_path / "ok", ("dotmac_files/__init__.py",))
+    directory = zip_central_directory(wheel)
+    assert directory.entries == len(zipfile.ZipFile(wheel).infolist())
+    assert not directory.zip64
+    assert directory.offset + directory.size <= wheel.stat().st_size
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    (
+        ("Requires-Dist: x", "not a mapping"),
+        ({"requires-dist": 7}, "not a list"),
+        ({"requires-dist": [None]}, "not a string"),
+    ),
+)
+def test_requires_dist_refuses_an_invalid_header_shape(
+    headers: Any, expected: str
+) -> None:
+    """It crashed on these instead of refusing, so `main` would have shown a
+    traceback with no `::error::` line."""
+
+    with pytest.raises(Refusal, match=expected):
+        requires_dist(headers)
+
+
+# ── ZIP64 is believed only through a complete, adjacent, linked locator ──────
+
+
+def _zip64_archive(
+    tmp_path: Path,
+    *,
+    gap: int = 0,
+    locator_disks: int = 1,
+    record_size: int = 44,
+    overlap: bool = False,
+    record_gap: int = 0,
+) -> Path:
+    """A GENUINE, well-formed ZIP64 tail appended to a real archive.
+
+    Built by hand because `zipfile` only emits ZIP64 end records when an archive
+    actually needs them -- over 65535 entries or past 4 GiB -- and `force_zip64`
+    on a small member does not produce them. A fixture that merely *claims* to
+    be ZIP64 would leave the positive path through this branch untested, so the
+    records here are constructed correctly and the keyword arguments break
+    exactly one property each.
+    """
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    base = tmp_path / "base.whl"
+    with zipfile.ZipFile(base, "w") as archive:
+        archive.writestr(_DIST_INFO, _HEADERS + _REQUIRES + "\n")
+    raw = bytearray(base.read_bytes())
+    end = raw.rfind(b"PK\x05\x06")
+    here = int.from_bytes(raw[end + 8 : end + 10], "little")
+    total = int.from_bytes(raw[end + 10 : end + 12], "little")
+    cd_size = int.from_bytes(raw[end + 12 : end + 16], "little")
+    cd_offset = int.from_bytes(raw[end + 16 : end + 20], "little")
+    body = bytes(raw[:end])
+    record_at = len(body)
+    record = (
+        b"PK\x06\x06"
+        + struct.pack("<Q", record_size)
+        + struct.pack("<HH", 45, 45)
+        + struct.pack("<II", 0, 0)
+        + struct.pack(
+            "<QQQQ",
+            here,
+            total,
+            cd_size,
+            record_at + 8 if overlap else cd_offset,
+        )
+    )
+    locator = (
+        b"PK\x06\x07"
+        + struct.pack("<I", 0)
+        + struct.pack("<Q", record_at)
+        + struct.pack("<I", locator_disks)
+    )
+    eocd = (
+        b"PK\x05\x06"
+        + struct.pack("<HHHH", 0, 0, here, total)
+        + struct.pack("<I", 0xFFFFFFFF)
+        + struct.pack("<I", cd_offset)
+        + struct.pack("<H", 0)
+    )
+    wheel = tmp_path / "dotmac_deployment_control-0.1.0a13-py3-none-any.whl"
+    wheel.write_bytes(
+        body + record + (b"\x00" * record_gap) + locator + (b"\x00" * gap) + eocd
+    )
+    return wheel
+
+
+def test_a_well_formed_zip64_archive_is_accepted(tmp_path: Path) -> None:
+    """POSITIVE CONTROL for the ZIP64 branch. Without it every refusal below
+    could pass against a branch that rejected all ZIP64 archives."""
+
+    directory = zip_central_directory(_zip64_archive(tmp_path / "ok"))
+    assert directory.zip64 is True
+    assert directory.entries == 1
+    assert directory.size > 0
+
+
+@pytest.mark.parametrize(
+    ("label", "kwargs", "expected"),
+    (
+        ("locator not adjacent", {"gap": 4}, "immediately before its EOCD"),
+        ("locator names two disks", {"locator_disks": 2}, "single-disk archives only"),
+        (
+            "record shorter than its own remainder",
+            {"record_size": 10},
+            "short of its own",
+        ),
+        ("directory overlaps the record", {"overlap": True}, "runs past"),
+        ("bytes between record and locator", {"record_gap": 8}, "must be adjacent"),
+    ),
+)
+def test_zip64_linkage_is_validated(
+    tmp_path: Path, label: str, kwargs: dict[str, Any], expected: str
+) -> None:
+    """A `PK\x06\x06` found by scanning the tail is not a LINKED record.
+
+    The locator must sit immediately before the EOCD, because `rfind` over the
+    whole tail would accept one buried in member data or in the archive comment
+    -- both attacker-supplied regions. It must name a single disk, the record it
+    points at must declare at least its own fixed remainder and must not run
+    past the locator, and the central directory must not overlap either record.
+    """
+
+    wheel = _zip64_archive(tmp_path / label.replace(" ", "_"), **kwargs)
+    with pytest.raises(Refusal, match=expected):
+        zip_central_directory(wheel)
+
+
+def test_staging_is_0700_while_it_exists_and_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mode is observed WHILE staging exists, not inferred afterwards.
+
+    A test that only checked the directory was gone could not tell 0700 from
+    0777. And cleanup uses `ignore_errors=False`: swallowing the error would let
+    `fetch` claim staging is always removed while leaving a directory behind,
+    and that claim is the whole point — a later step globbing the bundle must
+    not find a fragment.
+    """
+
+    observed: dict[str, Any] = {}
+
+    def fake_run(*args: Any, **_kwargs: Any) -> Any:
+        argv = args[0]
+        staged = Path(argv[argv.index("-o") + 1])
+        observed["dir"] = staged.parent
+        observed["mode"] = staged.parent.stat().st_mode & 0o777
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"payload")
+
+        class _Completed:
+            returncode = 0
+            stdout = "200"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    kernel_lock.fetch(
+        f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/a.whl", tmp_path / "a.whl"
+    )
+    assert observed["mode"] == 0o700, oct(observed["mode"])
+    assert not observed["dir"].exists(), "staging must not survive"
+    # Deliberately NOT `assert "ignore_errors=False" in getsource(...)`. That
+    # restated an implementation literal and went stale the moment the success
+    # path stopped passing the keyword at all — the same defect class as a test
+    # asserting a version string it could derive. That cleanup is not silenced
+    # is proven BEHAVIOURALLY by the transaction plants, which break cleanup
+    # after publication and require a typed failure.
+
+
+# ── the cleanup transaction, after the artifact is already published ─────────
+
+
+def _published_then(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cleanup_fails: bool,
+    rollback_fails: bool,
+    target: Path,
+) -> None:
+    """Publish successfully, then break cleanup (and optionally rollback)."""
+
+    def fake_run(*args: Any, **_kwargs: Any) -> Any:
+        argv = args[0]
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"payload")
+
+        class _Completed:
+            returncode = 0
+            stdout = "200"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(kernel_lock.subprocess, "run", fake_run)
+    if cleanup_fails:
+
+        def boom(path: Any, *_args: Any, **kwargs: Any) -> None:
+            if kwargs.get("ignore_errors"):
+                return
+            raise PermissionError(f"cannot remove {path}")
+
+        monkeypatch.setattr(kernel_lock.shutil, "rmtree", boom)
+    if rollback_fails:
+        original = Path.unlink
+
+        def refuse_unlink(self: Path, *args: Any, **kwargs: Any) -> None:
+            if self == target:
+                raise PermissionError("cannot unlink published artifact")
+            original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", refuse_unlink)
+
+
+def test_a_cleanup_failure_after_publication_rolls_the_publication_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup is part of the TRANSACTION, not a `finally`.
+
+    A cleanup failure after `os.link` used to let an untyped `PermissionError`
+    escape while the artifact sat at its final path and no digest was ever
+    returned — and because publication is no-overwrite, the retry then wedged on
+    a destination that already existed. The publication is now rolled back so
+    the transfer CAN be retried.
+    """
+
+    target = tmp_path / "dest" / "artifact.whl"
+    _published_then(
+        monkeypatch, cleanup_fails=True, rollback_fails=False, target=target
+    )
+    with pytest.raises(Refusal, match="rolled back so this transfer can be retried"):
+        kernel_lock.fetch(
+            f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/artifact.whl", target
+        )
+    assert not target.exists(), "the publication must be rolled back"
+
+
+def test_a_failed_rollback_raises_a_distinct_fatal_not_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `Refusal` says nothing happened. This says the opposite.
+
+    The artifact IS at its final path, no digest was returned for it, and the
+    rollback failed too. It must NOT be a `Refusal`, because a caller that
+    treats every refusal as "nothing happened, retry" would be wrong here: the
+    destination is occupied and publication is no-overwrite.
+    """
+
+    target = tmp_path / "dest" / "artifact.whl"
+    _published_then(monkeypatch, cleanup_fails=True, rollback_fails=True, target=target)
+    with pytest.raises(PublishedArtifactUnrecorded) as raised:
+        kernel_lock.fetch(
+            f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/artifact.whl", target
+        )
+    assert not isinstance(
+        raised.value, Refusal
+    ), "it must not be catchable as an ordinary refusal"
+    assert "NOT usable" in str(raised.value), str(raised.value)
+    assert target.exists(), "the artifact really is published; the message says so"
+
+
+def test_a_clean_transfer_still_returns_its_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSITIVE CONTROL for the transaction: with cleanup working, the digest
+    comes back and nothing is left behind."""
+
+    target = tmp_path / "dest" / "artifact.whl"
+    _published_then(
+        monkeypatch, cleanup_fails=False, rollback_fails=False, target=target
+    )
+    digest = kernel_lock.fetch(
+        f"{ARTIFACT_ORIGIN}/api/packages/dotmac/pypi/artifact.whl", target
+    )
+    assert digest == hashlib.sha256(b"payload").hexdigest()
+    assert target.read_bytes() == b"payload"
+    assert [c.name for c in (tmp_path / "dest").iterdir()] == ["artifact.whl"]
