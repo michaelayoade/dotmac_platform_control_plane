@@ -1,0 +1,310 @@
+# Acquire two published distributions and use them to regenerate
+# `deploy/product-manifest.json`, without ever giving the credential that
+# reaches the private index to the code that runs the generator.
+#
+# ── THE PROBLEM THIS SOLVES ─────────────────────────────────────────────────
+#
+# `tests/architecture/test_product_manifest.py` fails on this branch because
+# the committed `deploy/product-manifest.json` no longer equals
+# `build_manifest()`. The cause is established, not re-derived here:
+#
+#   * `scripts/generate_product_manifest.py`'s `build_manifest()` reads
+#     `importlib.metadata.version("dotmac-deployment-control")`, and this
+#     branch repins that distribution a6 -> a13, moving that entry's
+#     `version` to `0.1.0a13`;
+#   * control a13 derives its own `ModuleManifest.version` from installed
+#     metadata (it was previously the literal `"0.1.0a2"`), so
+#     `declared == installed` now always holds and the
+#     `manifest_declared_version` key disappears from that entry entirely.
+#
+# The manifest is a DERIVED record. It must come out of its generator, never
+# a hand-edit, however well-reasoned — but the generator imports the composed
+# distributions, and those live on a private index reachable only with a
+# read-only registry credential. A developer shell holding that credential is
+# explicitly refused as the mechanism.
+#
+# ── THE SHAPE, AND WHY IT IS THE SAME SHAPE AS `kernel-lock.yml` ────────────
+#
+# `.github/workflows/kernel-lock.yml` exists for exactly this credential/
+# resolver separation, and this workflow reuses its conventions rather than
+# inventing a second style:
+#
+#   acquire     — holds the credential. Downloads and hash-verifies the two
+#                 distributions this branch repins, via
+#                 `scripts/product_manifest_acquire.py`, which itself calls
+#                 `kernel_lock.acquire` — the SAME curl/sha256/PEP-503-page
+#                 function `kernel-lock.yml`'s `acquire` job uses. Runs no
+#                 Poetry resolution, no `pip install`, and no code from the
+#                 candidate checkout or from any downloaded package.
+#   regenerate  — holds NO secret, and asserts it holds none before it
+#                 installs anything. Checks out the candidate ref, installs
+#                 ONLY the two verified artifacts OFFLINE (`--no-index`, a
+#                 local `--find-links` directory, no other index reachable),
+#                 and runs `scripts/generate_product_manifest.py` against
+#                 them.
+#
+# Same two checkouts as `kernel-lock.yml`, for the same reason, in the job
+# that holds the credential: the TRUSTED workspace root is `github.sha` — the
+# commit that defines this workflow, the one an operator approved by
+# dispatching it — and the ref under review is checked out BESIDE it, at
+# `work/`, read only as DATA (two version strings out of its
+# `pyproject.toml`) in `acquire`. `regenerate` holds no credential, so it
+# checks the candidate ref out directly and runs its generator script — there
+# is nothing there for untrusted code to steal.
+#
+# ── THIS WORKFLOW WRITES NOTHING BACK TO THE REPOSITORY ─────────────────────
+#
+# No commit, no push, no pull request. `regenerate` uploads the produced
+# `deploy/product-manifest.json` as an artifact; a human downloads it and
+# applies it in a separate, reviewed change — the same division `kernel-
+# lock.yml` draws between resolving a lock and applying it.
+#
+# ── AN OPEN QUESTION THIS WORKFLOW DOES NOT RESOLVE ─────────────────────────
+#
+# `vendor_cp.assembly.build_spec()` — what the generator imports — composes
+# six privately-published distributions declared in this repository's
+# `pyproject.toml`, not the two `acquire` fetches here, plus this project's
+# ordinary PyPI dependencies. Whether `regenerate`'s offline install leaves
+# enough of the environment in place for that import to actually succeed on a
+# bare `ubuntu-latest` runner is not answered by this file — see
+# `scripts/product_manifest_acquire.py`'s module docstring.
+
+name: Product manifest regenerate
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: >-
+          The EXACT commit SHA to regenerate the manifest for. A branch name
+          is refused — a branch moves, and a manifest regenerated against
+          "whatever a branch was" names a tree nobody reviewed.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # ── THE ONLY JOB THAT HOLDS THE CREDENTIAL ─────────────────────────────────
+  acquire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse anything but an exact commit
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # A 40-hex ref is the only input that cannot mean something
+          # different tomorrow. `main`, a branch, a tag and a short SHA are
+          # all refused by the same rule rather than by four special cases.
+          if ! printf '%s' "${REF}" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::ref must be a full 40-character commit SHA, got '${REF}'"
+            exit 1
+          fi
+
+      # THE TRUSTED CHECKOUT — the workspace root, and the only place a local
+      # action, a script or this workflow's own tooling may come from.
+      - name: Check out the tooling from the commit that defines this workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The requested ref is reachable from a branch of this repository
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # Defence in depth, with a stated premise. This excludes a commit
+          # that exists in this repository's object store but is on no
+          # branch — a fork pull request's head, which `actions/checkout`
+          # will happily resolve by SHA. It does NOT establish that anyone
+          # reviewed the commit: a branch here can be attacker-authored.
+          git fetch --quiet --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if ! git rev-parse --quiet --verify "${REF}^{commit}" > /dev/null; then
+            echo "::error::${REF} is not present in this repository after fetching"
+            echo "::error::every branch head. It is either not a commit here at all, or"
+            echo "::error::reachable only as a pull-request head — neither is dispatchable."
+            exit 1
+          fi
+          BRANCHES=$(git branch --remotes --contains "${REF}" --format='%(refname:short)')
+          if [ -z "${BRANCHES}" ]; then
+            echo "::error::${REF} is on no branch of this repository. A commit"
+            echo "::error::reachable only as a pull-request head is not dispatchable here."
+            exit 1
+          fi
+          echo "reachable from:"
+          printf '  %s\n' ${BRANCHES}
+
+      # THE UNTRUSTED CHECKOUT. Data, beside the tooling — never above it.
+      - name: Check out the ref under review, beside the tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          path: work
+          persist-credentials: false
+
+      - name: The checkout is the commit that was asked for
+        working-directory: work
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # `actions/checkout` resolving something other than what was
+          # requested would be silent, and every downstream fact would
+          # describe the wrong tree. One comparison closes that.
+          ACTUAL=$(git rev-parse HEAD)
+          if [ "${ACTUAL}" != "${REF}" ]; then
+            echo "::error::checked out ${ACTUAL}, asked for ${REF}"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: There is a credential to resolve with
+        env:
+          FORGEJO_CREDENTIAL: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          # An unconfigured secret interpolates to the empty string. Everything
+          # downstream then fails for a reason that reads like an index fault.
+          # Say it here instead.
+          if [ -z "${FORGEJO_CREDENTIAL:-}" ]; then
+            echo "::error::FORGEJO_READ_TOKEN is unset or empty in this repository."
+            echo "::error::Its owner is OpenBao secret/dotmac/forgejo/read-token#value;"
+            echo "::error::this workflow consumes the projection, it does not fetch it."
+            exit 1
+          fi
+          echo "the credential is present"
+
+      - name: Download and hash-verify the two distributions this branch repins
+        env:
+          TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The netrc exists for the length of this ONE step. `kernel_lock
+          # .fetch` (called by `kernel_lock.acquire`, which
+          # `product_manifest_acquire.py` calls) offers it only to the
+          # machine named here, never follows a redirect, and every URL it
+          # is handed is validated against the approved origin and path
+          # prefix before a transfer — a simple index page is
+          # index-controlled data; its links are validated before a
+          # transfer, not after.
+          trap 'rm -f -- "${HOME}/.netrc"' EXIT HUP INT TERM
+          umask 077
+          : > "${HOME}/.netrc"
+          chmod 600 "${HOME}/.netrc"
+          printf 'machine %s login %s password %s\n' \
+            "registry.dotmac.io" "ci-reader" "${TOKEN}" >> "${HOME}/.netrc"
+
+          python scripts/product_manifest_acquire.py \
+            --manifest work/pyproject.toml \
+            --out /tmp/bundle
+
+      - name: The bundle carries no credential out of this job
+        env:
+          FORGEJO_CREDENTIAL: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The bundle is package bytes and an index page this trusted
+          # tooling wrote. Neither should contain the credential, and this is
+          # the last moment anything downstream is in a job that can look
+          # for it.
+          if grep -rqF -- "${FORGEJO_CREDENTIAL}" /tmp/bundle; then
+            echo "::error::the credential appears in the bundle; refusing to upload it"
+            exit 1
+          fi
+          echo "the bundle is clean"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: product-manifest-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/bundle
+          retention-days: 1
+          if-no-files-found: error
+
+  # ── THE GENERATOR. NO SECRET IS REFERENCED ANYWHERE IN THIS JOB ────────────
+  regenerate:
+    runs-on: ubuntu-latest
+    needs: acquire
+    steps:
+      - name: Check out the ref under review
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: The checkout is the commit that was asked for
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          ACTUAL=$(git rev-parse HEAD)
+          if [ "${ACTUAL}" != "${REF}" ]; then
+            echo "::error::checked out ${ACTUAL}, asked for ${REF}"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: This job holds no credential, and says so before it installs anything
+        run: |
+          set -euo pipefail
+          # A property, asserted, not a comment. If a future edit ever wires
+          # a secret into this job, it stops before anything is installed.
+          if env | grep -qiE '^(FORGEJO|POETRY_HTTP_BASIC|NETRC|TWINE)'; then
+            echo "::error::a credential-shaped variable is set in the generator job."
+            echo "::error::This job installs published packages; it may not hold one."
+            env | grep -oiE '^(FORGEJO|POETRY_HTTP_BASIC|NETRC|TWINE)[A-Z_]*' || true
+            exit 1
+          fi
+          if [ -e "${HOME}/.netrc" ]; then
+            echo "::error::${HOME}/.netrc exists in the generator job"
+            exit 1
+          fi
+          echo "no credential is present in this job"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: product-manifest-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/bundle
+
+      - name: Install only the two verified artifacts, offline
+        run: |
+          set -euo pipefail
+          # READ-ONLY INPUTS, and no way to reach for anything else: `--no-
+          # index` disables every index (private and public alike), and
+          # `--find-links` names only the bundle `acquire` verified and
+          # uploaded. There is no credential in this job to authenticate an
+          # index with even if one were configured, and `--no-deps` means a
+          # dependency neither of these two distributions' wheels bundle
+          # cannot be fetched either.
+          chmod -R a-w /tmp/bundle
+          python3 -m pip install --no-index --no-deps \
+            --find-links /tmp/bundle/files \
+            dotmac-kernel dotmac-deployment-control
+
+      - name: Regenerate the manifest
+        run: |
+          set -euo pipefail
+          python scripts/generate_product_manifest.py
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: product-manifest-${{ inputs.ref }}
+          path: deploy/product-manifest.json
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Say plainly that nothing was committed
+        run: |
+          echo "Regenerated. NOTHING was committed and no pull request was opened:"
+          echo "download the artifact and apply deploy/product-manifest.json in the"
+          echo "pull request that carries this fix, so one reviewer sees the pin"
+          echo "change and the manifest it produces together."
