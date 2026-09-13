@@ -34,6 +34,7 @@ import ast
 import importlib.util
 import re
 from pathlib import Path
+from typing import Final
 
 from vendor_cp.data_governance import (
     DELETION_SITES,
@@ -59,19 +60,32 @@ COMPOSED_DISTRIBUTIONS = (
 #: bare privilege NAME — which appears in every grant-verification helper in the
 #: vendor lineage — is not mistaken for a statement.
 #:
-#: The three negative lookbehinds exclude a trigger EVENT clause —
-#: `BEFORE`/`AFTER`/`INSTEAD OF ... TRUNCATE ON <table>` — from matching as a
-#: deletion statement. `dc_0010_attempt_settlements` and
-#: `dc_0011_attestation_registry` each install
-#: `CREATE TRIGGER ... BEFORE TRUNCATE ON mod_deploy.<table>`, a guard that
-#: REFUSES truncation, and without this exclusion the bare `TRUNCATE\s+...` half
-#: of this pattern reads the clause's own `ON` keyword as though it were the
-#: identifier a real `TRUNCATE` targets. A real `TRUNCATE TABLE x` / `TRUNCATE x`
-#: is never preceded by one of these three keywords, so the exclusion costs
-#: nothing in the direction that matters.
+#: The exclusion is keyed on the trigger-event SYNTAX, not on whatever keyword
+#: happens to precede `TRUNCATE`. A trigger EVENT clause always reads
+#: `TRUNCATE ON <table>`; a real statement never does — it is `TRUNCATE
+#: <table>`, `TRUNCATE TABLE <table>` or `TRUNCATE ONLY <table>`. `(?!ON\b)`
+#: refuses the match exactly when `TRUNCATE` is immediately followed by the
+#: literal word `ON`, which is what `dc_0010_attempt_settlements` and
+#: `dc_0011_attestation_registry`'s `CREATE TRIGGER ... BEFORE TRUNCATE ON
+#: mod_deploy.<table>` guards against truncation both are shaped like — a guard
+#: that REFUSES truncation, the opposite of a deletion. An earlier version of
+#: this pattern excluded `BEFORE`/`AFTER`/`INSTEAD OF` immediately before
+#: `TRUNCATE` instead; that missed `BEFORE INSERT OR TRUNCATE ON t`, `BEFORE
+#: UPDATE OR DELETE OR TRUNCATE ON t`, and a line-broken `BEFORE\nTRUNCATE ON
+#: t`, because none of those has the excluded keyword ADJACENT to `TRUNCATE`.
+#: Keying on `ON` instead needs no lookbehind and does not grow a new keyword
+#: exclusion for every trigger-event combination anyone writes next.
+#:
+#: The `\b` in `(?!ON\b)` is load-bearing, not decoration: PostgreSQL's real
+#: `TRUNCATE ONLY <table>` must still be DETECTED, and a bare `(?!ON)` would
+#: refuse to match it too, since `ON` is a literal prefix of `ONLY`. `\b`
+#: after `ON` means the negative lookahead only fires for the whole word `ON`,
+#: so `TRUNCATE ONLY x` still matches while `TRUNCATE ON <table>` still does
+#: not. `TRUNCATE ONLY` is the near-miss that proves this exclusion is the
+#: narrow one rather than one that happens to work on today's two triggers.
 DELETION_SQL = re.compile(
     r"\bDELETE\s+FROM\b"
-    r"|(?<!BEFORE )(?<!AFTER )(?<!INSTEAD OF )\bTRUNCATE\s+(?:TABLE\s+)?[A-Za-z_\"{]",
+    r"|\bTRUNCATE\s+(?!ON\b)(?:TABLE\s+)?[A-Za-z_\"{]",
     re.IGNORECASE,
 )
 
@@ -248,48 +262,66 @@ def test_the_detector_names_a_planted_deletion() -> None:
     assert deletion_sites_in(PLANTED, "planted") == {("planted", "purge_the_audit_log")}
 
 
-PLANTED_TRUNCATE = '''
-"""A module docstring about a migration that truncates a table."""
-
-
-def wipe_rollout_attempts(op):
-    op.execute("TRUNCATE TABLE mod_deploy.rollout_attempts")
-'''
-
-PLANTED_TRIGGER_EVENT = '''
-"""A migration that installs a guard refusing truncation, not a deletion."""
-
-
-def upgrade(op):
-    op.execute(
-        """
-        CREATE TRIGGER refuse_evidence_truncate
-        BEFORE TRUNCATE ON mod_deploy.rollout_attempt_settlements
-        FOR EACH STATEMENT EXECUTE FUNCTION mod_deploy.refuse_evidence_rewrite();
-        """
+def _planted_statement(sql: str) -> str:
+    """One function whose body issues exactly the given SQL as a string
+    literal, so `deletion_sites_in` sees it the way it sees a real migration."""
+    return (
+        '"""A module docstring about a migration."""\n\n\n'
+        f"def planted_statement(op):\n    op.execute({sql!r})\n"
     )
-'''
 
 
-def test_the_detector_still_names_a_real_truncate_statement() -> None:
-    """The narrowing in Task 3 must not blind the scan to an actual `TRUNCATE`.
+#: Real statements the scan must still find. `TRUNCATE` bare, `TRUNCATE TABLE`
+#: and `TRUNCATE ONLY` are the three real forms PostgreSQL accepts; `TRUNCATE
+#: ONLY` is also the near-miss that proves the `(?!ON\b)` exclusion below is
+#: keyed on the whole word `ON` and not merely on the letters "ON" — a bare
+#: `(?!ON)` would refuse to match `TRUNCATE ONLY` too, since `ON` is a literal
+#: prefix of `ONLY`, and that would silently stop detecting a real truncation.
+REAL_STATEMENTS: Final[tuple[str, ...]] = (
+    "TRUNCATE TABLE mod_deploy.rollout_attempts",
+    "TRUNCATE mod_deploy.rollout_attempts",
+    "TRUNCATE ONLY mod_deploy.rollout_attempts",
+    "DELETE FROM mod_deploy.rollouts",
+)
 
-    Same shape as a real migration body: a bare `TRUNCATE TABLE <table>`, with
-    no `BEFORE`/`AFTER`/`INSTEAD OF` anywhere near it.
-    """
-    assert deletion_sites_in(PLANTED_TRUNCATE, "planted") == {
-        ("planted", "wipe_rollout_attempts")
-    }
+#: Trigger EVENT clauses — always `TRUNCATE ON <table>`, never a statement —
+#: that the scan must NOT read as a deletion. `dc_0010_attempt_settlements`
+#: and `dc_0011_attestation_registry` both install exactly the first shape,
+#: and it is the OPPOSITE of a deletion: it installs a guard that REFUSES
+#: truncation. The other three are near-misses an adjacency-based exclusion
+#: would have missed (keying on the keyword immediately before `TRUNCATE`
+#: rather than on the `ON` that follows it): `INSERT OR TRUNCATE`, `UPDATE OR
+#: DELETE OR TRUNCATE` and a `TRUNCATE` moved to its own line both put a
+#: different token directly before `TRUNCATE`, and this exclusion does not
+#: care what that token is.
+TRIGGER_EVENT_CLAUSES: Final[tuple[str, ...]] = (
+    "CREATE TRIGGER refuse_evidence_truncate\n"
+    "BEFORE TRUNCATE ON mod_deploy.rollout_attempt_settlements\n"
+    "FOR EACH STATEMENT EXECUTE FUNCTION mod_deploy.refuse_evidence_rewrite();",
+    "CREATE TRIGGER g AFTER TRUNCATE ON mod_deploy.t",
+    "CREATE TRIGGER g BEFORE INSERT OR TRUNCATE ON mod_deploy.t",
+    "CREATE TRIGGER g BEFORE UPDATE OR DELETE OR TRUNCATE ON mod_deploy.t",
+    "CREATE TRIGGER g\nBEFORE\n  TRUNCATE ON mod_deploy.t",
+)
 
 
-def test_the_detector_does_not_name_a_trigger_event_clause() -> None:
-    """`dc_0010`'s and `dc_0011`'s own `BEFORE TRUNCATE ON <table>` shape.
+def test_the_detector_still_names_every_real_statement_form() -> None:
+    """The exclusion below must not blind the scan to an actual `TRUNCATE` or
+    `DELETE FROM`, in any of the three real `TRUNCATE` spellings."""
+    for sql in REAL_STATEMENTS:
+        found = deletion_sites_in(_planted_statement(sql), "planted")
+        assert found == {("planted", "planted_statement")}, (sql, found)
 
-    This is the opposite of a deletion: it installs a guard that REFUSES
-    truncation. A ledger row describing a trigger definition would be a
-    classification describing nothing.
-    """
-    assert deletion_sites_in(PLANTED_TRIGGER_EVENT, "planted") == set()
+
+def test_the_detector_does_not_name_any_trigger_event_clause() -> None:
+    """A trigger EVENT clause is `TRUNCATE ON <table>`, never a statement, no
+    matter what keyword sits immediately before `TRUNCATE`. The exclusion is
+    keyed on the `ON` that follows `TRUNCATE`, so it catches all four
+    near-misses an adjacency-based (keyword-before-`TRUNCATE`) exclusion would
+    have missed, alongside the exact `dc_0010`/`dc_0011` shape."""
+    for sql in TRIGGER_EVENT_CLAUSES:
+        found = deletion_sites_in(_planted_statement(sql), "planted")
+        assert found == set(), (sql, found)
 
 
 def test_the_detector_does_not_name_a_near_miss() -> None:
