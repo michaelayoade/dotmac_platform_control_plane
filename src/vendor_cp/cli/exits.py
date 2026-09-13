@@ -105,6 +105,12 @@ REFUSAL_CODES: Final[dict[str, ExitCode]] = {
     "owner.forbidden": ExitCode.REFUSED,
     "owner.migration_target_refused": ExitCode.REFUSED,
     "owner.provider_not_permitted": ExitCode.REFUSED,
+    # A relay-readiness or deployment-readiness preflight looked and said no.
+    # Raised at `commands.py:583` (`relay_preflight`) and `:884`
+    # (`deployment_readiness_packet`) and already mapped in `runtime._BY_NAME`
+    # (`PacketRefused`) — it was simply never declared here, so `refuse()`
+    # raised `AssertionError: undeclared refusal code` instead of exiting 3.
+    "owner.readiness_refused": ExitCode.REFUSED,
     # ── absent or unreachable evidence (4) ─────────────────────────────────
     "evidence.not_found": ExitCode.UNAVAILABLE,
     "evidence.tool_absent": ExitCode.UNAVAILABLE,
@@ -134,7 +140,13 @@ def refuse(code: str, message: str) -> Refusal:
     """
     try:
         exit_code = REFUSAL_CODES[code]
-    except KeyError:  # pragma: no cover - guarded by test_installed_cli
+    except KeyError:
+        # NOT guarded by a coverage-proof test today: `owner.readiness_refused`
+        # was raised and mapped in `runtime._BY_NAME` for months while absent
+        # from `REFUSAL_CODES`, and this branch is exactly how that surfaced —
+        # an `AssertionError` instead of exit 3. The pragma here used to claim
+        # a guard `test_installed_cli.py` did not have;
+        # `test_every_raised_refusal_code_is_declared` is that guard now.
         raise AssertionError(f"undeclared refusal code {code!r}") from None
     return Refusal(code, message, exit_code=exit_code)
 
