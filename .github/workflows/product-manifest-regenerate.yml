@@ -1,6 +1,7 @@
-# Acquire two published distributions and use them to regenerate
-# `deploy/product-manifest.json`, without ever giving the credential that
-# reaches the private index to the code that runs the generator.
+# Acquire every privately-published distribution this repository composes and
+# use them to regenerate `deploy/product-manifest.json`, without ever letting
+# the credential that reaches the private index share a job with candidate
+# code.
 #
 # ── THE PROBLEM THIS SOLVES ─────────────────────────────────────────────────
 #
@@ -23,34 +24,71 @@
 # read-only registry credential. A developer shell holding that credential is
 # explicitly refused as the mechanism.
 #
+# ── WHAT "ACQUIRE" MEANS HERE: EVERY COMPOSED DISTRIBUTION, NOT JUST THE TWO
+# THAT MOVED ─────────────────────────────────────────────────────────────────
+#
+# `generate_product_manifest.py` imports `vendor_cp.assembly.build_spec()`,
+# which composes EVERY privately-published distribution this repository
+# declares — not only the two this branch's repin touches. An earlier version
+# of this workflow acquired just those two, which would have left
+# `regenerate` unable to import the assembly at all. `scripts
+# /product_manifest_acquire.py`'s `private_distributions()` derives the full
+# list from the candidate ref's own `tool.poetry.dependencies` — every entry
+# bound to the private index, at the exact version declared there — so a
+# distribution composed tomorrow is acquired automatically instead of
+# depending on someone remembering to extend a name list.
+#
+# ── THE SECURITY BOUNDARY IS THE CREDENTIAL, NOT THE NETWORK ────────────────
+#
+# `regenerate` holds no secret, so the property that matters is that
+# candidate code never runs where the private-index credential is reachable —
+# not that the job is fully air-gapped. It MAY reach public PyPI for this
+# project's ordinary dependencies, the same precedent this fleet's other
+# lock-resolution workflows already establish: the private index is
+# unreachable from `regenerate` BY CONSTRUCTION (no credential, no `.netrc`,
+# no `POETRY_HTTP_BASIC_*`, and the private host name appears nowhere in this
+# job's configuration — asserted, not merely arranged), while public PyPI
+# stays reachable for everything this repository depends on that is not
+# privately published. Every PRIVATE distribution is still installed ONLY
+# from the bundle `acquire` verified (`--no-index --find-links`), so a
+# private name can never be satisfied from anywhere else; the public install
+# that follows is wheel-only (`--only-binary=:all:`), so no PyPI sdist's
+# PEP 517 build backend executes in the job that is about to run candidate
+# code — the same reasoning `kernel-lock.yml`'s own wheel-only gates state for
+# its `resolve` job, and the reason it matters here too.
+#
 # ── THE SHAPE, AND WHY IT IS THE SAME SHAPE AS `kernel-lock.yml` ────────────
 #
 # `.github/workflows/kernel-lock.yml` exists for exactly this credential/
 # resolver separation, and this workflow reuses its conventions rather than
 # inventing a second style:
 #
-#   acquire     — holds the credential. Downloads and hash-verifies the two
-#                 distributions this branch repins, via
-#                 `scripts/product_manifest_acquire.py`, which itself calls
-#                 `kernel_lock.acquire` — the SAME curl/sha256/PEP-503-page
-#                 function `kernel-lock.yml`'s `acquire` job uses. Runs no
-#                 Poetry resolution, no `pip install`, and no code from the
+#   acquire     — holds the credential. Downloads and hash-verifies every
+#                 distribution the candidate ref binds to the private index,
+#                 via `scripts/product_manifest_acquire.py`, which itself
+#                 calls `kernel_lock.acquire` — the SAME curl/sha256/PEP-503
+#                 -page function `kernel-lock.yml`'s `acquire` job uses. Runs
+#                 no Poetry resolution, no `pip install`, and no code from the
 #                 candidate checkout or from any downloaded package.
-#   regenerate  — holds NO secret, and asserts it holds none before it
-#                 installs anything. Checks out the candidate ref, installs
-#                 ONLY the two verified artifacts OFFLINE (`--no-index`, a
-#                 local `--find-links` directory, no other index reachable),
-#                 and runs `scripts/generate_product_manifest.py` against
-#                 them.
+#   regenerate  — holds NO secret, and asserts it holds none, and that the
+#                 private host is absent from its own configuration, before
+#                 it installs anything. Re-derives the same private
+#                 distribution list from its own checkout and REFUSES if the
+#                 bundle does not cover all of it, rather than letting a
+#                 later `pip install` or `ModuleNotFoundError` fail somewhere
+#                 less legible. Installs the private distributions from the
+#                 bundle alone, then this project's public dependencies
+#                 normally but wheel-only, then runs
+#                 `scripts/generate_product_manifest.py`.
 #
 # Same two checkouts as `kernel-lock.yml`, for the same reason, in the job
 # that holds the credential: the TRUSTED workspace root is `github.sha` — the
 # commit that defines this workflow, the one an operator approved by
 # dispatching it — and the ref under review is checked out BESIDE it, at
-# `work/`, read only as DATA (two version strings out of its
-# `pyproject.toml`) in `acquire`. `regenerate` holds no credential, so it
-# checks the candidate ref out directly and runs its generator script — there
-# is nothing there for untrusted code to steal.
+# `work/`, read only as DATA (name/version pairs out of its `pyproject.toml`)
+# in `acquire`. `regenerate` holds no credential, so it checks the candidate
+# ref out directly and runs its generator script — there is nothing there for
+# untrusted code to steal.
 #
 # ── THIS WORKFLOW WRITES NOTHING BACK TO THE REPOSITORY ─────────────────────
 #
@@ -59,15 +97,24 @@
 # applies it in a separate, reviewed change — the same division `kernel-
 # lock.yml` draws between resolving a lock and applying it.
 #
-# ── AN OPEN QUESTION THIS WORKFLOW DOES NOT RESOLVE ─────────────────────────
+# ── A CAVEAT THIS WORKFLOW DOES NOT RESOLVE ──────────────────────────────────
 #
-# `vendor_cp.assembly.build_spec()` — what the generator imports — composes
-# six privately-published distributions declared in this repository's
-# `pyproject.toml`, not the two `acquire` fetches here, plus this project's
-# ordinary PyPI dependencies. Whether `regenerate`'s offline install leaves
-# enough of the environment in place for that import to actually succeed on a
-# bare `ubuntu-latest` runner is not answered by this file — see
-# `scripts/product_manifest_acquire.py`'s module docstring.
+# `regenerate`'s public-dependency step is `pip install --only-binary=:all: .`
+# — installing this project itself, via its own `pyproject.toml` and the
+# `poetry-core` build backend it already declares under `[build-system]`, so
+# pip resolves this project's PUBLIC dependencies from PyPI in the ordinary
+# way. Its correctness rests on an assumption this file does not verify: that
+# because every PRIVATE distribution is already installed by the step before
+# it, pip's resolver treats each as an already-satisfied leaf and does not
+# need further index access for it or its own sub-dependencies (all of which
+# are, by this point, other already-installed private distributions). This
+# workflow is never dispatched by this change, and nothing here has run it.
+# If that assumption is wrong, the correct fix is generating an explicit
+# public-only requirement list from this repository's own `poetry.lock` —
+# which needs `poetry-plugin-export`, NOT present in
+# `.github/bootstrap/poetry-requirements.txt`'s pinned Poetry toolchain today
+# — and that is a dependency decision for this workflow's owner, not one made
+# here by adding an unpinned plugin on this file's own authority.
 
 name: Product manifest regenerate
 
@@ -181,7 +228,7 @@ jobs:
           fi
           echo "the credential is present"
 
-      - name: Download and hash-verify the two distributions this branch repins
+      - name: Download and hash-verify every distribution bound to the private index
         env:
           TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: |
@@ -270,25 +317,84 @@ jobs:
           fi
           echo "no credential is present in this job"
 
+      - name: The private index host names nothing in this job's configuration
+        run: |
+          set -euo pipefail
+          # The property that matters is stated in the header: the private
+          # index is unreachable from this job BY CONSTRUCTION, not merely
+          # because nothing here happens to reach for it. Asserted, not
+          # arranged — the same discipline as the credential-absence check
+          # above, aimed at the one fact that would let this job reach the
+          # private index even without the credential: something pointing an
+          # installer at its host.
+          HOST="registry.dotmac.io"
+          if env | grep -qiF -- "${HOST}"; then
+            echo "::error::the private index host appears in this job's environment"
+            exit 1
+          fi
+          for CANDIDATE in "${HOME}/.netrc" "${HOME}/.pip/pip.conf" \
+            "${HOME}/.config/pip/pip.conf" "/etc/pip.conf"; do
+            if [ -f "${CANDIDATE}" ] && grep -qiF -- "${HOST}" "${CANDIDATE}"; then
+              echo "::error::the private index host appears in ${CANDIDATE}"
+              exit 1
+            fi
+          done
+          if python3 -m pip config list 2>/dev/null | grep -qiF -- "${HOST}"; then
+            echo "::error::the private index host appears in pip's effective configuration"
+            exit 1
+          fi
+          echo "the private index host names nothing in this job's configuration"
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: product-manifest-bundle-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/bundle
 
-      - name: Install only the two verified artifacts, offline
+      - name: Verify the bundle covers every declared private distribution
         run: |
           set -euo pipefail
-          # READ-ONLY INPUTS, and no way to reach for anything else: `--no-
-          # index` disables every index (private and public alike), and
-          # `--find-links` names only the bundle `acquire` verified and
-          # uploaded. There is no credential in this job to authenticate an
-          # index with even if one were configured, and `--no-deps` means a
-          # dependency neither of these two distributions' wheels bundle
-          # cannot be fetched either.
+          # Re-derived from THIS job's own checkout, independent of job 1 —
+          # this job does not simply trust the other job's artifact. A
+          # declared private distribution with no matching artifact in the
+          # bundle REFUSES here, rather than surfacing later as a `pip`
+          # failure or a `ModuleNotFoundError` with no context.
           chmod -R a-w /tmp/bundle
+          python scripts/product_manifest_bundle_check.py \
+            --manifest pyproject.toml \
+            --bundle-files /tmp/bundle/files \
+            > /tmp/private-distribution-specs.txt
+          cat /tmp/private-distribution-specs.txt
+
+      - name: Install the private distributions from the verified bundle, offline
+        run: |
+          set -euo pipefail
+          # READ-ONLY INPUT, and no way to reach for anything else: `--no-
+          # index` disables every index, and `--find-links` names only the
+          # bundle `acquire` verified and uploaded — a private name can never
+          # be satisfied from anywhere else. `--no-deps` defers every
+          # dependency, public or private, to the step below; this step
+          # installs exactly the artifacts the bundle-completeness check just
+          # verified, nothing else.
+          mapfile -t SPECS < /tmp/private-distribution-specs.txt
           python3 -m pip install --no-index --no-deps \
             --find-links /tmp/bundle/files \
-            dotmac-kernel dotmac-deployment-control
+            "${SPECS[@]}"
+
+      - name: Install the public dependencies, wheel-only
+        run: |
+          set -euo pipefail
+          # Public PyPI IS reachable here — see the header's "security
+          # boundary is the credential, not the network". `--only-binary=
+          # :all:` is the load-bearing flag: it is what keeps a PyPI sdist's
+          # PEP 517 build backend from executing in a job that is about to
+          # run candidate code, the same reasoning `kernel-lock.yml` states
+          # for its own wheel-only gates. `.` installs this project itself,
+          # via the `poetry-core` backend it already declares, so pip
+          # resolves its ordinary PyPI dependencies normally; every private
+          # dependency this project declares is already installed by the
+          # step above and is not fetched again here. See the header's
+          # closing caveat for what this step does not verify.
+          python3 -m pip install --only-binary=:all: .
 
       - name: Regenerate the manifest
         run: |

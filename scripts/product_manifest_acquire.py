@@ -1,40 +1,29 @@
 #!/usr/bin/env python3
-"""Acquire the two distributions `product-manifest-regenerate.yml` job 1 holds
-the credential for, and hash-verify them the same way `kernel-lock.yml`'s
-`acquire` job does.
+"""Acquire every privately-published distribution
+`product-manifest-regenerate.yml` job 1 holds the credential for, and
+hash-verify them the same way `kernel-lock.yml`'s `acquire` job does.
 
-`scripts/generate_product_manifest.py`'s `build_manifest()` reads
-`importlib.metadata.version(...)` for every module that ships as its own
-distribution, so the derived `deploy/product-manifest.json` follows the
-DISTRIBUTION version, not the literal on `ModuleManifest`. This branch moves
-two of those facts at once (see the workflow's own header comment for the
-full causal chain): `dotmac-kernel`'s pin and `dotmac-deployment-control`'s
-declared `ModuleManifest.version`, which — once installed from a real
-distribution — stops being a literal and starts reading its own installed
-metadata, so `manifest_declared_version` disappears from that entry.
+`scripts/generate_product_manifest.py`'s `build_manifest()` calls
+`vendor_cp.assembly.build_spec()`, which composes every module this
+repository declares — and `importlib.metadata.version(...)` reads each
+module's DISTRIBUTION version, not the literal on its `ModuleManifest`. This
+branch's specific repin (`dotmac-kernel` and `dotmac-deployment-control`
+moving; see the workflow's own header comment for the full causal chain) is
+what made `test_product_manifest.py` fail, but the generator needs the WHOLE
+composed set importable, not just the two distributions that moved — so this
+module acquires every distribution the candidate ref's own `pyproject.toml`
+binds to the private index, derived from that manifest rather than a
+hardcoded name list, so a future composed distribution cannot be silently
+left out of the bundle.
 
 This module does not invent a second acquisition mechanism. It reads the
-candidate ref's own `pyproject.toml` as DATA (two exact version strings, never
+candidate ref's own `pyproject.toml` as DATA (name/version pairs, never
 executed) and calls `kernel_lock.acquire` — the exact function
 `kernel-lock.yml`'s `acquire` job uses to hold the credential, validate every
 index-supplied link against the approved origin, and lay the downloaded bytes
 out as a local PEP 503 index with recorded sha256 digests. Runs no Poetry, no
 pip, and no code from the candidate checkout or from any downloaded package:
 curl (via `kernel_lock.fetch`), sha256, and file-writing only.
-
-NOTE for the reviewer: this acquires exactly the two distributions this
-branch's fix is about, per the accepted design. `vendor_cp.assembly
-.build_spec()` — what `generate_product_manifest.py` actually imports — is
-composed from six privately-published distributions in this repository's
-`pyproject.toml`, not two; the other four (`dotmac-release-catalog`,
-`dotmac-entitlement-allocation`, `dotmac-approvals`,
-`dotmac-commercial-agreements`, `dotmac-licensing`) and this project's own
-ordinary PyPI dependencies are NOT acquired here and are not installed by job
-2's offline step either. Whether job 2's `generate_product_manifest.py` step
-can actually import successfully in a bare `ubuntu-latest` runner with only
-these two distributions installed is therefore an open question this module
-does not resolve — flagged for the workflow's owner, not silently patched by
-widening this script's scope on its own authority.
 """
 
 from __future__ import annotations
@@ -48,32 +37,52 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import kernel_lock  # noqa: E402
 
-#: Exactly the two distributions this branch repins. Not the full closure of
-#: this repository's `forgejo`-sourced dependencies — see the module
-#: docstring for why that is a named open question, not a decision made here.
-PACKAGES: tuple[str, ...] = ("dotmac-kernel", "dotmac-deployment-control")
 
+def private_distributions(manifest: dict[str, object]) -> dict[str, str]:
+    """Every `tool.poetry.dependencies` entry bound to the private index, and
+    the EXACT version it is pinned at, read straight out of the manifest.
 
-def pinned_versions(manifest: dict[str, object]) -> dict[str, str]:
-    """The exact version each of `PACKAGES` is pinned at in `manifest`.
-
-    Read as DATA — `tomllib.load`, never `import` or `exec` — so this can run
-    against the candidate ref's own `pyproject.toml` in the job that holds the
-    credential without that job executing a line of the candidate's code.
+    Derived rather than named, so a distribution added to the composed
+    assembly tomorrow is acquired automatically instead of silently missing
+    from the bundle the day someone forgets to update a list here. Scoped to
+    the main dependency table: every composed module this repository runs is
+    a runtime dependency, never a dev-only or group-only one, and the
+    candidate ref's own `manifest_problems` (`kernel-lock.yml`'s guard) is the
+    place a private dependency hiding in another table is refused, not this
+    one, which only derives what to fetch.
     """
 
-    poetry = manifest.get("tool", {}).get("poetry", {})  # type: ignore[union-attr]
+    poetry = manifest.get("tool", {})
+    poetry = poetry.get("poetry", {}) if isinstance(poetry, dict) else {}
     dependencies = poetry.get("dependencies", {}) if isinstance(poetry, dict) else {}
+    if not isinstance(dependencies, dict):
+        raise kernel_lock.Refusal(
+            "tool.poetry.dependencies is not a table; cannot derive what to acquire"
+        )
+
     plan: dict[str, str] = {}
-    for name in PACKAGES:
-        spec = dependencies.get(name) if isinstance(dependencies, dict) else None
-        version = spec.get("version") if isinstance(spec, dict) else None
-        if not isinstance(version, str) or not version:
+    for name, spec in sorted(dependencies.items()):
+        if not isinstance(spec, dict):
+            continue
+        if spec.get("source") != kernel_lock.INDEX_SOURCE_NAME:
+            continue
+        version = spec.get("version")
+        if not isinstance(version, str) or not kernel_lock._EXACT_VERSION.fullmatch(
+            version
+        ):
             raise kernel_lock.Refusal(
-                f"{name} is not declared as an exact-version table dependency "
-                f"under tool.poetry.dependencies; found {spec!r}"
+                f"{name} is bound to {kernel_lock.INDEX_SOURCE_NAME!r} with "
+                f"the constraint {version!r}. Acquisition can only be closed "
+                "around an exact pin; a range would need this module to "
+                "decide what it resolves to."
             )
         plan[name] = version
+
+    if not plan:
+        raise kernel_lock.Refusal(
+            f"no dependency in tool.poetry.dependencies is bound to "
+            f"{kernel_lock.INDEX_SOURCE_NAME!r}; nothing to acquire"
+        )
     return plan
 
 
@@ -85,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with args.manifest.open("rb") as handle:
         manifest = tomllib.load(handle)
-    plan = pinned_versions(manifest)
+    plan = private_distributions(manifest)
     for package, version in sorted(plan.items()):
         print(f"acquiring {package} {version}")
     digests = kernel_lock.acquire(plan, args.out)
