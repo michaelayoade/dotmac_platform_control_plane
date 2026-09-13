@@ -432,6 +432,7 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
             "audit",
             "create_app",
             "currency",
+            "environment_api_documentation_policy",
             "hash_password",
             "models_platform",
             "settings_models",
