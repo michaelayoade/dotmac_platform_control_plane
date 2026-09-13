@@ -96,6 +96,7 @@ from uuid import UUID
 from dotmac_deployment_control import (
     ApprovalEvidence,
     ApprovePlanCommand,
+    AuthorizationSigner,
     DesiredDeployment,
     PlanView,
     ProposePlanCommand,
@@ -624,7 +625,7 @@ def propose_deployment_plan(db: Session, request: ProposePlanRequest) -> Propose
 
 
 def authorize_deployment(
-    db: Session, request: AuthorizeRequest
+    db: Session, request: AuthorizeRequest, *, signer: AuthorizationSigner | None
 ) -> AuthorizationReceipt:
     """Approve a frozen plan on carried evidence, then request its rollout.
 
@@ -642,19 +643,31 @@ def authorize_deployment(
     would report success. The derived suffixes keep both steps idempotent under
     the operator's single id, which is what a retry of this command needs.
 
-    ## This deployment cannot complete this command today
+    ## `signer` is a required, defaultless CAPABILITY, not part of the request
 
-    `request_rollout` (a13) takes an injected `AuthorizationSigner` and raises
-    `AuthorizationEnvelopeRefusedError(ABSENT)` when none is supplied. This
-    assembly holds signer POINTERS only — identities are unminted by design
-    (`vendor_cp.deployment.signers`, `readiness_packet.HELD_PENDING_MINT`) — so
-    no real signer exists here to pass, and this call always reaches that
-    refusal. Supplying one is key material and production activation, which is
-    explicitly out of scope: this function does not pre-empt Control with a
-    duplicate check, and does not stub or fake a signer. The refusal arrives
-    honestly, mapped by `cli.runtime._BY_NAME` to `evidence.capability_absent`
-    rather than `execution.failed` — a plan CAN be proposed and approved in
-    this deployment; it cannot be rolled out until a signing identity exists.
+    It is Control's own `AuthorizationSigner` protocol, injected straight
+    through to `request_rollout`, and it is a keyword-only PARAMETER rather
+    than a field on `AuthorizeRequest` — a signer is a capability this call
+    either has or does not, not a fact the operator states. A default of
+    `None` here would put the silent absence straight back: Control already
+    treats `signer=None` as "no injected signer" and raises
+    `AuthorizationEnvelopeRefusedError(ABSENT)` (mapped by
+    `cli.runtime._BY_NAME` to `evidence.capability_absent`, never
+    `execution.failed`), so requiring the argument only moves where that
+    absence becomes visible — from a default buried in this function to every
+    caller's own call site.
+
+    This deployment holds signer POINTERS only; identities are unminted by
+    design (`vendor_cp.deployment.signers`, `readiness_packet
+    .HELD_PENDING_MINT`). `cli.commands.deployment_authorize` has nothing to
+    inject and passes that absence explicitly (`signer=None`) rather than
+    omitting the argument, so a reader sees THAT this deployment has no
+    signer and WHY. Minting a real one is key material and production
+    activation, explicitly out of scope: this function does not pre-empt
+    Control with a duplicate check, and does not stub, fake or default one
+    itself. A test that needs `request_rollout` to succeed injects its own
+    test double implementing this same protocol — see
+    `tests/unit/test_plan_inputs.py` — never a value defined in `src/`.
     """
     _enforce_authorization_window(request.authorization_expires_at)
     plan = read_plan(db, request.plan_id)
@@ -710,6 +723,7 @@ def authorize_deployment(
             reason=request.reason,
             actor_ref=request.actor_ref,
         ),
+        signer=signer,
     )
 
     approved_at = approved.approved_at or evidence.decided_at

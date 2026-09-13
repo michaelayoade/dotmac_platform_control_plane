@@ -868,13 +868,14 @@ def deployment_authorize(args: argparse.Namespace) -> Result:
     ## This deployment cannot finish this command today
 
     Signer identities are unminted by design (`vendor_cp.deployment.signers`),
-    so `authorize_deployment` always reaches Deployment Control's
-    `AuthorizationEnvelopeRefusedError(ABSENT)` — mapped to exit 4
-    (`evidence.capability_absent`), not a 5. The plan CAN be proposed and
-    approved in this deployment; it cannot be rolled out until a signing
-    identity is minted. That is not this command's failure to hide: it is
-    stated in `message` below, on the one path that reaches it — a refusal
-    that arrives honestly is not silent about what's missing.
+    so this CLI has no capability to inject. `signer=None` is passed
+    EXPLICITLY below rather than omitted, so a reader sees that this
+    deployment has no signer and why — `authorize_deployment` requires the
+    argument precisely so this call site cannot go quiet about it. Control
+    then always reaches `AuthorizationEnvelopeRefusedError(ABSENT)`, mapped to
+    exit 4 (`evidence.capability_absent`), never a 5. The plan CAN be proposed
+    and approved in this deployment; it cannot be rolled out until a signing
+    identity is minted — see this subcommand's own `--help` text.
     """
     from vendor_cp.deployment.adapter import AuthorizeRequest, authorize_deployment
 
@@ -894,6 +895,11 @@ def deployment_authorize(args: argparse.Namespace) -> Result:
                 expected_plan_digest=args.expect_plan_digest,
                 expected_plan_version=args.expect_plan_version,
             ),
+            # No signing identity is minted in this deployment
+            # (`vendor_cp.deployment.signers`). Explicit, not omitted: the
+            # required keyword-only parameter exists so this absence cannot
+            # be defaulted away silently.
+            signer=None,
         )
         return Result(
             command="deployment authorize",

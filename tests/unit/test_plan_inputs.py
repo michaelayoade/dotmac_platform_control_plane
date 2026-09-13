@@ -23,6 +23,11 @@ from dotmac_kernel import NotFoundError
 from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy.orm import Session
 
+from dotmac_deployment_control import (
+    AuthorizationSignature,
+    AuthorizationSignerIdentity,
+)
+
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.deployment import adapter
 from vendor_cp.deployment.candidate import RenderedCandidate
@@ -63,6 +68,39 @@ _CANDIDATE = RenderedCandidate(
 #: A default authorization window comfortably inside the one-hour ceiling
 #: default (`adapter.DEFAULT_AUTHORIZATION_WINDOW_CEILING_SECONDS`).
 _DEFAULT_EXPIRY = datetime.now(UTC) + timedelta(minutes=15)
+
+
+class _TestAuthorizationSigner:
+    """A THROWAWAY key implementing Control's `AuthorizationSigner` protocol.
+
+    This is TEST INFRASTRUCTURE, not a minted signing identity: it exists
+    solely so `resolve_plan_inputs`'s resolver stays testable end to end
+    while this deployment's real signing identities remain unminted by
+    design (`vendor_cp.deployment.signers`). It grants no authority, is
+    reachable from no deployment path, and MUST NEVER be imported from or
+    defined in `src/` — `vendor_cp.deployment.adapter.authorize_deployment`
+    requires a caller to supply a signer explicitly precisely so a value
+    like this one cannot arrive by default in production code.
+    """
+
+    def __init__(self) -> None:
+        self._identity = AuthorizationSignerIdentity(
+            key_id="test-signer",
+            algorithm="ed25519",
+            public_key_fingerprint="sha256:" + "c" * 64,
+        )
+
+    @property
+    def identity(self) -> AuthorizationSignerIdentity:
+        return self._identity
+
+    def sign(self, canonical_bytes: bytes) -> AuthorizationSignature:
+        return AuthorizationSignature(
+            key_id=self._identity.key_id,
+            algorithm=self._identity.algorithm,
+            public_key_fingerprint=self._identity.public_key_fingerprint,
+            signature="test-signature-not-a-real-signature",
+        )
 
 
 @pytest.fixture
