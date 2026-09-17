@@ -255,3 +255,15 @@ rule, not a change to the rule itself.
   in § 2 are repository-local reads of an external repository's tags, used to
   establish which versions contain a file — not evidence that any of them is
   published, installable or adopted (hard rule 17).
+
+## Amendment — 2026-09-17: retain a live uninventoried-route plant
+
+Control a13 is now route-bearing and explicitly inventoried by `FULL`, while
+both production profiles explicitly withhold it. It can no longer be the
+uninventoried-route plant described in § 6: a refusal test using its code would
+pass or fail for the profile's real declaration, not for an unknown new
+surface. The test now plants a route on the real, route-silent Release Catalogue
+manifest and proves refusal in every declared profile, followed by a positive
+mount when one profile inventories it. The Control-shaped plant remains the
+separate check that withholding routes preserves all non-route declarations.
+This updates the sensitivity proof, not the admission decision.

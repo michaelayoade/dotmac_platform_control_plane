@@ -46,14 +46,12 @@ genuinely mounts its route in a real application.
 
 ## The plant is the live coverage for property 6
 
-Zero composed modules bear a route today, so a guard written only against the
-real composition would cover nothing at the instant the old rule is removed.
-What carries property 6 is `_a11_shaped_module()` — the real
-`deployment_control` manifest, with its real `platform_tables`,
-`migration_prefix`, `migration_branch`, `requires`, `audit_actions` and
-`database_catalog`, carrying the browser surface `dotmac-deployment-control` has
-shipped since `0.1.0a8`. It is a11's actual shape on a11's actual module rather
-than a fabrication that resembles it, and it proves the property NOW.
+Deployment Control a13 now bears a real route and is inventoried, so it is no
+longer a valid *uninventoried* plant. Property 6 instead plants a route on the
+real, currently route-silent Release Catalogue manifest. Its persistence
+declarations are retained and no profile inventories its surface. The old
+`_a11_shaped_module()` remains the separate retention/withholding canary for
+the route-bearing Control module.
 
 Property 1 and 5's registry+lineage checks are the coverage that ARRIVES with
 the first real pin of a route-bearing module. They are not the same coverage and
@@ -184,6 +182,21 @@ def _a11_shaped_module() -> ModuleManifest:
                 code="planted_deployments",
                 # The same facet a11 joins, which is the same facet the console
                 # already contributes to and every production profile publishes.
+                facet="platform_admin",
+                routers=(_planted_router(),),
+                supported_ui_contract_versions=frozenset({1}),
+            ),
+        ),
+    )
+
+
+def _uninventoried_module() -> ModuleManifest:
+    """Plant a route on a real composed module no profile inventories today."""
+    return replace(
+        assembly.release_catalog_module,
+        web_surfaces=(
+            WebSurfaceContribution(
+                code="planted_release_catalogue",
                 facet="platform_admin",
                 routers=(_planted_router(),),
                 supported_ui_contract_versions=frozenset({1}),
@@ -393,16 +406,16 @@ def test_a_composed_module_that_mounts_a_route_is_refused_when_uninventoried(
 ) -> None:
     """PLANTED CASE — the defect ADR-0019 closes, on every declared profile.
 
-    a11's shape: a composed stateful module carrying a contract-v2
+    A real composed, route-silent stateful module receives a contract-v2
     `WebSurfaceContribution` on the `platform_admin` facet. No profile
     inventories it, so admission must refuse.
     """
     profile = deployment_profile(code)
     with pytest.raises(SurfaceAdmissionError) as refusal:
-        admit_surfaces(profile, _composition_with(_a11_shaped_module()))
+        admit_surfaces(profile, _composition_with(_uninventoried_module()))
 
     assert refusal.value.refusal is AdmissionRefusal.SURFACE_NOT_INVENTORIED
-    assert refusal.value.surfaces == ("deployment_control",)
+    assert refusal.value.surfaces == ("release_catalog",)
 
 
 @pytest.mark.parametrize("code", [p.code for p in PROFILES])
@@ -424,7 +437,7 @@ def test_the_refusal_reaches_the_real_composition_entry_point(monkeypatch) -> No
     provider mode.
     """
     monkeypatch.setattr(
-        assembly, "COMPOSED_MANIFESTS", _composition_with(_a11_shaped_module())
+        assembly, "COMPOSED_MANIFESTS", _composition_with(_uninventoried_module())
     )
     monkeypatch.setattr(
         assembly,
@@ -447,7 +460,7 @@ def test_the_planted_surface_genuinely_mounts_once_it_is_inventoried(
     names it. The application is really built, and the route really answers to a
     path that did not exist a moment ago.
     """
-    planted = _a11_shaped_module()
+    planted = _uninventoried_module()
     monkeypatch.setattr(assembly, "COMPOSED_MANIFESTS", _composition_with(planted))
     monkeypatch.setattr(
         assembly,
