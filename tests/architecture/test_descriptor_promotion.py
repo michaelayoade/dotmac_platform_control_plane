@@ -47,7 +47,7 @@ RECONCILIATION = (
 )
 V017 = ROOT / "alembic" / "versions" / "v017_deployment_target_authority.py"
 
-#: Which authority each descriptor's declared migration heads answer to.
+#: Which authority each accepted descriptor's declared migration heads answer to.
 #:
 #: This mapping exists because the assertion below was once pointed at a single
 #: descriptor by name, and the moment a SECOND descriptor appeared the obvious
@@ -64,11 +64,14 @@ V017 = ROOT / "alembic" / "versions" / "v017_deployment_target_authority.py"
 #: `promotion_ledger` -- the accepted descriptor may only have moved its
 #:     `migration` section in a promotion that SAYS it did.
 #:
-#: When a prospective descriptor lands, `deploy/product.toml` moves to
-#: `promotion_ledger` and the prospective file takes `composed_lineages`. Both
-#: predicates already exist, so that is a data edit and nothing goes uncovered.
+#: The accepted descriptor is always promotion-ledger truth. The branch source
+#: composition below is a separate JSON subject: it names no image or candidate
+#: and therefore cannot be promoted by merely changing a test target.
 DESCRIPTOR_HEADS_AUTHORITY: Final[dict[str, str]] = {
-    "deploy/product.toml": "composed_lineages",
+    "deploy/product.toml": "promotion_ledger",
+}
+SOURCE_COMPOSITION_HEADS_AUTHORITY: Final[dict[str, str]] = {
+    "deploy/prospective/source-composition.json": "composed_lineages",
 }
 
 #: Authorities this file actually exercises, maintained by hand beside the tests
@@ -106,6 +109,15 @@ def _descriptors_answering(authority: str) -> list[Path]:
     return [
         ROOT / relative
         for relative, declared in DESCRIPTOR_HEADS_AUTHORITY.items()
+        if declared == authority and (ROOT / relative).is_file()
+    ]
+
+
+def _source_compositions_answering(authority: str) -> list[Path]:
+    """Source records are distinct subjects from accepted descriptors."""
+    return [
+        ROOT / relative
+        for relative, declared in SOURCE_COMPOSITION_HEADS_AUTHORITY.items()
         if declared == authority and (ROOT / relative).is_file()
     ]
 
@@ -273,13 +285,13 @@ def test_the_declared_heads_are_the_composed_effective_heads() -> None:
     map does, in one reviewed place, and the descriptor it stops covering picks
     up `promotion_ledger` in the same edit.
     """
-    subjects = _descriptors_answering("composed_lineages")
+    subjects = _source_compositions_answering("composed_lineages")
     assert subjects, (
         "no descriptor answers to composed_lineages, so this recomputes the "
         "heads and compares them with nothing"
     )
     for path in subjects:
-        migration = tomllib.loads(path.read_text(encoding="utf-8"))["migration"]
+        migration = json.loads(path.read_text(encoding="utf-8"))["migration"]
         assert isinstance(migration, dict)
         assert tuple(migration["expected_heads"]) == composed_effective_heads(), (
             f"{path.relative_to(ROOT)} declares heads that are not the composed "
@@ -444,18 +456,27 @@ def test_every_descriptor_on_disk_declares_a_heads_authority() -> None:
     Found by glob, never by a hand list: a hand list cannot see the file added
     tomorrow, which is the whole shape being defended against.
     """
-    found = {
+    descriptors = {
         path.relative_to(ROOT).as_posix()
         for path in DEPLOY.glob("**/product.toml")
         if "candidates" not in path.parts
     }
-    assert found, "no descriptor found at all; this guard would pass over nothing"
-    undeclared = found - set(DESCRIPTOR_HEADS_AUTHORITY)
-    assert not undeclared, (
-        f"{sorted(undeclared)} declare migration heads and no authority says "
+    assert descriptors, "no descriptor found at all; this guard would pass over nothing"
+    undeclared_descriptors = descriptors - set(DESCRIPTOR_HEADS_AUTHORITY)
+    assert not undeclared_descriptors, (
+        f"{sorted(undeclared_descriptors)} declare migration heads and no "
+        "authority says "
         "what those heads must equal. Add an entry to "
         "DESCRIPTOR_HEADS_AUTHORITY rather than pointing an existing assertion "
         "at the new file: moving one leaves the other unchecked"
+    )
+    sources = {
+        path.relative_to(ROOT).as_posix()
+        for path in (DEPLOY / "prospective").glob("source-composition.json")
+    }
+    assert sources == set(SOURCE_COMPOSITION_HEADS_AUTHORITY), (
+        "every prospective source-composition record needs an authority; it is "
+        "not an accepted descriptor and must not be silently omitted"
     )
 
 
@@ -465,7 +486,10 @@ def test_no_declared_authority_is_unexercised() -> None:
     A third authority cannot be declared without a test that applies it, and a
     retired one cannot linger in the map naming a predicate nobody runs.
     """
-    assert set(DESCRIPTOR_HEADS_AUTHORITY.values()) <= EXERCISED_AUTHORITIES
+    declared = set(DESCRIPTOR_HEADS_AUTHORITY.values()) | set(
+        SOURCE_COMPOSITION_HEADS_AUTHORITY.values()
+    )
+    assert declared <= EXERCISED_AUTHORITIES
     assert EXERCISED_AUTHORITIES == {"composed_lineages", "promotion_ledger"}
 
 

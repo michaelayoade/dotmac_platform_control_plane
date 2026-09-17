@@ -1,5 +1,14 @@
 # Kernel a98, a99 and a100 — one boundary, measured; a100 is not a regression
 
+> **Status amendment — 2026-09-17.** This is an as-of-2026-09-01 assessment;
+> its measurements and decision history are unchanged. Kernel `0.1.0a101` was
+> subsequently published, tagged and independently verified (release evidence:
+> `docs/inventories/kernel-release-verifications/0.1.0a101.json` in Starter
+> protected main). It carries the import-boundary repair and the
+> `ProductAssemblySpec.api_documentation` contract. The Platform CP repin to
+> a101 and the ADR-0016 owner cutover supersede this document's then-current
+> conclusion that no pin move was possible.
+
 **Status:** assessed on 2026-09-01, and revised the same day when an independent
 arbitration settled the question this document had left open. The pin holds at
 `0.1.0a98`. **No pin move is possible yet**: the repair lands in a101, and a101

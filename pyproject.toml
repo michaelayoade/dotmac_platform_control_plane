@@ -29,7 +29,7 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a98", extras = [
+dotmac-kernel = { version = "0.1.0a101", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
@@ -90,8 +90,9 @@ dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # one supported plane set, so no `ModulePlaneSelection` is possible and none is
 # made. Its two declared prerequisites were already bound here.
 #
-# a6. Three published versions below it are refused, and they failed three
-# DIFFERENT questions — deliberately not collapsed into one "use the latest".
+# a13 is the current independently verified Control release. Earlier published
+# versions below it are refused for different reasons — deliberately not
+# collapsed into one "use the latest".
 #
 #   a3  its evidence chain: published by a defective internal verifier.
 #   a4  its BEHAVIOUR: `snapshot_digest` returned bare hex while its sibling
@@ -109,29 +110,30 @@ dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # a5's artifact identity and behaviour both passed; only its declared floor was
 # wrong. It remains published and is refused BY NAME by the release guard.
 #
-# a6 carries `Requires-Dist: dotmac-kernel (>=0.1.0a98)` — read out of the
-# PUBLISHED WHEEL rather than from a source tree — and a canary that installs
-# the wheel against exactly that declared minimum and drives a real collision
-# through `conflict_savepoint`, with a paired mutation forcing a97 and
-# requiring both a resolver conflict and a behavioural failure. The floor can
-# now fail in both directions, which is what makes it a contract rather than a
-# claim.
+# a13 carries `Requires-Dist: dotmac-kernel (>=0.1.0a100)` and adds the
+# attestation trust registry and the `RehearsalGrantV1` type (the release adds
+# no rehearsal migration or durable consumption store). Its fifteen behavioural
+# canaries, including the public read-only attestation binding, passed against
+# the registry-served wheel. The current Kernel a101 pin is
+# above that declared floor and supplies the assembly's API-documentation
+# contract; no resolver-selected kernel is accepted here.
 #
 # Oracles (AGENTS.md rule 17). Pinnable — `peeled_tag`
-# `dotmac-deployment-control-v0.1.0a6`, peeled commit
-# `518711c36e9e5774e11b02c6ab35ec0c9c7b75b9`, tag object
-# `553c2bb014a9c2a3d8ebecafa06c4166bc94be1b`. Published and installable —
-# `release_run` 33322980430, verified by run 33323067886 (VERIFIED 7/7), which
-# wrote the tag. The resolved artifacts were compared against that evidence
-# before this pin was accepted: wheel `9b02cf33…7b8fc0`, sdist `68871c24…1adad0`.
+# `dotmac-deployment-control-v0.1.0a13`, peeled commit
+# `8173954886396e8d2fbb8e3b470aa2dfddbe64b0`, tag object
+# `5b63f293ce93781f627151992d7034f1698213ff`. Published and installable —
+# `release_run` 34687474025, verified by run 34687542590 (VERIFIED 15/15),
+# which wrote the tag. Artifact digests are recorded in the published release
+# record at `docs/published-versions.json` in the Control source repository.
+# Pinning a13 installs these surfaces; it does not by itself retire any
+# caller-supplied attestation evaluator path. That adoption/cutover remains a
+# separate consumer decision, as the release record explicitly requires.
 #
-# The kernel pin moves a77 -> a98 BECAUSE a6 requires it, and it is pinned
-# EXACTLY here rather than left to the resolver. Twenty-one alphas of kernel is
-# not a bump whose consequences are discovered at boot — which is the lesson a5
-# just taught at lower cost. This pin is not deployment authorization: the
-# a77->a98 migration still owes a rehearsal against a RESTORED isolated
+# The kernel pin is above a13's declared floor and is pinned EXACTLY here rather
+# than left to the resolver. This pin is not deployment authorization: the
+# a98->a100 migration still owes a rehearsal against a RESTORED isolated
 # database before it reaches the running deployment.
-dotmac-deployment-control = { version = "0.1.0a6", source = "forgejo" }
+dotmac-deployment-control = { version = "0.1.0a13", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor

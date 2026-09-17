@@ -11,7 +11,7 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a98` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a101` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source. That version is not transcribed here by
@@ -19,6 +19,10 @@ it owns and — just as importantly — what it must never become.
   stated in this document differs from the one `pyproject.toml` pins. It said
   `0.1.0a77` for the three weeks after the pin moved to a98, and nothing could
   see it.
+- API-documentation exposure is declared in `assembly.build_spec()` through
+  `ProductAssemblySpec.api_documentation`; the Kernel applies it when it
+  constructs FastAPI. `vendor_cp.api_documentation` was retired in the a101
+  cutover, so this product has no post-construction route mutator.
 - The a61 → a77 compatibility uplift moves no domain writer and composes no new
   module. It does cross kernel a68's platform-audit registry enforcement, so
   every Vendor-owned platform audit action is now declared on exactly one
@@ -149,7 +153,7 @@ it owns and — just as importantly — what it must never become.
   product capability catalogue, converts the authoritative Approvals request
   into content-bound evidence, and exposes the owner's bounded UUID-keyset
   agreement reader for complete commercial-cohort enumeration.
-- `dotmac-deployment-control==0.1.0a2` is the owner of deployment identity,
+- `dotmac-deployment-control==0.1.0a13` is the owner of deployment identity,
   desired state, immutable plans, rollouts and authenticated observations under
   ADR-0011. Platform-only and atomic — one supported plane set, so no
   `ModulePlaneSelection` is possible and `ASSEMBLY_MODULE_PLANES` gains nothing.
@@ -433,8 +437,8 @@ the build if a second module imports the loader, because `dotmac_starter_mt`
 ADR-0003 forbids feature code branching on a profile name.
 
 `production-bootstrap` (required by `scripts/deploy_production.sh` in the host
-env file) composes and runs everything and does not mount the `licence_delivery`,
-`offers` or `provisioning` routers. Licensing's issuer is composed; Vendor still
+env file) composes and runs everything and does not mount the Deployment Control,
+`licence_delivery`, `offers` or `provisioning` routers. Licensing's issuer is composed; Vendor still
 owns its route adapter, key custody and delivery. A withheld surface is not a
 disabled subsystem: licence key custody still loads at boot, and a test asserts
 it.
@@ -492,10 +496,11 @@ Four composed modules are queued against the same hole: `dotmac-release-catalog`
 `dotmac-approvals` each state in their own manifest prose that the release
 shipping their routers is still ahead of them, and `dotmac-deployment-control`
 has shipped an operator browser surface — four `platform_admin` screens and two
-navigation entries — since `0.1.0a8`. The pin here is `0.1.0a6`, which is the
-only reason nothing is mounted yet. That is why the repair is derivation rather
-than a roster entry: a roster entry closes one omission, and the omission is a
-class.
+ navigation entries — since `0.1.0a8`. The a13 pin makes that module route-
+ bearing in this assembly. `FULL` explicitly inventories the operator surface;
+ both production profiles withhold it until separate operator publication
+ authorization. That is why the repair is derivation rather than a roster entry:
+ a roster entry closes one omission, and the omission is a class.
 
 ## Production topology
 
@@ -596,24 +601,34 @@ makes a checkout-relative invocation fail loudly instead of quietly running
 whichever bytes were last copied into `/app`.
 
 The CLI is an adapter family, held to hard rule 6 exactly as `router.py` and
-`web.py` are. `vendor_cp.cli.owners` declares, as data, which single service or
-query owner each command delegates to; the table is checked against the parser
-in both directions, no mutating owner may live inside `vendor_cp.cli`, and no
-mutating symbol may be claimed by two commands. `dotmac-platform diagnose
-owners` prints the same table at runtime.
+`web.py` are. `vendor_cp.cli.owners` declares each available command's single
+service or query owner, or the actual refusal handler for an unavailable
+parser entry. The table is checked against the parser in both directions;
+an unavailable entry is non-mutating and architecture-tested as such. No
+mutating owner may live inside `vendor_cp.cli`, and no mutating symbol may be
+claimed by two commands. `dotmac-platform diagnose owners` prints the same
+table at runtime.
 
-Its deployment group is ADR-0013's operator workflow and nothing more: it
-registers a target, declares that target's desired state, proposes a plan,
-carries an `ApprovalEvidence` the approvals module produced into `approve_plan`,
-requests a rollout, and reads. The first two are amendment A6's: § 2's original
-four could only act on a target something else had already created, and nothing
-else was ever going to, so `deployment propose` had nothing to freeze and the
-authorization step had no reachable path to a plan. **`deployment authorize`
-prints the `authorization_ref`** — the rollout id, which is the authorization
-run identity a deployment foundation binds between the canonical descriptor and
-its own execution report. Rendering, applying, observing and rolling back are
-the published Foundation CLI's; `deployment foundation — …` forwards to
-`dotmac-deploy` verbatim and returns its status unchanged.
+Its deployment group currently registers a target, declares that target's
+desired state, and reads. `deployment propose` and `deployment authorize` are
+parser entries that refuse before invoking Control until the admission and
+signer seams below exist. The intended ADR-0013 workflow then proposes a plan,
+carries Approvals evidence into `approve_plan`, and requests a rollout; that
+workflow is not yet executable from this assembly. Rendering, applying,
+observing and rolling back belong to the published Foundation CLI;
+`deployment foundation — …` forwards to `dotmac-deploy` verbatim.
+
+**As-built amendment — 2026-09-17.** The CLI parses `deployment propose` and
+`deployment authorize`, but both currently refuse with
+`evidence.capability_absent`; they do not produce a plan or authorization
+receipt. Control a13 requires `operation`, `descriptor_digest`, and
+`execution_plan_digest` from one Foundation-rendered immutable candidate, and
+requires an injected `AuthorizationSigner` for rollout. This assembly has no
+CLI admission path for that candidate and no custody-approved runtime signer
+installer. Supplying digest flags, resolving a signer pointer, or constructing
+a signer in the CLI would be a second source of authority and violate ADR-0013
+A6.4/key custody. A positive path remains unavailable until those two assembly
+seams are wired; this is not a cutover claim.
 
 Exit codes, the secret-intake rule, the production-shape ratchet and the
 clean-install acceptance are in `docs/operations/installed-cli.md` and are
@@ -724,12 +739,12 @@ acts on. Vendor-owned fleet tables and a Vendor `DeploymentRunner` remain
 forbidden (hard rule 4) — the prohibition was always on a VENDOR-owned fleet
 owner, and composing the independent one is what makes it affordable.
 
-Vendor DOES now present an operator surface over the module's own commands —
-`deployment register-target`, `set-desired-state`, `propose` and `authorize`,
-ADR-0013 as amended by A6 — and that is a surface, not an ownership move.
-Registering a target, setting desired state, proposing a plan and requesting a
-rollout remain `mod_deploy`'s commands; this assembly builds their arguments
-through the one seam and carries their answers back. Suspension,
+Vendor presents an operator surface over `deployment register-target` and
+`set-desired-state`. `propose` and `authorize` parse but currently refuse before
+the Control owner is called (2026-09-17 amendment above). Registering a target
+and setting desired state remain `mod_deploy`'s commands; plan proposal and
+rollout issuance remain its intended ownership, not an assembly-local
+alternative. Suspension,
 decommissioning, credential enrolment and observation recording still have NO
 operator surface here, and each is a separate decision when it is needed.
 

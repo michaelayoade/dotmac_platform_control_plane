@@ -1189,6 +1189,8 @@ CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
             "described",
             "0.1.0a77": "the previous pin, named in past tense while explaining what "
             "pinning alone does NOT do",
+            "0.1.0a98": "the previous pin, named in past tense while explaining "
+            "the version-drift detector",
             "0.1.0a5": "not the kernel at all — `a5/a6` here are the composed "
             "commercial modules' versions, on a line that happens to say kernel",
             "0.1.0a6": "not the kernel at all — see `a5`",
@@ -1197,26 +1199,19 @@ CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
     "docs/cutover-readiness.md": CurrentVersionClaim(
         assertions=("| `dotmac-kernel` | `{pin}` |",),
         other_kernel_versions={
-            "0.1.0a100": "the newest PUBLISHED kernel, in the table's `Released` "
+            "0.1.0a102": "the newest PUBLISHED kernel, in the table's `Released` "
             "column — a different fact from the pin, and stating it is the point",
-            "0.1.0a101": "the unpublished repair, named as not-yet-available",
             "0.1.0a61": "a LANDED migration step in the cutover table's history "
             "column (`Kernel a61 -> a77`), not a claim about now",
             "0.1.0a77": "the other end of that landed step — see `a61`",
         },
     ),
-    # No assertion: the hard-rules file states kernel versions only as the
-    # worked example behind a rule ("a98, a99 and a100 reach a product-owned
-    # driver identically"). It claims nothing about what this checkout runs, so
-    # there is no sentence for a repin to make stale — but it is monitored, so
-    # a pin claim cannot be added to it without being declared.
+    # No assertion: the hard-rules file states kernel versions as a worked
+    # example and names a98 as the prior pin, not this checkout's current pin.
+    # It is still monitored so a stale pin claim cannot pass as silence.
     "AGENTS.md": CurrentVersionClaim(
         other_kernel_versions={
-            # `0.1.0a98` is deliberately NOT declared here. It equals the pin
-            # today, so nothing consults it — and the sentence around it says
-            # "a98 is what runs in production", which a repin makes FALSE.
-            # Declaring it would suppress exactly the failure that should
-            # happen on the day the pin moves.
+            "0.1.0a98": "the prior repository pin, named in past tense",
             "0.1.0a99": "a published kernel the example compares against",
             "0.1.0a100": "a published kernel the example compares against",
         },
@@ -1666,10 +1661,10 @@ def test_the_bare_reader_still_bites_over_the_real_tree() -> None:
         "in the same change that the bare form is no longer exercised."
     )
     assert (
-        "0.1.0a100"
+        "0.1.0a102"
         in CURRENT_VERSION_ASSERTIONS["docs/cutover-readiness.md"].other_kernel_versions
     )
     # And the bare spelling really is the only one on that line: if the document
     # ever writes it in full, this control stops exercising the repaired half.
-    assert "a100" in readiness
+    assert "a102" in readiness
     assert "0.1.0a100" not in readiness

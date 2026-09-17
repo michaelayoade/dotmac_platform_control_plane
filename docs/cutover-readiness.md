@@ -1,11 +1,26 @@
 # Cutover readiness — Deployment Control, delivery, Brand Profiles
 
-**Dated 2026-08-21; updated 2026-08-26.** What the remaining ADR-0007 slices
+**Dated 2026-08-21; updated 2026-08-26; status amended 2026-09-17.** What the remaining ADR-0007 slices
 need before anyone writes them, and what is already true. Nothing here takes a
 pin, composes a module or moves a writer. The machine-readable half is
 `src/vendor_cp/cutover_readiness.py`, held by
 `tests/architecture/test_cutover_readiness.py`; where the two disagree, the test
 is the one that fails.
+
+**Status amendment — 2026-09-17:** Deployment Control a13 is now pinned in
+`pyproject.toml`. This amendment supersedes the current-pin statements below;
+the historical readiness evidence remains unchanged. The pin installs a13's
+attestation and rehearsal surfaces but does not, by itself, retire a
+caller-supplied attestation evaluator path; that is a separate adoption and
+cutover decision.
+
+**CLI bridge amendment — 2026-09-17:** `deployment propose` and `deployment
+authorize` remain explicitly unavailable. The former needs one
+Foundation-rendered immutable candidate as its source of `operation`,
+`descriptor_digest`, and `execution_plan_digest`; the latter needs an
+assembly-injected, custody-approved authorization signer. Neither seam is
+wired here. This is a fail-closed implementation state, not evidence of a
+positive deployment-authorization cutover.
 
 ## The rule this document is written under
 
@@ -30,8 +45,8 @@ not a coordinate and is not used below.
 
 | Claim | Kind | Oracle |
 | --- | --- | --- |
-| `dotmac-deployment-control` `0.1.0a2` is published and installable | `release_run` | `dotmac_starter_mt` release run `32471956734` — published, installed the wheel back from the private index, registered the manifest, then tagged |
-| a2 is pinnable | `peeled_tag` | tag `dotmac-deployment-control-v0.1.0a2`, peeled commit `5c87272a632096850a80e5e9dc1f625a97c3e5d6` (PR #308) |
+| `dotmac-deployment-control` `0.1.0a13` is published and installable | `release_run` | Control release run `34687474025`, independently verified by run `34687542590` (15/15 behavioural canaries) |
+| a13 is pinnable | `peeled_tag` | tag `dotmac-deployment-control-v0.1.0a13`, peeled commit `8173954886396e8d2fbb8e3b470aa2dfddbe64b0` |
 | `dotmac-commercial-agreements` `0.1.0a2` is published and installable | `release_run` | `dotmac_starter_mt` release run `33010902146` — published, installed the wheel back from the private index, registered the manifest, then tagged |
 | Commercial Agreements a2 is pinnable | `peeled_tag` | tag `dotmac-commercial-agreements-v0.1.0a2`, peeled commit `42acc8b30f1bcaed1580d312fd33d7b5ef358817` (release-record PR #470, contained by `dotmac_starter_mt@2cab76b442e6cc6c8ed81a409d943ba250351c3d`) |
 | `dotmac-brand-profiles` `0.1.0a1` is pinnable | `peeled_tag` | tag `dotmac-brand-profiles-v0.1.0a1`, peeled commit `ed69f9dfdeea493dab7d7ba25c04e940f0870545` |
@@ -81,7 +96,7 @@ amendment at the owning source. Six slices, three landed.
 | 1 | Kernel a61 → a77 | — | landed (#63) |
 | 2 | Commercial Agreements | `dotmac-commercial-agreements` | landed (#64), ADR-0008, `v015` |
 | 3 | Licensing issuer | `dotmac-licensing` | landed (#65), ADR-0009, `v016` |
-| 4 | **Deployment Control** | `dotmac-deployment-control` | **LANDED** — a2 composed, `v017` sealed the target registrar (ADR-0011 + its 2026-08-21 amendment) |
+| 4 | **Deployment Control** | `dotmac-deployment-control` | **LANDED** — a13 composed; `v017` sealed the target registrar (ADR-0011 + its 2026-08-21 amendment) |
 | 5 | Licence delivery | `dotmac-integration` in Dotmac Integrator | contracted (ADR-0010), blocked on 4 |
 | 6 | Brand Profiles, platform plane | `dotmac-brand-profiles` | released; **deferred by local decision** behind another product |
 
@@ -89,20 +104,23 @@ amendment at the owning source. Six slices, three landed.
 
 | Distribution | Pinned here | Released | Position |
 | --- | --- | --- | --- |
-| `dotmac-kernel` | `0.1.0a98` | a100 | the pin IS the highest floor anything composed declares, and `kernel-pin` executes that both ways; a100 is published and not adopted — it shares this pin's import boundary rather than regressing it, and the repair is a101, which is not yet published — see `docs/operations/kernel-a100-assessment-2026-09-01.md` |
+| `dotmac-kernel` | `0.1.0a101` | a102 | a101 is published, tagged and independently verified; it repairs the import boundary and supplies the ADR-0016 `ProductAssemblySpec.api_documentation` owner. The pin now carries that cutover; see the dated amendment in `docs/operations/kernel-a100-assessment-2026-09-01.md`. |
 | `dotmac-approvals` | `0.1.0a5` | a5 | current |
 | `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current (a5 unpublished; never pin it) |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
 | `dotmac-commercial-agreements` | `0.1.0a2` | a2 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
-| `dotmac-deployment-control` | `0.1.0a2` | a2 | current |
+| `dotmac-deployment-control` | `0.1.0a13` | a13 | current; independently verified 15/15 |
 | `dotmac-brand-profiles` | not pinned | a1, tagged | deferred by local decision (ADR-0007 § 6) |
 
 ADR-0007's rule is that a package enters with the coherent slice that consumes
 it, so "not pinned" for Deployment Control is sequencing, not a blocker: the
 release exists and the slice may be written now.
 
-**a2 rather than a1**, because a1 returns the raw unique-constraint error
+**a13 rather than a2**, because a13 is the current independently verified
+release and adds the attestation registry plus the `RehearsalGrantV1` type (with
+no rehearsal migration or durable consumption store). The
+earlier a2 rather than a1 choice was made because a1 returns the raw unique-constraint error
 instead of the canonical verdict when two genuinely concurrent first
 observations race, and this assembly receives arrivals from deployments it does
 not control over an at-least-once transport.

@@ -743,75 +743,39 @@ def deployment_targets(args: argparse.Namespace) -> Result:
 
 
 def deployment_propose(args: argparse.Namespace) -> Result:
-    """Freeze the target's desired state, and print what an approval must bind to."""
-    from vendor_cp.deployment.adapter import (
-        ProposePlanRequest,
-        propose_deployment_plan,
-    )
+    """Refuse until the Foundation supplies the complete immutable candidate.
 
-    with platform_db() as db:
-        plan = propose_deployment_plan(
-            db,
-            ProposePlanRequest(
-                command_id=args.command_id,
-                target_id=UUID(args.target_id),
-                approval_policy_code=args.policy_code,
-                approval_policy_version=args.policy_version,
-                actor_ref=args.actor_ref,
-            ),
-        )
-        return Result(
-            command="deployment propose",
-            data=_fields(plan),
-            references={
-                "plan_id": str(plan.plan_id),
-                "plan_digest": plan.plan_digest,
-                "approval_subject_type": plan.subject_type,
-                "approval_subject_id": str(plan.plan_id),
-                "approval_content_hash": plan.approval_content_hash,
-            },
-            message=(
-                "open an approval request against approval_subject_type / "
-                "approval_subject_id / approval_content_hash, have it decided, "
-                "then run `deployment authorize`"
-            ),
-        )
+    Control a13 requires `operation`, `descriptor_digest`, and
+    `execution_plan_digest` together.  The only renderer for the two digests
+    is the Foundation-facing candidate seam, where they are derived from an
+    accepted descriptor, receipt, and registry observation.  This CLI has no
+    admission path for that immutable source; accepting flags would make the
+    three values independent operator assertions.
+    """
+    del args
+    raise refuse(
+        "evidence.capability_absent",
+        "deployment propose requires a Foundation-rendered immutable candidate; "
+        "this CLI cannot derive operation, descriptor digest, and execution-plan "
+        "digest from an admitted source",
+    )
 
 
 def deployment_authorize(args: argparse.Namespace) -> Result:
-    """Carry the approval into the frozen plan and request the rollout.
+    """Refuse until the assembly injects a custody-approved signer.
 
-    The `authorization_ref` this prints is the fleet's authorization run
-    identity — the middle term a deployment foundation binds between the
-    canonical descriptor and its own execution report. It is the reason this
-    command exists.
+    `authorize_deployment` now requires Control's `AuthorizationSigner`.
+    The local signer module deliberately holds pointers only; it neither
+    dereferences private material nor provides a runtime signer installer.
+    Passing a CLI flag, synthesising a signer, or resolving the pointer here
+    would violate that custody boundary.
     """
-    from vendor_cp.deployment.adapter import AuthorizeRequest, authorize_deployment
-
-    with platform_db() as db:
-        receipt = authorize_deployment(
-            db,
-            AuthorizeRequest(
-                command_id=args.command_id,
-                plan_id=UUID(args.plan_id),
-                approval_request_id=UUID(args.approval_request_id),
-                rollout_ref=args.rollout_ref,
-                reason=args.reason,
-                actor_ref=args.actor_ref,
-                expected_plan_digest=args.expect_plan_digest,
-                expected_plan_version=args.expect_plan_version,
-            ),
-        )
-        return Result(
-            command="deployment authorize",
-            data=_fields(receipt),
-            references={
-                "authorization_ref": receipt.authorization_ref,
-                "rollout_ref": receipt.rollout_ref,
-                "plan_digest": receipt.plan_digest,
-                "approval_decision_ref": receipt.approval_decision_ref,
-            },
-        )
+    del args
+    raise refuse(
+        "evidence.capability_absent",
+        "deployment authorize requires an assembly-injected authorization signer; "
+        "no signer is available to the CLI without violating key custody",
+    )
 
 
 def deployment_plan(args: argparse.Namespace) -> Result:
