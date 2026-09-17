@@ -172,10 +172,22 @@ jobs:
           # If this prints nothing the command exits non-zero and says why: the
           # pin would then be higher than anything the composition needs, and
           # the mutation below would be demanding a failure that cannot happen.
+          # Entries are either absent modules or exact `module:symbol` pairs;
+          # a pre-existing module is not evidence that it carries every public
+          # symbol this assembly imports.
           poetry run python scripts/kernel_floor.py missing-from \
             --kernel-root "${KERNEL_ROOT}" > missing.txt
-          echo "the composition imports these, and ${EXCLUDED} has none of them:"
+          echo "the composition or assembly imports these, and ${EXCLUDED} lacks them:"
           cat missing.txt
+          # The right-failure proof is stricter than the inventory above. It
+          # names ONLY the exact assembly symbol(s) whose recorded first-
+          # shipping version equals the effective pin. An unrelated missing
+          # module is evidence that the old wheel is old, not evidence that it
+          # is missing the boundary that binds this release's pin.
+          poetry run python scripts/kernel_floor.py binding-missing-from \
+            --kernel-root "${KERNEL_ROOT}" > binding-missing.txt
+          echo "the exact pin-binding symbols absent from ${EXCLUDED}:"
+          cat binding-missing.txt
 
           # 1. THE RESOLVER. The pin has to be enforced by something that
           #    actually resolves, not only by a number in a file.
@@ -251,19 +263,24 @@ jobs:
             exit 1
           fi
           # 3. THE RIGHT FAILURE. Unrelated breakage must not be able to stand
-          #    in for the proof, so the traceback has to name a module the
-          #    excluded kernel was measured to be missing.
+          #    in for the proof, so the traceback has to name an exact missing
+          #    symbol that establishes this pin — not merely any missing module
+          #    in the older wheel.
           matched=""
-          while read -r module; do
-            [ -n "${module}" ] || continue
-            if grep -q -F -- "${module}" mutation.txt; then
-              matched="${module}"
+          while IFS=: read -r module symbol; do
+            requirement="${module}:${symbol}"
+            [ -n "${requirement}" ] || continue
+            if [ -n "${module}" ] && [ -n "${symbol}" ] && \
+               awk -v module="${module}" -v symbol="${symbol}" \
+                 'index($0, module) && index($0, symbol) { found = 1 } END { exit !found }' \
+                 mutation.txt; then
+              matched="${requirement}"
             fi
-          done < missing.txt
+          done < binding-missing.txt
           if [ -z "${matched}" ]; then
             echo "::error::the boot failed under dotmac-kernel ${EXCLUDED}, but its"
-            echo "output names none of the modules that kernel is missing"
-            echo "($(tr '\n' ' ' < missing.txt)). This mutation observed some other"
+            echo "output names none of the exact pin-binding symbols that kernel is missing"
+            echo "($(tr '\n' ' ' < binding-missing.txt)). This mutation observed some other"
             echo "breakage and the pin is still unproven."
             exit 1
           fi
@@ -291,10 +308,11 @@ jobs:
             dotmac-vendor-control-plane:ci \
             -c "from vendor_cp.main import app; \
                 assert app is not None; \
-                assert app.openapi_url is None; \
+                assert app.openapi_url == '/openapi.json'; \
                 assert app.docs_url is None; \
                 assert app.redoc_url is None; \
                 paths = {getattr(route, 'path', '') for route in app.routes}; \
+                assert '/openapi.json' in paths, paths; \
                 assert not paths & {'/docs', '/docs/oauth2-redirect', '/redoc'}, paths"
       # ── Clean-install acceptance ────────────────────────────────────────
       # Six steps, and step 3 is the one that cannot be faked. The runtime stage

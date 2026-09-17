@@ -11,9 +11,9 @@ Two directions, and both have to be able to fail:
   declared floor did not require. The static half below refuses a pin that does
   not satisfy every composed distribution's own `Requires-Dist`.
 * pinned too HIGH — a kernel upgrade nobody asked for still owes the migration
-  rehearsal a kernel upgrade owes. `missing-from` refuses when every module the
-  composition imports is already present in the excluded kernel, and the pin is
-  held equal to the highest floor anything composed declares.
+  rehearsal a kernel upgrade owes. The mutation's right-failure half names an
+  exact binding requirement absent from the excluded kernel; an unrelated
+  missing module cannot stand in for it.
 * the EQUALITY ITSELF wrong — `pin == max(composed floors)` was only the whole
   rule while the assembly's own imports were satisfied by that maximum. That was
   a coincidence nothing checked. The subject is named now:
@@ -56,11 +56,13 @@ from kernel_floor import (  # noqa: E402
     INERT_NON_FAMILY_REGIONS,
     FloorError,
     absent_from_kernel,
+    absent_symbols_from_kernel,
     absorbed_external_modules,
     assembly_import_floor,
     assembly_kernel_requirements,
     assembly_source_symbols,
     binding_distribution,
+    binding_symbol_requirements,
     composed_distribution_maximum,
     composed_distributions,
     declared_kernel_floors,
@@ -73,6 +75,7 @@ from kernel_floor import (  # noqa: E402
     kernel_import_sites,
     kernel_importers_in_inert_regions,
     kernel_imports,
+    missing_binding_symbols_from_kernel,
     newest_excluded,
     parse,
     sites_naming,
@@ -301,6 +304,71 @@ def test_absent_from_kernel_is_sensitive_in_both_directions(tmp_path: Path) -> N
     assert absent_from_kernel(kernel, (*imported, "dotmac_kernel.transactions")) == (
         "dotmac_kernel.transactions",
     )
+
+
+def test_absent_symbols_from_kernel_detects_a_new_name_in_an_old_module(
+    tmp_path: Path,
+) -> None:
+    """The a101 boundary is a missing name, not a missing module."""
+
+    kernel = tmp_path / "dotmac_kernel"
+    kernel.mkdir()
+    (kernel / "__init__.py").write_text("")
+    (kernel / "api_documentation.py").write_text(
+        "def older_policy() -> None:\n    pass\n"
+    )
+
+    required = {
+        "dotmac_kernel.api_documentation": frozenset(
+            {"older_policy", "environment_api_documentation_policy"}
+        )
+    }
+    assert absent_symbols_from_kernel(kernel, required) == (
+        "dotmac_kernel.api_documentation:environment_api_documentation_policy",
+    )
+
+
+def test_dynamic_kernel_exports_are_refused_rather_than_guessed_at(
+    tmp_path: Path,
+) -> None:
+    kernel = tmp_path / "dotmac_kernel"
+    kernel.mkdir()
+    (kernel / "__init__.py").write_text("")
+    (kernel / "dynamic.py").write_text(
+        "def __getattr__(name: str) -> object:\n    return object()\n"
+    )
+
+    with pytest.raises(FloorError, match="dynamic exports"):
+        absent_symbols_from_kernel(
+            kernel,
+            {"dotmac_kernel.dynamic": frozenset({"possibly_dynamic"})},
+        )
+
+
+def test_only_the_exact_pin_binding_symbol_is_admissible_for_mutation(
+    tmp_path: Path,
+) -> None:
+    """An unrelated missing old-module cannot stand in for the pin boundary."""
+
+    kernel = tmp_path / "dotmac_kernel"
+    kernel.mkdir()
+    (kernel / "__init__.py").write_text("")
+    (kernel / "boundary.py").write_text("# old wheel, before binding\n")
+
+    unrelated = absent_from_kernel(kernel, ("dotmac_kernel.unrelated",))
+    floors = {
+        "dotmac_kernel.unrelated:unrelated_name": "0.1.0a7",
+        "dotmac_kernel.boundary:binding_name": "0.1.0a8",
+    }
+    assert unrelated == ("dotmac_kernel.unrelated",)
+    assert binding_symbol_requirements("0.1.0a8", floors) == {
+        "dotmac_kernel.boundary": frozenset({"binding_name"})
+    }
+    assert missing_binding_symbols_from_kernel(
+        kernel,
+        "0.1.0a8",
+        floors,
+    ) == ("dotmac_kernel.boundary:binding_name",)
 
 
 def test_comparing_against_a_directory_that_is_not_a_kernel_is_refused(
@@ -1095,12 +1163,19 @@ def test_the_mutation_lane_derives_its_versions_and_module_names() -> None:
 def test_the_mutation_lane_calls_every_verb_it_needs() -> None:
     executable = _executable_workflow()
 
-    for verb in ("pinned", "excluded", "missing-from", "assembly-satisfied"):
+    for verb in (
+        "pinned",
+        "excluded",
+        "missing-from",
+        "binding-missing-from",
+        "assembly-satisfied",
+    ):
         assert f"kernel_floor.py {verb}" in executable, (
-            f"the mutation lane never asks for `{verb}`. All four derived facts "
+            f"the mutation lane never asks for `{verb}`. All five derived facts "
             "are load-bearing: the pin it installs, the version it must be "
-            "refused against, the name its failure has to carry, and the "
-            "premise that makes the equality rule the whole rule."
+            "refused against, the broad old-wheel inventory, the exact "
+            "pin-binding symbol its failure has to carry, and the premise that "
+            "makes the equality rule the whole rule."
         )
 
 
