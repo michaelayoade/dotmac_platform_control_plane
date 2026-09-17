@@ -1147,7 +1147,17 @@ def test_the_mutation_lane_derives_its_versions_and_module_names() -> None:
         "declaration and the mutation target from the index, or the lanes stop "
         "tracking what they claim to test."
     )
-    named = re.findall(r"dotmac_kernel\.[a-z_]+", executable)
+    # The exact repair probe deliberately names its defect path. The mutation
+    # is different: its missing module must still come from the installed
+    # composition, not a literal that goes stale on the next floor bump.
+    mutation = executable[
+        executable.index(
+            "EXCLUDED=$(poetry run python scripts/kernel_floor.py"
+        ) : executable.index(
+            'echo "dotmac-kernel ${EXCLUDED} cannot boot this assembly:'
+        )
+    ]
+    named = re.findall(r"dotmac_kernel\.[a-z_]+", mutation)
     assert not named, (
         f"the workflow names {named} literally. The module the mutation's "
         "failure must carry is derived from the composition's real imports, for "
@@ -1201,7 +1211,7 @@ def test_repair_probe_uses_closed_wheels_and_no_product_environment() -> None:
     assert "sqlalchemy.exc.ArgumentError: Could not parse SQLAlchemy URL" in executable
     assert "no-DSN negative control reached the separate psycopg path" in executable
     assert "dotmac_kernel.db' not in sys.modules" in executable
-    assert "exact accepted Governance revision" in executable
+    assert "kernel_floor.py repair-admission" in executable
 
 
 def test_repair_probes_share_one_transitive_wheelhouse_before_imports() -> None:
