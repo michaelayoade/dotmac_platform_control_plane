@@ -148,24 +148,166 @@ jobs:
           poetry run python scripts/kernel_floor.py floors
           echo "the pin is bound by: $(poetry run python scripts/kernel_floor.py binding)"
 
-          # Compatibility is derived from imports, not from the staged repair
-          # pin. a100 and a101 have byte-identical api-documentation bytes, so
-          # the current a101 pin has no import-floor justification. Until
-          # Michael decides whether to restore a100 or record a distinct repair
-          # policy, this deliberately fails red at the equality gate below.
+          # Compatibility is derived from imports, not from the repair pin.
+          # Its exact floor is measured below from the hash-checked a100 wheel;
+          # a101 is admitted only by the exact accepted Governance policy below.
+          COMPATIBILITY=$(poetry run python scripts/kernel_floor.py compatibility-floor)
+
+          # The one accepted over-floor candidate is receipt-bound and exact,
+          # not a general >= rule. Record its immutable receipt before
+          # downloading either probe wheel.
+          poetry run python scripts/kernel_floor.py repair-candidate
+          poetry run python scripts/kernel_floor.py repair-evidence > repair-evidence.env
+          REPAIR_VERSION=$(sed -n 's/^repair_version=//p' repair-evidence.env)
+          REPAIR_WHEEL_SHA256=$(sed -n 's/^repair_wheel_sha256=//p' repair-evidence.env)
+          REPAIR_FLOOR=$(sed -n 's/^repair_floor=//p' repair-evidence.env)
+          REPAIR_FLOOR_WHEEL_SHA256=$(sed -n 's/^repair_floor_wheel_sha256=//p' repair-evidence.env)
+          REPAIR_SOURCE_SHA=$(sed -n 's/^repair_source_sha=//p' repair-evidence.env)
+          REPAIR_RECEIPT=$(sed -n 's/^repair_receipt=//p' repair-evidence.env)
+          REPAIR_RECEIPT_SHA256=$(sed -n 's/^repair_receipt_sha256=//p' repair-evidence.env)
+          test "${COMPATIBILITY}" = "${REPAIR_FLOOR}"
+          test -n "${REPAIR_VERSION}"
+          test -n "${REPAIR_WHEEL_SHA256}"
+          test -n "${REPAIR_FLOOR_WHEEL_SHA256}"
+          test -n "${REPAIR_SOURCE_SHA}"
+          test -n "${REPAIR_RECEIPT}"
+          test -n "${REPAIR_RECEIPT_SHA256}"
+          curl --fail --silent --show-error --location "${REPAIR_RECEIPT}" \
+            --output repair-receipt.json
+          test "$(sha256sum repair-receipt.json | awk '{print $1}')" = "${REPAIR_RECEIPT_SHA256}"
+          python - "${REPAIR_VERSION}" "${REPAIR_SOURCE_SHA}" "${REPAIR_WHEEL_SHA256}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          receipt = json.loads(pathlib.Path("repair-receipt.json").read_text())
+          version, source, wheel = sys.argv[1:]
+          assert receipt["version"] == version
+          assert receipt["source_sha"] == source
+          assert receipt["authorization"]["source_sha"] == source
+          assert any(
+              item["name"] == f"dotmac_kernel-{version}-py3-none-any.whl"
+              and item["sha256"] == wheel
+              for item in receipt["files"]
+          )
+          PY
+
+          # Clean-wheel evidence is intentionally isolated from this product:
+          # no checkout, no product driver, no DSN and no PYTHONPATH. The a100
+          # negative control must fail on its eager URL construction; with no
+          # DSN, that comes before the separate DSN-set psycopg observation.
+          # The exact a101 receipt wheel must import the factory without loading
+          # either that driver or dotmac_kernel.db. Neither wheel is rebuilt.
+          for probe in floor repair; do
+            python -m venv "/tmp/kernel-${probe}-clean"
+          done
+          mkdir -p /tmp/kernel-floor-wheel /tmp/kernel-repair-wheel
+          CLEAN_CWD=$(mktemp -d)
+          "/tmp/kernel-floor-clean/bin/pip" download --quiet --no-cache-dir --only-binary=:all: --no-deps \
+            --index-url "https://pypi.org/simple" \
+            --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
+            --dest /tmp/kernel-floor-wheel "dotmac-kernel==${REPAIR_FLOOR}"
+          FLOOR_WHEEL=$(find /tmp/kernel-floor-wheel -name '*.whl' -type f -print -quit)
+          test -n "${FLOOR_WHEEL}"
+          test "$(sha256sum "${FLOOR_WHEEL}" | awk '{print $1}')" = "${REPAIR_FLOOR_WHEEL_SHA256}"
+          "/tmp/kernel-repair-clean/bin/pip" download --quiet --no-cache-dir --only-binary=:all: --no-deps \
+            --index-url "https://pypi.org/simple" \
+            --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
+            --dest /tmp/kernel-repair-wheel "dotmac-kernel==${REPAIR_VERSION}"
+          REPAIR_WHEEL=$(find /tmp/kernel-repair-wheel -name '*.whl' -type f -print -quit)
+          test -n "${REPAIR_WHEEL}"
+          test "$(sha256sum "${REPAIR_WHEEL}" | awk '{print $1}')" = "${REPAIR_WHEEL_SHA256}"
+
+          # Both clean probes must differ only in their exact Kernel wheel.
+          # A metadata change or two independent resolver outcomes would make
+          # a passing repair probe ambiguous, so fail before either import.
+          python - "${FLOOR_WHEEL}" "${REPAIR_WHEEL}" <<'PY'
+          from email.parser import Parser
+          from pathlib import Path
+          from zipfile import ZipFile
+          import sys
+
+          def dependency_contract(path: str) -> tuple[tuple[str, ...], str | None]:
+              with ZipFile(Path(path)) as wheel:
+                  names = [name for name in wheel.namelist() if name.endswith(".dist-info/METADATA")]
+                  assert len(names) == 1, f"expected one METADATA entry in {path}"
+                  message = Parser().parsestr(wheel.read(names[0]).decode("utf-8"))
+              return tuple(sorted(message.get_all("Requires-Dist", []))), message.get("Requires-Python")
+
+          assert dependency_contract(sys.argv[1]) == dependency_contract(sys.argv[2]), (
+              "the a100 and a101 wheel dependency contracts differ"
+          )
+          PY
+
+          # Resolve transitive wheels ONCE, then install both clean venvs from
+          # those same local files with the verified subject wheel explicit.
+          # This holds the probe environment constant without claiming those
+          # freshly resolved transitive bytes are release-byte provenance.
+          mkdir -p /tmp/kernel-common-wheelhouse
+          "/tmp/kernel-floor-clean/bin/pip" download --quiet --no-cache-dir --only-binary=:all: \
+            --index-url "https://pypi.org/simple" \
+            --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
+            --dest /tmp/kernel-common-wheelhouse "${FLOOR_WHEEL}"
+          "/tmp/kernel-floor-clean/bin/pip" install --quiet --no-index \
+            --find-links /tmp/kernel-common-wheelhouse "${FLOOR_WHEEL}"
+          "/tmp/kernel-repair-clean/bin/pip" install --quiet --no-index \
+            --find-links /tmp/kernel-common-wheelhouse "${REPAIR_WHEEL}"
+          for probe in floor repair; do
+            expected="${REPAIR_FLOOR}"
+            if [ "${probe}" = repair ]; then expected="${REPAIR_VERSION}"; fi
+            env -u PYTHONPATH "/tmp/kernel-${probe}-clean/bin/python" - "${expected}" \
+              > "/tmp/kernel-${probe}-inventory.txt" <<'PY'
+          import importlib.metadata as metadata
+          import re
+          import sys
+
+          assert metadata.version("dotmac-kernel") == sys.argv[1]
+          for distribution in sorted(
+              (
+                  re.sub(r"[-_.]+", "-", item.metadata["Name"]).lower(),
+                  item.version,
+              )
+              for item in metadata.distributions()
+              if item.metadata["Name"]
+              and re.sub(r"[-_.]+", "-", item.metadata["Name"]).lower()
+              not in {"dotmac-kernel", "pip"}
+          ):
+              print(*distribution, sep="==")
+          PY
+          done
+          cmp -s /tmp/kernel-floor-inventory.txt /tmp/kernel-repair-inventory.txt
+
+          poetry run pip install --quiet --no-cache-dir --no-deps --force-reinstall "${FLOOR_WHEEL}"
           poetry run python scripts/kernel_floor.py assembly-needs
           poetry run python scripts/kernel_floor.py assembly-floor
           DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
           PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
             poetry run python scripts/kernel_floor.py assembly-satisfied
+          (cd "${CLEAN_CWD}" && env -u PYTHONPATH -u DATABASE_URL -u PLATFORM_DATABASE_URL \
+            "/tmp/kernel-floor-clean/bin/python" -c \
+            "import importlib.util; assert importlib.util.find_spec('psycopg') is None")
+          if (cd "${CLEAN_CWD}" && env -u PYTHONPATH -u DATABASE_URL -u PLATFORM_DATABASE_URL \
+              "/tmp/kernel-floor-clean/bin/python" -c \
+              "from dotmac_kernel.app_factory import create_app") > a100-clean.log 2>&1; then
+            echo "::error::the compatibility-floor wheel unexpectedly imports cleanly"
+            exit 1
+          fi
+          grep -F "sqlalchemy.exc.ArgumentError: Could not parse SQLAlchemy URL" a100-clean.log
+          if grep -F "No module named 'psycopg'" a100-clean.log; then
+            echo "::error::the no-DSN negative control reached the separate psycopg path"
+            exit 1
+          fi
 
-          # Once the compatibility equality above is true, preserve the
-          # excluded-wheel negative control. It proves a compatible pin is not
-          # merely a number that happens to equal a declared floor.
+          (cd "${CLEAN_CWD}" && env -u PYTHONPATH -u DATABASE_URL -u PLATFORM_DATABASE_URL \
+            "/tmp/kernel-repair-clean/bin/python" -c \
+            "import importlib.util, sys; assert importlib.util.find_spec('psycopg') is None; from dotmac_kernel.app_factory import create_app; assert 'dotmac_kernel.db' not in sys.modules")
+
+          # Preserve the below-floor negative control. It proves the repair
+          # candidate did not erase the ordinary compatibility boundary.
           curl --netrc -sS --fail -o kernel-index.html \
             "https://registry.dotmac.io/api/packages/dotmac/pypi/simple/dotmac-kernel/"
-          EXCLUDED=$(poetry run python scripts/kernel_floor.py excluded --index-html kernel-index.html)
-          echo "the newest published kernel this pin excludes: ${EXCLUDED}"
+          EXCLUDED=$(poetry run python scripts/kernel_floor.py compatibility-excluded --index-html kernel-index.html)
+          echo "the newest published kernel the compatibility floor excludes: ${EXCLUDED}"
 
           python -m venv /tmp/excluded
           /tmp/excluded/bin/pip install --quiet --upgrade pip
@@ -228,6 +370,10 @@ jobs:
             exit 1
           fi
           echo "dotmac-kernel ${EXCLUDED} cannot boot this assembly: ${matched} is absent"
+
+          # Final policy gate: only the exact accepted Governance revision can
+          # activate this one receipt-bound a101-over-a100 repair.
+          poetry run python scripts/kernel_floor.py repair-admission
 
   image:
     runs-on: ubuntu-latest

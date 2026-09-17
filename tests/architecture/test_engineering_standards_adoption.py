@@ -23,7 +23,7 @@ CATEGORIES = {
     "sync_checkpoint",
     "delivery_retry",
 }
-ACCEPTED_GOVERNANCE_SHA = "a19259b10568d29dc0a9617347498fea7f1e7a97"
+ACCEPTED_GOVERNANCE_SHA = "7cb563d38d8f64f8019581a912a64ac466cd9fbd"
 _EVIDENCE_ROW = re.compile(r"^\|\s*`(\w+)`\s*\|\s*(\d+)\s*\|", re.MULTILINE)
 
 
