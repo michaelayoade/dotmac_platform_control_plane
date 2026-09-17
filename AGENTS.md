@@ -534,7 +534,9 @@ disagree, fix the drift.
     arithmetic, because the index has gaps and a version that was never
     published fails a lane while reporting it proven.
 
-    **The pin equals the highest floor anything composed declares.** Too LOW is
+    **The active pin equals the highest floor anything composed declares unless
+    an exact, separately accepted repair policy admits a receipt-bound
+    over-floor candidate.** Too LOW is
     `dotmac-deployment-control 0.1.0a5` — byte-perfect artifacts that could not
     boot, because it imported a kernel module its declared floor did not
     require. Too HIGH is a kernel upgrade taken on nobody's behalf, which still
@@ -550,15 +552,14 @@ disagree, fix the drift.
     takes the pin as its own third input returns the pin and proves nothing.
     § 10.1's own sentence is the rule: a planted assembly import first shipped
     ABOVE that floor must turn the lane RED, planted separately from the
-    composed-set plants and producing a DISTINCT finding. (The governance
-    revision pinned in `.dotmac/standards-profile.json` predates § 10; the
-    binding text is ahead of the pin and repinning is a separate rule-15
-    change.) Equality with the composed maximum alone is correct only while
+    composed-set plants and producing a DISTINCT finding. The assembly pins
+    the accepted Governance revision carrying § 10. Equality with the
+    composed maximum alone is correct only while
     (b) sits at or below (a) — true for today's import-compatibility floor.
-    The staged a101 repair pin exceeds that floor and the equality gate is
-    deliberately red pending Michael's repair-pin decision; a101's independent
-    artifact-adoptability repair is not an import-floor contribution. That
-    premise may not remain unstated: `assembly-satisfied`
+    The accepted a101 repair policy admits only its receipt-bound candidate
+    above the measured a100 floor; a101's independent artifact-adoptability
+    repair is not an import-floor contribution. That premise may not remain
+    unstated: `assembly-satisfied`
     requires every kernel module and every top-level name `src/vendor_cp`
     imports to be provided by an installation of the effective floor, and a
     planted assembly import of a kernel name first shipped above it turns the
@@ -570,7 +571,8 @@ disagree, fix the drift.
 
     **The rule's subject is three named values, not one implied one.**
     `composed_distribution_maximum()`, `assembly_import_floor()` and
-    `effective_kernel_floor() = max(the two)`; the pin equals the third. Before
+    `effective_kernel_floor() = max(the two)`; the pin equals the third unless
+    the exact accepted repair policy applies. Before
     they were named, a reader could not tell whether the assembly had been
     considered and found to contribute nothing or simply never asked.
     `assembly_import_floor()` is `None` while every kernel name the assembly

@@ -13,12 +13,14 @@ Two directions, and both have to be able to fail:
 * pinned too HIGH — a kernel upgrade nobody asked for still owes the migration
   rehearsal a kernel upgrade owes. Once the compatibility equality is true,
   the mutation's right-failure half names a module the excluded kernel lacks.
-* the EQUALITY ITSELF wrong — `pin == max(composed floors)` was only the whole
-  rule while the assembly's own imports were satisfied by that maximum. That was
+* the COMPATIBILITY EQUALITY itself wrong — `pin == max(composed floors)` was
+  only the whole rule while the assembly's own imports were satisfied by that
+  maximum. That was
   a coincidence nothing checked. The subject is named now:
   `effective_kernel_floor() = max(composed_distribution_maximum(),
-  assembly_import_floor())`, and the pin equals THAT. The comparison is still
-  `==`; only what it ranges over moved.
+  assembly_import_floor())`, which is the exact compatibility floor. An active
+  pin must equal that floor; the staged a101 candidate activates only under its
+  exact accepted Governance conditional policy.
 
 The assembly's half is a property-based scan of its executable source compared
 with a CLOSED declaration, and five plants prove the comparison bites: an added
@@ -52,6 +54,12 @@ from kernel_floor import (  # noqa: E402
     ASSEMBLY_SYMBOL_FLOORS,
     DEPENDENCY,
     INERT_NON_FAMILY_REGIONS,
+    REPAIR_COMPATIBILITY_FLOOR,
+    REPAIR_PIN_RECEIPT,
+    REPAIR_PIN_RECEIPT_SHA256,
+    REPAIR_PIN_VERSION,
+    REPAIR_PIN_WHEEL_SHA256,
+    REPAIR_POLICY_GOVERNANCE_SHA,
     FloorError,
     absent_from_kernel,
     absorbed_external_modules,
@@ -65,6 +73,7 @@ from kernel_floor import (  # noqa: E402
     declared_pin,
     effective_kernel_floor,
     executable_python_surface,
+    governance_revision,
     import_closure,
     importable_index,
     index_versions,
@@ -73,6 +82,8 @@ from kernel_floor import (  # noqa: E402
     kernel_imports,
     newest_excluded,
     parse,
+    repair_candidate_evidence,
+    repair_pin_admission,
     sites_naming,
     undeclared_assembly_symbols,
     unsatisfied_kernel_requirements,
@@ -99,7 +110,7 @@ def _pyproject(tmp_path: Path, kernel: str) -> Path:
 # ── the pin, and what binds it ──────────────────────────────────────────────
 
 
-def test_the_pin_is_exactly_the_highest_floor_anything_composed_declares() -> None:
+def test_compatibility_floor_is_exact_and_repair_candidate_is_separate() -> None:
     """Neither under- nor over-constrained, and the module that asked is named.
 
     Held as equality rather than as `>=`. A pin above every declared floor is
@@ -124,21 +135,21 @@ def test_the_pin_is_exactly_the_highest_floor_anything_composed_declares() -> No
     maximum ranges over moved, which is the repair § 10.1 prescribes; loosening
     this to `>=` is the one thing the rule forbids.
 
-    Today the compatibility floor is the composed a100 maximum. The staged a101
-    repair pin is deliberately unequal pending Michael's repair-pin decision;
-    that red equality is a truthful gate, not a licence to make the pin look
-    justified by an import that already existed in a100.
+    The compatibility floor is the composed a100 maximum. a101 is a distinct,
+    exact repair candidate, never a claim that an a100 symbol first shipped at
+    a101. The candidate is tested separately below under its accepted policy.
     """
 
     pin = declared_pin()
     name, floor = effective_kernel_floor()
 
-    assert pin == floor, (
-        f"this assembly pins {DEPENDENCY} {pin} while the effective floor is "
-        f"{floor}, from {name}. Composed floors: "
-        f"{sorted(declared_kernel_floors().items())}; assembly-declared "
-        f"floors: {sorted(ASSEMBLY_SYMBOL_FLOORS.items())}."
+    assert floor == REPAIR_COMPATIBILITY_FLOOR, (
+        f"the compatibility floor is {floor}, from {name}. The narrow repair "
+        f"record is only established above {REPAIR_COMPATIBILITY_FLOOR}; a new "
+        "floor requires a new review rather than silently reusing this one."
     )
+    assert pin == REPAIR_PIN_VERSION
+    repair_candidate_evidence()
 
 
 def test_every_composed_distribution_declares_a_readable_kernel_floor() -> None:
@@ -312,10 +323,10 @@ def test_comparing_against_a_directory_that_is_not_a_kernel_is_refused(
 
 # ── the three values, and the five canaries that prove the gate bites ───────
 #
-# The gate is: `declared_pin() == effective_kernel_floor()`, where the effective
-# floor is the maximum of a value read from composed artifacts' metadata and a
-# value read from this repository's own executable source against a CLOSED
-# declaration.
+# The compatibility gate is: `effective_kernel_floor()`, the maximum of a value
+# read from composed artifacts' metadata and a value read from this repository's
+# own executable source against a CLOSED declaration. The accepted pin differs
+# only as a separately-tested, exact repair candidate under explicit policy.
 #
 # A gate over a clean tree proves nothing about itself, so each of the five ways
 # it can be wrong is planted and shown to be NAMED:
@@ -333,7 +344,7 @@ def test_comparing_against_a_directory_that_is_not_a_kernel_is_refused(
 # census.
 
 
-def test_the_three_values_are_distinct_and_the_pin_equals_the_maximum() -> None:
+def test_the_three_values_are_distinct_and_keep_the_repair_out_of_the_maximum() -> None:
     """The rule, read as three named things rather than one implied one."""
 
     composed_name, composed_floor = composed_distribution_maximum()
@@ -348,7 +359,66 @@ def test_the_three_values_are_distinct_and_the_pin_equals_the_maximum() -> None:
         )
     else:
         assert parse(effective) == max(parse(own), parse(composed_floor))
-    assert declared_pin() == effective
+    assert effective == REPAIR_COMPATIBILITY_FLOOR
+    assert declared_pin() == REPAIR_PIN_VERSION
+    assert declared_pin() != effective
+    repair_candidate_evidence()
+
+
+def test_repair_candidate_refuses_a_different_pin_or_floor() -> None:
+    """SENSITIVITY — this is an exact, two-coordinate candidate, not `>=`."""
+
+    with pytest.raises(FloorError, match="sole repair candidate"):
+        repair_candidate_evidence(pin="0.1.0a102", compatibility_floor="0.1.0a100")
+    with pytest.raises(FloorError, match="only for 0.1.0a100"):
+        repair_candidate_evidence(pin="0.1.0a101", compatibility_floor="0.1.0a101")
+
+
+def test_repair_candidate_refuses_a_nonimmutable_evidence_digest() -> None:
+    """SENSITIVITY — a receipt name without an exact digest is no evidence."""
+
+    with pytest.raises(FloorError, match="repair wheel digest"):
+        repair_candidate_evidence(
+            pin="0.1.0a101",
+            compatibility_floor="0.1.0a100",
+            wheel_sha256="not-a-sha256",
+        )
+    with pytest.raises(FloorError, match="receipt digest"):
+        repair_candidate_evidence(
+            pin="0.1.0a101",
+            compatibility_floor="0.1.0a100",
+            receipt_sha256="not-a-sha256",
+        )
+    with pytest.raises(FloorError, match="compatibility-floor wheel digest"):
+        repair_candidate_evidence(
+            pin="0.1.0a101",
+            compatibility_floor="0.1.0a100",
+            floor_wheel_sha256="not-a-sha256",
+        )
+
+
+def test_repair_candidate_names_an_immutable_receipt_and_wheel() -> None:
+    """The evidence coordinate itself is closed, not a branch or a release name."""
+
+    assert "/387171cdeaf4cea3c2d589c6e41092f65e89e501/" in REPAIR_PIN_RECEIPT
+    assert REPAIR_PIN_RECEIPT.endswith("0.1.0a101.json")
+    assert re.fullmatch(r"[0-9a-f]{64}", REPAIR_PIN_WHEEL_SHA256)
+    assert re.fullmatch(r"[0-9a-f]{64}", REPAIR_PIN_RECEIPT_SHA256)
+
+
+def test_repair_admission_requires_the_exact_accepted_governance_policy() -> None:
+    """The candidate activates only under the accepted conditional policy."""
+
+    repair_pin_admission(policy_sha=REPAIR_POLICY_GOVERNANCE_SHA)
+    with pytest.raises(FloorError, match="requires accepted Governance policy"):
+        repair_pin_admission(policy_sha="a" * 40)
+
+
+def test_repair_admission_reads_the_profile_governance_pin_by_default() -> None:
+    """The default admission path is bound to the profile, not a caller flag."""
+
+    assert governance_revision() == REPAIR_POLICY_GOVERNANCE_SHA
+    repair_pin_admission()
 
 
 def test_the_assembly_is_not_smuggled_into_the_composed_distribution_floors() -> None:
@@ -1088,22 +1158,82 @@ def test_the_mutation_lane_derives_its_versions_and_module_names() -> None:
 def test_the_mutation_lane_calls_every_verb_it_needs() -> None:
     executable = _executable_workflow()
 
-    for verb in ("pinned", "excluded", "missing-from", "assembly-satisfied"):
+    for verb in (
+        "pinned",
+        "compatibility-excluded",
+        "missing-from",
+        "assembly-satisfied",
+        "compatibility-floor",
+        "repair-candidate",
+        "repair-admission",
+        "repair-evidence",
+    ):
         assert f"kernel_floor.py {verb}" in executable, (
-            f"the mutation lane never asks for `{verb}`. All four derived facts "
-            "are load-bearing: the pin it installs, the version it must be "
-            "refused against, the name its failure has to carry, and the "
-            "premise that makes the equality rule the whole rule."
+            f"the mutation lane never asks for `{verb}`. These derived facts "
+            "are load-bearing: the selected pin, the compatibility floor, its "
+            "below-floor mutation target, candidate identity/evidence, and the "
+            "premise that makes the floor computation complete."
         )
 
 
-def test_the_compatibility_equality_precedes_the_excluded_wheel_mutation() -> None:
-    """An unjustified repair pin must fail before it can borrow old-wheel proof."""
+def test_candidate_evidence_precedes_floor_proof_and_final_policy_admission() -> None:
+    """Candidate bytes are checked before a100; policy admission remains last."""
 
     executable = _executable_workflow()
-    assert executable.index("kernel_floor.py assembly-satisfied") < executable.index(
-        "kernel_floor.py excluded"
+    assert (
+        executable.index("kernel_floor.py repair-candidate")
+        < executable.index("kernel_floor.py assembly-satisfied")
+        < executable.index("kernel_floor.py compatibility-excluded")
+        < executable.index("kernel_floor.py repair-admission")
     )
+
+
+def test_repair_probe_uses_closed_wheels_and_no_product_environment() -> None:
+    """The repair evidence must remain a wheel probe, not an assembly boot."""
+
+    executable = _executable_workflow()
+    assert "sha256sum" in executable
+    assert "--only-binary=:all: --no-deps" in executable
+    assert "--no-cache-dir" in executable
+    assert "CLEAN_CWD=$(mktemp -d)" in executable
+    assert 'cd "${CLEAN_CWD}"' in executable
+    assert "env -u PYTHONPATH -u DATABASE_URL -u PLATFORM_DATABASE_URL" in executable
+    assert "sqlalchemy.exc.ArgumentError: Could not parse SQLAlchemy URL" in executable
+    assert "no-DSN negative control reached the separate psycopg path" in executable
+    assert "dotmac_kernel.db' not in sys.modules" in executable
+    assert "exact accepted Governance revision" in executable
+
+
+def test_repair_probes_share_one_transitive_wheelhouse_before_imports() -> None:
+    """A different dependency resolution must not masquerade as a Kernel fix."""
+
+    executable = _executable_workflow()
+    metadata_check = executable.index("dependency_contract(sys.argv[1])")
+    common_download = executable.index("--dest /tmp/kernel-common-wheelhouse")
+    floor_install = executable.index(
+        '--find-links /tmp/kernel-common-wheelhouse "${FLOOR_WHEEL}"'
+    )
+    repair_install = executable.index(
+        '--find-links /tmp/kernel-common-wheelhouse "${REPAIR_WHEEL}"'
+    )
+    inventory_match = executable.index(
+        "cmp -s /tmp/kernel-floor-inventory.txt /tmp/kernel-repair-inventory.txt"
+    )
+    floor_probe = executable.index('"from dotmac_kernel.app_factory import create_app"')
+    repair_probe = executable.index(
+        "from dotmac_kernel.app_factory import create_app; assert"
+    )
+    assert (
+        metadata_check
+        < common_download
+        < floor_install
+        < repair_install
+        < inventory_match
+        < floor_probe
+        < repair_probe
+    )
+    assert executable.count("--no-index") >= 2
+    assert executable.count("--find-links /tmp/kernel-common-wheelhouse") == 2
 
 
 def test_the_pin_the_tests_read_is_the_pin_the_lockfile_resolved() -> None:
