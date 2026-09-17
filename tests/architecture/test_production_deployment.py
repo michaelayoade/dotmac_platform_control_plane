@@ -377,7 +377,7 @@ def test_image_smokes_prove_the_built_bytes_publish_no_api_documentation() -> No
         ".github/candidate/acceptance.sh",
     ):
         source = _text(path)
-        assert "import vendor_cp.api_documentation as policy" in source
+        assert "import dotmac_kernel.api_documentation as policy" in source
         assert "policy.classify_environment(None) == policy.PRODUCTION" in source
         assert "'/docs', '/docs/oauth2-redirect', '/redoc'" in source
         assert "policy.audit_api_documentation(" in source

@@ -38,7 +38,9 @@ screens and two navigation entries, landing in the same facet and the same
 sidebar as the console, which every production profile publishes. Pinning any
 of those would have force-published an operator UI into
 `production-composed-v1` with no line in any inventory and no test able to see
-it.
+it. The current a13 composition is explicit: `FULL` inventories the module,
+while the production profiles withhold it until operator publication is
+authorized.
 
 So the roster is DERIVED. `route_bearing_codes` reads the composed manifests and
 returns the codes that actually contribute routes; `admit_surfaces` compares a
@@ -363,13 +365,14 @@ class VendorDeploymentProfile:
 PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     VendorDeploymentProfile(
         code=FULL,
-        version="3",
+        version="4",
         withheld_surfaces=frozenset(),
         surface_inventory=(
             "accounts",
             "allocations",
             "console",
             "contracts",
+            "deployment_control",
             "licence_delivery",
             "offers",
             "provisioning",
@@ -383,14 +386,17 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "so the tests exercise what the code actually offers. That includes "
             "the fake provisioning laboratory, which is why this profile is "
             "declared a laboratory and can never be production-accepted. "
-            "Version 3 adds the readiness surface, which every profile "
-            "publishes and none may withhold."
+            "Version 4 includes the deployment-control browser surface and "
+            "readiness surface, which every profile publishes or explicitly "
+            "withholds."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_BOOTSTRAP,
-        version="4",
-        withheld_surfaces=frozenset({"licence_delivery", "offers", "provisioning"}),
+        version="5",
+        withheld_surfaces=frozenset(
+            {"deployment_control", "licence_delivery", "offers", "provisioning"}
+        ),
         surface_inventory=(
             "accounts",
             "allocations",
@@ -406,7 +412,9 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "module-owned, while Vendor retains its high-consequence route and "
             "delivery surface; priced offers remain Vendor-owned. Both "
             "behaviours run during bootstrap, but their operator routes are "
-            "withheld until explicitly published. Version 3 additionally "
+            "withheld until explicitly published. Deployment Control's operator "
+            "surface is also withheld pending its separate publication "
+            "authorization. Version 3 additionally "
             "withholds the provisioning laboratory, which versions 1 and 2 "
             "published on the production host: its only implementation "
             "simulates, so every plan and apply an operator ran there returned "
@@ -419,11 +427,12 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_COMPOSED_V1,
-        version="2",
+        version="3",
         withheld_surfaces=frozenset(
             {
                 "accounts",
                 "contracts",
+                "deployment_control",
                 "licence_delivery",
                 "offers",
                 "provisioning",

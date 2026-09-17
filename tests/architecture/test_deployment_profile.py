@@ -8,8 +8,8 @@ Six properties are worth failing the build over:
    assembly that no longer describes its own tables, and the composed
    live-catalogue audit would walk a schema nobody declared. The assertion is
    DERIVED from that tuple rather than listing modules by hand — the previous
-   version named five and the assembly composes six, so `deployment_control`
-   was covered by nothing.
+   composed module's route-bearing surface is covered by the same derived
+   admission check as Vendor features.
 2. **The production profiles actually withhold the routes they claim to.** A
    profile that says it hides a surface and mounts it anyway is worse than no
    profile — it is a written-down belief that is false.
@@ -69,6 +69,7 @@ from pathlib import Path
 import pytest
 from alembic.script import ScriptDirectory
 from dotmac_kernel import ProductAssemblySpec, create_app
+from dotmac_kernel.api_documentation import environment_api_documentation_policy
 from dotmac_kernel.features import FeatureManifest
 from dotmac_kernel.modules import ModuleManifest, ModuleRegistry
 from dotmac_kernel.web_surfaces import WebSurfaceContribution
@@ -113,6 +114,7 @@ PROVISIONING_PREFIX = "/platform/vendor/provisioning"
 ALLOCATIONS_PREFIX = "/platform/vendor/allocations"
 ACCOUNTS_PREFIX = "/platform/vendor/accounts"
 APPROVALS_PREFIX = "/platform/vendor/approvals"
+DEPLOYMENT_CONTROL_PREFIX = "/platform/deployments"
 
 #: The facet-relative path the planted browser surface mounts. Facet-relative
 #: exactly as a11's own screens are, so the composed path carries the
@@ -121,11 +123,10 @@ PLANTED_PATH = "/planted-operator-screen"
 PLANTED_FULL_PATH = f"/platform{PLANTED_PATH}"
 
 #: The retention fields the rule NAMES, as opposed to the exhaustive
-#: field-by-field comparison that backs them. Ratcheted against the pinned
-#: kernel's `ModuleManifest`: `database_catalog` is declared by
-#: `dotmac-deployment-control` a11 and does not exist on the manifest at the
-#: kernel pinned here, so it is listed and its absence is asserted rather than
-#: quietly skipped.
+#: field-by-field comparison that backs them. `database_catalog` is a real
+#: `ModuleManifest` field in the pinned Kernel a101 and is supplied by
+#: `dotmac-deployment-control` a13, so it belongs in the same retention proof
+#: as the other persistence declarations.
 NAMED_RETENTION_FIELDS: tuple[str, ...] = (
     "platform_tables",
     "migration_prefix",
@@ -345,21 +346,16 @@ def test_withholding_a_stateful_module_clears_routes_and_nothing_else() -> None:
     # The named half, spelled out because it is what the rule promises: a
     # withheld surface keeps its manifest and its migration lineage.
     #
-    # Ratcheted in BOTH directions against the PINNED kernel's field set rather
-    # than assumed. `database_catalog` is declared by `dotmac-deployment-control`
-    # a11 and is NOT a field of `ModuleManifest` at the kernel pinned here, so an
-    # unconditional assertion on it fails and a silently-skipped one would be an
-    # assertion that vanished. Recording the absence makes it visible: this fails
-    # if the field appears (add the assertion) and if a named field disappears.
-    absent = [name for name in NAMED_RETENTION_FIELDS if name not in declared]
-    assert absent == ["database_catalog"], (
+    # These are named, load-bearing persistence declarations. A Kernel repin
+    # that removes one must fail rather than silently skipping its retention
+    # assertion.
+    missing = [name for name in NAMED_RETENTION_FIELDS if name not in declared]
+    assert not missing, (
         "the pinned kernel's `ModuleManifest` field set moved. Update "
         "NAMED_RETENTION_FIELDS deliberately rather than letting a retention "
-        f"assertion appear or vanish unnoticed: absent={absent}"
+        f"assertion vanish unnoticed: missing={missing}"
     )
     for name in NAMED_RETENTION_FIELDS:
-        if name not in declared:
-            continue
         original = getattr(planted, name)
         assert getattr(profiled, name) == original, name
         assert original, f"vacuous: the plant declares no {name}"
@@ -514,6 +510,7 @@ def _legacy_spec(profile: VendorDeploymentProfile) -> ProductAssemblySpec:
                 for feature in assembly.VENDOR_SURFACES
             ),
         ),
+        api_documentation=environment_api_documentation_policy(),
         web_enabled=True,
     )
 
@@ -529,30 +526,16 @@ def _route_signatures(spec: ProductAssemblySpec) -> set[tuple[str, str, str]]:
     }
 
 
-def test_extending_admission_to_composed_modules_mounted_and_removed_no_route() -> None:
-    """C — the neutrality claim, measured rather than reasoned.
-
-    ADR-0019 changed which manifests the profile filters and dropped
-    `release_evidence` from three inventories. Neither is allowed to have moved
-    a route, and the profile versions were deliberately NOT bumped on exactly
-    that ground: rule 11 ties a bump to the effective surface set, and a bump
-    that signalled a change nobody made would be its own kind of lie.
-
-    The premise assertion comes first on purpose. This test certifies a change
-    that is already history; it holds only while no composed module bears a
-    route. When one does, DELETE it rather than repairing it — the comparison
-    would then be measuring the new module, not this change.
-    """
-    assert route_bearing_codes(assembly.STATEFUL_MODULES) == frozenset(), (
-        "the premise changed; this test certified that extending profile "
-        "admission to composed modules mounted and removed no route, which was "
-        "true only while no composed module bore one. Delete it — the change it "
-        "certifies is historical — rather than repairing it."
+def test_composed_route_bearing_module_is_profiled_and_admitted() -> None:
+    """ADR-0019's derived admission now covers Deployment Control's UI."""
+    assert route_bearing_codes(assembly.STATEFUL_MODULES) == frozenset(
+        {"deployment_control"}
     )
-    for profile in PROFILES:
-        assert _route_signatures(assembly.build_spec(profile)) == _route_signatures(
-            _legacy_spec(profile)
-        ), profile.code
+    assert "deployment_control" in deployment_profile(FULL).surface_inventory
+    for code in (PRODUCTION_BOOTSTRAP, PRODUCTION_COMPOSED_V1):
+        profile = deployment_profile(code)
+        assert "deployment_control" in profile.withheld_surfaces
+        assert not _under(_paths(code), DEPLOYMENT_CONTROL_PREFIX), code
 
 
 def test_the_neutrality_comparison_can_see_a_route() -> None:
@@ -577,6 +560,7 @@ def test_production_bootstrap_withholds_licensing_offers_and_the_laboratory() ->
     # The correction this profile version exists for: versions 1 and 2
     # published a simulated provisioning API on the production host.
     assert not _under(paths, PROVISIONING_PREFIX), paths
+    assert not _under(paths, DEPLOYMENT_CONTROL_PREFIX), paths
     # SENSITIVITY: the check must be able to see a mounted vendor surface, or it
     # would pass just as well against an assembly that mounted nothing at all.
     assert _under(paths, CONTRACTS_PREFIX), paths
@@ -605,6 +589,7 @@ def test_production_composed_v1_publishes_exactly_its_declared_inventory() -> No
     assert "/platform/console" in paths, paths
     assert _under(paths, ALLOCATIONS_PREFIX), paths
     assert "/health/ready" in paths, paths
+    assert not _under(paths, DEPLOYMENT_CONTROL_PREFIX), paths
     # Withheld: every operator WRITE surface, and the laboratory.
     for prefix in (
         LICENSING_PREFIX,
@@ -630,8 +615,10 @@ def test_the_full_profile_mounts_what_the_production_profiles_withhold() -> None
         ACCOUNTS_PREFIX,
         APPROVALS_PREFIX,
         ALLOCATIONS_PREFIX,
+        DEPLOYMENT_CONTROL_PREFIX,
     ):
         assert _under(paths, prefix), (prefix, paths)
+    assert DEPLOYMENT_CONTROL_PREFIX in paths, paths
 
 
 def test_a_withheld_surface_keeps_its_manifest_declarations() -> None:

@@ -212,6 +212,18 @@ this assembly's local expression of it and is expected to be DELETED, not
 rewritten, when the kernel field exists — the declared policies move to
 `build_spec()` and `vendor_cp.main` returns to one line.
 
+### Amendment — 2026-09-17: Kernel ownership is now the accepted boundary
+
+The accepted decision above named the temporary `vendor_cp.api_documentation`
+module as the policy owner while the kernel obligation was pending. That local
+module has since been retired. The owner is now the Kernel a101
+`ProductAssemblySpec.api_documentation` field and its accompanying
+`dotmac_kernel.api_documentation` implementation. Enforcement occurs at
+application construction time, when `create_app` refuses an assembly without a
+declared policy or with a route inventory that violates it. The retained
+unit, architecture, and CI checks remain the evidence for this boundary; no
+new vendor-control-plane policy owner is introduced.
+
 ## 7. Consequences
 
 * `/docs` and `/redoc` return 404 on vendor-cp-prod. No operator workflow used

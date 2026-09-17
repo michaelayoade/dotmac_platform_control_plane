@@ -3,7 +3,7 @@
 The defect this file exists to prevent, in one sentence: the adapter documented
 that a `None` from `dotmac_deployment_control.drift` meant *"the target has no
 rollout to compare against"* and refused with a message saying so — and that
-condition never fires. Verified against the pinned owner (`0.1.0a6`) rather than
+condition never fires. Verified against the pinned owner (`0.1.0a13`) rather than
 taken second-hand: `drift()` returns `None` when
 `db.get(DeploymentTarget, target_id) is None`, and on nothing else.
 

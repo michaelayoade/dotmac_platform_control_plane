@@ -18,6 +18,10 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
+from dotmac_deployment_control import (
+    AuthorizationSignature,
+    AuthorizationSignerIdentity,
+)
 from dotmac_kernel import NotFoundError
 from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy.orm import Session
@@ -46,6 +50,58 @@ PROFILE_OVERRIDE = Override(
     reason="the application foundation profile document does not exist yet",
 )
 
+OPERATION = "deploy"
+DESCRIPTOR_DIGEST = "sha256:" + "2" * 64
+EXECUTION_PLAN_DIGEST = "sha256:" + "3" * 64
+AUTHORIZED_IMAGE = {
+    "service": "vendor-control-plane",
+    "repository": "ghcr.io/example",
+    "digest": "sha256:" + "a" * 64,
+}
+
+
+class _TestAuthorizationSigner:
+    """A purpose-bound signer double for the direct adapter path only."""
+
+    identity = AuthorizationSignerIdentity(
+        key_id="test-platform-authorizer",
+        algorithm="ed25519",
+        public_key_fingerprint="sha256:" + "0" * 64,
+    )
+
+    def sign(self, canonical_bytes: bytes) -> AuthorizationSignature:
+        return AuthorizationSignature(
+            key_id=self.identity.key_id,
+            algorithm=self.identity.algorithm,
+            public_key_fingerprint=self.identity.public_key_fingerprint,
+            signature="test-signature",
+        )
+
+
+def test_a13_proposal_binding_has_no_absent_default() -> None:
+    """Proposal binding values are required; an adapter must not invent them."""
+    with pytest.raises(TypeError, match="operation"):
+        adapter.ProposePlanRequest(  # type: ignore[call-arg]  # absence is under test
+            command_id="propose-binding-absence",
+            target_id=uuid.uuid4(),
+            approval_policy_code="deployment",
+            approval_policy_version=1,
+        )
+
+
+def test_a13_rollout_does_not_accept_an_absent_signer() -> None:
+    """An authorization envelope is signed authority, never a local default."""
+    with pytest.raises(TypeError, match="signer"):
+        adapter.authorize_deployment(  # type: ignore[call-arg]  # absence is under test
+            None,  # type: ignore[arg-type]
+            adapter.AuthorizeRequest(
+                command_id="authorize-signer-absence",
+                plan_id=uuid.uuid4(),
+                approval_request_id=uuid.uuid4(),
+                rollout_ref="absence",
+            ),
+        )
+
 
 @pytest.fixture
 def db() -> Iterator[Session]:
@@ -58,12 +114,13 @@ def db() -> Iterator[Session]:
 
 
 def _authorized(db: Session) -> str:
-    """Drive the REAL chain to a real authorization reference.
+    """Drive the adapter components with synthetic binding and test signer.
 
     Register a target, declare its desired state, publish a policy, freeze a
-    plan, decide the approval, authorize. Nothing is inserted by hand: the
-    reference under test has to be the one production would produce, or this
-    tests a fixture rather than the resolver.
+    plan, decide the approval, and authorize without inserting rows by hand.
+    This proves the resolver against an owner-produced reference, not the
+    production CLI chain: its immutable-candidate admission and signer custody
+    seams remain unavailable.
     """
     target = adapter.register_deployment_target(
         db,
@@ -82,6 +139,7 @@ def _authorized(db: Session) -> str:
             target_id=target.id,
             release_ref="ghcr.io/example@sha256:" + "a" * 64,
             spec={"replicas": 1},
+            images=(AUTHORIZED_IMAGE,),
         ),
     )
     approvals.publish_policy_version(
@@ -101,6 +159,9 @@ def _authorized(db: Session) -> str:
             target_id=target.id,
             approval_policy_code="deployment",
             approval_policy_version=1,
+            operation=OPERATION,
+            descriptor_digest=DESCRIPTOR_DIGEST,
+            execution_plan_digest=EXECUTION_PLAN_DIGEST,
         ),
     )
     request = approvals.open_request(
@@ -132,6 +193,7 @@ def _authorized(db: Session) -> str:
             approval_request_id=request.request_id,
             rollout_ref=f"rollout-{uuid.uuid4().hex[:8]}",
         ),
+        signer=_TestAuthorizationSigner(),
     )
     return receipt.authorization_ref
 

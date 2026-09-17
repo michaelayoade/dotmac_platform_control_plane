@@ -143,9 +143,8 @@ disagree, fix the drift.
     field and the named subset — `platform_tables`, `migration_prefix`,
     `migration_branch`, `requires`, `audit_actions`, `database_catalog` —
     RATCHETED two-directionally against the pinned kernel's manifest field set,
-    because `database_catalog` is a11's declaration and does not exist on
-    `ModuleManifest` at the pinned kernel. An assertion that cannot run is
-    RECORDED as absent, never skipped. The same plant is proved REAL by mounting
+    because `database_catalog` is now a real `ModuleManifest` field in the
+    pinned kernel and the a13 module supplies it. The same plant is proved REAL by mounting
     its route in a built application once a profile inventories it. That plant is the LIVE coverage; the per-profile
     registry+lineage check over `assembly.STATEFUL_MODULES` — derived from that
     tuple rather than listing modules by hand, the earlier version named five
@@ -379,9 +378,12 @@ disagree, fix the drift.
     reporting itself as `0.1.0a2`, and the fix is removing the second copy
     rather than keeping two and correcting one.
 
-    **The CLI is an adapter and owns no decision.** Every command names one
-    service or query owner in `vendor_cp.cli.owners`; the table is compared
-    against the parser in both directions, no mutating owner may live inside
+    **The CLI is an adapter and owns no business decision.** Each available
+    command names one service or query owner in `vendor_cp.cli.owners`;
+    an explicitly unavailable parser entry instead names its own fail-closed
+    handler and is recorded as non-mutating. The exact unavailable set is
+    architecture-tested against the handlers. The table is compared against
+    the parser in both directions, no mutating owner may live inside
     `vendor_cp.cli`, and no mutating symbol may be claimed by two commands. A
     policy that existed only in the CLI would be a second authority, and an
     operator at a shell would get a different answer from one at a screen.
@@ -606,8 +608,9 @@ disagree, fix the drift.
 
     **A published version is not blamed for a boundary its predecessors share.**
     Kernel a98, a99 and a100 reach a product-owned PostgreSQL driver on the
-    public `create_app` symbol identically; a100 regressed nothing, a98 is what
-    runs in production, and the repair is a101. Operational functionality and
+    public `create_app` symbol identically; a100 regressed nothing, a98 was the
+    prior repository pin, and the a101 repair is staged here. Pinning a101 is
+    not evidence that a new image runs in production. Operational functionality and
     independent artifact adoptability are different properties with different
     oracles, and a pin may not name a version that has not been published
     (`scripts/kernel_floor.py`, `tests/architecture/test_kernel_floor.py`, CI job

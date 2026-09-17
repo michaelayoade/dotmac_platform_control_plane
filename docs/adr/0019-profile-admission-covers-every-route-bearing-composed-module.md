@@ -209,6 +209,18 @@ fails on the premise with an instruction to DELETE it rather than repair it: the
 change it certifies is historical, and a repaired version would be measuring the
 new module instead.
 
+### Amendment — 2026-09-17: Deployment Control surface is now composed
+
+The historical decision above correctly required every profile to account for a
+route-bearing composed module, but its then-current premise was that no such
+module was pinned. Deployment Control a13 now contributes its
+`web_surfaces` operator UI. `FULL` explicitly inventories and mounts
+`deployment_control`; `production-bootstrap` and `production-composed-v1`
+explicitly withhold it pending separate operator publication authorization.
+Their profile versions therefore advance to 5 and 3 respectively (and `FULL`
+advances to 4). This is the profile admission implementation of the accepted
+rule, not a change to the rule itself.
+
 ## 7. Consequences
 
 - Pinning `dotmac-deployment-control` a8 or later now FAILS every declared

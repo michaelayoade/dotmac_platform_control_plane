@@ -241,26 +241,29 @@ def test_diagnose_owners_runs_without_a_database(
     assert envelope["data"]["count"] > 0
 
 
-# ── the deployment journey ──────────────────────────────────────────────────
+# ── deployment parser surface and unavailable authorization bridge ──────────
 
-#: The sequence an operator runs to reach one authorization receipt, in order.
+#: The deployment commands the parser exposes in their intended order.
 #: `approval open` and `approval decide` sit between the third and the fourth
-#: and are deliberately absent: they belong to the approvals owner, and this
-#: tuple is about the steps the DEPLOYMENT group has to provide.
-DEPLOYMENT_JOURNEY = ("register-target", "set-desired-state", "propose", "authorize")
+#: and are deliberately absent: they belong to the approvals owner. This is a
+#: parser inventory, not a claim that the complete authorization journey works.
+DEPLOYMENT_PARSER_SURFACE = (
+    "register-target",
+    "set-desired-state",
+    "propose",
+    "authorize",
+)
 
 
-def test_the_operator_journey_reaches_an_authorization_from_nothing(
+def test_the_deployment_parser_accepts_each_declared_command(
     tmp_path: Path,
 ) -> None:
-    """Every step parses, in order, with no gap an operator bridges by hand.
+    """Every declared command parses; this deliberately proves no execution.
 
-    Until `register-target` and `set-desired-state` existed, `propose` had
-    nothing to freeze: the group presented an authorization step whose SUBJECT
-    no command could bring into existence. A surface whose later steps are
-    unreachable reads as built and is not, so the sequence is driven rather than
-    described — a deleted step fails here instead of being discovered by an
-    operator halfway through a deployment.
+    `propose` and `authorize` currently refuse until the assembly wires their
+    immutable candidate and authorization-signer inputs. Calling parse success
+    "reachability" would turn the unavailable positive path into a false
+    cutover claim.
     """
     spec = tmp_path / "spec.json"
     spec.write_text('{"modules": []}', encoding="utf-8")
@@ -320,23 +323,64 @@ def test_the_operator_journey_reaches_an_authorization_from_nothing(
         ],
     ]
     parsed = [parser.parse_args(vector).command for vector in vectors]
-    assert parsed == [f"deployment {step}" for step in DEPLOYMENT_JOURNEY]
+    assert parsed == [f"deployment {step}" for step in DEPLOYMENT_PARSER_SURFACE]
 
 
-def test_every_journey_step_delegates_to_an_owner_outside_the_cli() -> None:
-    """The journey grew two mutations; neither may have landed here.
+@pytest.mark.parametrize(
+    ("handler_name", "owner_name"),
+    [
+        ("deployment_propose", "propose_deployment_plan"),
+        ("deployment_authorize", "authorize_deployment"),
+    ],
+)
+def test_unwired_deployment_authorization_commands_refuse_before_db_or_owner_call(
+    monkeypatch: pytest.MonkeyPatch,
+    handler_name: str,
+    owner_name: str,
+) -> None:
+    """No incomplete candidate or signer can reach the deployment owner."""
+    from vendor_cp.cli import commands
+    from vendor_cp.deployment import adapter as deployment_adapter
 
-    A step that decided anything locally would be a second authority over
-    `mod_deploy`, and the operator at a shell would get an answer the API and
-    the browser never agreed to.
+    def database_touched() -> None:
+        raise AssertionError("unwired CLI command must not open a database session")
+
+    def owner_touched(*args: object, **kwargs: object) -> None:
+        raise AssertionError("unwired CLI command must not invoke the deployment owner")
+
+    monkeypatch.setattr(commands, "platform_db", database_touched)
+    monkeypatch.setattr(deployment_adapter, owner_name, owner_touched)
+
+    handler = getattr(commands, handler_name)
+    with pytest.raises(Refusal) as caught:
+        handler(argparse.Namespace())
+
+    assert caught.value.code == "evidence.capability_absent"
+    assert caught.value.exit_code is ExitCode.UNAVAILABLE
+
+
+def test_available_deployment_mutations_delegate_outside_the_cli() -> None:
+    """Registration and desired-state mutation still reach the named owner.
+
+    The two unavailable entries instead stop before owner invocation; the
+    inventory must not claim they mutate or delegate while they refuse.
     """
-    from vendor_cp.cli.owners import by_command
+    from vendor_cp.cli.owners import UNAVAILABLE_COMMANDS, by_command
 
     owners = by_command()
-    for step in DEPLOYMENT_JOURNEY:
+    for step in ("register-target", "set-desired-state"):
         owner = owners[f"deployment {step}"]
         assert not owner.module.startswith("vendor_cp.cli"), owner
         assert owner.mutates, owner
+    assert UNAVAILABLE_COMMANDS == {
+        "deployment propose",
+        "deployment authorize",
+    }
+    for command in UNAVAILABLE_COMMANDS:
+        owner = owners[command]
+        assert owner.module == "vendor_cp.cli.commands"
+        assert not owner.mutates
+        assert owner.symbol == command.replace(" ", "_")
 
 
 def test_a_desired_state_spec_that_is_not_an_object_refuses_before_the_database(
