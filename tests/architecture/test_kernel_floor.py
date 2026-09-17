@@ -11,9 +11,8 @@ Two directions, and both have to be able to fail:
   declared floor did not require. The static half below refuses a pin that does
   not satisfy every composed distribution's own `Requires-Dist`.
 * pinned too HIGH — a kernel upgrade nobody asked for still owes the migration
-  rehearsal a kernel upgrade owes. The mutation's right-failure half names an
-  exact binding requirement absent from the excluded kernel; an unrelated
-  missing module cannot stand in for it.
+  rehearsal a kernel upgrade owes. Once the compatibility equality is true,
+  the mutation's right-failure half names a module the excluded kernel lacks.
 * the EQUALITY ITSELF wrong — `pin == max(composed floors)` was only the whole
   rule while the assembly's own imports were satisfied by that maximum. That was
   a coincidence nothing checked. The subject is named now:
@@ -49,20 +48,17 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from kernel_floor import (  # noqa: E402
     ABSORBED_EXTERNAL_MODULES,
-    ASSEMBLY_FLOOR_KEY,
     ASSEMBLY_KERNEL_SYMBOLS,
     ASSEMBLY_SYMBOL_FLOORS,
     DEPENDENCY,
     INERT_NON_FAMILY_REGIONS,
     FloorError,
     absent_from_kernel,
-    absent_symbols_from_kernel,
     absorbed_external_modules,
     assembly_import_floor,
     assembly_kernel_requirements,
     assembly_source_symbols,
     binding_distribution,
-    binding_symbol_requirements,
     composed_distribution_maximum,
     composed_distributions,
     declared_kernel_floors,
@@ -75,7 +71,6 @@ from kernel_floor import (  # noqa: E402
     kernel_import_sites,
     kernel_importers_in_inert_regions,
     kernel_imports,
-    missing_binding_symbols_from_kernel,
     newest_excluded,
     parse,
     sites_naming,
@@ -129,10 +124,10 @@ def test_the_pin_is_exactly_the_highest_floor_anything_composed_declares() -> No
     maximum ranges over moved, which is the repair § 10.1 prescribes; loosening
     this to `>=` is the one thing the rule forbids.
 
-    Today `environment_api_documentation_policy` makes the assembly floor a101,
-    above the composed a100 maximum. That contribution is asserted separately
-    below rather than relied on here, because an equality that holds for two
-    different reasons proves neither.
+    Today the compatibility floor is the composed a100 maximum. The staged a101
+    repair pin is deliberately unequal pending Michael's repair-pin decision;
+    that red equality is a truthful gate, not a licence to make the pin look
+    justified by an import that already existed in a100.
     """
 
     pin = declared_pin()
@@ -306,71 +301,6 @@ def test_absent_from_kernel_is_sensitive_in_both_directions(tmp_path: Path) -> N
     )
 
 
-def test_absent_symbols_from_kernel_detects_a_new_name_in_an_old_module(
-    tmp_path: Path,
-) -> None:
-    """The a101 boundary is a missing name, not a missing module."""
-
-    kernel = tmp_path / "dotmac_kernel"
-    kernel.mkdir()
-    (kernel / "__init__.py").write_text("")
-    (kernel / "api_documentation.py").write_text(
-        "def older_policy() -> None:\n    pass\n"
-    )
-
-    required = {
-        "dotmac_kernel.api_documentation": frozenset(
-            {"older_policy", "environment_api_documentation_policy"}
-        )
-    }
-    assert absent_symbols_from_kernel(kernel, required) == (
-        "dotmac_kernel.api_documentation:environment_api_documentation_policy",
-    )
-
-
-def test_dynamic_kernel_exports_are_refused_rather_than_guessed_at(
-    tmp_path: Path,
-) -> None:
-    kernel = tmp_path / "dotmac_kernel"
-    kernel.mkdir()
-    (kernel / "__init__.py").write_text("")
-    (kernel / "dynamic.py").write_text(
-        "def __getattr__(name: str) -> object:\n    return object()\n"
-    )
-
-    with pytest.raises(FloorError, match="dynamic exports"):
-        absent_symbols_from_kernel(
-            kernel,
-            {"dotmac_kernel.dynamic": frozenset({"possibly_dynamic"})},
-        )
-
-
-def test_only_the_exact_pin_binding_symbol_is_admissible_for_mutation(
-    tmp_path: Path,
-) -> None:
-    """An unrelated missing old-module cannot stand in for the pin boundary."""
-
-    kernel = tmp_path / "dotmac_kernel"
-    kernel.mkdir()
-    (kernel / "__init__.py").write_text("")
-    (kernel / "boundary.py").write_text("# old wheel, before binding\n")
-
-    unrelated = absent_from_kernel(kernel, ("dotmac_kernel.unrelated",))
-    floors = {
-        "dotmac_kernel.unrelated:unrelated_name": "0.1.0a7",
-        "dotmac_kernel.boundary:binding_name": "0.1.0a8",
-    }
-    assert unrelated == ("dotmac_kernel.unrelated",)
-    assert binding_symbol_requirements("0.1.0a8", floors) == {
-        "dotmac_kernel.boundary": frozenset({"binding_name"})
-    }
-    assert missing_binding_symbols_from_kernel(
-        kernel,
-        "0.1.0a8",
-        floors,
-    ) == ("dotmac_kernel.boundary:binding_name",)
-
-
 def test_comparing_against_a_directory_that_is_not_a_kernel_is_refused(
     tmp_path: Path,
 ) -> None:
@@ -435,19 +365,14 @@ def test_the_assembly_is_not_smuggled_into_the_composed_distribution_floors() ->
     assert not any("assembly" in name for name in composed), composed
 
 
-def test_todays_assembly_floor_is_stated_not_relied_on() -> None:
-    """The a101 API-policy import, not the composed a100 maximum, binds today.
+def test_staged_repair_pin_is_not_mistaken_for_the_compatibility_floor() -> None:
+    """a101 is staged for repair/adoptability, not falsely claimed by imports."""
 
-    The composed maximum remains a100, but `assembly.py` imports the policy
-    builder first shipped in a101. Keeping both facts explicit means a later
-    removal or a different newly introduced kernel API cannot silently turn the
-    equality back into an assertion over the wrong subject.
-    """
-
-    coordinate = "dotmac_kernel.api_documentation:environment_api_documentation_policy"
-    assert ASSEMBLY_SYMBOL_FLOORS == {coordinate: declared_pin()}
-    assert assembly_import_floor() == declared_pin()
-    assert effective_kernel_floor() == (ASSEMBLY_FLOOR_KEY, declared_pin())
+    composed_name, composed_floor = composed_distribution_maximum()
+    assert ASSEMBLY_SYMBOL_FLOORS == {}
+    assert assembly_import_floor() is None
+    assert effective_kernel_floor() == (composed_name, composed_floor)
+    assert declared_pin() != composed_floor
 
 
 # ── canary 1: an added symbol ───────────────────────────────────────────────
@@ -1163,20 +1088,22 @@ def test_the_mutation_lane_derives_its_versions_and_module_names() -> None:
 def test_the_mutation_lane_calls_every_verb_it_needs() -> None:
     executable = _executable_workflow()
 
-    for verb in (
-        "pinned",
-        "excluded",
-        "missing-from",
-        "binding-missing-from",
-        "assembly-satisfied",
-    ):
+    for verb in ("pinned", "excluded", "missing-from", "assembly-satisfied"):
         assert f"kernel_floor.py {verb}" in executable, (
-            f"the mutation lane never asks for `{verb}`. All five derived facts "
+            f"the mutation lane never asks for `{verb}`. All four derived facts "
             "are load-bearing: the pin it installs, the version it must be "
-            "refused against, the broad old-wheel inventory, the exact "
-            "pin-binding symbol its failure has to carry, and the premise that "
-            "makes the equality rule the whole rule."
+            "refused against, the name its failure has to carry, and the "
+            "premise that makes the equality rule the whole rule."
         )
+
+
+def test_the_compatibility_equality_precedes_the_excluded_wheel_mutation() -> None:
+    """An unjustified repair pin must fail before it can borrow old-wheel proof."""
+
+    executable = _executable_workflow()
+    assert executable.index("kernel_floor.py assembly-satisfied") < executable.index(
+        "kernel_floor.py excluded"
+    )
 
 
 def test_the_pin_the_tests_read_is_the_pin_the_lockfile_resolved() -> None:

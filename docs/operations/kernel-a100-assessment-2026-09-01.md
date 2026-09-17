@@ -4,10 +4,12 @@
 > its measurements and decision history are unchanged. Kernel `0.1.0a101` was
 > subsequently published, tagged and independently verified (release evidence:
 > `docs/inventories/kernel-release-verifications/0.1.0a101.json` in Starter
-> protected main). It carries the import-boundary repair and the
-> `ProductAssemblySpec.api_documentation` contract. The Platform CP repin to
-> a101 and the ADR-0016 owner cutover supersede this document's then-current
-> conclusion that no pin move was possible.
+> protected main). It carries the import-boundary lazy-resolver repair.
+> `ProductAssemblySpec.api_documentation` and
+> `environment_api_documentation_policy` already exist in a100; they do not
+> establish a101 as an import-compatibility floor. The Platform CP a101 pin is
+> staged pending a separate repair-pin decision, not accepted by this
+> assessment as a compatibility repin.
 
 **Status:** assessed on 2026-09-01, and revised the same day when an independent
 arbitration settled the question this document had left open. The pin holds at

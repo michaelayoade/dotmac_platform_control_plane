@@ -554,8 +554,11 @@ disagree, fix the drift.
     revision pinned in `.dotmac/standards-profile.json` predates § 10; the
     binding text is ahead of the pin and repinning is a separate rule-15
     change.) Equality with the composed maximum alone is correct only while
-    (b) sits at or below (a) — true today, and true by COINCIDENCE. That
-    coincidence may not remain an unstated premise: `assembly-satisfied`
+    (b) sits at or below (a) — true for today's import-compatibility floor.
+    The staged a101 repair pin exceeds that floor and the equality gate is
+    deliberately red pending Michael's repair-pin decision; a101's independent
+    artifact-adoptability repair is not an import-floor contribution. That
+    premise may not remain unstated: `assembly-satisfied`
     requires every kernel module and every top-level name `src/vendor_cp`
     imports to be provided by an installation of the effective floor, and a
     planted assembly import of a kernel name first shipped above it turns the
@@ -594,15 +597,11 @@ disagree, fix the drift.
     with a changed signature satisfies every name-level check and still will not
     boot.
 
-    **The mutation lane installs the newest version the pin excludes and
-    requires this assembly to fail on it** — and to fail for the RIGHT reason:
-    the traceback must name a `dotmac_kernel` module that installation was
-    MEASURED to be missing, compared against the real files of a real install
-    rather than against a hand-kept version-to-module table whose missing row is
-    invisible. A lane satisfied by any non-zero exit is satisfied by a typo'd
-    index URL. Every version and module name in the workflow is derived; a
-    literal there is how a lane keeps passing after it has stopped testing
-    anything, and the architecture test greps for both.
+    **An excluded-wheel mutation can prove only an established compatibility
+    boundary.** It is not run while the staged repair pin lacks an
+    import-compatibility basis: an unrelated missing module cannot justify a
+    repair/adoptability pin. The lane prints both sides and fails the equality
+    gate until the repair-pin decision is recorded.
 
     **A kernel version stated in canonical prose is checked against the pin.**
     `docs/ARCHITECTURE.md` and the pin-state table said `0.1.0a77` for as long

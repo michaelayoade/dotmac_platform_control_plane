@@ -51,13 +51,9 @@ Both halves are derived, and neither is copied into a document:
   the mutation lane fail on a resolver error while reporting the pin proven.
 * `kernel_imports()` / `absent_from_kernel()` — every `dotmac_kernel`
   submodule the composed code imports, and which of them a given kernel
-  installation lacks. This is an old-wheel inventory, not by itself proof of
-  what binds the pin.
-* `binding_symbol_requirements()` / `missing_binding_symbols_from_kernel()` —
-  the exact closed assembly symbol(s) whose recorded first-shipping version
-  equals the effective pin, and which an excluded wheel lacks. The mutation
-  lane requires its failure to NAME one of those, so an unrelated old-module
-  failure cannot stand in for the boundary that binds this pin.
+  installation lacks. This can establish a future composed-module boundary,
+  but cannot justify the current staged repair pin: an old missing module is
+  not a substitute for an import-compatibility floor.
 * `assembly_kernel_requirements()` / `unsatisfied_kernel_requirements()` —
   the OTHER half of that maximum, and the half nothing executed until now.
   See "The assembly's own imports join the maximum" below.
@@ -168,7 +164,7 @@ import re
 import subprocess
 import sys
 import tomllib
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from types import ModuleType
 from typing import Final
@@ -530,19 +526,17 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
 #: and lies ABOVE the composed maximum — the only symbols that can raise this
 #: assembly's own floor. Keyed `module:name`, or `module:` for a whole module.
 #:
-#: `environment_api_documentation_policy` first ships in `0.1.0a101`, above
-#: the composed maximum `0.1.0a100`. It is therefore the current measured
-#: assembly contribution. Every other declared name is provided at or below the
-#: composed maximum; resolving all of `ASSEMBLY_KERNEL_SYMBOLS` against the
-#: INSTALLED artifact still proves that claim, and an unresolvable name is a
-#: refusal.
+#: Empty after the 2026-09-17 artifact comparison: a100 and a101 carry
+#: byte-identical `api_documentation.py`, so the policy builder cannot justify
+#: a101 as an import-compatibility floor. Every declared name is provided at or
+#: below the composed maximum; resolving all of `ASSEMBLY_KERNEL_SYMBOLS`
+#: against the INSTALLED artifact still proves that claim, and an unresolvable
+#: name is a refusal.
 #:
 #: An entry here must be above the composed maximum. One at or below it would
 #: claim to raise a floor while raising nothing, and be indistinguishable from a
 #: floor that had gone stale downward; `assembly_import_floor()` refuses it.
-ASSEMBLY_SYMBOL_FLOORS: Final[dict[str, str]] = {
-    "dotmac_kernel.api_documentation:environment_api_documentation_policy": "0.1.0a101",
-}
+ASSEMBLY_SYMBOL_FLOORS: Final[dict[str, str]] = {}
 
 
 def _entrypoints_module() -> ModuleType:
@@ -1131,146 +1125,6 @@ def absent_from_kernel(kernel_root: Path, imported: Iterable[str]) -> tuple[str,
     return tuple(missing)
 
 
-def absent_symbols_from_kernel(
-    kernel_root: Path,
-    required: Mapping[str, frozenset[str]],
-) -> tuple[str, ...]:
-    """Which named, first-shipping requirements an installed kernel lacks.
-
-    A kernel surface can grow inside a module that was already present. The
-    module-only mutation proof therefore cannot establish an assembly floor
-    raised by ``from dotmac_kernel.api_documentation import
-    environment_api_documentation_policy``: a100 has that module, but not the
-    public function. Read the excluded wheel's actual module source rather
-    than adding a maintained version-to-symbol table.
-
-    This is limited to the closed, above-composed-floor entries supplied by
-    ``ASSEMBLY_SYMBOL_FLOORS``. For a module with dynamic exports, source
-    inspection cannot say whether an attribute exists, so it refuses instead
-    of guessing; package-root lazy re-exports remain covered by
-    ``assembly-satisfied`` against the pinned wheel.
-    """
-
-    if not kernel_root.is_dir():
-        raise FloorError(
-            f"{kernel_root} is not an installed {KERNEL_PACKAGE} package "
-            "directory. Comparing against nothing would return every symbol as "
-            "absent, which reads as a proof and is not one."
-        )
-
-    missing: list[str] = []
-    for module, names in sorted(required.items()):
-        if not names:
-            continue
-        if module == KERNEL_PACKAGE:
-            raise FloorError(
-                f"cannot establish named exports from the {KERNEL_PACKAGE} "
-                "package root by source inspection: its public surface may be "
-                "provided by __getattr__. Use a concrete submodule or add an "
-                "executable artifact probe in the change that needs it."
-            )
-        relative = Path(*module.split(".")[1:])
-        module_path = kernel_root / relative
-        source = module_path.with_suffix(".py")
-        if not source.is_file() and module_path.is_dir():
-            source = module_path / "__init__.py"
-        if not source.is_file():
-            # The module-level proof names this case. Do not duplicate it as
-            # every member of a module that does not exist.
-            continue
-        try:
-            tree = ast.parse(source.read_text(encoding="utf-8", errors="replace"))
-        except SyntaxError as exc:
-            raise FloorError(
-                f"cannot parse installed kernel module {source} while checking "
-                "its public symbols; refusing rather than treating an "
-                "unreadable artifact as an absent one."
-            ) from exc
-        if any(
-            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-            and node.name == "__getattr__"
-            for node in tree.body
-        ):
-            raise FloorError(
-                f"{module} supplies dynamic exports through __getattr__, so "
-                "source inspection cannot establish whether its named surface "
-                "is absent. Add an executable excluded-wheel probe rather than "
-                "recording a static guess."
-            )
-        exported: set[str] = set()
-        for node in tree.body:
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                exported.add(node.name)
-            elif isinstance(node, ast.Assign | ast.AnnAssign):
-                targets = (
-                    node.targets if isinstance(node, ast.Assign) else (node.target,)
-                )
-                for target in targets:
-                    if isinstance(target, ast.Name):
-                        exported.add(target.id)
-            elif isinstance(node, ast.Import):
-                exported.update(
-                    alias.asname or alias.name.split(".")[0] for alias in node.names
-                )
-            elif isinstance(node, ast.ImportFrom):
-                exported.update(alias.asname or alias.name for alias in node.names)
-        missing.extend(
-            f"{module}:{name}" for name in sorted(names) if name not in exported
-        )
-    return tuple(missing)
-
-
-def binding_symbol_requirements(
-    pin: str,
-    floors: Mapping[str, str] | None = None,
-) -> dict[str, frozenset[str]]:
-    """The named assembly requirements that establish this exact pin.
-
-    A mutation failure is admissible only when it names one of these. A random
-    absent module from an older wheel proves that wheel is old; it does not
-    prove why *this* pin is necessary. The caller establishes separately that
-    the effective-floor contributor is the assembly before using this result.
-    """
-
-    entries = ASSEMBLY_SYMBOL_FLOORS if floors is None else floors
-    selected: dict[str, set[str]] = {}
-    for coordinate, version in entries.items():
-        module, symbol = coordinate.split(":", 1)
-        if version == pin:
-            selected.setdefault(module, set()).add(symbol)
-    return {module: frozenset(symbols) for module, symbols in sorted(selected.items())}
-
-
-def missing_binding_symbols_from_kernel(
-    kernel_root: Path,
-    pin: str,
-    floors: Mapping[str, str] | None = None,
-) -> tuple[str, ...]:
-    """Exact pin-binding symbols absent from an excluded kernel installation."""
-
-    required = binding_symbol_requirements(pin, floors)
-    if not required:
-        raise FloorError(
-            f"no assembly symbol floor establishes pin {pin}. This mutation "
-            "cannot use an assembly-symbol failure to prove a composed-only "
-            "floor; add a separately derived composed-bound proof instead of "
-            "letting an arbitrary missing module stand in."
-        )
-    missing = absent_symbols_from_kernel(kernel_root, required)
-    if not missing:
-        required_coordinates = sorted(
-            f"{module}:{name}" for module, names in required.items() for name in names
-        )
-        raise FloorError(
-            f"the excluded kernel at {kernel_root} provides every exact "
-            f"assembly symbol recorded as establishing pin {pin}: "
-            f"{required_coordinates}. "
-            "The pin-binding record and the artifact disagree, so the mutation "
-            "must refuse rather than substitute an unrelated missing module."
-        )
-    return missing
-
-
 def assembly_kernel_requirements(
     root: Path | None = None,
 ) -> dict[str, frozenset[str]]:
@@ -1437,7 +1291,6 @@ def main(argv: list[str] | None = None) -> int:
             "excluded",
             "imports",
             "missing-from",
-            "binding-missing-from",
             "assembly-needs",
             "assembly-satisfied",
             "assembly-floor",
@@ -1459,7 +1312,7 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help=(
             "an installed dotmac_kernel package directory. Required for "
-            "`missing-from` and `binding-missing-from`."
+            "`missing-from`."
         ),
     )
     args = parser.parse_args(argv)
@@ -1624,54 +1477,17 @@ def main(argv: list[str] | None = None) -> int:
             missing_modules = absent_from_kernel(
                 args.kernel_root, kernel_imports(composed_package_roots())
             )
-            # The module proof covers every import in the composition. The
-            # exact-symbol proof covers the closed set that establishes an
-            # assembly contribution above the composed maximum; without it, a
-            # pre-existing module can make the mutation falsely report no
-            # boundary failure.
-            symbols_by_module: dict[str, set[str]] = {}
-            for coordinate in ASSEMBLY_SYMBOL_FLOORS:
-                required_module, symbol = coordinate.split(":", 1)
-                symbols_by_module.setdefault(required_module, set()).add(symbol)
-            missing_symbols = absent_symbols_from_kernel(
-                args.kernel_root,
-                {
-                    module: frozenset(symbols)
-                    for module, symbols in symbols_by_module.items()
-                },
-            )
-            missing = tuple(dict.fromkeys((*missing_modules, *missing_symbols)))
-            if not missing:
+            if not missing_modules:
                 raise FloorError(
-                    f"every {KERNEL_PACKAGE} module this composition imports and "
-                    "every named assembly requirement that establishes the "
-                    f"floor is present in {args.kernel_root}. The pin {pin} is "
-                    "then higher than anything the composition needs, and the "
-                    "mutation lane would be requiring a failure that cannot "
-                    "happen. Lower the pin to the version the composition "
-                    "actually requires, or record why it was raised anyway."
+                    f"every {KERNEL_PACKAGE} module this composition imports is "
+                    f"present in {args.kernel_root}. The pin {pin} is then higher "
+                    "than anything the composition needs, and the mutation lane "
+                    "would be requiring a failure that cannot happen. Lower the "
+                    "pin to the version the composition actually requires, or "
+                    "record why it was raised anyway."
                 )
-            for missing_requirement in missing:
+            for missing_requirement in missing_modules:
                 print(missing_requirement)
-            return 0
-        if args.what == "binding-missing-from":
-            if args.kernel_root is None:
-                raise FloorError("`binding-missing-from` requires --kernel-root")
-            contributor, effective = effective_kernel_floor()
-            if contributor != ASSEMBLY_FLOOR_KEY:
-                raise FloorError(
-                    f"the effective floor {effective} is established by "
-                    f"{contributor}, not the assembly's exact symbol record. "
-                    "This mutation's symbol proof is intentionally unavailable "
-                    "for a composed-only floor; add a separately derived "
-                    "composed-bound proof rather than accepting an arbitrary "
-                    "missing module."
-                )
-            for requirement in missing_binding_symbols_from_kernel(
-                args.kernel_root,
-                effective,
-            ):
-                print(requirement)
             return 0
         if args.index_html is None:
             raise FloorError("`excluded` requires --index-html")
