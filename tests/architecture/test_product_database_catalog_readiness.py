@@ -10,7 +10,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from check_product_database_catalog_readiness import (  # noqa: E402
-    CONTRIBUTION_FIELD,
     MODULE_DATABASE_CATALOG_DEBT,
     OPEN_PRODUCT_DATABASE_CATALOG_BLOCKERS,
     ProductDatabaseCatalogBlockerCode,
@@ -49,42 +48,25 @@ def test_debt_detector_is_sensitive_to_presence_and_absence() -> None:
     assert missing_module_database_catalogs(modules) == frozenset({"missing"})
 
 
-def test_the_module_probe_is_dormant_because_the_pinned_kernel_carries_no_field() -> (
-    None
-):
-    """Say why the probe reports all six, because it is not about the six.
+def test_the_module_probe_measures_published_contributions() -> None:
+    """The kernel now publishes the field, so the ratchet names module debt.
 
-    ``missing_module_database_catalogs`` reads a manifest attribute that the
-    EXACT-PINNED kernel's ``ModuleManifest`` does not declare.  While that holds,
-    no module release could publish a contribution even in principle — the
-    manifest could not be constructed — so the probe's composition half is the
-    only half that can fail, and "all six are missing" is a fact about the kernel
-    generation rather than about any module owner.
-
-    The operations note previously claimed that "adopting a contribution cannot
-    pass silently".  Half of that was true and half was not, and nothing said
-    which.  This assertion is the premise made enforceable (``AGENTS.md`` rule
-    13): the moment the pin moves to a kernel whose manifest carries the field,
-    this test fails, and the review that raised the pin has to confirm that the
-    probe now measures what its name says.  Had the kernel named the field
-    anything else, the ratchet would have sat at all-six for ever and a repin
-    would have passed over it in silence.
+    Deployment Control's exact pinned manifest carries a contribution; the five
+    other stateful modules do not.  The two-directional assertion above holds
+    that observed split against the register, rather than retaining the former
+    kernel-generation dormancy premise.
     """
 
-    assert not pinned_manifest_declares_contribution_field(), (
-        f"the pinned kernel's ModuleManifest now declares {CONTRIBUTION_FIELD!r}. "
-        "The module probe is no longer dormant: confirm in this same change that "
-        "each composed module's pinned release either publishes a contribution or "
-        "is still recorded in MODULE_DATABASE_CATALOG_DEBT for a reason about "
-        "that module, then delete this test with the premise it was holding."
-    )
+    assert pinned_manifest_declares_contribution_field()
+    assert "deployment_control" not in missing_module_database_catalogs()
+    assert "deployment_control" not in MODULE_DATABASE_CATALOG_DEBT
 
 
-def test_the_dormancy_premise_is_sensitive_to_the_field_appearing() -> None:
-    """A premise nobody has seen flip is not a premise.
+def test_the_contribution_field_probe_is_sensitive_to_manifest_generation() -> None:
+    """The active-field claim must still fail for an older manifest shape.
 
-    The assertion above passes today; on its own it cannot distinguish "the field
-    is absent" from "this helper never finds anything".
+    The positive case above alone cannot distinguish a real field from a probe
+    that always reports presence.
     """
 
     assert pinned_manifest_declares_contribution_field(_Module)

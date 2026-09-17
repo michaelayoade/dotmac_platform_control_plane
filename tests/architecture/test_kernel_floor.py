@@ -49,6 +49,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from kernel_floor import (  # noqa: E402
     ABSORBED_EXTERNAL_MODULES,
+    ASSEMBLY_FLOOR_KEY,
     ASSEMBLY_KERNEL_SYMBOLS,
     ASSEMBLY_SYMBOL_FLOORS,
     DEPENDENCY,
@@ -125,9 +126,10 @@ def test_the_pin_is_exactly_the_highest_floor_anything_composed_declares() -> No
     maximum ranges over moved, which is the repair § 10.1 prescribes; loosening
     this to `>=` is the one thing the rule forbids.
 
-    Today `assembly_import_floor()` is `None` and the two subjects agree. That
-    agreement is asserted separately below rather than relied on here, because
-    an equality that holds for two different reasons proves neither.
+    Today `environment_api_documentation_policy` makes the assembly floor a101,
+    above the composed a100 maximum. That contribution is asserted separately
+    below rather than relied on here, because an equality that holds for two
+    different reasons proves neither.
     """
 
     pin = declared_pin()
@@ -365,22 +367,19 @@ def test_the_assembly_is_not_smuggled_into_the_composed_distribution_floors() ->
     assert not any("assembly" in name for name in composed), composed
 
 
-def test_todays_agreement_between_the_two_subjects_is_stated_not_relied_on() -> None:
-    """Pinned at a98 the old and new subjects agree — say so, do not assume it.
+def test_todays_assembly_floor_is_stated_not_relied_on() -> None:
+    """The a101 API-policy import, not the composed a100 maximum, binds today.
 
-    The gate was rebuilt while the pin was already correct, deliberately: it
-    means these canaries are the only thing exercising the new machinery, rather
-    than an in-flight pin move masking a defect in it. That is a fact about
-    TODAY, so it is asserted where a future change can see it break.
+    The composed maximum remains a100, but `assembly.py` imports the policy
+    builder first shipped in a101. Keeping both facts explicit means a later
+    removal or a different newly introduced kernel API cannot silently turn the
+    equality back into an assertion over the wrong subject.
     """
 
-    assert assembly_import_floor() is None, (
-        "the assembly now declares a floor of its own, so the two subjects have "
-        "parted company — which is fine and expected, but this test's premise "
-        "is gone and the sentence above should be rewritten rather than the "
-        "assertion deleted"
-    )
-    assert effective_kernel_floor() == binding_distribution()
+    coordinate = "dotmac_kernel.api_documentation:environment_api_documentation_policy"
+    assert ASSEMBLY_SYMBOL_FLOORS == {coordinate: declared_pin()}
+    assert assembly_import_floor() == declared_pin()
+    assert effective_kernel_floor() == (ASSEMBLY_FLOOR_KEY, declared_pin())
 
 
 # ── canary 1: an added symbol ───────────────────────────────────────────────
@@ -546,10 +545,8 @@ def test_the_declaration_matches_the_tree_exactly_in_both_directions() -> None:
 def test_every_declared_floor_names_a_symbol_the_assembly_actually_imports() -> None:
     """A floor for an import that does not exist is a number with no subject.
 
-    Vacuously true today — `ASSEMBLY_SYMBOL_FLOORS` is empty — and that is
-    exactly why it is written as a loop over the declaration rather than as a
-    literal: it starts biting on the day the first entry lands, without anyone
-    having to remember to add it then.
+    The current API-policy entry exercises the loop. A future floor entry is
+    subject to the same check without requiring another test branch.
     """
 
     for coordinate in ASSEMBLY_SYMBOL_FLOORS:
@@ -1136,7 +1133,7 @@ def test_the_pin_the_tests_read_is_the_pin_the_lockfile_resolved() -> None:
 # It monitored `docs/ARCHITECTURE.md` and `docs/cutover-readiness.md` and
 # nothing else, while nineteen other tracked documents stated a kernel version.
 # And inside the two it did monitor it matched only `0\.1\.0a\d+` on a line that
-# also said `dotmac-kernel` — so the bare `a100` in the pin-state table, in a
+# also said `dotmac-kernel` — so the bare `a102` in the pin-state table, in a
 # file the gate had open, was not seen. Its own docstring admitted the second
 # half. A guard that reports a coverage it does not have is worse than no guard,
 # because the next reader stops looking.
@@ -1189,8 +1186,6 @@ CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
             "described",
             "0.1.0a77": "the previous pin, named in past tense while explaining what "
             "pinning alone does NOT do",
-            "0.1.0a98": "the previous pin, named in past tense while explaining "
-            "the version-drift detector",
             "0.1.0a5": "not the kernel at all — `a5/a6` here are the composed "
             "commercial modules' versions, on a line that happens to say kernel",
             "0.1.0a6": "not the kernel at all — see `a5`",
@@ -1365,7 +1360,7 @@ def test_a_current_version_document_states_no_undeclared_kernel_version() -> Non
     """Every kernel version in a live document is the pin or is declared.
 
     This is where the bare form is read. `docs/cutover-readiness.md` states
-    `a100` in its `Released` column — correct, and a DIFFERENT fact from the
+    `a102` in its `Released` column — correct, and a DIFFERENT fact from the
     pin — inside a file the old gate had open and could not see it in.
     """
 
@@ -1553,7 +1548,7 @@ def test_a_planted_stale_full_version_is_named(
 
 def test_a_planted_bare_version_is_named(edited: Callable[[str, str], None]) -> None:
     """SENSITIVITY — THE DEFECT. `a77` with no `0.1.0` prefix, on a kernel line,
-    in a monitored file, was invisible. It is the exact shape of the `a100`
+    in a monitored file, was invisible. It is the exact shape of the `a102`
     already sitting in `docs/cutover-readiness.md`."""
 
     relative = "docs/ARCHITECTURE.md"
@@ -1651,11 +1646,11 @@ def test_a_stale_version_inside_a_snapshot_stays_silent() -> None:
 def test_the_bare_reader_still_bites_over_the_real_tree() -> None:
     """NON-VACUITY. If nothing in the tree stated a bare kernel version, the
     repair for defect 3 would pass without ever having been exercised. It does:
-    `docs/cutover-readiness.md` states `a100` in its `Released` column."""
+    `docs/cutover-readiness.md` states `a102` in its `Released` column."""
 
     readiness = (ROOT / "docs" / "cutover-readiness.md").read_text()
     stated = stated_kernel_versions(readiness)
-    assert "0.1.0a100" in stated, (
+    assert "0.1.0a102" in stated, (
         "no bare kernel version is stated anywhere in the pin-state table any "
         "more. Point this control at whatever states one, or delete it and say "
         "in the same change that the bare form is no longer exercised."
@@ -1667,4 +1662,4 @@ def test_the_bare_reader_still_bites_over_the_real_tree() -> None:
     # And the bare spelling really is the only one on that line: if the document
     # ever writes it in full, this control stops exercising the repaired half.
     assert "a102" in readiness
-    assert "0.1.0a100" not in readiness
+    assert "0.1.0a102" not in readiness

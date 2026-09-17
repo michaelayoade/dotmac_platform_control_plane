@@ -142,10 +142,12 @@ disagree, fix the drift.
     surface a8 shipped, withheld, with every non-route field compared field by
     field and the named subset — `platform_tables`, `migration_prefix`,
     `migration_branch`, `requires`, `audit_actions`, `database_catalog` —
-    RATCHETED two-directionally against the pinned kernel's manifest field set,
-    because `database_catalog` is now a real `ModuleManifest` field in the
-    pinned kernel and the a13 module supplies it. The same plant is proved REAL by mounting
-    its route in a built application once a profile inventories it. That plant is the LIVE coverage; the per-profile
+    RATCHETED two-directionally against the pinned kernel's manifest field set.
+    The pinned kernel declares `database_catalog` on `ModuleManifest`;
+    Deployment Control a13 supplies it. Since a13 is now inventoried, the
+    uninventoried-route refusal is separately planted on the real, route-silent
+    Release Catalogue manifest; the positive control mounts its route after
+    explicit inventory. These plants are LIVE coverage; the per-profile
     registry+lineage check over `assembly.STATEFUL_MODULES` — derived from that
     tuple rather than listing modules by hand, the earlier version named five
     while the assembly composed six — is the coverage that ARRIVES with the

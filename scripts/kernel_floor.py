@@ -440,6 +440,9 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
         }
     ),
     "dotmac_kernel.audit": frozenset({"write_platform_audit_event"}),
+    "dotmac_kernel.api_documentation": frozenset(
+        {"environment_api_documentation_policy"}
+    ),
     "dotmac_kernel.db": frozenset(
         {
             "PlatformSessionLocal",
@@ -523,17 +526,19 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
 #: and lies ABOVE the composed maximum — the only symbols that can raise this
 #: assembly's own floor. Keyed `module:name`, or `module:` for a whole module.
 #:
-#: EMPTY TODAY, and that is the assembly's floor being *measured* rather than
-#: assumed: every name above is provided by the composed maximum, so this
-#: assembly contributes nothing and `effective_kernel_floor()` is the composed
-#: maximum. Empty is not "unchecked" — `assembly_import_floor()` proves the
-#: emptiness by resolving all of `ASSEMBLY_KERNEL_SYMBOLS` against the INSTALLED
-#: artifact, and an unresolvable name is a refusal.
+#: `environment_api_documentation_policy` first ships in `0.1.0a101`, above
+#: the composed maximum `0.1.0a100`. It is therefore the current measured
+#: assembly contribution. Every other declared name is provided at or below the
+#: composed maximum; resolving all of `ASSEMBLY_KERNEL_SYMBOLS` against the
+#: INSTALLED artifact still proves that claim, and an unresolvable name is a
+#: refusal.
 #:
 #: An entry here must be above the composed maximum. One at or below it would
 #: claim to raise a floor while raising nothing, and be indistinguishable from a
 #: floor that had gone stale downward; `assembly_import_floor()` refuses it.
-ASSEMBLY_SYMBOL_FLOORS: Final[dict[str, str]] = {}
+ASSEMBLY_SYMBOL_FLOORS: Final[dict[str, str]] = {
+    "dotmac_kernel.api_documentation:environment_api_documentation_policy": "0.1.0a101",
+}
 
 
 def _entrypoints_module() -> ModuleType:
