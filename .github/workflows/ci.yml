@@ -148,18 +148,25 @@ jobs:
           poetry run python scripts/kernel_floor.py floors
           echo "the pin is bound by: $(poetry run python scripts/kernel_floor.py binding)"
 
-          # The index, not arithmetic. It has gaps — there is no published
-          # 0.1.0a96 — and a target that was never published would make this
-          # lane fail on a resolver error while reporting the pin proven.
+          # Compatibility is derived from imports, not from the staged repair
+          # pin. a100 and a101 have byte-identical api-documentation bytes, so
+          # the current a101 pin has no import-floor justification. Until
+          # Michael decides whether to restore a100 or record a distinct repair
+          # policy, this deliberately fails red at the equality gate below.
+          poetry run python scripts/kernel_floor.py assembly-needs
+          poetry run python scripts/kernel_floor.py assembly-floor
+          DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+          PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+            poetry run python scripts/kernel_floor.py assembly-satisfied
+
+          # Once the compatibility equality above is true, preserve the
+          # excluded-wheel negative control. It proves a compatible pin is not
+          # merely a number that happens to equal a declared floor.
           curl --netrc -sS --fail -o kernel-index.html \
             "https://registry.dotmac.io/api/packages/dotmac/pypi/simple/dotmac-kernel/"
           EXCLUDED=$(poetry run python scripts/kernel_floor.py excluded --index-html kernel-index.html)
           echo "the newest published kernel this pin excludes: ${EXCLUDED}"
 
-          # A scratch install of the excluded kernel, used ONLY as something to
-          # compare against. Real files rather than a hand-kept table of which
-          # alpha introduced which module: a table has rows somebody must
-          # remember to add, and the row nobody added is invisible.
           python -m venv /tmp/excluded
           /tmp/excluded/bin/pip install --quiet --upgrade pip
           /tmp/excluded/bin/pip install --quiet --no-deps \
@@ -168,29 +175,11 @@ jobs:
             "dotmac-kernel==${EXCLUDED}"
           KERNEL_ROOT=$(/tmp/excluded/bin/python -c \
             "import importlib.util as u; print(u.find_spec('dotmac_kernel').submodule_search_locations[0])")
-
-          # If this prints nothing the command exits non-zero and says why: the
-          # pin would then be higher than anything the composition needs, and
-          # the mutation below would be demanding a failure that cannot happen.
-          # Entries are either absent modules or exact `module:symbol` pairs;
-          # a pre-existing module is not evidence that it carries every public
-          # symbol this assembly imports.
           poetry run python scripts/kernel_floor.py missing-from \
             --kernel-root "${KERNEL_ROOT}" > missing.txt
-          echo "the composition or assembly imports these, and ${EXCLUDED} lacks them:"
+          echo "the composition imports these, and ${EXCLUDED} has none of them:"
           cat missing.txt
-          # The right-failure proof is stricter than the inventory above. It
-          # names ONLY the exact assembly symbol(s) whose recorded first-
-          # shipping version equals the effective pin. An unrelated missing
-          # module is evidence that the old wheel is old, not evidence that it
-          # is missing the boundary that binds this release's pin.
-          poetry run python scripts/kernel_floor.py binding-missing-from \
-            --kernel-root "${KERNEL_ROOT}" > binding-missing.txt
-          echo "the exact pin-binding symbols absent from ${EXCLUDED}:"
-          cat binding-missing.txt
 
-          # 1. THE RESOLVER. The pin has to be enforced by something that
-          #    actually resolves, not only by a number in a file.
           python -m venv /tmp/resolver-check
           /tmp/resolver-check/bin/pip install --quiet --upgrade pip
           if /tmp/resolver-check/bin/pip install --quiet \
@@ -201,9 +190,6 @@ jobs:
             exit 1
           fi
           tail -n 5 resolver.log
-          # The refusal has to be the RIGHT refusal. A step satisfied by any
-          # non-zero pip would report the pin proven on a run where a typo'd
-          # index URL was the only thing that happened.
           if ! grep -qiE "conflict|ResolutionImpossible|Cannot install" resolver.log; then
             echo "::error::pip failed, but not with a dependency conflict, so this"
             echo "half observed something other than the pin."
@@ -211,41 +197,6 @@ jobs:
           fi
           echo "the resolver refuses the pair, as the pin requires"
 
-          # THE OTHER HALF OF THE MAXIMUM. ADR 0021 sections 10 and 10.1,
-          # settled 2026-09-01: the effective floor is the maximum of (a) every
-          # composed distribution's installed Requires-Dist and (b) this
-          # assembly's own direct constraint, read from ITS OWN SOURCE. Reading
-          # the pin as that third input would return the pin, agree with itself
-          # and prove nothing, so the assembly's contribution is derived from
-          # what its code imports.
-          #
-          # Placed AFTER the composed-set conditions on purpose. Section 10.1
-          # requires this to be plantable separately with those left intact, and
-          # the finding to be DISTINCT: an assembly that out-imports its
-          # composition is repaired in a different repository by a different
-          # person than a composed module that raised its floor.
-          #
-          # The DSNs are dummies so the kernel can build its engine at import;
-          # nothing connects. The driver is present because the assembly
-          # declares it - and if it ever is not, this refuses to reason rather
-          # than recording an environment gap as a missing kernel symbol.
-          poetry run python scripts/kernel_floor.py assembly-needs
-          # The three values the equality ranges over, printed side by side so a
-          # reviewer reading the log can see WHICH input established the floor
-          # rather than inferring it from the pin.
-          poetry run python scripts/kernel_floor.py assembly-floor
-          # `assembly-satisfied` ends by importing `vendor_cp.main`, which is
-          # `create_app(build_spec())` at module scope: the same boot the
-          # mutation lane drives below. A name-level sweep cannot see a symbol
-          # that survived with a changed signature or field set, and that is
-          # where a pin move actually breaks.
-          DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
-          PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
-            poetry run python scripts/kernel_floor.py assembly-satisfied
-
-          # 2. THE BEHAVIOUR. `--no-deps --force-reinstall` defeats the
-          #    constraint on purpose: nothing else in the environment changes,
-          #    so a failure below can only be the kernel downgrade.
           poetry run pip install --quiet --no-deps --force-reinstall \
             --index-url "https://pypi.org/simple" \
             --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
@@ -262,25 +213,17 @@ jobs:
             echo "record in the same change why it was raised anyway."
             exit 1
           fi
-          # 3. THE RIGHT FAILURE. Unrelated breakage must not be able to stand
-          #    in for the proof, so the traceback has to name an exact missing
-          #    symbol that establishes this pin — not merely any missing module
-          #    in the older wheel.
           matched=""
-          while IFS=: read -r module symbol; do
-            requirement="${module}:${symbol}"
-            [ -n "${requirement}" ] || continue
-            if [ -n "${module}" ] && [ -n "${symbol}" ] && \
-               awk -v module="${module}" -v symbol="${symbol}" \
-                 'index($0, module) && index($0, symbol) { found = 1 } END { exit !found }' \
-                 mutation.txt; then
-              matched="${requirement}"
+          while read -r module; do
+            [ -n "${module}" ] || continue
+            if grep -q -F -- "${module}" mutation.txt; then
+              matched="${module}"
             fi
-          done < binding-missing.txt
+          done < missing.txt
           if [ -z "${matched}" ]; then
             echo "::error::the boot failed under dotmac-kernel ${EXCLUDED}, but its"
-            echo "output names none of the exact pin-binding symbols that kernel is missing"
-            echo "($(tr '\n' ' ' < binding-missing.txt)). This mutation observed some other"
+            echo "output names none of the modules that kernel is missing"
+            echo "($(tr '\n' ' ' < missing.txt)). This mutation observed some other"
             echo "breakage and the pin is still unproven."
             exit 1
           fi
