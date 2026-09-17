@@ -1150,10 +1150,9 @@ def test_the_mutation_lane_derives_its_versions_and_module_names() -> None:
     # The exact repair probe deliberately names its defect path. The mutation
     # is different: its missing module must still come from the installed
     # composition, not a literal that goes stale on the next floor bump.
+    mutation_start = "EXCLUDED=$(poetry run python " + "scripts/kernel_floor.py"
     mutation = executable[
-        executable.index(
-            "EXCLUDED=$(poetry run python scripts/kernel_floor.py"
-        ) : executable.index(
+        executable.index(mutation_start) : executable.index(
             'echo "dotmac-kernel ${EXCLUDED} cannot boot this assembly:'
         )
     ]
