@@ -105,6 +105,18 @@ REFUSAL_CODES: Final[dict[str, ExitCode]] = {
     "owner.forbidden": ExitCode.REFUSED,
     "owner.migration_target_refused": ExitCode.REFUSED,
     "owner.provider_not_permitted": ExitCode.REFUSED,
+    # Deployment Control 0.1.0a13's execution-plan and descriptor bindings: the
+    # module looked at a PLAN's or ROLLOUT's own stored state and refused to
+    # act on it. Distinct codes because an operator repairs them differently —
+    # one needs a re-proposed plan bound to an execution plan digest, the other
+    # a re-proposed plan bound to a descriptor digest.
+    "owner.execution_plan_binding_refused": ExitCode.REFUSED,
+    "owner.descriptor_binding_refused": ExitCode.REFUSED,
+    # The operation IS a member of the closed vocabulary and the signing fence
+    # refused it anyway: the executor has not published support for it. Not a
+    # vocabulary fault (that is `usage.invalid_argument`) — the word is valid
+    # and the counterparty cannot honour it.
+    "owner.operation_not_executable": ExitCode.REFUSED,
     # ── absent or unreachable evidence (4) ─────────────────────────────────
     "evidence.not_found": ExitCode.UNAVAILABLE,
     "evidence.tool_absent": ExitCode.UNAVAILABLE,
