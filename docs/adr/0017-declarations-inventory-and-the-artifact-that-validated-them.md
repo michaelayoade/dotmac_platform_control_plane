@@ -333,10 +333,11 @@ surface, remain open and are not resolved by naming the concept above:
    thing CI byte-compares against, because a rendered file missing them
    would be compared and pass while describing a deployment nobody could
    run.
-2. **Platform CP is not the party permitted to close that gap.** The
-   fleet-wide extraction rule (`AGENTS.md`, product-first extraction: a
-   shared capability is built and owned in one place, and a product
-   consumes it rather than forking it) forbids Platform CP writing its own
+2. **Platform CP is not the party permitted to close that gap.** This
+   repository's own `AGENTS.md` rule 21 states it directly: "Render, apply,
+   observe and rollback are the published Foundation CLI's," reached only
+   through a verbatim passthrough, because re-growing any of them here would
+   be a second deployment engine. That forbids Platform CP writing its own
    renderer to work around Foundation's gap. Only a Foundation release with
    full topology support closes this; a local renderer would create the
    exact second-writer problem the rule exists to prevent, and it would be
