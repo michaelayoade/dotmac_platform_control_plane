@@ -93,9 +93,10 @@ grep -Fqx 'VENDOR_DEPLOYMENT_PROFILE=production-bootstrap' "$ENV_FILE" \
 # ── The kernel's production-fatal settings, checked BEFORE anything is touched ─
 #
 # Look at the order of this script. `compose up -d app` is the SEVENTH action:
-# the image is pulled, the database is started, the manifest volume is
-# initialised, the role and ownership contracts are read, a backup is taken and
-# THE MIGRATIONS ARE APPLIED before the application is ever started. A
+# the image is pulled, the database is started, the role and ownership
+# contracts are read, a recovery bundle is published and verified, the
+# manifest volume is initialised, and THE MIGRATIONS ARE APPLIED before the
+# application is ever started. A
 # configuration error left to the application's lifespan therefore arrives with
 # the schema already advanced and the service down — the most expensive possible
 # moment to learn it, and entirely avoidable, because every input it depends on
@@ -154,8 +155,8 @@ docker pull "$VENDOR_APP_IMAGE"
 # three of the kernel's rules and will drift from them; this asks the image that
 # is about to run, using the very function its lifespan calls. A clean answer
 # here is the answer the boot will give — except that it arrives before the
-# database has been started, the manifest volume initialised, a backup taken or
-# a single migration applied.
+# database has been started, a recovery bundle published or verified, a
+# manifest volume initialised, or a single migration applied.
 #
 # The two DSNs are placeholders. Compose supplies the real ones from its own
 # `environment:` block, so they are absent from the env file and would be
@@ -177,7 +178,6 @@ Nothing has been changed — no container started, no migration applied.
 ${CSRF_REMEDY}"
 
 compose up -d --wait db
-compose --profile ops run --rm --no-deps manifest-init
 
 readonly ROLE_CONTRACT="$(compose exec -T db sh -c \
     'psql --username app_admin --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT rolsuper::text || '\''|'\'' || rolcreaterole::text || '\''|'\'' || rolbypassrls::text || '\''|'\'' || rolcanlogin::text FROM pg_roles WHERE rolname = current_user"')"
@@ -408,6 +408,10 @@ done
 
 printf 'recovery bundle %s\n  digest %s\n  restore order: globals.sql then database.dump\n' \
     "$BUNDLE_PATH" "$BUNDLE_DIGEST"
+
+# Initialize the manifest volume only after the published recovery bundle has
+# been verified on disk, and before the composed migration consumes it.
+compose --profile ops run --rm --no-deps manifest-init
 
 # This is the one composed migration owner: kernel, Vendor, Release Catalog,
 # Entitlement Allocation, and Approvals advance before the app is replaced.

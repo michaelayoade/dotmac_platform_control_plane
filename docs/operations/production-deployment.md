@@ -23,11 +23,12 @@ The host then performs one ordered operation:
 2. pull the exact digest;
 3. generate an ephemeral verifier for the separate `postgres` cluster-bootstrap
    role and start PostgreSQL;
-4. reconcile the product-manifest volume to UID/GID 10001 and mode `0750`
-   through the isolated, capability-limited `manifest-init` service;
-5. verify that initialization created `app_admin` as a non-superuser,
+4. verify that initialization created `app_admin` as a non-superuser,
    `BYPASSRLS` database/schema owner and removed the bootstrap verifier;
-6. take a host-local `pg_dump` backup;
+5. take and publish a host-local recovery bundle, then verify its on-disk
+   `SHA256SUMS` before continuing;
+6. reconcile the product-manifest volume to UID/GID 10001 and mode `0750`
+   through the isolated, capability-limited `manifest-init` service;
 7. run `dotmac-platform admin migrate`, the owner that composes all eight
    lineages, as an installed console script inside the `ops` container;
 8. replace the app and prove `/health` on the loopback port while declaring
