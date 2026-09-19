@@ -1,5 +1,16 @@
 # Kernel a98, a99 and a100 — one boundary, measured; a100 is not a regression
 
+> **Status amendment — 2026-09-17.** This is an as-of-2026-09-01 assessment;
+> its measurements and decision history are unchanged. Kernel `0.1.0a101` was
+> subsequently published, tagged and independently verified (release evidence:
+> `docs/inventories/kernel-release-verifications/0.1.0a101.json` in Starter
+> protected main). It carries the import-boundary lazy-resolver repair.
+> `ProductAssemblySpec.api_documentation` and
+> `environment_api_documentation_policy` already exist in a100; they do not
+> establish a101 as an import-compatibility floor. The Platform CP a101 pin is
+> staged pending a separate repair-pin decision, not accepted by this
+> assessment as a compatibility repin.
+
 **Status:** assessed on 2026-09-01, and revised the same day when an independent
 arbitration settled the question this document had left open. The pin holds at
 `0.1.0a98`. **No pin move is possible yet**: the repair lands in a101, and a101
@@ -299,3 +310,63 @@ out-imports its composition is repaired by a different person in a different
 repository than a composed module that raised its floor. (An earlier placement
 put the step before those conditions and stopped the job at itself; run
 33516674334 is that first shape, kept only for the record.)
+
+## 2026-09-17 amendment — exact a101 repair candidate, separate from the floor
+
+Michael authorized preparation of a candidate for **only** Kernel `0.1.0a101`
+above the independently-derived `0.1.0a100` compatibility floor, pending
+Governance acceptance and hosted CI. It is not a current compliance or adoption
+claim. This does not change that floor, claim that `api_documentation` first
+shipped in a101, or authorise a range of later kernels.
+`scripts/kernel_floor.py` holds the two predicates separately and refuses if
+either coordinate changes.
+
+The candidate bytes are the published wheel
+`dotmac_kernel-0.1.0a101-py3-none-any.whl`, SHA-256
+`9145716dadd08423421d08483f6a9ff4de47d6d94ef4bcf16e29edcca008c569`, from
+source `037ef065376c0ad4597cc59f86f4ef3eb7d5322b`. The immutable receipt is
+[KernelReleaseEvidence.v1 at Starter protected main](https://github.com/michaelayoade/dotmac_starter_mt/blob/387171cdeaf4cea3c2d589c6e41092f65e89e501/docs/inventories/kernel-release-verifications/0.1.0a101.json),
+whose raw-byte SHA-256 is
+`d051a9ed6d3bc7600a769eda2840e00323e419ba65b538d2d2127066dcda293e`.
+
+`kernel-pin` now downloads and hash-checks that receipt and both probe wheels;
+it does not rebuild release bytes. The historical a100 negative-control wheel
+has SHA-256 `60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c`.
+Under the shared no-driver, no-DSN probe condition, it must fail
+`from dotmac_kernel.app_factory import create_app` with SQLAlchemy's URL
+`ArgumentError`, before the separate DSN-set `ModuleNotFoundError: psycopg`
+observation. The receipt-bound a101 wheel must succeed with `PYTHONPATH`, both
+DSNs and the product driver absent, and leave `dotmac_kernel.db` unloaded. The
+a100 hash identifies arbitration bytes; it is not represented as an adoptable
+release receipt.
+
+The probe venvs resolve the wheel's declared transitive dependencies afresh,
+with no cache, from the configured indexes. That is intentionally not claimed
+as transitive-artifact provenance: this evidence binds the two Kernel wheels,
+starts from an empty working directory, and refuses if `psycopg` is supplied,
+if a no-DSN a100 probe reaches the DSN-set `psycopg` path, or if the a100
+failure/a101 success stops discriminating the lazy-import repair.
+
+This is not a permanent over-floor licence: any future Kernel repin requires a
+new derived-floor result and a separate approved admission or exact equality.
+The cross-repository Governance amendment remains Proposed until its own review
+and acceptance process completes. Until then `kernel-pin` deliberately ends
+red after preserving the candidate evidence; it is not mergeable evidence.
+This change promotes no descriptor, deploys no host, cuts over no executor and
+retires no legacy writer.
+
+## 2026-09-17 correction — Governance acceptance and active admission
+
+Governance ADR-0021's conditional repair was accepted on protected `main` at
+`dotmac_governance` revision
+`7cb563d38d8f64f8019581a912a64ac466cd9fbd` (PR #88). The profile and the
+Engineering Standards action now pin that exact revision. The preceding
+paragraphs remain the dated pre-acceptance record; they describe the state
+before this acceptance and are not current-state prose.
+
+With that exact policy pin, `kernel-pin` admits only the receipt-bound
+`0.1.0a101` candidate over the independently measured `0.1.0a100` floor. The
+admission remains conditional on the clean-wheel a100 negative/a101 positive
+probe, both wheel hashes, the immutable release receipt, and the below-floor
+negative control already described above. A different policy SHA, pin, floor,
+wheel, or receipt digest fails closed. No generic `>=` relaxation is introduced.

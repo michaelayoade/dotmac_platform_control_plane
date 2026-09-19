@@ -209,6 +209,18 @@ fails on the premise with an instruction to DELETE it rather than repair it: the
 change it certifies is historical, and a repaired version would be measuring the
 new module instead.
 
+### Amendment — 2026-09-17: Deployment Control surface is now composed
+
+The historical decision above correctly required every profile to account for a
+route-bearing composed module, but its then-current premise was that no such
+module was pinned. Deployment Control a13 now contributes its
+`web_surfaces` operator UI. `FULL` explicitly inventories and mounts
+`deployment_control`; `production-bootstrap` and `production-composed-v1`
+explicitly withhold it pending separate operator publication authorization.
+Their profile versions therefore advance to 5 and 3 respectively (and `FULL`
+advances to 4). This is the profile admission implementation of the accepted
+rule, not a change to the rule itself.
+
 ## 7. Consequences
 
 - Pinning `dotmac-deployment-control` a8 or later now FAILS every declared
@@ -243,3 +255,15 @@ new module instead.
   in § 2 are repository-local reads of an external repository's tags, used to
   establish which versions contain a file — not evidence that any of them is
   published, installable or adopted (hard rule 17).
+
+## Amendment — 2026-09-17: retain a live uninventoried-route plant
+
+Control a13 is now route-bearing and explicitly inventoried by `FULL`, while
+both production profiles explicitly withhold it. It can no longer be the
+uninventoried-route plant described in § 6: a refusal test using its code would
+pass or fail for the profile's real declaration, not for an unknown new
+surface. The test now plants a route on the real, route-silent Release Catalogue
+manifest and proves refusal in every declared profile, followed by a positive
+mount when one profile inventories it. The Control-shaped plant remains the
+separate check that withholding routes preserves all non-route declarations.
+This updates the sensitivity proof, not the admission decision.

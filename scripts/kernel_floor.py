@@ -51,9 +51,9 @@ Both halves are derived, and neither is copied into a document:
   the mutation lane fail on a resolver error while reporting the pin proven.
 * `kernel_imports()` / `absent_from_kernel()` — every `dotmac_kernel`
   submodule the composed code imports, and which of them a given kernel
-  installation lacks. The mutation lane requires its failure to NAME one of
-  those, so "the boot failed" cannot stand in for "the boot failed at the
-  boundary the pin describes".
+  installation lacks. This can establish a future composed-module boundary,
+  but cannot justify the current staged repair pin: an old missing module is
+  not a substitute for an import-compatibility floor.
 * `assembly_kernel_requirements()` / `unsatisfied_kernel_requirements()` —
   the OTHER half of that maximum, and the half nothing executed until now.
   See "The assembly's own imports join the maximum" below.
@@ -88,11 +88,9 @@ Two things in § 10.1 shape this implementation rather than merely licensing it:
   in a different repository by a different person than a composed module that
   raised its floor.
 
-One accurate caveat: this repository's PINNED governance revision
-(`a19259b1`, `.dotmac/standards-profile.json`) predates § 10 altogether. The
-binding text is therefore ahead of the pin. Repinning is a deliberate change
-under rule 15 — it would also pull in every other decision accepted since — and
-is not taken here.
+The assembly now pins the accepted Governance revision carrying § 10.1. The
+separate a101 repair policy is narrower than the compatibility-floor rule: it
+admits one receipt-bound candidate and does not change the derived floor.
 
 Today those two agree, and the equality held only because of a coincidence:
 nothing in `src/vendor_cp` imported a kernel symbol its composed modules did not
@@ -114,7 +112,9 @@ considered and found to contribute nothing or simply never asked:
   establishes, from a closed declaration of every kernel name it imports.
   `None` when every one of them sits at or below the composed maximum, which is
   today's state and a measured one rather than an assumption.
-* `effective_kernel_floor()` — the maximum of the two. THE PIN MUST EQUAL THIS.
+* `effective_kernel_floor()` — the maximum of the two. It is the exact
+  compatibility floor; an active pin must equal it unless a separately accepted
+  policy says otherwise.
 
 The equality is unchanged and stays `==`. What moved is what it ranges over.
 
@@ -160,6 +160,7 @@ from __future__ import annotations
 import argparse
 import ast
 import importlib.metadata
+import json
 import re
 import subprocess
 import sys
@@ -167,7 +168,7 @@ import tomllib
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from types import ModuleType
-from typing import Final
+from typing import Final, cast
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 PYPROJECT: Final = REPO_ROOT / "pyproject.toml"
@@ -363,7 +364,7 @@ def binding_distribution(floors: dict[str, str] | None = None) -> tuple[str, str
 #
 #   composed_distribution_maximum()  — the composed distributions' Requires-Dist
 #   assembly_import_floor()          — what THIS repository's own source needs
-#   effective_kernel_floor()         — the maximum, and the pin must equal it
+#   effective_kernel_floor()         — the exact compatibility maximum
 #
 # Naming the third is the point. `pin == max(...)` was previously written
 # against the first alone, which made the rule's subject implicit and therefore
@@ -375,6 +376,120 @@ def binding_distribution(floors: dict[str, str] | None = None) -> tuple[str, str
 #: Deliberately unlike a distribution name, because the whole point is that this
 #: floor comes from a source tree rather than from an artifact's metadata.
 ASSEMBLY_FLOOR_KEY: Final = "this repository's executable Python surface"
+
+# A repair candidate is deliberately a different predicate from the compatibility
+# floor.  The floor remains a derived maximum and is still exact; this record
+# identifies precisely one published wheel whose independent clean-wheel probe
+# repairs a defect in that floor.  It is not a version range and must never turn
+# into one.
+REPAIR_PIN_VERSION: Final = "0.1.0a101"
+REPAIR_COMPATIBILITY_FLOOR: Final = "0.1.0a100"
+REPAIR_PIN_WHEEL_SHA256: Final = (
+    "9145716dadd08423421d08483f6a9ff4de47d6d94ef4bcf16e29edcca008c569"
+)
+REPAIR_FLOOR_WHEEL_SHA256: Final = (
+    "60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c"
+)
+REPAIR_PIN_SOURCE_SHA: Final = "037ef065376c0ad4597cc59f86f4ef3eb7d5322b"
+REPAIR_PIN_RECEIPT: Final = (
+    "https://raw.githubusercontent.com/michaelayoade/dotmac_starter_mt/"
+    "387171cdeaf4cea3c2d589c6e41092f65e89e501/"
+    "docs/inventories/kernel-release-verifications/0.1.0a101.json"
+)
+REPAIR_PIN_RECEIPT_SHA256: Final = (
+    "d051a9ed6d3bc7600a769eda2840e00323e419ba65b538d2d2127066dcda293e"
+)
+REPAIR_POLICY_GOVERNANCE_SHA: Final = "7cb563d38d8f64f8019581a912a64ac466cd9fbd"
+
+
+def governance_revision(
+    profile: Path = REPO_ROOT / ".dotmac" / "standards-profile.json",
+) -> str:
+    """Read the assembly's immutable Governance policy coordinate."""
+
+    try:
+        model = json.loads(profile.read_text(encoding="utf-8"))["governance_model"]
+        revision = model["revision"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise FloorError(
+            f"cannot establish the Governance policy revision from {profile}"
+        ) from exc
+    if not isinstance(revision, str):
+        raise FloorError("the Governance policy revision is not a string")
+    return revision
+
+
+def repair_candidate_evidence(
+    pin: str | None = None,
+    compatibility_floor: str | None = None,
+    repair_version: str = REPAIR_PIN_VERSION,
+    repair_floor: str = REPAIR_COMPATIBILITY_FLOOR,
+    wheel_sha256: str = REPAIR_PIN_WHEEL_SHA256,
+    floor_wheel_sha256: str = REPAIR_FLOOR_WHEEL_SHA256,
+    receipt_sha256: str = REPAIR_PIN_RECEIPT_SHA256,
+) -> None:
+    """Validate the one separately evidenced repair candidate.
+
+    This is intentionally not part of :func:`effective_kernel_floor`: an
+    import-adoptability repair does not make an already-present symbol first
+    ship later.  The caller must establish the compatibility floor separately,
+    then this narrow candidate binds the over-pin to an immutable published
+    wheel and receipt.  CI verifies both wheel hashes and executes the clean
+    a100-negative/a101-positive probe; this function makes their identities
+    and the one permitted relationship fail closed before that work begins.
+    """
+
+    actual_pin = declared_pin() if pin is None else pin
+    actual_floor = (
+        effective_kernel_floor()[1]
+        if compatibility_floor is None
+        else compatibility_floor
+    )
+    for label, version in (
+        ("pin", actual_pin),
+        ("compatibility floor", actual_floor),
+        ("repair pin", repair_version),
+        ("repair compatibility floor", repair_floor),
+    ):
+        parse(version)
+        if version != version.strip():
+            raise FloorError(f"the {label} contains surrounding whitespace")
+    if actual_floor != repair_floor:
+        raise FloorError(
+            f"the derived compatibility floor is {actual_floor}, but this repair "
+            f"candidate is only for {repair_floor}. Re-derive the floor and make "
+            "a new, reviewed candidate; do not widen this one."
+        )
+    if actual_pin != repair_version:
+        raise FloorError(
+            f"the assembly pins {actual_pin}, but the sole repair candidate is "
+            f"{repair_version}. This is an exact candidate, never a range."
+        )
+    if parse(repair_version) <= parse(repair_floor):
+        raise FloorError(
+            f"repair pin {repair_version} is not above compatibility floor "
+            f"{repair_floor}; it is not an over-floor repair candidate."
+        )
+    for label, digest in (
+        ("repair wheel", wheel_sha256),
+        ("compatibility-floor wheel", floor_wheel_sha256),
+        ("receipt", receipt_sha256),
+    ):
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise FloorError(f"the {label} digest is not a lowercase sha256 hex digest")
+
+
+def repair_pin_admission(policy_sha: str | None = None) -> None:
+    """Admit only the exact accepted Governance conditional repair policy."""
+
+    repair_candidate_evidence()
+    actual_policy = governance_revision() if policy_sha is None else policy_sha
+    if actual_policy != REPAIR_POLICY_GOVERNANCE_SHA:
+        raise FloorError(
+            "the a101 repair candidate requires accepted Governance policy "
+            f"{REPAIR_POLICY_GOVERNANCE_SHA}, but the assembly is pinned to "
+            f"{actual_policy or '(missing)'}"
+        )
 
 
 def composed_distribution_maximum() -> tuple[str, str]:
@@ -440,6 +555,9 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
         }
     ),
     "dotmac_kernel.audit": frozenset({"write_platform_audit_event"}),
+    "dotmac_kernel.api_documentation": frozenset(
+        {"environment_api_documentation_policy"}
+    ),
     "dotmac_kernel.db": frozenset(
         {
             "PlatformSessionLocal",
@@ -523,12 +641,12 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
 #: and lies ABOVE the composed maximum — the only symbols that can raise this
 #: assembly's own floor. Keyed `module:name`, or `module:` for a whole module.
 #:
-#: EMPTY TODAY, and that is the assembly's floor being *measured* rather than
-#: assumed: every name above is provided by the composed maximum, so this
-#: assembly contributes nothing and `effective_kernel_floor()` is the composed
-#: maximum. Empty is not "unchecked" — `assembly_import_floor()` proves the
-#: emptiness by resolving all of `ASSEMBLY_KERNEL_SYMBOLS` against the INSTALLED
-#: artifact, and an unresolvable name is a refusal.
+#: Empty after the 2026-09-17 artifact comparison: a100 and a101 carry
+#: byte-identical `api_documentation.py`, so the policy builder cannot justify
+#: a101 as an import-compatibility floor. Every declared name is provided at or
+#: below the composed maximum; resolving all of `ASSEMBLY_KERNEL_SYMBOLS`
+#: against the INSTALLED artifact still proves that claim, and an unresolvable
+#: name is a refusal.
 #:
 #: An entry here must be above the composed maximum. One at or below it would
 #: claim to raise a floor while raising nothing, and be indistinguishable from a
@@ -558,7 +676,7 @@ def _entrypoints_module() -> ModuleType:
             f"{exc}. Falling back to a `*.py` glob would silently reintroduce "
             "the extension blindness it exists to repair, so this refuses."
         ) from exc
-    return python_entrypoints
+    return cast(ModuleType, python_entrypoints)
 
 
 def _entrypoint_classifier() -> (
@@ -961,8 +1079,8 @@ def assembly_import_floor(
     """The kernel floor the assembly's OWN imports establish, or `None`.
 
     `None` means every name the assembly imports is provided at or below the
-    composed maximum, so this input does not move the answer. That is today's
-    state and it is a MEASURED one: the caller has already required the scan to
+    composed maximum, so this input does not move the answer. When that is the
+    state, it is a MEASURED one: the caller has already required the scan to
     equal the closed declaration, and `assembly-satisfied` resolves every
     declared name against the installed artifact.
 
@@ -993,11 +1111,12 @@ def assembly_import_floor(
 
 
 def effective_kernel_floor() -> tuple[str, str]:
-    """The floor the pin must EQUAL, and the contributor that established it.
+    """The exact compatibility floor and the contributor that established it.
 
     `max(composed_distribution_maximum, assembly_import_floor)`. Naming the
-    contributor matters as much as the number: a pin move nobody can attribute
-    is a kernel upgrade taken on nobody's behalf.
+    contributor matters as much as the number: an active pin move nobody can
+    attribute is a kernel upgrade taken on nobody's behalf. The accepted a101
+    policy is a narrow, receipt-bound exception and does not alter this floor.
     """
 
     composed_name, composed_floor = composed_distribution_maximum()
@@ -1286,12 +1405,17 @@ def main(argv: list[str] | None = None) -> int:
             "binding",
             "floors",
             "excluded",
+            "compatibility-excluded",
             "imports",
             "missing-from",
             "assembly-needs",
             "assembly-satisfied",
             "assembly-floor",
+            "compatibility-floor",
             "surface",
+            "repair-candidate",
+            "repair-admission",
+            "repair-evidence",
         ),
     )
     parser.add_argument("--pyproject", type=Path, default=PYPROJECT)
@@ -1308,8 +1432,7 @@ def main(argv: list[str] | None = None) -> int:
         "--kernel-root",
         type=Path,
         help=(
-            "an installed dotmac_kernel package directory. Required for "
-            "`missing-from`."
+            "an installed dotmac_kernel package directory. Required for `missing-from`."
         ),
     )
     args = parser.parse_args(argv)
@@ -1340,8 +1463,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{origin}\t{relative}")
             return 0
         if args.what == "assembly-needs":
-            for module, names in assembly_kernel_requirements().items():
-                print(f"{module}: {' '.join(sorted(names)) or '(module only)'}")
+            for module_name, names in assembly_kernel_requirements().items():
+                print(f"{module_name}: {' '.join(sorted(names)) or '(module only)'}")
             return 0
         if args.what == "assembly-floor":
             composed_name, composed_floor = composed_distribution_maximum()
@@ -1350,6 +1473,29 @@ def main(argv: list[str] | None = None) -> int:
             print(f"composed_distribution_maximum {composed_floor} ({composed_name})")
             print(f"assembly_import_floor         {own or '(contributes nothing)'}")
             print(f"effective_kernel_floor        {effective} ({contributor})")
+            return 0
+        if args.what == "compatibility-floor":
+            print(effective_kernel_floor()[1])
+            return 0
+        if args.what == "repair-admission":
+            repair_pin_admission()
+            return 0
+        if args.what == "repair-candidate":
+            repair_candidate_evidence()
+            print(
+                f"repair candidate {REPAIR_PIN_VERSION} above compatibility "
+                f"floor {REPAIR_COMPATIBILITY_FLOOR}; receipt {REPAIR_PIN_RECEIPT}"
+            )
+            return 0
+        if args.what == "repair-evidence":
+            repair_candidate_evidence()
+            print(f"repair_version={REPAIR_PIN_VERSION}")
+            print(f"repair_wheel_sha256={REPAIR_PIN_WHEEL_SHA256}")
+            print(f"repair_floor={REPAIR_COMPATIBILITY_FLOOR}")
+            print(f"repair_floor_wheel_sha256={REPAIR_FLOOR_WHEEL_SHA256}")
+            print(f"repair_source_sha={REPAIR_PIN_SOURCE_SHA}")
+            print(f"repair_receipt={REPAIR_PIN_RECEIPT}")
+            print(f"repair_receipt_sha256={REPAIR_PIN_RECEIPT_SHA256}")
             return 0
         if args.what == "assembly-satisfied":
             # The premise, held where it can fail — in five steps, each of which
@@ -1465,16 +1611,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.what == "imports":
-            for module in sorted(kernel_imports(composed_package_roots())):
-                print(module)
+            for imported_module in sorted(kernel_imports(composed_package_roots())):
+                print(imported_module)
             return 0
         if args.what == "missing-from":
             if args.kernel_root is None:
                 raise FloorError("`missing-from` requires --kernel-root")
-            missing = absent_from_kernel(
+            missing_modules = absent_from_kernel(
                 args.kernel_root, kernel_imports(composed_package_roots())
             )
-            if not missing:
+            if not missing_modules:
                 raise FloorError(
                     f"every {KERNEL_PACKAGE} module this composition imports is "
                     f"present in {args.kernel_root}. The pin {pin} is then higher "
@@ -1483,8 +1629,8 @@ def main(argv: list[str] | None = None) -> int:
                     "pin to the version the composition actually requires, or "
                     "record why it was raised anyway."
                 )
-            for module in missing:
-                print(module)
+            for missing_requirement in missing_modules:
+                print(missing_requirement)
             return 0
         if args.index_html is None:
             raise FloorError("`excluded` requires --index-html")
@@ -1497,6 +1643,9 @@ def main(argv: list[str] | None = None) -> int:
                 "empty listing reads as 'nothing is excluded', which is the "
                 "absent-as-success shape this repository refuses everywhere."
             )
+        if args.what == "compatibility-excluded":
+            print(newest_excluded(effective_kernel_floor()[1], versions))
+            return 0
         print(newest_excluded(pin, versions))
         return 0
     except FloorError as exc:

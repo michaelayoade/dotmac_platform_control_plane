@@ -26,7 +26,12 @@ import pytest
 from vendor_cp.cli import GROUPS, build_parser
 from vendor_cp.cli.delegate import FOUNDATION_OWNED_VERBS
 from vendor_cp.cli.exits import REFUSAL_CODES, STATUS, ExitCode
-from vendor_cp.cli.owners import DELEGATED_COMMANDS, OWNERS, by_command
+from vendor_cp.cli.owners import (
+    DELEGATED_COMMANDS,
+    OWNERS,
+    UNAVAILABLE_COMMANDS,
+    by_command,
+)
 from vendor_cp.identity import DISTRIBUTION
 from vendor_cp.installed_surface import (
     BASELINE,
@@ -99,6 +104,23 @@ def test_no_mutating_command_names_an_owner_inside_the_cli() -> None:
     )
     assert inside == [], inside
     assert all(command in by_command() for command in DELEGATED_COMMANDS)
+
+
+def test_unavailable_authorization_entries_name_only_their_refusal_handlers() -> None:
+    """The inventory must not advertise an unavailable Control mutation."""
+    assert UNAVAILABLE_COMMANDS == {
+        "deployment propose",
+        "deployment authorize",
+    }
+    owners = by_command()
+    for command in UNAVAILABLE_COMMANDS:
+        owner = owners[command]
+        assert (owner.module, owner.symbol, owner.mutates) == (
+            "vendor_cp.cli.commands",
+            command.replace(" ", "_"),
+            False,
+        )
+        assert owner.summary.startswith("unavailable")
 
 
 def test_no_mutating_owner_is_claimed_by_two_commands() -> None:

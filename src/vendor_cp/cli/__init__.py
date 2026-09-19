@@ -382,7 +382,10 @@ def build_parser() -> _Parser:
     targets.set_defaults(handler=commands.deployment_targets)
 
     propose = _command(
-        deployment_sub, "deployment", "propose", "freeze the desired state into a plan"
+        deployment_sub,
+        "deployment",
+        "propose",
+        "unavailable: requires a Foundation-rendered immutable candidate",
     )
     propose.add_argument("--command-id", required=True)
     propose.add_argument("--target-id", required=True)
@@ -395,7 +398,7 @@ def build_parser() -> _Parser:
         deployment_sub,
         "deployment",
         "authorize",
-        "carry an approval into a frozen plan and request its rollout",
+        "unavailable: requires an assembly-injected authorization signer",
     )
     authorize.add_argument("--command-id", required=True)
     authorize.add_argument("--plan-id", required=True)
