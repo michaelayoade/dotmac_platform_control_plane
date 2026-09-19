@@ -261,16 +261,24 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     bootstrap_password = commands.index("secrets.token_urlsafe")
     start_db = commands.index("up -d --wait db")
     initialize_manifests = commands.index("run --rm --no-deps manifest-init")
+    manifest_init_command = "compose --profile ops run --rm --no-deps manifest-init"
+    assert [
+        line.strip()
+        for line in commands.splitlines()
+        if line.strip() == manifest_init_command
+    ] == [manifest_init_command]
     verify_roles = commands.index("module database role contract is not satisfied")
     migrate = commands.index("dotmac-platform admin migrate")
     replace = commands.index("up -d app")
+    verify = commands.index("sha256sum --quiet --check SHA256SUMS")
     assert (
         bootstrap_password
         < start_db
-        < initialize_manifests
         < verify_roles
         < globals_capture
         < backup
+        < verify
+        < initialize_manifests
         < migrate
         < replace
     )
@@ -494,9 +502,10 @@ def test_the_deploy_refuses_a_fatal_environment_before_it_touches_anything() -> 
     """The failure must arrive before the migrations, not in the lifespan.
 
     `compose up -d app` is the SEVENTH action this script takes. The image is
-    pulled, the database started, the manifest volume initialised, the role and
-    ownership contracts read, a backup taken and THE MIGRATIONS APPLIED before
-    the application is ever started — so a configuration error left to the
+    pulled, the database started, the role and ownership contracts read, a
+    recovery bundle published and verified, the manifest volume initialised,
+    and THE MIGRATIONS APPLIED before the application is ever started — so a
+    configuration error left to the
     application's own `validate_settings` call arrives with the schema already
     advanced and the service down.
 
@@ -550,11 +559,14 @@ def test_the_recovery_bundle_is_atomic_and_gates_the_migration() -> None:
 
     publish = commands.index('mv "$BUNDLE_TMP" "$BUNDLE_PATH"')
     verify = commands.index("sha256sum --quiet --check SHA256SUMS")
+    initialize_manifests = commands.index(
+        "compose --profile ops run --rm --no-deps manifest-init"
+    )
     migrate = commands.index("dotmac-platform admin migrate")
-    assert publish < verify < migrate, (
+    assert publish < verify < initialize_manifests < migrate, (
         "the bundle must be published and re-verified from its published "
-        "location BEFORE the schema advances; a rollback discovered to be "
-        "absent afterwards is not a rollback"
+        "location before manifest initialization and schema advancement; a "
+        "rollback discovered to be absent afterwards is not a rollback"
     )
 
 
