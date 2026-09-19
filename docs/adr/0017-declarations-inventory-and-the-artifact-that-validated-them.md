@@ -228,3 +228,130 @@ existed that day, so a declared-but-absent check was green on a database that
 had moved. `dotmac-platform admin descriptor-drift` reports both directions,
 against a catalogue capture from the target, connects to nothing, and is the
 first live consumer those two declarations have ever had.
+
+---
+
+## Amendment — 2026-09-20 (a render candidate, distinct from both artifacts § 1 already names)
+
+Proposed 2026-09-20, pending Michael Ayoade's acceptance. **Nothing above is
+edited.** § 1 through § 8 stand exactly as accepted; this section names a gap
+between what Governance now requires and what this record currently
+distinguishes, and proposes a third artifact to close it. It does not close
+the gap itself.
+
+### Why § 1's two candidates are not the thing Governance's gate wants
+
+Governance's `Dotmac engineering standards` check now requires
+`schema_version: 11` on `.dotmac/standards-profile.json`, which adds a
+`deployment_artefact_surfaces` declaration: a product must render its
+deployment assets and byte-compare the rendered output against a committed
+copy, in CI, before merge. Platform CP is pinned at `schema_version: 9` and
+fails that check.
+
+§ 1 already distinguishes two artifacts and this record's own header comment
+on `deploy/product.toml` names the discipline plainly: "THIS FILE IS A
+PROMOTED CANDIDATE. IT IS NEVER HAND-EDITED." Both of § 1's candidates —
+the immutable build artifact in § 1 itself, and the pre-promotion drafts held
+under `deploy/candidates/*.toml` and indexed in
+`deploy/descriptor-promotions.json` — describe a decision that has ALREADY
+been taken: an exact image, exact migration heads, an exact manifest digest,
+promoted to the accepted descriptor only **after** a real deployment
+succeeded (§ 2). Neither one exists to be rendered and byte-compared before
+that deployment happens; both exist to be promoted after it.
+
+Schema 11 wants the opposite direction: an artifact that is rendered and
+byte-compared **ahead of** any deployment, as a merge gate. Nothing in § 1
+through § 8 names that artifact, because nothing in this repository's
+deployment model produces deployable bytes before a deployment is decided —
+`deploy/product.toml` and every file under `deploy/candidates/` are records
+of what was decided or what is already running, never a render target.
+
+### The proposed third artifact: the deployment render candidate
+
+This amendment proposes naming a fourth kind of file — distinct from all
+three § 1 names — called the **deployment render candidate**. Concretely,
+one `deploy/render-candidates/<date>-<slug>.toml` (or equivalent path,
+exact location deferred to implementation) per product, matching whatever
+input shape a Foundation renderer release requires, and the corresponding
+rendered output committed beside it for CI to byte-compare.
+
+The name is chosen to avoid exactly the collision Governance's schema
+change would otherwise create with existing vocabulary: `deploy/candidates/
+*.toml` already means "a pre-promotion draft of the accepted descriptor,"
+per § 1 and the ledger's own `note` field. A deployment render candidate is
+not a draft of the accepted descriptor and is never a promotion input. It
+answers a different question — "what would Foundation's renderer produce
+right now, from this input, and does the committed copy still match?" —
+never "is this what the product will run next."
+
+**The render candidate is never auto-promoted.** § 2's migration rule is
+untouched: the accepted descriptor still advances only when a real
+deployment has produced the state it describes, still only from one of § 1's
+existing two candidate kinds, and still only through
+`deploy/descriptor-promotions.json`'s append-only ledger exactly as it
+operates today. A deployment render candidate reaching CI green says
+Foundation can render this input byte-for-byte; it says nothing about
+whether that input has been, or ever will be, deployed. Promotion of the
+accepted descriptor remains a fact about a deployment that already
+happened. Producing a deployment render candidate is not a fact about
+anything having happened at all.
+
+### The invariant
+
+> A deployment render candidate's fields — `[image]` and any other
+> forward-declared value — MUST NOT retroactively alter
+> `deploy/product.toml` or `deploy/descriptor-promotions.json`.
+
+The three files remain independent documents with independent lifecycles.
+Concretely: no test, script, or CI step reads a deployment render candidate
+to decide what the accepted descriptor says; no promotion in the ledger may
+cite a deployment render candidate as its `candidate` field (that field
+names one of § 1's existing pre-promotion drafts, and only that); and a
+deployment render candidate carrying an image reference that later gets
+deployed still requires its own ordinary promotion — through
+`deploy/candidates/*.toml` and the ledger, exactly as § 2 already requires —
+rather than being treated as having pre-authorized one. The render
+candidate answers Governance's question; it never answers `dotmac-deploy
+drift`'s.
+
+### What this amendment does not resolve
+
+Two prerequisites, found by a bounded read-only architecture review of
+Governance's schema-11 requirement against Platform CP's actual deployment
+surface, remain open and are not resolved by naming the concept above:
+
+1. **No published Foundation release can render Platform CP's complete
+   topology.** The published `dotmac_deployment_foundation` release
+   (`0.2.0a2`, the version this record's § 5 and § 7 already establish as
+   what is actually installable) cannot parse Platform CP's `[database]`
+   contract at all — § 7 already records the exact refusal,
+   `error: unknown key(s) ['database']`. The unpublished `0.3.0a3`
+   candidate understands more of the shape but still cannot reproduce
+   Platform CP's actual database bootstrap sequence, the `manifest-init`
+   ownership boundary, volume permission requirements, or Host-header-aware
+   readiness checks. A renderer that cannot represent these cannot be the
+   thing CI byte-compares against, because a rendered file missing them
+   would be compared and pass while describing a deployment nobody could
+   run.
+2. **Platform CP is not the party permitted to close that gap.** The
+   fleet-wide extraction rule (`AGENTS.md`, product-first extraction: a
+   shared capability is built and owned in one place, and a product
+   consumes it rather than forking it) forbids Platform CP writing its own
+   renderer to work around Foundation's gap. Only a Foundation release with
+   full topology support closes this; a local renderer would create the
+   exact second-writer problem the rule exists to prevent, and it would be
+   invisible to every other product pinned to the same Foundation contract.
+
+**This amendment does not authorize implementation.** No
+`deploy/render-candidates/` path, renderer invocation, CI byte-compare step,
+or `.dotmac/standards-profile.json` change follows from accepting the
+concept above. Implementation waits for BOTH a published
+`dotmac-deployment-foundation` release with full topology support for
+Platform CP's `[database]` contract, bootstrap sequence, `manifest-init`
+ownership boundary, volume permissions and readiness checks, AND Michael
+Ayoade's explicit go-ahead on this exact amendment, separately from his
+acceptance of the concept it proposes.
+
+**Status: Proposed.** Michael Ayoade is the owner and only approver, per
+this record's own header. Nothing in this amendment is accepted until he
+rules on it.
