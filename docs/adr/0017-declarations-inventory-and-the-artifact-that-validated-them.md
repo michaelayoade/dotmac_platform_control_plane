@@ -233,7 +233,10 @@ first live consumer those two declarations have ever had.
 
 ## Amendment — 2026-09-20 (a render candidate, distinct from § 1's three artifacts)
 
-Proposed 2026-09-20, pending Michael Ayoade's acceptance. **Nothing above is
+Proposed 2026-09-20; concept accepted by Michael Ayoade 2026-09-20 after two
+rounds of correction (the pre-authorization lifecycle sequencing in
+`admit_candidate_image`, and refusing any independent image slot in the
+render candidate — see this section's revision history). **Nothing above is
 edited.** § 1 through § 8 stand exactly as written above; this section names
 a gap between what Governance now requires and what this record currently
 distinguishes, and proposes a fourth artifact to close it. It does not close
@@ -467,6 +470,12 @@ ownership boundary, volume permissions and readiness checks, AND Michael
 Ayoade's explicit go-ahead on this exact amendment, separately from his
 acceptance of the concept it proposes.
 
-**Status: Proposed.** Michael Ayoade is the owner and only approver, per
-this record's own header. Nothing in this amendment is accepted until he
-rules on it.
+**Status: Concept accepted 2026-09-20.** Michael Ayoade is the owner and only
+approver, per this record's own header, and has accepted the concept above
+after the two correction rounds noted at this amendment's opening. This
+still does not authorize implementation: it still waits on BOTH a published
+`dotmac-deployment-foundation` release with full topology support for
+Platform CP's `[database]` contract, bootstrap sequence, `manifest-init`
+ownership boundary, volume permissions and readiness checks, AND Michael
+Ayoade's separate, explicit go-ahead on an implementation of this exact
+amendment.
