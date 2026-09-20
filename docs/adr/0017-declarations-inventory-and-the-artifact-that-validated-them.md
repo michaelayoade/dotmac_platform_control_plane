@@ -324,11 +324,36 @@ output happens to byte-compare cleanly in CI. Two mechanisms that usually
 agree are not one mechanism; the day they diverge is the day this
 distinction was load-bearing.
 
-**The render candidate's `[image]`, if it has one at all, MUST be the same
-value `admit_candidate_image` already admits for the current authorized
-plan — derived, never independently declared or typed.** A render candidate
-implementation that cannot source its image this way has not closed the
-gap Governance names; it has reopened the one `candidate.py` closed.
+**Correction: `admit_candidate_image` does not admit an image "for the
+current authorized plan" — it runs BEFORE any authorization exists.**
+`CandidateRefused`'s own docstring says so directly: "nothing has been asked
+of Deployment Control at this point." The real sequence has three stages,
+not two, and pre-merge CI sits BEFORE the first one that touches a real
+image:
+
+1. **Pre-merge (this amendment's render candidate, in CI): NON-AUTHORIZING
+   and receipt-free.** No `production-image.yml` release receipt exists yet
+   for a change still under review, so nothing here may call
+   `admit_candidate_image` and expect it to succeed. The render candidate's
+   `[image]` at this stage is a placeholder or declared value scoped to
+   proving Foundation can render this input — it is not, and cannot be, the
+   real deployment image.
+2. **Later, once a real release receipt exists:** `admit_candidate_image`
+   derives the actual image from the accepted descriptor plus that VERIFIED
+   RECEIPT and a registry readback — never from a plan, authorized or
+   otherwise, because at this point still nothing has been asked of Control.
+3. **Only after that derivation: Control binds the exact deployment
+   inputs**, the derived image among them, as part of authorizing the
+   deployment. Authorization consumes the derived image; it does not
+   precede or produce it.
+
+A render candidate implementation must not conflate stage 1 with stages 2–3
+by treating its pre-merge render as if it carried, or needed to carry, an
+authorized or receipt-derived image. Whatever it does carry pre-merge has no
+bearing on what `admit_candidate_image` later derives, and reaching stage 2
+by any other path (a typed or string `[image]` an operator or a second
+document could set) is exactly the raw reference `candidate.py`'s own
+docstring says "has nowhere to go."
 
 **Satisfying schema 11's byte-compare does not satisfy Governance ADR-0014
 § 6.** ADR-0014 requires ONE document binding release digest, private-
