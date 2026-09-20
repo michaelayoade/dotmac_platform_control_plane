@@ -231,15 +231,15 @@ first live consumer those two declarations have ever had.
 
 ---
 
-## Amendment — 2026-09-20 (a render candidate, distinct from both artifacts § 1 already names)
+## Amendment — 2026-09-20 (a render candidate, distinct from § 1's three artifacts)
 
 Proposed 2026-09-20, pending Michael Ayoade's acceptance. **Nothing above is
 edited.** § 1 through § 8 stand exactly as written above; this section names
 a gap between what Governance now requires and what this record currently
-distinguishes, and proposes a third artifact to close it. It does not close
+distinguishes, and proposes a fourth artifact to close it. It does not close
 the gap itself.
 
-### Why § 1's two candidates are not the thing Governance's gate wants
+### Why § 1's candidate descriptor is not the thing Governance's gate wants
 
 Governance introduced a `deployment_artefact_surfaces` declaration at
 `schema_version: 10`: a product must render its deployment assets and
@@ -254,34 +254,28 @@ exposed to either requirement. It is draft PR #187 specifically that repins
 `schema_version` field is still `9` — that mismatch, not anything on `main`,
 is what fails the `Dotmac engineering standards` check.
 
-§ 1 already distinguishes two artifacts and this record's own header comment
-on `deploy/product.toml` names the discipline plainly: "THIS FILE IS A
-PROMOTED CANDIDATE. IT IS NEVER HAND-EDITED." Both of § 1's candidates —
-the immutable build artifact in § 1 itself, and the pre-promotion drafts held
-under `deploy/candidates/*.toml` and indexed in
-`deploy/descriptor-promotions.json` — describe a decision that has ALREADY
-been taken: an exact image, exact migration heads, an exact manifest digest,
-promoted to the accepted descriptor only **after** the state it describes is
-already true. That is not always a deployment: the ledger's own
-`contract_change` and `composition_change` promotion kinds promote a new
-candidate that "deploys nothing" (its own words) — widening a verification
-set, or adding a process role the running image already serves. What every
-promotion kind shares, deployment or not, is that the candidate it promotes
-already describes a decided, present fact. Neither of § 1's candidate kinds
-exists to be rendered and byte-compared before that fact is decided; both
-exist to be promoted after it.
+§ 1 names a source contract, a candidate descriptor and an accepted
+descriptor. The files under `deploy/candidates/*.toml` are instances of that
+one candidate-descriptor kind; `deploy/descriptor-promotions.json` records
+which one became `deploy/product.toml`, whose header says "THIS FILE IS A
+PROMOTED CANDIDATE. IT IS NEVER HAND-EDITED." The ledger includes
+`contract_change` and `composition_change` promotions that deploy nothing.
+The latter explicitly declares what a deployment **will** run, not a process
+role already running. The distinction here is therefore not past versus
+future: the descriptor candidate and promotion ledger record a declared
+contract and its promotion authority. They do not define a Foundation render
+input and committed output that CI byte-compares with the asset production
+consumes.
 
-Schema 11 wants the opposite direction: an artifact that is rendered and
-byte-compared **ahead of** any deployment, as a merge gate. Nothing in § 1
-through § 8 names that artifact, because nothing in this repository's
-deployment model produces deployable bytes before a deployment is decided —
-`deploy/product.toml` and every file under `deploy/candidates/` are records
-of what was decided or what is already running, never a render target.
+The deployment-artefact requirement instead needs a render input and
+committed rendered output checked before merge. § 1 through § 8 name no such
+artifact; reusing a descriptor candidate would silently couple its promotion
+lifecycle to a different job.
 
-### The proposed third artifact: the deployment render candidate
+### The proposed fourth artifact: the deployment render candidate
 
-This amendment proposes naming a fourth kind of file — distinct from all
-three § 1 names — called the **deployment render candidate**. Concretely,
+This amendment proposes naming a fourth artifact — distinct from all three
+§ 1 names — called the **deployment render candidate**. Concretely,
 one `deploy/render-candidates/<date>-<slug>.toml` (or equivalent path,
 exact location deferred to implementation) per product, matching whatever
 input shape a Foundation renderer release requires, and the corresponding
@@ -298,15 +292,15 @@ never "is this what the product will run next."
 
 **The render candidate does not itself authorize descriptor promotion.**
 § 2's migration rule is untouched: the accepted descriptor still advances
-only from one of § 1's existing two candidate kinds, and still only through
-`deploy/descriptor-promotions.json`'s append-only ledger exactly as it
+only from a descriptor candidate under `deploy/candidates/*.toml`, and only
+through `deploy/descriptor-promotions.json`'s append-only ledger exactly as it
 operates today — whether the promoted state is a deployment or, as the
 ledger's own `contract_change`/`composition_change` entries record, a
 narrower fact that "deploys nothing." A deployment render candidate reaching
 CI green says Foundation can render this input byte-for-byte; it says
 nothing about whether that input has been, or ever will be, promoted or
-deployed, and it may never stand in for one of § 1's two candidate kinds in
-the ledger's `candidate` field.
+deployed, and it may never stand in for a descriptor candidate in the
+ledger's `candidate` field.
 
 ### The invariant
 
@@ -314,11 +308,11 @@ the ledger's `candidate` field.
 > forward-declared value — MUST NOT retroactively alter
 > `deploy/product.toml` or `deploy/descriptor-promotions.json`.
 
-The three files remain independent documents with independent lifecycles.
+These artifacts retain independent lifecycles.
 Concretely: no test, script, or CI step reads a deployment render candidate
 to decide what the accepted descriptor says; no promotion in the ledger may
 cite a deployment render candidate as its `candidate` field (that field
-names one of § 1's existing pre-promotion drafts, and only that); and a
+names an existing pre-promotion descriptor candidate, and only that); and a
 deployment render candidate carrying an image reference that later gets
 deployed still requires its own ordinary promotion — through
 `deploy/candidates/*.toml` and the ledger, exactly as § 2 already requires —
@@ -329,23 +323,23 @@ drift`'s.
 ### The second invariant: rendered bytes must be the bytes production runs
 
 A render candidate satisfying Governance in isolation is not enough. Today,
-`.github/workflows/production-deploy.yml` (line 209) `rsync`s
-`docker-compose.production.yml` to the production host verbatim, and
-`scripts/deploy_production.sh` (line 147) executes exactly that file via
-`$COMPOSE_FILE`. Nothing about naming a separate, CI-only render candidate
-changes this: a render candidate could pass Governance's byte-compare every
-day while `docker-compose.production.yml` — the file production actually
-runs — drifts from it freely, since nothing today ties the two together.
+`.github/workflows/production-deploy.yml` `rsync`s
+`docker-compose.production.yml` to the production host verbatim.
+`scripts/deploy_production.sh` uses that file by default, but its
+`COMPOSE_FILE` environment override can select a different path. Naming a
+separate, CI-only render candidate does not bind either the copied file or
+the effective Compose path to the bytes CI compared.
 
-A conforming implementation MUST close that gap: the rendered output a
-render candidate's CI job byte-compares against has to BE
-`docker-compose.production.yml` itself (the render candidate becomes the
-one thing that produces that file, and hand-edits to it fail the same way a
-hand-edit to `deploy/product.toml` fails § 1's discipline), or the
-implementation must add its own proof that the two are kept byte-identical
-by construction. An implementation that renders a file production never
-consumes has satisfied Governance's letter while leaving its actual purpose
-— proving what CI checked is what runs — unmet.
+A conforming implementation MUST prove that the exact rendered bytes its CI
+job byte-compares are the bytes the production executor consumes at its
+effective Compose path. The render candidate may produce
+`docker-compose.production.yml` itself, provided the production invocation
+pins that path or refuses an override; otherwise the implementation must
+verify the effective file's digest against the retained rendered asset before
+execution. Hand-edits to the retained output must fail the CI byte-compare.
+An implementation that renders a file production never consumes has
+satisfied Governance's letter while leaving its actual purpose — proving
+what CI checked is what runs — unmet.
 
 ### What this amendment does not resolve
 
