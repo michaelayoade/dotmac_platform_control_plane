@@ -21,13 +21,13 @@
       "code": "approvals",
       "contract_version": 2,
       "distribution": "dotmac-approvals",
-      "version": "0.1.0a5"
+      "version": "0.1.0a6"
     },
     {
       "code": "commercial_agreements",
       "contract_version": 2,
       "distribution": "dotmac-commercial-agreements",
-      "version": "0.1.0a2"
+      "version": "0.1.0a3"
     },
     {
       "code": "console",
@@ -49,7 +49,7 @@
       "code": "entitlement_allocation",
       "contract_version": 2,
       "distribution": "dotmac-entitlement-allocation",
-      "version": "0.1.0a6"
+      "version": "0.1.0a7"
     },
     {
       "code": "licence_delivery",
@@ -59,7 +59,7 @@
       "code": "licensing",
       "contract_version": 2,
       "distribution": "dotmac-licensing",
-      "version": "0.1.0a1"
+      "version": "0.1.0a2"
     },
     {
       "code": "offers",
@@ -77,7 +77,7 @@
       "code": "release_catalog",
       "contract_version": 2,
       "distribution": "dotmac-release-catalog",
-      "version": "0.1.0a4"
+      "version": "0.1.0a5"
     },
     {
       "code": "release_evidence",

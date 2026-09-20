@@ -34,7 +34,7 @@ def test_entitlement_allocation_is_exact_pinned_from_forgejo() -> None:
     dependency = config["tool"]["poetry"]["dependencies"][
         "dotmac-entitlement-allocation"
     ]
-    assert dependency == {"version": "0.1.0a6", "source": "forgejo"}
+    assert dependency == {"version": "0.1.0a7", "source": "forgejo"}
 
 
 def test_the_unpublished_release_is_never_pinned() -> None:

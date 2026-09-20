@@ -1,6 +1,6 @@
 {
   "manifest": {
-    "digest": "sha256:6d0e838f811689cf4b7210db32d7e24d35981a07c82de0b256923d407159e7a7",
+    "digest": "sha256:82618ce1b0c6e34d1ddd9d8c0682a198d72e088eefcaa8b57d488470607d91fa",
     "path": "deploy/prospective/product-manifest.json"
   },
   "migration": {
@@ -9,7 +9,7 @@
       "ap_0002_outbox_relay",
       "dc_0011_attestation_registry",
       "ea_0003_platform_audit_log",
-      "rl_0001_release_artifacts",
+      "rl_0002_db_catalog_attestations",
       "v019_relay_heartbeat"
     ]
   },

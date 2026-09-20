@@ -16,10 +16,18 @@ can never make this command report product readiness.
 
 The module half of the ratchet is ACTIVE under Kernel a101: `ModuleManifest`
 declares `database_catalog`, and the exact-pinned Deployment Control a13
-manifest publishes one. The other five composed modules are the explicit debt
-set. ``pinned_manifest_declares_contribution_field`` and the two-directional
-debt test make that premise executable; if the field or a contribution changes,
-the checked-in register must change in the same review.
+manifest publishes one. The other five composed modules -- approvals,
+commercial_agreements, entitlement_allocation, licensing, release_catalog --
+were the explicit debt set; each now publishes a live-PostgreSQL-verified
+contribution as of its 2026-09-20 repin (dotmac-approvals 0.1.0a6,
+dotmac-commercial-agreements 0.1.0a3, dotmac-entitlement-allocation 0.1.0a7,
+dotmac-licensing 0.1.0a2, dotmac-release-catalog 0.1.0a5), so the register
+below is empty. ``pinned_manifest_declares_contribution_field`` and the
+two-directional debt test make that premise executable; if the field or a
+contribution changes, the checked-in register must change in the same
+review -- retiring every entry here does not retire
+`OPEN_PRODUCT_DATABASE_CATALOG_BLOCKERS` below, which is a separate,
+still-open product-level register.
 """
 
 from __future__ import annotations
@@ -45,15 +53,7 @@ ACCEPTED_DESCRIPTOR: Final = ROOT / "deploy" / "product.toml"
 #: and two literals is exactly how they would stop being about the same one.
 CONTRIBUTION_FIELD: Final = "database_catalog"
 
-MODULE_DATABASE_CATALOG_DEBT: Final[frozenset[str]] = frozenset(
-    {
-        "approvals",
-        "commercial_agreements",
-        "entitlement_allocation",
-        "licensing",
-        "release_catalog",
-    }
-)
+MODULE_DATABASE_CATALOG_DEBT: Final[frozenset[str]] = frozenset()
 
 
 class ProductDatabaseCatalogBlockerCode(StrEnum):

@@ -454,14 +454,14 @@ def test_the_source_projection_reads_attributes_that_exist() -> None:
 def test_agreement_enumeration_is_the_exact_pinned_owner_reader() -> None:
     """The local fact behind `COHORT_FULLY_ENUMERABLE`.
 
-    Vendor exposes one bounded page adapter over the a2 top-level public API.
+    Vendor exposes one bounded page adapter over the a3 top-level public API.
     It neither queries the module schema nor invents a second estate reader.
     """
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     dependency = project["tool"]["poetry"]["dependencies"][
         "dotmac-commercial-agreements"
     ]
-    assert dependency["version"] == "0.1.0a2"
+    assert dependency["version"] == "0.1.0a3"
 
     adapter_path = ROOT / "src" / "vendor_cp" / "contracts" / "adapter.py"
     tree = _module(adapter_path)

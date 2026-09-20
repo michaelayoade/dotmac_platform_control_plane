@@ -91,9 +91,15 @@ def test_the_commands_exit_code_is_observed_in_both_directions() -> None:
     assert main(modules=contributing, blockers=()) == 0
 
     # Either register alone holds the exit at 2, so neither can be quietly
-    # emptied on the strength of the other still being full.
+    # emptied on the strength of the other still being full. The real
+    # STATEFUL_MODULES default can no longer stand in for "missing" on its
+    # own: all five previously-debt modules now publish contributions (their
+    # 2026-09-20 repin), so `main(blockers=())` against the real default
+    # would return 0 -- a synthetic missing module keeps this assertion
+    # about the property, not about today's real module state.
+    missing_only = (_Module(code="missing", database_catalog=None),)
     assert main(modules=contributing) == 2
-    assert main(blockers=()) == 2
+    assert main(modules=missing_only, blockers=()) == 2
 
 
 def test_every_unautomated_product_obligation_is_explicit() -> None:

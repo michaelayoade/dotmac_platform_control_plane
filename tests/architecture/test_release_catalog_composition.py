@@ -29,23 +29,23 @@ def test_shared_dependencies_are_exact_published_pins() -> None:
     # how the entitlement-allocation pin could have drifted to a range or to a
     # path dependency without a single test noticing.
     assert dependencies["dotmac-release-catalog"] == {
-        "version": "0.1.0a4",
-        "source": "forgejo",
-    }
-    assert dependencies["dotmac-entitlement-allocation"] == {
-        "version": "0.1.0a6",
-        "source": "forgejo",
-    }
-    assert dependencies["dotmac-approvals"] == {
         "version": "0.1.0a5",
         "source": "forgejo",
     }
+    assert dependencies["dotmac-entitlement-allocation"] == {
+        "version": "0.1.0a7",
+        "source": "forgejo",
+    }
+    assert dependencies["dotmac-approvals"] == {
+        "version": "0.1.0a6",
+        "source": "forgejo",
+    }
     assert dependencies["dotmac-commercial-agreements"] == {
-        "version": "0.1.0a2",
+        "version": "0.1.0a3",
         "source": "forgejo",
     }
     assert dependencies["dotmac-licensing"] == {
-        "version": "0.1.0a1",
+        "version": "0.1.0a2",
         "source": "forgejo",
     }
     assert dependencies["dotmac-deployment-control"] == {

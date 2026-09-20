@@ -29,7 +29,7 @@ from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
 KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a101)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
-RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
+RELEASE_CATALOG_HEAD = "rl_0002_db_catalog_attestations"  # current pin (0.1.0a5)
 
 # The a5/a6 repin extended two module lineages, and it changed the version-ROW
 # topology as well as the head names — which is the whole reason these rehearsals
