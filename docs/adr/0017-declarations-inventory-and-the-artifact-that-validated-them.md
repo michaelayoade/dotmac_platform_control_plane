@@ -272,14 +272,13 @@ committed rendered output checked before merge. § 1 through § 8 name no such
 artifact; reusing a descriptor candidate would silently couple its promotion
 lifecycle to a different job.
 
-### The proposed fourth artifact: the deployment render candidate
+### The proposed fourth artifact: the deployment render candidate — concept named, concrete shape DEFERRED
 
-This amendment proposes naming a fourth artifact — distinct from all three
-§ 1 names — called the **deployment render candidate**. Concretely,
-one `deploy/render-candidates/<date>-<slug>.toml` (or equivalent path,
-exact location deferred to implementation) per product, matching whatever
-input shape a Foundation renderer release requires, and the corresponding
-rendered output committed beside it for CI to byte-compare.
+This amendment names the gap and proposes naming a fourth artifact —
+distinct from all three § 1 names — as the **deployment render candidate**.
+It does NOT yet propose the concrete file shape (an independent
+`deploy/render-candidates/<date>-<slug>.toml` was an earlier draft of this
+amendment's own text; that specific shape is DEFERRED below, not accepted).
 
 The name is chosen to avoid exactly the collision Governance's schema
 change would otherwise create with existing vocabulary: `deploy/candidates/
@@ -302,11 +301,59 @@ nothing about whether that input has been, or ever will be, promoted or
 deployed, and it may never stand in for a descriptor candidate in the
 ledger's `candidate` field.
 
+### Why an independent `[image]` field is refused, not deferred as a detail
+
+An earlier draft of this amendment let the render candidate declare its own
+`[image]`, matching or diverging from the accepted descriptor's. That is not
+a detail to fill in later — it is a second image authority, and this
+repository already has one, on purpose. `src/vendor_cp/deployment/
+candidate.py` derives the ONLY image a Foundation execution plan may name:
+
+    accepted descriptor + accepted release receipt
+            -> candidate spec (two fields replaced, nothing else)
+            -> canonical document
+            -> FoundationExecutionPlanV1
+
+`CandidateImage` (same file) carries a private witness only
+`admit_candidate_image` holds, specifically so "the override must come from
+a verified receipt" is a TYPE, not a convention an operator or a second
+document could route around. A render candidate with its own typed or
+string `[image]` field is exactly the raw reference that module's own
+docstring says "has nowhere to go" — regardless of whether its Compose
+output happens to byte-compare cleanly in CI. Two mechanisms that usually
+agree are not one mechanism; the day they diverge is the day this
+distinction was load-bearing.
+
+**The render candidate's `[image]`, if it has one at all, MUST be the same
+value `admit_candidate_image` already admits for the current authorized
+plan — derived, never independently declared or typed.** A render candidate
+implementation that cannot source its image this way has not closed the
+gap Governance names; it has reopened the one `candidate.py` closed.
+
+**Satisfying schema 11's byte-compare does not satisfy Governance ADR-0014
+§ 6.** ADR-0014 requires ONE document binding release digest, private-
+inventory digest, rendered-configuration digest, exact container image
+digest, target, approver and rationale together — its own stated argument
+is that any three of those agreeing proves nothing about the fourth. A CI
+job that renders and byte-compares Compose output answers schema 11's
+question and none of ADR-0014's; an implementation that stops at the byte-
+compare has closed one gate and left the other exactly as open as before
+this amendment. Both gates apply; neither substitutes for the other.
+
+**Disposition: the render-candidate CONCEPT is proposed; the concrete
+`deploy/render-candidates/*.toml` file shape is DEFERRED** until a design
+demonstrates it introduces no image authority independent of
+`admit_candidate_image`, and separately addresses ADR-0014 § 6's full
+binding rather than schema 11's byte-compare alone. Implementation must not
+proceed from the concept alone.
+
 ### The invariant
 
 > A deployment render candidate's fields — `[image]` and any other
 > forward-declared value — MUST NOT retroactively alter
-> `deploy/product.toml` or `deploy/descriptor-promotions.json`.
+> `deploy/product.toml` or `deploy/descriptor-promotions.json`, and its
+> `[image]`, if present, MUST be derived from `admit_candidate_image`
+> (`src/vendor_cp/deployment/candidate.py`) — never independently declared.
 
 These artifacts retain independent lifecycles.
 Concretely: no test, script, or CI step reads a deployment render candidate
@@ -343,9 +390,11 @@ what CI checked is what runs — unmet.
 
 ### What this amendment does not resolve
 
-Two prerequisites, found by a bounded read-only architecture review of
+Three prerequisites remain open and are not resolved by naming the concept
+above — the first two found by a bounded read-only architecture review of
 Governance's schema-11 requirement against Platform CP's actual deployment
-surface, remain open and are not resolved by naming the concept above:
+surface, the third by review of this amendment's own draft against
+`candidate.py` and Governance ADR-0014:
 
 1. **No published Foundation release can render Platform CP's complete
    topology.** The published `dotmac_deployment_foundation` release
@@ -369,6 +418,13 @@ surface, remain open and are not resolved by naming the concept above:
    full topology support closes this; a local renderer would create the
    exact second-writer problem the rule exists to prevent, and it would be
    invisible to every other product pinned to the same Foundation contract.
+3. **No design yet proves the render candidate introduces no second image
+   authority, or satisfies ADR-0014 § 6's full binding.** See "Why an
+   independent `[image]` field is refused, not deferred as a detail" above.
+   This is not a detail to fill in during implementation — it is a
+   precondition implementation must arrive already satisfying, because a
+   render candidate built first and reconciled with `candidate.py` second
+   would spend real effort on a shape this amendment has already refused.
 
 **This amendment does not authorize implementation.** No
 `deploy/render-candidates/` path, renderer invocation, CI byte-compare step,
