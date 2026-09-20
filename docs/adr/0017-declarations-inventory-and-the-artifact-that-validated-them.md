@@ -334,10 +334,13 @@ image:
 1. **Pre-merge (this amendment's render candidate, in CI): NON-AUTHORIZING
    and receipt-free.** No `production-image.yml` release receipt exists yet
    for a change still under review, so nothing here may call
-   `admit_candidate_image` and expect it to succeed. The render candidate's
-   `[image]` at this stage is a placeholder or declared value scoped to
-   proving Foundation can render this input — it is not, and cannot be, the
-   real deployment image.
+   `admit_candidate_image` and expect it to succeed. The render candidate
+   declares no deployable `[image]` or independent desired-image value. A
+   non-deployable, late-bound image slot in rendered Compose bytes may be a
+   way to prove the render before publication — today's production Compose
+   uses `${VENDOR_APP_IMAGE:?…}` — but only a later design can establish
+   whether Foundation preserves that slot and execution fills it without
+   changing the checked bytes. This amendment approves no such file shape.
 2. **Later, once a real release receipt exists:** `admit_candidate_image`
    derives the actual image from the accepted descriptor plus that VERIFIED
    RECEIPT and a registry readback — never from a plan, authorized or
@@ -374,23 +377,26 @@ proceed from the concept alone.
 
 ### The invariant
 
-> A deployment render candidate's fields — `[image]` and any other
-> forward-declared value — MUST NOT retroactively alter
-> `deploy/product.toml` or `deploy/descriptor-promotions.json`, and its
-> `[image]`, if present, MUST be derived from `admit_candidate_image`
-> (`src/vendor_cp/deployment/candidate.py`) — never independently declared.
+> A deployment render candidate MUST NOT declare a deployable `[image]` or
+> any independent desired-image value. Its pre-merge render is receipt-free
+> and non-authorizing; a late-bound image slot, if the eventual design can
+> prove one, is not an image admission. After publication, the image used for
+> execution MUST come from `admit_candidate_image`
+> (`src/vendor_cp/deployment/candidate.py`), never from the render candidate.
+> No field of the render candidate may retroactively alter
+> `deploy/product.toml` or `deploy/descriptor-promotions.json`.
 
 These artifacts retain independent lifecycles.
 Concretely: no test, script, or CI step reads a deployment render candidate
 to decide what the accepted descriptor says; no promotion in the ledger may
 cite a deployment render candidate as its `candidate` field (that field
-names an existing pre-promotion descriptor candidate, and only that); and a
-deployment render candidate carrying an image reference that later gets
-deployed still requires its own ordinary promotion — through
-`deploy/candidates/*.toml` and the ledger, exactly as § 2 already requires —
-rather than being treated as having pre-authorized one. The render
-candidate answers Governance's question; it never answers `dotmac-deploy
-drift`'s.
+names an existing pre-promotion descriptor candidate, and only that). The
+image derived after publication may enter the accepted descriptor only
+AFTER successful deployment, through an ordinary candidate under
+`deploy/candidates/*.toml` and a ledger promotion, as §§ 2 and 8 require;
+the pre-merge render candidate never pre-authorizes or promotes that image.
+The render candidate answers Governance's question; it never answers
+`dotmac-deploy drift`'s.
 
 ### The second invariant: rendered bytes must be the bytes production runs
 
