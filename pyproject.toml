@@ -45,7 +45,13 @@ dotmac-kernel = { version = "0.1.0a101", extras = [
 # does, and an a3 module fails it correctly: the declaration and the database
 # disagree. a4 moves both tables to `platform_tables`, which is what makes the
 # declaration true (`dotmac_starter_mt` ADR-0023).
-dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
+#
+# a5 adds the module's first `database_catalog=` declaration
+# (`ModuleDatabaseCatalogContributionV1`), live-PostgreSQL-verified, and the
+# `rl_0002_db_catalog_attestations` migration it names — no other DDL moved,
+# and `rl_0001`'s bytes are unchanged from a4. Declared `dotmac-kernel` floor
+# is unchanged at `>=0.1.0a100`.
+dotmac-release-catalog = { version = "0.1.0a5", source = "forgejo" }
 # The allocation authority under ADR-0006. Vendor migration `v014` checked the
 # greenfield premise, dropped the empty local tables and retired their writer;
 # Vendor retains only its typed assembly adapter. Exact-pinned from the private
@@ -64,7 +70,11 @@ dotmac-release-catalog = { version = "0.1.0a4", source = "forgejo" }
 #
 # a5 is skipped deliberately and must never be pinned: it carried only the first
 # half of that repair and was never published to the index.
-dotmac-entitlement-allocation = { version = "0.1.0a6", source = "forgejo" }
+#
+# a7 adds the module's first `database_catalog=` declaration, live-PostgreSQL-
+# verified; no migration file changed from a6 (`ea_0001`/`ea_0002`/`ea_0003`
+# are byte-identical). Declared `dotmac-kernel` floor is unchanged.
+dotmac-entitlement-allocation = { version = "0.1.0a7", source = "forgejo" }
 # The dual-plane approval-state authority (ADR-0005 and
 # `dotmac_starter_mt` ADR-0028), composed on its PLATFORM plane only. Vendor
 # migration `v013` restored the module's online DML,
@@ -84,7 +94,11 @@ dotmac-entitlement-allocation = { version = "0.1.0a6", source = "forgejo" }
 # PROOF — which is why the repin comes with the `outbox_relay.v1` binding in
 # `vendor_cp.migration_bindings` and the DDL-free `ap_0002_outbox_relay`
 # verification revision. See ADR-0005 s "Adoption plan".
-dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
+#
+# a6 adds the module's first `database_catalog=` declaration, live-PostgreSQL-
+# verified across both planes; no migration file changed from a5. Declared
+# `dotmac-kernel` floor is unchanged.
+dotmac-approvals = { version = "0.1.0a6", source = "forgejo" }
 # The platform-only owner of deployment identity, desired state, immutable
 # plans, rollouts and authenticated observations (ADR-0011). Atomic: it declares
 # one supported plane set, so no `ModulePlaneSelection` is possible and none is
@@ -138,11 +152,19 @@ dotmac-deployment-control = { version = "0.1.0a13", source = "forgejo" }
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor
 # retains only typed offer, catalogue and approval-evidence adapters.
-dotmac-commercial-agreements = { version = "0.1.0a2", source = "forgejo" }
+#
+# a3 adds the module's first `database_catalog=` declaration, live-PostgreSQL-
+# verified; no migration file changed from a2. Declared `dotmac-kernel` floor
+# is unchanged.
+dotmac-commercial-agreements = { version = "0.1.0a3", source = "forgejo" }
 # The platform-only Licensing issuer authority. Vendor v016 checks the
 # greenfield premise under lock, drops the empty local issuer tables and keeps
 # only key custody plus the separately owned delivery projection.
-dotmac-licensing = { version = "0.1.0a1", source = "forgejo" }
+#
+# a2 adds the module's first `database_catalog=` declaration, live-PostgreSQL-
+# verified across all six tables; no migration file changed from a1. Declared
+# `dotmac-kernel` floor is unchanged.
+dotmac-licensing = { version = "0.1.0a2", source = "forgejo" }
 uvicorn = "^0.30"
 # The one control-plane database's driver (Postgres). There is exactly ONE
 # database; no product DSNs, no cross-database access (deny-case D1/D2).
