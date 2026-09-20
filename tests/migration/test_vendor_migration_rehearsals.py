@@ -543,6 +543,16 @@ def test_upgrade_from_accepted_control_a6_preserves_target(
     assert old_control_head in accepted_heads
     assert DEPLOYMENT_CONTROL_HEAD not in accepted_heads
 
+    # The accepted descriptor's release-catalog head is also stale relative
+    # to this branch's composed lineage (the a5 repin's rl_0002 migration),
+    # independent of the dc_0002->a13 switch this test isolates. Naming it
+    # here, the same way old_control_head is, is what keeps this test about
+    # the Control switch specifically rather than assuming "everything except
+    # Control stays put" -- a premise this branch has already made false once.
+    old_release_catalog_head = "rl_0001_release_artifacts"
+    assert old_release_catalog_head in accepted_heads
+    assert RELEASE_CATALOG_HEAD not in accepted_heads
+
     for revision in sorted(accepted_heads):
         _upgrade(scratch_db, revision)
     assert _versions(scratch_db) == accepted_heads
@@ -602,9 +612,9 @@ def test_upgrade_from_accepted_control_a6_preserves_target(
         engine.dispose()
 
     _upgrade(scratch_db, "heads")
-    assert _versions(scratch_db) == (accepted_heads - {old_control_head}) | {
-        DEPLOYMENT_CONTROL_HEAD
-    }
+    assert _versions(scratch_db) == (
+        accepted_heads - {old_control_head, old_release_catalog_head}
+    ) | {DEPLOYMENT_CONTROL_HEAD, RELEASE_CATALOG_HEAD}
     assert _qualified_table_exists(scratch_db, "mod_deploy.attestation_enrolments")
     assert _qualified_table_exists(scratch_db, "mod_deploy.attestation_current_roots")
     assert _qualified_table_exists(scratch_db, "mod_deploy.rollout_attempt_settlements")
