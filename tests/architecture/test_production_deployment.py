@@ -362,25 +362,25 @@ def test_image_smokes_use_the_production_database_dialect() -> None:
         assert f"dsn {role}" in acceptance
 
 
-def test_image_smokes_prove_the_built_bytes_publish_no_api_documentation() -> None:
-    """The route inventory is checked on the ARTIFACT, not only in the suite.
+def test_image_smokes_prove_only_the_document_plane_is_published() -> None:
+    """The built artifact serves OpenAPI JSON but no interactive docs routes.
 
-    The smoke passes no `ENVIRONMENT`, which is exactly the point:
-    `classify_environment` fails closed, so an image with no declared
-    environment resolves the PRODUCTION policy — and the assertion below then
-    proves the image it just built serves neither browser documentation page and
-    satisfies the production gate. A unit test proves the source is right; this
-    proves the thing that gets deployed is (ADR-0016).
+    The image smoke uses FastAPI's public route attributes so a kernel pin
+    mutation cannot fail on a hard-coded module import instead of the intended
+    missing symbol. Candidate acceptance separately audits Kernel's policy.
     """
-    for path in (
-        ".github/workflows/ci.yml",
-        ".github/candidate/acceptance.sh",
-    ):
-        source = _text(path)
-        assert "import vendor_cp.api_documentation as policy" in source
-        assert "policy.classify_environment(None) == policy.PRODUCTION" in source
-        assert "'/docs', '/docs/oauth2-redirect', '/redoc'" in source
-        assert "policy.audit_api_documentation(" in source
+    workflow = _text(".github/workflows/ci.yml")
+    assert "app.openapi_url == '/openapi.json'" in workflow
+    assert "'/openapi.json' in paths" in workflow
+    for field in ("docs_url", "redoc_url"):
+        assert f"app.{field} is None" in workflow
+    assert "'/docs', '/docs/oauth2-redirect', '/redoc'" in workflow
+
+    acceptance = _text(".github/candidate/acceptance.sh")
+    assert "import dotmac_kernel.api_documentation as policy" in acceptance
+    assert "policy.classify_environment(None) == policy.PRODUCTION" in acceptance
+    assert "'/docs', '/docs/oauth2-redirect', '/redoc'" in acceptance
+    assert "policy.audit_api_documentation(" in acceptance
 
 
 def test_every_test_job_runs_on_a_github_hosted_runner() -> None:

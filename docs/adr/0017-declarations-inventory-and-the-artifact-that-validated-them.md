@@ -228,3 +228,22 @@ existed that day, so a declared-but-absent check was green on a database that
 had moved. `dotmac-platform admin descriptor-drift` reports both directions,
 against a catalogue capture from the target, connects to nothing, and is the
 first live consumer those two declarations have ever had.
+
+## 9. Branch composition is prospective, not accepted — amendment, 2026-09-17
+
+`deploy/product.toml` and `deploy/product-manifest.json` remain accepted
+production truth. They name the image and manifest that promotion accepted, so
+they must not be regenerated merely because a source branch repins a dependency.
+
+The branch instead generates `deploy/prospective/product-manifest.json` and
+`deploy/prospective/source-composition.json`. The latter names only that
+manifest's canonical digest and migration heads derived from the composed
+revision graph. It has no image, release, candidate, receipt, or promotion
+claim. It therefore records what this checkout would compose without asserting
+that any target runs it.
+
+This is intentionally not an alternate deployment path. `scripts/promote_descriptor.py`
+and `vendor_cp.deployment.candidate` still require the post-migrate receipt and
+the normal candidate/promotion chain before accepted truth can advance. Until
+that receipt exists, the prospective record is a deployment stop condition, not
+authorization to change the accepted descriptor.

@@ -236,7 +236,7 @@ def test_the_reverse_translation_refuses_rather_than_repairs() -> None:
 def test_the_module_is_pinned_exactly() -> None:
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert config["tool"]["poetry"]["dependencies"]["dotmac-approvals"] == {
-        "version": "0.1.0a5",
+        "version": "0.1.0a6",
         "source": "forgejo",
     }
 

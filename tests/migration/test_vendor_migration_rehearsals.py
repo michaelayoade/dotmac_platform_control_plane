@@ -12,6 +12,7 @@ skips when `TEST_DATABASE_URL` is unset.
 
 from __future__ import annotations
 
+import tomllib
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -26,9 +27,9 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a98)
+KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a101)
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
-RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
+RELEASE_CATALOG_HEAD = "rl_0002_db_catalog_attestations"  # current pin (0.1.0a5)
 
 # The a5/a6 repin extended two module lineages, and it changed the version-ROW
 # topology as well as the head names — which is the whole reason these rehearsals
@@ -58,7 +59,7 @@ LICENSING_HEAD = "li_0001_licensing"
 # module head IS depended on by a vendor revision — `v017` names it — so it
 # is an ancestor and NOT a version row, the same shape `ap_0001` had before
 # a5 moved that lineage past it.
-DEPLOYMENT_CONTROL_HEAD = "dc_0002_canonical_plan_digest"
+DEPLOYMENT_CONTROL_HEAD = "dc_0011_attestation_registry"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v019_relay_heartbeat"
@@ -216,14 +217,14 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
-        # Two more became version ROWS with the a98 / Control-a6 repin, by the
+        # These remain version ROWS with the a101 / Control-a13 repin, by the
         # same rule the approvals and allocation tips already follow: a head
         # nothing depends on is a row, a head something depends on is an
         # ancestor.
         #
         # Commercial Agreements depends on kernel `0026`, which kept the kernel
         # tip an ancestor while `0026` WAS the tip. At `0028` it no longer is.
-        # `v017` names `dc_0001` rather than its lineage's tip, so `dc_0002` is
+        # `v017` names `dc_0001` rather than its lineage's tip, so `dc_0011` is
         # likewise depended on by nothing.
         KERNEL_HEAD,
         DEPLOYMENT_CONTROL_HEAD,
@@ -529,6 +530,117 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
         KERNEL_HEAD,
         DEPLOYMENT_CONTROL_HEAD,
     }
+
+
+def test_upgrade_from_accepted_control_a6_preserves_target(
+    scratch_db: str,
+) -> None:
+    """Advance the actual accepted dc_0002 estate, not a root install."""
+    descriptor_path = Path(__file__).resolve().parents[2] / "deploy/product.toml"
+    descriptor = tomllib.loads(descriptor_path.read_text(encoding="utf-8"))
+    accepted_heads = set(descriptor["migration"]["expected_heads"])
+    old_control_head = "dc_0002_canonical_plan_digest"
+    assert old_control_head in accepted_heads
+    assert DEPLOYMENT_CONTROL_HEAD not in accepted_heads
+
+    # The accepted descriptor's release-catalog head is also stale relative
+    # to this branch's composed lineage (the a5 repin's rl_0002 migration),
+    # independent of the dc_0002->a13 switch this test isolates. Naming it
+    # here, the same way old_control_head is, is what keeps this test about
+    # the Control switch specifically rather than assuming "everything except
+    # Control stays put" -- a premise this branch has already made false once.
+    old_release_catalog_head = "rl_0001_release_artifacts"
+    assert old_release_catalog_head in accepted_heads
+    assert RELEASE_CATALOG_HEAD not in accepted_heads
+
+    for revision in sorted(accepted_heads):
+        _upgrade(scratch_db, revision)
+    assert _versions(scratch_db) == accepted_heads
+    assert not _qualified_table_exists(scratch_db, "mod_deploy.attestation_enrolments")
+
+    target_id = str(uuid.uuid4())
+    plan_id = str(uuid.uuid4())
+    rollout_id = str(uuid.uuid4())
+    attempt_id = str(uuid.uuid4())
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO mod_deploy.deployment_targets "
+                    "(id, target_ref, subject_ref, product_code, environment, "
+                    "status, desired_revision, record_version) VALUES "
+                    "(CAST(:id AS uuid), 'accepted-a6-target', 'subject', "
+                    "'vendor-control-plane', 'production', 'registered', 0, 1)"
+                ),
+                {"id": target_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO mod_deploy.deployment_plans "
+                    "(id, target_id, sequence, status, desired_revision, "
+                    "requires_approval, record_version) VALUES "
+                    "(CAST(:id AS uuid), CAST(:target_id AS uuid), 1, "
+                    "'approved', 0, false, 1)"
+                ),
+                {"id": plan_id, "target_id": target_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO mod_deploy.rollouts "
+                    "(id, rollout_ref, target_id, plan_id, status, "
+                    "record_version) VALUES "
+                    "(CAST(:id AS uuid), 'legacy-rollout', "
+                    "CAST(:target_id AS uuid), CAST(:plan_id AS uuid), "
+                    "'failed', 1)"
+                ),
+                {"id": rollout_id, "target_id": target_id, "plan_id": plan_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO mod_deploy.rollout_attempts "
+                    "(id, rollout_id, attempt_no, outcome, integrator_ref, "
+                    "error_code, detail, settled_at) VALUES "
+                    "(CAST(:id AS uuid), CAST(:rollout_id AS uuid), 1, "
+                    "'failed', 'legacy-correlation', 'LEGACY_FAILURE', "
+                    "'legacy terminal evidence', "
+                    "TIMESTAMPTZ '2026-08-30 12:00:00+00')"
+                ),
+                {"id": attempt_id, "rollout_id": rollout_id},
+            )
+    finally:
+        engine.dispose()
+
+    _upgrade(scratch_db, "heads")
+    assert _versions(scratch_db) == (
+        accepted_heads - {old_control_head, old_release_catalog_head}
+    ) | {DEPLOYMENT_CONTROL_HEAD, RELEASE_CATALOG_HEAD}
+    assert _qualified_table_exists(scratch_db, "mod_deploy.attestation_enrolments")
+    assert _qualified_table_exists(scratch_db, "mod_deploy.attestation_current_roots")
+    assert _qualified_table_exists(scratch_db, "mod_deploy.rollout_attempt_settlements")
+    assert (
+        _q(
+            scratch_db,
+            "SELECT count(*) FROM mod_deploy.deployment_targets "
+            "WHERE id = CAST(:id AS uuid) AND target_ref = 'accepted-a6-target'",
+            id=target_id,
+        )
+        == 1
+    )
+    assert (
+        _q(
+            scratch_db,
+            "SELECT count(*) FROM mod_deploy.rollout_attempt_settlements "
+            "WHERE id = CAST(:id AS uuid) AND attempt_id = CAST(:id AS uuid) "
+            "AND outcome = 'failed' "
+            "AND integrator_ref = 'legacy-correlation' "
+            "AND error_code = 'LEGACY_FAILURE' "
+            "AND detail = 'legacy terminal evidence' "
+            "AND settled_at = TIMESTAMPTZ '2026-08-30 12:00:00+00'",
+            id=attempt_id,
+        )
+        == 1
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

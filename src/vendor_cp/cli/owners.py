@@ -1,9 +1,9 @@
-"""Which owner each command delegates to, declared once as data.
+"""Which owner each available command delegates to, declared once as data.
 
-Every CLI command is an adapter over exactly one owning service or query
-function, and this table says which. It exists because the claim "the CLI
-implements no policy" is otherwise unfalsifiable prose: with the table, three
-things become checkable rather than asserted.
+Available commands are adapters over one owning service or query function;
+unavailable commands name their actual fail-closed handler instead. This table
+makes the claim "the CLI implements no business policy" checkable rather than
+asserted.
 
 **1. No mutation is owned here.** Every mutating command's owner resolves to a
 module OUTSIDE `vendor_cp.cli`. A decision that existed only in the CLI would be
@@ -23,6 +23,11 @@ executing it, and asserts its origin is under the interpreter's `purelib` or
 point of the check: running against a checkout is exactly how a package can
 report one identity while being another.
 
+Two parser entries currently refuse before invoking a business owner. They
+are recorded against their actual CLI refusal handlers and marked read-only;
+claiming the intended Control owner here would make `diagnose owners` report a
+mutation that cannot occur.
+
 The `MUTATES` flag is the assembly's own statement about the command, not
 something inferred from the owner's name. A read that happens to be spelled like
 a write, or a write whose owner reads first, is classified by what it does.
@@ -36,7 +41,7 @@ from typing import Final
 
 @dataclass(frozen=True, slots=True)
 class Owner:
-    """One command, and the single service or query function behind it."""
+    """One command and its actual delegate or fail-closed refusal handler."""
 
     #: `"<group> <command>"`, exactly as the operator types it.
     command: str
@@ -44,7 +49,7 @@ class Owner:
     module: str
     #: The callable within it. Resolved by name only when a command runs.
     symbol: str
-    #: Whether invoking it changes durable state.
+    #: Whether invoking this command currently changes durable state.
     mutates: bool
     #: One line an operator can read in `diagnose owners`.
     summary: str
@@ -275,17 +280,17 @@ OWNERS: Final[tuple[Owner, ...]] = (
     ),
     Owner(
         "deployment propose",
-        "vendor_cp.deployment.adapter",
-        "propose_deployment_plan",
-        True,
-        "freeze the target's desired state into an immutable plan",
+        "vendor_cp.cli.commands",
+        "deployment_propose",
+        False,
+        "unavailable until an immutable Foundation candidate can be admitted",
     ),
     Owner(
         "deployment authorize",
-        "vendor_cp.deployment.adapter",
-        "authorize_deployment",
-        True,
-        "carry an approval into the frozen plan and request the rollout",
+        "vendor_cp.cli.commands",
+        "deployment_authorize",
+        False,
+        "unavailable until a custody-approved signer is injected",
     ),
     Owner(
         "deployment plan",
@@ -376,6 +381,12 @@ OWNERS: Final[tuple[Owner, ...]] = (
 #: what this entry exists to make unnecessary.
 DELEGATED_COMMANDS: Final[frozenset[str]] = frozenset({"deployment foundation"})
 
+# These parser entries intentionally stop before their intended Control owner.
+# Keep the set exact: adding an unavailable command is a visible contract change.
+UNAVAILABLE_COMMANDS: Final[frozenset[str]] = frozenset(
+    {"deployment propose", "deployment authorize"}
+)
+
 
 def by_command() -> dict[str, Owner]:
     return {owner.command: owner for owner in OWNERS}
@@ -385,4 +396,11 @@ def mutating_owners() -> tuple[Owner, ...]:
     return tuple(owner for owner in OWNERS if owner.mutates)
 
 
-__all__ = ["DELEGATED_COMMANDS", "OWNERS", "Owner", "by_command", "mutating_owners"]
+__all__ = [
+    "DELEGATED_COMMANDS",
+    "OWNERS",
+    "UNAVAILABLE_COMMANDS",
+    "Owner",
+    "by_command",
+    "mutating_owners",
+]

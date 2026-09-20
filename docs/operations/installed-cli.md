@@ -41,7 +41,7 @@ data every check reads, so it cannot drift from what the CLI actually does.
 | `allocation` | entitlement allocations |
 | `licence` | issuance, revocation, signing keys, delivery |
 | `relay` | the platform outbox relay: activation -> allocation |
-| `deployment` | the operator workflow over Deployment Control |
+| `deployment` | target/desired-state commands over Deployment Control; proposal and authorization currently refuse |
 | `recovery` | the catalogue capture query and the recovery bundle |
 | `diagnose` | questions about this process rather than about the fleet |
 
@@ -167,14 +167,13 @@ printed — every credential-named field in any output is replaced with
 
 ## The deployment workflow
 
-Five commands, in this order, and the middle one is not ours.
-
-Steps 1 and 2 exist because the ones after them could not otherwise be reached.
-`deployment propose` freezes a target's desired state; until a command could
-register a target and declare a desired state, there was nothing for it to
-freeze, and the authorize step everybody described as "the installed CLI" had no
-path to a plan. A surface whose later steps are unreachable reads as built and
-is not.
+**Authorization is unavailable in this CLI as of 2026-09-17.** Registration
+and desired-state declaration are live Control commands, but `deployment
+propose` and `deployment authorize` always return
+`evidence.capability_absent` (exit 4), before opening a database session or
+invoking the Control owner. Do not use the following registration sequence as
+evidence that a rollout is authorized, and do not use this CLI for a production
+rollout.
 
 ```bash
 # 1. Name a deployment this control plane is responsible for. Idempotent on
@@ -184,43 +183,20 @@ dotmac-platform --format json deployment register-target \
   --subject-ref "$customer_ref" --product-code vendor-control-plane \
   --environment production
 
-# 2. Declare what it should converge on. --spec names a file holding a JSON
-#    object; it is required, because an omitted spec would freeze an EMPTY
-#    specification into an immutable plan digest and the approver would never
-#    see that it was empty. Optionally bind to the target's current
-#    --expect-record-version.
+# 2. Declare desired state. This does not authorize execution. --spec is a
+#    required JSON-object file; it is not yet an A6.4 immutable candidate.
 dotmac-platform --format json deployment set-desired-state \
   --command-id "$id-desired" --target-id "$target" \
   --release-ref "$release" --spec ./desired-spec.json
-
-# 3. Freeze the target's desired state into an immutable plan.
-dotmac-platform --format json deployment propose \
-  --command-id "$id" --target-id "$target" \
-  --policy-code deployment.rollout --policy-version 1
-
-# 4. Open and decide the approval, bound to what step 3 printed.
-dotmac-platform approval open \
-  --command-id "$id-open" --policy-code deployment.rollout --policy-version 1 \
-  --subject-type deployment_plan --subject-id "$plan_id" \
-  --content-hash "$approval_content_hash" --requested-by "$admin_id"
-dotmac-platform approval decide \
-  --command-id "$id-decide" --request-id "$request_id" \
-  --approver-id "$admin_id" --content-hash "$approval_content_hash"
-
-# 5. Carry the decision into the frozen plan and request the rollout.
-dotmac-platform --format json deployment authorize \
-  --command-id "$id-auth" --plan-id "$plan_id" \
-  --approval-request-id "$request_id" --rollout-ref "$rollout_ref" \
-  --expect-plan-digest "$plan_digest"
 ```
 
-Step 5 prints an `authorization_ref`. **That is the authorization run identity**
-the deployment foundation binds between the canonical descriptor and its own
-execution report. It is the reason this command exists.
-
-`--expect-plan-digest` is optional and compares byte for byte against what the
-module froze. A difference exits `6` before the approvals owner is asked
-anything: the assembly stopped first, so nobody refused.
+The intended next steps are proposal, approval, and rollout issuance, but two
+assembly seams are missing: proposal must derive `operation`, descriptor digest,
+and execution-plan digest from one admitted Foundation-rendered immutable
+candidate; authorization must receive a custody-approved signer injected by
+the assembly. Raw CLI digest flags or a dereferenced signer pointer are not
+substitutes. No `authorization_ref` is emitted until those seams are wired and
+the positive journey is proven.
 
 **Registration is not authorisation.** A registered target with no desired
 state converges on nothing, and step 1 says so in its own output: the module
@@ -228,14 +204,11 @@ leaves it `REGISTERED`, this assembly maps that onto delivery `SUSPENDED`, and
 step 2 is what promotes it. Do not read a successful step 1 as permission for
 anything.
 
-The CLI decides none of this. It calls `register_target`, `set_desired_state`
-and `propose_plan`, carries an `ApprovalEvidence` the approvals module produced,
-and calls `request_rollout` — the six things ADR-0013 § 2 permits, as amended by
-A6. What a plan contains, whether a target may take a desired state, whether a
-transition is legal and whether evidence binds are all upstream. In particular
-there is no local "has anything changed?" check before step 2: the module bumps
-`desired_revision` unconditionally, on purpose, because the revision records
-that a decision was taken.
+The currently live CLI calls `register_target` and `set_desired_state`; it
+does not call `propose_plan` or `request_rollout`. The intended owner for those
+transitions remains Control, not the CLI. In particular there is no local "has
+anything changed?" check before step 2: the module bumps
+`desired_revision` unconditionally because the revision records a decision.
 
 ## Rendering, applying, observing, rolling back
 

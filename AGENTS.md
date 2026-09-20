@@ -142,11 +142,12 @@ disagree, fix the drift.
     surface a8 shipped, withheld, with every non-route field compared field by
     field and the named subset — `platform_tables`, `migration_prefix`,
     `migration_branch`, `requires`, `audit_actions`, `database_catalog` —
-    RATCHETED two-directionally against the pinned kernel's manifest field set,
-    because `database_catalog` is a11's declaration and does not exist on
-    `ModuleManifest` at the pinned kernel. An assertion that cannot run is
-    RECORDED as absent, never skipped. The same plant is proved REAL by mounting
-    its route in a built application once a profile inventories it. That plant is the LIVE coverage; the per-profile
+    RATCHETED two-directionally against the pinned kernel's manifest field set.
+    The pinned kernel declares `database_catalog` on `ModuleManifest`;
+    Deployment Control a13 supplies it. Since a13 is now inventoried, the
+    uninventoried-route refusal is separately planted on the real, route-silent
+    Release Catalogue manifest; the positive control mounts its route after
+    explicit inventory. These plants are LIVE coverage; the per-profile
     registry+lineage check over `assembly.STATEFUL_MODULES` — derived from that
     tuple rather than listing modules by hand, the earlier version named five
     while the assembly composed six — is the coverage that ARRIVES with the
@@ -379,9 +380,12 @@ disagree, fix the drift.
     reporting itself as `0.1.0a2`, and the fix is removing the second copy
     rather than keeping two and correcting one.
 
-    **The CLI is an adapter and owns no decision.** Every command names one
-    service or query owner in `vendor_cp.cli.owners`; the table is compared
-    against the parser in both directions, no mutating owner may live inside
+    **The CLI is an adapter and owns no business decision.** Each available
+    command names one service or query owner in `vendor_cp.cli.owners`;
+    an explicitly unavailable parser entry instead names its own fail-closed
+    handler and is recorded as non-mutating. The exact unavailable set is
+    architecture-tested against the handlers. The table is compared against
+    the parser in both directions, no mutating owner may live inside
     `vendor_cp.cli`, and no mutating symbol may be claimed by two commands. A
     policy that existed only in the CLI would be a second authority, and an
     operator at a shell would get a different answer from one at a screen.
@@ -530,7 +534,9 @@ disagree, fix the drift.
     arithmetic, because the index has gaps and a version that was never
     published fails a lane while reporting it proven.
 
-    **The pin equals the highest floor anything composed declares.** Too LOW is
+    **The active pin equals the highest floor anything composed declares unless
+    an exact, separately accepted repair policy admits a receipt-bound
+    over-floor candidate.** Too LOW is
     `dotmac-deployment-control 0.1.0a5` — byte-perfect artifacts that could not
     boot, because it imported a kernel module its declared floor did not
     require. Too HIGH is a kernel upgrade taken on nobody's behalf, which still
@@ -546,12 +552,14 @@ disagree, fix the drift.
     takes the pin as its own third input returns the pin and proves nothing.
     § 10.1's own sentence is the rule: a planted assembly import first shipped
     ABOVE that floor must turn the lane RED, planted separately from the
-    composed-set plants and producing a DISTINCT finding. (The governance
-    revision pinned in `.dotmac/standards-profile.json` predates § 10; the
-    binding text is ahead of the pin and repinning is a separate rule-15
-    change.) Equality with the composed maximum alone is correct only while
-    (b) sits at or below (a) — true today, and true by COINCIDENCE. That
-    coincidence may not remain an unstated premise: `assembly-satisfied`
+    composed-set plants and producing a DISTINCT finding. The assembly pins
+    the accepted Governance revision carrying § 10. Equality with the
+    composed maximum alone is correct only while
+    (b) sits at or below (a) — true for today's import-compatibility floor.
+    The accepted a101 repair policy admits only its receipt-bound candidate
+    above the measured a100 floor; a101's independent artifact-adoptability
+    repair is not an import-floor contribution. That premise may not remain
+    unstated: `assembly-satisfied`
     requires every kernel module and every top-level name `src/vendor_cp`
     imports to be provided by an installation of the effective floor, and a
     planted assembly import of a kernel name first shipped above it turns the
@@ -563,7 +571,8 @@ disagree, fix the drift.
 
     **The rule's subject is three named values, not one implied one.**
     `composed_distribution_maximum()`, `assembly_import_floor()` and
-    `effective_kernel_floor() = max(the two)`; the pin equals the third. Before
+    `effective_kernel_floor() = max(the two)`; the pin equals the third unless
+    the exact accepted repair policy applies. Before
     they were named, a reader could not tell whether the assembly had been
     considered and found to contribute nothing or simply never asked.
     `assembly_import_floor()` is `None` while every kernel name the assembly
@@ -590,15 +599,11 @@ disagree, fix the drift.
     with a changed signature satisfies every name-level check and still will not
     boot.
 
-    **The mutation lane installs the newest version the pin excludes and
-    requires this assembly to fail on it** — and to fail for the RIGHT reason:
-    the traceback must name a `dotmac_kernel` module that installation was
-    MEASURED to be missing, compared against the real files of a real install
-    rather than against a hand-kept version-to-module table whose missing row is
-    invisible. A lane satisfied by any non-zero exit is satisfied by a typo'd
-    index URL. Every version and module name in the workflow is derived; a
-    literal there is how a lane keeps passing after it has stopped testing
-    anything, and the architecture test greps for both.
+    **An excluded-wheel mutation can prove only an established compatibility
+    boundary.** It is not run while the staged repair pin lacks an
+    import-compatibility basis: an unrelated missing module cannot justify a
+    repair/adoptability pin. The lane prints both sides and fails the equality
+    gate until the repair-pin decision is recorded.
 
     **A kernel version stated in canonical prose is checked against the pin.**
     `docs/ARCHITECTURE.md` and the pin-state table said `0.1.0a77` for as long
@@ -606,8 +611,9 @@ disagree, fix the drift.
 
     **A published version is not blamed for a boundary its predecessors share.**
     Kernel a98, a99 and a100 reach a product-owned PostgreSQL driver on the
-    public `create_app` symbol identically; a100 regressed nothing, a98 is what
-    runs in production, and the repair is a101. Operational functionality and
+    public `create_app` symbol identically; a100 regressed nothing, a98 was the
+    prior repository pin, and the a101 repair is staged here. Pinning a101 is
+    not evidence that a new image runs in production. Operational functionality and
     independent artifact adoptability are different properties with different
     oracles, and a pin may not name a version that has not been published
     (`scripts/kernel_floor.py`, `tests/architecture/test_kernel_floor.py`, CI job

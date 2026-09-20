@@ -50,7 +50,7 @@ def _refs(path: Path):
 def test_the_published_module_is_exact_pinned_and_composed() -> None:
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert config["tool"]["poetry"]["dependencies"][AUTHORITY.replace("_", "-")] == {
-        "version": "0.1.0a2",
+        "version": "0.1.0a3",
         "source": "forgejo",
     }
     assert commercial_agreements_module in build_spec().modules

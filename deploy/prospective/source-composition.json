@@ -1,0 +1,17 @@
+{
+  "manifest": {
+    "digest": "sha256:82618ce1b0c6e34d1ddd9d8c0682a198d72e088eefcaa8b57d488470607d91fa",
+    "path": "deploy/prospective/product-manifest.json"
+  },
+  "migration": {
+    "expected_heads": [
+      "0028_machine_attribution",
+      "ap_0002_outbox_relay",
+      "dc_0011_attestation_registry",
+      "ea_0003_platform_audit_log",
+      "rl_0002_db_catalog_attestations",
+      "v019_relay_heartbeat"
+    ]
+  },
+  "schema": "ProspectiveSourceComposition.v1"
+}

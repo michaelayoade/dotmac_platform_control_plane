@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 env:
-  GOVERNANCE_REF: "a19259b10568d29dc0a9617347498fea7f1e7a97"
+  GOVERNANCE_REF: "7cb563d38d8f64f8019581a912a64ac466cd9fbd"
 
 jobs:
   pin-preflight:
@@ -40,6 +40,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Enforce the accepted Dotmac engineering standards
-        uses: michaelayoade/dotmac_governance/.github/actions/standards-check@a19259b10568d29dc0a9617347498fea7f1e7a97
+        uses: michaelayoade/dotmac_governance/.github/actions/standards-check@7cb563d38d8f64f8019581a912a64ac466cd9fbd
         with:
           default-branch: ${{ github.event.repository.default_branch }}

@@ -14,17 +14,20 @@ register.  A reviewer may remove an entry only with the integration that makes
 its retirement machine-provable.  Merely publishing every module contribution
 can never make this command report product readiness.
 
-The module half of that ratchet is currently DORMANT, and saying so is the
-point.  ``missing_module_database_catalogs`` asks each composed manifest for a
-``database_catalog`` attribute, and the EXACT-PINNED kernel's ``ModuleManifest``
-declares no such field — so no module could carry one even if its own release
-published it.  Today the probe therefore reports all six for a reason about the
-KERNEL rather than about the modules, and only its composition half can fail.
-``pinned_manifest_declares_contribution_field`` states that premise so a test
-can hold it: when the pin moves to a kernel carrying the field, the premise dies
-and the review that raised the pin has to confirm the probe now measures the
-thing its name claims (``AGENTS.md`` rule 13 — a guard premise is enforceable or
-the region is unmonitored rather than exempt).
+The module half of the ratchet is ACTIVE under Kernel a101: `ModuleManifest`
+declares `database_catalog`, and the exact-pinned Deployment Control a13
+manifest publishes one. The other five composed modules -- approvals,
+commercial_agreements, entitlement_allocation, licensing, release_catalog --
+were the explicit debt set; each now publishes a live-PostgreSQL-verified
+contribution as of its 2026-09-20 repin (dotmac-approvals 0.1.0a6,
+dotmac-commercial-agreements 0.1.0a3, dotmac-entitlement-allocation 0.1.0a7,
+dotmac-licensing 0.1.0a2, dotmac-release-catalog 0.1.0a5), so the register
+below is empty. ``pinned_manifest_declares_contribution_field`` and the
+two-directional debt test make that premise executable; if the field or a
+contribution changes, the checked-in register must change in the same
+review -- retiring every entry here does not retire
+`OPEN_PRODUCT_DATABASE_CATALOG_BLOCKERS` below, which is a separate,
+still-open product-level register.
 """
 
 from __future__ import annotations
@@ -46,20 +49,11 @@ ACCEPTED_DESCRIPTOR: Final = ROOT / "deploy" / "product.toml"
 
 #: The manifest attribute a module publishes its typed database-catalogue
 #: contribution through.  Named ONCE: the probe below and the premise check
-#: that says why the probe is dormant have to be asking about one attribute,
+#: that says the probe is active have to be asking about one attribute,
 #: and two literals is exactly how they would stop being about the same one.
 CONTRIBUTION_FIELD: Final = "database_catalog"
 
-MODULE_DATABASE_CATALOG_DEBT: Final[frozenset[str]] = frozenset(
-    {
-        "approvals",
-        "commercial_agreements",
-        "deployment_control",
-        "entitlement_allocation",
-        "licensing",
-        "release_catalog",
-    }
-)
+MODULE_DATABASE_CATALOG_DEBT: Final[frozenset[str]] = frozenset()
 
 
 class ProductDatabaseCatalogBlockerCode(StrEnum):
@@ -191,18 +185,11 @@ def missing_module_database_catalogs(
 def pinned_manifest_declares_contribution_field(
     manifest: type = ModuleManifest,
 ) -> bool:
-    """Whether the EXACT-PINNED kernel's manifest type can carry a contribution.
+    """Whether this manifest generation can publish the contribution.
 
-    This is the premise the module probe above rests on, made observable.  While
-    it is False, ``missing_module_database_catalogs`` cannot report anything but
-    every composed stateful module, because the attribute it reads is one no
-    manifest of this generation has: a module release that published a
-    contribution could not even be constructed against this kernel.  The probe is
-    a FORWARD probe, and its "all six" is not evidence about the six.
-
-    Kept next to the probe rather than in the test, so the two read the same
-    ``CONTRIBUTION_FIELD`` and cannot drift into asking about different
-    attributes.
+    Kept beside the missing-contribution probe so both name the one declared
+    field. The active ratchet asserts this is true for the exact-pinned kernel;
+    its negative test retains sensitivity to an older manifest generation.
     """
 
     return CONTRIBUTION_FIELD in {field.name for field in dataclasses.fields(manifest)}

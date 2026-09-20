@@ -59,7 +59,8 @@ COMPOSED_DISTRIBUTIONS = (
 #: bare privilege NAME — which appears in every grant-verification helper in the
 #: vendor lineage — is not mistaken for a statement.
 DELETION_SQL = re.compile(
-    r"\bDELETE\s+FROM\b|\bTRUNCATE\s+(?:TABLE\s+)?[A-Za-z_\"{]", re.IGNORECASE
+    r"\bDELETE\s+FROM\b|\bTRUNCATE\s+(?:TABLE\s+)?(?!ON\b)[A-Za-z_\"{]",
+    re.IGNORECASE,
 )
 
 
@@ -159,6 +160,105 @@ def scan() -> set[tuple[str, str]]:
     return found
 
 
+#: These are the only deletion seams the attestation registry exposes. Their
+#: `NOT_COMPOSED` entries in `DELETION_SITES` rest on an executable premise,
+#: not on the registry's prose saying it has no HTTP/RPC boundary.
+ATTESTATION_REGISTRY_MODULE = "dotmac_deployment_control.attestation_trust_registry"
+ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS = frozenset(
+    {"repair_current_root", "revoke_root"}
+)
+
+
+def attestation_current_root_references_in(
+    source: str, *, allow_ledger_declaration: bool = False
+) -> set[str]:
+    """Static references to either deletion seam, excluding docstring prose.
+
+    This intentionally forbids more than calls. An import alias, nested-block
+    attribute read, or exact symbol string literal already invalidates the
+    `NOT_COMPOSED` premise, without attempting to interpret Python binding.
+    """
+    tree = ast.parse(source)
+    docstrings = _docstring_ids(tree)
+    ledger_symbol_constants: set[int] = set()
+    if allow_ledger_declaration:
+        for statement in tree.body:
+            target = (
+                statement.targets[0]
+                if isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                else statement.target
+                if isinstance(statement, ast.AnnAssign)
+                else None
+            )
+            value = getattr(statement, "value", None)
+            if isinstance(target, ast.Name) and target.id == "DELETION_SITES" and value:
+                for node in ast.walk(value):
+                    if not (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "DeletionSite"
+                    ):
+                        continue
+                    for keyword in node.keywords:
+                        if (
+                            keyword.arg == "symbol"
+                            and isinstance(keyword.value, ast.Constant)
+                            and isinstance(keyword.value.value, str)
+                            and keyword.value.value
+                            in ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS
+                        ):
+                            ledger_symbol_constants.add(id(keyword.value))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if id(node) in ledger_symbol_constants:
+            continue
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == ATTESTATION_REGISTRY_MODULE
+        ):
+            for imported in node.names:
+                if imported.name == "*":
+                    found |= ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS
+                elif imported.name in ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS:
+                    found.add(imported.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id in ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS:
+                found.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            if node.attr in ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS:
+                found.add(node.attr)
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+            and node.value in ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS
+        ):
+            found.add(node.value)
+    return found
+
+
+def attestation_current_root_reference_sites() -> set[tuple[str, str]]:
+    """References from every composed entrypoint family, excluding the definition.
+
+    `_scanned_files` derives repository adapters, scripts and migration lineage
+    plus every composed distribution. Only the defining registry and the
+    exact `symbol=` constants of `DeletionSite(...)` calls in the top-level
+    `DELETION_SITES` declaration are excluded: they must name the seams. Every
+    other node is held to the no-syntactic-reference-or-exact-symbol-literal
+    premise.
+    """
+    found: set[tuple[str, str]] = set()
+    for path, module in _scanned_files():
+        if module == ATTESTATION_REGISTRY_MODULE:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for symbol in attestation_current_root_references_in(
+            source, allow_ledger_declaration=module == "vendor_cp.data_governance"
+        ):
+            found.add((module, symbol))
+    return found
+
+
 # ── the ledger, held in both directions ─────────────────────────────────────
 
 
@@ -228,6 +328,80 @@ def describe(db):
     return f"REVOKE {', '.join(REVOKED)} ON public.platform_audit_events"
 '''
 
+TRIGGER_NEAR_MISS = '''
+def install_refusal_trigger(db):
+    db.execute("""
+        CREATE TRIGGER refuse_evidence_truncate
+        BEFORE TRUNCATE ON mod_deploy.attestation_enrolments
+        FOR EACH STATEMENT EXECUTE FUNCTION mod_deploy.refuse_evidence_rewrite();
+    """)
+'''
+
+ATTESTATION_CALL_PLANT = """
+from dotmac_deployment_control.attestation_trust_registry import repair_current_root
+import dotmac_deployment_control.attestation_trust_registry as registry
+
+
+def mounted_adapter(db):
+    repair_current_root(db, custody_domain="host_attester", subject="host-1")
+    registry.revoke_root(db, fingerprint="f", revocation_authority="operator")
+"""
+
+ATTESTATION_ALIAS_CALL_PLANT = """
+from dotmac_deployment_control.attestation_trust_registry import revoke_root as revoke
+import dotmac_deployment_control.attestation_trust_registry as registry
+
+
+def mounted_adapter(db):
+    fn = registry.repair_current_root
+    revoke(db, fingerprint="f", revocation_authority="operator")
+    fn(db, custody_domain="host_attester", subject="host-1")
+"""
+
+ATTESTATION_DOTTED_CALL_PLANT = """
+import dotmac_deployment_control.attestation_trust_registry
+
+
+def mounted_adapter(db):
+    if db is not None:
+        dotmac_deployment_control.attestation_trust_registry.revoke_root(
+            db, fingerprint="f", revocation_authority="operator"
+        )
+"""
+
+ATTESTATION_DYNAMIC_REFERENCE_PLANT = """
+import dotmac_deployment_control.attestation_trust_registry as registry
+
+
+def mounted_adapter():
+    seam = "revoke_root"
+    getattr(registry, seam)
+    return registry.__getattribute__("repair_current_root")
+"""
+
+ATTESTATION_BENIGN_REFERENCE_NEAR_MISS = '''
+import dotmac_deployment_control.attestation_trust_registry as registry
+
+"""repair_current_root and revoke_root are names this prose may discuss."""
+
+
+def read_only():
+    return registry.AttestationRootRefusal
+'''
+
+ATTESTATION_LEDGER_SCOPE_PLANT = """
+import dotmac_deployment_control.attestation_trust_registry as registry
+
+DELETION_SITES = (
+    DeletionSite(symbol="revoke_root"),
+    registry.repair_current_root(),
+)
+
+
+def helper():
+    return registry.revoke_root
+"""
+
 
 def test_the_detector_names_a_planted_deletion() -> None:
     """A check that has only ever run over a clean tree proves nothing about
@@ -242,6 +416,81 @@ def test_the_detector_does_not_name_a_near_miss() -> None:
     fifth — and a detector that flagged them would be turned off within a week.
     """
     assert deletion_sites_in(NEAR_MISS, "nearmiss") == set()
+
+
+def test_the_detector_does_not_mistake_a_trigger_event_for_truncate() -> None:
+    """`BEFORE TRUNCATE ON table` describes a guarded event, not a statement.
+
+    The deployment-control lineage installs these guards. Treating their event
+    clauses as row removal makes the two-directional ledger describe code that
+    cannot delete a row, and masks an actual future `TRUNCATE TABLE` statement.
+    """
+    assert deletion_sites_in(TRIGGER_NEAR_MISS, "trigger_nearmiss") == set()
+
+
+def test_current_root_not_composed_premise_is_executable() -> None:
+    """The two current-root ledger exemptions cannot outlive a caller."""
+    sites = {
+        site.symbol: site
+        for site in DELETION_SITES
+        if site.module == ATTESTATION_REGISTRY_MODULE
+    }
+    assert set(sites) == ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS
+    assert all(
+        site.reachability is Reachability.NOT_COMPOSED for site in sites.values()
+    )
+    assert attestation_current_root_reference_sites() == set()
+
+
+def test_current_root_not_composed_detector_is_sensitive_to_calls() -> None:
+    """The premise guard must fail for direct and module-attribute references."""
+    assert attestation_current_root_references_in(ATTESTATION_CALL_PLANT) == (
+        ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS
+    )
+
+
+def test_current_root_not_composed_detector_is_sensitive_to_alias_calls() -> None:
+    """An imported-symbol or assigned-function alias cannot hide a reference."""
+    assert attestation_current_root_references_in(ATTESTATION_ALIAS_CALL_PLANT) == (
+        ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS
+    )
+
+
+def test_current_root_not_composed_detector_is_sensitive_to_dotted_import_calls() -> (
+    None
+):
+    """A nested unaliased dotted reference cannot hide a mounted caller."""
+    assert attestation_current_root_references_in(ATTESTATION_DOTTED_CALL_PLANT) == {
+        "revoke_root"
+    }
+
+
+def test_current_root_not_composed_detector_is_sensitive_to_dynamic_references() -> (
+    None
+):
+    """Dynamic access to a deletion seam is still a prohibited reference."""
+    references = attestation_current_root_references_in(
+        ATTESTATION_DYNAMIC_REFERENCE_PLANT
+    )
+    assert references == ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS
+
+
+def test_current_root_not_composed_detector_ignores_prose_and_unrelated_reads() -> None:
+    """The strict policy is about the two seam names, not a registry import."""
+    assert (
+        attestation_current_root_references_in(ATTESTATION_BENIGN_REFERENCE_NEAR_MISS)
+        == set()
+    )
+
+
+def test_current_root_ledger_exception_does_not_skip_sibling_helpers() -> None:
+    """Only exact declaration symbols are exempt; executable nodes remain scanned."""
+    assert (
+        attestation_current_root_references_in(
+            ATTESTATION_LEDGER_SCOPE_PLANT, allow_ledger_declaration=True
+        )
+        == ATTESTATION_CURRENT_ROOT_DELETION_SYMBOLS
+    )
 
 
 def test_the_owner_module_is_scanned_rather_than_exempted() -> None:

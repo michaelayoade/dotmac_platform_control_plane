@@ -1,8 +1,11 @@
 # Vendor Control Plane external-connector surface
 
 Vendor Control Plane adopts the Governance-owned schema-9 ratchet from
-accepted ADR 0011 at immutable canonical-main commit
-`a19259b10568d29dc0a9617347498fea7f1e7a97`.
+accepted ADR 0011. The original 2026-08-16 baseline below was measured at
+immutable canonical-main commit
+`a19259b10568d29dc0a9617347498fea7f1e7a97`; the current profile and action
+pin the accepted Governance revision
+`7cb563d38d8f64f8019581a912a64ac466cd9fbd`.
 
 The ratchet freezes measured direct connector surface while integrations move
 behind Dotmac Integrator. It is transitional defence in depth, not runtime

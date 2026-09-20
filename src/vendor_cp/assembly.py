@@ -17,6 +17,7 @@ from dotmac_commercial_agreements import module as commercial_agreements_module
 from dotmac_deployment_control import module as deployment_control_module
 from dotmac_entitlement_allocation import module as entitlement_allocation_module
 from dotmac_kernel import FeatureManifest, ModuleManifest, ProductAssemblySpec
+from dotmac_kernel.api_documentation import environment_api_documentation_policy
 from dotmac_licensing import module as licensing_module
 from dotmac_release_catalog import module as release_catalog_module
 
@@ -207,5 +208,9 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
         modules=tuple(
             _profiled_surface(manifest, effective) for manifest in COMPOSED_MANIFESTS
         ),
+        # Declared before the app exists, so the kernel gives FastAPI its
+        # documentation coordinates at construction rather than this assembly
+        # deleting mounted routes afterwards (ADR-0016).
+        api_documentation=environment_api_documentation_policy(),
         web_enabled=True,
     )

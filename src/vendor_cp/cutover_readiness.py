@@ -222,6 +222,7 @@ TARGET_PROJECTION_SYMBOLS: Final[dict[str, dict[str, int]]] = {
         "src/vendor_cp/deployment/adapter.py": 8,
         "src/vendor_cp/licensing/delivery_models.py": 3,
         "src/vendor_cp/licensing/projection.py": 2,
+        "tests/architecture/test_control_facade_installed_view.py": 1,
         "tests/unit/test_licence_delivery.py": 5,
     },
 }
