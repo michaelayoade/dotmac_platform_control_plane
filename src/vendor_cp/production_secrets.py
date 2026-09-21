@@ -1352,31 +1352,9 @@ def _bootstrap_relay_dispatcher_on_existing_host_unlocked(
     if health != "healthy":
         raise ProductionSecretError("production db container is not healthy")
 
-    psql = (
-        "docker",
-        "exec",
-        "-i",
-        "--user",
-        "postgres",
-        container,
-        "sh",
-        "-eu",
-        "-c",
-        'exec psql -X -v ON_ERROR_STOP=1 -U postgres -d "$POSTGRES_DB"',
-    )
-    run(psql, stdin=bootstrap_sql.decode("utf-8"))
-
-    encoded = base64.b64encode(dispatcher_password.encode("utf-8")).decode("ascii")
-    install_program = (
-        "\\set ON_ERROR_STOP on\n"
-        "\\set VERBOSITY verbose\n"
-        "\\bind platform_outbox_dispatcher "
-        + encoded
-        + "\nSELECT public.bootstrap_dispatcher_credential("
-        "$1::text, convert_from(decode($2::text, 'base64'), 'UTF8'));\n"
-    )
-    installed = run(psql, stdin=install_program, check=False)
-
+    # Every proof coordinate is read and validated before the first persistent
+    # database mutation. A malformed topology must not strand a committed
+    # credential that this adapter cannot subsequently authenticate.
     network_rows = [
         row
         for row in run(
@@ -1420,6 +1398,31 @@ def _bootstrap_relay_dispatcher_on_existing_host_unlocked(
     ).stdout.strip()
     if re.fullmatch(r"[A-Za-z0-9_.-]+", database_name) is None:
         raise ProductionSecretError("production database name is invalid")
+
+    psql = (
+        "docker",
+        "exec",
+        "-i",
+        "--user",
+        "postgres",
+        container,
+        "sh",
+        "-eu",
+        "-c",
+        'exec psql -X -v ON_ERROR_STOP=1 -U postgres -d "$POSTGRES_DB"',
+    )
+    run(psql, stdin=bootstrap_sql.decode("utf-8"))
+
+    encoded = base64.b64encode(dispatcher_password.encode("utf-8")).decode("ascii")
+    install_program = (
+        "\\set ON_ERROR_STOP on\n"
+        "\\set VERBOSITY verbose\n"
+        "\\bind platform_outbox_dispatcher "
+        + encoded
+        + "\nSELECT public.bootstrap_dispatcher_credential("
+        "$1::text, convert_from(decode($2::text, 'base64'), 'UTF8'));\n"
+    )
+    installed = run(psql, stdin=install_program, check=False)
 
     auth_command = (
         "docker",
