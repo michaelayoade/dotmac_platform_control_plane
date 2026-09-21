@@ -9,6 +9,7 @@ source code, or start the application before its backup and composed migrations.
 from __future__ import annotations
 
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -603,6 +604,55 @@ def test_the_recovery_bundle_is_atomic_and_gates_the_migration() -> None:
         "the bundle must be published and re-verified from its published "
         "location before manifest initialization and schema advancement; a "
         "rollback discovered to be absent afterwards is not a rollback"
+    )
+
+
+def test_bundle_digest_passes_readonly_tmp_through_env(tmp_path: Path) -> None:
+    """The digest helper must not assign to the readonly shell variable.
+
+    A command-prefix assignment is evaluated by the shell before Python runs;
+    with ``BUNDLE_TMP`` readonly that aborts the command substitution and leaves
+    the later Python process without its required environment variable.  Keep
+    this detector narrow so a future refactor cannot silently restore the
+    production failure while retaining the manifest helper's working pattern.
+    """
+    deploy = _text("scripts/deploy_production.sh")
+    digest = deploy.split("# 7. The bundle digest", 1)[1].split(
+        "# 8. Publish atomically", 1
+    )[0]
+    assignment = digest.split("BUNDLE_DIGEST=", 1)[1].split(
+        "\nreadonly BUNDLE_DIGEST", 1
+    )[0]
+
+    (tmp_path / "manifest.json").write_text('{"schema":"test"}\n', encoding="utf-8")
+    result = subprocess.run(  # noqa: S603, S607 -- fixed bash and repository block
+        [  # noqa: S607 -- executable is fixed to bash
+            "bash",
+            "-c",
+            "\n".join(
+                (
+                    "set -euo pipefail",
+                    'readonly BUNDLE_TMP="$1"',
+                    f"BUNDLE_DIGEST={assignment}",
+                    'printf "%s\\n" "$BUNDLE_DIGEST"',
+                )
+            ),
+            "bundle-digest-test",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}\n", result.stdout)
+
+    assert (
+        'BUNDLE_DIGEST="$(env BUNDLE_TMP="$BUNDLE_TMP" python3 - <<\'DIGEST\'' in digest
+    )
+    assert (
+        'BUNDLE_DIGEST="$(BUNDLE_TMP="$BUNDLE_TMP" python3 - <<\'DIGEST\'' not in digest
     )
 
 

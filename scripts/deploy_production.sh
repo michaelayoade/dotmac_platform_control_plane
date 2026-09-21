@@ -393,7 +393,7 @@ MANIFEST
 
 # 7. The bundle digest is over the canonical manifest, which names both file
 #    digests — so one value identifies the whole artifact.
-BUNDLE_DIGEST="$(BUNDLE_TMP="$BUNDLE_TMP" python3 - <<'DIGEST'
+BUNDLE_DIGEST="$(env BUNDLE_TMP="$BUNDLE_TMP" python3 - <<'DIGEST'
 import hashlib, json, os
 from pathlib import Path
 payload = json.loads(
