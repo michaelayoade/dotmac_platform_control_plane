@@ -21,8 +21,8 @@ The host then performs one ordered operation:
    declaration from the versioned template while preserving every held secret
    and operator-owned value;
 2. pull the exact digest;
-3. generate an ephemeral verifier for the separate `postgres` cluster-bootstrap
-   role and start PostgreSQL;
+3. require the already-running PostgreSQL container to be uniquely identified
+   and healthy; the deploy never starts or recreates it;
 4. verify that initialization created `app_admin` as a non-superuser,
    `BYPASSRLS` database/schema owner and removed the bootstrap verifier;
 5. take and publish a host-local recovery bundle, then verify its on-disk
@@ -31,7 +31,8 @@ The host then performs one ordered operation:
    through the isolated, capability-limited `manifest-init` service;
 7. run `dotmac-platform admin migrate`, the owner that composes all eight
    lineages, as an installed console script inside the `ops` container;
-8. replace the app and prove `/health` on the loopback port while declaring
+8. start the relay with `--no-deps`, replace the app with `--no-deps`, and prove
+   `/health` and `/health/ready` on the loopback port while declaring
    `Host: vendor.dotmac.io`, so the probe passes through the same trusted-host
    boundary as production traffic rather than weakening it for an IP-only probe.
 
@@ -111,47 +112,53 @@ exactly this one operation on exactly one role, and nothing else. `PUBLIC`,
 `app_user` and `platform_api` are revoked by name in the file, so the absence is
 stated rather than inherited.
 
-### The six steps, in order
+### The recovery-forward steps, in order
 
-Steps 1–3 need nothing from the relay. Steps 4–6 need the relay service to
-exist on the host, which means slice 2 must be **merged and deployed** first —
-see "What step 4 additionally requires" below, which is not optional.
+The versioned adapter and relay service must be present before this ceremony.
+On an already-initialised host, the ordinary deploy refuses to recreate the
+database and therefore cannot make a missing dispatcher credential appear.
 
-1. **Mint the record.** `materialize_production_secrets.py seed` creates
+1. **Mint only the absent relay record with CAS zero.** The operator creates
    `secret/dotmac/vendor-control-plane/production/relay-dispatcher` with a
    generated `dispatcher_password`. KV v2 `cas=0`, so it creates an absent
    record and can never overwrite an existing one — safe against the live
    estate, and the reason a re-run after a later failure is a no-op rather than
    a silent rotation.
 
-2. **Set it on the existing role.** `platform_outbox_dispatcher` already exists
-   with `LOGIN NOSUPERUSER NOBYPASSRLS` and no password; only the credential is
-   missing. Connect as `app_admin` and `ALTER ROLE platform_outbox_dispatcher
-   PASSWORD …`, reading the value from OpenBao into the session rather than
-   typing it, and never as a command-line argument.
+2. **Run the bounded adapter on the named host, with held material on stdin.**
+   As root on `vendor-cp-prod`, run
+   `materialize_production_secrets.py receive-relay-dispatcher --env-file .env
+   --bootstrap-sql-file deploy/postgres/bootstrap-credential-function.sql`.
+   The adapter verifies `/etc/dotmac-host-id`, requires exactly one running,
+   healthy database container, installs the checked-in SECURITY DEFINER
+   operation as the container's `postgres` superuser, passes the material to
+   `psql` as a bound value on stdin, and never puts it in argv or a diagnostic.
+   It then proves correct TCP password authentication and proves a deliberately
+   wrong password is refused before atomically appending the one dispatcher
+   declaration to `.env`. It refuses to replace or duplicate that declaration.
+   If a previous attempt committed the database change and crashed before the
+   `.env` write, the install returns `DM105`; the adapter reconciles only when
+   authentication with the exact held record succeeds, and never alters again.
 
-3. **Materialize the host environment.** This renders
-   `VENDOR_DB_DISPATCHER_PASSWORD` into the host-local `.env` from the record
-   minted in step 1. **Read the warning under "What step 3 actually rewrites"
-   before running it.**
-
-4. **Start the relay service.** `docker compose up -d relay`. It publishes no
+3. **Run the approved immutable deployment.** Its migration creates the
+   heartbeat table, then it starts the relay and app with `--no-deps`; the
+   existing database is never recreated. The relay publishes no
    port and declares no container healthcheck, by decision rather than
    omission — see below.
 
-5. **Verify the authenticated connection and a fresh durable heartbeat.**
+4. **Verify the authenticated connection and a fresh durable heartbeat.**
    `dotmac-platform relay health` must report a `heartbeat_age_seconds` that is
    small and falling. That single number carries both facts: the relay could
    only have written `public.relay_heartbeats` by connecting successfully as
    `platform_outbox_dispatcher` for the claim and as `platform_api` for the
-   stamp. Before step 4 the same command reports `relay_not_running` with
+   stamp. Before step 3 the same command reports `relay_not_running` with
    `relay_ever_reported: false`, which is the before-picture worth capturing.
 
-6. **Verify one real outbox settlement.** A platform outbox event must go from
-   `pending` to `sent` by the relay's own action. **Read "What step 6 needs that
+5. **Verify one real outbox settlement.** A platform outbox event must go from
+   `pending` to `sent` by the relay's own action. **Read "What step 5 needs that
    does not exist yet" — there is nothing queued on this host to settle.**
 
-`/health/ready` answering 200 is the composed confirmation of 5 and 6 together:
+`/health/ready` answering 200 confirms the fresh durable heartbeat:
 it is red while the relay is stopped, red while it is wedged, and green only
 when the heartbeat is fresh and work is moving.
 
@@ -160,7 +167,7 @@ when the heartbeat is fresh and work is moving.
 Three things the steps as written do not say, each of which stops execution if
 it is discovered at the moment it matters instead of now.
 
-**What step 4 additionally requires.** The relay service must be present in the
+**What step 3 additionally requires.** The relay service must be present in the
 host's compose file, and `v019_relay_heartbeat` must be applied. Both arrive
 with slice 2, and neither is implied by "start the service":
 
@@ -175,16 +182,7 @@ Migrations run in the one-shot `ops` container, as `dotmac-platform admin
 migrate`, before the application is replaced — the ordinary composed-migration
 path, not a relay-specific act.
 
-**What step 3 actually rewrites.** `materialize` is not relay-scoped. It renders
-the COMPLETE `.env` from the template plus a COMPLETE secret bundle, and it also
-rewrites the licence signing key file and the deploy `authorized_keys`. Two
-consequences: it refuses unless every OpenBao record is present and valid, and
-it converges every secret line on the host to whatever OpenBao currently holds.
-If the host and OpenBao have drifted for any reason, step 3 is where that
-resolves — silently, in OpenBao's favour. That may be exactly right; it should
-be a decision rather than a surprise.
-
-**What step 6 needs that does not exist yet.** As of the 2026-08-30 census,
+**What step 5 needs that does not exist yet.** As of the 2026-08-30 census,
 `public.platform_outbox_events` holds ZERO rows on this host, so there is
 nothing pending for the relay to settle. Step 6 therefore requires an operation
 that EMITS a platform event first, and the emitting owners are Commercial

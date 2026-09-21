@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import fcntl
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import os
 import re
@@ -28,7 +30,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from importlib import resources
@@ -88,6 +91,12 @@ ENV_SECRET_KEYS = frozenset(
         "VENDOR_LICENCE_SIGNING_KEY_ID",
         "VENDOR_DB_DISPATCHER_PASSWORD",
     }
+)
+PRODUCTION_DEPLOYMENT_LOCK = Path(
+    "/var/lock/dotmac_dotmac_vendor_control_plane_deploy.lock"
+)
+RELAY_BOOTSTRAP_SQL_SHA256 = (
+    "e59760696be22f263288dd10c9cbf399fa995fbae0fe03f612b514af06d5f2d1"
 )
 
 #: `dotmac_kernel.config.validate_settings` refuses a production `CSRF_SECRET`
@@ -1170,6 +1179,315 @@ def reconcile_host_environment_declarations(
             owner=(metadata.st_uid, metadata.st_gid),
         )
     return tuple(changed)
+
+
+def materialize_relay_dispatcher_environment(
+    *, env_file: Path, dispatcher_password: str
+) -> bool:
+    """Install only the relay dispatcher declaration into an existing env file.
+
+    This is the narrow bootstrap seam for an already-initialised production
+    host.  It deliberately cannot rewrite any other secret or declaration.
+    The input is accepted only as held material from stdin by the CLI adapter;
+    it is never rendered into an argument, diagnostic, or receipt.
+    """
+    validate_record(
+        RELAY_DISPATCHER_PATH,
+        {"dispatcher_password": dispatcher_password},
+    )
+    if "\n" in dispatcher_password:
+        raise ProductionSecretError("relay dispatcher material has unsafe bytes")
+    if not env_file.is_file() or env_file.is_symlink():
+        raise ProductionSecretError("production env file must be a regular file")
+
+    original = env_file.read_text(encoding="utf-8")
+    lines = original.splitlines()
+    positions = [
+        index
+        for index, line in enumerate(lines)
+        if line.partition("=")[:2] == ("VENDOR_DB_DISPATCHER_PASSWORD", "=")
+    ]
+    if len(positions) > 1:
+        raise ProductionSecretError(
+            "production env file repeats VENDOR_DB_DISPATCHER_PASSWORD"
+        )
+    if positions:
+        raise ProductionSecretError(
+            "production env file already declares VENDOR_DB_DISPATCHER_PASSWORD"
+        )
+
+    metadata = env_file.stat()
+    prefix = original if original.endswith("\n") else original + "\n"
+    _atomic_write(
+        env_file,
+        prefix + f"VENDOR_DB_DISPATCHER_PASSWORD={dispatcher_password}\n",
+        mode=stat.S_IMODE(metadata.st_mode),
+        owner=(metadata.st_uid, metadata.st_gid),
+    )
+    return True
+
+
+@contextmanager
+def production_deployment_lock(
+    lock_file: Path = PRODUCTION_DEPLOYMENT_LOCK,
+) -> Iterator[None]:
+    """Contend on the same inode as every production deployment/env writer."""
+    if lock_file.is_symlink():
+        raise ProductionSecretError("production deployment lock is a symlink")
+    descriptor = os.open(
+        lock_file,
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ProductionSecretError(
+                "production deployment lock is not a regular file"
+            )
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ProductionSecretError(
+                "another production deployment or environment writer is active"
+            ) from exc
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _bootstrap_relay_dispatcher_on_existing_host_unlocked(
+    *,
+    env_file: Path,
+    bootstrap_sql_file: Path,
+    dispatcher_password: str,
+    host_id_file: Path = Path("/etc/dotmac-host-id"),
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Install and prove the dispatcher credential without recreating Postgres.
+
+    The only material input is held stdin from the operator adapter.  It is
+    forwarded only on child stdin: never in argv, a URL, a diagnostic, or a
+    receipt.  A retry after the database commit reconciles by authenticating
+    with the held value; it never performs a second successful ALTER ROLE.
+    """
+    validate_record(
+        RELAY_DISPATCHER_PATH,
+        {"dispatcher_password": dispatcher_password},
+    )
+    if (
+        not host_id_file.is_file()
+        or host_id_file.is_symlink()
+        or host_id_file.read_text(encoding="utf-8").strip() != ROTATION_HOST_ID
+    ):
+        raise ProductionSecretError("relay bootstrap target is not vendor-cp-prod")
+    if "\n" in dispatcher_password:
+        raise ProductionSecretError("relay dispatcher material has unsafe bytes")
+    if not bootstrap_sql_file.is_file() or bootstrap_sql_file.is_symlink():
+        raise ProductionSecretError("credential bootstrap SQL must be a regular file")
+    bootstrap_sql = bootstrap_sql_file.read_bytes()
+    if hashlib.sha256(bootstrap_sql).hexdigest() != RELAY_BOOTSTRAP_SQL_SHA256:
+        raise ProductionSecretError(
+            "credential bootstrap SQL does not match the accepted artifact"
+        )
+
+    # Refuse an env replacement before making any database change.  The actual
+    # write happens only after both authentication directions have passed.
+    if not env_file.is_file() or env_file.is_symlink():
+        raise ProductionSecretError("production env file must be a regular file")
+    declarations = [
+        line
+        for line in env_file.read_text(encoding="utf-8").splitlines()
+        if line.partition("=")[:2] == ("VENDOR_DB_DISPATCHER_PASSWORD", "=")
+    ]
+    if declarations:
+        raise ProductionSecretError(
+            "production env file already declares VENDOR_DB_DISPATCHER_PASSWORD"
+        )
+
+    def run(
+        command: Sequence[str], *, stdin: str | None = None, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        try:
+            return runner(
+                command,
+                input=stdin,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=check,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise ProductionSecretError(
+                "relay dispatcher database bootstrap command failed"
+            ) from exc
+
+    containers = run(
+        (
+            "docker",
+            "ps",
+            "--filter",
+            f"label=com.docker.compose.project={ROTATION_COMPOSE_PROJECT}",
+            "--filter",
+            "label=com.docker.compose.service=db",
+            "--filter",
+            "status=running",
+            "--format",
+            "{{.ID}}",
+        )
+    ).stdout.splitlines()
+    if len(containers) != 1:
+        raise ProductionSecretError(
+            "expected exactly one running production db container"
+        )
+    container = containers[0]
+    health = run(
+        (
+            "docker",
+            "inspect",
+            "--format",
+            "{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}",
+            container,
+        )
+    ).stdout.strip()
+    if health != "healthy":
+        raise ProductionSecretError("production db container is not healthy")
+
+    psql = (
+        "docker",
+        "exec",
+        "-i",
+        "--user",
+        "postgres",
+        container,
+        "sh",
+        "-eu",
+        "-c",
+        'exec psql -X -v ON_ERROR_STOP=1 -U postgres -d "$POSTGRES_DB"',
+    )
+    run(psql, stdin=bootstrap_sql.decode("utf-8"))
+
+    encoded = base64.b64encode(dispatcher_password.encode("utf-8")).decode("ascii")
+    install_program = (
+        "\\set ON_ERROR_STOP on\n"
+        "\\set VERBOSITY verbose\n"
+        "\\bind platform_outbox_dispatcher "
+        + encoded
+        + "\nSELECT public.bootstrap_dispatcher_credential("
+        "$1::text, convert_from(decode($2::text, 'base64'), 'UTF8'));\n"
+    )
+    installed = run(psql, stdin=install_program, check=False)
+
+    network_rows = [
+        row
+        for row in run(
+            (
+                "docker",
+                "inspect",
+                "--format",
+                "{{range $name, $settings := .NetworkSettings.Networks}}"
+                "{{$name}}|{{$settings.IPAddress}}{{println}}{{end}}",
+                container,
+            )
+        ).stdout.splitlines()
+        if row
+    ]
+    if len(network_rows) != 1 or "|" not in network_rows[0]:
+        raise ProductionSecretError(
+            "production db container must have exactly one network"
+        )
+    network, database_address = network_rows[0].split("|", 1)
+    try:
+        ipaddress.ip_address(database_address)
+    except ValueError as exc:
+        raise ProductionSecretError(
+            "production db container has an invalid network address"
+        ) from exc
+    database_image = run(
+        ("docker", "inspect", "--format", "{{.Image}}", container)
+    ).stdout.strip()
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", database_image) is None:
+        raise ProductionSecretError("production db container image is not immutable")
+    database_name = run(
+        (
+            "docker",
+            "exec",
+            container,
+            "sh",
+            "-eu",
+            "-c",
+            'printf "%s" "$POSTGRES_DB"',
+        )
+    ).stdout.strip()
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", database_name) is None:
+        raise ProductionSecretError("production database name is invalid")
+
+    auth_command = (
+        "docker",
+        "run",
+        "--rm",
+        "-i",
+        "--network",
+        network,
+        "--entrypoint",
+        "sh",
+        database_image,
+        "-eu",
+        "-c",
+        "IFS= read -r PGPASSWORD; export PGPASSWORD; "
+        'exec psql -X -v ON_ERROR_STOP=1 -h "$1" '
+        '-U platform_outbox_dispatcher -d "$2" -c "SELECT 1"',
+        "relay-auth-proof",
+        database_address,
+        database_name,
+    )
+    positive = run(
+        auth_command, stdin=dispatcher_password + "\n", check=False
+    ).returncode
+    negative = run(
+        auth_command,
+        stdin=dispatcher_password + "-deliberately-wrong\n",
+        check=False,
+    ).returncode
+    if positive != 0:
+        raise ProductionSecretError(
+            "relay dispatcher credential did not authenticate after bootstrap"
+        )
+    if negative == 0:
+        raise ProductionSecretError(
+            "production database does not enforce the dispatcher credential"
+        )
+    if installed.returncode != 0:
+        # Authentication with the exact held value proves this is the crash
+        # reconciliation state.  Any other failed install remains a refusal.
+        if "DM105" not in installed.stderr:
+            raise ProductionSecretError(
+                "relay dispatcher credential installation was refused"
+            )
+
+    materialize_relay_dispatcher_environment(
+        env_file=env_file,
+        dispatcher_password=dispatcher_password,
+    )
+
+
+def bootstrap_relay_dispatcher_on_existing_host(
+    *,
+    env_file: Path,
+    bootstrap_sql_file: Path,
+    dispatcher_password: str,
+    host_id_file: Path = Path("/etc/dotmac-host-id"),
+    lock_file: Path = PRODUCTION_DEPLOYMENT_LOCK,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Serialize the complete recovery-forward bootstrap with deployment."""
+    with production_deployment_lock(lock_file):
+        _bootstrap_relay_dispatcher_on_existing_host_unlocked(
+            env_file=env_file,
+            bootstrap_sql_file=bootstrap_sql_file,
+            dispatcher_password=dispatcher_password,
+            host_id_file=host_id_file,
+            runner=runner,
+        )
 
 
 def pin_product_release(
@@ -3368,7 +3686,8 @@ def host_adapter_main() -> int:
         ):
             raise ProductionSecretError("rotation adapter identity mismatch")
         payload = HostSecretRotationPayload.from_json(raw)
-        proof = apply_secret_rotation_on_target(payload)
+        with production_deployment_lock():
+            proof = apply_secret_rotation_on_target(payload)
         print(proof.to_json(), end="")
         return 0
     except ProductionSecretError as exc:

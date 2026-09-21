@@ -12,6 +12,7 @@ from vendor_cp.production_secrets import (
     ROLLBACK_CONFIRMATION,
     HostSecretBundle,
     ProductionSecretError,
+    bootstrap_relay_dispatcher_on_existing_host,
     build_host_bundle,
     build_rollback_payload,
     client_from_environment,
@@ -21,6 +22,7 @@ from vendor_cp.production_secrets import (
     materialize_host_bundle,
     pin_product_release,
     preflight_rotation_target,
+    production_deployment_lock,
     read_rotation_receipt,
     reconcile_host_environment_declarations,
     retire_rotation_adapter,
@@ -109,6 +111,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     reconcile.add_argument("--env-template", required=True, type=Path)
     reconcile.add_argument("--env-file", required=True, type=Path)
+
+    receive_dispatcher = subparsers.add_parser(
+        "receive-relay-dispatcher", help=argparse.SUPPRESS
+    )
+    receive_dispatcher.add_argument("--env-file", required=True, type=Path)
+    receive_dispatcher.add_argument("--bootstrap-sql-file", required=True, type=Path)
 
     pin = subparsers.add_parser(
         "pin-product-release",
@@ -209,24 +217,36 @@ def main() -> int:
         if args.command == "reconcile-declarations":
             if os.geteuid() != 0:
                 raise ProductionSecretError("reconcile-declarations must run as root")
-            changed = reconcile_host_environment_declarations(
-                env_template=args.env_template,
-                env_file=args.env_file,
-            )
+            with production_deployment_lock():
+                changed = reconcile_host_environment_declarations(
+                    env_template=args.env_template,
+                    env_file=args.env_file,
+                )
             if changed:
                 print("reconciled production declarations: " + ", ".join(changed))
             else:
                 print("production declarations already current")
             return 0
+        if args.command == "receive-relay-dispatcher":
+            if os.geteuid() != 0:
+                raise ProductionSecretError("receive-relay-dispatcher must run as root")
+            bootstrap_relay_dispatcher_on_existing_host(
+                env_file=args.env_file,
+                bootstrap_sql_file=args.bootstrap_sql_file,
+                dispatcher_password=sys.stdin.read(),
+            )
+            print("relay dispatcher credential installed and authenticated")
+            return 0
         if args.command == "pin-product-release":
             if os.geteuid() != 0:
                 raise ProductionSecretError("pin-product-release must run as root")
-            pin_changed = pin_product_release(
-                env_file=args.env_file,
-                product_code=args.product_code,
-                artifact_digest=args.artifact_digest,
-                product_manifest_digest=args.product_manifest_digest,
-            )
+            with production_deployment_lock():
+                pin_changed = pin_product_release(
+                    env_file=args.env_file,
+                    product_code=args.product_code,
+                    artifact_digest=args.artifact_digest,
+                    product_manifest_digest=args.product_manifest_digest,
+                )
             state = "updated" if pin_changed else "already current"
             print(f"product release pin {state}: {args.product_code!r}")
             return 0
@@ -242,14 +262,15 @@ def main() -> int:
             if os.geteuid() != 0:
                 raise ProductionSecretError("receive must run as root")
             bundle = HostSecretBundle.from_json(sys.stdin.read())
-            materialization = materialize_host_bundle(
-                bundle,
-                env_template=args.env_template,
-                env_file=args.env_file,
-                signing_key_file=args.signing_key_file,
-                authorized_keys_file=args.authorized_keys_file,
-                app_owner=(10001, 10001),
-            )
+            with production_deployment_lock():
+                materialization = materialize_host_bundle(
+                    bundle,
+                    env_template=args.env_template,
+                    env_file=args.env_file,
+                    signing_key_file=args.signing_key_file,
+                    authorized_keys_file=args.authorized_keys_file,
+                    app_owner=(10001, 10001),
+                )
             for materialized_path in (
                 materialization.env_file,
                 materialization.signing_key_file,

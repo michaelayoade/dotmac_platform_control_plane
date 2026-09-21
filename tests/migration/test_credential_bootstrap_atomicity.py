@@ -27,13 +27,19 @@ are created inside it — nothing touches a role the rest of the suite uses.
 
 from __future__ import annotations
 
+import subprocess
+import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from sqlalchemy import Connection, create_engine, text
+
+from vendor_cp.production_secrets import (
+    bootstrap_relay_dispatcher_on_existing_host,
+)
 
 # A password shape chosen to break naive quoting: a single quote, a backslash,
 # a semicolon and a comment marker. If `%L` is doing its job none of it matters.
@@ -498,6 +504,29 @@ def test_the_operation_installs_once_and_then_refuses(
         conn.rollback()
 
 
+def test_the_operation_refuses_a_dispatcher_that_bypasses_rls(
+    superuser_url: str, operation: None, uncredentialed_dispatcher: None
+) -> None:
+    """The exact hard-coded principal must remain a least-privilege login."""
+    from sqlalchemy.exc import DBAPIError
+
+    with _connect(superuser_url) as conn:
+        conn.execute(text(f"ALTER ROLE {DISPATCHER} BYPASSRLS"))
+        conn.commit()
+    try:
+        with _connect(superuser_url) as conn:
+            with pytest.raises(DBAPIError) as refused:
+                _call(conn, DISPATCHER, HOSTILE)
+            assert "DM107" in str(refused.value) or "bypasses" in str(refused.value)
+            conn.rollback()
+        with _connect(superuser_url) as conn:
+            assert _password_present(conn, DISPATCHER) is False
+    finally:
+        with _connect(superuser_url) as conn:
+            conn.execute(text(f"ALTER ROLE {DISPATCHER} NOBYPASSRLS PASSWORD NULL"))
+            conn.commit()
+
+
 def test_the_operation_is_not_executable_by_the_application_roles(
     superuser_url: str, operation: None, url_for: Callable[..., str]
 ) -> None:
@@ -540,3 +569,139 @@ def test_the_operation_holds_its_lock_only_for_the_transaction(
             )
         ).scalar_one()
         assert held == 0, "a refusing executor must not keep the lock"
+
+
+def test_the_host_adapter_drives_bound_install_scram_proof_and_dm105_recovery(
+    tmp_path: Path,
+) -> None:
+    """Drive the exact host adapter against an isolated password-auth cluster."""
+    container = f"relay-bootstrap-adapter-{uuid.uuid4().hex[:12]}"
+    material = "adapter-live-material"
+    image = "postgres:16"
+    subprocess.run(  # noqa: S603 -- fixed test harness argv
+        (
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container,
+            "--label",
+            "com.docker.compose.project=dotmac_vendor_control_plane",
+            "--label",
+            "com.docker.compose.service=db",
+            "--health-cmd",
+            "pg_isready -U postgres",
+            "--health-interval",
+            "1s",
+            "--health-retries",
+            "30",
+            "-e",
+            "POSTGRES_PASSWORD=adapter-cluster-password",
+            "-e",
+            "POSTGRES_DB=adapter_db",
+            image,
+        ),
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    try:
+        for _attempt in range(30):
+            health = subprocess.run(  # noqa: S603 -- fixed test harness argv
+                (
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.State.Health.Status}}",
+                    container,
+                ),
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            if health == "healthy":
+                break
+            time.sleep(1)
+        assert health == "healthy"
+        subprocess.run(  # noqa: S603 -- fixed test harness argv
+            (
+                "docker",
+                "exec",
+                container,
+                "psql",
+                "-X",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-U",
+                "postgres",
+                "-d",
+                "adapter_db",
+                "-c",
+                "CREATE ROLE app_user LOGIN; "
+                "CREATE ROLE platform_api LOGIN; "
+                "CREATE ROLE platform_outbox_dispatcher LOGIN "
+                "NOSUPERUSER NOCREATEROLE NOBYPASSRLS",
+            ),
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        env_file = tmp_path / ".env"
+        env_file.write_text("APP_ENV=production\n", encoding="utf-8")
+        host_id = tmp_path / "host-id"
+        host_id.write_text("vendor-cp-prod\n", encoding="utf-8")
+        sql_file = (
+            Path(__file__).resolve().parents[2]
+            / "deploy/postgres/bootstrap-credential-function.sql"
+        )
+        observed_calls: list[tuple[Sequence[str], str | None]] = []
+
+        def runner(
+            command: Sequence[str],
+            *,
+            input: str | None,
+            text: bool,
+            stdout: int,
+            stderr: int,
+            check: bool,
+        ) -> subprocess.CompletedProcess[str]:
+            assert material not in " ".join(command)
+            observed_calls.append((command, input))
+            return subprocess.run(  # noqa: S603 -- adapter argv under test
+                command,
+                input=input,
+                text=text,
+                stdout=stdout,
+                stderr=stderr,
+                check=check,
+            )
+
+        bootstrap_relay_dispatcher_on_existing_host(
+            env_file=env_file,
+            bootstrap_sql_file=sql_file,
+            dispatcher_password=material,
+            host_id_file=host_id,
+            lock_file=tmp_path / "deploy.lock",
+            runner=runner,
+        )
+        assert any("\\bind" in (call_input or "") for _, call_input in observed_calls)
+        assert all(material not in " ".join(command) for command, _ in observed_calls)
+
+        # Model a crash after DB commit and before env replacement, then prove
+        # the retry reaches DM105 and reconciles by SCRAM authentication.
+        env_file.write_text("APP_ENV=production\n", encoding="utf-8")
+        bootstrap_relay_dispatcher_on_existing_host(
+            env_file=env_file,
+            bootstrap_sql_file=sql_file,
+            dispatcher_password=material,
+            host_id_file=host_id,
+            lock_file=tmp_path / "deploy.lock",
+        )
+        assert env_file.read_text(encoding="utf-8").endswith(
+            f"VENDOR_DB_DISPATCHER_PASSWORD={material}\n"
+        )
+    finally:
+        subprocess.run(  # noqa: S603 -- exact canary cleanup target
+            ("docker", "rm", "-f", container),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )

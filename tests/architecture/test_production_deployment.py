@@ -259,7 +259,7 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     globals_capture = commands.index("pg_dumpall")
     backup = commands.index("--format custom")
     bootstrap_password = commands.index("secrets.token_urlsafe")
-    start_db = commands.index("up -d --wait db")
+    require_existing_db = commands.index("compose ps --status running -q db")
     initialize_manifests = commands.index("run --rm --no-deps manifest-init")
     manifest_init_command = "compose --profile ops run --rm --no-deps manifest-init"
     assert [
@@ -269,19 +269,29 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     ] == [manifest_init_command]
     verify_roles = commands.index("module database role contract is not satisfied")
     migrate = commands.index("dotmac-platform admin migrate")
-    replace = commands.index("up -d app")
+    start_relay = commands.index("up -d --no-deps relay")
+    replace = commands.index("up -d --no-deps app --wait")
     verify = commands.index("sha256sum --quiet --check SHA256SUMS")
     assert (
         bootstrap_password
-        < start_db
+        < require_existing_db
         < verify_roles
         < globals_capture
         < backup
         < verify
         < initialize_manifests
         < migrate
+        < start_relay
         < replace
     )
+    # DB was required to be already running and healthy. Recreating it would be
+    # a destructive attempt to make the old, initialized volume look new.
+    assert "compose up -d --wait db" not in commands
+    assert not re.search(r"compose up\b[^\n]*\bdb\b", commands)
+    assert '"${#DB_CONTAINER_IDS[@]}" -eq 1' in commands
+    assert '"$DB_HEALTH" == "healthy"' in commands
+    assert "compose up -d --no-deps relay" in commands
+    assert "compose up -d --no-deps app --wait" in commands
     assert "ALTER ROLE app_admin" not in deploy
     assert '"false|false|true|true"' in deploy
     assert '--header "Host: vendor.dotmac.io"' in deploy
@@ -469,6 +479,25 @@ def test_deployment_adapter_includes_the_owned_secret_materializer() -> None:
     assert "first production dispatch on 2026-08-17 was held at that gate" in operations
 
 
+def test_deployment_adapter_delivers_relay_bootstrap_material_for_an_old_database() -> (
+    None
+):
+    """An initialized database never reruns Docker's init directory.
+
+    The one-time, superuser-owned function and the typed caller must therefore
+    arrive with the deployment adapter. Copying them is not an instruction to
+    replay init-roles or recreate the service/volume; it gives the authorized
+    recovery-forward credential ceremony its versioned inputs.
+    """
+    workflow = _text(".github/workflows/production-deploy.yml")
+
+    assert "deploy/postgres/bootstrap-credential-function.sql" in workflow
+    assert "deploy/postgres/init-roles.sh" in workflow
+    install = workflow.index("Install the versioned deployment adapter")
+    deploy = workflow.index("Deploy the approved digest")
+    assert install < deploy
+
+
 def test_nginx_contract_routes_only_to_the_loopback_vendor_app() -> None:
     nginx = _text("deploy/nginx/vendor.dotmac.io.conf")
 
@@ -520,10 +549,17 @@ def test_the_deploy_refuses_a_fatal_environment_before_it_touches_anything() -> 
     csrf_length = commands.index("CSRF_SECRET is shorter than 32 bytes")
     csrf_distinct = commands.index("CSRF_SECRET must differ from JWT_SECRET")
     verdict = commands.index("the image refuses this host environment")
-    start_db = commands.index("up -d --wait db")
+    require_existing_db = commands.index("compose ps --status running -q db")
     migrate = commands.index("dotmac-platform admin migrate")
 
-    assert csrf_present < csrf_length < csrf_distinct < verdict < start_db < migrate
+    assert (
+        csrf_present
+        < csrf_length
+        < csrf_distinct
+        < verdict
+        < require_existing_db
+        < migrate
+    )
     # The artifact's own function, not a re-implementation of its rules.
     assert "validate_settings" in deploy
     assert "--network none" in deploy
@@ -690,7 +726,8 @@ def test_the_ordering_guard_reads_the_script_and_not_its_explanation() -> None:
     deploy = _text("scripts/deploy_production.sh")
 
     assert _commands(deploy) != deploy
-    assert deploy.index("up -d app") < _commands(deploy).index("up -d app"), (
+    command = "compose up -d --no-deps app --wait"
+    assert deploy.index(command) < _commands(deploy).index(command), (
         "no comment mentions the command the ordering guard probes for, so this "
         "helper is currently inert — keep it, but the sensitivity claim is stale"
     )
@@ -904,10 +941,9 @@ def test_lock_validation_and_trap_precede_every_mutation() -> None:
     trap = commands.index("trap cleanup_effector")
     first_mutations = [
         commands.index("docker pull"),
-        commands.index("up -d --wait db"),
         commands.index("--format custom"),
         commands.index("dotmac-platform admin migrate"),
-        commands.index("up -d app"),
+        commands.index("up -d --no-deps app"),
     ]
     boundary = min(first_mutations)
     assert validation < boundary

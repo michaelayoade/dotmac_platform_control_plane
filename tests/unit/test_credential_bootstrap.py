@@ -381,7 +381,7 @@ def test_the_allowlist_is_narrow_and_can_refuse() -> None:
 
 
 def test_every_refusal_code_is_declared_and_distinct() -> None:
-    assert len(REFUSAL_CODES) == 10
+    assert len(REFUSAL_CODES) == 11
     assert all(code.count(".") == 1 for code in REFUSAL_CODES)
 
 
