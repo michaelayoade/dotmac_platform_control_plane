@@ -228,3 +228,254 @@ existed that day, so a declared-but-absent check was green on a database that
 had moved. `dotmac-platform admin descriptor-drift` reports both directions,
 against a catalogue capture from the target, connects to nothing, and is the
 first live consumer those two declarations have ever had.
+
+---
+
+## Amendment — 2026-09-20 (a render candidate, distinct from § 1's three artifacts)
+
+Proposed 2026-09-20; concept accepted by Michael Ayoade 2026-09-20 after two
+rounds of correction (the pre-authorization lifecycle sequencing in
+`admit_candidate_image`, and refusing any independent image slot in the
+render candidate — see this section's revision history). **Nothing above is
+edited.** § 1 through § 8 stand exactly as written above; this section names
+a gap between what Governance now requires and what this record currently
+distinguishes, and proposes a fourth artifact to close it. It does not close
+the gap itself.
+
+### Why § 1's candidate descriptor is not the thing Governance's gate wants
+
+Governance introduced a `deployment_artefact_surfaces` declaration at
+`schema_version: 10`: a product must render its deployment assets and
+byte-compare the rendered output against a committed copy, in CI, before
+merge. `schema_version: 11` additionally requires `compatibility_retirements`
+and `retirement_history`. Protected `main`'s `.dotmac/standards-profile.json`
+is pinned to an older accepted Governance revision
+(`a19259b10568d29dc0a9617347498fea7f1e7a97`, predating schema 10) and is not
+exposed to either requirement. It is draft PR #187 specifically that repins
+`governance_model.revision` to the newest accepted revision
+(`7cb563d38d8f64f8019581a912a64ac466cd9fbd`, schema 11) while its own
+`schema_version` field is still `9` — that mismatch, not anything on `main`,
+is what fails the `Dotmac engineering standards` check.
+
+§ 1 names a source contract, a candidate descriptor and an accepted
+descriptor. The files under `deploy/candidates/*.toml` are instances of that
+one candidate-descriptor kind; `deploy/descriptor-promotions.json` records
+which one became `deploy/product.toml`, whose header says "THIS FILE IS A
+PROMOTED CANDIDATE. IT IS NEVER HAND-EDITED." The ledger includes
+`contract_change` and `composition_change` promotions that deploy nothing.
+The latter explicitly declares what a deployment **will** run, not a process
+role already running. The distinction here is therefore not past versus
+future: the descriptor candidate and promotion ledger record a declared
+contract and its promotion authority. They do not define a Foundation render
+input and committed output that CI byte-compares with the asset production
+consumes.
+
+The deployment-artefact requirement instead needs a render input and
+committed rendered output checked before merge. § 1 through § 8 name no such
+artifact; reusing a descriptor candidate would silently couple its promotion
+lifecycle to a different job.
+
+### The proposed fourth artifact: the deployment render candidate — concept named, concrete shape DEFERRED
+
+This amendment names the gap and proposes naming a fourth artifact —
+distinct from all three § 1 names — as the **deployment render candidate**.
+It does NOT yet propose the concrete file shape (an independent
+`deploy/render-candidates/<date>-<slug>.toml` was an earlier draft of this
+amendment's own text; that specific shape is DEFERRED below, not accepted).
+
+The name is chosen to avoid exactly the collision Governance's schema
+change would otherwise create with existing vocabulary: `deploy/candidates/
+*.toml` already means "a pre-promotion draft of the accepted descriptor,"
+per § 1 and the ledger's own `note` field. A deployment render candidate is
+not a draft of the accepted descriptor and is never a promotion input. It
+answers a different question — "what would Foundation's renderer produce
+right now, from this input, and does the committed copy still match?" —
+never "is this what the product will run next."
+
+**The render candidate does not itself authorize descriptor promotion.**
+§ 2's migration rule is untouched: the accepted descriptor still advances
+only from a descriptor candidate under `deploy/candidates/*.toml`, and only
+through `deploy/descriptor-promotions.json`'s append-only ledger exactly as it
+operates today — whether the promoted state is a deployment or, as the
+ledger's own `contract_change`/`composition_change` entries record, a
+narrower fact that "deploys nothing." A deployment render candidate reaching
+CI green says Foundation can render this input byte-for-byte; it says
+nothing about whether that input has been, or ever will be, promoted or
+deployed, and it may never stand in for a descriptor candidate in the
+ledger's `candidate` field.
+
+### Why an independent `[image]` field is refused, not deferred as a detail
+
+An earlier draft of this amendment let the render candidate declare its own
+`[image]`, matching or diverging from the accepted descriptor's. That is not
+a detail to fill in later — it is a second image authority, and this
+repository already has one, on purpose. `src/vendor_cp/deployment/
+candidate.py` derives the ONLY image a Foundation execution plan may name:
+
+    accepted descriptor + accepted release receipt
+            -> candidate spec (two fields replaced, nothing else)
+            -> canonical document
+            -> FoundationExecutionPlanV1
+
+`CandidateImage` (same file) carries a private witness only
+`admit_candidate_image` holds, specifically so "the override must come from
+a verified receipt" is a TYPE, not a convention an operator or a second
+document could route around. A render candidate with its own typed or
+string `[image]` field is exactly the raw reference that module's own
+docstring says "has nowhere to go" — regardless of whether its Compose
+output happens to byte-compare cleanly in CI. Two mechanisms that usually
+agree are not one mechanism; the day they diverge is the day this
+distinction was load-bearing.
+
+**Correction: `admit_candidate_image` does not admit an image "for the
+current authorized plan" — it runs BEFORE any authorization exists.**
+`CandidateRefused`'s own docstring says so directly: "nothing has been asked
+of Deployment Control at this point." The real sequence has three stages,
+not two, and pre-merge CI sits BEFORE the first one that touches a real
+image:
+
+1. **Pre-merge (this amendment's render candidate, in CI): NON-AUTHORIZING
+   and receipt-free.** No `production-image.yml` release receipt exists yet
+   for a change still under review, so nothing here may call
+   `admit_candidate_image` and expect it to succeed. The render candidate
+   declares no deployable `[image]` or independent desired-image value. A
+   non-deployable, late-bound image slot in rendered Compose bytes may be a
+   way to prove the render before publication — today's production Compose
+   uses `${VENDOR_APP_IMAGE:?…}` — but only a later design can establish
+   whether Foundation preserves that slot and execution fills it without
+   changing the checked bytes. This amendment approves no such file shape.
+2. **Later, once a real release receipt exists:** `admit_candidate_image`
+   derives the actual image from the accepted descriptor plus that VERIFIED
+   RECEIPT and a registry readback — never from a plan, authorized or
+   otherwise, because at this point still nothing has been asked of Control.
+3. **Only after that derivation: Control binds the exact deployment
+   inputs**, the derived image among them, as part of authorizing the
+   deployment. Authorization consumes the derived image; it does not
+   precede or produce it.
+
+A render candidate implementation must not conflate stage 1 with stages 2–3
+by treating its pre-merge render as if it carried, or needed to carry, an
+authorized or receipt-derived image. Whatever it does carry pre-merge has no
+bearing on what `admit_candidate_image` later derives, and reaching stage 2
+by any other path (a typed or string `[image]` an operator or a second
+document could set) is exactly the raw reference `candidate.py`'s own
+docstring says "has nowhere to go."
+
+**Satisfying schema 11's byte-compare does not satisfy Governance ADR-0014
+§ 6.** ADR-0014 requires ONE document binding release digest, private-
+inventory digest, rendered-configuration digest, exact container image
+digest, target, approver and rationale together — its own stated argument
+is that any three of those agreeing proves nothing about the fourth. A CI
+job that renders and byte-compares Compose output answers schema 11's
+question and none of ADR-0014's; an implementation that stops at the byte-
+compare has closed one gate and left the other exactly as open as before
+this amendment. Both gates apply; neither substitutes for the other.
+
+**Disposition: the render-candidate CONCEPT is proposed; the concrete
+`deploy/render-candidates/*.toml` file shape is DEFERRED** until a design
+demonstrates it introduces no image authority independent of
+`admit_candidate_image`, and separately addresses ADR-0014 § 6's full
+binding rather than schema 11's byte-compare alone. Implementation must not
+proceed from the concept alone.
+
+### The invariant
+
+> A deployment render candidate MUST NOT declare a deployable `[image]` or
+> any independent desired-image value. Its pre-merge render is receipt-free
+> and non-authorizing; a late-bound image slot, if the eventual design can
+> prove one, is not an image admission. After publication, the image used for
+> execution MUST come from `admit_candidate_image`
+> (`src/vendor_cp/deployment/candidate.py`), never from the render candidate.
+> No field of the render candidate may retroactively alter
+> `deploy/product.toml` or `deploy/descriptor-promotions.json`.
+
+These artifacts retain independent lifecycles.
+Concretely: no test, script, or CI step reads a deployment render candidate
+to decide what the accepted descriptor says; no promotion in the ledger may
+cite a deployment render candidate as its `candidate` field (that field
+names an existing pre-promotion descriptor candidate, and only that). The
+image derived after publication may enter the accepted descriptor only
+AFTER successful deployment, through an ordinary candidate under
+`deploy/candidates/*.toml` and a ledger promotion, as §§ 2 and 8 require;
+the pre-merge render candidate never pre-authorizes or promotes that image.
+The render candidate answers Governance's question; it never answers
+`dotmac-deploy drift`'s.
+
+### The second invariant: rendered bytes must be the bytes production runs
+
+A render candidate satisfying Governance in isolation is not enough. Today,
+`.github/workflows/production-deploy.yml` `rsync`s
+`docker-compose.production.yml` to the production host verbatim.
+`scripts/deploy_production.sh` uses that file by default, but its
+`COMPOSE_FILE` environment override can select a different path. Naming a
+separate, CI-only render candidate does not bind either the copied file or
+the effective Compose path to the bytes CI compared.
+
+A conforming implementation MUST prove that the exact rendered bytes its CI
+job byte-compares are the bytes the production executor consumes at its
+effective Compose path. The render candidate may produce
+`docker-compose.production.yml` itself, provided the production invocation
+pins that path or refuses an override; otherwise the implementation must
+verify the effective file's digest against the retained rendered asset before
+execution. Hand-edits to the retained output must fail the CI byte-compare.
+An implementation that renders a file production never consumes has
+satisfied Governance's letter while leaving its actual purpose — proving
+what CI checked is what runs — unmet.
+
+### What this amendment does not resolve
+
+Three prerequisites remain open and are not resolved by naming the concept
+above — the first two found by a bounded read-only architecture review of
+Governance's schema-11 requirement against Platform CP's actual deployment
+surface, the third by review of this amendment's own draft against
+`candidate.py` and Governance ADR-0014:
+
+1. **No published Foundation release can render Platform CP's complete
+   topology.** The published `dotmac_deployment_foundation` release
+   (`0.2.0a2`, the version this record's § 5 and § 7 already establish as
+   what is actually installable) cannot parse Platform CP's `[database]`
+   contract at all — § 7 already records the exact refusal,
+   `error: unknown key(s) ['database']`. The unpublished `0.3.0a3`
+   candidate understands more of the shape but still cannot reproduce
+   Platform CP's actual database bootstrap sequence, the `manifest-init`
+   ownership boundary, volume permission requirements, or Host-header-aware
+   readiness checks. A renderer that cannot represent these cannot be the
+   thing CI byte-compares against, because a rendered file missing them
+   would be compared and pass while describing a deployment nobody could
+   run.
+2. **Platform CP is not the party permitted to close that gap.** This
+   repository's own `AGENTS.md` rule 21 states it directly: "Render, apply,
+   observe and rollback are the published Foundation CLI's," reached only
+   through a verbatim passthrough, because re-growing any of them here would
+   be a second deployment engine. That forbids Platform CP writing its own
+   renderer to work around Foundation's gap. Only a Foundation release with
+   full topology support closes this; a local renderer would create the
+   exact second-writer problem the rule exists to prevent, and it would be
+   invisible to every other product pinned to the same Foundation contract.
+3. **No design yet proves the render candidate introduces no second image
+   authority, or satisfies ADR-0014 § 6's full binding.** See "Why an
+   independent `[image]` field is refused, not deferred as a detail" above.
+   This is not a detail to fill in during implementation — it is a
+   precondition implementation must arrive already satisfying, because a
+   render candidate built first and reconciled with `candidate.py` second
+   would spend real effort on a shape this amendment has already refused.
+
+**This amendment does not authorize implementation.** No
+`deploy/render-candidates/` path, renderer invocation, CI byte-compare step,
+or `.dotmac/standards-profile.json` change follows from accepting the
+concept above. Implementation waits for BOTH a published
+`dotmac-deployment-foundation` release with full topology support for
+Platform CP's `[database]` contract, bootstrap sequence, `manifest-init`
+ownership boundary, volume permissions and readiness checks, AND Michael
+Ayoade's explicit go-ahead on this exact amendment, separately from his
+acceptance of the concept it proposes.
+
+**Status: Concept accepted 2026-09-20.** Michael Ayoade is the owner and only
+approver, per this record's own header, and has accepted the concept above
+after the two correction rounds noted at this amendment's opening. This
+still does not authorize implementation: it still waits on BOTH a published
+`dotmac-deployment-foundation` release with full topology support for
+Platform CP's `[database]` contract, bootstrap sequence, `manifest-init`
+ownership boundary, volume permissions and readiness checks, AND Michael
+Ayoade's separate, explicit go-ahead on an implementation of this exact
+amendment.
