@@ -25,9 +25,12 @@ from vendor_cp.production_secrets import (
     OpenBaoClient,
     ProductionSecretError,
     _render_env,
+    bootstrap_relay_dispatcher_on_existing_host,
     build_host_bundle,
     materialize_host_bundle,
+    materialize_relay_dispatcher_environment,
     pin_product_release,
+    production_deployment_lock,
     reconcile_host_environment_declarations,
     seed_missing_records,
     sync_github_deploy_key,
@@ -215,6 +218,278 @@ def test_invalid_bundle_refuses_before_writing_any_file(tmp_path: Path) -> None:
     assert not env_file.exists()
     assert not signing_key_file.exists()
     assert not authorized_keys_file.exists()
+
+
+def test_dispatcher_bootstrap_appends_only_its_declaration(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    original = "APP_ENV=production\nJWT_SECRET=held-unchanged\n"
+    env_file.write_text(original, encoding="utf-8")
+    env_file.chmod(0o640)
+
+    changed = materialize_relay_dispatcher_environment(
+        env_file=env_file,
+        dispatcher_password="dispatcher_test_123",
+    )
+
+    assert changed is True
+    assert env_file.read_text(encoding="utf-8") == (
+        original + "VENDOR_DB_DISPATCHER_PASSWORD=dispatcher_test_123\n"
+    )
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o640
+
+
+def test_dispatcher_bootstrap_refuses_to_replace_existing_material(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    original = "VENDOR_DB_DISPATCHER_PASSWORD=existing\n"
+    env_file.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ProductionSecretError, match="already declares"):
+        materialize_relay_dispatcher_environment(
+            env_file=env_file,
+            dispatcher_password="replacement",
+        )
+
+    assert env_file.read_text(encoding="utf-8") == original
+
+
+def test_dispatcher_bootstrap_refuses_duplicate_declarations(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    original = (
+        "VENDOR_DB_DISPATCHER_PASSWORD=one\n" "VENDOR_DB_DISPATCHER_PASSWORD=two\n"
+    )
+    env_file.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ProductionSecretError, match="repeats"):
+        materialize_relay_dispatcher_environment(
+            env_file=env_file,
+            dispatcher_password="replacement",
+        )
+
+    assert env_file.read_text(encoding="utf-8") == original
+
+
+def test_existing_host_bootstrap_uses_only_stdin_and_proves_authentication(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("APP_ENV=production\n", encoding="utf-8")
+    sql_file = (
+        Path(__file__).resolve().parents[2]
+        / "deploy/postgres/bootstrap-credential-function.sql"
+    )
+    host_id = tmp_path / "host-id"
+    host_id.write_text("vendor-cp-prod\n", encoding="utf-8")
+    material = "dispatcher_test_123"
+    calls: list[tuple[Sequence[str], str | None]] = []
+    results = iter(
+        (
+            (0, "db-container-id\n", ""),
+            (0, "healthy\n", ""),
+            (0, "vendor_backend|172.20.0.2\n", ""),
+            (0, "sha256:" + "a" * 64 + "\n", ""),
+            (0, "vendor_control_plane", ""),
+            (0, "", ""),
+            (0, "installed\n", ""),
+            (0, "1\n", ""),
+            (2, "", "authentication refused"),
+        )
+    )
+
+    def runner(
+        command: Sequence[str],
+        *,
+        input: str | None,
+        text: bool,
+        stdout: int,
+        stderr: int,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert text is True
+        assert stdout == subprocess.PIPE
+        assert stderr == subprocess.PIPE
+        assert material not in " ".join(command)
+        calls.append((command, input))
+        returncode, output, error = next(results)
+        return subprocess.CompletedProcess(command, returncode, output, error)
+
+    bootstrap_relay_dispatcher_on_existing_host(
+        env_file=env_file,
+        bootstrap_sql_file=sql_file,
+        dispatcher_password=material,
+        host_id_file=host_id,
+        lock_file=tmp_path / "deploy.lock",
+        runner=runner,
+    )
+
+    assert len(calls) == 9
+    assert calls[-2][1] == material + "\n"
+    assert calls[-1][1] == material + "-deliberately-wrong\n"
+    assert env_file.read_text(encoding="utf-8").endswith(
+        f"VENDOR_DB_DISPATCHER_PASSWORD={material}\n"
+    )
+
+
+def test_existing_host_bootstrap_reconciles_only_the_same_committed_credential(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("APP_ENV=production\n", encoding="utf-8")
+    sql_file = (
+        Path(__file__).resolve().parents[2]
+        / "deploy/postgres/bootstrap-credential-function.sql"
+    )
+    host_id = tmp_path / "host-id"
+    host_id.write_text("vendor-cp-prod\n", encoding="utf-8")
+    results = iter(
+        (
+            (0, "db-container-id\n", ""),
+            (0, "healthy\n", ""),
+            (0, "vendor_backend|172.20.0.2\n", ""),
+            (0, "sha256:" + "a" * 64 + "\n", ""),
+            (0, "vendor_control_plane", ""),
+            (0, "", ""),
+            (3, "", "ERROR: DM105 credential already present"),
+            (0, "1\n", ""),
+            (2, "", "authentication refused"),
+        )
+    )
+
+    def runner(
+        command: Sequence[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        returncode, output, error = next(results)
+        return subprocess.CompletedProcess(command, returncode, output, error)
+
+    bootstrap_relay_dispatcher_on_existing_host(
+        env_file=env_file,
+        bootstrap_sql_file=sql_file,
+        dispatcher_password="same_committed_material",
+        host_id_file=host_id,
+        lock_file=tmp_path / "deploy.lock",
+        runner=runner,
+    )
+
+    assert "VENDOR_DB_DISPATCHER_PASSWORD=same_committed_material" in (
+        env_file.read_text(encoding="utf-8")
+    )
+
+
+def test_existing_host_bootstrap_refuses_substituted_superuser_sql(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("APP_ENV=production\n", encoding="utf-8")
+    sql_file = tmp_path / "bootstrap.sql"
+    sql_file.write_text("SELECT 'arbitrary superuser SQL';\n", encoding="utf-8")
+    host_id = tmp_path / "host-id"
+    host_id.write_text("vendor-cp-prod\n", encoding="utf-8")
+    called = False
+
+    def runner(
+        command: Sequence[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal called
+        called = True
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with pytest.raises(ProductionSecretError, match="accepted artifact"):
+        bootstrap_relay_dispatcher_on_existing_host(
+            env_file=env_file,
+            bootstrap_sql_file=sql_file,
+            dispatcher_password="dispatcher_test_123",
+            host_id_file=host_id,
+            lock_file=tmp_path / "deploy.lock",
+            runner=runner,
+        )
+
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    ("preflight_results", "message"),
+    (
+        (
+            (
+                (0, "db-container-id\n", ""),
+                (0, "healthy\n", ""),
+                (0, "net-a|172.20.0.2\nnet-b|172.21.0.2\n", ""),
+            ),
+            "exactly one network",
+        ),
+        (
+            (
+                (0, "db-container-id\n", ""),
+                (0, "healthy\n", ""),
+                (0, "vendor_backend|172.20.0.2\n", ""),
+                (0, "mutable-image-name\n", ""),
+            ),
+            "image is not immutable",
+        ),
+        (
+            (
+                (0, "db-container-id\n", ""),
+                (0, "healthy\n", ""),
+                (0, "vendor_backend|172.20.0.2\n", ""),
+                (0, "sha256:" + "a" * 64 + "\n", ""),
+                (0, "unsafe database name", ""),
+            ),
+            "database name is invalid",
+        ),
+    ),
+)
+def test_existing_host_bootstrap_refuses_bad_proof_coordinates_before_sql(
+    tmp_path: Path,
+    preflight_results: tuple[tuple[int, str, str], ...],
+    message: str,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("APP_ENV=production\n", encoding="utf-8")
+    host_id = tmp_path / "host-id"
+    host_id.write_text("vendor-cp-prod\n", encoding="utf-8")
+    sql_file = (
+        Path(__file__).resolve().parents[2]
+        / "deploy/postgres/bootstrap-credential-function.sql"
+    )
+    results = iter(preflight_results)
+    inputs: list[str | None] = []
+
+    def runner(
+        command: Sequence[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        inputs.append(
+            kwargs.get("input") if isinstance(kwargs.get("input"), str) else None
+        )
+        returncode, output, error = next(results)
+        return subprocess.CompletedProcess(command, returncode, output, error)
+
+    with pytest.raises(ProductionSecretError, match=message):
+        bootstrap_relay_dispatcher_on_existing_host(
+            env_file=env_file,
+            bootstrap_sql_file=sql_file,
+            dispatcher_password="dispatcher_test_123",
+            host_id_file=host_id,
+            lock_file=tmp_path / "deploy.lock",
+            runner=runner,
+        )
+
+    assert inputs and all(stdin is None for stdin in inputs)
+
+
+def test_existing_host_bootstrap_contends_on_the_deployment_lock(
+    tmp_path: Path,
+) -> None:
+    lock_file = tmp_path / "deploy.lock"
+    with production_deployment_lock(lock_file):
+        with pytest.raises(ProductionSecretError, match="writer is active"):
+            bootstrap_relay_dispatcher_on_existing_host(
+                env_file=tmp_path / ".env",
+                bootstrap_sql_file=tmp_path / "bootstrap.sql",
+                dispatcher_password="dispatcher_test_123",
+                host_id_file=tmp_path / "host-id",
+                lock_file=lock_file,
+            )
 
 
 def test_transfer_places_the_bundle_only_on_ssh_stdin(tmp_path: Path) -> None:

@@ -48,6 +48,7 @@ DECLARE
     allowed constant text := 'platform_outbox_dispatcher';
     can_login boolean;
     is_super boolean;
+    bypasses_rls boolean;
     has_password boolean;
 BEGIN
     IF p_principal IS DISTINCT FROM allowed THEN
@@ -60,7 +61,8 @@ BEGIN
             USING ERRCODE = 'DM106';
     END IF;
 
-    SELECT r.rolcanlogin, r.rolsuper INTO can_login, is_super
+    SELECT r.rolcanlogin, r.rolsuper, r.rolbypassrls
+      INTO can_login, is_super, bypasses_rls
       FROM pg_catalog.pg_roles AS r
      WHERE r.rolname = allowed;
     IF NOT FOUND THEN
@@ -74,6 +76,10 @@ BEGIN
     IF is_super THEN
         RAISE EXCEPTION 'role % is a superuser', allowed
             USING ERRCODE = 'DM104';
+    END IF;
+    IF bypasses_rls THEN
+        RAISE EXCEPTION 'role % bypasses row-level security', allowed
+            USING ERRCODE = 'DM107';
     END IF;
 
     -- Transaction-scoped, so it is released by the caller's commit or rollback

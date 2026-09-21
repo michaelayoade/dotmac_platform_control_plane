@@ -110,6 +110,7 @@ REFUSAL_CODES: Final[frozenset[str]] = frozenset(
         "principal.absent",
         "principal.not_login",
         "principal.is_superuser",
+        "principal.bypasses_rls",
         "material.unresolvable",
         "material.version_mismatch",
         "credential.already_present",
@@ -135,6 +136,7 @@ SQLSTATE_REFUSALS: Final[dict[str, str]] = {
     "DM104": "principal.is_superuser",
     "DM105": "credential.already_present",
     "DM106": "material.unresolvable",
+    "DM107": "principal.bypasses_rls",
 }
 
 

@@ -92,9 +92,10 @@ grep -Fqx 'VENDOR_DEPLOYMENT_PROFILE=production-bootstrap' "$ENV_FILE" \
     || die "deployment profile is not production-bootstrap"
 # ── The kernel's production-fatal settings, checked BEFORE anything is touched ─
 #
-# Look at the order of this script. `compose up -d app` is the SEVENTH action:
-# the image is pulled, the database is started, the role and ownership
-# contracts are read, a recovery bundle is published and verified, the
+# Look at the order of this script. `compose up -d --no-deps app --wait` is the
+# final service mutation. The existing database is REQUIRED healthy;
+# this script never starts or recreates it. The image is pulled, the role and
+# ownership contracts are read, a recovery bundle is published and verified, the
 # manifest volume is initialised, and THE MIGRATIONS ARE APPLIED before the
 # application is ever started. A
 # configuration error left to the application's lifespan therefore arrives with
@@ -177,7 +178,20 @@ ${ENVIRONMENT_VERDICT}
 Nothing has been changed — no container started, no migration applied.
 ${CSRF_REMEDY}"
 
-compose up -d --wait db
+# The production database volume predates the relay. Docker's init directory
+# runs only for a NEW data directory, so bringing `db` up here cannot repair an
+# absent relay credential and risks recreating the one database this deploy must
+# preserve. Refuse unless the existing, named container is already healthy;
+# everything below is an exec/run operation against that unchanged database.
+mapfile -t DB_CONTAINER_IDS < <(compose ps --status running -q db)
+[[ "${#DB_CONTAINER_IDS[@]}" -eq 1 ]] \
+    || die "expected exactly one running existing db container; refusing to create one"
+readonly DB_CONTAINER_ID="${DB_CONTAINER_IDS[0]}"
+readonly DB_HEALTH="$(docker inspect --format \
+    '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+    "$DB_CONTAINER_ID")"
+[[ "$DB_HEALTH" == "healthy" ]] \
+    || die "existing db container is not healthy; refusing to recreate it"
 
 readonly ROLE_CONTRACT="$(compose exec -T db sh -c \
     'psql --username app_admin --dbname "$POSTGRES_DB" --tuples-only --no-align --command "SELECT rolsuper::text || '\''|'\'' || rolcreaterole::text || '\''|'\'' || rolbypassrls::text || '\''|'\'' || rolcanlogin::text FROM pg_roles WHERE rolname = current_user"')"
@@ -423,7 +437,14 @@ compose --profile ops run --rm --no-deps manifest-init
 # absent — which `set -e` propagates to the deploy as a whole.
 compose --profile ops run --rm --no-deps ops dotmac-platform admin migrate
 
-compose up -d app --wait
+# The relay is an independently restartable worker, not an application
+# dependency Compose should create opportunistically. The database is already
+# healthy and the migration above created its heartbeat storage, so start the
+# relay explicitly before the app's readiness probe can judge its durable
+# heartbeat. `--no-deps` is intentional: recreating `db` here would be unsafe
+# on an already-initialized production volume.
+compose up -d --no-deps relay
+compose up -d --no-deps app --wait
 # Both probes, and they answer different questions. `/health` is the kernel's
 # liveness route and does not touch the database; `/health/ready` asks the one
 # dependency this assembly has. Checking only the first is how a deploy could
