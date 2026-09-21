@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "Immutable coordinates for the dotmac-kernel release this assembly pins.",
+    "",
+    "AGENTS.md rule 30 (Governance ADR 0013 s 1): a release claim is not a",
+    "repository-local fact. A version string in pyproject.toml says which",
+    "kernel this assembly ASKS for; it is no evidence that such a release",
+    "exists or which bytes it is. The peeled commit below therefore carries",
+    "its oracle, and the oracle is an annotated tag in the kernel's own",
+    "canonical repository rather than anything readable here.",
+    "",
+    "Read by scripts/kernel_adoption_observation.py, which supplies it to the",
+    "Governance Kernel-adoption runner as KernelSurfaceCatalogue.revision --",
+    "the coordinate a reader who was not present uses to re-derive the module",
+    "lists a surface verdict was taken against.",
+    "",
+    "A version present here is NOT an adoption claim. It records what the",
+    "release IS, not that this assembly runs it."
+  ],
+  "schema": "KernelReleaseCoordinates.v1",
+  "releases": [
+    {
+      "version": "0.1.0a98",
+      "peeled_commit": "ae7320876ad91d5bf4639d634d65a6e8fd36bb00",
+      "oracle": "peeled_tag",
+      "oracle_detail": "refs/tags/dotmac-kernel-v0.1.0a98^{} in https://github.com/michaelayoade/dotmac_starter_mt, resolved 2026-09-06 with `git ls-remote --tags`. The tag object is 8c63609d976b460369d1247b63652a57cb5ffa86; the PEELED commit is the coordinate recorded here, because an annotated tag's own object id is not the source it points at.",
+      "wheel_sha256": "sha256:27405c57c4af395224cdd2f4366c0144207e9df2eab4ca8a8ed1142c1d0859fa",
+      "wheel_sha256_source": "poetry.lock, the resolution this assembly installs. A repository-local read, NOT a registry attestation."
+    }
+  ]
+}
