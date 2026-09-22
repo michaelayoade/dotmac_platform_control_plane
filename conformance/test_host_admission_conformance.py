@@ -66,16 +66,15 @@ import pytest
 # see here". By the time this module is even imported, conftest.py's
 # pytest_configure has already confirmed CONFORMANCE_DATABASE_URL is set.
 from dotmac_deployment_control import (
-    AUTHORIZATION_PURPOSE,
-    DISPATCH_PURPOSE,
     ApprovalEvidence,
     ApprovePlanCommand,
-    AttestationRootDescriptorTerms,
     AuthorizationSignature,
+    AuthorizationSignerIdentity,
     BindTargetHostCommand,
     CredentialTransitionCommand,
     DesiredDeployment,
     DispatchSignature,
+    DispatchSignerIdentity,
     EnrolHostAdmissionCredentialCommand,
     HostAdmissionForeignVerificationEvidenceV1,
     HostAdmissionPresentationStatementV1,
@@ -93,7 +92,6 @@ from dotmac_deployment_control import (
     bind_target_host,
     dispatch_attempt,
     enrol_host_admission_credential,
-    enrol_root,
     install_host_admission_security,
     propose_plan,
     register_target,
@@ -104,6 +102,15 @@ from dotmac_deployment_control import (
     set_target_admission_policy,
 )
 from dotmac_deployment_control import service as control_service
+
+# `enrol_root`/`AttestationRootDescriptorTerms` are NOT re-exported at the
+# top-level package -- verified directly against the installed wheel, not
+# assumed. They live in the module that actually owns attestation-root
+# enrolment.
+from dotmac_deployment_control.attestation_trust_registry import (
+    AttestationRootDescriptorTerms,
+    enrol_root,
+)
 from dotmac_deployment_control.digests import PublicKeyFingerprintV1
 from dotmac_deployment_control.models import AttestationEnrolment, RolloutAttempt
 from dotmac_deployment_foundation import (
@@ -115,9 +122,13 @@ from dotmac_deployment_foundation import (
     InstalledHostAttestationSubjectV2,
     PreconditionFailed,
     attestation_envelope_digest,
-    candidate_subject_digest,
     verify_attestation_pair,
 )
+
+# Also not top-level -- verified against the installed wheel. Foundation's OWN
+# test suite (tests/unit/test_deployment_foundation_trusted_host_source.py)
+# imports it from here too.
+from dotmac_deployment_foundation.trusted_host_source import candidate_subject_digest
 from dotmac_kernel.idempotency_models import PlatformIdempotencyRecord
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -132,17 +143,13 @@ from vendor_cp.deployment.host_admission_adapter import (
     admit_and_launch_host_source,
 )
 
+# No pytestmark skipif here. `conformance/conftest.py`'s `pytest_configure`
+# already raised a hard `pytest.UsageError` before collection ever reached
+# this module if CONFORMANCE_DATABASE_URL were unset -- by the time this line
+# runs, it is guaranteed set. A redundant skipif here would be dead code that
+# could never actually fire, and worse, would misdescribe this suite's real
+# behavior (a hard failure, not a skip) to the next reader.
 CONFORMANCE_DATABASE_URL = os.environ.get("CONFORMANCE_DATABASE_URL")
-
-pytestmark = pytest.mark.skipif(
-    not CONFORMANCE_DATABASE_URL,
-    reason=(
-        "CONFORMANCE_DATABASE_URL is unset -- this suite only runs against a "
-        "real, migrated PostgreSQL mod_deploy schema in the disposable "
-        "environment described in conformance/README.md. It is not run as "
-        "part of this repository's normal CI or local pytest."
-    ),
-)
 
 
 # ── Deterministic signing doubles -- same convention as both repos' own test
@@ -170,27 +177,32 @@ def _public_key_b64(key_id: str) -> str:
 
 class _AuthorizationSigner:
     """Deterministic double for `request_rollout`'s `signer=` parameter --
-    same SHA-256-over-canonical-bytes convention as Control's own
-    `tests/authorization_support.py::TestAuthorizationSigner`."""
-
-    key_id = "conformance-authorization-key"
-    algorithm = "test-sha256"
+    faithfully reproduces Control's own real
+    `tests/authorization_support.py::TestAuthorizationSigner` shape
+    (`.identity`, an `AuthorizationSignerIdentity`), verified directly
+    against the installed wheel: `issue_authorization_envelope` reads
+    `signer.identity`, not flat attributes."""
 
     def __init__(self) -> None:
-        self.public_key_fingerprint = PublicKeyFingerprintV1.from_public_key_b64(
-            _public_key_b64("authorization")
-        ).canonical
+        self.identity = AuthorizationSignerIdentity(
+            key_id="conformance-authorization-key",
+            algorithm="test-sha256",
+            public_key_fingerprint=PublicKeyFingerprintV1.from_public_key_b64(
+                _public_key_b64("authorization")
+            ).canonical,
+        )
 
     def sign(self, canonical_bytes: bytes) -> Any:
+        identity = self.identity
         signature = hashlib.sha256(
-            self.key_id.encode() + b"\0" + canonical_bytes
+            identity.key_id.encode() + b"\0" + canonical_bytes
         ).hexdigest()
         return AuthorizationSignature(
-            key_id=self.key_id,
-            algorithm=self.algorithm,
-            public_key_fingerprint=self.public_key_fingerprint,
+            key_id=identity.key_id,
+            algorithm=identity.algorithm,
+            public_key_fingerprint=identity.public_key_fingerprint,
             signature=signature,
-            purpose=AUTHORIZATION_PURPOSE,
+            purpose=identity.purpose,
         )
 
 
@@ -208,11 +220,12 @@ class _AuthorizationVerifier:
         canonical_bytes: bytes,
         signature: str,
     ) -> bool:
+        identity = self._signer.identity
         if (
-            key_id != self._signer.key_id
-            or algorithm != self._signer.algorithm
-            or purpose != AUTHORIZATION_PURPOSE
-            or public_key_fingerprint != self._signer.public_key_fingerprint
+            key_id != identity.key_id
+            or algorithm != identity.algorithm
+            or purpose != identity.purpose
+            or public_key_fingerprint != identity.public_key_fingerprint
         ):
             return False
         expected = hashlib.sha256(key_id.encode() + b"\0" + canonical_bytes).hexdigest()
@@ -221,25 +234,32 @@ class _AuthorizationVerifier:
 
 class _DispatchSigner:
     """Deterministic double for `dispatch_attempt`'s `dispatch_signer=`
-    parameter -- same convention as `tests/dispatch_support.py::TestDispatchSigner`."""
+    parameter -- faithfully reproduces Control's own real
+    `tests/dispatch_support.py::TestDispatchSigner` shape
+    (`.dispatch_identity`, a `DispatchSignerIdentity`), verified directly:
+    `issue_dispatch_envelope` reads `signer.dispatch_identity`, not flat
+    attributes."""
 
     def __init__(self) -> None:
-        self.key_id = "conformance-dispatch-key"
-        self.algorithm = "test-sha256"
         self.public_key_b64 = _public_key_b64("dispatch")
-        self.public_key_fingerprint = PublicKeyFingerprintV1.from_public_key_b64(
-            self.public_key_b64
-        ).canonical
+        self.dispatch_identity = DispatchSignerIdentity(
+            key_id="conformance-dispatch-key",
+            algorithm="test-sha256",
+            public_key_fingerprint=PublicKeyFingerprintV1.from_public_key_b64(
+                self.public_key_b64
+            ).canonical,
+        )
 
     def sign_dispatch(self, canonical_bytes: bytes) -> Any:
+        identity = self.dispatch_identity
         signature = hashlib.sha256(
             self.public_key_b64.encode() + b"\0dispatch\0" + canonical_bytes
         ).hexdigest()
         return DispatchSignature(
-            key_id=self.key_id,
-            algorithm=self.algorithm,
-            purpose=DISPATCH_PURPOSE,
-            public_key_fingerprint=self.public_key_fingerprint,
+            key_id=identity.key_id,
+            algorithm=identity.algorithm,
+            purpose=identity.purpose,
+            public_key_fingerprint=identity.public_key_fingerprint,
             signature=signature,
         )
 
@@ -355,6 +375,19 @@ def _clean_security_between_tests() -> Any:
     admission_coordinator._reset_host_admission_security_for_tests()
     yield
     admission_coordinator._reset_host_admission_security_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _installed_module_audit_actions() -> None:
+    """This suite builds no real `create_app()`, so nothing installs the
+    process-active audit-action registry `write_platform_audit_event` needs.
+    Same pattern as every one of Control's own unit tests (e.g.
+    `tests/unit/test_deployment_control_intent.py`) -- verified there, not
+    guessed."""
+    from dotmac_deployment_control import module
+    from dotmac_kernel.audit_actions import AuditActionRegistry, install_audit_actions
+
+    install_audit_actions(AuditActionRegistry.from_manifests([module]))
 
 
 # ── Control-side setup: target, plan, rollout, dispatch, host-admission
@@ -478,6 +511,17 @@ def _build_admission_coordinate(
     now: datetime,
     package: str = "dotmac-sub",
 ) -> _AdmissionCoordinate:
+    # Every identity below is suffixed with a fresh per-call token. The
+    # commands this function calls (register_target, enrol_host_admission_
+    # credential, enrol_root, ...) run through `process_once_platform`, which
+    # commits internally for at-most-once durability -- the outer `db`
+    # fixture's rollback-on-teardown does NOT undo them. Seven tests in one
+    # process therefore each need their own key_id/host_id/custody subject,
+    # or the second test to run collides with the first's already-committed
+    # rows (real defect found by actually running this against Postgres,
+    # not a hypothetical).
+    run = uuid.uuid4().hex[:8]
+
     target = _register_target(db)
     _set_desired(db, target.id)
     plan = _approved_plan(db, target.id)
@@ -497,7 +541,7 @@ def _build_admission_coordinate(
     assert stored_dispatch is not None
     attempt_id = stored_dispatch.attempt_id
 
-    admission_key_id = "conformance-admission-key-1"
+    admission_key_id = f"conformance-admission-key-{run}"
     admission_public_key_b64 = _public_key_b64(admission_key_id)
     credential_id = enrol_host_admission_credential(
         db,
@@ -513,28 +557,32 @@ def _build_admission_coordinate(
     activate_credential(
         db, CredentialTransitionCommand(command_id=_cmd(), credential_id=credential_id)
     )
+    host_id = f"conformance-host-{run}"
     bind_target_host(
         db,
         BindTargetHostCommand(
             target_id=target.id,
-            host_id="conformance-host-one",
+            host_id=host_id,
             authority="conformance-test",
         ),
     )
+    candidate_subject_name = f"conformance-release-{run}"
     set_target_admission_policy(
         db,
         SetTargetAdmissionPolicyCommand(
             target_id=target.id,
-            candidate_root_subject="conformance-release",
+            candidate_root_subject=candidate_subject_name,
             candidate_audience="foundation-candidate",
-            installed_audience="conformance-host-one",
+            installed_audience=host_id,
             expected_foundation_package=package,
             authority="conformance-test",
         ),
     )
 
-    candidate_key = hashlib.sha256(b"conformance-candidate-root-key").digest()
-    host_key = hashlib.sha256(b"conformance-host-root-key").digest()
+    candidate_key = hashlib.sha256(
+        f"conformance-candidate-root-key-{run}".encode()
+    ).digest()
+    host_key = hashlib.sha256(f"conformance-host-root-key-{run}".encode()).digest()
     candidate_root_b64 = (
         base64.urlsafe_b64encode(candidate_key).decode("ascii").rstrip("=")
     )
@@ -543,13 +591,13 @@ def _build_admission_coordinate(
     for custody_domain, subject, purpose, public_key_b64 in (
         (
             "candidate_release_signer",
-            "conformance-release",
+            candidate_subject_name,
             "dotmac.foundation.candidate-artifact.v2",
             candidate_root_b64,
         ),
         (
             "host_attester",
-            "conformance-host-one",
+            host_id,
             "dotmac.foundation.installed-host.v2",
             host_root_b64,
         ),
@@ -583,35 +631,42 @@ def _build_admission_coordinate(
     candidate_subject = CandidateAttestationSubjectV2(
         package,
         "0.4.0a2",
-        _sha256_digest(b"conformance-wheel-bytes"),
+        _sha256_digest(f"conformance-wheel-bytes-{run}".encode()),
         "b" * 40,
         "dotmac/conformance",
         "111",
         "222",
     )
     installed_subject = InstalledHostAttestationSubjectV2(
-        "conformance-host-one",
+        host_id,
         candidate_subject.package,
         candidate_subject.version,
         candidate_subject.wheel_sha256,
         candidate_subject_digest(candidate_subject),
     )
+    candidate_trust_root_version = str(
+        _enrolment_id_for(db, "candidate_release_signer", candidate_subject_name)
+    )
+    host_trust_root_version = str(_enrolment_id_for(db, "host_attester", host_id))
+
     candidate_envelope = _sign_envelope(
         purpose="dotmac.foundation.candidate-artifact.v2",
         fingerprint=candidate_fp,
-        custody_domain="conformance-release",
+        custody_domain=candidate_subject_name,
+        trust_root_version=candidate_trust_root_version,
         subject=candidate_subject.canonical_document(),
-        observation_id="conformance-candidate-observation",
+        observation_id=f"conformance-candidate-observation-{run}",
         audience="foundation-candidate",
         foundation_verifier=foundation_verifier,
     )
     installed_envelope = _sign_envelope(
         purpose="dotmac.foundation.installed-host.v2",
         fingerprint=host_fp,
-        custody_domain="conformance-host-one",
+        custody_domain=host_id,
+        trust_root_version=host_trust_root_version,
         subject=installed_subject.canonical_document(),
         observation_id=attempt_id.hex,
-        audience="conformance-host-one",
+        audience=host_id,
         foundation_verifier=foundation_verifier,
     )
 
@@ -639,15 +694,11 @@ def _build_admission_coordinate(
                 public_key_fingerprint=candidate_fp,
                 public_key_base64=_to_foundation_b64(candidate_root_b64),
                 purpose="dotmac.foundation.candidate-artifact.v2",
-                custody_domain="conformance-release",
+                custody_domain=candidate_subject_name,
                 issuer="conformance-test",
-                key_id="attestation-conformance-release",
+                key_id=f"attestation-{candidate_subject_name}",
                 algorithm="ed25519",
-                trust_root_version=str(
-                    _enrolment_id_for(
-                        db, "candidate_release_signer", "conformance-release"
-                    )
-                ),
+                trust_root_version=candidate_trust_root_version,
                 not_before=(now - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
                 not_after=(now + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
             ),
@@ -657,19 +708,17 @@ def _build_admission_coordinate(
                 public_key_fingerprint=host_fp,
                 public_key_base64=_to_foundation_b64(host_root_b64),
                 purpose="dotmac.foundation.installed-host.v2",
-                custody_domain="conformance-host-one",
+                custody_domain=host_id,
                 issuer="conformance-test",
-                key_id="attestation-conformance-host-one",
+                key_id=f"attestation-{host_id}",
                 algorithm="ed25519",
-                trust_root_version=str(
-                    _enrolment_id_for(db, "host_attester", "conformance-host-one")
-                ),
+                trust_root_version=host_trust_root_version,
                 not_before=(now - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
                 not_after=(now + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
             ),
         ),
         candidate_audience="foundation-candidate",
-        installed_audience="conformance-host-one",
+        installed_audience=host_id,
     )
 
     clock = _AdmissionClock(now)
@@ -743,7 +792,7 @@ def test_valid_signed_attestations_complete_the_full_flow(db: Session) -> None:
             installed=coordinate.installed_envelope,
             foundation_verifier=coordinate.foundation_verifier,
             trust_policy=coordinate.trust_policy,
-            expected_host_identity="conformance-host-one",
+            expected_host_identity=coordinate.trust_policy.installed_audience,
             expected_observation_id=coordinate.attempt_id.hex,
             expected_package="dotmac-sub",
             now=coordinate.clock.now(),
@@ -787,7 +836,7 @@ def test_an_invalid_signature_stops_inside_real_foundation_code(db: Session) -> 
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
                 trust_policy=coordinate.trust_policy,
-                expected_host_identity="conformance-host-one",
+                expected_host_identity=coordinate.trust_policy.installed_audience,
                 expected_observation_id=coordinate.attempt_id.hex,
                 expected_package="dotmac-sub",
                 now=coordinate.clock.now(),
@@ -827,7 +876,7 @@ def test_a_sentinel_foundation_failure_has_no_fallback(db: Session) -> None:
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
                 trust_policy=coordinate.trust_policy,
-                expected_host_identity="conformance-host-one",
+                expected_host_identity=coordinate.trust_policy.installed_audience,
                 expected_observation_id=coordinate.attempt_id.hex,
                 expected_package="dotmac-sub",
                 now=coordinate.clock.now(),
@@ -866,7 +915,7 @@ def test_an_altered_evidence_digest_is_refused(db: Session) -> None:
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
                 trust_policy=coordinate.trust_policy,
-                expected_host_identity="conformance-host-one",
+                expected_host_identity=coordinate.trust_policy.installed_audience,
                 expected_observation_id=coordinate.attempt_id.hex,
                 expected_package="dotmac-sub",
                 now=coordinate.clock.now(),
@@ -905,7 +954,7 @@ def test_a_state_change_between_resolve_and_admission_consumes_nothing(
         installed=coordinate.installed_envelope,
         verifier=coordinate.foundation_verifier,
         trust_policy=coordinate.trust_policy,
-        expected_host_identity="conformance-host-one",
+        expected_host_identity=coordinate.trust_policy.installed_audience,
         expected_observation_id=coordinate.attempt_id.hex,
         expected_package="dotmac-sub",
         verification_context_digest=context.context_digest,
@@ -937,7 +986,7 @@ def test_expiry_between_foundation_verification_and_final_admission_is_refused(
         installed=coordinate.installed_envelope,
         verifier=coordinate.foundation_verifier,
         trust_policy=coordinate.trust_policy,
-        expected_host_identity="conformance-host-one",
+        expected_host_identity=coordinate.trust_policy.installed_audience,
         expected_observation_id=coordinate.attempt_id.hex,
         expected_package="dotmac-sub",
         verification_context_digest=context.context_digest,
@@ -991,7 +1040,7 @@ def test_launch_cannot_occur_before_the_admission_transaction_commits(
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
                 trust_policy=coordinate.trust_policy,
-                expected_host_identity="conformance-host-one",
+                expected_host_identity=coordinate.trust_policy.installed_audience,
                 expected_observation_id=coordinate.attempt_id.hex,
                 expected_package="dotmac-sub",
                 now=coordinate.clock.now(),
@@ -1030,6 +1079,7 @@ def _sign_envelope(
     purpose: str,
     fingerprint: str,
     custody_domain: str,
+    trust_root_version: str,
     subject: dict[str, str],
     observation_id: str,
     audience: str,
@@ -1043,7 +1093,7 @@ def _sign_envelope(
         "ed25519",
         fingerprint,
         custody_domain,
-        "1",
+        trust_root_version,
         "2026-09-22T00:00:00Z",
         "2026-09-23T00:00:00Z",
         audience,
