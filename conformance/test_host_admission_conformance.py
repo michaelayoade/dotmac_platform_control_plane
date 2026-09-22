@@ -156,7 +156,20 @@ CONFORMANCE_DATABASE_URL = os.environ.get("CONFORMANCE_DATABASE_URL")
 # ── Deterministic signing doubles -- same convention as both repos' own test
 #    suites (see module docstring). ──────────────────────────────────────────
 
-_NOW = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
+# NOT a fixed historical constant -- REAL DEFECT found by actually running
+# this suite in the afternoon after having only ever run it in the morning
+# before: `activate_credential` (Control's own service.py) stamps
+# `activated_at` with `_control_now()`, the REAL current wall-clock time --
+# it has no injected-clock parameter this suite could override. Every test's
+# injected `_AdmissionClock` must therefore start at or after real wall-clock
+# time, or `resolve_host_admission_context`'s `_credential_is_active` check
+# (`now < activated_at`) refuses with CREDENTIAL_NOT_ACTIVE the moment real
+# time passes whatever instant this suite hardcoded. A one-hour forward
+# margin comfortably covers this suite's own real Postgres round-trip time
+# (~5 minutes for all 9 tests) without weakening anything the tests check --
+# every test still moves ITS OWN clock only forward from this baseline,
+# relative to itself, never compared against another fixed point.
+_NOW = datetime.now(UTC) + timedelta(hours=1)
 _POLICY = "deployment.production"
 _POLICY_VERSION = 4
 _EXECUTION_PLAN = "sha256:" + "1a" * 32
@@ -673,7 +686,16 @@ def _build_admission_coordinate(
     candidate_envelope = _sign_envelope(
         purpose="dotmac.foundation.candidate-artifact.v2",
         fingerprint=candidate_fp,
-        custody_domain=candidate_subject_name,
+        # Foundation's `custody_domain` field on the envelope must equal the
+        # REAL custody-domain role name Control's own `_root_context` reads
+        # off the enrolled row (`AttestationEnrolment.custody_domain`,
+        # "candidate_release_signer"/"host_attester") -- NOT the subject.
+        # Conflating the two was a real bug this suite's widened
+        # verified-root comparison caught: Foundation's own internal
+        # envelope/root consistency check never noticed, because both sides
+        # of THAT check used the same (wrong) value consistently.
+        custody_domain="candidate_release_signer",
+        key_id=f"attestation-{candidate_subject_name}",
         trust_root_version=candidate_trust_root_version,
         subject=candidate_subject.canonical_document(),
         observation_id=f"conformance-candidate-observation-{run}",
@@ -683,7 +705,8 @@ def _build_admission_coordinate(
     installed_envelope = _sign_envelope(
         purpose="dotmac.foundation.installed-host.v2",
         fingerprint=host_fp,
-        custody_domain=host_id,
+        custody_domain="host_attester",
+        key_id=f"attestation-{host_id}",
         trust_root_version=host_trust_root_version,
         subject=installed_subject.canonical_document(),
         observation_id=attempt_id.hex,
@@ -715,7 +738,7 @@ def _build_admission_coordinate(
                 public_key_fingerprint=candidate_fp,
                 public_key_base64=_to_foundation_b64(candidate_root_b64),
                 purpose="dotmac.foundation.candidate-artifact.v2",
-                custody_domain=candidate_subject_name,
+                custody_domain="candidate_release_signer",
                 issuer="conformance-test",
                 key_id=f"attestation-{candidate_subject_name}",
                 algorithm="ed25519",
@@ -729,7 +752,7 @@ def _build_admission_coordinate(
                 public_key_fingerprint=host_fp,
                 public_key_base64=_to_foundation_b64(host_root_b64),
                 purpose="dotmac.foundation.installed-host.v2",
-                custody_domain=host_id,
+                custody_domain="host_attester",
                 issuer="conformance-test",
                 key_id=f"attestation-{host_id}",
                 algorithm="ed25519",
@@ -1241,6 +1264,7 @@ def _sign_envelope(
     purpose: str,
     fingerprint: str,
     custody_domain: str,
+    key_id: str,
     trust_root_version: str,
     subject: dict[str, str],
     observation_id: str,
@@ -1251,7 +1275,7 @@ def _sign_envelope(
         "TrustedHostAttestation.v2",
         purpose,
         "conformance-test",
-        f"attestation-{custody_domain}",
+        key_id,
         "ed25519",
         fingerprint,
         custody_domain,
