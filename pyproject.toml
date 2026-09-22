@@ -184,6 +184,12 @@ select = ["E", "F", "I", "UP", "B", "S"]
 # asserts are the point in tests; S105/S106 flag dummy fixture "passwords"
 # (e.g. password_hash="x") that are not real secrets.
 "tests/**" = ["S101", "S105", "S106"]
+# conformance/ is a real-dependency integration suite (see its own README):
+# functionally a test directory, deliberately kept outside tests/ only so
+# pytest's testpaths=["tests"] never tries to collect/import it before the
+# real dotmac_deployment_control/dotmac_deployment_foundation wheels exist.
+# Same S101 rationale as tests/** above applies verbatim.
+"conformance/**" = ["S101"]
 # The rotation preflight is GENERATED Python that runs on the target host, and
 # executing it is the only way to test it. S102's premise is a string of unknown
 # provenance reaching `exec`: this string is produced by
