@@ -368,6 +368,26 @@ def db() -> Any:
         engine.dispose()
 
 
+@pytest.fixture()
+def admit_db() -> Any:
+    """A SECOND, genuinely independent real PostgreSQL session/connection,
+    for `admit_and_launch_host_source`'s `admit_session`. Property 1
+    (`resolve_session is not admit_session`, now enforced by
+    `HostAdmissionAdapterUsageError`) and property 3 (no open transaction on
+    EITHER session during Foundation verification) are proven against real
+    Postgres transaction/connection semantics only if this is a distinct
+    engine and connection from `db`'s, not merely a distinct Python object
+    wrapping the same connection."""
+    engine = create_engine(CONFORMANCE_DATABASE_URL, future=True)
+    session = sessionmaker(bind=engine, future=True)()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
+        engine.dispose()
+
+
 @pytest.fixture(autouse=True)
 def _clean_security_between_tests() -> Any:
     import dotmac_deployment_control.host_admission_coordinator as admission_coordinator
@@ -770,7 +790,9 @@ def _idempotency_marker_count(db: Session, attempt_id: uuid.UUID) -> int:
 # ── The seven required conformance properties ───────────────────────────────
 
 
-def test_valid_signed_attestations_complete_the_full_flow(db: Session) -> None:
+def test_valid_signed_attestations_complete_the_full_flow(
+    db: Session, admit_db: Session
+) -> None:
     coordinate = _build_admission_coordinate(db, now=_NOW)
     install_host_admission_security(
         verifier=coordinate.presentation_verifier, clock=coordinate.clock
@@ -779,7 +801,7 @@ def test_valid_signed_attestations_complete_the_full_flow(db: Session) -> None:
 
     result = admit_and_launch_host_source(
         resolve_session=db,
-        admit_session=db,
+        admit_session=admit_db,
         attempt_id=coordinate.attempt_id,
         presentation=coordinate.presentation,
         resolve_context=resolve_host_admission_context,
@@ -798,14 +820,19 @@ def test_valid_signed_attestations_complete_the_full_flow(db: Session) -> None:
             now=coordinate.clock.now(),
         ),
     )
-    db.commit()
 
     assert len(launched) == 1
     assert launched[0] is result
+    # Read back through `db` -- a DIFFERENT connection from `admit_db`, which
+    # is where the marker was actually written and committed. Seeing it here
+    # proves the write is really durable, not merely visible on the writer's
+    # own connection.
     assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
 
 
-def test_an_invalid_signature_stops_inside_real_foundation_code(db: Session) -> None:
+def test_an_invalid_signature_stops_inside_real_foundation_code(
+    db: Session, admit_db: Session
+) -> None:
     coordinate = _build_admission_coordinate(db, now=_NOW)
     install_host_admission_security(
         verifier=coordinate.presentation_verifier, clock=coordinate.clock
@@ -823,7 +850,7 @@ def test_an_invalid_signature_stops_inside_real_foundation_code(db: Session) -> 
     with pytest.raises(PreconditionFailed) as excinfo:
         admit_and_launch_host_source(
             resolve_session=db,
-            admit_session=db,
+            admit_session=admit_db,
             attempt_id=coordinate.attempt_id,
             presentation=coordinate.presentation,
             resolve_context=resolve_host_admission_context,
@@ -847,7 +874,9 @@ def test_an_invalid_signature_stops_inside_real_foundation_code(db: Session) -> 
     assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
 
 
-def test_a_sentinel_foundation_failure_has_no_fallback(db: Session) -> None:
+def test_a_sentinel_foundation_failure_has_no_fallback(
+    db: Session, admit_db: Session
+) -> None:
     coordinate = _build_admission_coordinate(db, now=_NOW)
     install_host_admission_security(
         verifier=coordinate.presentation_verifier, clock=coordinate.clock
@@ -863,7 +892,7 @@ def test_a_sentinel_foundation_failure_has_no_fallback(db: Session) -> None:
     with pytest.raises(_Sentinel):
         admit_and_launch_host_source(
             resolve_session=db,
-            admit_session=db,
+            admit_session=admit_db,
             attempt_id=coordinate.attempt_id,
             presentation=coordinate.presentation,
             resolve_context=resolve_host_admission_context,
@@ -886,7 +915,7 @@ def test_a_sentinel_foundation_failure_has_no_fallback(db: Session) -> None:
     assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
 
 
-def test_an_altered_evidence_digest_is_refused(db: Session) -> None:
+def test_an_altered_evidence_digest_is_refused(db: Session, admit_db: Session) -> None:
     coordinate = _build_admission_coordinate(db, now=_NOW)
     install_host_admission_security(
         verifier=coordinate.presentation_verifier, clock=coordinate.clock
@@ -902,7 +931,7 @@ def test_an_altered_evidence_digest_is_refused(db: Session) -> None:
     with pytest.raises(HostAdmissionRefusedError) as excinfo:
         admit_and_launch_host_source(
             resolve_session=db,
-            admit_session=db,
+            admit_session=admit_db,
             attempt_id=coordinate.attempt_id,
             presentation=coordinate.presentation,
             resolve_context=resolve_host_admission_context,
@@ -1006,7 +1035,7 @@ def test_expiry_between_foundation_verification_and_final_admission_is_refused(
 
 
 def test_launch_cannot_occur_before_the_admission_transaction_commits(
-    db: Session,
+    db: Session, admit_db: Session
 ) -> None:
     coordinate = _build_admission_coordinate(db, now=_NOW)
     install_host_admission_security(
@@ -1014,20 +1043,26 @@ def test_launch_cannot_occur_before_the_admission_transaction_commits(
     )
 
     events: list[str] = []
-    real_commit = db.commit
+    real_resolve_commit = db.commit
+    real_admit_commit = admit_db.commit
 
-    def _recording_commit() -> None:
-        events.append("commit")
-        real_commit()
+    def _recording_resolve_commit() -> None:
+        events.append("resolve_commit")
+        real_resolve_commit()
+
+    def _recording_admit_commit() -> None:
+        events.append("admit_commit")
+        real_admit_commit()
 
     def _recording_launch(staged: object) -> None:
         events.append("launch")
 
-    db.commit = _recording_commit  # type: ignore[method-assign]
+    db.commit = _recording_resolve_commit  # type: ignore[method-assign]
+    admit_db.commit = _recording_admit_commit  # type: ignore[method-assign]
     try:
         admit_and_launch_host_source(
             resolve_session=db,
-            admit_session=db,
+            admit_session=admit_db,
             attempt_id=coordinate.attempt_id,
             presentation=coordinate.presentation,
             resolve_context=resolve_host_admission_context,
@@ -1047,10 +1082,14 @@ def test_launch_cannot_occur_before_the_admission_transaction_commits(
             ),
         )
     finally:
-        db.commit = real_commit  # type: ignore[method-assign]
+        db.commit = real_resolve_commit  # type: ignore[method-assign]
+        admit_db.commit = real_admit_commit  # type: ignore[method-assign]
 
-    # Two commits recorded (resolve's, then admit's) followed by launch.
-    assert events == ["commit", "commit", "launch"]
+    # Distinguishable now that resolve and admit run on two real, separate
+    # sessions/connections: resolve's own commit, then admit's own commit,
+    # then launch -- never launch before either commit, and never admit's
+    # commit before resolve's.
+    assert events == ["resolve_commit", "admit_commit", "launch"]
 
 
 # ── small helpers used above ────────────────────────────────────────────────

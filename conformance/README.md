@@ -1,9 +1,14 @@
 # Host-admission conformance suite
 
 Proves CP's `admit_and_launch_host_source` orchestration
-(`src/vendor_cp/deployment/adapter.py`) against the REAL
-`dotmac_deployment_control` and `dotmac_deployment_foundation` functions --
-real Ed25519 signatures, real PostgreSQL, real transaction semantics. The
+(`src/vendor_cp/deployment/host_admission_adapter.py`, a leaf module -- see
+its own docstring) against the REAL `dotmac_deployment_control` and
+`dotmac_deployment_foundation` functions -- real PostgreSQL, real
+transaction/locking semantics, real Foundation/Control refusal codes. Every
+signer/verifier is a deterministic SHA-256/HMAC double, NOT real Ed25519 --
+see the test module's own docstring for why that is still a legitimate proof
+of the real function logic (the functions under test only call an injected
+verifier's boolean-returning method; they never inspect its internals). The
 fast unit tests in `tests/unit/test_host_admission_adapter.py` prove the
 adapter's own wiring with injected fakes; this suite proves those fakes were
 faithful to the real implementations.
@@ -142,14 +147,17 @@ one-liner is exact).
     CONFORMANCE_DATABASE_URL=postgresql://<test-server-dsn> \
       /tmp/host-admission-conformance-venv/bin/pytest conformance/ -v
 
-If `CONFORMANCE_DATABASE_URL` is unset, every test in this suite skips
-cleanly rather than erroring -- this is what lets the suite live in this
-repository today without ever breaking an accidental `pytest conformance/`
-invocation before the real dependencies exist. Once it IS set, a real defect
-(a missing wheel, a stale API, a broken leaf import) fails collection loudly
-instead of skipping -- see the module docstring. A genuine run with
-`CONFORMANCE_DATABASE_URL` set must report **zero skipped** tests; any skip
-under that condition means the run did not actually execute what it claims
+There is NO skip anywhere in this suite. If `CONFORMANCE_DATABASE_URL` is
+unset, `conformance/conftest.py`'s `pytest_configure` raises a hard
+`pytest.UsageError` before collection even starts -- a loud, non-zero-exit
+usage error, never a quiet "0 passed, N skipped" that could be mistaken for
+a pass. `conformance/` is already excluded from `testpaths` and from normal
+CI, so an explicit `pytest conformance/` invocation is always a deliberate
+act, and this suite treats "not configured" the same as any other real
+defect (a missing wheel, a stale API, a broken leaf import): fail loudly,
+never skip. A genuine run with `CONFORMANCE_DATABASE_URL` set must report
+**zero skipped** tests; any skip under that condition means the run did not
+actually execute what it claims
 to.
 
 ## Evidence to record
@@ -171,6 +179,23 @@ Do NOT run this suite against this repository's own `.venv`, commit its
 disposable venv or wheel artifacts, or edit `pyproject.toml`/`poetry.lock` to
 make it installable in this repository's own environment -- that would
 silently move CP's own pin off `dotmac-deployment-control==0.1.0a6`, which is
-its own, separate, deliberate decision (see `adapter.py`'s host-admission
-section docstring and this repository's `pyproject.toml` comments above the
-`dotmac-deployment-control` pin).
+its own, separate, deliberate decision (see
+`host_admission_adapter.py`'s own module docstring and this repository's
+`pyproject.toml` comments above the `dotmac-deployment-control` pin).
+
+## Mandatory re-run gate: the moment either real pin moves
+
+CI can never catch a Control/Foundation signature drift against this leaf
+module: `dotmac-deployment-control` stays pinned at `0.1.0a6` (pre-dates all
+of this), `dotmac-deployment-foundation` is not a dependency at all, and
+`pyproject.toml`'s `[tool.mypy] files = ["src/vendor_cp"]` never type-checks
+`conformance/` against the real functions. The Protocols in
+`host_admission_adapter.py` are proven to match the real functions ONLY by
+this suite's runtime execution, at the exact commits recorded above.
+
+So: the FIRST PR that bumps `dotmac-deployment-control` off `0.1.0a6`, or
+adds `dotmac-deployment-foundation` as a real dependency, MUST re-run this
+suite against wheels built from the new pinned commits and record fresh
+evidence in that PR, before merge -- not as a follow-up. A signature change
+on either real function with no test anywhere in CI to catch it is exactly
+the gap this gate closes.

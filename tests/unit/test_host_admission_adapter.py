@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from vendor_cp.deployment.host_admission_adapter import (
     AttestationVerificationInputs,
+    HostAdmissionAdapterUsageError,
     admit_and_launch_host_source,
 )
 
@@ -72,6 +73,22 @@ def _resolver(events: list[str] | None = None, digest: str = "context-digest"):
     return _resolve
 
 
+def _capturing_resolver(digest: str = "context-digest"):
+    """Like `_resolver`, but keeps the exact `_ResolvedContext` object it
+    returned -- needed to assert `admit_and_consume` receives that SAME
+    object as `context`, not an equal-looking copy."""
+    resolved_holder: list[_ResolvedContext] = []
+
+    def _resolve(db, *, attempt_id, presentation):
+        db.execute(text("SELECT 1"))
+        resolved = _ResolvedContext(digest)
+        resolved_holder.append(resolved)
+        return resolved
+
+    _resolve.resolved = resolved_holder  # type: ignore[attr-defined]
+    return _resolve
+
+
 def _raising_verifier(exc: Exception):
     def _verify(**kwargs):
         raise exc
@@ -84,6 +101,20 @@ def _recording_verifier(events: list[str], result: object = "verified"):
         events.append("verify")
         return result
 
+    return _verify
+
+
+def _capturing_verifier(result: object = "verified"):
+    """Like `_recording_verifier`, but keeps the actual kwargs `verify_pair`
+    was called with -- needed to assert `verification_context_digest` is
+    genuinely `resolved.context_digest`, not merely that verify ran."""
+    calls: list[dict[str, object]] = []
+
+    def _verify(**kwargs):
+        calls.append(kwargs)
+        return result
+
+    _verify.calls = calls  # type: ignore[attr-defined]
     return _verify
 
 
@@ -166,6 +197,37 @@ class _CountingSession:
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._session, name)
+
+
+def test_the_same_session_for_both_roles_is_refused_before_anything_runs() -> None:
+    """Property 1, ENFORCED: passing one session object for both
+    `resolve_session` and `admit_session` is refused immediately, before
+    `resolve_context` is ever called -- not merely a documented convention.
+    A shared session's `resolve_session.commit()` would otherwise commit
+    whatever unrelated work the caller still had open on it."""
+    shared = _make_session()
+    resolve_events: list[str] = []
+    resolve = _resolver(resolve_events)
+    admit = _admitter()
+    launch = _launcher()
+
+    with pytest.raises(HostAdmissionAdapterUsageError):
+        admit_and_launch_host_source(
+            resolve_session=shared,
+            admit_session=shared,
+            attempt_id=ATTEMPT_ID,
+            presentation=object(),
+            resolve_context=resolve,
+            verify_pair=_recording_verifier([]),
+            admit_and_consume=admit,
+            launch=launch,
+            build_foreign_evidence=lambda result: result,
+            verification=_verification_inputs(),
+        )
+
+    assert resolve_events == []
+    assert len(admit.calls) == 0  # type: ignore[attr-defined]
+    assert len(launch.calls) == 0  # type: ignore[attr-defined]
 
 
 def test_a_foundation_refusal_never_reaches_control() -> None:
@@ -311,6 +373,47 @@ def test_the_positive_path_commits_before_verify_and_before_launch_in_order() ->
     assert events.index("resolve_commit") < events.index("verify")
     # (c) admit commits strictly before launch.
     assert events.index("admit_commit") < events.index("launch:the-staged-object")
+
+
+def test_verification_and_admission_bind_to_the_resolved_context_correctly() -> None:
+    """No unit test before this one actually inspected what `verify_pair` and
+    `admit_and_consume` were CALLED WITH, only that they ran -- an
+    implementation that bound verification to a constant, `verification.now`,
+    or a caller-supplied digest instead of `resolved.context_digest` would
+    have passed every other test in this file. Three bindings, each load-
+    bearing for the security properties this adapter exists to hold:
+
+    1. `verify_pair` receives `verification_context_digest ==
+       resolved.context_digest` -- the exact value the resolve phase froze,
+       not a different one.
+    2. `admit_and_consume` receives `context is resolved` -- the SAME object
+       the resolve phase returned, not an equal-looking reconstruction.
+    3. `admit_and_consume` receives `foreign_evidence` as EXACTLY what
+       `build_foreign_evidence` returned from Foundation's verification
+       result -- nothing substituted in between.
+    """
+    resolve = _capturing_resolver(digest="the-real-frozen-digest")
+    verify = _capturing_verifier(result="foundation-verification-result")
+    admit = _admitter()
+    mapped_evidence = object()
+
+    admit_and_launch_host_source(
+        resolve_session=_make_session(),
+        admit_session=_make_session(),
+        attempt_id=ATTEMPT_ID,
+        presentation=object(),
+        resolve_context=resolve,
+        verify_pair=verify,
+        admit_and_consume=admit,
+        launch=_launcher(),
+        build_foreign_evidence=lambda result: mapped_evidence,
+        verification=_verification_inputs(),
+    )
+
+    resolved = resolve.resolved[0]  # type: ignore[attr-defined]
+    assert verify.calls[0]["verification_context_digest"] == "the-real-frozen-digest"  # type: ignore[attr-defined]
+    assert admit.calls[0]["context"] is resolved  # type: ignore[attr-defined]
+    assert admit.calls[0]["foreign_evidence"] is mapped_evidence  # type: ignore[attr-defined]
 
 
 def test_no_open_transaction_on_either_session_during_verification() -> None:

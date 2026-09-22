@@ -53,6 +53,13 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 
+class HostAdmissionAdapterUsageError(ValueError):
+    """The caller misused `admit_and_launch_host_source` itself -- never a
+    refusal from Control or Foundation. Kept distinct from either package's
+    own refusal types so a caller cannot mistake a wiring mistake here for a
+    security refusal upstream."""
+
+
 class HostAdmissionContextResolver(Protocol):
     """What CP needs from Control's resolve phase.
 
@@ -139,6 +146,28 @@ class AttestationVerificationInputs:
     OWN resolved context (`HostAdmissionResolvedContext.context_digest`), not
     from the caller, so it cannot be supplied here without letting a caller
     bind verification to a digest Control never froze.
+
+    CALLER OBLIGATION, not enforced here or by Control. `expected_host_identity`,
+    `expected_observation_id`, `expected_package` and `trust_policy` are ALSO
+    facts Control's resolved context already carries -- respectively
+    `context.host_id` (or `installed_audience`), `context.attempt_id.hex`,
+    `context.expected_foundation_package`, and a policy built from
+    `context.candidate_root`/`context.installed_root`. Unlike the digest, this
+    module does NOT derive them from `resolved` itself; the caller must. And
+    unlike the digest, Control's own `admit_and_consume_host_admission` never
+    cross-checks any of these four against what it resolved: its foreign-
+    evidence check compares only `verification_context_digest` and the two
+    envelope digests (see `host_admission_coordinator.py`'s "Foreign evidence"
+    section). Foundation genuinely enforces audience/observation/package/root
+    matches -- but only against whatever expectations and trust policy it was
+    handed. A caller that supplies a wrong host identity, observation id,
+    package, or trust policy here -- one that does not match what Control
+    actually resolved for this attempt -- has no downstream backstop from
+    either package. This is a known, currently-undischarged design gap
+    (see the security review on PR #192): widening
+    `HostAdmissionResolvedContext` so the adapter derives all four here, the
+    same way it already derives the digest, is the intended follow-up, not
+    yet implemented.
     """
 
     candidate: object
@@ -170,10 +199,13 @@ def admit_and_launch_host_source(
     a Foundation refusal. Five properties, each structural rather than
     incidental:
 
-    1. **Two separate sessions.** `resolve_session` reads Control's context;
-       `admit_session` performs the admit-and-consume write. They are never
-       the same session, so a resolve-phase read can never be part of the
-       same transaction as the write that consumes the attempt.
+    1. **Two separate sessions, ENFORCED.** `resolve_session` reads Control's
+       context; `admit_session` performs the admit-and-consume write. Passing
+       the same object for both is refused with `HostAdmissionAdapterUsageError`
+       before either is touched -- not merely a convention this function
+       assumes, because the `resolve_session.commit()` in property 2 below
+       would otherwise commit whatever unrelated work a shared, caller-owned
+       session already had in flight.
     2. **Resolve commits before verify.** `resolve_session.commit()` runs
        immediately after `resolve_context` returns, and BEFORE `verify_pair`
        is called at all. Control's own resolve function never commits --
@@ -201,6 +233,14 @@ def admit_and_launch_host_source(
     `HostAdmissionForeignVerificationEvidenceV1`; it stays a generic callable
     here so this function keeps zero import coupling to either concrete type.
     """
+    if resolve_session is admit_session:
+        raise HostAdmissionAdapterUsageError(
+            "resolve_session and admit_session must be two separate sessions -- "
+            "this function commits resolve_session before Foundation "
+            "verification runs, and committing a session the caller is still "
+            "using for other work would commit that unrelated work too"
+        )
+
     resolved = resolve_context(
         resolve_session, attempt_id=attempt_id, presentation=presentation
     )
@@ -230,6 +270,7 @@ def admit_and_launch_host_source(
 __all__ = [
     "AttestationPairVerifier",
     "AttestationVerificationInputs",
+    "HostAdmissionAdapterUsageError",
     "HostAdmissionConsumer",
     "HostAdmissionContextResolver",
     "HostAdmissionResolvedContext",
