@@ -14,11 +14,14 @@ never referenced from `pyproject.toml`.
 This file lives OUTSIDE `tests/` (this repository's `pyproject.toml` pins
 `testpaths = ["tests"]`) specifically so a normal `pytest tests/` run in this
 repository never collects it and never tries to import either real package,
-neither of which is installable here today. If `CONFORMANCE_DATABASE_URL` is
-unset, every test in this module skips at collection time via
-`pytest.importorskip`-style module-level guard below, so this file can exist
-in the repository without ever breaking an accidental `pytest conformance/`
-invocation before the real dependencies and a real database exist.
+neither of which is installable here today. The ONLY graceful skip is the
+`CONFORMANCE_DATABASE_URL`-gated `pytestmark` below -- "you have not pointed
+this at a real database yet" is a legitimate precondition. An import error,
+a missing symbol, or any other real defect is NOT converted into a skip: this
+directory is already excluded from normal test discovery (`testpaths`) and
+from CI, so an explicit `pytest conformance/` run is a deliberate act, and it
+must FAIL loudly the moment a real dependency, API, or wheel is wrong rather
+than reporting a quiet, misleading "0 passed, N skipped".
 
 SIGNING CONVENTION. Every signer/verifier pair below is a deterministic,
 non-asymmetric double -- SHA-256/HMAC over canonical bytes, exactly the same
@@ -54,6 +57,80 @@ from typing import Any
 
 import pytest
 
+# ── Real imports -- only resolve once the real wheels are installed ────────
+# Deliberately NOT wrapped in a try/except: this is a real, explicit
+# conformance run (see module docstring), and an ImportError here is a real
+# defect -- a missing wheel, a missing symbol, a stale API -- that must fail
+# collection loudly, not be laundered into a skip that looks like "nothing to
+# see here". The `CONFORMANCE_DATABASE_URL` skipif below is the only
+# legitimate skip this suite has.
+from dotmac_deployment_control import (
+    AUTHORIZATION_PURPOSE,
+    DISPATCH_PURPOSE,
+    ApprovalEvidence,
+    ApprovePlanCommand,
+    AttestationRootDescriptorTerms,
+    AuthorizationSignature,
+    BindTargetHostCommand,
+    CredentialTransitionCommand,
+    DesiredDeployment,
+    DispatchSignature,
+    EnrolHostAdmissionCredentialCommand,
+    HostAdmissionForeignVerificationEvidenceV1,
+    HostAdmissionPresentationStatementV1,
+    HostAdmissionPresentationV1,
+    HostAdmissionRefusalCode,
+    HostAdmissionRefusedError,
+    ProposePlanCommand,
+    RegisterTargetCommand,
+    RequestRolloutCommand,
+    SetDesiredStateCommand,
+    SetTargetAdmissionPolicyCommand,
+    activate_credential,
+    admit_and_consume_host_admission,
+    approve_plan,
+    bind_target_host,
+    dispatch_attempt,
+    enrol_host_admission_credential,
+    enrol_root,
+    install_host_admission_security,
+    propose_plan,
+    register_target,
+    request_rollout,
+    resolve_host_admission_context,
+    revoke_credential,
+    set_desired_state,
+    set_target_admission_policy,
+)
+from dotmac_deployment_control import service as control_service
+from dotmac_deployment_control.digests import PublicKeyFingerprintV1
+from dotmac_deployment_control.models import AttestationEnrolment, RolloutAttempt
+from dotmac_deployment_foundation import (
+    AttestationEnvelopeV2,
+    AttestationTrustPolicy,
+    AttestationTrustRootV2,
+    CandidateAttestationSubjectV2,
+    Digest,
+    InstalledHostAttestationSubjectV2,
+    PreconditionFailed,
+    attestation_envelope_digest,
+    candidate_subject_digest,
+    verify_attestation_pair,
+)
+from dotmac_kernel.idempotency_models import PlatformIdempotencyRecord
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
+
+# The LEAF module only -- see its own docstring and
+# tests/architecture/test_host_admission_adapter_import_boundary.py. NEVER
+# `vendor_cp.deployment.adapter`, which pulls in this application's entire
+# approvals/identity/licensing closure and would defeat the whole point of
+# the leaf split.
+from vendor_cp.deployment.host_admission_adapter import (
+    AttestationVerificationInputs,
+    admit_and_launch_host_source,
+)
+
 CONFORMANCE_DATABASE_URL = os.environ.get("CONFORMANCE_DATABASE_URL")
 
 pytestmark = pytest.mark.skipif(
@@ -65,89 +142,6 @@ pytestmark = pytest.mark.skipif(
         "part of this repository's normal CI or local pytest."
     ),
 )
-
-# ── Real imports -- only resolve once the two real wheels are installed ────
-# Deferred to inside fixtures/tests would also work, but importing at module
-# scope is fine here BECAUSE the skipif above already prevents collection
-# from ever reaching an import error in an environment where these are
-# absent... except pytest still IMPORTS the module to read `pytestmark`
-# before evaluating skip conditions per-item in some pytest versions, so wrap
-# these in a try/except and skip the whole module cleanly on ImportError too,
-# defense in depth alongside the environment-variable guard above.
-try:
-    from dotmac_deployment_control import (
-        AUTHORIZATION_PURPOSE,
-        DISPATCH_PURPOSE,
-        ApprovalEvidence,
-        ApprovePlanCommand,
-        AttestationRootDescriptorTerms,
-        AuthorizationSignature,
-        BindTargetHostCommand,
-        CredentialTransitionCommand,
-        DesiredDeployment,
-        DispatchSignature,
-        EnrolHostAdmissionCredentialCommand,
-        HostAdmissionForeignVerificationEvidenceV1,
-        HostAdmissionPresentationStatementV1,
-        HostAdmissionPresentationV1,
-        HostAdmissionRefusalCode,
-        HostAdmissionRefusedError,
-        ProposePlanCommand,
-        RegisterTargetCommand,
-        RequestRolloutCommand,
-        SetDesiredStateCommand,
-        SetTargetAdmissionPolicyCommand,
-        activate_credential,
-        admit_and_consume_host_admission,
-        approve_plan,
-        bind_target_host,
-        dispatch_attempt,
-        enrol_host_admission_credential,
-        enrol_root,
-        install_host_admission_security,
-        propose_plan,
-        register_target,
-        request_rollout,
-        resolve_host_admission_context,
-        revoke_credential,
-        set_desired_state,
-        set_target_admission_policy,
-    )
-    from dotmac_deployment_control import service as control_service
-    from dotmac_deployment_control.digests import PublicKeyFingerprintV1
-    from dotmac_deployment_control.models import AttestationEnrolment, RolloutAttempt
-    from dotmac_deployment_foundation import (
-        AttestationEnvelopeV2,
-        AttestationTrustPolicy,
-        AttestationTrustRootV2,
-        CandidateAttestationSubjectV2,
-        Digest,
-        InstalledHostAttestationSubjectV2,
-        PreconditionFailed,
-        attestation_envelope_digest,
-        candidate_subject_digest,
-        verify_attestation_pair,
-    )
-    from dotmac_kernel.idempotency_models import PlatformIdempotencyRecord
-    from sqlalchemy import create_engine, select
-    from sqlalchemy.orm import Session, sessionmaker
-
-    from vendor_cp.deployment.adapter import (
-        AttestationVerificationInputs,
-        admit_and_launch_host_source,
-    )
-
-    _IMPORT_ERROR: Exception | None = None
-except Exception as exc:  # noqa: BLE001 - deliberately broad, see module docstring
-    _IMPORT_ERROR = exc
-
-if _IMPORT_ERROR is not None:
-    pytest.skip(
-        f"real dotmac_deployment_control/dotmac_deployment_foundation not "
-        f"installed in this interpreter: {_IMPORT_ERROR}. This is expected "
-        f"outside the disposable conformance environment.",
-        allow_module_level=True,
-    )
 
 
 # ── Deterministic signing doubles -- same convention as both repos' own test

@@ -1,13 +1,19 @@
 """`admit_and_launch_host_source`'s transaction ordering and no-fallback rule.
 
-SCOPE. Every collaborator here is a fake satisfying one of `adapter.py`'s
-CP-owned host-admission Protocols -- this tier proves the orchestration's OWN
-properties (session ordering, commit-before-launch, no fallback on a
-Foundation refusal) against injected fakes, never against the real
+SCOPE. Every collaborator here is a fake satisfying one of
+`host_admission_adapter.py`'s CP-owned host-admission Protocols -- this tier
+proves the orchestration's OWN properties (session ordering,
+commit-before-launch, no fallback on a Foundation refusal) against injected
+fakes, never against the real
 `dotmac_deployment_control`/`dotmac_deployment_foundation` functions, which
-are not installable in this repository today (see `adapter.py`'s host-
-admission section docstring). A conformance suite against the real functions
-is a later, separate task.
+are not installable in this repository today (see
+`host_admission_adapter.py`'s module docstring). A conformance suite against
+the real functions is `conformance/test_host_admission_conformance.py`.
+
+`host_admission_adapter` is a deliberate LEAF module (stdlib + SQLAlchemy
+only, see its own docstring and
+`tests/architecture/test_host_admission_adapter_import_boundary.py`) -- this
+file imports from it directly, never through `vendor_cp.deployment.adapter`.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from vendor_cp.deployment.adapter import (
+from vendor_cp.deployment.host_admission_adapter import (
     AttestationVerificationInputs,
     admit_and_launch_host_source,
 )

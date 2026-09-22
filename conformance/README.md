@@ -42,10 +42,20 @@ fixture-building patterns from scratch under time pressure.
    this suite is ever run. Re-verify both merge states and SHAs again
    immediately before building wheels, since more time may have passed.
 
-Never run this suite against a branch tip. Only exact, verified merge
-commits, recorded in the evidence this suite's execution produces.
+Never run this suite against a branch tip for Control or Foundation -- only
+exact, verified merge commits, recorded in the evidence this suite's
+execution produces. **CP's own wheel is the one exception**: it is built from
+whatever commit on THIS branch is under test (the code being proven, not an
+external dependency), and is rebuilt whenever that code changes.
 
-## Build the two wheels (NOT done by this scaffold -- a later manual step)
+3. **CP's own host-admission adapter** --
+   `src/vendor_cp/deployment/host_admission_adapter.py`, a deliberate LEAF
+   module (stdlib + SQLAlchemy only -- see its own docstring and
+   `tests/architecture/test_host_admission_adapter_import_boundary.py`).
+   Built from THIS repository's current branch HEAD, not a merge commit --
+   there is nothing external to pin yet.
+
+## Build the wheels (NOT done by this scaffold -- a later manual step)
 
 **Control** (its own repository):
 
@@ -65,10 +75,26 @@ subdirectory, not the monorepo root):
     poetry build   # or: python -m build
     # produces dist/dotmac_deployment_foundation-*.whl
 
-Always pin to the exact merge-commit SHA, never a branch tip -- re-resolve
-both SHAs with `gh pr view <n> --json mergeCommit,state` immediately before
-this step, since either could be superseded by a later force-push-free merge
-of a follow-up PR.
+Always pin Control and Foundation to the exact merge-commit SHA, never a
+branch tip -- re-resolve both SHAs with `gh pr view <n> --json
+mergeCommit,state` immediately before this step, since either could be
+superseded by a later force-push-free merge of a follow-up PR.
+
+**CP** (this repository, current branch -- NOT a merge commit, this is the
+code under test):
+
+    cd <this repository's own checkout>
+    git rev-parse HEAD   # record this in the evidence -- it moves as fixes land
+    poetry build         # or: python -m build
+    # produces dist/dotmac_platform_control_plane-*.whl (or vendor_cp-*.whl,
+    # whatever the current distribution name is -- check dist/ after building)
+
+This is a NORMAL, whole-repository `poetry build` -- it is the `--no-deps`
+install below, not a special narrow build, that keeps the leaf boundary real.
+Nothing besides `vendor_cp/__init__.py`, `vendor_cp/deployment/__init__.py`
+(both docstring-only, no imports) and
+`vendor_cp/deployment/host_admission_adapter.py` itself ever actually
+executes, because the conformance suite imports only that one submodule.
 
 ## Install into a disposable environment (NOT this repo's own .venv, NOT pyproject.toml)
 
@@ -77,14 +103,18 @@ of a follow-up PR.
       /tmp/foundation-conformance-build/dist/dotmac_deployment_foundation-*.whl \
       /tmp/control-conformance-build/dist/dotmac_deployment_control-*.whl \
       -r conformance/requirements.txt
+    # `dotmac-kernel` itself needs the private Forgejo registry -- see
+    # requirements.txt's own comment on why it is NOT reused from this
+    # repo's own .venv (a disposable venv has nothing to derive it from).
 
-`conformance/requirements.txt` also brings in this repo's own runtime
-dependencies the suite needs directly (`sqlalchemy`, `cryptography`,
-`psycopg`, `alembic`, `pytest`) -- `dotmac-kernel` itself is already a real,
-installed dependency of this repository (pinned `0.1.0a98`) and is reused
-from this repo's own `.venv`'s resolution; it does not need a separate wheel
-here, since `PlatformIdempotencyRecord`, `install_audit_actions`, and `Base`
-already import successfully in this repo today.
+    # CP's own wheel, installed SEPARATELY and with --no-deps: this is what
+    # actually proves the leaf boundary. If host_admission_adapter.py ever
+    # regains a vendor_cp/dotmac_kernel/fastapi import, THIS install fails
+    # with a real ModuleNotFoundError the moment the suite tries to import
+    # it -- the architecture test catches the same regression earlier, at
+    # ordinary `pytest tests/` time, without needing this venv at all.
+    /tmp/host-admission-conformance-venv/bin/pip install --no-deps \
+      dist/dotmac_platform_control_plane-*.whl   # built in this repo, above
 
 ## Database
 
@@ -115,17 +145,25 @@ one-liner is exact).
 If `CONFORMANCE_DATABASE_URL` is unset, every test in this suite skips
 cleanly rather than erroring -- this is what lets the suite live in this
 repository today without ever breaking an accidental `pytest conformance/`
-invocation before the real dependencies exist.
+invocation before the real dependencies exist. Once it IS set, a real defect
+(a missing wheel, a stale API, a broken leaf import) fails collection loudly
+instead of skipping -- see the module docstring. A genuine run with
+`CONFORMANCE_DATABASE_URL` set must report **zero skipped** tests; any skip
+under that condition means the run did not actually execute what it claims
+to.
 
 ## Evidence to record
 
 For marking PR #192 ready for review, record:
 
-- Both exact merge-commit SHAs actually used (re-verified at run time, not
-  copied from this file, in case either has since been superseded).
+- Both exact merge-commit SHAs actually used for Control and Foundation
+  (re-verified at run time, not copied from this file, in case either has
+  since been superseded), plus the exact CP commit (`git rev-parse HEAD`)
+  the CP wheel was built from.
 - The exact wheel filenames actually installed (`pip list` or `pip freeze`
-  from the disposable venv).
-- The full `pytest conformance/ -v` output.
+  from the disposable venv), including the CP wheel installed with
+  `--no-deps`.
+- The full `pytest conformance/ -v` output, showing zero skipped.
 - The PostgreSQL server/database identity the suite ran against (never a
   connection string containing credentials -- name the host, not the DSN).
 

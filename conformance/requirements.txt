@@ -1,10 +1,29 @@
-# Runtime dependencies the conformance suite itself needs, on top of the two
-# real wheels (dotmac_deployment_control, dotmac_deployment_foundation)
-# installed separately per conformance/README.md. Pinned to the exact
-# versions this repository's own poetry.lock already resolves for
-# dotmac-kernel's transitive dependencies, so the disposable conformance venv
-# never disagrees with what this repository's own dependency graph proved
-# works together (checked via `poetry.lock` at scaffold time, 2026-09-22):
+# Runtime dependencies the conformance SUITE itself needs (real Postgres
+# access, the deterministic signing doubles, pytest), on top of THREE real
+# wheels installed separately per conformance/README.md:
+#
+#   - dotmac_deployment_control    (exact merge commit)
+#   - dotmac_deployment_foundation (exact merge commit)
+#   - the CP host-admission adapter wheel, built from
+#     src/vendor_cp/deployment/host_admission_adapter.py ONLY and installed
+#     with `pip install --no-deps` -- that leaf module needs nothing beyond
+#     stdlib + sqlalchemy (see its own docstring and
+#     tests/architecture/test_host_admission_adapter_import_boundary.py), so
+#     `--no-deps` is correct, not a shortcut: a real dependency resolution
+#     for it would pull in nothing this file doesn't already list.
+#
+# `dotmac-kernel` is also required directly (PlatformIdempotencyRecord, for
+# the conformance suite's own idempotency-marker assertions) -- installed
+# from the private Forgejo registry alongside the three wheels above, NOT
+# derived from this repository's own .venv (an earlier version of this file
+# assumed that, incorrectly -- a fresh disposable venv has nothing to derive
+# it from).
+#
+# Pinned to the exact versions this repository's own poetry.lock already
+# resolves for dotmac-kernel's transitive dependencies, so the disposable
+# conformance venv never disagrees with what this repository's own
+# dependency graph proved works together (checked via `poetry.lock` at
+# scaffold time, 2026-09-22):
 #
 #   sqlalchemy   2.0.51
 #   cryptography 50.0.0
