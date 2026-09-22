@@ -74,17 +74,16 @@ class HostAdmissionContextResolver(Protocol):
 
 
 class HostAdmissionResolvedContext(Protocol):
-    """The narrow slice of Control's resolved context this adapter reads.
-
-    Everything else Control's real context carries is opaque to CP: the whole
-    object is passed through to `admit_and_consume` untouched. The one field
-    read here is `context_digest`, because it is what binds Foundation's
-    verification to the exact context Control resolved -- a verification
-    performed against a stale or substituted context is not a verification of
-    this admission at all.
-    """
+    """The narrow slice of Control's resolved context this adapter reads
+    directly, plus the additional slice its `build_trust_policy` caller
+    needs (opaque to this Protocol -- see that parameter's own docstring).
+    Everything else Control's real context carries is opaque to CP: the
+    whole object is passed through to `admit_and_consume` untouched."""
 
     context_digest: str
+    host_id: str
+    attempt_id: UUID
+    expected_foundation_package: str
 
 
 class AttestationPairVerifier(Protocol):
@@ -141,42 +140,23 @@ class HostSourceLauncher(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class AttestationVerificationInputs:
-    """Everything `admit_and_launch_host_source` hands Foundation's verifier,
-    except `verification_context_digest` -- that value comes from Control's
-    OWN resolved context (`HostAdmissionResolvedContext.context_digest`), not
-    from the caller, so it cannot be supplied here without letting a caller
-    bind verification to a digest Control never froze.
-
-    CALLER OBLIGATION, not enforced here or by Control. `expected_host_identity`,
-    `expected_observation_id`, `expected_package` and `trust_policy` are ALSO
-    facts Control's resolved context already carries -- respectively
-    `context.host_id` (or `installed_audience`), `context.attempt_id.hex`,
-    `context.expected_foundation_package`, and a policy built from
-    `context.candidate_root`/`context.installed_root`. Unlike the digest, this
-    module does NOT derive them from `resolved` itself; the caller must. And
-    unlike the digest, Control's own `admit_and_consume_host_admission` never
-    cross-checks any of these four against what it resolved: its foreign-
-    evidence check compares only `verification_context_digest` and the two
-    envelope digests (see `host_admission_coordinator.py`'s "Foreign evidence"
-    section). Foundation genuinely enforces audience/observation/package/root
-    matches -- but only against whatever expectations and trust policy it was
-    handed. A caller that supplies a wrong host identity, observation id,
-    package, or trust policy here -- one that does not match what Control
-    actually resolved for this attempt -- has no downstream backstop from
-    either package. This is a known, currently-undischarged design gap
-    (see the security review on PR #192): widening
-    `HostAdmissionResolvedContext` so the adapter derives all four here, the
-    same way it already derives the digest, is the intended follow-up, not
-    yet implemented.
-    """
+    """Everything `admit_and_launch_host_source` hands Foundation's verifier
+    that is NOT derivable from Control's resolved context -- just the two
+    envelopes, the injected cryptographic verifier, and the trusted clock.
+    Every value Control's resolved context already carries
+    (`expected_host_identity`, `expected_observation_id`, `expected_package`,
+    `verification_context_digest`, and the trust policy itself) is now
+    derived by `admit_and_launch_host_source` directly from `resolved`,
+    never accepted from a caller -- closing the gap an independent security
+    review found: a caller could previously supply ANY value for these,
+    with nothing downstream (in CP or in Control) comparing it against what
+    Control actually resolved. See `build_trust_policy` below for why the
+    trust policy specifically needs one more level of indirection than the
+    plain string fields."""
 
     candidate: object
     installed: object
     foundation_verifier: object
-    trust_policy: object
-    expected_host_identity: str
-    expected_observation_id: str
-    expected_package: str
     now: datetime
 
 
@@ -191,12 +171,13 @@ def admit_and_launch_host_source(
     admit_and_consume: HostAdmissionConsumer,
     launch: HostSourceLauncher,
     build_foreign_evidence: Callable[[object], object],
+    build_trust_policy: Callable[[HostAdmissionResolvedContext], object],
     verification: AttestationVerificationInputs,
 ) -> object:
     """CP's whole authenticated host-admission sequence.
 
     Own transaction lifecycle, commit-before-launch ordering, no fallback on
-    a Foundation refusal. Five properties, each structural rather than
+    a Foundation refusal. Six properties, each structural rather than
     incidental:
 
     1. **Two separate sessions, ENFORCED.** `resolve_session` reads Control's
@@ -225,6 +206,13 @@ def admit_and_launch_host_source(
        exception propagates immediately and `admit_and_consume` is never
        called. There is no alternate path that reaches Control on a
        Foundation failure.
+    6. **Every verification expectation is derived, never caller-supplied.**
+       The digest, the host identity, the observation id, the package, and
+       the trust policy handed to `verify_pair` are all computed from
+       `resolved` -- Control's own resolved context for this attempt -- not
+       from `verification` or any other caller input. A caller therefore
+       cannot bind verification to an expectation Control never actually
+       resolved.
 
     `build_foreign_evidence` maps Foundation's verification result into
     whatever Control-owned evidence shape `admit_and_consume` expects. A real
@@ -232,6 +220,16 @@ def admit_and_launch_host_source(
     `AttestationPairVerificationResultV1` into Control's
     `HostAdmissionForeignVerificationEvidenceV1`; it stays a generic callable
     here so this function keeps zero import coupling to either concrete type.
+
+    `build_trust_policy` maps `resolved` into whatever Foundation-shaped
+    trust policy object `verify_pair` expects. A real adapter's callable
+    reads `resolved.candidate_root`/`resolved.installed_root`/
+    `resolved.candidate_audience`/`resolved.installed_audience` -- fields on
+    Control's real context object, opaque to this Protocol and to this file
+    -- and builds a real `AttestationTrustPolicy`. It stays a generic
+    callable here for the identical zero-import-coupling reason
+    `build_foreign_evidence` does: Foundation's `AttestationTrustPolicy` is a
+    Foundation type this leaf module must never import.
     """
     if resolve_session is admit_session:
         raise HostAdmissionAdapterUsageError(
@@ -250,10 +248,10 @@ def admit_and_launch_host_source(
         candidate=verification.candidate,
         installed=verification.installed,
         verifier=verification.foundation_verifier,
-        trust_policy=verification.trust_policy,
-        expected_host_identity=verification.expected_host_identity,
-        expected_observation_id=verification.expected_observation_id,
-        expected_package=verification.expected_package,
+        trust_policy=build_trust_policy(resolved),
+        expected_host_identity=resolved.host_id,
+        expected_observation_id=resolved.attempt_id.hex,
+        expected_package=resolved.expected_foundation_package,
         verification_context_digest=resolved.context_digest,
         now=verification.now,
     )

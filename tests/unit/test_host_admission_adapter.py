@@ -56,8 +56,18 @@ class _SentinelControlRefusal(Exception):
 
 
 class _ResolvedContext:
-    def __init__(self, digest: str = "context-digest") -> None:
+    def __init__(
+        self,
+        digest: str = "context-digest",
+        *,
+        host_id: str = "host-1",
+        attempt_id: UUID = ATTEMPT_ID,
+        expected_foundation_package: str = "package-1",
+    ) -> None:
         self.context_digest = digest
+        self.host_id = host_id
+        self.attempt_id = attempt_id
+        self.expected_foundation_package = expected_foundation_package
 
 
 def _resolver(events: list[str] | None = None, digest: str = "context-digest"):
@@ -73,7 +83,13 @@ def _resolver(events: list[str] | None = None, digest: str = "context-digest"):
     return _resolve
 
 
-def _capturing_resolver(digest: str = "context-digest"):
+def _capturing_resolver(
+    digest: str = "context-digest",
+    *,
+    host_id: str = "host-1",
+    attempt_id_: UUID = ATTEMPT_ID,
+    expected_foundation_package: str = "package-1",
+):
     """Like `_resolver`, but keeps the exact `_ResolvedContext` object it
     returned -- needed to assert `admit_and_consume` receives that SAME
     object as `context`, not an equal-looking copy."""
@@ -81,7 +97,17 @@ def _capturing_resolver(digest: str = "context-digest"):
 
     def _resolve(db, *, attempt_id, presentation):
         db.execute(text("SELECT 1"))
-        resolved = _ResolvedContext(digest)
+        # `attempt_id` here is the call-site attempt id passed by
+        # `admit_and_launch_host_source`; the resolved context's own
+        # `attempt_id` attribute is a separate, explicitly-configured value
+        # (defaulting to the same `ATTEMPT_ID` module constant), matching
+        # how `_ResolvedContext.__init__` keeps the two independent.
+        resolved = _ResolvedContext(
+            digest,
+            host_id=host_id,
+            attempt_id=attempt_id_,
+            expected_foundation_package=expected_foundation_package,
+        )
         resolved_holder.append(resolved)
         return resolved
 
@@ -168,12 +194,15 @@ def _verification_inputs() -> AttestationVerificationInputs:
         candidate=object(),
         installed=object(),
         foundation_verifier=object(),
-        trust_policy=object(),
-        expected_host_identity="host-1",
-        expected_observation_id="obs-1",
-        expected_package="package-1",
         now=NOW,
     )
+
+
+def _build_trust_policy(resolved: object) -> object:
+    """A simple stand-in `build_trust_policy` callable -- proves the
+    orchestration property (the returned value reaches `verify_pair` as
+    `trust_policy`), not a real Foundation `AttestationTrustPolicy`."""
+    return f"trust-policy-for-{resolved.host_id}"  # type: ignore[attr-defined]
 
 
 class _CountingSession:
@@ -222,6 +251,7 @@ def test_the_same_session_for_both_roles_is_refused_before_anything_runs() -> No
             admit_and_consume=admit,
             launch=launch,
             build_foreign_evidence=lambda result: result,
+            build_trust_policy=_build_trust_policy,
             verification=_verification_inputs(),
         )
 
@@ -246,6 +276,7 @@ def test_a_foundation_refusal_never_reaches_control() -> None:
             admit_and_consume=admit,
             launch=_launcher(),
             build_foreign_evidence=lambda result: result,
+            build_trust_policy=_build_trust_policy,
             verification=_verification_inputs(),
         )
     assert len(admit.calls) == 0  # type: ignore[attr-defined]
@@ -269,6 +300,7 @@ def test_a_sentinel_foundation_failure_propagates_with_no_fallback() -> None:
             admit_and_consume=admit,
             launch=launch,
             build_foreign_evidence=lambda result: result,
+            build_trust_policy=_build_trust_policy,
             verification=_verification_inputs(),
         )
 
@@ -296,6 +328,7 @@ def test_a_substituted_evidence_digest_refuses_before_any_commit_or_launch() -> 
             ),
             launch=launch,
             build_foreign_evidence=lambda result: result,
+            build_trust_policy=_build_trust_policy,
             verification=_verification_inputs(),
         )
 
@@ -357,6 +390,7 @@ def test_the_positive_path_commits_before_verify_and_before_launch_in_order() ->
         admit_and_consume=_admit,
         launch=_launch,
         build_foreign_evidence=lambda verification_result: verification_result,
+        build_trust_policy=_build_trust_policy,
         verification=_verification_inputs(),
     )
 
@@ -380,7 +414,7 @@ def test_verification_and_admission_bind_to_the_resolved_context_correctly() -> 
     `admit_and_consume` were CALLED WITH, only that they ran -- an
     implementation that bound verification to a constant, `verification.now`,
     or a caller-supplied digest instead of `resolved.context_digest` would
-    have passed every other test in this file. Three bindings, each load-
+    have passed every other test in this file. Six bindings, each load-
     bearing for the security properties this adapter exists to hold:
 
     1. `verify_pair` receives `verification_context_digest ==
@@ -391,11 +425,28 @@ def test_verification_and_admission_bind_to_the_resolved_context_correctly() -> 
     3. `admit_and_consume` receives `foreign_evidence` as EXACTLY what
        `build_foreign_evidence` returned from Foundation's verification
        result -- nothing substituted in between.
+    4. `build_trust_policy` is called with the real `resolved` object, and
+       whatever it returns is EXACTLY what `verify_pair` receives as
+       `trust_policy` -- not a caller-supplied constant.
+    5. `verify_pair`'s `expected_host_identity` is exactly `resolved.host_id`.
+    6. `verify_pair`'s `expected_observation_id` is exactly
+       `resolved.attempt_id.hex`, and `expected_package` is exactly
+       `resolved.expected_foundation_package` -- none of the three
+       caller-suppliable in the old `AttestationVerificationInputs` shape.
     """
-    resolve = _capturing_resolver(digest="the-real-frozen-digest")
+    resolve = _capturing_resolver(
+        digest="the-real-frozen-digest",
+        host_id="the-real-host-id",
+        expected_foundation_package="the-real-package",
+    )
     verify = _capturing_verifier(result="foundation-verification-result")
     admit = _admitter()
     mapped_evidence = object()
+    trust_policy_calls: list[object] = []
+
+    def _build_trust_policy_capturing(resolved: object) -> object:
+        trust_policy_calls.append(resolved)
+        return "the-derived-trust-policy"
 
     admit_and_launch_host_source(
         resolve_session=_make_session(),
@@ -407,6 +458,7 @@ def test_verification_and_admission_bind_to_the_resolved_context_correctly() -> 
         admit_and_consume=admit,
         launch=_launcher(),
         build_foreign_evidence=lambda result: mapped_evidence,
+        build_trust_policy=_build_trust_policy_capturing,
         verification=_verification_inputs(),
     )
 
@@ -414,6 +466,17 @@ def test_verification_and_admission_bind_to_the_resolved_context_correctly() -> 
     assert verify.calls[0]["verification_context_digest"] == "the-real-frozen-digest"  # type: ignore[attr-defined]
     assert admit.calls[0]["context"] is resolved  # type: ignore[attr-defined]
     assert admit.calls[0]["foreign_evidence"] is mapped_evidence  # type: ignore[attr-defined]
+    assert trust_policy_calls == [resolved]
+    assert verify.calls[0]["trust_policy"] == "the-derived-trust-policy"  # type: ignore[attr-defined]
+    assert verify.calls[0]["expected_host_identity"] == resolved.host_id  # type: ignore[attr-defined]
+    assert (
+        verify.calls[0]["expected_observation_id"]  # type: ignore[attr-defined]
+        == resolved.attempt_id.hex
+    )
+    assert (
+        verify.calls[0]["expected_package"]  # type: ignore[attr-defined]
+        == resolved.expected_foundation_package
+    )
 
 
 def test_no_open_transaction_on_either_session_during_verification() -> None:
@@ -436,5 +499,6 @@ def test_no_open_transaction_on_either_session_during_verification() -> None:
         admit_and_consume=_admitter(),
         launch=_launcher(),
         build_foreign_evidence=lambda result: result,
+        build_trust_policy=_build_trust_policy,
         verification=_verification_inputs(),
     )

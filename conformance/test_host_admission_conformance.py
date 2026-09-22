@@ -76,6 +76,7 @@ from dotmac_deployment_control import (
     DispatchSignature,
     DispatchSignerIdentity,
     EnrolHostAdmissionCredentialCommand,
+    HostAdmissionForeignRootV1,
     HostAdmissionForeignVerificationEvidenceV1,
     HostAdmissionPresentationStatementV1,
     HostAdmissionPresentationV1,
@@ -757,6 +758,16 @@ def _build_admission_coordinate(
     )
 
 
+# NOTE: this suite's real-wheel execution is blocked until
+# `dotmac_starter_mt`#743 (Foundation's widened `AttestationPairVerificationResultV1`)
+# and `dotmac_deployment_control`#59 (Control's widened
+# `HostAdmissionForeignVerificationEvidenceV1`) both merge and the two pinned
+# wheels this suite installs are rebuilt from those merge commits -- the
+# fields this mapper reads/writes below do not exist in the wheels currently
+# pinned by `conformance/README.md`. The source changes below are made and
+# verified against the real, unmerged diffs directly (not guessed), so this
+# file is ready the moment new wheels are available; it cannot be run
+# successfully before then.
 def _map_foundation_result_to_control_evidence(
     result: Any,
 ) -> HostAdmissionForeignVerificationEvidenceV1:
@@ -764,11 +775,36 @@ def _map_foundation_result_to_control_evidence(
     needs: converting Foundation's real `AttestationPairVerificationResultV1`
     into Control's real `HostAdmissionForeignVerificationEvidenceV1`. Field
     names differ deliberately (ADR-0073: the two packages never import each
-    other), so this mapping is CP's, not either package's own."""
+    other), so this mapping is CP's, not either package's own -- including
+    the one outright rename: Foundation's `trust_root_version` becomes
+    Control's `root_version` on each verified-root sub-object."""
     return HostAdmissionForeignVerificationEvidenceV1(
         candidate_attestation_envelope_digest=result.candidate_attestation_envelope_digest,
         installed_attestation_envelope_digest=result.installed_attestation_envelope_digest,
         verification_context_digest=result.verification_context_digest,
+        verified_host_identity=result.expected_host_identity,
+        verified_observation_id=result.expected_observation_id,
+        verified_package=result.expected_package,
+        verified_candidate_audience=result.candidate_audience,
+        verified_installed_audience=result.installed_audience,
+        verified_candidate_root=HostAdmissionForeignRootV1(
+            public_key_fingerprint=result.candidate_root.public_key_fingerprint,
+            root_version=result.candidate_root.trust_root_version,
+            key_id=result.candidate_root.key_id,
+            algorithm=result.candidate_root.algorithm,
+            purpose=result.candidate_root.purpose,
+            custody_domain=result.candidate_root.custody_domain,
+            issuer=result.candidate_root.issuer,
+        ),
+        verified_installed_root=HostAdmissionForeignRootV1(
+            public_key_fingerprint=result.installed_root.public_key_fingerprint,
+            root_version=result.installed_root.trust_root_version,
+            key_id=result.installed_root.key_id,
+            algorithm=result.installed_root.algorithm,
+            purpose=result.installed_root.purpose,
+            custody_domain=result.installed_root.custody_domain,
+            issuer=result.installed_root.issuer,
+        ),
     )
 
 
@@ -809,14 +845,11 @@ def test_valid_signed_attestations_complete_the_full_flow(
         admit_and_consume=admit_and_consume_host_admission,
         launch=lambda staged: launched.append(staged),
         build_foreign_evidence=_map_foundation_result_to_control_evidence,
+        build_trust_policy=lambda resolved: coordinate.trust_policy,
         verification=AttestationVerificationInputs(
             candidate=coordinate.candidate_envelope,
             installed=coordinate.installed_envelope,
             foundation_verifier=coordinate.foundation_verifier,
-            trust_policy=coordinate.trust_policy,
-            expected_host_identity=coordinate.trust_policy.installed_audience,
-            expected_observation_id=coordinate.attempt_id.hex,
-            expected_package="dotmac-sub",
             now=coordinate.clock.now(),
         ),
     )
@@ -858,14 +891,11 @@ def test_an_invalid_signature_stops_inside_real_foundation_code(
             admit_and_consume=admit_and_consume_host_admission,
             launch=lambda staged: launched.append(staged),
             build_foreign_evidence=_map_foundation_result_to_control_evidence,
+            build_trust_policy=lambda resolved: coordinate.trust_policy,
             verification=AttestationVerificationInputs(
                 candidate=tampered_candidate,
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
-                trust_policy=coordinate.trust_policy,
-                expected_host_identity=coordinate.trust_policy.installed_audience,
-                expected_observation_id=coordinate.attempt_id.hex,
-                expected_package="dotmac-sub",
                 now=coordinate.clock.now(),
             ),
         )
@@ -900,14 +930,11 @@ def test_a_sentinel_foundation_failure_has_no_fallback(
             admit_and_consume=admit_and_consume_host_admission,
             launch=lambda staged: launched.append(staged),
             build_foreign_evidence=_map_foundation_result_to_control_evidence,
+            build_trust_policy=lambda resolved: coordinate.trust_policy,
             verification=AttestationVerificationInputs(
                 candidate=coordinate.candidate_envelope,
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
-                trust_policy=coordinate.trust_policy,
-                expected_host_identity=coordinate.trust_policy.installed_audience,
-                expected_observation_id=coordinate.attempt_id.hex,
-                expected_package="dotmac-sub",
                 now=coordinate.clock.now(),
             ),
         )
@@ -939,18 +966,117 @@ def test_an_altered_evidence_digest_is_refused(db: Session, admit_db: Session) -
             admit_and_consume=admit_and_consume_host_admission,
             launch=lambda staged: launched.append(staged),
             build_foreign_evidence=_substituting_mapper,
+            build_trust_policy=lambda resolved: coordinate.trust_policy,
             verification=AttestationVerificationInputs(
                 candidate=coordinate.candidate_envelope,
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
-                trust_policy=coordinate.trust_policy,
-                expected_host_identity=coordinate.trust_policy.installed_audience,
-                expected_observation_id=coordinate.attempt_id.hex,
-                expected_package="dotmac-sub",
                 now=coordinate.clock.now(),
             ),
         )
     assert excinfo.value.code is HostAdmissionRefusalCode.EVIDENCE_CHANGED
+    assert len(launched) == 0
+    assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
+
+
+# NOTE: like `_map_foundation_result_to_control_evidence` above, the two
+# tests below exercise the widened `FOREIGN_EVIDENCE_SEMANTIC_MISMATCH`
+# refusal added by `dotmac_deployment_control`#59 and cannot actually run
+# until that PR (and `dotmac_starter_mt`#743) merge and this suite's pinned
+# wheels are rebuilt from the new merge commits.
+
+
+def test_a_substituted_verified_host_identity_is_refused(
+    db: Session, admit_db: Session
+) -> None:
+    """Mirrors `test_an_altered_evidence_digest_is_refused`'s exact shape,
+    but corrupts `verified_host_identity` instead of an envelope digest --
+    proving Control's widened `FOREIGN_EVIDENCE_SEMANTIC_MISMATCH` refusal
+    fires when Foundation's reported host identity does not match what
+    Control itself resolved, with zero launches and zero idempotency
+    markers."""
+    coordinate = _build_admission_coordinate(db, now=_NOW)
+    install_host_admission_security(
+        verifier=coordinate.presentation_verifier, clock=coordinate.clock
+    )
+
+    def _substituting_mapper(result: Any) -> HostAdmissionForeignVerificationEvidenceV1:
+        real = _map_foundation_result_to_control_evidence(result)
+        return dataclasses.replace(
+            real, verified_host_identity="a-different-host-entirely"
+        )
+
+    launched: list[Any] = []
+    with pytest.raises(HostAdmissionRefusedError) as excinfo:
+        admit_and_launch_host_source(
+            resolve_session=db,
+            admit_session=admit_db,
+            attempt_id=coordinate.attempt_id,
+            presentation=coordinate.presentation,
+            resolve_context=resolve_host_admission_context,
+            verify_pair=verify_attestation_pair,
+            admit_and_consume=admit_and_consume_host_admission,
+            launch=lambda staged: launched.append(staged),
+            build_foreign_evidence=_substituting_mapper,
+            build_trust_policy=lambda resolved: coordinate.trust_policy,
+            verification=AttestationVerificationInputs(
+                candidate=coordinate.candidate_envelope,
+                installed=coordinate.installed_envelope,
+                foundation_verifier=coordinate.foundation_verifier,
+                now=coordinate.clock.now(),
+            ),
+        )
+    assert (
+        excinfo.value.code
+        is HostAdmissionRefusalCode.FOREIGN_EVIDENCE_SEMANTIC_MISMATCH
+    )
+    assert len(launched) == 0
+    assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
+
+
+def test_a_substituted_verified_candidate_root_field_is_refused(
+    db: Session, admit_db: Session
+) -> None:
+    """Same shape again, corrupting one field (`public_key_fingerprint`) of
+    `verified_candidate_root` instead -- proving the widened refusal also
+    catches a root-identity mismatch, not only a flat string field."""
+    coordinate = _build_admission_coordinate(db, now=_NOW)
+    install_host_admission_security(
+        verifier=coordinate.presentation_verifier, clock=coordinate.clock
+    )
+
+    def _substituting_mapper(result: Any) -> HostAdmissionForeignVerificationEvidenceV1:
+        real = _map_foundation_result_to_control_evidence(result)
+        tampered_root = dataclasses.replace(
+            real.verified_candidate_root,
+            public_key_fingerprint="sha256:" + "cc" * 32,
+        )
+        return dataclasses.replace(real, verified_candidate_root=tampered_root)
+
+    launched: list[Any] = []
+    with pytest.raises(HostAdmissionRefusedError) as excinfo:
+        admit_and_launch_host_source(
+            resolve_session=db,
+            admit_session=admit_db,
+            attempt_id=coordinate.attempt_id,
+            presentation=coordinate.presentation,
+            resolve_context=resolve_host_admission_context,
+            verify_pair=verify_attestation_pair,
+            admit_and_consume=admit_and_consume_host_admission,
+            launch=lambda staged: launched.append(staged),
+            build_foreign_evidence=_substituting_mapper,
+            build_trust_policy=lambda resolved: coordinate.trust_policy,
+            verification=AttestationVerificationInputs(
+                candidate=coordinate.candidate_envelope,
+                installed=coordinate.installed_envelope,
+                foundation_verifier=coordinate.foundation_verifier,
+                now=coordinate.clock.now(),
+            ),
+        )
+    assert (
+        excinfo.value.code
+        is HostAdmissionRefusalCode.FOREIGN_EVIDENCE_SEMANTIC_MISMATCH
+    )
     assert len(launched) == 0
     assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
 
@@ -1070,14 +1196,11 @@ def test_launch_cannot_occur_before_the_admission_transaction_commits(
             admit_and_consume=admit_and_consume_host_admission,
             launch=_recording_launch,
             build_foreign_evidence=_map_foundation_result_to_control_evidence,
+            build_trust_policy=lambda resolved: coordinate.trust_policy,
             verification=AttestationVerificationInputs(
                 candidate=coordinate.candidate_envelope,
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
-                trust_policy=coordinate.trust_policy,
-                expected_host_identity=coordinate.trust_policy.installed_audience,
-                expected_observation_id=coordinate.attempt_id.hex,
-                expected_package="dotmac-sub",
                 now=coordinate.clock.now(),
             ),
         )
