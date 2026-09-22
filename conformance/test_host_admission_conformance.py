@@ -701,6 +701,7 @@ def _build_admission_coordinate(
         observation_id=f"conformance-candidate-observation-{run}",
         audience="foundation-candidate",
         foundation_verifier=foundation_verifier,
+        now=now,
     )
     installed_envelope = _sign_envelope(
         purpose="dotmac.foundation.installed-host.v2",
@@ -712,6 +713,7 @@ def _build_admission_coordinate(
         observation_id=attempt_id.hex,
         audience=host_id,
         foundation_verifier=foundation_verifier,
+        now=now,
     )
 
     presentation_verifier = _HostAdmissionPresentationVerifier()
@@ -883,6 +885,91 @@ def test_valid_signed_attestations_complete_the_full_flow(
     # is where the marker was actually written and committed. Seeing it here
     # proves the write is really durable, not merely visible on the writer's
     # own connection.
+    assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
+
+
+def _build_trust_policy_from_resolved_context(resolved: Any) -> AttestationTrustPolicy:
+    """A REAL production-shaped `build_trust_policy` -- unlike every other
+    test in this file (which closes over `coordinate.trust_policy`, already
+    built before any resolve happened, for setup simplicity), this derives
+    the policy FRESH from Control's real resolved context, exactly the way
+    any real production caller must. An independent security review found
+    that no test anywhere exercised this actual derivation -- every existing
+    test's `build_trust_policy` ignored `resolved` entirely -- so the 9/9
+    conformance result proved Control's comparison fires, but not that the
+    caller-side mapping it depends on is even possible to write correctly
+    with the real fields `HostAdmissionVerificationContextV1` exposes.
+
+    `HostAdmissionRootContextV1.public_key_base64` is ALREADY in
+    Foundation's padded-standard-base64 form (`_root_context` computes it via
+    Control's own `foundation_public_key_base64`) -- unlike this file's own
+    fixture setup in `_build_admission_coordinate`, which must convert
+    Control's stored unpadded-base64url key material via `_to_foundation_b64`
+    because that setup runs BEFORE any resolve exists. A real derivation
+    needs no such conversion, which is itself worth proving: it means
+    `_to_foundation_b64`'s existence in this file is fixture-setup-specific,
+    not something a real caller also has to reproduce.
+    """
+
+    def _root(root: Any) -> AttestationTrustRootV2:
+        return AttestationTrustRootV2(
+            public_key_fingerprint=root.public_key_fingerprint,
+            public_key_base64=root.public_key_base64,
+            purpose=root.purpose,
+            custody_domain=root.custody_domain,
+            issuer=root.issuer,
+            key_id=root.key_id,
+            algorithm=root.algorithm,
+            trust_root_version=root.root_version,
+            not_before=root.not_before.isoformat().replace("+00:00", "Z"),
+            not_after=root.not_after.isoformat().replace("+00:00", "Z"),
+            revoked=root.revoked,
+        )
+
+    return AttestationTrustPolicy(
+        candidate_roots=(_root(resolved.candidate_root),),
+        installed_roots=(_root(resolved.installed_root),),
+        candidate_audience=resolved.candidate_audience,
+        installed_audience=resolved.installed_audience,
+    )
+
+
+def test_a_trust_policy_genuinely_derived_from_resolved_context_completes_the_full_flow(
+    db: Session, admit_db: Session
+) -> None:
+    """Same shape as `test_valid_signed_attestations_complete_the_full_flow`,
+    with exactly one difference: `build_trust_policy` is
+    `_build_trust_policy_from_resolved_context` -- a real derivation from
+    `resolved`, not a closure over an already-built policy. Proves the
+    mapping an independent review flagged as unexercised is both POSSIBLE
+    and CORRECT with the real fields Control's resolved context exposes."""
+    coordinate = _build_admission_coordinate(db, now=_NOW)
+    install_host_admission_security(
+        verifier=coordinate.presentation_verifier, clock=coordinate.clock
+    )
+    launched: list[Any] = []
+
+    result = admit_and_launch_host_source(
+        resolve_session=db,
+        admit_session=admit_db,
+        attempt_id=coordinate.attempt_id,
+        presentation=coordinate.presentation,
+        resolve_context=resolve_host_admission_context,
+        verify_pair=verify_attestation_pair,
+        admit_and_consume=admit_and_consume_host_admission,
+        launch=lambda staged: launched.append(staged),
+        build_foreign_evidence=_map_foundation_result_to_control_evidence,
+        build_trust_policy=_build_trust_policy_from_resolved_context,
+        verification=AttestationVerificationInputs(
+            candidate=coordinate.candidate_envelope,
+            installed=coordinate.installed_envelope,
+            foundation_verifier=coordinate.foundation_verifier,
+            now=coordinate.clock.now(),
+        ),
+    )
+
+    assert len(launched) == 1
+    assert launched[0] is result
     assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
 
 
@@ -1270,7 +1357,15 @@ def _sign_envelope(
     observation_id: str,
     audience: str,
     foundation_verifier: _FoundationAttestationVerifier,
+    now: datetime,
 ) -> AttestationEnvelopeV2:
+    # `issued_at`/`expires_at` are derived from `now` (the same convention
+    # `enrol_root`'s `enrolled_at`/`not_after` already use below), NOT a
+    # hardcoded calendar date -- a fixed literal here made this suite's own
+    # evidence non-reproducible past a ~24-hour window (a real defect an
+    # independent review caught): Foundation's own staleness/future checks
+    # compare the envelope's issued_at/expires_at against real wall-clock
+    # time, so a literal date silently expires exactly like a certificate.
     envelope = AttestationEnvelopeV2(
         "TrustedHostAttestation.v2",
         purpose,
@@ -1280,8 +1375,8 @@ def _sign_envelope(
         fingerprint,
         custody_domain,
         trust_root_version,
-        "2026-09-22T00:00:00Z",
-        "2026-09-23T00:00:00Z",
+        (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        (now + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
         audience,
         observation_id,
         subject,
