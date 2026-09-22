@@ -2,9 +2,10 @@
 
 This section used to live inside `adapter.py`, "the ONE seam between this
 assembly and `dotmac-deployment-control`". It moved out because that file is
-not import-light: `adapter.py`'s other seam (the operator workflow /
-`DeploymentTargetFacts` reconciliation) pulls in `vendor_cp.approvals.adapter`,
-`vendor_cp.approvals_authority`, `vendor_cp.identity` and
+not import-light: `adapter.py`'s other seam (the operator workflow that
+reconciles a deployment target's delivery-eligibility facts) pulls in
+`vendor_cp.approvals.adapter`, `vendor_cp.approvals_authority`,
+`vendor_cp.identity` and
 `vendor_cp.licensing.delivery_models` at module scope -- and Python executes
 every one of those imports the moment anything imports `adapter` at all, this
 module's own functions included. A conformance suite for the host-admission

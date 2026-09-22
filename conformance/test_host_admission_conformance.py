@@ -14,14 +14,15 @@ never referenced from `pyproject.toml`.
 This file lives OUTSIDE `tests/` (this repository's `pyproject.toml` pins
 `testpaths = ["tests"]`) specifically so a normal `pytest tests/` run in this
 repository never collects it and never tries to import either real package,
-neither of which is installable here today. The ONLY graceful skip is the
-`CONFORMANCE_DATABASE_URL`-gated `pytestmark` below -- "you have not pointed
-this at a real database yet" is a legitimate precondition. An import error,
-a missing symbol, or any other real defect is NOT converted into a skip: this
+neither of which is installable here today. There is NO skip anywhere in
+this suite, graceful or otherwise: `conformance/conftest.py` raises a hard
+`pytest.UsageError` before collection even starts if
+`CONFORMANCE_DATABASE_URL` is unset, and an import error, a missing symbol,
+or any other real defect below is likewise never converted into a skip. This
 directory is already excluded from normal test discovery (`testpaths`) and
-from CI, so an explicit `pytest conformance/` run is a deliberate act, and it
-must FAIL loudly the moment a real dependency, API, or wheel is wrong rather
-than reporting a quiet, misleading "0 passed, N skipped".
+from CI, so an explicit `pytest conformance/` run is always a deliberate act,
+and it must FAIL loudly -- never report a misleading "0 passed, N skipped"
+that reads as a pass.
 
 SIGNING CONVENTION. Every signer/verifier pair below is a deterministic,
 non-asymmetric double -- SHA-256/HMAC over canonical bytes, exactly the same
@@ -62,8 +63,8 @@ import pytest
 # conformance run (see module docstring), and an ImportError here is a real
 # defect -- a missing wheel, a missing symbol, a stale API -- that must fail
 # collection loudly, not be laundered into a skip that looks like "nothing to
-# see here". The `CONFORMANCE_DATABASE_URL` skipif below is the only
-# legitimate skip this suite has.
+# see here". By the time this module is even imported, conftest.py's
+# pytest_configure has already confirmed CONFORMANCE_DATABASE_URL is set.
 from dotmac_deployment_control import (
     AUTHORIZATION_PURPOSE,
     DISPATCH_PURPOSE,
