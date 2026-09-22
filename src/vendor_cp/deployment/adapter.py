@@ -599,6 +599,17 @@ def authorize_deployment(
     )
 
 
+# ── Authenticated host admission (cross-repo redesign step 6) ──────────────
+#
+# Moved to `vendor_cp.deployment.host_admission_adapter` -- a LEAF module,
+# deliberately kept out of this file, because this file is not import-light
+# (see that module's docstring for why the distinction matters: a conformance
+# suite for the host-admission choreography needs this file's entire
+# `vendor_cp.approvals`/`vendor_cp.identity`/`vendor_cp.licensing` dependency
+# closure just to import five Protocols, which is not a property that
+# choreography should have).
+
+
 __all__ = [
     "PLAN_SUBJECT_TYPE",
     "AuthorizationReceipt",
