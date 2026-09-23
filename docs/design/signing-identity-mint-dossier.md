@@ -57,6 +57,7 @@ whether a signature can be manufactured.
 | `target_execution_observation` | **on the target, and never leaves it** | **NO — structurally** |
 | `platform_release_evidence` | Michael's workstation -> OpenBao, read by the release path | **yes, by design** |
 | `deployment_recovery` | Michael's workstation -> OpenBao, read by the recovery-grant issuer | **yes, by design** — it issues recovery grants |
+| `deployment_rehearsal_issuer` | Michael's workstation -> OpenBao, read by the rehearsal-issuer authorization issuer | **yes, by design** — it issues rehearsal-issuer authorizations |
 
 ### Identity 5 shares the namespace and is separated by POLICY SCOPE
 
@@ -165,6 +166,23 @@ declares it rather than from a description:
   `michaelayoade/dotmac_deployment_control` `main` rather than from a branch
   description. It existed nowhere at all until that merge, which is why this
   document could not name it earlier and did not guess.
+- `deployment_rehearsal_issuer` is Control's `REHEARSAL_ISSUER_PURPOSE`, at
+  `src/dotmac_deployment_control/rehearsal_issuer_authorization.py`, merged
+  commit `a41d142` on `michaelayoade/dotmac_deployment_control` `main`. It has
+  a descriptor class (`RehearsalIssuerSignerPointer`) and a
+  `POINTER_MATERIAL` entry in `src/vendor_cp/deployment/signers.py` — the
+  same `MaterialKind.PRIVATE` verdict as `deployment_recovery`, and for the
+  identical reason: Platform CP issues the rehearsal-issuer authorization, so
+  it is the party that must hold the key. **It is deliberately NOT yet one of
+  the five identities this document's ceremony mints.** The "Where each
+  private half lives" table above records its custody verdict, which is what
+  binds `POINTER_MATERIAL` to this document (`test_dossier_ceremony.py`); the
+  identities table, the mint steps and the step 7b purpose-misuse matrix are
+  this document's OWN separate register of what has actually been minted, and
+  extending that register — a sixth identity, a sixth column, ten more
+  directed pairs — is out of scope for this change. The same reservation
+  Decision 1 already makes for identity 3 before its ceremony landed applies
+  here: the pointer costs nothing while reserved and unused.
 
 **A purpose is not a document type, and one of them will not save you from the
 other.** The same file declares `RECOVERY_GRANT_SCHEMA =
