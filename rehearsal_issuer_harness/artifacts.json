@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "dotmac-deployment-control": {
+      "filename": "dotmac_deployment_control-0.1.0a14-py3-none-any.whl",
+      "version": "0.1.0a14",
+      "sha256": "3e66851fd03708ba8f296b7be13f36cbd6548341136380534937d554d672bbf5",
+      "source_commit": "f555f4384fbeb7eb18822bdaff70055fedbe1480",
+      "tag_object": "9769096c2129589d4818d8ba2357111c6b249d1f"
+    },
+    "dotmac-kernel": {
+      "filename": "dotmac_kernel-0.1.0a100-py3-none-any.whl",
+      "version": "0.1.0a100",
+      "sha256": "60a9ba68e4f659ada1d38583e2e5a8d6c803f387a692496cb49e60019772b88c",
+      "source_commit": "917181b38dcc5954bac932b630909afdfb19012b"
+    }
+  },
+  "harness_dependencies": {
+    "alembic": "1.18.5",
+    "cryptography": "50.0.0",
+    "psycopg": "3.3.4",
+    "pytest": "8.4.2",
+    "sqlalchemy": "2.0.51"
+  }
+}
