@@ -617,10 +617,10 @@ passing this harness alone cannot close any of them or amend § 5's bootstrap.
 **Proposed 2026-09-24, pending Michael Ayoade's ratification — nothing below is
 accepted merely by being written down**, the same discipline A6.4 already
 states for itself. This amendment does not implement anything; it freezes
-what the next five work packets (B-E, tracked outside this ADR) must be
-consistent with before any of them may merge. Work Packet A closes when
+what the next five work packets (B, C1, C2, D, E, tracked outside this ADR)
+must be consistent with before any of them may merge. Work Packet A closes when
 Michael ratifies this section; nothing downstream may begin implementation
-before that.
+before that, even if this amendment merges.
 
 ### A7.1 Why a rehearsal issuer needed its own gate sequence at all
 
@@ -652,13 +652,18 @@ manufacturing consent after the fact.
 
 | Gate | Question it answers | Output | Must NOT produce |
 | --- | --- | --- | --- |
-| **Gate 0** | Can the protected rehearsal issuer genuinely issue, hold standing on, revoke, and single-use-consume authority, under real custody and a real approval chain — with no candidate in the loop? | A protected issuer-readiness receipt and a reviewed authority graph (this amendment plus B/C1/C2/D below) | Any authorization naming a specific Foundation candidate. A candidate does not exist yet; nothing may bind to one. |
-| **Gate 2** | Given Gate 0 is closed, what is the one Foundation successor this fleet allocates, builds, signs, and rehearses? | One allocated, built, signed Foundation successor artifact | Any change to the rehearsal-issuer mechanism itself. Gate 2 consumes Gate 0's output; it does not renegotiate it. |
-| **Gate 3** | Does the exact successor built in Gate 2 pass an authorized, exact-byte Lane 3 rehearsal, using Gate 0's real (not disposable) issuer? | A genuine, candidate-bound Lane-3 receipt, on the real self-hosted runner | Anything upstream of Lane 3 itself — Gate 3 is pure execution against an already-closed authority. |
+| **Gate 0** | Can the protected rehearsal issuer genuinely issue, hold standing on, revoke, and single-use-consume authority, under real custody and a real approval chain — with no candidate in the loop? | Work Packet E's immutable, candidate-independent protected issuer-readiness receipt and a reviewed authority graph (this amendment plus B, C1, C2, D, E below) | Any authorization naming a specific Foundation candidate. A candidate does not exist yet; nothing may bind to one. |
+| **Gate 2** | Given candidate-independent Gate-0 readiness, what is the one Foundation successor this fleet allocates, builds, and signs? | Exactly one allocated, built, signed Foundation successor artifact | Rehearsal, execution authority, or a change to the rehearsal-issuer mechanism. Gate 2 consumes Gate 0's readiness evidence; it does not renegotiate it. |
+| **Gate 3** | Does the exact successor built in Gate 2 pass an authorized, exact-byte Lane 3 rehearsal, using Gate 0's real protected issuer composition? | An issued and validated Foundation `ExecutionGrant` binding the exact candidate and execution inputs, followed by a genuine candidate-bound Lane-3 receipt on the real self-hosted runner | Treating Gate-0 readiness or issuer-operation authority as authority to execute the candidate. |
 
-A Gate cannot be reordered or partially skipped: Gate 2 cited a candidate
-Gate 0 never authorized would be exactly the fabricated-consent failure §
-A7.1 names; Gate 3 run before Gate 2 has nothing exact-byte to rehearse.
+A Gate cannot be reordered or partially skipped. Gate 2 may begin only from
+candidate-independent Gate-0 readiness evidence; Gate 0 authorizes no
+candidate. Candidate-specific authority arises only after Gate 2, within Gate
+3. Before any executor or Lane-3 action, Gate 3 must obtain and validate
+Foundation's candidate-bound `ExecutionGrant` against the exact Gate-2
+artifact bytes, rendered plan, target and host, and controller identity. An
+absent, invalid, or mismatched grant refuses the run. Only then may Gate 3
+execute the Lane-3 rehearsal and produce its receipt.
 
 ### A7.3 The document-purpose matrix — five documents, never conflated
 
@@ -668,26 +673,29 @@ through Control, and they are not.
 
 | Document | Issued by | Binds | Consumed by | Explicitly NOT |
 | --- | --- | --- | --- | --- |
-| **Rehearsal-issuer authorization** (`RehearsalIssuerAuthorizationV1`, Control a14) | Control's real `issue_rehearsal_issuer_authorization_for_plan`, against a genuinely approved, standing plan | One lease's authority to OPERATE the disposable rehearsal issuer — issue harness evidence and stand up the issuer's own signing capability for that lease | The rehearsal issuer's own consumption/revocation/standing surface | **A grant to deploy, execute, or provoke anything.** It says "this lease may operate the issuer machinery," never "this issuer may act on a target." |
-| **Foundation `ExecutionGrant`** (owned by Foundation, C1 selects the real path) | Foundation, against its own execution-authorization semantics — still undecided, C1's exact job | Authority to execute a specific rendered deployment plan against a specific target | Foundation's own executor | **Not issued, checked, or implied by the rehearsal-issuer authorization above.** Confusing the two would let "the issuer is allowed to exist" stand in for "this deployment is allowed to run" — the single most consequential document-purpose collapse this matrix exists to refuse. |
-| **Harness evidence** (`rehearsal_harness_evidence.py`, Control a14) | The disposable rehearsal harness's own operational signer — in production this MUST be the real controller's per-run OpenSSH key fingerprint (§ A7.4), never PR #195's ephemeral in-memory Ed25519 test key | One lease presentation's authenticity — "this presentation genuinely came from the harness controller for this lease, in this environment, in this window" | Rehearsal-issuer issuance and consumption, as the caller-supplied but independently verified evidence | **Not an approval of anything.** It authenticates a presenter; it does not authorize an action. |
+| **Rehearsal-issuer authorization** (`RehearsalIssuerAuthorizationV1`, Control a14) | Control's real `issue_rehearsal_issuer_authorization_for_plan`, against a genuinely approved, standing plan | One lease's authority to OPERATE the protected rehearsal issuer; PR #195's disposable harness proves the mechanism but is not that protected composition | The rehearsal issuer's own consumption/revocation/standing surface | **A grant to deploy, execute, or provoke anything.** It says "this lease may operate the issuer machinery," never "this issuer may act on a target." |
+| **Foundation `ExecutionGrant`** (owned by Foundation, C1 selects the real path) | Foundation, against its own execution-authorization semantics — still undecided, C1's exact job | Gate 3's authority for the exact Gate-2 artifact bytes, rendered plan, target and host, and controller identity | Foundation's executor, after Gate 3 obtains and validates it | **Not issued, checked, or implied by the rehearsal-issuer authorization above.** Confusing the two would let "the issuer is allowed to exist" stand in for "this deployment is allowed to run" — the single most consequential document-purpose collapse this matrix exists to refuse. |
+| **Harness evidence** (`rehearsal_harness_evidence.py`, Control a14) | The disposable harness uses its own ephemeral signer for mechanism proof; the protected composition must use independently signed evidence bound to the real controller's per-run OpenSSH key fingerprint (§ A7.4) | One lease presentation's authenticity — "this presentation genuinely came from the harness controller for this lease, in this environment, in this window" | Rehearsal-issuer issuance and consumption, as the caller-supplied but independently verified evidence | **Not an approval of anything.** It authenticates a presenter; it does not authorize an action. |
 | **`ApprovalEvidence`** (`dotmac-approvals`, via Control's real `approve_plan`) | A human approver, through `dotmac-approvals`'s own real decision flow | That a specific frozen plan snapshot was genuinely reviewed and granted | `approve_plan`, and transitively every later reader of plan standing (including the rehearsal issuer's own `_standing_plan_terms`) | **Not rollout-coupled for a rehearsal act.** CP's existing deployment adapter (ADR-0013 § 2 item 2) carries `ApprovalEvidence` straight into `approve_plan` on the way to `request_rollout` — Work Packet B's protected adapter must reach the identical `approve_plan` call without ever constructing or requesting a `DeliveryIntent`. Approving a rehearsal is not approving a deployment, even though both terminate in the same `approve_plan` call. |
 | **Lane-3 receipt** (`RehearsalReceipt.v1`, Starter/Foundation, pre-existing per `docs/inventories/lane3-acceptance-criteria.md`) | The exposure-rehearsal runner, against its own sixteen-item closed vocabulary | That a specific candidate passed real, measured exposure-verification rehearsal | `require_rehearsal.py`'s publication gate | **Not itself an authorization to deploy.** It is evidence a candidate already holding execution authority (from Foundation's `ExecutionGrant`, above) behaved correctly under measured exposure conditions. |
 
-Every arrow into "issued by"/"consumed by" above is an EXISTING, already-real
-call path (`issue_rehearsal_issuer_authorization_for_plan`, `approve_plan`,
-`verify_rehearsal_harness_evidence_signature`, `require_rehearsal.decide`) —
-this matrix names what already exists rather than proposing a sixth
-document. Work Packets B through D each own exactly one row's remaining gap:
+The named Control, Approvals, harness-verification, and receipt-gate paths
+already exist (`issue_rehearsal_issuer_authorization_for_plan`, `approve_plan`,
+`verify_rehearsal_harness_evidence_signature`, `require_rehearsal.decide`).
+The Foundation `ExecutionGrant` issuance and validation path is still C1's
+undecided contract; this matrix does not assert that arrow exists today or
+propose a sixth document. Among the five downstream packets B, C1, C2, D,
+and E, the first four close distinct gaps:
 B closes the `ApprovalEvidence` row's rollout-decoupling; C1 closes the
 `ExecutionGrant` row's still-undecided semantics; C2 wires B's protected
 adapter into the composed assembly; D closes the harness-evidence row's
 identity gap (§ A7.4) and the Lane-3 row's protected-runner/environment gap
-(§ A7.5).
+(§ A7.5). E accepts their candidate-independent operational evidence and
+closes Gate 0 (§ A7.7).
 
 ### A7.4 Identity and custody — what is real, what remains a test fixture
 
-| Role | PR #195's disposable harness (mechanism proof) | Gate 0's real composition (Work Packet B, not yet built) |
+| Role | PR #195's disposable harness (mechanism proof) | Gate 0's protected issuer composition (Work Packets B, C2, D; operationally accepted by E) |
 | --- | --- | --- |
 | Rehearsal-issuer signer (`RehearsalIssuerAuthorizationSigner`) | Ephemeral in-memory Ed25519, generated fresh per test session, never persisted | A real key held under OpenBao custody (fleet-standard pattern — see `bao-get` skill), installed once at process start via `install_rehearsal_issuer_security`, never resolved on the per-request path (mirroring `authorization_v3`'s existing "no OpenBao call on the controller path" discipline from § 5) |
 | Rehearsal-issuer authorization verifier | The same ephemeral key's own public half | The same real signer's public half; no separate verifier identity |
@@ -726,21 +734,46 @@ so far — PRs #194/#195 never claimed to close them.
 | `dotmac-deployment-control` | Rehearsal-issuer authorization state — issuance, standing, revocation, single-use consumption (already real, per PR #61's merged `rehearsal_issuer_issuance.py`) |
 | `dotmac-approvals` | The approval DECISION an `ApprovalEvidence` carries — Platform CP constructs no approval logic of its own, exactly as § 2 already holds for the real issuer |
 | Deployment Foundation | Execution semantics and the `ExecutionGrant` boundary (Work Packet C1) — Control's rehearsal-issuer envelope never substitutes for this |
-| Platform CP (this assembly) | The protected rehearsal-issuer OPERATOR WORKFLOW only (Work Packet B/C2) — approves and requests issuance/consumption, decides nothing about plan legality, receipt content, or drift, exactly as § 2's test of a design error already states |
+| Platform CP (this assembly) | The protected rehearsal-issuer OPERATOR WORKFLOW (Work Packets B/C2) and the single writer of Gate-0's candidate-independent readiness receipt (Work Packet E); it decides nothing about plan legality, execution authority, Lane-3 receipt content, or drift, exactly as § 2's test of a design error already states |
 | Starter / Foundation infrastructure | The protected runner, its GitHub Environment, OIDC, and the Lane-3 vantage configuration (Work Packet D) |
 
 Do not create a second rehearsal-issuer state owner, a second approval
 model, or a second execution-authorization path. The test of a design error
-from § 2 applies here unchanged: if a change to any of B-E would require
-deciding *whether a plan is standing, whether a signature is valid, or
-whether a deployment may execute*, the change belongs to the module that
-already owns that decision, not to the workflow composing it.
+from § 2 applies here unchanged: if a change to any of B, C1, C2, D, or E
+would require deciding *whether a plan is standing, whether a signature is
+valid, or whether a deployment may execute*, the change belongs to the module
+that already owns that decision, not to the workflow composing it.
 
-### A7.7 What this amendment does not do
+### A7.7 Work Packet E — operational Gate-0 acceptance and closeout
+
+Platform CP owns this packet and is the single writer of the immutable
+protected issuer-readiness receipt. E begins only after Michael ratifies this
+amendment and B, C1, C2, and D are each accepted. It consumes D's protected
+workflow evidence and the accepted, immutable revision and test coordinates
+from B, C1, and C2. Using a candidate-independent issuer-operation test plan,
+the protected run must show a genuine human approval through
+`dotmac-approvals`, real issuer signing custody, and the actual
+controller's per-run identity in independently verified harness evidence. It
+exercises issuance and standing, then single-use consumption with replay
+refused; a separate lease exercises revocation with later use refused. Missing
+approval or custody, an absent or mismatched controller identity, invalid
+evidence, a stale or revoked lease, or a second consumption is a refusal, not
+a readiness pass.
+
+E records the protected environment and run identity, exact source revisions,
+evidence digests, and pass/refusal outcomes in a candidate-independent receipt.
+The receipt names no Foundation successor, artifact, rendered deployment plan,
+or candidate-bound authority. A disposable-harness result cannot substitute
+for the protected run. Gate 0 closes only when this receipt passes after B,
+C1, C2, and D close. E does not allocate, build, sign, or rehearse a Foundation
+candidate, produce an `ExecutionGrant`, or authorize deployment. Gate 3 alone
+obtains candidate-specific execution authority after Gate 2 builds its artifact.
+
+### A7.8 What this amendment does not do
 
 It does not install a signer, create a GitHub Environment, provision a key,
 read an OpenBao path, allocate a Foundation successor, or authorize any
 candidate. It does not amend § 5's bootstrap or A6's plan-input decisions. It
-is the frozen reference B through E must be consistent with, and Gate 0 does
-not close until B, C1, C2, and D each close against it and this amendment is
-ratified.
+is the proposed reference with which B, C1, C2, D, and E must be consistent
+after ratification. Gate 0 does not close until B, C1, C2, and D each close
+against it and E produces its passing protected issuer-readiness receipt.
