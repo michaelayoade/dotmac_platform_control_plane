@@ -589,3 +589,23 @@ stays at its existing kernel a98, Control a6, and Governance schema-9 pins.
 This does not install a signer or verifier, close Gate 0 or Gate 1, activate
 the issuer, or allocate Foundation. Exact a14 disposable composition is the
 next separate gate.
+
+---
+
+## Amendment, 2026-09-24 — disposable a14 rehearsal issuer harness source
+
+`rehearsal_issuer_harness/` is a candidate-independent source and receipt
+readiness gate for Control `0.1.0a14`. Its lock identifies exact Control and
+Kernel wheels and its explicit test lane requires those installed artifacts,
+a real disposable PostgreSQL database, and ephemeral distinct Ed25519 keys.
+The harness sends the dependency-light three-field request from the Platform CP
+leaf into Control's installed issuer. Control alone derives the signed statement
+from its frozen approved plan, records standing, and governs revocation and
+single-use consumption. The harness neither launches a deployment nor grants
+an application authority over its own creation.
+
+This amendment records local harness source and potential test receipt
+readiness only. Protected runner identity, production key custody, and genuine
+approval provenance are still open. Gate 0/1, namespace allocation, rehearsal
+of an exact Foundation artifact, and Platform CP adoption remain unclosed;
+passing this harness alone cannot close any of them or amend § 5's bootstrap.
