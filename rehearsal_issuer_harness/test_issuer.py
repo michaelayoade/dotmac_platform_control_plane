@@ -1,4 +1,12 @@
-"""Real installed Control a14, real signatures, real migrated PostgreSQL."""
+"""Real installed Control a14, real signatures, real migrated PostgreSQL.
+
+Every issuer/standing/revocation/consumption/target/plan call below --
+including the `_seed` helper -- runs against the `engine` fixture, which is
+`platform_api`: the real online CP runtime role `dc_0014` actually grants the
+rehearsal-issuer ledger to. Raw-SQL structural checks and the sensitivity
+proofs below use `admin_engine` (the migrator/table-owner) instead, since
+those need privileges no online runtime role should hold.
+"""
 
 # ruff: noqa: S101
 
@@ -44,7 +52,7 @@ from dotmac_deployment_control.rehearsal_issuer_issuance import (
     revoke_rehearsal_issuer_authorization,
     stage_rehearsal_issuer_consumption,
 )
-from sqlalchemy import func, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
@@ -487,3 +495,79 @@ def test_concurrent_consumption_has_one_winner(
         _standing(engine, envelope, later).standing
         is RehearsalIssuerAuthorizationStanding.CONSUMED
     )
+
+
+# ── Sensitivity proofs (F1/F2/F3 from the independent review) ──────────────
+
+
+def test_app_user_cannot_read_the_rehearsal_issuer_ledger(
+    admin_engine: Engine,
+) -> None:
+    """dc_0014 REVOKEs ALL on the ledger from `app_user` -- prove the negative
+    directly, as `app_user`, rather than trusting the migration's own grant
+    comment. A planted removal of that REVOKE would turn this SELECT from a
+    permission error into a real (empty) result, which is exactly the defect
+    this test exists to catch.
+    """
+    app_user_url = admin_engine.url.set(username="app_user", password=None)
+    app_user_engine = create_engine(app_user_url)
+    try:
+        with app_user_engine.connect() as conn:
+            with pytest.raises(DBAPIError, match="permission denied"):
+                conn.execute(
+                    text("SELECT 1 FROM mod_deploy.rehearsal_issuer_authorizations")
+                )
+    finally:
+        app_user_engine.dispose()
+
+
+def test_removing_platform_apis_target_update_grant_fails_the_real_operation(
+    admin_engine: Engine, engine: Engine
+) -> None:
+    """Prove `platform_api`'s `UPDATE` on `deployment_targets` is load-bearing,
+    not a redundant grant left over from `app_admin`'s own privileges: revoke
+    it, attempt the real `suspend_target` operation as `platform_api`, and
+    require a genuine DB-level permission error -- not a typed Control
+    refusal, which would mean the grant was never actually reached.
+    """
+    target_ref, _ = _seed(engine)
+    with admin_engine.connect() as conn:
+        raw_target_id = conn.execute(
+            text(
+                "SELECT id FROM mod_deploy.deployment_targets WHERE target_ref = :ref"
+            ),
+            {"ref": target_ref},
+        ).scalar_one()
+        target_id = (
+            raw_target_id
+            if isinstance(raw_target_id, uuid.UUID)
+            else uuid.UUID(str(raw_target_id))
+        )
+    with admin_engine.begin() as conn:
+        conn.execute(
+            text("REVOKE UPDATE ON mod_deploy.deployment_targets FROM platform_api")
+        )
+    try:
+        with Session(engine) as db:
+            with pytest.raises(DBAPIError, match="permission denied"):
+                suspend_target(
+                    db, TargetTransitionCommand(command_id=_id(), target_id=target_id)
+                )
+    finally:
+        with admin_engine.begin() as conn:
+            conn.execute(
+                text("GRANT UPDATE ON mod_deploy.deployment_targets TO platform_api")
+            )
+
+
+def test_app_admin_cannot_create_a_role(admin_engine: Engine) -> None:
+    """If `init-roles.sh` had NOT pre-created `outbox_dispatcher`/
+    `platform_outbox_dispatcher`, the Kernel migration's own
+    ``CREATE ROLE IF NOT EXISTS`` would genuinely fail closed here, rather
+    than the harness silently working around a missing role by granting
+    itself the power to create one. `app_admin` must lack `CREATEROLE`
+    entirely, not merely lack it for these two specific roles.
+    """
+    with admin_engine.connect() as conn, conn.begin():
+        with pytest.raises(DBAPIError, match="permission denied"):
+            conn.execute(text(f'CREATE ROLE "probe_{_id()}" LOGIN'))

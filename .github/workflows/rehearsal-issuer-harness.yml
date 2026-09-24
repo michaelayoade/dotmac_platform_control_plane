@@ -1,0 +1,140 @@
+name: Rehearsal Issuer Harness
+
+# The disposable Control a14 / Kernel a100 rehearsal-issuer conformance
+# harness (`rehearsal_issuer_harness/`) is deliberately outside the
+# application's default `testpaths`, so `ci.yml`'s `check` job never collects
+# it. That made a "13 passed" claim in a pull request description a one-time
+# manual run, never a reproducible gate. This job is that gate: a real,
+# separate, always-runs-on-PR job -- not folded into an existing one -- that
+# proves the harness against real Postgres, as the real `platform_api`
+# runtime role, in a genuinely isolated environment.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal-issuer-harness:
+    runs-on: ubuntu-latest
+    env:
+      TEST_DB_PORT: "5439"
+      TEST_DB_NAME: vendor_cp_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+
+      # `docker-compose.test.yml` already mounts `init-roles.sh` -- the real
+      # production role initializer -- so by the time this returns, all five
+      # production roles exist with their exact production attributes. The
+      # harness's own conftest only ever verifies that contract; it never
+      # creates, alters, or grants a role.
+      - name: Start disposable Postgres (init-roles.sh provisions the role contract)
+        run: docker compose -f docker-compose.test.yml up -d --wait
+
+      # A NORMAL, whole-repository build -- not a narrow one -- mirroring
+      # conformance/README.md's own stated rationale: it is the --no-deps
+      # install below, not a special build, that keeps the leaf boundary real.
+      - name: Build this repository's own wheel
+        run: poetry build
+
+      - name: Create the isolated venv and install this repo's wheel with --no-deps
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/rehearsal-issuer-venv
+          /tmp/rehearsal-issuer-venv/bin/pip install --quiet --upgrade pip
+          wheel=$(ls dist/*.whl)
+          echo "installing ${wheel} with --no-deps into an isolated venv"
+          /tmp/rehearsal-issuer-venv/bin/pip install --no-deps "$wheel"
+
+      # Same private-registry credential pattern as ci.yml's existing
+      # kernel-pin job: a scoped netrc, removed unconditionally on exit.
+      - name: Download the two locked private wheels and verify their sha256
+        env:
+          TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          trap 'rm -f -- "${HOME}/.netrc"' EXIT HUP INT TERM
+          umask 077
+          : > "${HOME}/.netrc"
+          chmod 600 "${HOME}/.netrc"
+          printf 'machine %s login %s password %s\n' \
+            "registry.dotmac.io" "ci-reader" "${TOKEN}" >> "${HOME}/.netrc"
+
+          mkdir -p /tmp/private-wheels
+          /tmp/rehearsal-issuer-venv/bin/pip download --no-deps \
+            --index-url "https://pypi.org/simple" \
+            --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
+            --dest /tmp/private-wheels \
+            "dotmac-deployment-control==0.1.0a14" "dotmac-kernel==0.1.0a100"
+
+          # A CI-level sanity check only -- defense in depth. The harness's
+          # own verify_wheels/verify_installed re-checks this again, from
+          # first principles, at test collection time regardless.
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          lock = json.loads(
+              pathlib.Path("rehearsal_issuer_harness/artifacts.json").read_text()
+          )
+          wheels = {p.name: p for p in pathlib.Path("/tmp/private-wheels").glob("*.whl")}
+          for name, spec in lock["artifacts"].items():
+              path = wheels.get(spec["filename"])
+              if path is None:
+                  sys.exit(f"::error::{spec['filename']} was not downloaded")
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              if digest != spec["sha256"]:
+                  sys.exit(
+                      f"::error::{name} sha256 {digest} differs from "
+                      f"artifacts.json's {spec['sha256']}"
+                  )
+              print(f"{name} sha256 matches artifacts.json: {digest}")
+          PY
+
+      # The README's own documented recipe, verbatim.
+      - name: Build the public wheelhouse from public-requirements.lock
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/public-wheelhouse
+          /tmp/rehearsal-issuer-venv/bin/pip download --require-hashes \
+            --dest /tmp/public-wheelhouse \
+            -r rehearsal_issuer_harness/public-requirements.lock
+          /tmp/rehearsal-issuer-venv/bin/pip install --require-hashes --no-index \
+            --find-links /tmp/public-wheelhouse \
+            -r rehearsal_issuer_harness/public-requirements.lock
+
+      # Zero skips permitted. `-rs` prints a `SKIPPED ...` short-summary line
+      # for any skip; a clean run has none, so this is checked by absence
+      # rather than by matching a fragile "0 skipped" substring pytest does
+      # not actually print when nothing was skipped.
+      - name: Rehearsal issuer harness (real Postgres, real platform_api role)
+        env:
+          REHEARSAL_ISSUER_DATABASE_URL: "postgresql+psycopg://postgres@localhost:${{ env.TEST_DB_PORT }}/${{ env.TEST_DB_NAME }}"
+        run: |
+          set -euo pipefail
+          control_wheel=$(ls /tmp/private-wheels/dotmac_deployment_control-*.whl)
+          kernel_wheel=$(ls /tmp/private-wheels/dotmac_kernel-*.whl)
+          /tmp/rehearsal-issuer-venv/bin/python -m pytest rehearsal_issuer_harness/ \
+            -q -rs --no-header \
+            --control-wheel "$control_wheel" \
+            --kernel-wheel "$kernel_wheel" \
+            --public-wheelhouse /tmp/public-wheelhouse \
+            | tee /tmp/rehearsal-issuer-output.log
+          if grep -q '^SKIPPED' /tmp/rehearsal-issuer-output.log; then
+            echo "::error::this suite must never skip"
+            exit 1
+          fi
+
+      - name: Stop Postgres
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v

@@ -28,7 +28,7 @@ try:
         verify_wheels,
     )
     from rehearsal_issuer_harness.conftest import (  # noqa: E402
-        _require_migration_roles,
+        _verify_role_contracts,
     )
 finally:
     sys.path.remove(str(ROOT))
@@ -269,31 +269,42 @@ def test_alembic_os_separator_discovers_both_lineage_heads(tmp_path: Path) -> No
     assert "ScriptDirectory.from_config(cfg).get_heads()" in fixture
 
 
-def test_migration_role_preflight_refuses_missing_or_unprivileged_roles() -> None:
+def test_role_contract_preflight_refuses_missing_or_mismatched_roles() -> None:
+    """`app_admin` must be `NOCREATEROLE` -- the opposite of the old harness's
+    wrong requirement -- matching production's real contract exactly."""
     conn = MagicMock()
     conn.execute.return_value.all.return_value = [
-        ("app_admin", False),
-        ("app_user", False),
+        ("app_admin", "false|false|true|true"),
+        ("app_user", "false|false|false|true"),
     ]
     with pytest.raises(RuntimeError, match="lacks roles.*platform_api"):
-        _require_migration_roles(conn)
+        _verify_role_contracts(conn)
     query = str(conn.execute.call_args.args[0])
-    assert "rolcreaterole FROM pg_roles" in query
+    assert "rolcreaterole" in query and "FROM pg_roles" in query
 
     conn.execute.return_value.all.return_value = [
-        ("app_admin", False),
-        ("app_user", False),
-        ("platform_api", False),
+        # Planted defect: app_admin wrongly holds CREATEROLE.
+        ("app_admin", "false|true|true|true"),
+        ("app_user", "false|false|false|true"),
+        ("platform_api", "false|false|false|true"),
+        ("outbox_dispatcher", "false|false|false|true"),
+        ("platform_outbox_dispatcher", "false|false|false|true"),
     ]
-    with pytest.raises(RuntimeError, match="app_admin requires CREATEROLE"):
-        _require_migration_roles(conn)
+    with pytest.raises(RuntimeError, match="role contract differs from production"):
+        _verify_role_contracts(conn)
 
-    conn.execute.return_value.all.return_value[0] = ("app_admin", True)
-    _require_migration_roles(conn)
-    fixture = (HARNESS / "conftest.py").read_text()
-    assert fixture.index("_require_migration_roles(conn)") < fixture.index(
-        "conn.execute(text(f'CREATE DATABASE \"{scratch_name}\"'))"
+    conn.execute.return_value.all.return_value[0] = (
+        "app_admin",
+        "false|false|true|true",
     )
+    _verify_role_contracts(conn)
+    fixture = (HARNESS / "conftest.py").read_text()
+    assert fixture.index("_verify_role_contracts(conn)") < fixture.index(
+        "conn.execute(text(f'CREATE DATABASE \"{scratch_name}\" OWNER app_admin'))"
+    )
+    assert (
+        "requires CREATEROLE" not in fixture
+    ), "the harness must never require CREATEROLE for app_admin again"
 
 
 def test_no_private_key_or_checkout_dependency() -> None:
