@@ -1,5 +1,7 @@
 # Disposable Control a14 rehearsal issuer proof
 
+<!-- kernel-pin: snapshot -->
+
 This directory is an explicit, candidate-independent test suite. It does not
 compose the Platform CP application, launch Foundation, or deploy anything.
 It creates a new scratch PostgreSQL database on the named test server, applies
