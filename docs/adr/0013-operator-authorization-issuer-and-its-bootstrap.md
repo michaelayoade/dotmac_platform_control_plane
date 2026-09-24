@@ -576,3 +576,16 @@ NAMED `resolve_target`: the count is over occurrences, and raising a declared
 call-site count to accommodate prose would have left room underneath it for a
 real new caller. The prose was reworded instead. Both are recorded because the
 tempting repair in each case was to edit the ledger.
+
+---
+
+## Amendment, 2026-09-23 — rehearsal issuer source seam only
+
+`src/vendor_cp/deployment/rehearsal_issuer_seam.py` defines an immutable
+three-field command and an opaque evidence carrier. It converts only
+`command_id`, `plan_id`, and optional `actor_ref` to Control a14's request
+mapping. This is source readiness, not operational issuance: the application
+stays at its existing kernel a98, Control a6, and Governance schema-9 pins.
+This does not install a signer or verifier, close Gate 0 or Gate 1, activate
+the issuer, or allocate Foundation. Exact a14 disposable composition is the
+next separate gate.
