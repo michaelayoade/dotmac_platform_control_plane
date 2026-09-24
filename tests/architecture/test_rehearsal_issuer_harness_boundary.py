@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 from zipfile import ZipFile
@@ -12,15 +13,25 @@ from zipfile import ZipFile
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from rehearsal_issuer_harness.artifacts import (
-    read_public_lock,
-    verify_public_wheelhouse,
-    verify_wheels,
-)
-from rehearsal_issuer_harness.conftest import _require_migration_roles
 
 ROOT = Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "rehearsal_issuer_harness"
+
+# The harness is intentionally outside the installed application package and
+# the default test collection. Hosted CI does not put the repository root on
+# sys.path, so load this excluded source explicitly and then restore sys.path.
+sys.path.insert(0, str(ROOT))
+try:
+    from rehearsal_issuer_harness.artifacts import (  # noqa: E402
+        read_public_lock,
+        verify_public_wheelhouse,
+        verify_wheels,
+    )
+    from rehearsal_issuer_harness.conftest import (  # noqa: E402
+        _require_migration_roles,
+    )
+finally:
+    sys.path.remove(str(ROOT))
 
 
 _STDLIB_ROOTS = {
