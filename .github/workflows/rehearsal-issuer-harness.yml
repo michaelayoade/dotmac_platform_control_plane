@@ -101,6 +101,18 @@ jobs:
               print(f"{name} sha256 matches artifacts.json: {digest}")
           PY
 
+      # verify_wheels/verify_installed check the DOWNLOADED files' bytes and
+      # the RUNNING interpreter's installed metadata separately -- downloading
+      # a wheel does not install it. Without this step, importlib.metadata
+      # finds nothing for either distribution and pytest_configure's
+      # verify_installed() call fails before pytest collects a single test.
+      - name: Install the two locked private wheels into the isolated venv
+        run: |
+          set -euo pipefail
+          /tmp/rehearsal-issuer-venv/bin/pip install --no-deps \
+            /tmp/private-wheels/dotmac_deployment_control-*.whl \
+            /tmp/private-wheels/dotmac_kernel-*.whl
+
       # The README's own documented recipe, verbatim.
       - name: Build the public wheelhouse from public-requirements.lock
         run: |
