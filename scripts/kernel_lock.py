@@ -1838,8 +1838,19 @@ def _changed_fields(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
 def _kernel_entry_problems(
     old: dict[tuple[str, str], dict[str, Any]],
     new: dict[tuple[str, str], dict[str, Any]],
+    *,
+    unmoved_is_permitted: bool = False,
 ) -> list[str]:
     """The kernel entry may move its version and its files. Nothing else.
+
+    `unmoved_is_permitted` is True only when the dispatch DECLARED a dependency
+    movement. Then an identical kernel entry is the honest outcome, not an
+    empty lock: a composition whose kernel already moved in an earlier chained
+    run (Control a6 -> a15 took kernel a98 -> a100) can move a second declared
+    module (Approvals a5 -> a7) without inventing a kernel change. "Unmoved"
+    means the entry is byte-for-byte identical, so nothing on it is exempt. A
+    kernel-only dispatch keeps the old refusal: with no declared movement an
+    unmoved kernel really does leave a lock that says nothing.
 
     The gate this replaced compared every entry EXCEPT this one, and then let
     this one change arbitrarily. So the single entry the whole change is about
@@ -1857,6 +1868,8 @@ def _kernel_entry_problems(
             f"{len(old_kernel)} before and {len(new_kernel)} after"
         ]
     if old_kernel == new_kernel:
+        if unmoved_is_permitted:
+            return []
         return [f"{KERNEL} did not move; this lock says nothing"]
 
     before = next(iter(old_kernel.values()))
@@ -2530,7 +2543,7 @@ def drift_problems(
         if fields:
             problems.append(f"{key[0]} {key[1]} changed {', '.join(fields)}")
 
-    problems += _kernel_entry_problems(old, new)
+    problems += _kernel_entry_problems(old, new, unmoved_is_permitted=delta is not None)
     if delta is not None:
         problems += _declared_delta_problems(old, new, delta, bundle)
 
