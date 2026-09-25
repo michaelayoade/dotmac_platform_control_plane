@@ -151,7 +151,16 @@ KERNEL_MUTABLE_FIELDS = frozenset({"version", "files"})
 #: here only by review, in the same change that states why that package's pin
 #: must move together with the kernel's (see `docs/adr` for the composed-
 #: maximum relationship `scripts/kernel_floor.py` enforces between them).
-DECLARABLE_DEPENDENCIES: Final = frozenset({"dotmac-deployment-control"})
+#:
+#: `dotmac-approvals` joined on 2026-09-25 for the same reason Control did: its
+#: 0.1.0a7 release declares `dotmac-kernel >=0.1.0a100`, so the Gate-0
+#: composition adoption (Control a6 -> a15, Approvals a5 -> a7, kernel a98 ->
+#: a100) cannot move Approvals without moving the kernel with it. A dispatch
+#: still declares ONE movement; the two modules move in two chained runs, each
+#: resolved against the exact commit the previous run's pair produced.
+DECLARABLE_DEPENDENCIES: Final = frozenset(
+    {"dotmac-deployment-control", "dotmac-approvals"}
+)
 
 #: The only two fields a DECLARED dependency's entry may change. Identical
 #: reasoning to `KERNEL_MUTABLE_FIELDS`: a version move changes `version` and

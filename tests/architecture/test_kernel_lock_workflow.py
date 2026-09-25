@@ -752,8 +752,24 @@ def test_manifest_problems_with_a_delta_is_clean_when_declared_correctly() -> No
     assert manifest_problems(manifest, "0.1.0a99", CONTROL_DELTA) == []
 
 
-def test_dotmac_deployment_control_is_in_the_closed_allowlist() -> None:
-    assert DECLARABLE_DEPENDENCIES == frozenset({CONTROL})
+def test_the_closed_allowlist_is_exactly_control_and_approvals() -> None:
+    """Both modules declare a kernel floor that the composed maximum makes the
+    kernel pin equal, so each can only move together with the kernel. The set
+    is compared by equality: a third name arriving here without review fails."""
+    assert DECLARABLE_DEPENDENCIES == frozenset({CONTROL, "dotmac-approvals"})
+
+
+def test_an_approvals_movement_is_declarable() -> None:
+    delta = parse_dependency_delta("dotmac-approvals", "0.1.0a5", "0.1.0a7")
+    assert delta == DependencyDelta(
+        name="dotmac-approvals", before="0.1.0a5", after="0.1.0a7"
+    )
+
+
+def test_a_name_outside_the_allowlist_is_still_refused() -> None:
+    """NEGATIVE CONTROL for the widening above: the allowlist stays closed."""
+    with pytest.raises(Refusal, match="closed allowlist"):
+        parse_dependency_delta("dotmac-licensing", "0.1.0a1", "0.1.0a2")
 
 
 # ── the manifest may not misdirect the credential ───────────────────────────
