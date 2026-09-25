@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "dotmac-deployment-control": {
+      "repository": "michaelayoade/dotmac_deployment_control",
+      "record_path": "docs/published-versions.json",
+      "version": "0.1.0a15",
+      "record_commit": null,
+      "tag": null,
+      "tag_object": null,
+      "source_commit": null,
+      "sha256": null
+    },
+    "dotmac-approvals": {
+      "repository": "michaelayoade/dotmac_starter_mt",
+      "record_path": "docs/inventories/module-release-verifications.json",
+      "version": "0.1.0a7",
+      "record_commit": null,
+      "tag": null,
+      "tag_object": null,
+      "source_commit": null,
+      "sha256": null
+    }
+  }
+}

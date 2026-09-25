@@ -1,11 +1,11 @@
-"""Composes the drain: the kernel's platform relay worker + Vendor's consumer.
+"""Compose the kernel platform relay with Vendor's platform event consumers.
 
 This module owns no decision. The kernel owns leasing, backoff, dead-lettering
 and the two connection identities; `dotmac-entitlement-allocation` owns what a
 valid allocation is; `dotmac-commercial-agreements` owns whether an agreement is
-active. All that was missing was something to construct
-`ContractEventConsumer` and hand it to `dotmac_kernel.messaging.platform_worker`,
-and that is the whole of this file.
+active. The composed transport routes activation facts to ContractEventConsumer
+and issuer withdrawal facts to ApprovalWithdrawalConsumer. The latter's future
+Control API stays lazily imported until that event is delivered.
 
 ## Two connections, THREE ROLES, ONE DATABASE
 
@@ -38,8 +38,7 @@ whole subject of this package is that those two must never look alike.
 
 ## Delivery failure is the kernel's business
 
-A refusal from `stage_allocation` — a superseded agreement, a content hash that
-no longer matches — raises out of `deliver`, and the kernel worker backs it off
+A refusal from a consumer raises out of `deliver`, and the kernel worker backs it off
 and eventually dead-letters it. That is deliberate and is not caught here: a
 dead letter is VISIBLE and `vendor_cp.relay.health` reports it, where swallowing
 the refusal would settle the event as sent and restore exactly the silence this
@@ -54,16 +53,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
 
-from dotmac_kernel.messaging import RelayPolicy
+from dotmac_kernel.messaging import ClaimedPlatformEvent, RelayPolicy
 from dotmac_kernel.messaging.platform_worker import (
     PlatformDeliveryTransport,
     SessionFactory,
     run_once,
 )
 from dotmac_kernel.session_runtime import DatabaseRuntime
+from sqlalchemy.orm import Session
 
 from vendor_cp.allocations.consumer import ContractEventConsumer
 from vendor_cp.config import VendorSettings, vendor_settings
+from vendor_cp.deployment.protected_rehearsal_issuer import ApprovalWithdrawalConsumer
 from vendor_cp.relay import heartbeat
 
 logger = logging.getLogger("vendor_cp.relay.runner")
@@ -82,6 +83,18 @@ class RelayNotConfiguredError(RuntimeError):
     relay, the other is a relay with an empty queue, and they are the two states
     this package exists to keep apart.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformEventConsumers:
+    """Route the one claimed event to each composed platform consumer."""
+
+    contracts: ContractEventConsumer
+    approval_withdrawals: ApprovalWithdrawalConsumer
+
+    def deliver(self, event: ClaimedPlatformEvent, platform_db: Session) -> None:
+        self.contracts.deliver(event, platform_db)
+        self.approval_withdrawals.deliver(event, platform_db)
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,16 +160,15 @@ def require_dispatcher_dsn(settings: VendorSettings = vendor_settings) -> str:
 
 
 def composed(settings: VendorSettings = vendor_settings) -> RelayComposition:
-    """The production arrangement: dispatcher credential, delivery credential, consumer.
+    """The production arrangement: dispatcher and delivery credentials, consumers.
 
     The delivery factory is the ASSEMBLY'S EXISTING runtime, reached through its
     public name. A relay that built its own platform engine would be the second
     session factory hard rule 8 forbids — the dispatcher needs its own because
     its CREDENTIAL differs, and this one does not.
 
-    The transport is returned as the kernel's Protocol rather than the concrete
-    class, because what the worker needs is a `deliver`, and naming the protocol
-    here is what keeps a second transport from being bolted onto the consumer.
+    The transport is returned as the kernel's Protocol; one multiplexer
+    delivers each claimed event to the two composed consumers in that session.
     """
     from dotmac_kernel.db import runtime
 
@@ -164,7 +176,10 @@ def composed(settings: VendorSettings = vendor_settings) -> RelayComposition:
     return RelayComposition(
         dispatcher_sessions=dispatcher.platform_session_factory,
         delivery_sessions=runtime.platform_session_factory,
-        transport=ContractEventConsumer(),
+        transport=PlatformEventConsumers(
+            contracts=ContractEventConsumer(),
+            approval_withdrawals=ApprovalWithdrawalConsumer(),
+        ),
     )
 
 
