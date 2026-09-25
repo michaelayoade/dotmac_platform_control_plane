@@ -350,12 +350,14 @@ only where A1 replaces the host.
 
 ## Amendment, 2026-09-01 — A6: the issuer must be able to create the SUBJECT it authorizes
 
-Proposed 2026-09-01, **A6.4 replaced 2026-09-04, and the whole amendment is
-still pending Michael Ayoade's acceptance.** Nothing here is marked accepted:
-A6.1, A6.2, A6.3 and A6.5 stand as proposed on 2026-09-01 and were accepted in
-substance without being ratified in this record; A6.4 now carries Michael's
-2026-09-04 ruling and is prepared FOR ratification, not recorded as having
-received it.
+**RATIFIED 2026-09-25 by Michael Ayoade, the owner and only approver, including
+the replacement A6.4 recorded on 2026-09-04.** The amendment was originally
+proposed 2026-09-01. A6.1, A6.2, A6.3 and A6.5 had already been accepted in
+substance; this record now makes that acceptance explicit and ratifies the
+replacement A6.4 as part of the complete A6 amendment. Ratification was given
+after § A7's separate ratification record, through the owner's instruction to
+implement the recommendation that named this exact scope; it does not amend
+§ 5's bootstrap or authorize a deployment.
 
 **Nothing above the amendment is edited**, for the reason A2 already gave: a
 record quietly rewritten to look as though it always said the right thing
@@ -430,10 +432,10 @@ target has no desired state, `_STATUS` maps `REGISTERED` onto delivery
 
 ### A6.4 Every plan input derives from one immutable reference
 
-**REPLACED 2026-09-04 on Michael's ruling, pending his ratification.** A6.1,
-A6.2, A6.3 and A6.5 are accepted in substance and are not reopened; A6.4 alone
-is replaced, and what it used to say is kept below rather than deleted, for the
-reason the amendment header already gives.
+**REPLACED 2026-09-04 on Michael's ruling; RATIFIED with the complete A6
+amendment 2026-09-25.** A6.1, A6.2, A6.3 and A6.5 are accepted and are not
+reopened; A6.4 alone was replaced, and what it used to say is kept below rather
+than deleted, for the reason the amendment header already gives.
 
 **Which record this is.** This is `dotmac_platform_control_plane`'s ADR-0013 —
 *the operator authorization issuer, and the one-time bootstrap that starts it* —
@@ -626,8 +628,9 @@ outside this ADR) must be consistent with before any of them may merge. Work
 Packet A is now closed, and B, C1, C2, D and E may begin implementation in the
 order § A7.7 and the Starter roadmap state.
 
-Only § A7 is ratified by this record. A6 (including A6.4) keeps its own
-still-pending status, stated at the head of that amendment.
+Only § A7 was ratified by the 2026-09-24 record. A6, including replacement
+A6.4, was ratified separately on 2026-09-25 and carries its own provenance at
+the head of that amendment.
 
 ### A7.1 Why a rehearsal issuer needed its own gate sequence at all
 
