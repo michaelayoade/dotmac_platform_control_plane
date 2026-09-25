@@ -614,13 +614,20 @@ passing this harness alone cannot close any of them or amend § 5's bootstrap.
 
 ## Amendment, 2026-09-24 — Work Packet A: the Gate 0/2/3 authority contract
 
-**Proposed 2026-09-24, pending Michael Ayoade's ratification — nothing below is
-accepted merely by being written down**, the same discipline A6.4 already
-states for itself. This amendment does not implement anything; it freezes
-what the next five work packets (B, C1, C2, D, E, tracked outside this ADR)
-must be consistent with before any of them may merge. Work Packet A closes when
-Michael ratifies this section; nothing downstream may begin implementation
-before that, even if this amendment merges.
+**RATIFIED 2026-09-24 by Michael Ayoade, the owner and only approver.**
+Proposed 2026-09-24 and merged as Platform CP PR #196
+(`c8ead5ac1f35aa2d457fa26f0454051df4ef2ed3`), with its Starter companion PR
+#747 (`ead3b8a7ba981533216908ae0c14328a6c48e79f`). Ratification was given
+separately, after both merges, in the owner's own words: "a is ratified" —
+recorded here because this amendment itself states that a merge is not a
+ratification. As originally proposed: this amendment does not implement
+anything; it freezes what the next five work packets (B, C1, C2, D, E, tracked
+outside this ADR) must be consistent with before any of them may merge. Work
+Packet A is now closed, and B, C1, C2, D and E may begin implementation in the
+order § A7.7 and the Starter roadmap state.
+
+Only § A7 is ratified by this record. A6 (including A6.4) keeps its own
+still-pending status, stated at the head of that amendment.
 
 ### A7.1 Why a rehearsal issuer needed its own gate sequence at all
 
@@ -774,6 +781,5 @@ obtains candidate-specific execution authority after Gate 2 builds its artifact.
 It does not install a signer, create a GitHub Environment, provision a key,
 read an OpenBao path, allocate a Foundation successor, or authorize any
 candidate. It does not amend § 5's bootstrap or A6's plan-input decisions. It
-is the proposed reference with which B, C1, C2, D, and E must be consistent
-after ratification. Gate 0 does not close until B, C1, C2, and D each close
+is the ratified reference with which B, C1, C2, D, and E must be consistent. Gate 0 does not close until B, C1, C2, and D each close
 against it and E produces its passing protected issuer-readiness receipt.
