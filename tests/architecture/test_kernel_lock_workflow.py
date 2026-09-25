@@ -375,6 +375,8 @@ def test_a_new_top_level_table_in_the_lock_is_named() -> None:
 
 
 def test_the_kernel_not_moving_is_still_a_refusal() -> None:
+    """Kernel-only dispatch: no declared movement, so an unmoved kernel is
+    still a lock that says nothing."""
     resolved = _after()
     resolved["package"][KERNEL_ENTRY] = _package(
         KERNEL, "0.1.0a98", source=_INDEX_SOURCE
@@ -435,6 +437,53 @@ def test_a_well_formed_kernel_and_control_delta_produces_no_problems(
     )
     after = _lock([_package(KERNEL, "0.1.0a100", source=_INDEX_SOURCE), control], "B")
     assert drift_problems(before, after, CONTROL_DELTA, bundle) == []
+
+
+def test_a_declared_movement_may_leave_an_identical_kernel_unmoved(
+    tmp_path: Path,
+) -> None:
+    """A chained second run: the kernel already moved in the first, so only the
+    declared module moves here. POSITIVE CONTROL for the permission."""
+
+    bundle = tmp_path / "bundle"
+    (bundle / "files").mkdir(parents=True)
+    wheel = _control_wheel(bundle / "files")
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    (bundle / "digests.json").write_text(json.dumps({wheel.name: digest}))
+    control = _entry(wheel, dict(_GOOD_DEPS))
+    before_control = dict(control, version="0.1.0a6")
+    kernel = _package(KERNEL, "0.1.0a100", source=_INDEX_SOURCE)
+    before = _lock([kernel, before_control], "A")
+    after = _lock([dict(kernel), control], "B")
+    assert drift_problems(before, after, CONTROL_DELTA, bundle) == []
+
+
+def test_an_unmoved_kernel_with_a_changed_field_is_still_refused(
+    tmp_path: Path,
+) -> None:
+    """NEGATIVE CONTROL: "unmoved" means identical. Same version, different
+    files is a movement, and it is checked like one."""
+
+    bundle = tmp_path / "bundle"
+    (bundle / "files").mkdir(parents=True)
+    wheel = _control_wheel(bundle / "files")
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    (bundle / "digests.json").write_text(json.dumps({wheel.name: digest}))
+    control = _entry(wheel, dict(_GOOD_DEPS))
+    before_control = dict(control, version="0.1.0a6")
+    kernel = _package(KERNEL, "0.1.0a100", source=_INDEX_SOURCE)
+    repointed = dict(
+        kernel,
+        source={
+            "type": "legacy",
+            "url": "https://evil.example/simple",
+            "reference": "forgejo",
+        },
+    )
+    before = _lock([kernel, before_control], "A")
+    after = _lock([repointed, control], "B")
+    problems = drift_problems(before, after, CONTROL_DELTA, bundle)
+    assert any("source" in problem for problem in problems), problems
 
 
 def test_a_control_movement_with_no_delta_is_still_unrelated_drift() -> None:
