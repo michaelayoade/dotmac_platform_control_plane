@@ -93,24 +93,17 @@ from typing import Final
 from uuid import UUID
 
 from dotmac_deployment_control import (
-    ApprovalEvidence,
-    ApprovePlanCommand,
     DesiredDeployment,
     PlanView,
-    ProposePlanCommand,
     RegisterTargetCommand,
-    RequestRolloutCommand,
     RolloutView,
     SetDesiredStateCommand,
     TargetView,
-    approve_plan,
     drift,
     get_plan,
     get_rollout,
     get_target,
-    propose_plan,
     register_target,
-    request_rollout,
     set_desired_state,
 )
 from dotmac_deployment_control import DriftReport as ModuleDriftReport
@@ -118,14 +111,6 @@ from dotmac_deployment_control import TargetStatus as ModuleTargetStatus
 from dotmac_kernel import NotFoundError
 from sqlalchemy.orm import Session
 
-from vendor_cp.approvals.adapter import approved_request_evidence
-from vendor_cp.approvals_authority import bare_content_hash
-from vendor_cp.identity import (
-    AUTHORITY_DISTRIBUTION,
-    DISTRIBUTION,
-    authority_version,
-    require_version,
-)
 from vendor_cp.licensing.delivery_models import TargetStatus
 
 #: Module standing -> delivery eligibility. Total over the module's enum: a new
@@ -465,137 +450,60 @@ def set_target_desired_state(db: Session, request: DesiredStateRequest) -> Targe
     )
 
 
-def propose_deployment_plan(db: Session, request: ProposePlanRequest) -> ProposedPlan:
-    """Ask the module to freeze the target's desired state. ADR-0013 § 2 item 1.
+class PlanInputDerivationUnavailable(Exception):
+    """ADR-0013 A6.4: the Foundation-execution inputs do not exist yet here.
 
-    `requires_approval` is hard-wired to `True`. It is a parameter upstream, and
-    a flag here that could turn it off would be this assembly deciding an
-    authorization is unnecessary — a policy decision, and the exact one the
-    issuer must never own.
+    Ratified 2026-09-25: target, desired state, profile digest, authorized
+    images and execution-plan inputs must all derive from ONE immutable
+    reference. Under Control 0.1.0a15, `ProposePlanCommand` requires
+    `operation`, `descriptor_digest` and `execution_plan_digest`, and
+    `request_rollout` requires `authorization_expires_at` plus an injected
+    `AuthorizationSigner` — none of which this assembly can derive before the
+    Deployment Foundation exists to render and sign them. That path returns at
+    Gate 3, when this assembly composes the Foundation. Control was never
+    asked: there is no call, no DB read and no invented placeholder to ask it
+    with.
     """
-    view = propose_plan(
-        db,
-        ProposePlanCommand(
-            command_id=request.command_id,
-            target_id=request.target_id,
-            requires_approval=True,
-            approval_policy_code=request.approval_policy_code,
-            approval_policy_version=request.approval_policy_version,
-            actor_ref=request.actor_ref,
-        ),
-    )
-    digest = view.plan_digest
-    if not digest:
-        raise NotFoundError(
-            f"deployment plan {view.id} was proposed without a frozen digest, so "
-            "there is nothing an approval could bind to"
-        )
-    return ProposedPlan(
-        plan_id=view.id,
-        target_id=view.target_id,
-        sequence=view.sequence,
-        status=view.status,
-        desired_revision=view.desired_revision,
-        record_version=view.record_version,
-        plan_digest=digest,
-        approval_content_hash=bare_content_hash(digest),
-        approval_policy_code=view.approval_policy_code or "",
-        approval_policy_version=view.approval_policy_version or 0,
+
+    code = "a6_4_derivation_not_available"
+
+
+def propose_deployment_plan(db: Session, request: ProposePlanRequest) -> ProposedPlan:
+    """Refuse. ADR-0013 A6.4: the Foundation-execution inputs do not exist yet.
+
+    `ProposePlanCommand` (Control 0.1.0a15) requires `operation`,
+    `descriptor_digest` and `execution_plan_digest`, all derived from the
+    Deployment Foundation's render of the immutable artifact. This assembly
+    composes no Foundation before Gate 3, so it has no way to produce them —
+    and no fallback, inferred value or caller-supplied placeholder is
+    acceptable in their place. This function raises before making any Control
+    call or reading the database. See `PlanInputDerivationUnavailable`.
+    """
+    raise PlanInputDerivationUnavailable(
+        "ADR-0013 A6.4: proposing a deployment plan needs a descriptor digest "
+        "and an execution-plan digest the Deployment Foundation renders and "
+        "signs; this assembly does not compose a Foundation before Gate 3, so "
+        "Control was not asked to freeze a plan"
     )
 
 
 def authorize_deployment(
     db: Session, request: AuthorizeRequest
 ) -> AuthorizationReceipt:
-    """Approve a frozen plan on carried evidence, then request its rollout.
+    """Refuse. ADR-0013 A6.4: the Foundation-execution inputs do not exist yet.
 
-    ADR-0013 § 2 items 2 and 3, in one operator step because they are one
-    operator intent: *this approved plan may now be deployed*. Splitting them
-    would leave an approved plan with no rollout as a routine state, which is a
-    deployment somebody believes is authorized and nothing is executing.
-
-    ## Two derived command ids, and why they are not one
-
-    `process_once_platform` keys at-most-once execution on the command id alone
-    — `operation_name` is recorded, not part of the key. Passing the operator's
-    id to both steps would make the second REPLAY the first's recorded result
-    and never run, so the rollout would silently not happen and the command
-    would report success. The derived suffixes keep both steps idempotent under
-    the operator's single id, which is what a retry of this command needs.
+    Approving and rolling out a plan (Control 0.1.0a15) requires
+    `request_rollout`'s `authorization_expires_at` and an injected
+    `AuthorizationSigner` producing a portable authorization envelope — both of
+    which belong to the Deployment Foundation this assembly composes at Gate
+    3. This function raises before reading the plan, calling approvals or
+    calling Control. See `PlanInputDerivationUnavailable`.
     """
-    plan = read_plan(db, request.plan_id)
-    frozen = plan.plan_digest
-    if not frozen:
-        raise NotFoundError(
-            f"deployment plan {plan.id} has no frozen digest; propose it before "
-            "authorizing it"
-        )
-    if request.expected_plan_digest and request.expected_plan_digest != frozen:
-        raise DeploymentIdentityMismatch(
-            f"this authorization was bound to plan digest "
-            f"{request.expected_plan_digest!r}, and plan {plan.id} holds "
-            f"{frozen!r}. No approval was carried and the module was not asked: "
-            "confirm which plan you meant."
-        )
-
-    evidence = approved_request_evidence(
-        db,
-        request_id=request.approval_request_id,
-        subject_type=PLAN_SUBJECT_TYPE,
-        subject_id=str(plan.id),
-        content_hash=bare_content_hash(frozen),
-    )
-
-    approved = approve_plan(
-        db,
-        ApprovePlanCommand(
-            command_id=f"{request.command_id}:approve",
-            plan_id=plan.id,
-            evidence=ApprovalEvidence(
-                policy_code=evidence.policy_code,
-                policy_version=evidence.policy_version,
-                decision_ref=str(evidence.request_id),
-                # The module's own frozen string, carried across untouched.
-                content_digest=frozen,
-                decided_at=evidence.decided_at,
-                # Stays empty. ADR-0013 § 3: approver identity lives once, in
-                # `dotmac-approvals`, reachable through `decision_ref`.
-            ),
-            expected_version=request.expected_plan_version,
-            actor_ref=request.actor_ref,
-        ),
-    )
-
-    rollout = request_rollout(
-        db,
-        RequestRolloutCommand(
-            command_id=f"{request.command_id}:rollout",
-            rollout_ref=request.rollout_ref,
-            plan_id=plan.id,
-            reason=request.reason,
-            actor_ref=request.actor_ref,
-        ),
-    )
-
-    approved_at = approved.approved_at or evidence.decided_at
-    return AuthorizationReceipt(
-        authorization_ref=str(rollout.id),
-        rollout_id=rollout.id,
-        rollout_ref=rollout.rollout_ref,
-        rollout_status=rollout.status,
-        plan_id=approved.id,
-        plan_digest=frozen,
-        plan_status=approved.status,
-        target_id=approved.target_id,
-        desired_revision=approved.desired_revision,
-        approval_policy_code=evidence.policy_code,
-        approval_policy_version=evidence.policy_version,
-        approval_decision_ref=str(evidence.request_id),
-        approved_at=approved_at,
-        issuer=DISTRIBUTION,
-        issuer_version=require_version(),
-        authority=AUTHORITY_DISTRIBUTION,
-        authority_version=authority_version(),
+    raise PlanInputDerivationUnavailable(
+        "ADR-0013 A6.4: authorizing a deployment plan needs an authorization "
+        "expiry and a signer the Deployment Foundation provides; this "
+        "assembly does not compose a Foundation before Gate 3, so Control was "
+        "not asked to approve or roll out a plan"
     )
 
 
