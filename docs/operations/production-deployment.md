@@ -277,7 +277,7 @@ PYTHONPATH=src python3 scripts/materialize_production_secrets.py push \
   --known-hosts "$KNOWN_HOSTS"
 PYTHONPATH=src python3 scripts/materialize_production_secrets.py \
   sync-github-deploy-key \
-  --repository michaelayoade/dotmac_vendor_control_plane \
+  --repository michaelayoade/dotmac_platform_control_plane \
   --environment production
 ```
 

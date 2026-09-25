@@ -480,6 +480,15 @@ def test_deployment_adapter_includes_the_owned_secret_materializer() -> None:
     assert "first production dispatch on 2026-08-17 was held at that gate" in operations
 
 
+def test_deploy_key_sync_targets_the_current_repository() -> None:
+    """The operator runbook must not write the deploy key to the retired name."""
+    operations = _text("docs/operations/production-deployment.md")
+    command = operations.split("sync-github-deploy-key", 1)[1].split("```", 1)[0]
+
+    assert "--repository michaelayoade/dotmac_platform_control_plane" in command
+    assert "--repository michaelayoade/dotmac_vendor_control_plane" not in command
+
+
 def test_deployment_adapter_delivers_relay_bootstrap_material_for_an_old_database() -> (
     None
 ):
