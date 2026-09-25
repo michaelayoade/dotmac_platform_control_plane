@@ -584,6 +584,20 @@ have all been verified. An existing Certbot account may be reused without
 restating its contact; a new registration still requires an explicit contact.
 The deployment path never creates or repairs the marker itself.
 
+The Foundation V3 successor composition is kept in the import-light
+`vendor_cp.deployment.host_admission_adapter` leaf while CP still pins the
+pre-V3 Control wheel and does not install Foundation. Its single startup
+factory binds Control's public resolve/finalize/lookup contracts, Foundation's
+real F2 admission function and types, fixed trust and clock, and local session
+and observation sources. F2 resolves in a committed, closed Session A, then
+verifies the actual attestation pair with no open Control transaction; its
+trace retains the real pair result and a transient, identity-bound continuation.
+V3 maps that exact trace and fresh independently observed facts to Control's
+sole finalizer in Session B, returning only after CP commits. The signed
+`dispatch_id` is the observation and recovery coordinate; Control's committed
+lookup is the post-crash source of authority. No new consumption ledger, CP
+fallback finalizer, request-supplied verifier or per-call clock is installed.
+
 ## The installed operator CLI
 
 The operator surface is a console script on an installed wheel:

@@ -62,11 +62,13 @@ class _ResolvedContext:
         *,
         host_id: str = "host-1",
         attempt_id: UUID = ATTEMPT_ID,
+        dispatch_id: str | None = None,
         expected_foundation_package: str = "package-1",
     ) -> None:
         self.context_digest = digest
         self.host_id = host_id
         self.attempt_id = attempt_id
+        self.dispatch_id = dispatch_id or str(attempt_id)
         self.expected_foundation_package = expected_foundation_package
 
 
@@ -430,7 +432,7 @@ def test_verification_and_admission_bind_to_the_resolved_context_correctly() -> 
        `trust_policy` -- not a caller-supplied constant.
     5. `verify_pair`'s `expected_host_identity` is exactly `resolved.host_id`.
     6. `verify_pair`'s `expected_observation_id` is exactly
-       `resolved.attempt_id.hex`, and `expected_package` is exactly
+       `resolved.dispatch_id`, and `expected_package` is exactly
        `resolved.expected_foundation_package` -- none of the three
        caller-suppliable in the old `AttestationVerificationInputs` shape.
     """
@@ -471,7 +473,7 @@ def test_verification_and_admission_bind_to_the_resolved_context_correctly() -> 
     assert verify.calls[0]["expected_host_identity"] == resolved.host_id  # type: ignore[attr-defined]
     assert (
         verify.calls[0]["expected_observation_id"]  # type: ignore[attr-defined]
-        == resolved.attempt_id.hex
+        == resolved.dispatch_id
     )
     assert (
         verify.calls[0]["expected_package"]  # type: ignore[attr-defined]
