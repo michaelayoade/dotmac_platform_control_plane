@@ -84,7 +84,7 @@ dotmac-entitlement-allocation = { version = "0.1.0a6", source = "forgejo" }
 # PROOF — which is why the repin comes with the `outbox_relay.v1` binding in
 # `vendor_cp.migration_bindings` and the DDL-free `ap_0002_outbox_relay`
 # verification revision. See ADR-0005 s "Adoption plan".
-dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
+dotmac-approvals = { version = "0.1.0a7", source = "forgejo" }
 # The platform-only owner of deployment identity, desired state, immutable
 # plans, rollouts and authenticated observations (ADR-0011). Atomic: it declares
 # one supported plane set, so no `ModulePlaneSelection` is possible and none is
