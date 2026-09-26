@@ -813,3 +813,57 @@ def test_i5_an_intermediate_commit_inside_the_issuance_hold_breaks_the_i3_proof(
         # the sensitivity this test exists to measure.
         with pytest.raises(AssertionError, match="did not block"):
             _prove_the_issuance_barrier_holds(engine, plan_id, request_id, invocation)
+
+
+def test_i1_the_hold_and_the_issuance_run_in_the_same_transaction(
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    engine: Engine,
+    issuer_security: tuple[object, object],
+) -> None:
+    plan_id, request_id = seeded
+    _approve_and_commit(engine, plan_id, request_id)
+
+    _, harness = issuer_security
+    target_ref = _target_ref_for(engine, plan_id)
+    _, evidence = _harness_evidence(harness, target_ref)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(f"issue-{uuid.uuid4()}", plan_id, "operator-rehearsal"),
+        evidence,
+    )
+
+    captured: dict[str, tuple[int, int]] = {}
+    real_hold = approvals.hold_approval
+    real_issue = control.issue_rehearsal_issuer_authorization_for_plan
+
+    def observing_hold(db: Session, **kwargs: object) -> object:
+        held = real_hold(db, **kwargs)
+        row = db.execute(text("SELECT txid_current(), pg_backend_pid()")).one()
+        captured["hold"] = (int(row[0]), int(row[1]))
+        return held
+
+    def observing_issue(
+        db: Session, request: object, *, harness_evidence_document: object
+    ) -> object:
+        result = real_issue(
+            db, request, harness_evidence_document=harness_evidence_document
+        )
+        row = db.execute(text("SELECT txid_current(), pg_backend_pid()")).one()
+        captured["transition"] = (int(row[0]), int(row[1]))
+        return result
+
+    with (
+        Session(engine) as db,
+        mock.patch.object(approvals, "hold_approval", observing_hold),
+        mock.patch.object(
+            control, "issue_rehearsal_issuer_authorization_for_plan", observing_issue
+        ),
+    ):
+        issue_authorization(db, invocation)
+        db.commit()
+
+    assert captured.keys() == {"hold", "transition"}
+    assert captured["hold"] == captured["transition"], (
+        "the hold and the issuance transition observed different (txid, pid) "
+        "pairs -- they did not run in the same transaction on the same "
+        "connection"
+    )
