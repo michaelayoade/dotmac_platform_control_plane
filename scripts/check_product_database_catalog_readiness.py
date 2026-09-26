@@ -14,17 +14,15 @@ register.  A reviewer may remove an entry only with the integration that makes
 its retirement machine-provable.  Merely publishing every module contribution
 can never make this command report product readiness.
 
-The module half of that ratchet is currently DORMANT, and saying so is the
-point.  ``missing_module_database_catalogs`` asks each composed manifest for a
-``database_catalog`` attribute, and the EXACT-PINNED kernel's ``ModuleManifest``
-declares no such field — so no module could carry one even if its own release
-published it.  Today the probe therefore reports all six for a reason about the
-KERNEL rather than about the modules, and only its composition half can fail.
-``pinned_manifest_declares_contribution_field`` states that premise so a test
-can hold it: when the pin moves to a kernel carrying the field, the premise dies
-and the review that raised the pin has to confirm the probe now measures the
-thing its name claims (``AGENTS.md`` rule 13 — a guard premise is enforceable or
-the region is unmonitored rather than exempt).
+The module half of the ratchet is ACTIVE under kernel 0.1.0a100: its
+``ModuleManifest`` declares ``database_catalog``. At this pin set Control 0.1.0a15
+and Approvals 0.1.0a7 each publish a contribution; commercial_agreements,
+entitlement_allocation, licensing and release_catalog are pinned at releases
+that predate theirs and remain the explicit debt below.
+``pinned_manifest_declares_contribution_field`` and the two-directional debt
+test make that premise executable: if the field or a contribution changes, the
+register changes in the same review. Retiring an entry here does not retire
+``OPEN_PRODUCT_DATABASE_CATALOG_BLOCKERS``, a separate product-level register.
 """
 
 from __future__ import annotations
@@ -46,15 +44,13 @@ ACCEPTED_DESCRIPTOR: Final = ROOT / "deploy" / "product.toml"
 
 #: The manifest attribute a module publishes its typed database-catalogue
 #: contribution through.  Named ONCE: the probe below and the premise check
-#: that says why the probe is dormant have to be asking about one attribute,
+#: that says the probe is active have to be asking about one attribute,
 #: and two literals is exactly how they would stop being about the same one.
 CONTRIBUTION_FIELD: Final = "database_catalog"
 
 MODULE_DATABASE_CATALOG_DEBT: Final[frozenset[str]] = frozenset(
     {
-        "approvals",
         "commercial_agreements",
-        "deployment_control",
         "entitlement_allocation",
         "licensing",
         "release_catalog",

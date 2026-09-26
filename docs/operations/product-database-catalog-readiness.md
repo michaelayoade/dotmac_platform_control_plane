@@ -9,15 +9,17 @@ it is never an authoring source.
 
 ## Repository-local blockers
 
-The exact pins in `pyproject.toml` currently compose six stateful module
+The exact pins in `pyproject.toml` currently compose four stateful module
 manifests without a database-catalogue contribution:
 
-- `approvals`
 - `commercial_agreements`
-- `deployment_control`
 - `entitlement_allocation`
 - `licensing`
 - `release_catalog`
+
+`approvals` (0.1.0a7) and `deployment_control` (0.1.0a15) left this set with the
+2026-09-25 Gate-0 composition adoption: each exact-pinned release publishes a
+contribution.
 
 `scripts/check_product_database_catalog_readiness.py` derives that set from
 `assembly.STATEFUL_MODULES`. Its test compares the result with the declared debt
@@ -27,18 +29,14 @@ not duplicate any module's schema contract. Presence is all this part proves: a
 non-null attribute is not proof that canonical bytes parse, cover the selected
 plane or agree with a live observation.
 
-**The other direction — a module adopting a contribution — is dormant, and this
-is the honest statement of it.** The probe reads a `database_catalog` attribute,
-and the exact-pinned kernel's `ModuleManifest` declares no such field, so no
-module release of this generation could publish one even in principle. Today the
-six therefore record a fact about the kernel generation, not about six module
-owners, and only the composition half of the ratchet can fail.
-`pinned_manifest_declares_contribution_field` states that premise and
-`test_the_module_probe_is_dormant_because_the_pinned_kernel_carries_no_field`
-holds it, so the premise dies with the pin that established it rather than
-outliving it in silence (`AGENTS.md` rule 13). Had the kernel named the field
-anything else, the set would have sat at six for ever and a repin would have
-passed over it without a word.
+**The other direction — a module adopting a contribution — is now live.** Kernel
+0.1.0a100's `ModuleManifest` declares `database_catalog`, so the probe measures
+each composed module's own pinned release rather than the kernel generation.
+`pinned_manifest_declares_contribution_field` holds that premise and
+`test_the_module_probe_measures_published_contributions` pins the two modules
+that publish; its sensitivity test still fails for an older manifest shape
+(`AGENTS.md` rule 13). The former dormancy test retired with the a98 pin that
+established it.
 
 The command itself is now executed by
 `test_the_commands_exit_code_is_observed_in_both_directions` rather than only
@@ -46,10 +44,8 @@ described here. Nothing else calls it — not CI, not the `Makefile` — so its
 documented exit 2 had never been run and its zero branch had never been reached
 by anything at all.
 
-Deployment Control's candidate source contribution is not evidence available to
-this assembly. It becomes usable only after its kernel dependency exists in a
-published version, Deployment Control publishes a verified artifact carrying
-the contribution, and this repository exact-pins that artifact.
+Deployment Control's contribution is now evidence available to this assembly:
+0.1.0a15 is published, independently verified and exact-pinned here.
 
 ## Fail-closed product-level register
 
