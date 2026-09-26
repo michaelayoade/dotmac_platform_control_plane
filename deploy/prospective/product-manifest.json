@@ -21,7 +21,7 @@
       "code": "approvals",
       "contract_version": 2,
       "distribution": "dotmac-approvals",
-      "version": "0.1.0a7"
+      "version": "0.1.0a8"
     },
     {
       "code": "commercial_agreements",
@@ -43,7 +43,7 @@
       "code": "deployment_control",
       "contract_version": 2,
       "distribution": "dotmac-deployment-control",
-      "version": "0.1.0a15"
+      "version": "0.1.0a16"
     },
     {
       "code": "entitlement_allocation",

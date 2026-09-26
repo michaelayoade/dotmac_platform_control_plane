@@ -125,14 +125,14 @@ def test_the_digest_is_computed_over_canonical_bytes() -> None:
     assert digest(manifest) == digest(reordered)
 
 
-def test_control_a15_manifest_version_matches_installed_distribution() -> None:
+def test_control_a16_manifest_version_matches_installed_distribution() -> None:
     prospective = json.loads(PROSPECTIVE_MANIFEST.read_text())
     control = next(
         module
         for module in prospective["modules"]
         if module["code"] == "deployment_control"
     )
-    assert control["version"] == "0.1.0a15"
+    assert control["version"] == "0.1.0a16"
     assert "manifest_declared_version" not in control
 
 
@@ -144,7 +144,7 @@ def test_a_planted_manifest_version_disagreement_is_recorded(monkeypatch) -> Non
 
     def changed_distribution_version(distribution: str) -> str | None:
         if distribution == "dotmac-deployment-control":
-            return "0.1.0a16"
+            return "0.1.0a17"
         return original(distribution)
 
     monkeypatch.setattr(
@@ -155,5 +155,5 @@ def test_a_planted_manifest_version_disagreement_is_recorded(monkeypatch) -> Non
         for module in generator.build_manifest()["modules"]
         if module["code"] == "deployment_control"
     )
-    assert control["version"] == "0.1.0a16"
-    assert control["manifest_declared_version"] == "0.1.0a15"
+    assert control["version"] == "0.1.0a17"
+    assert control["manifest_declared_version"] == "0.1.0a16"
