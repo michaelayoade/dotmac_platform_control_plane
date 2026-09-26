@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -54,15 +55,23 @@ def test_successor_lane_uses_private_index_and_checked_in_evidence() -> None:
     for source in (workflow, check.EVIDENCE.with_name("check.py").read_text()):
         assert "0.1.0a15" not in source
         assert "0.1.0a7" not in source
+    # Both producers have published (Control 0.1.0a15, record #68; Approvals
+    # 0.1.0a7, record #756), so the manifest carries complete immutable
+    # coordinates and the lane's evidence step accepts it. Since CP #204 the
+    # application pins the SAME versions, so the lane verifies the exact bytes
+    # the assembly composes; the two may not drift apart.
     manifest = json.loads(check.EVIDENCE.read_text())
     for item in manifest["artifacts"].values():
-        assert item["record_commit"] is None
-        assert item["tag"] is None
-        assert item["tag_object"] is None
-        assert item["source_commit"] is None
-        assert item["sha256"] is None
-    with pytest.raises(SystemExit, match="tag does not bind"):
-        check._release_evidence()
+        for field in ("record_commit", "tag_object", "source_commit"):
+            assert isinstance(item[field], str) and len(item[field]) == 40, field
+        assert isinstance(item["sha256"], str) and len(item["sha256"]) == 64
+        assert item["tag"].endswith(f"-v{item['version']}")
+    assert set(check._release_evidence()) == set(manifest["artifacts"])
+    pins = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["poetry"][
+        "dependencies"
+    ]
+    for distribution, item in manifest["artifacts"].items():
+        assert pins[distribution]["version"] == item["version"], distribution
 
 
 def _complete_manifest() -> dict[str, object]:

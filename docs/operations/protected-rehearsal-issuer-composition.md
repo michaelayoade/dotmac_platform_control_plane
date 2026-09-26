@@ -1,15 +1,13 @@
 # Protected rehearsal-issuer composition source
 
 The sibling module `vendor_cp.deployment.protected_rehearsal_issuer` composes
-Control and Approvals for the issuer's own operation. It remains source-only
-until Control `0.1.0a15` and Approvals `0.1.0a7` are published and their exact
-wheel bytes pass the isolated successor lane. The upstream source commits
-`a1f6d81e96fdf9035dd5f43129d421414a36825d` (Control) and
-`2795508056e577a2fe68511216b3d3754e8dc5fa` (Approvals) still declare
-`0.1.0a14` and `0.1.0a6` respectively; they are source changes destined for
-separate version-bumped release commits, not the future release coordinates.
-The application's existing pins
-and mounted routes are unchanged; there is no operator CLI in this slice.
+Control and Approvals for the issuer's own operation. Both producers have
+published: Control `0.1.0a15` (tag object `466f48d2…`, peeled `cd887722…`,
+record Control PR #68) and Approvals `0.1.0a7` (tag object `d59ee6f2…`, peeled
+`7cab65c5…`, record Starter PR #756). Since CP PR #204 (the Gate-0 composition
+adoption) the application pins exactly those versions, so the isolated lane
+below verifies the same bytes the assembly composes. Mounted routes are
+unchanged; there is no operator CLI in this slice.
 
 The sequence has two caller-owned transactions. In the first, Control freezes
 the plan with purpose `rehearsal_issuer_operation`, explicit operation `deploy`,
@@ -50,9 +48,10 @@ The checked-in `protected_issuer_conformance/release-evidence.json` is the
 lane's sole successor coordinate source. Each row names the producing GitHub
 repository, its publication-record path and immutable record commit, release
 version, annotated tag object, peeled source commit, and wheel SHA-256. The
-release coordinates are null until real a15/a7 releases exist, so the lane
-refuses at its first evidence step. A separate reviewed commit must fill them
-from each producer's completed publication. The workflow then fetches each
+coordinates were filled, in a reviewed commit, from each producer's completed
+publication (Control record commit `6edb376f…`, Starter record commit
+`0bff1b7a…`), and an architecture test holds their versions equal to the
+application pins. The workflow fetches each
 producer's pinned record commit and tag, checks the record is on `main`, the
 tag is annotated and peels to the same source, and the producing record binds
 the same version, source commit and wheel hash. It derives exact pins and wheel

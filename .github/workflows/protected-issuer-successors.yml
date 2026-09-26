@@ -1,7 +1,8 @@
 name: Protected issuer successor wheels
 
-# Deliberately manual until the checked-in manifest names both immutable
-# release commits and wheel digests. The separate environment keeps app pins.
+# Manual. The checked-in manifest names both producers' immutable record
+# commits, tag objects and wheel digests; the isolated environment verifies
+# those exact wheels, which since CP #204 are also the application's pins.
 on:
   workflow_dispatch:
 
