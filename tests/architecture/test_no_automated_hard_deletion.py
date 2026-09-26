@@ -59,7 +59,8 @@ COMPOSED_DISTRIBUTIONS = (
 #: bare privilege NAME — which appears in every grant-verification helper in the
 #: vendor lineage — is not mistaken for a statement.
 DELETION_SQL = re.compile(
-    r"\bDELETE\s+FROM\b|\bTRUNCATE\s+(?:TABLE\s+)?[A-Za-z_\"{]", re.IGNORECASE
+    r"\bDELETE\s+FROM\b|\bTRUNCATE\s+(?:TABLE\s+)?(?!ON\b)[A-Za-z_\"{]",
+    re.IGNORECASE,
 )
 
 
@@ -361,6 +362,38 @@ def test_the_detector_names_a_planted_deletion() -> None:
     """A check that has only ever run over a clean tree proves nothing about
     itself."""
     assert deletion_sites_in(PLANTED, "planted") == {("planted", "purge_the_audit_log")}
+
+
+TRIGGER_NEAR_MISS = '''
+def install_refusal_trigger(db):
+    db.execute("""
+        CREATE TRIGGER refuse_evidence_truncate
+        BEFORE TRUNCATE ON mod_deploy.attestation_enrolments
+        FOR EACH STATEMENT EXECUTE FUNCTION mod_deploy.refuse_evidence_rewrite();
+    """)
+'''
+
+TRUNCATE_STATEMENT_PLANT = """
+def wipe(db):
+    db.execute("TRUNCATE TABLE mod_deploy.attestation_enrolments")
+"""
+
+
+def test_the_detector_does_not_mistake_a_trigger_event_for_truncate() -> None:
+    """`BEFORE TRUNCATE ON table` names a guarded event, not a statement.
+
+    Control's lineage installs exactly these guards (dc_0010, dc_0011, dc_0013).
+    Reading their event clause as row removal would make the ledger describe
+    code that cannot delete a row. Ported from CP PR #187.
+    """
+    assert deletion_sites_in(TRIGGER_NEAR_MISS, "trigger_nearmiss") == set()
+
+
+def test_a_real_truncate_statement_is_still_named() -> None:
+    """SENSITIVITY for the exclusion above: only `TRUNCATE ON` is exempt."""
+    assert deletion_sites_in(TRUNCATE_STATEMENT_PLANT, "truncate_plant") == {
+        ("truncate_plant", "wipe")
+    }
 
 
 def test_the_detector_does_not_name_a_near_miss() -> None:

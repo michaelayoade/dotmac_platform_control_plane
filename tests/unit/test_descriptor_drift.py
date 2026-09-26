@@ -37,6 +37,12 @@ from vendor_cp.descriptor import Direction, IncompleteCapture, Subject, compare
 
 ROOT = Path(__file__).resolve().parents[2]
 ACCEPTED = ROOT / "deploy" / "product.toml"
+#: The descriptor the 2026-08-30 incident replay below was written against. The
+#: replay is history, so it reads an immutable candidate rather than whatever is
+#: accepted today; a later promotion must not rewrite what the incident was.
+INCIDENT_REPLAY_POST = (
+    ROOT / "deploy" / "candidates" / "2026-09-04-activation-relay-service.toml"
+)
 
 
 def accepted() -> dict[str, Any]:
@@ -190,10 +196,10 @@ def test_a_declared_head_that_never_ran_is_reported() -> None:
     upgrade rolled back claims revisions the database does not have."""
     descriptor = accepted()
     capture = conforming_capture(descriptor)
-    capture["migration_heads"].remove("dc_0002_canonical_plan_digest")
+    capture["migration_heads"].remove("dc_0015_plan_purpose")
     report = compare(descriptor, capture)
     assert directions(report, Subject.MIGRATION_HEAD)[Direction.DECLARED_ABSENT] == {
-        "dc_0002_canonical_plan_digest"
+        "dc_0015_plan_purpose"
     }
 
 
@@ -239,7 +245,7 @@ def test_the_pre_bootstrap_descriptor_fails_against_the_post_bootstrap_database(
     heads. Every declared object still existed — which is why a declared-only
     check reported nothing — and every finding below is in the second direction.
     """
-    post = accepted()
+    post = tomllib.loads(INCIDENT_REPLAY_POST.read_text(encoding="utf-8"))
     capture = conforming_capture(post)
 
     pre = deepcopy(post)
