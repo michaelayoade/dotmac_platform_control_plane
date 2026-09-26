@@ -1,0 +1,67 @@
+name: Protected issuer successor wheels
+
+# Manual. The checked-in manifest names both producers' immutable record
+# commits, tag objects and wheel digests; the isolated environment verifies
+# those exact wheels, which since CP #204 are also the application's pins.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  successor-wheel-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - name: Require reviewed immutable successor release evidence
+        run: python3 protected_issuer_conformance/check.py --evidence-only
+      - name: Verify each producer's pinned publication record and annotated tag
+        run: python3 protected_issuer_conformance/check.py --verify-publications
+      - name: Build the complete CP wheel without changing its application pins
+        run: poetry build
+      - name: Download exact successor wheels
+        env:
+          TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          trap 'rm -f -- "${HOME}/.netrc"' EXIT HUP INT TERM
+          umask 077
+          : > "${HOME}/.netrc"
+          chmod 600 "${HOME}/.netrc"
+          printf 'machine %s login %s password %s\n' \
+            registry.dotmac.io ci-reader "${TOKEN}" >> "${HOME}/.netrc"
+          python3 protected_issuer_conformance/check.py --requirements \
+            > /tmp/protected-issuer-requirements.in
+          python3 -m pip --isolated download --no-deps --only-binary=:all: \
+            --index-url https://registry.dotmac.io/api/packages/dotmac/pypi/simple \
+            --dest /tmp/protected-issuer-wheels \
+            -r /tmp/protected-issuer-requirements.in
+      - name: Refuse absent or mismatched successor coordinates before install
+        run: |
+          set -euo pipefail
+          python3 protected_issuer_conformance/check.py \
+            --wheel-dir /tmp/protected-issuer-wheels \
+            > /tmp/protected-issuer-verified-wheels.txt
+      - name: Install isolated wheel set and locked public dependencies
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/protected-issuer-venv
+          /tmp/protected-issuer-venv/bin/pip install --require-hashes \
+            -r rehearsal_issuer_harness/public-requirements.lock
+          mapfile -t verified_wheels < /tmp/protected-issuer-verified-wheels.txt
+          test "${#verified_wheels[@]}" -eq 3
+          /tmp/protected-issuer-venv/bin/pip install --no-deps \
+            "${verified_wheels[@]}" \
+            dist/dotmac_vendor_control_plane-*.whl
+      - name: Check installed contract and fast composition tests
+        run: |
+          set -euo pipefail
+          /tmp/protected-issuer-venv/bin/python protected_issuer_conformance/check.py --installed
+          /tmp/protected-issuer-venv/bin/python -m pytest -q -rs \
+            --confcutdir=tests/unit tests/unit/test_protected_rehearsal_issuer.py \
+            tests/unit/test_rehearsal_issuer_seam.py

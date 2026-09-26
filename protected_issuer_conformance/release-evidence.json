@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "dotmac-deployment-control": {
+      "repository": "michaelayoade/dotmac_deployment_control",
+      "record_path": "docs/published-versions.json",
+      "version": "0.1.0a15",
+      "record_commit": "6edb376f4a302b41cbe28b35d9f0ce14db46ccf6",
+      "tag": "dotmac-deployment-control-v0.1.0a15",
+      "tag_object": "466f48d2b9a75f6dc46aacb641f9e48c9a37ab8c",
+      "source_commit": "cd887722b3ffc909d98ef624032fd19cf31ba497",
+      "sha256": "edd32c0fb528316689d2540eafb9c587dadbc9f99c0b5e45f6872180b0611532"
+    },
+    "dotmac-approvals": {
+      "repository": "michaelayoade/dotmac_starter_mt",
+      "record_path": "docs/inventories/module-release-verifications.json",
+      "version": "0.1.0a7",
+      "record_commit": "0bff1b7a18ce6f42f28b66cb90276b4ac733dec2",
+      "tag": "dotmac-approvals-v0.1.0a7",
+      "tag_object": "d59ee6f273755c2c2e7330bfd9f45e6ca1e1d85a",
+      "source_commit": "7cab65c56272c1d8e3a2784ce5b91ce601dd9b05",
+      "sha256": "ef8b804b55fe1d5d860ea8f666fa2931876a51db8ce38166539821e9883d61b7"
+    }
+  }
+}

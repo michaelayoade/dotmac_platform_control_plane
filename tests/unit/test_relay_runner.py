@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import replace
+from uuid import UUID
 
 import pytest
+from dotmac_kernel.messaging import ClaimedPlatformEvent
 from dotmac_kernel.messaging.platform_worker import PlatformDeliveryTransport
 
 from vendor_cp.allocations.consumer import ContractEventConsumer
@@ -20,9 +22,12 @@ from vendor_cp.cli.exits import ExitCode, Refusal
 from vendor_cp.cli.runtime import translate
 from vendor_cp.config import ProductionConfigurationError, load_vendor_settings
 from vendor_cp.config import vendor_settings as configured
+from vendor_cp.deployment import protected_rehearsal_issuer as issuer
+from vendor_cp.deployment.protected_rehearsal_issuer import ApprovalWithdrawalConsumer
 from vendor_cp.relay.runner import (
-    RelayComposition,
+    PlatformEventConsumers,
     RelayNotConfiguredError,
+    composed,
     dispatcher_runtime,
     require_dispatcher_dsn,
 )
@@ -93,15 +98,12 @@ def test_the_dispatcher_pool_is_one_connection() -> None:
 # ── the transport is the consumer, and it is the kernel's protocol ──────────
 
 
-def test_the_composed_transport_is_the_contract_event_consumer() -> None:
-    """The defect being repaired, stated as an assertion: this class was
-    constructed NOWHERE under `src/`, so activation reached no allocation."""
-    composition = RelayComposition(
-        dispatcher_sessions=lambda: None,  # type: ignore[arg-type,return-value]
-        delivery_sessions=lambda: None,  # type: ignore[arg-type,return-value]
-        transport=ContractEventConsumer(),
-    )
-    assert isinstance(composition.transport, ContractEventConsumer)
+def test_production_composition_includes_both_platform_consumers() -> None:
+    settings = replace(configured, relay_dispatcher_database_url=DSN)
+    transport = composed(settings).transport
+    assert isinstance(transport, PlatformEventConsumers)
+    assert isinstance(transport.contracts, ContractEventConsumer)
+    assert isinstance(transport.approval_withdrawals, ApprovalWithdrawalConsumer)
 
 
 def test_the_consumer_matches_the_kernel_delivery_signature() -> None:
@@ -117,6 +119,53 @@ def test_the_consumer_matches_the_kernel_delivery_signature() -> None:
     assert [p.name for p in actual.parameters.values()] == [
         p.name for p in expected.parameters.values()
     ]
+
+
+def test_the_multiplexer_delivers_one_claimed_row_to_both_consumers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object, object]] = []
+    monkeypatch.setattr(
+        ContractEventConsumer,
+        "deliver",
+        lambda self, event, db: calls.append(("contracts", event, db)),
+    )
+    monkeypatch.setattr(
+        ApprovalWithdrawalConsumer,
+        "deliver",
+        lambda self, event, db: calls.append(("withdrawals", event, db)),
+    )
+    event = ClaimedPlatformEvent(
+        id=UUID("30000000-0000-0000-0000-000000000003"),
+        event_type="approval.withdrawn",
+        payload={},
+        attempts=0,
+        correlation_id=None,
+    )
+    db = object()
+    PlatformEventConsumers(
+        ContractEventConsumer(), ApprovalWithdrawalConsumer()
+    ).deliver(event, db)
+    assert calls == [("contracts", event, db), ("withdrawals", event, db)]
+
+
+def test_current_pin_delivers_unrelated_event_without_successor_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_import(name: str) -> None:
+        raise AssertionError(f"unrelated delivery imported successor {name}")
+
+    monkeypatch.setattr(issuer, "import_module", unexpected_import)
+    event = ClaimedPlatformEvent(
+        id=UUID("30000000-0000-0000-0000-000000000003"),
+        event_type="unrelated.event",
+        payload={},
+        attempts=0,
+        correlation_id=None,
+    )
+    PlatformEventConsumers(
+        ContractEventConsumer(), ApprovalWithdrawalConsumer()
+    ).deliver(event, object())
 
 
 def test_the_signature_comparison_can_still_fail() -> None:
