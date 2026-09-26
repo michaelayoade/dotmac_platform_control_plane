@@ -116,6 +116,7 @@ def platform_db() -> Iterator[Session]:
 #: told the plan had changed after approval. Keeping them apart here is the
 #: caller-side half of the repair `a6` made upstream.
 _BY_NAME: Final[tuple[tuple[str, str], ...]] = (
+    ("PlanInputDerivationUnavailable", "evidence.plan_input_derivation_unavailable"),
     ("DigestEncodingError", "integrity.digest_unreadable"),
     # The assembly compared what the operator asserted against what the module
     # froze and stopped first. Nobody refused: the owner was never asked, which

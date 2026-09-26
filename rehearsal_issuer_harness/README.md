@@ -1,11 +1,11 @@
-# Disposable Control a14 rehearsal issuer proof
+# Disposable Control a15 rehearsal issuer proof
 
 <!-- kernel-pin: snapshot -->
 
 This directory is an explicit, candidate-independent test suite. It does not
 compose the Platform CP application, launch Foundation, or deploy anything.
 It creates a new scratch PostgreSQL database on the named test server, applies
-only installed Kernel a100 and Control a14 lineages as `app_admin`, exercises
+only installed Kernel a100 and Control a15 lineages as `app_admin`, exercises
 Control's real issuer and ledger as `platform_api` -- the real online CP
 runtime role `dc_0014`'s own migration grants the rehearsal-issuer ledger to,
 not the migrator that owns it -- and drops the scratch database after the run.
@@ -40,7 +40,7 @@ the seam module fails this install with a genuine `ModuleNotFoundError`).
 Install the complete public dependency closure from
 `public-requirements.lock` with pip's `--require-hashes`, then install the
 two locally supplied private wheels with `--no-index --no-deps`. The public
-lock was derived offline from exact a100/a14 wheel METADATA and the existing
+lock was derived offline from exact a100/a15 wheel METADATA and the existing
 checked-in Poetry artifact hashes; it includes the `pydantic[email]` and
 `psycopg[binary]` transitives and SQLAlchemy's Linux `greenlet` dependency
 (31 public packages). Keep the public wheels selected by that install in a
@@ -59,7 +59,7 @@ Wheel paths are supplied at execution, never stored in this repository.
   -r rehearsal_issuer_harness/public-requirements.lock
 <isolated-python> -m pip install --no-index --no-deps \
   /path/to/dotmac_kernel-0.1.0a100-py3-none-any.whl \
-  /path/to/dotmac_deployment_control-0.1.0a14-py3-none-any.whl
+  /path/to/dotmac_deployment_control-0.1.0a15-py3-none-any.whl
 
 # This repository's own wheel -- built normally, installed separately and
 # with --no-deps, exactly as conformance/README.md documents:
@@ -73,7 +73,7 @@ poetry build   # or: python -m build
 ```sh
 REHEARSAL_ISSUER_DATABASE_URL='postgresql+psycopg://postgres@<test-server-host>:<port>/<db>' \
   <isolated-python> -m pytest rehearsal_issuer_harness/ -q \
-  --control-wheel /path/to/dotmac_deployment_control-0.1.0a14-py3-none-any.whl \
+  --control-wheel /path/to/dotmac_deployment_control-0.1.0a15-py3-none-any.whl \
   --kernel-wheel /path/to/dotmac_kernel-0.1.0a100-py3-none-any.whl \
   --public-wheelhouse /path/to/public-wheelhouse
 ```

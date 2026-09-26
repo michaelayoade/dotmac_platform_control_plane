@@ -12,6 +12,7 @@ must produce the same answer either way.
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -27,12 +28,20 @@ from vendor_cp.deployment.relay_preflight import (
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
+def _accepted_candidate() -> str:
+    """The candidate the ledger's LAST promotion names — derived, not listed, so
+    the next promotion does not silently leave the copy without its candidate."""
+    ledger = json.loads((ROOT / "deploy" / "descriptor-promotions.json").read_text())
+    return str(ledger["promotions"][-1]["candidate"])
+
+
 #: The files the packet reads. Copied into a scratch tree so a plant can be made
 #: without touching the repository.
 _SOURCES = (
     "deploy/product.toml",
     "deploy/descriptor-promotions.json",
-    "deploy/candidates/2026-09-04-activation-relay-service.toml",
+    _accepted_candidate(),
     "docker-compose.production.yml",
     ".env.production.example",
     "src/vendor_cp/production_secrets.py",

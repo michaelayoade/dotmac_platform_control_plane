@@ -32,7 +32,7 @@ def install_disposable_security() -> tuple[AuthorizationSecurity, HarnessSecurit
 def issue_from_leaf(
     db: Session, invocation: RehearsalIssuerInvocation
 ) -> RehearsalIssuerAuthorizationV1:
-    """Pass the exact leaf mapping and opaque evidence into real Control a14."""
+    """Pass the exact leaf mapping and opaque evidence into real Control a15."""
     return issue_rehearsal_issuer_authorization_for_plan(
         db,
         dict(invocation.to_control_request()),

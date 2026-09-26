@@ -167,6 +167,19 @@ printed — every credential-named field in any output is replaced with
 
 ## The deployment workflow
 
+> **Steps 3 and 5 are refused until Gate 3 (2026-09-25, Gate-0 composition
+> adoption).** Under Control 0.1.0a15 a plan must carry its operation, descriptor
+> digest and execution-plan digest, and ADR-0013 A6.4 requires those to be
+> DERIVED from one immutable reference. This assembly cannot derive them before a
+> Foundation-rendered execution plan exists, so `deployment propose` and
+> `deployment authorize` exit `4` with
+> `evidence.plan_input_derivation_unavailable` (message code
+> `a6_4_derivation_not_available`) before any database read or Control call.
+> `--expect-plan-digest` changes nothing: there is no caller-supplied route into
+> a Foundation-execution plan. Steps 1, 2 and the reads still work. The journey
+> below is the shape it returns to at Gate 3; production's writer remains
+> `scripts/deploy_production.sh`.
+
 Five commands, in this order, and the middle one is not ours.
 
 Steps 1 and 2 exist because the ones after them could not otherwise be reached.

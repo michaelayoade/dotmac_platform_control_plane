@@ -109,6 +109,9 @@ REFUSAL_CODES: Final[dict[str, ExitCode]] = {
     "evidence.not_found": ExitCode.UNAVAILABLE,
     "evidence.tool_absent": ExitCode.UNAVAILABLE,
     "evidence.capability_absent": ExitCode.UNAVAILABLE,
+    # ADR-0013 A6.4: the Foundation-execution inputs a plan or rollout needs
+    # do not exist before Gate 3 — no owner refused, so this is an absence.
+    "evidence.plan_input_derivation_unavailable": ExitCode.UNAVAILABLE,
     # ── execution failure (5) ──────────────────────────────────────────────
     "execution.failed": ExitCode.FAILED,
     "execution.delegate_failed": ExitCode.FAILED,

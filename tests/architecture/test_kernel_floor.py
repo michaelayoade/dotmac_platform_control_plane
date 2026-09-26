@@ -1197,9 +1197,9 @@ CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
     "docs/cutover-readiness.md": CurrentVersionClaim(
         assertions=("| `dotmac-kernel` | `{pin}` |",),
         other_kernel_versions={
-            "0.1.0a100": "the newest PUBLISHED kernel, in the table's `Released` "
+            "0.1.0a104": "the newest PUBLISHED kernel, in the table's `Released` "
             "column — a different fact from the pin, and stating it is the point",
-            "0.1.0a101": "the unpublished repair, named as not-yet-available",
+            "0.1.0a101": "the published repair, named as held under debt D2",
             "0.1.0a61": "a LANDED migration step in the cutover table's history "
             "column (`Kernel a61 -> a77`), not a claim about now",
             "0.1.0a77": "the other end of that landed step — see `a61`",
@@ -1212,11 +1212,11 @@ CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
     # a pin claim cannot be added to it without being declared.
     "AGENTS.md": CurrentVersionClaim(
         other_kernel_versions={
-            # `0.1.0a98` is deliberately NOT declared here. It equals the pin
-            # today, so nothing consults it — and the sentence around it says
-            # "a98 is what runs in production", which a repin makes FALSE.
-            # Declaring it would suppress exactly the failure that should
-            # happen on the day the pin moves.
+            # The sentence used to say "a98 is what runs in production" — a
+            # production claim no oracle here checks. It now states the dated
+            # measurement it came from, so a98 is declared as that past fact.
+            "0.1.0a98": "the pin when the shared boundary was measured, "
+            "2026-09-01; past tense, not a claim about production",
             "0.1.0a99": "a published kernel the example compares against",
             "0.1.0a100": "a published kernel the example compares against",
         },
@@ -1656,20 +1656,20 @@ def test_a_stale_version_inside_a_snapshot_stays_silent() -> None:
 def test_the_bare_reader_still_bites_over_the_real_tree() -> None:
     """NON-VACUITY. If nothing in the tree stated a bare kernel version, the
     repair for defect 3 would pass without ever having been exercised. It does:
-    `docs/cutover-readiness.md` states `a100` in its `Released` column."""
+    `docs/cutover-readiness.md` states `a104` in its `Released` column."""
 
     readiness = (ROOT / "docs" / "cutover-readiness.md").read_text()
     stated = stated_kernel_versions(readiness)
-    assert "0.1.0a100" in stated, (
+    assert "0.1.0a104" in stated, (
         "no bare kernel version is stated anywhere in the pin-state table any "
         "more. Point this control at whatever states one, or delete it and say "
         "in the same change that the bare form is no longer exercised."
     )
     assert (
-        "0.1.0a100"
+        "0.1.0a104"
         in CURRENT_VERSION_ASSERTIONS["docs/cutover-readiness.md"].other_kernel_versions
     )
     # And the bare spelling really is the only one on that line: if the document
     # ever writes it in full, this control stops exercising the repaired half.
-    assert "a100" in readiness
-    assert "0.1.0a100" not in readiness
+    assert "a104" in readiness
+    assert "0.1.0a104" not in readiness

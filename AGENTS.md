@@ -606,8 +606,8 @@ disagree, fix the drift.
 
     **A published version is not blamed for a boundary its predecessors share.**
     Kernel a98, a99 and a100 reach a product-owned PostgreSQL driver on the
-    public `create_app` symbol identically; a100 regressed nothing, a98 is what
-    runs in production, and the repair is a101. Operational functionality and
+    public `create_app` symbol identically; a100 regressed nothing (measured
+    2026-09-01, when a98 was the pin), and the repair is a101. Operational functionality and
     independent artifact adoptability are different properties with different
     oracles, and a pin may not name a version that has not been published
     (`scripts/kernel_floor.py`, `tests/architecture/test_kernel_floor.py`, CI job

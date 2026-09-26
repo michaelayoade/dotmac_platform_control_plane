@@ -11,14 +11,19 @@ it owns and — just as importantly — what it must never become.
   the single RLS database + transaction authority, platform-admin auth, the
   middleware stack, error handling, and feature mounting. The vendor supplies
   only its own feature modules.
-- The kernel is `dotmac-kernel==0.1.0a98` (extras `testing` and `licensing`),
+- The kernel is `dotmac-kernel==0.1.0a100` (extras `testing` and `licensing`),
   resolved **only**
   from the private Forgejo registry (ADR-0005 in `dotmac_starter_mt`). It is a
   dependency, never vendored source. That version is not transcribed here by
   hand any more: `test_kernel_floor.py` fails if any `dotmac-kernel` version
   stated in this document differs from the one `pyproject.toml` pins. It said
   `0.1.0a77` for the three weeks after the pin moved to a98, and nothing could
-  see it.
+  see it. The pin is the truthful composed floor, not the final kernel state:
+  Control and Approvals declare `>=0.1.0a100`. That kernel generation keeps the
+  import-boundary defect its two predecessors share (`create_app` reaches a
+  product-owned PostgreSQL driver), which this assembly tolerates because its
+  environment supplies the driver; the repaired a101 is held with Governance
+  schema 11 (debt D2).
 - The a61 → a77 compatibility uplift moves no domain writer and composes no new
   module. It does cross kernel a68's platform-audit registry enforcement, so
   every Vendor-owned platform audit action is now declared on exactly one
@@ -63,7 +68,7 @@ it owns and — just as importantly — what it must never become.
   no module schema holds a tenant-scoped table — and says plainly that the full
   four-fact proof (platform tables built, tenant tables absent, *because of the
   selection*) lands with the first shadow composition.
-- `dotmac-approvals==0.1.0a5` is the **approval authority** (ADR-0005). Pinned,
+- `dotmac-approvals==0.1.0a7` is the **approval authority** (ADR-0005). Pinned,
   its public `versions_dir()` locator composed, `ModulePlane.PLATFORM` selected,
   and `platform_api` holding DML on `mod_approvals` — restored by vendor
   migration `v013`, which reverses v012's shadow revoke as a forward revision and
@@ -149,7 +154,7 @@ it owns and — just as importantly — what it must never become.
   product capability catalogue, converts the authoritative Approvals request
   into content-bound evidence, and exposes the owner's bounded UUID-keyset
   agreement reader for complete commercial-cohort enumeration.
-- `dotmac-deployment-control==0.1.0a2` is the owner of deployment identity,
+- `dotmac-deployment-control==0.1.0a15` is the owner of deployment identity,
   desired state, immutable plans, rollouts and authenticated observations under
   ADR-0011. Platform-only and atomic — one supported plane set, so no
   `ModulePlaneSelection` is possible and `ASSEMBLY_MODULE_PLANES` gains nothing.

@@ -92,6 +92,30 @@
       "ratified_decisions": {
         "no_container_healthcheck_on_the_relay_role": "Accepted by Michael 2026-09-04: '/health/ready, heartbeat age and settlement progress own health; a process-local healthcheck must not call a wedged relay healthy.' The candidate declares the relay role with no [roles.health] block, and this records that the omission is a ratified decision rather than an unvalidated inference. Recorded HERE rather than in the candidate, because a promoted candidate is immutable and a ratification arriving after promotion must not rewrite the bytes it ratifies."
       }
+    },
+    {
+      "promoted_at": "2026-09-25",
+      "kind": "composition_change",
+      "candidate": "deploy/candidates/2026-09-25-gate0-composition-adoption.toml",
+      "descriptor_sha256": "sha256:f3adaff6a23b21d78fe870522d817b874e0fe33c6adacc642b932f622e5c898d",
+      "supersedes": "sha256:42d1b0b6bbb8b1b0cc9990cd5630a4be66ea778aaa206ef69a22c3cc72f1c5aa",
+      "summary": "Declares the migration heads the Gate-0 composition adoption (ADR-0013 s A7) will reach: Approvals 0.1.0a7's ap_0003_withdrawals replaces ap_0002_outbox_relay, and Control 0.1.0a15's dc_0015_plan_purpose (via dc_0003..dc_0015) replaces dc_0002_canonical_plan_digest. Mechanically derived: the two heads are exactly the difference between the old declaration and the composed effective heads recomputed by tests/architecture/test_descriptor_promotion.py. NON-AUTHORIZING: no deployment is claimed, performed or licensed, and nothing here authorizes an execution. Kernel 0.1.0a98 -> 0.1.0a100 moves no migration head.",
+      "changed_sections": [
+        "migration"
+      ],
+      "carried_forward": {
+        "why": "This promotion declares what a deployment WILL run and performs none, so every half of the descriptor describing the APPLICATION ARTIFACT is carried across unchanged. assembly.manifest_digest names the manifest the running deployment was promoted with (deploy/product-manifest.json, byte-unchanged); the adoption's own composition is recorded separately as deploy/prospective/product-manifest.json and may replace it only through a deployment receipt and a later promotion. Advancing it here would claim a deployment nobody performed.",
+        "image.reference": "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
+        "image.source_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
+        "assembly.manifest_digest": "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
+      },
+      "plan_input_assessment": {
+        "rule": "dotmac_platform_control_plane ADR-0013 amendment A6.4 (ratified 2026-09-25), cited with its repository.",
+        "answer": "Not a plan input, unchanged from the 2026-09-04 assessment: this is the Foundation's accepted descriptor, and no code path feeds it into propose_deployment_plan. Under Control 0.1.0a15 that path now refuses outright (a6_4_derivation_not_available) until Gate 3 supplies a derived execution plan."
+      },
+      "deploy_ordering": "This composition was never preceded by a 0.1.0a14 deployment, so the a14 -> a15 precondition (stop every a14 process before dc_0015; debt D15) does not arise here. The deploy path still migrates before replacing the serving app, so D15 stays open for any real a14 consumer.",
+      "drift_reading": "Until the adoption is deployed, descriptor drift against production reports ap_0003_withdrawals and dc_0015_plan_purpose as declared-absent and ap_0002_outbox_relay and dc_0002_canonical_plan_digest as present-undeclared. That is the expected reading of a composition change, not a fault. Before that deployment, confirm how PostgresRecoveryBundleV1 verifies migration_heads against this descriptor, and assess the a6-serving-during-migrate window and a rollback to the a6 image after dc_0015 (D15's class).",
+      "authored_by": "Hand-authored, not written by scripts/promote_descriptor.py: that tool licenses a promotion with a deployment receipt's measured heads, and a composition change has no receipt. tests/architecture/test_descriptor_promotion.py recomputes the declared heads from the installed lineages and enforces byte equality, changed_sections and the carried-forward values."
     }
   ]
 }

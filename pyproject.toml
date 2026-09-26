@@ -29,7 +29,18 @@ python = ">=3.12,<3.14"
 # dependency `dotmac_kernel.licensing` needs, which the WS8 issuance slice
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
-dotmac-kernel = { version = "0.1.0a98", extras = [
+#
+# a100 is the truthful COMPOSED FLOOR (`scripts/kernel_floor.py`): Control a15
+# and Approvals a7 each declare `dotmac-kernel >=0.1.0a100`, and the pin equals
+# the highest floor anything composed declares. It is NOT the final kernel
+# state and is NOT independently adoptable: a98, a99 and a100 all reach a
+# product-owned PostgreSQL driver on the public `create_app` import path
+# (`docs/operations/kernel-a100-assessment-2026-09-01.md`). This assembly stays
+# operational because its assembled environment supplies that driver, exactly
+# as it did at a98. The repair is a101 (Starter #573), and adopting it is held
+# with Governance schema 11 and a truthful Foundation render check (debt D2);
+# it is not admitted here through any local exception.
+dotmac-kernel = { version = "0.1.0a100", extras = [
     "testing",
     "licensing",
 ], source = "forgejo" }
@@ -84,7 +95,17 @@ dotmac-entitlement-allocation = { version = "0.1.0a6", source = "forgejo" }
 # PROOF — which is why the repin comes with the `outbox_relay.v1` binding in
 # `vendor_cp.migration_bindings` and the DDL-free `ap_0002_outbox_relay`
 # verification revision. See ADR-0005 s "Adoption plan".
-dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
+#
+# a7 (Gate-0 composition adoption, ADR-0013 s A7). a6 added the module's
+# `database_catalog=` declaration; a7 adds platform/tenant withdrawal with its
+# `ap_0003_withdrawals` migration and the durable `approval.withdrawn` outbox
+# event the protected rehearsal issuer consumes, and declares
+# `dotmac-kernel >=0.1.0a100`. Oracles: tag `dotmac-approvals-v0.1.0a7`, tag
+# object `d59ee6f273755c2c2e7330bfd9f45e6ca1e1d85a`, peeled commit
+# `7cab65c56272c1d8e3a2784ce5b91ce601dd9b05`, release run 36151575723, wheel
+# `ef8b804b…3d61b7`, recorded in Starter's
+# `docs/inventories/module-release-verifications.json`.
+dotmac-approvals = { version = "0.1.0a7", source = "forgejo" }
 # The platform-only owner of deployment identity, desired state, immutable
 # plans, rollouts and authenticated observations (ADR-0011). Atomic: it declares
 # one supported plane set, so no `ModulePlaneSelection` is possible and none is
@@ -109,29 +130,31 @@ dotmac-approvals = { version = "0.1.0a5", source = "forgejo" }
 # a5's artifact identity and behaviour both passed; only its declared floor was
 # wrong. It remains published and is refused BY NAME by the release guard.
 #
-# a6 carries `Requires-Dist: dotmac-kernel (>=0.1.0a98)` — read out of the
-# PUBLISHED WHEEL rather than from a source tree — and a canary that installs
-# the wheel against exactly that declared minimum and drives a real collision
-# through `conflict_savepoint`, with a paired mutation forcing a97 and
-# requiring both a resolver conflict and a behavioural failure. The floor can
-# now fail in both directions, which is what makes it a contract rather than a
-# claim.
+# a15, never a14 (Gate-0 composition adoption, ADR-0013 s A7). a6 through
+# a14 remain published and verified; a15 adds the frozen plan purpose
+# (`foundation_execution` / `rehearsal_issuer_operation`) and the single
+# Foundation V3 execution consumption, and declares
+# `dotmac-kernel >=0.1.0a100`. Under a15 a plan proposal must carry its
+# operation, descriptor digest and execution-plan digest, which ADR-0013 A6.4
+# requires to be DERIVED; CP cannot derive them before Gate 3, so its
+# Foundation-execution propose/authorize refuse with
+# `a6_4_derivation_not_available` rather than supply them. a14 is skipped on
+# purpose: a14 -> a15 needs every a14 process stopped before `dc_0015` (debt
+# D15), and this assembly never ran a14.
 #
 # Oracles (AGENTS.md rule 17). Pinnable — `peeled_tag`
-# `dotmac-deployment-control-v0.1.0a6`, peeled commit
-# `518711c36e9e5774e11b02c6ab35ec0c9c7b75b9`, tag object
-# `553c2bb014a9c2a3d8ebecafa06c4166bc94be1b`. Published and installable —
-# `release_run` 33322980430, verified by run 33323067886 (VERIFIED 7/7), which
-# wrote the tag. The resolved artifacts were compared against that evidence
-# before this pin was accepted: wheel `9b02cf33…7b8fc0`, sdist `68871c24…1adad0`.
+# `dotmac-deployment-control-v0.1.0a15`, peeled commit
+# `cd887722b3ffc909d98ef624032fd19cf31ba497`, tag object
+# `466f48d2b9a75f6dc46aacb641f9e48c9a37ab8c`. Published and installable —
+# `release_run` 36162943891, verified by run 36163228780 (VERIFIED 7/7, fifteen
+# installed-artifact canaries), recorded by Control PR #68. The resolved
+# artifacts equal that evidence: wheel `edd32c0f…0611532`, sdist
+# `1aba41fd…8b254ad`, resolved by protected `kernel-lock.yml` run 36185761425.
 #
-# The kernel pin moves a77 -> a98 BECAUSE a6 requires it, and it is pinned
-# EXACTLY here rather than left to the resolver. Twenty-one alphas of kernel is
-# not a bump whose consequences are discovered at boot — which is the lesson a5
-# just taught at lower cost. This pin is not deployment authorization: the
-# a77->a98 migration still owes a rehearsal against a RESTORED isolated
-# database before it reaches the running deployment.
-dotmac-deployment-control = { version = "0.1.0a6", source = "forgejo" }
+# This pin is not deployment authorization: the a98 -> a100 kernel move and the
+# dc_0003..dc_0015 and ap_0003 migrations still owe a rehearsal against a
+# RESTORED isolated database before they reach the running deployment.
+dotmac-deployment-control = { version = "0.1.0a15", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor

@@ -1,11 +1,11 @@
 {
   "artifacts": {
     "dotmac-deployment-control": {
-      "filename": "dotmac_deployment_control-0.1.0a14-py3-none-any.whl",
-      "version": "0.1.0a14",
-      "sha256": "3e66851fd03708ba8f296b7be13f36cbd6548341136380534937d554d672bbf5",
-      "source_commit": "f555f4384fbeb7eb18822bdaff70055fedbe1480",
-      "tag_object": "9769096c2129589d4818d8ba2357111c6b249d1f"
+      "filename": "dotmac_deployment_control-0.1.0a15-py3-none-any.whl",
+      "version": "0.1.0a15",
+      "sha256": "edd32c0fb528316689d2540eafb9c587dadbc9f99c0b5e45f6872180b0611532",
+      "source_commit": "cd887722b3ffc909d98ef624032fd19cf31ba497",
+      "tag_object": "466f48d2b9a75f6dc46aacb641f9e48c9a37ab8c"
     },
     "dotmac-kernel": {
       "filename": "dotmac_kernel-0.1.0a100-py3-none-any.whl",

@@ -16,13 +16,28 @@ from __future__ import annotations
 import dataclasses
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from _control_a15_support import TEST_SIGNER
+from dotmac_deployment_control import (
+    ApprovalEvidence,
+    ApprovePlanCommand,
+    DesiredDeployment,
+    ProposePlanCommand,
+    RequestRolloutCommand,
+    SetDesiredStateCommand,
+    approve_plan,
+    propose_plan,
+    request_rollout,
+    set_desired_state,
+)
 from dotmac_kernel import NotFoundError
 from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import adapter as approvals
+from vendor_cp.approvals_authority import bare_content_hash
 from vendor_cp.deployment import adapter
 from vendor_cp.deployment.plan_inputs import (
     REFUSAL_CODES,
@@ -35,6 +50,18 @@ from vendor_cp.deployment.plan_inputs import (
     resolve_plan_inputs,
     verify_no_silent_value,
 )
+
+#: Test inputs standing in for the digests only the Deployment Foundation can
+#: render (ADR-0013 A6.4). This fixture is not deriving them from anything —
+#: they are fixed strings in the `sha256:<64 lowercase hex>` shape Control
+#: 0.1.0a15 validates, exactly like `dotmac-deployment-control`'s own fixtures
+#: (`tests/unit/test_approved_plan_lookup.py`).
+_DESCRIPTOR_DIGEST = "sha256:" + "3c" * 32
+_EXECUTION_PLAN_DIGEST = "sha256:" + "1a" * 32
+_POLICY_CODE = "deployment"
+_POLICY_VERSION = 1
+_OPERATION = "deploy"
+_PURPOSE = "foundation_execution"
 
 #: The profile document does not exist in this artifact yet, so a fully derived
 #: resolution is impossible today and every positive case declares this override.
@@ -58,12 +85,26 @@ def db() -> Iterator[Session]:
 
 
 def _authorized(db: Session) -> str:
-    """Drive the REAL chain to a real authorization reference.
+    """Drive Control 0.1.0a15 DIRECTLY to a real authorization reference.
 
-    Register a target, declare its desired state, publish a policy, freeze a
-    plan, decide the approval, authorize. Nothing is inserted by hand: the
-    reference under test has to be the one production would produce, or this
-    tests a fixture rather than the resolver.
+    `vendor_cp.deployment.adapter.propose_deployment_plan`/`authorize_deployment`
+    now refuse under ADR-0013 A6.4 until this assembly composes a Deployment
+    Foundation at Gate 3 (see `PlanInputDerivationUnavailable`), so this
+    fixture can no longer drive them and still reach a real authorization. It
+    instead calls `dotmac_deployment_control`'s own commands, the same way
+    that module's own test suite does
+    (`tests/unit/test_approved_plan_lookup.py`), with explicit TEST inputs —
+    `_DESCRIPTOR_DIGEST`/`_EXECUTION_PLAN_DIGEST` above and the image set
+    below — standing in for values only the Deployment Foundation renders.
+    These are fixed test strings, never derived values.
+
+    Target registration still goes through `vendor_cp.deployment.adapter`
+    (ADR-0013 A6 item 1, unaffected by A6.4), because it is a plain pass
+    through to `register_target` with no digest of any kind involved. Desired
+    state is set through Control's own `set_desired_state` directly, because
+    `adapter.DesiredStateRequest` does not carry `images` (out of scope for
+    this task) and a plan with no declared image set cannot be rolled out.
+    The approvals decision stays real, through `vendor_cp.approvals.adapter`.
     """
     target = adapter.register_deployment_target(
         db,
@@ -75,43 +116,58 @@ def _authorized(db: Session) -> str:
             environment="production",
         ),
     )
-    adapter.set_target_desired_state(
+    set_desired_state(
         db,
-        adapter.DesiredStateRequest(
+        SetDesiredStateCommand(
             command_id=f"desired-{uuid.uuid4()}",
             target_id=target.id,
-            release_ref="ghcr.io/example@sha256:" + "a" * 64,
-            spec={"replicas": 1},
+            desired=DesiredDeployment(
+                release_ref="ghcr.io/example@sha256:" + "a" * 64,
+                spec={"replicas": 1},
+                images=[
+                    {
+                        "service": "api",
+                        "repository": "ghcr.io/example",
+                        "digest": "sha256:" + "a" * 64,
+                    }
+                ],
+            ),
         ),
     )
     approvals.publish_policy_version(
         db,
         approvals.PublishPolicyCommand(
             command_id=f"policy-{uuid.uuid4()}",
-            policy_code="deployment",
-            version=1,
+            policy_code=_POLICY_CODE,
+            version=_POLICY_VERSION,
             quorum=1,
             allow_self_approval=False,
         ),
     )
-    plan = adapter.propose_deployment_plan(
+    plan = propose_plan(
         db,
-        adapter.ProposePlanRequest(
+        ProposePlanCommand(
             command_id=f"propose-{uuid.uuid4()}",
             target_id=target.id,
-            approval_policy_code="deployment",
-            approval_policy_version=1,
+            operation=_OPERATION,
+            descriptor_digest=_DESCRIPTOR_DIGEST,
+            execution_plan_digest=_EXECUTION_PLAN_DIGEST,
+            purpose=_PURPOSE,
+            requires_approval=True,
+            approval_policy_code=_POLICY_CODE,
+            approval_policy_version=_POLICY_VERSION,
         ),
     )
+    content_hash = bare_content_hash(plan.plan_digest or "")
     request = approvals.open_request(
         db,
         approvals.OpenRequestCommand(
             command_id=f"open-{uuid.uuid4()}",
-            policy_code="deployment",
-            policy_version=1,
-            subject_type="deployment_plan",
-            subject_id=str(plan.plan_id),
-            content_hash=plan.approval_content_hash,
+            policy_code=_POLICY_CODE,
+            policy_version=_POLICY_VERSION,
+            subject_type=adapter.PLAN_SUBJECT_TYPE,
+            subject_id=str(plan.id),
+            content_hash=content_hash,
             requested_by=uuid.uuid4(),
         ),
     )
@@ -121,19 +177,46 @@ def _authorized(db: Session) -> str:
             command_id=f"decide-{uuid.uuid4()}",
             request_id=request.request_id,
             approver_id=uuid.uuid4(),
-            content_hash=plan.approval_content_hash,
+            content_hash=content_hash,
         ),
     )
-    receipt = adapter.authorize_deployment(
+    evidence = approvals.approved_request_evidence(
         db,
-        adapter.AuthorizeRequest(
-            command_id=f"authorize-{uuid.uuid4()}",
-            plan_id=plan.plan_id,
-            approval_request_id=request.request_id,
-            rollout_ref=f"rollout-{uuid.uuid4().hex[:8]}",
+        request_id=request.request_id,
+        subject_type=adapter.PLAN_SUBJECT_TYPE,
+        subject_id=str(plan.id),
+        content_hash=content_hash,
+    )
+    approve_plan(
+        db,
+        ApprovePlanCommand(
+            command_id=f"approve-{uuid.uuid4()}",
+            plan_id=plan.id,
+            evidence=ApprovalEvidence(
+                policy_code=evidence.policy_code,
+                policy_version=evidence.policy_version,
+                decision_ref=str(evidence.request_id),
+                # The module's own frozen string, carried across untouched —
+                # see `vendor_cp.deployment.adapter`'s module docstring.
+                content_digest=plan.plan_digest or "",
+                decided_at=evidence.decided_at,
+                operation=_OPERATION,
+                execution_plan_digest=_EXECUTION_PLAN_DIGEST,
+                decision_status="granted",
+            ),
         ),
     )
-    return receipt.authorization_ref
+    rollout = request_rollout(
+        db,
+        RequestRolloutCommand(
+            command_id=f"rollout-{uuid.uuid4()}",
+            rollout_ref=f"rollout-{uuid.uuid4().hex[:8]}",
+            plan_id=plan.id,
+            authorization_expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+        signer=TEST_SIGNER,
+    )
+    return str(rollout.id)
 
 
 def _refusal(db: Session, reference: str, **kwargs: object) -> PlanInputRefused:

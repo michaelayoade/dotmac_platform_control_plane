@@ -23,6 +23,15 @@ from vendor_cp.migrations import make_alembic_config
 
 SHADOW_REVISION = "v012_approvals_shadow_readonly"
 SWITCH_REVISION = "v013_approvals_authority_switch"
+
+#: `platform_approval_withdrawals` arrived with Approvals 0.1.0a7's
+#: `ap_0003_withdrawals` (Gate-0 adoption). `v012` and `v013` govern the three
+#: tables that existed when they were written and never touch it: its online
+#: write path is the SECURITY DEFINER `record_platform_withdrawal`, and
+#: `platform_api` holds SELECT on the table itself, nothing more.
+WITHDRAWAL_TABLE = "platform_approval_withdrawals"
+SWITCHED_TABLES = tuple(t for t in PLATFORM_TABLES if t != WITHDRAWAL_TABLE)
+assert WITHDRAWAL_TABLE in PLATFORM_TABLES and len(SWITCHED_TABLES) == 3
 SCHEMA = "mod_approvals"
 ONLINE_ROLE = "platform_api"
 TENANT_ROLE = "app_user"
@@ -102,7 +111,7 @@ def test_a_populated_legacy_table_stops_the_switch(scratch_db: str) -> None:
     # and the online role did not gain write access.
     for table in LEGACY_TABLES:
         assert _table_exists(scratch_db, f"public.{table}")
-    assert not _holds(scratch_db, ONLINE_ROLE, PLATFORM_TABLES[0], "INSERT")
+    assert not _holds(scratch_db, ONLINE_ROLE, SWITCHED_TABLES[0], "INSERT")
 
     engine = create_engine(scratch_db)
     try:
@@ -135,7 +144,7 @@ def test_the_empty_check_is_not_vacuous(scratch_db: str) -> None:
 # ── The transfer ────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("table", PLATFORM_TABLES)
+@pytest.mark.parametrize("table", SWITCHED_TABLES)
 def test_the_online_role_can_operate_the_module(scratch_db: str, table: str) -> None:
     """v012's revoke, reversed — verified as an OUTCOME, both directions."""
     _upgrade(scratch_db)
@@ -145,6 +154,45 @@ def test_the_online_role_can_operate_the_module(scratch_db: str, table: str) -> 
 
     excess = [p for p in NEVER_GRANTED if _holds(scratch_db, ONLINE_ROLE, table, p)]
     assert not excess, f"{ONLINE_ROLE} holds {excess} on {table}"
+
+
+def test_the_withdrawal_table_is_written_only_through_its_owner_function(
+    scratch_db: str,
+) -> None:
+    """Approvals a7's append-only withdrawal record, seen from the online role.
+
+    `platform_api` may READ the table and may EXECUTE the module's SECURITY
+    DEFINER `record_platform_withdrawal`, which locks the parent and writes the
+    row. It holds no INSERT, UPDATE or DELETE on the table: a direct write would
+    bypass the owner, and a rewrite would destroy evidence.
+    """
+    _upgrade(scratch_db)
+    assert _holds(scratch_db, ONLINE_ROLE, WITHDRAWAL_TABLE, "SELECT")
+    held = [
+        p
+        for p in ("INSERT", "UPDATE", "DELETE", *NEVER_GRANTED)
+        if _holds(scratch_db, ONLINE_ROLE, WITHDRAWAL_TABLE, p)
+    ]
+    assert not held, f"{ONLINE_ROLE} holds {held} on {WITHDRAWAL_TABLE}"
+    engine = create_engine(scratch_db)
+    try:
+        with engine.connect() as conn:
+            grants = (
+                conn.execute(
+                    text(
+                        "SELECT has_function_privilege(:role, p.oid, 'EXECUTE') "
+                        "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+                        "WHERE n.nspname = 'mod_approvals' "
+                        "AND p.proname = 'record_platform_withdrawal'"
+                    ),
+                    {"role": ONLINE_ROLE},
+                )
+                .scalars()
+                .all()
+            )
+    finally:
+        engine.dispose()
+    assert grants == [True], grants
 
 
 @pytest.mark.parametrize("table", PLATFORM_TABLES)
@@ -164,7 +212,7 @@ def test_the_privilege_reader_would_notice_a_missing_grant(scratch_db: str) -> N
     """SENSITIVITY for the positive half: revoke one of the granted privileges
     and prove the same reader reports it absent."""
     _upgrade(scratch_db)
-    table = PLATFORM_TABLES[0]
+    table = SWITCHED_TABLES[0]
     engine = create_engine(scratch_db)
     try:
         with engine.begin() as conn:
@@ -219,7 +267,7 @@ def test_downgrade_is_refused(scratch_db: str) -> None:
 
     # Inert: the switch's effects are all still in place.
     assert not _table_exists(scratch_db, "public.approval_policies")
-    assert _holds(scratch_db, ONLINE_ROLE, PLATFORM_TABLES[0], "INSERT")
+    assert _holds(scratch_db, ONLINE_ROLE, SWITCHED_TABLES[0], "INSERT")
 
 
 def test_the_migration_takes_the_lock_it_needs_up_front() -> None:

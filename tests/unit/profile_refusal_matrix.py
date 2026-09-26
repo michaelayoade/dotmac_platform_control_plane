@@ -692,8 +692,8 @@ BUILDER_CASES: Final[tuple[BuilderCase, ...]] = (
             inputs,
             "lock_text",
             inputs.lock_text.replace(
-                'name = "dotmac-kernel"\nversion = "0.1.0a98"',
-                'name = "dotmac-kernel"\nversion = "0.1.0a97"',
+                'name = "dotmac-kernel"\nversion = "0.1.0a100"',
+                'name = "dotmac-kernel"\nversion = "0.1.0a99"',
             ),
         ),
         "not the one in this image",

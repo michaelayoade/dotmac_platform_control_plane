@@ -1,6 +1,6 @@
 name: Rehearsal Issuer Harness
 
-# The disposable Control a14 / Kernel a100 rehearsal-issuer conformance
+# The disposable Control a15 / Kernel a100 rehearsal-issuer conformance
 # harness (`rehearsal_issuer_harness/`) is deliberately outside the
 # application's default `testpaths`, so `ci.yml`'s `check` job never collects
 # it. That made a "13 passed" claim in a pull request description a one-time
@@ -73,7 +73,7 @@ jobs:
             --index-url "https://pypi.org/simple" \
             --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
             --dest /tmp/private-wheels \
-            "dotmac-deployment-control==0.1.0a14" "dotmac-kernel==0.1.0a100"
+            "dotmac-deployment-control==0.1.0a15" "dotmac-kernel==0.1.0a100"
 
           # A CI-level sanity check only -- defense in depth. The harness's
           # own verify_wheels/verify_installed re-checks this again, from

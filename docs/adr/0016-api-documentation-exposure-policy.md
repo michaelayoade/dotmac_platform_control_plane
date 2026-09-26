@@ -212,6 +212,17 @@ this assembly's local expression of it and is expected to be DELETED, not
 rewritten, when the kernel field exists — the declared policies move to
 `build_spec()` and `vendor_cp.main` returns to one line.
 
+### Amendment — 2026-09-25: § 6's kernel obligation is consumed at kernel a100
+
+The kernel obligation above is now satisfied by kernel 0.1.0a100:
+`dotmac_kernel.api_documentation` and `ProductAssemblySpec.api_documentation`.
+`vendor_cp.api_documentation` has been deleted; `build_spec()` declares
+`api_documentation=environment_api_documentation_policy()` and `create_app`
+applies it at `FastAPI(...)` construction, refusing to build an assembly with
+no declared policy. `vendor_cp.main` is back to the one-line `create_app`
+call this ADR anticipated. No new vendor-control-plane policy owner is
+introduced.
+
 ## 7. Consequences
 
 * `/docs` and `/redoc` return 404 on vendor-cp-prod. No operator workflow used

@@ -180,12 +180,12 @@ def test_a_lock_that_disagrees_with_the_installed_version_refuses(
     lock = tmp_path / "poetry.lock"
     lock.write_text(
         LOCK.read_text(encoding="utf-8").replace(
-            'name = "dotmac-kernel"\nversion = "0.1.0a98"',
-            'name = "dotmac-kernel"\nversion = "0.1.0a97"',
+            'name = "dotmac-kernel"\nversion = "0.1.0a100"',
+            'name = "dotmac-kernel"\nversion = "0.1.0a99"',
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ProfileBuildRefusal, match="0.1.0a97"):
+    with pytest.raises(ProfileBuildRefusal, match="0.1.0a99"):
         build_profile_document(
             source_revision=REVISION, dist_dir=dist_dir, lock_path=lock
         )

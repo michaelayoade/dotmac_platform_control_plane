@@ -278,14 +278,14 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "vendor_cp.deployment.adapter",
         "propose_deployment_plan",
         True,
-        "freeze the target's desired state into an immutable plan",
+        "refused until Gate 3 (ADR-0013 A6.4): would freeze an immutable plan",
     ),
     Owner(
         "deployment authorize",
         "vendor_cp.deployment.adapter",
         "authorize_deployment",
         True,
-        "carry an approval into the frozen plan and request the rollout",
+        "refused until Gate 3 (ADR-0013 A6.4): would approve and roll out",
     ),
     Owner(
         "deployment plan",

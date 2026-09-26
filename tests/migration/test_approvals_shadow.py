@@ -49,6 +49,15 @@ from vendor_cp.migrations import (
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = "mod_approvals"
+
+#: `platform_approval_withdrawals` arrived with Approvals 0.1.0a7's
+#: `ap_0003_withdrawals` (Gate-0 adoption). `v012` and `v013` govern the three
+#: tables that existed when they were written and never touch it: its online
+#: write path is the SECURITY DEFINER `record_platform_withdrawal`, and
+#: `platform_api` holds SELECT on the table itself, nothing more.
+WITHDRAWAL_TABLE = "platform_approval_withdrawals"
+SWITCHED_TABLES = tuple(t for t in PLATFORM_TABLES if t != WITHDRAWAL_TABLE)
+assert WITHDRAWAL_TABLE in PLATFORM_TABLES and len(SWITCHED_TABLES) == 3
 ONLINE_ROLE = "platform_api"
 TENANT_ROLE = "app_user"
 
@@ -238,7 +247,7 @@ def test_downgrade_is_refused_and_changes_nothing(scratch_db: str) -> None:
         command.downgrade(make_alembic_config(scratch_db), "v011_product_identity")
 
     # (a) the grants are exactly as the forward migration left them...
-    for table in PLATFORM_TABLES:
+    for table in SWITCHED_TABLES:
         assert _holds(scratch_db, ONLINE_ROLE, table, "SELECT")
         still_held = [
             privilege
@@ -268,7 +277,7 @@ def test_the_downgrade_canary_reads_a_real_version_table(scratch_db: str) -> Non
 # ── 5. After a successful upgrade: SELECT-only, no tenant access, empty ─────
 
 
-@pytest.mark.parametrize("table", PLATFORM_TABLES)
+@pytest.mark.parametrize("table", SWITCHED_TABLES)
 def test_the_online_role_is_select_only(scratch_db: str, table: str) -> None:
     """Both halves. The negative alone would be satisfied by a table nobody can
     read, which is not the contract: the shadow comparison READS these tables,
@@ -286,7 +295,7 @@ def test_the_online_role_is_select_only(scratch_db: str, table: str) -> None:
     assert not held, f"{ONLINE_ROLE} still holds {held} on {table}"
 
 
-@pytest.mark.parametrize("table", PLATFORM_TABLES)
+@pytest.mark.parametrize("table", SWITCHED_TABLES)
 def test_the_tenant_role_has_no_access_at_all(scratch_db: str, table: str) -> None:
     _upgrade(scratch_db)
     held = [
@@ -301,7 +310,7 @@ def test_the_privilege_reader_would_notice_a_granted_write(scratch_db: str) -> N
     """SENSITIVITY for the negatives above, which are all assertions that a list
     is empty — precisely the shape a broken reader satisfies."""
     _upgrade(scratch_db)
-    table = PLATFORM_TABLES[0]
+    table = SWITCHED_TABLES[0]
     engine = create_engine(scratch_db)
     try:
         with engine.begin() as conn:
@@ -319,7 +328,7 @@ def test_the_privilege_reader_would_notice_a_granted_write(scratch_db: str) -> N
     assert not _holds(scratch_db, ONLINE_ROLE, table, "INSERT")
 
 
-@pytest.mark.parametrize("table", PLATFORM_TABLES)
+@pytest.mark.parametrize("table", SWITCHED_TABLES)
 def test_the_module_tables_are_empty(scratch_db: str, table: str) -> None:
     """Nothing writes them during shadow. The legacy service is still the
     authority, and this phase reads only."""
