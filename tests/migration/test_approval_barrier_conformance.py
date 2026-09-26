@@ -72,6 +72,7 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.approvals_authority import bare_content_hash
+from vendor_cp.deployment import approval_barrier
 from vendor_cp.deployment.protected_rehearsal_issuer import (
     ProposeIssuerPlan,
     approve_issuer_plan,
@@ -867,3 +868,34 @@ def test_i1_the_hold_and_the_issuance_run_in_the_same_transaction(
         "pairs -- they did not run in the same transaction on the same "
         "connection"
     )
+
+
+# ── A1 ────────────────────────────────────────────────────────────────────
+
+
+def test_a1_an_autocommit_session_is_refused_before_any_mutation(
+    seeded: tuple[uuid.UUID, uuid.UUID], engine: Engine
+) -> None:
+    """`held_transition`'s AUTOCOMMIT refusal, exercised at the real
+    `approve_issuer_plan` call site against a real connection -- not a unit
+    stub of `get_isolation_level()`. A FOR SHARE lock on an AUTOCOMMIT
+    connection ends with its own statement, so `_require_transactional` must
+    refuse before `hold_approval` (and therefore the transition) ever runs,
+    leaving the plan exactly as `seeded` left it.
+    """
+    plan_id, request_id = seeded
+    autocommit_engine = engine.execution_options(isolation_level="AUTOCOMMIT")
+    with Session(autocommit_engine) as db:
+        with pytest.raises(approval_barrier.ApprovalBarrierUnavailable):
+            approve_issuer_plan(
+                db,
+                command_id=f"approve-{uuid.uuid4()}",
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+
+    with Session(engine) as db_c:
+        plan = control.get_plan(db_c, plan_id)
+    assert plan is not None
+    assert plan.status == "proposed", plan.status
+    assert plan.approval_decision_ref is None
