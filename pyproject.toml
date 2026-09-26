@@ -105,7 +105,7 @@ dotmac-entitlement-allocation = { version = "0.1.0a6", source = "forgejo" }
 # `7cab65c56272c1d8e3a2784ce5b91ce601dd9b05`, release run 36151575723, wheel
 # `ef8b804b…3d61b7`, recorded in Starter's
 # `docs/inventories/module-release-verifications.json`.
-dotmac-approvals = { version = "0.1.0a7", source = "forgejo" }
+dotmac-approvals = { version = "0.1.0a8", source = "forgejo" }
 # The platform-only owner of deployment identity, desired state, immutable
 # plans, rollouts and authenticated observations (ADR-0011). Atomic: it declares
 # one supported plane set, so no `ModulePlaneSelection` is possible and none is

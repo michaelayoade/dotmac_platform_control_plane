@@ -343,14 +343,14 @@ wmi = ["wmi (>=1.5.1) ; platform_system == \"Windows\""]
 
 [[package]]
 name = "dotmac-approvals"
-version = "0.1.0a7"
+version = "0.1.0a8"
 description = "DotMac dual-plane approval policy revisions, content-bound requests and decisions"
 optional = false
 python-versions = ">=3.11,<3.14"
 groups = ["main"]
 files = [
-    {file = "dotmac_approvals-0.1.0a7-py3-none-any.whl", hash = "sha256:ef8b804b55fe1d5d860ea8f666fa2931876a51db8ce38166539821e9883d61b7"},
-    {file = "dotmac_approvals-0.1.0a7.tar.gz", hash = "sha256:aa36925e9941a09f67d06e2bf36111fa921040c4be54bb98f9ffa4efdff7c4f1"},
+    {file = "dotmac_approvals-0.1.0a8-py3-none-any.whl", hash = "sha256:f37f02ac98734b6a65690f2f39c839fde9c0cb6545a71e70e090666deb8f01d7"},
+    {file = "dotmac_approvals-0.1.0a8.tar.gz", hash = "sha256:61fee66eded417b43e4eb752a7ce206d08c59238c794b38e8710c7d250f986de"},
 ]
 
 [package.dependencies]
@@ -1647,4 +1647,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "65a562aef235750bde7e095286d24b182f7c135728bf9878a994d0816ca4814e"
+content-hash = "c3d5e1ebb695428ed618e086865ac284077df81dd6dc4fece8045e758b4ec9a4"
