@@ -69,6 +69,22 @@ class HostAdmissionAdapterUsageError(ValueError):
     security refusal upstream."""
 
 
+class DispatchApprovalSubjectUnavailable(Exception):
+    """Dispatch refused: the plan requires approval, and no approval barrier exists.
+
+    C2 holds an approval FOR SHARE through every approval-dependent Control
+    transition, so that a withdrawal cannot commit in the window between the
+    check and the effect. A FOUNDATION_EXECUTION plan has no Approvals subject
+    type yet, so there is nothing to hold at dispatch. Michael decided on
+    2026-09-26 (C2-D1) that dispatch FAILS CLOSED for any plan that requires
+    approval, or that cannot be found, until Gate 3 defines that subject. This
+    is a refusal, not a wiring mistake, so it is deliberately not a
+    `HostAdmissionAdapterUsageError`.
+    """
+
+    code = "c2_dispatch_approval_subject_unavailable"
+
+
 class HostAdmissionContextResolver(Protocol):
     """What CP needs from Control's resolve phase.
 
@@ -298,6 +314,9 @@ class ControlFoundationV3Bindings:
     finalize: Callable[..., object]
     attest_pair: Callable[..., object]
     lookup_committed: Callable[..., object]
+    #: Control's public `get_plan`. Dispatch reads the plan's approval
+    #: requirement from it before finalizing (C2-D1: fail closed).
+    get_plan: Callable[..., object]
     foreign_root_type: Callable[..., object]
     foreign_evidence_type: Callable[..., object]
     execution_context_type: Callable[..., object]
@@ -534,11 +553,45 @@ class _FoundationV3Provider:
                 raise HostAdmissionAdapterUsageError(
                     "F2 resolution and V3 finalization require separate sessions"
                 )
+            self._refuse_an_approval_requiring_plan(
+                session, _field(continuation.execution_facts, "plan_id")
+            )
             self._control.finalize(
                 session, context=resolved, foreign_evidence=foreign, execution=execution
             )
             session.commit()
         # No fallible work follows the successful Control commit.
+
+    def _refuse_an_approval_requiring_plan(
+        self, session: Session, plan_id: object
+    ) -> None:
+        """C2-D1: fail closed at dispatch until a Foundation plan has an
+        Approvals subject that a barrier could hold.
+
+        The plan id comes from the observed execution facts, the same value
+        that becomes `expected_context.plan_id`. Control's `finalize` refuses a
+        coordinate mismatch between that context and the plan it locks, so the
+        plan checked here is the plan that would be consumed. A malformed id,
+        a missing plan, or a plan without an explicit `requires_approval=False`
+        all refuse before `finalize` is called.
+        """
+        try:
+            parsed = UUID(str(plan_id))
+        except ValueError as exc:
+            raise DispatchApprovalSubjectUnavailable(
+                f"dispatch plan id {plan_id!r} is not a UUID"
+            ) from exc
+        plan = self._control.get_plan(session, parsed)
+        if plan is None:
+            raise DispatchApprovalSubjectUnavailable(
+                f"dispatch plan {parsed} does not exist"
+            )
+        if getattr(plan, "requires_approval", True) is not False:
+            raise DispatchApprovalSubjectUnavailable(
+                f"dispatch plan {parsed} requires approval, and FOUNDATION_EXECUTION "
+                "plans have no Approvals subject for the C2 barrier to hold; "
+                "dispatch fails closed until Gate 3 (C2-D1)"
+            )
 
     def lookup_committed(self, *, control_consumption_ref: str) -> object:
         """Read Control's typed committed marker after a crash, never reconsume."""
@@ -640,6 +693,7 @@ def compose_foundation_v3_providers(
             control.finalize,
             control.attest_pair,
             control.lookup_committed,
+            control.get_plan,
             foundation.admit_host_source,
             foundation.trust_policy_from_context,
             sources.sessions,
@@ -659,6 +713,7 @@ def compose_foundation_v3_providers(
 __all__ = [
     "AttestationPairVerifier",
     "AttestationVerificationInputs",
+    "DispatchApprovalSubjectUnavailable",
     "HostAdmissionAdapterUsageError",
     "HostAdmissionConsumer",
     "HostAdmissionContextResolver",

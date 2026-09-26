@@ -12,9 +12,10 @@ and requires it to be lexically inside a function passed as `held_transition`'s
 `host_admission_adapter.py`'s `finalize` call is allowlisted explicitly,
 because it dispatches a `FOUNDATION_EXECUTION` plan that has no Approvals
 subject at all. Michael decided C2-D1 on 2026-09-26: dispatch FAILS CLOSED for
-an approval-requiring Foundation plan until Gate 3 defines its subject; slice S3
-implements that refusal and then narrows this entry. An exemption states an
-enforceable premise (AGENTS.md), not a bare pass.
+an approval-requiring Foundation plan until Gate 3 defines its subject, and
+`test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check` below
+enforces that premise structurally. An exemption states an enforceable premise
+(AGENTS.md), not a bare pass.
 
 `authorize_deployment`/`propose_deployment_plan` (`deployment/adapter.py`) are
 asserted to still raise `PlanInputDerivationUnavailable` before reaching any
@@ -50,9 +51,14 @@ GUARDED_CALL_NAMES = frozenset(
 ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
         # FOUNDATION_EXECUTION plans have no Approvals subject to hold. C2-D1
-        # (Michael, 2026-09-26): fail closed at dispatch for approval-requiring
-        # plans until Gate 3; S3 implements the refusal. Tracked: debt D18.
-        ("host_admission_adapter.py", "consume_dispatch"),
+        # (Michael, 2026-09-26): dispatch fails closed instead —
+        # `_refuse_an_approval_requiring_plan` runs before this finalize and
+        # refuses any plan without an explicit requires_approval=False
+        # (proved in tests/unit/test_foundation_v3_provider.py). Until Gate 3
+        # gives the plan a subject, there is nothing for a barrier to hold.
+        # Keyed by the path relative to src/vendor_cp, exactly as the scan
+        # reports it.
+        ("deployment/host_admission_adapter.py", "consume_dispatch"),
     }
 )
 
@@ -178,6 +184,25 @@ def test_the_allowlisted_finalize_call_still_exists_at_its_named_site() -> None:
         "consume_dispatch(); the ALLOWLIST entry naming that premise is stale "
         "and must be reviewed"
     )
+
+
+def test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check() -> None:
+    """The allowlist premise, enforced: inside `consume_dispatch`, the C2-D1
+    refusal is called on an earlier line than `finalize`, in the same block."""
+    tree = ast.parse(HOST_ADMISSION_ADAPTER.read_text())
+    (consume,) = (
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "consume_dispatch"
+    )
+    lines = {
+        _call_name(node): node.lineno
+        for node in ast.walk(consume)
+        if isinstance(node, ast.Call)
+        and _call_name(node) in {"finalize", "_refuse_an_approval_requiring_plan"}
+    }
+    assert set(lines) == {"finalize", "_refuse_an_approval_requiring_plan"}, lines
+    assert lines["_refuse_an_approval_requiring_plan"] < lines["finalize"]
 
 
 def test_authorize_deployment_and_propose_plan_still_raise_before_any_call() -> None:
