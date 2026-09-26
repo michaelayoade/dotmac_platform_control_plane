@@ -41,10 +41,13 @@ CI.
 
 from __future__ import annotations
 
+import sys
 import threading
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import timedelta
+from pathlib import Path
 from typing import Final
 from unittest import mock
 
@@ -57,6 +60,8 @@ from dotmac_deployment_control import (
     DesiredDeployment,
     RegisterTargetCommand,
     SetDesiredStateCommand,
+    get_target,
+    install_rehearsal_issuer_security,
     register_target,
     set_desired_state,
 )
@@ -70,10 +75,22 @@ from vendor_cp.approvals_authority import bare_content_hash
 from vendor_cp.deployment.protected_rehearsal_issuer import (
     ProposeIssuerPlan,
     approve_issuer_plan,
+    issue_authorization,
     open_issuer_approval,
     propose_issuer_plan,
 )
+from vendor_cp.deployment.rehearsal_issuer_seam import (
+    RehearsalIssuerCommand,
+    RehearsalIssuerInvocation,
+)
 from vendor_cp.migrations import make_alembic_config
+
+#: `rehearsal_issuer_harness` lives outside `src/` and outside `tests/`
+#: (pytest's own `testpaths = ["tests"]` in `pyproject.toml`), so this file
+#: reaches its disposable Ed25519 signer/verifier classes the same way
+#: `tests/architecture/test_rehearsal_issuer_harness_boundary.py` does: a
+#: scoped `sys.path` insert around one import, never a permanent path change.
+_REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 
 #: The online runtime role, same as `test_platform_relay_drain.py`'s
 #: `PLATFORM_ROLE`. `scratch_db` already grants it CONNECT; the module
@@ -188,6 +205,86 @@ def _seed(engine: Engine) -> tuple[uuid.UUID, uuid.UUID]:
 @pytest.fixture
 def seeded(engine: Engine) -> tuple[uuid.UUID, uuid.UUID]:
     return _seed(engine)
+
+
+@pytest.fixture
+def issuer_security() -> Iterator[tuple[object, object]]:
+    """Install disposable, in-process rehearsal-issuer security for exactly
+    one test, and uninstall it before the next.
+
+    `install_rehearsal_issuer_security` is process-global, install-once state
+    inside Control (a second call without a reset raises `RuntimeError`) --
+    exactly the harness's own precondition
+    (`rehearsal_issuer_harness/runtime.py::install_disposable_security`).
+    Resetting through the private `_reset_rehearsal_issuer_security_for_tests`
+    after every test keeps that footprint scoped to this fixture alone: no
+    other test in this module, or any other module in this suite, ever
+    observes rehearsal-issuer security installed. No secret or real key is
+    involved -- the keys are freshly generated, disposable Ed25519 pairs,
+    held only in this process's memory for the life of one test.
+    """
+    from dotmac_deployment_control.rehearsal_issuer_issuance import (
+        _reset_rehearsal_issuer_security_for_tests,
+    )
+
+    sys.path.insert(0, str(_REPO_ROOT))
+    try:
+        from rehearsal_issuer_harness.security import (
+            AuthorizationSecurity,
+            HarnessSecurity,
+        )
+    finally:
+        sys.path.remove(str(_REPO_ROOT))
+
+    authorization = AuthorizationSecurity()
+    harness = HarnessSecurity()
+    install_rehearsal_issuer_security(
+        signer=authorization,
+        authorization_verifier=authorization,
+        harness_verifier=harness,
+        authorization_ttl=timedelta(hours=1),
+    )
+    try:
+        yield authorization, harness
+    finally:
+        _reset_rehearsal_issuer_security_for_tests()
+
+
+def _target_ref_for(engine: Engine, plan_id: uuid.UUID) -> str:
+    """Look up the plan's own frozen target_ref from Control's read side --
+    issuance refuses a harness-evidence `target_ref` that does not match it.
+    """
+    with Session(engine) as db:
+        plan = control.get_plan(db, plan_id)
+        assert plan is not None
+        target = get_target(db, plan.target_id)
+        assert target is not None
+    return target.target_ref
+
+
+def _harness_evidence(
+    harness: object, target_ref: str
+) -> tuple[str, dict[str, object]]:
+    """Build signed harness evidence exactly as
+    `rehearsal_issuer_harness/test_issuer.py::_evidence` does."""
+    lease_id = f"lease-{uuid.uuid4()}"
+    return lease_id, harness.document(lease_id=lease_id, target_ref=target_ref)
+
+
+def _approve_and_commit(
+    engine: Engine, plan_id: uuid.UUID, request_id: uuid.UUID
+) -> None:
+    """Turn a `seeded` (proposed, decided) plan into an APPROVED one, the
+    precondition `issue_authorization` needs (a recorded
+    `approval_decision_ref`)."""
+    with Session(engine) as db:
+        approve_issuer_plan(
+            db,
+            command_id=f"approve-{uuid.uuid4()}",
+            plan_id=plan_id,
+            approval_request_id=request_id,
+        )
+        db.commit()
 
 
 def _withdraw(db: Session, *, request_id: uuid.UUID, external_ref: str) -> object:
@@ -555,3 +652,127 @@ def test_t4_a_withdrawal_that_commits_first_makes_the_hold_refuse(
     assert plan is not None
     assert plan.status == "proposed", plan.status
     assert plan.approval_decision_ref is None
+
+
+# ── I3 (issuance barrier) ───────────────────────────────────────────────────
+
+
+def _prove_the_issuance_barrier_holds(
+    engine: Engine,
+    plan_id: uuid.UUID,
+    request_id: uuid.UUID,
+    invocation: RehearsalIssuerInvocation,
+) -> None:
+    """`_prove_the_barrier_holds`'s proof, at `issue_authorization` instead of
+    `approve_issuer_plan`: the SAME approval hold, taken at the rollout-
+    equivalent site, must block a concurrent withdrawal and a peer's NOWAIT
+    probe on Control's plan row while it is open, and release both together
+    on session A's single commit.
+
+    Every failure here is a plain `assert`, so a sensitivity test can plant a
+    defect and show this exact function fails with `AssertionError`.
+    """
+    mutated = threading.Event()
+    release = threading.Event()
+    issue_result: list[object] = []
+    issue_error: list[BaseException] = []
+    real_issue = control.issue_rehearsal_issuer_authorization_for_plan
+
+    def paused_issue(
+        db: Session, request: object, *, harness_evidence_document: object
+    ) -> object:
+        result = real_issue(
+            db, request, harness_evidence_document=harness_evidence_document
+        )
+        mutated.set()
+        release.wait(timeout=_LOCK_WAIT)
+        return result
+
+    def run_a() -> None:
+        try:
+            with (
+                Session(engine) as db_a,
+                mock.patch.object(
+                    control,
+                    "issue_rehearsal_issuer_authorization_for_plan",
+                    paused_issue,
+                ),
+            ):
+                result = issue_authorization(db_a, invocation)
+                db_a.commit()
+            issue_result.append(result)
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            issue_error.append(exc)
+
+    thread_a = threading.Thread(target=run_a)
+    thread_a.start()
+    try:
+        assert mutated.wait(
+            timeout=_LOCK_WAIT
+        ), "session A never reached its pause point"
+
+        timed_out = False
+        sqlstate: str | None = None
+        with Session(engine) as db_b:
+            db_b.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            try:
+                _withdraw(
+                    db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+                )
+            except OperationalError as exc:
+                timed_out = True
+                sqlstate = getattr(exc.orig, "sqlstate", None)
+            db_b.rollback()
+        assert timed_out, "a withdrawal under A's issuance hold did not block at all"
+        assert (
+            sqlstate == "55P03"
+        ), f"expected a lock-timeout SQLSTATE, got {sqlstate!r}"
+
+        plan_sqlstate: str | None = None
+        with Session(engine) as db_c:
+            try:
+                db_c.execute(
+                    text(
+                        "SELECT id FROM mod_deploy.deployment_plans "
+                        "WHERE id = :id FOR UPDATE NOWAIT"
+                    ),
+                    {"id": plan_id},
+                )
+            except OperationalError as exc:
+                plan_sqlstate = getattr(exc.orig, "sqlstate", None)
+            db_c.rollback()
+        assert plan_sqlstate == "55P03", (
+            "Control's plan row was not locked while A's issuance transaction "
+            f"was open (sqlstate {plan_sqlstate!r})"
+        )
+    finally:
+        release.set()
+        thread_a.join(timeout=_LOCK_WAIT)
+
+    assert not issue_error, f"session A failed: {issue_error!r}"
+    assert issue_result, "session A never returned"
+
+    with Session(engine) as db_b:
+        outcome = _withdraw(
+            db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+        )
+        db_b.commit()
+    assert outcome.state is ApprovalState.WITHDRAWN
+
+
+def test_i3_issuance_holds_the_same_barrier_as_approval(
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    engine: Engine,
+    issuer_security: tuple[object, object],
+) -> None:
+    plan_id, request_id = seeded
+    _approve_and_commit(engine, plan_id, request_id)
+
+    _, harness = issuer_security
+    target_ref = _target_ref_for(engine, plan_id)
+    _, evidence = _harness_evidence(harness, target_ref)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(f"issue-{uuid.uuid4()}", plan_id, "operator-rehearsal"),
+        evidence,
+    )
+    _prove_the_issuance_barrier_holds(engine, plan_id, request_id, invocation)
