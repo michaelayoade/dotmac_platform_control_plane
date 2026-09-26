@@ -1212,12 +1212,11 @@ CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
     # a pin claim cannot be added to it without being declared.
     "AGENTS.md": CurrentVersionClaim(
         other_kernel_versions={
-            # The sentence says "a98 is what runs in production". After the
-            # Gate-0 repin to a100 that is still TRUE — this checkout is not
-            # deployed — so it is declared as the production fact it states.
-            # Revisit it when a deployment of this pin lands.
-            "0.1.0a98": "the kernel production runs today; this checkout pins "
-            "a100 and has not been deployed",
+            # The sentence used to say "a98 is what runs in production" — a
+            # production claim no oracle here checks. It now states the dated
+            # measurement it came from, so a98 is declared as that past fact.
+            "0.1.0a98": "the pin when the shared boundary was measured, "
+            "2026-09-01; past tense, not a claim about production",
             "0.1.0a99": "a published kernel the example compares against",
             "0.1.0a100": "a published kernel the example compares against",
         },

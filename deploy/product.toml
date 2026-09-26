@@ -21,23 +21,22 @@
 # indistinguishable from the next CORRECTION.
 #
 # Provenance of these bytes:
-#   candidate    deploy/candidates/2026-09-04-activation-relay-service.toml
-#   promoted     2026-09-04, as a COMPOSITION CHANGE rather than a deployment
-#   record       docs/operations/production-deployment.md
-#                (its "relay dispatcher credential" section)
-#   supersedes   deploy/candidates/2026-09-01-recovery-bundle-verification.toml
+#   candidate    deploy/candidates/2026-09-25-gate0-composition-adoption.toml
+#   promoted     2026-09-25, as a COMPOSITION CHANGE rather than a deployment
+#   record       deploy/descriptor-promotions.json (its 2026-09-25 entry)
+#   supersedes   deploy/candidates/2026-09-04-activation-relay-service.toml
 #
-# This promotion declares a SECOND process role and the migration that goes with
-# it. Three sections move and no others: `runtime_materials`, `roles` and
-# `migration`.
+# This promotion declares the migration heads the Gate-0 composition adoption
+# (Control 0.1.0a15, Approvals 0.1.0a7, kernel 0.1.0a100; ADR-0013 s A7) will
+# reach. ONE section moves and no other: `migration`, and within it only
+# `expected_heads`. It is non-authorizing: it licenses no deployment and
+# performs none.
 #
 # The image half is UNCHANGED and deliberately so. `[image]` still names the
-# artifact the application is running and `[assembly].manifest_digest` is
-# byte-identical, because the relay composes no module, no feature and no route
-# — it is a second process running the SAME image's installed console script.
-# A descriptor advanced here would claim a deployment nobody has performed
-# (ADR-0017 s 2); the deployment that starts this role is Michael's, and this
-# file describes what it will run rather than asserting that it has.
+# artifact the application is running and `[assembly].manifest_digest` still
+# names the manifest that artifact was promoted with. The adoption's own
+# composition is recorded apart, in `deploy/prospective/`, and replaces these
+# only through a deployment receipt and a later promotion (ADR-0017 s 2).
 #
 # The ledger's `descriptor_sha256` is a RAW-BYTES sha256 of the file, which is
 # the convention the bootstrap receipt's `product_descriptor_sha256` already
@@ -47,27 +46,24 @@
 # like tampering.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# THE IMAGE HALF AND THE DATABASE HALF ADVANCED ON DIFFERENT EVENTS
+# THE IMAGE HALF AND THE DATABASE HALF ADVANCE ON DIFFERENT EVENTS
 #
-# The single-use issuer bootstrap (ADR-0013, `scripts/bootstrap/bootstrap_once.sh`)
-# is CREATE-ONLY: it ran the composed migration lineage in a short-lived `ops`
-# container and did not replace, restart or repin the running application. So on
-# the target it describes, the two halves of this descriptor are true as of
-# different moments, and both are true NOW:
+# They have done so before: the single-use issuer bootstrap (ADR-0013,
+# `scripts/bootstrap/bootstrap_once.sh`) advanced the database WITHOUT
+# deploying, and the 2026-08-31 reconciliation promoted what it left. This
+# promotion is the opposite direction and says so, rather than claiming both
+# halves are true now:
 #
 #   [image]     UNCHANGED. The application still runs `sha256:45715e42…` at
 #               revision `af9fcf6d…`. A descriptor advanced here would claim a
 #               deployment nobody performed — ADR-0017 § 2's refusal.
-#   [migration] ADVANCED. The bootstrap applied the composed lineage to its
-#   [database]  heads, which created `mod_deploy` and applied `v017`'s
-#               revocation (ADR-0011's Amendment of 2026-08-21). A descriptor left behind here claims a database that
-#               no longer exists, which is the same defect mirrored, and it is
-#               the one that actually happened.
-#
-# The earlier version of this header treated the two as one unit and said both
-# deltas would arrive "in the SAME change that deploys". The bootstrap advanced
-# the database WITHOUT deploying, so that sentence stopped being reachable, and
-# nothing noticed for a day. See the reconciliation record and ADR-0017 § 8.
+#   [migration] AHEAD OF THE TARGET. `expected_heads` names what the NEXT
+#               deployment will reach (`ap_0003_withdrawals`,
+#               `dc_0015_plan_purpose`), not what the running database holds.
+#               Until that deployment lands, a drift check against production
+#               reports those two as declared-absent and `ap_0002`/`dc_0002` as
+#               present-undeclared. That is the expected reading, not an alarm.
+#   [database]  UNCHANGED by this promotion.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # HOW THE DATABASE HALF WAS DERIVED

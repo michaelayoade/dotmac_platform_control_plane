@@ -480,7 +480,8 @@ def propose_deployment_plan(db: Session, request: ProposePlanRequest) -> Propose
     call or reading the database. See `PlanInputDerivationUnavailable`.
     """
     raise PlanInputDerivationUnavailable(
-        "ADR-0013 A6.4: proposing a deployment plan needs a descriptor digest "
+        "a6_4_derivation_not_available — ADR-0013 A6.4: proposing a deployment "
+        "plan needs a descriptor digest "
         "and an execution-plan digest the Deployment Foundation renders and "
         "signs; this assembly does not compose a Foundation before Gate 3, so "
         "Control was not asked to freeze a plan"
@@ -500,7 +501,8 @@ def authorize_deployment(
     calling Control. See `PlanInputDerivationUnavailable`.
     """
     raise PlanInputDerivationUnavailable(
-        "ADR-0013 A6.4: authorizing a deployment plan needs an authorization "
+        "a6_4_derivation_not_available — ADR-0013 A6.4: authorizing a deployment "
+        "plan needs an authorization "
         "expiry and a signer the Deployment Foundation provides; this "
         "assembly does not compose a Foundation before Gate 3, so Control was "
         "not asked to approve or roll out a plan"

@@ -70,11 +70,14 @@ def test_the_source_composition_is_not_an_image_or_release_candidate() -> None:
 
 
 def test_the_prospective_subject_check_can_fail() -> None:
-    """SENSITIVITY. A different manifest digest must not satisfy the record."""
+    """SENSITIVITY. A changed manifest must produce a record that no longer
+    equals the committed one, so the equality above can actually fail."""
     record = _source_composition()
-    planted = dict(record["manifest"])
-    planted["digest"] = "sha256:" + "f" * 64
-    assert planted != record["manifest"]
+    prospective = json.loads(PROSPECTIVE_MANIFEST.read_text())
+    planted = json.loads(json.dumps(prospective))
+    planted["modules"][0]["code"] = "planted-module"
+    assert build_source_composition(planted) != record
+    assert build_source_composition(prospective) == record
 
 
 def test_the_accepted_descriptor_matches_its_declared_accepted_manifest() -> None:

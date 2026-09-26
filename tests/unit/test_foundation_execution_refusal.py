@@ -64,6 +64,9 @@ def test_propose_refuses_before_control_or_the_database() -> None:
             ),
         )
     assert caught.value.code == CODE
+    # The code is in the message too, so the CLI's `translate` (which carries
+    # the message) lets an operator search for the ruling's own identifier.
+    assert CODE in str(caught.value)
     assert "A6.4" in str(caught.value)
     assert "Gate 3" in str(caught.value)
 
