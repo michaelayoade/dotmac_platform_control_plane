@@ -776,3 +776,40 @@ def test_i3_issuance_holds_the_same_barrier_as_approval(
         evidence,
     )
     _prove_the_issuance_barrier_holds(engine, plan_id, request_id, invocation)
+
+
+def test_i5_an_intermediate_commit_inside_the_issuance_hold_breaks_the_i3_proof(
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    engine: Engine,
+    issuer_security: tuple[object, object],
+) -> None:
+    """SENSITIVITY for I3, mirroring T5 at the issuance site: plant the exact
+    defect `held_transition` exists to prevent -- the hold committing before
+    the transition runs -- by wrapping the `hold_platform_approval` name
+    `approval_barrier` resolves. The I3 proof above must then fail, not pass
+    for the wrong reason.
+    """
+    plan_id, request_id = seeded
+    _approve_and_commit(engine, plan_id, request_id)
+
+    _, harness = issuer_security
+    target_ref = _target_ref_for(engine, plan_id)
+    _, evidence = _harness_evidence(harness, target_ref)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(f"issue-{uuid.uuid4()}", plan_id, "operator-rehearsal"),
+        evidence,
+    )
+
+    real_hold = approvals.hold_approval
+
+    def hold_then_commit(db: Session, **kwargs: object) -> object:
+        held = real_hold(db, **kwargs)
+        db.commit()
+        return held
+
+    with mock.patch.object(approvals, "hold_approval", hold_then_commit):
+        # Match the SPECIFIC failure: the withdrawal was no longer blocked.
+        # Any other AssertionError (e.g. A never reaching its pause) is not
+        # the sensitivity this test exists to measure.
+        with pytest.raises(AssertionError, match="did not block"):
+            _prove_the_issuance_barrier_holds(engine, plan_id, request_id, invocation)
