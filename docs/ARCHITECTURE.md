@@ -68,7 +68,7 @@ it owns and — just as importantly — what it must never become.
   no module schema holds a tenant-scoped table — and says plainly that the full
   four-fact proof (platform tables built, tenant tables absent, *because of the
   selection*) lands with the first shadow composition.
-- `dotmac-approvals==0.1.0a7` is the **approval authority** (ADR-0005). Pinned,
+- `dotmac-approvals==0.1.0a8` is the **approval authority** (ADR-0005). Pinned,
   its public `versions_dir()` locator composed, `ModulePlane.PLATFORM` selected,
   and `platform_api` holding DML on `mod_approvals` — restored by vendor
   migration `v013`, which reverses v012's shadow revoke as a forward revision and
@@ -154,7 +154,7 @@ it owns and — just as importantly — what it must never become.
   product capability catalogue, converts the authoritative Approvals request
   into content-bound evidence, and exposes the owner's bounded UUID-keyset
   agreement reader for complete commercial-cohort enumeration.
-- `dotmac-deployment-control==0.1.0a15` is the owner of deployment identity,
+- `dotmac-deployment-control==0.1.0a16` is the owner of deployment identity,
   desired state, immutable plans, rollouts and authenticated observations under
   ADR-0011. Platform-only and atomic — one supported plane set, so no
   `ModulePlaneSelection` is possible and `ASSEMBLY_MODULE_PLANES` gains nothing.

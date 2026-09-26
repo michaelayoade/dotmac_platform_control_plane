@@ -17,7 +17,7 @@ manifests without a database-catalogue contribution:
 - `licensing`
 - `release_catalog`
 
-`approvals` (0.1.0a7) and `deployment_control` (0.1.0a15) left this set with the
+`approvals` (0.1.0a7, now 0.1.0a8) and `deployment_control` (0.1.0a15, now 0.1.0a16) left this set with the
 2026-09-25 Gate-0 composition adoption: each exact-pinned release publishes a
 contribution.
 
@@ -45,7 +45,7 @@ documented exit 2 had never been run and its zero branch had never been reached
 by anything at all.
 
 Deployment Control's contribution is now evidence available to this assembly:
-0.1.0a15 is published, independently verified and exact-pinned here.
+0.1.0a16 is published, independently verified and exact-pinned here.
 
 ## Fail-closed product-level register
 

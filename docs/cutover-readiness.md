@@ -90,12 +90,12 @@ amendment at the owning source. Six slices, three landed.
 | Distribution | Pinned here | Released | Position |
 | --- | --- | --- | --- |
 | `dotmac-kernel` | `0.1.0a100` | a104 | the pin IS the highest floor anything composed declares (the pinned Control and Approvals releases both require it), and `kernel-pin` executes that both ways. It is the truthful floor, not the final state: it keeps the import boundary its predecessors share, which this assembly tolerates because its environment supplies the driver. The repair, a101, is held with Governance schema 11 and a truthful Foundation render check (debt D2) — see `docs/operations/kernel-a100-assessment-2026-09-01.md` |
-| `dotmac-approvals` | `0.1.0a7` | a7 | current — Gate-0 composition adoption (platform withdrawal) |
+| `dotmac-approvals` | `0.1.0a8` | a8 | current — adds the `hold_platform_approval` FOR SHARE barrier C2 composes (a7 brought platform withdrawal) |
 | `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current (a5 unpublished; never pin it) |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
 | `dotmac-commercial-agreements` | `0.1.0a2` | a2 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
-| `dotmac-deployment-control` | `0.1.0a15` | a15 | current — Gate-0 composition adoption; a14 skipped on purpose (debt D15) |
+| `dotmac-deployment-control` | `0.1.0a16` | a16 | current — a16 locks `cancel_plan` target-then-plan; a15 was the Gate-0 composition adoption; a14 skipped on purpose (debt D15) |
 | `dotmac-brand-profiles` | not pinned | a1, tagged | deferred by local decision (ADR-0007 § 6) |
 
 ADR-0007's rule is that a package enters with the coherent slice that consumes
