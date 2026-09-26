@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import ast
 import json
+import sys
 import tomllib
 from pathlib import Path
 
 import pytest
-from protected_issuer_conformance import check
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# The conformance lane lives outside the installed application package, and
+# hosted CI does not put the repository root on sys.path. Load it explicitly and
+# restore sys.path, as the rehearsal-issuer harness boundary test does.
+sys.path.insert(0, str(ROOT))
+try:
+    from protected_issuer_conformance import check  # noqa: E402
+finally:
+    sys.path.remove(str(ROOT))
 SOURCE = ROOT / "src/vendor_cp/deployment/protected_rehearsal_issuer.py"
 
 
