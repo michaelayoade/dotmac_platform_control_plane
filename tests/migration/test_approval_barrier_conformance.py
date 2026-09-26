@@ -15,13 +15,15 @@ public seams (`propose_issuer_plan`, `open_issuer_approval`,
 `vendor_cp.approvals.adapter`) — no hand-inserted rows.
 
 Michael's five acceptance conditions (C2), landed T3 and T5 first (the
-minimum useful commit); T1, T2 and T4 follow in their own commits:
+minimum useful commit), then T1; T2 and T4 follow in their own commits:
 
 - T3 — a withdrawal attempted while the hold is open times out; released, it
   succeeds; and a third session can then take the Control plan row's lock
   NOWAIT, proving ONE commit released both locks together.
 - T5 — SENSITIVITY for T3: plant an intermediate commit inside the hold and
   show the T3 proof itself now fails, so T3 is not vacuously green.
+- T1 — the hold and the transition observe the same `txid_current()` and
+  `pg_backend_pid()`: one transaction, one connection.
 
 Every blocking wait below is bounded (a `lock_timeout`, a `Thread.join`
 timeout) so a real regression here fails fast instead of hanging CI.
@@ -315,3 +317,46 @@ def test_t5_an_intermediate_commit_inside_the_hold_breaks_the_t3_proof(
     ):
         with pytest.raises(AssertionError):
             _prove_the_barrier_holds(engine, plan_id, request_id)
+
+
+# ── T1 ────────────────────────────────────────────────────────────────────
+
+
+def test_t1_the_hold_and_the_transition_run_in_the_same_transaction(
+    seeded: tuple[uuid.UUID, uuid.UUID], engine: Engine
+) -> None:
+    plan_id, request_id = seeded
+    captured: dict[str, tuple[int, int]] = {}
+    real_hold = dotmac_approvals.hold_platform_approval
+    real_approve_plan = control.approve_plan
+
+    def observing_hold(db: Session, **kwargs: object) -> object:
+        held = real_hold(db, **kwargs)
+        row = db.execute(text("SELECT txid_current(), pg_backend_pid()")).one()
+        captured["hold"] = (int(row[0]), int(row[1]))
+        return held
+
+    def observing_approve_plan(db: Session, cmd: object) -> object:
+        result = real_approve_plan(db, cmd)
+        row = db.execute(text("SELECT txid_current(), pg_backend_pid()")).one()
+        captured["transition"] = (int(row[0]), int(row[1]))
+        return result
+
+    with (
+        Session(engine) as db,
+        mock.patch.object(dotmac_approvals, "hold_platform_approval", observing_hold),
+        mock.patch.object(control, "approve_plan", observing_approve_plan),
+    ):
+        approve_issuer_plan(
+            db,
+            command_id=f"approve-{uuid.uuid4()}",
+            plan_id=plan_id,
+            approval_request_id=request_id,
+        )
+        db.commit()
+
+    assert captured.keys() == {"hold", "transition"}
+    assert captured["hold"] == captured["transition"], (
+        "the hold and the transition observed different (txid, pid) pairs — "
+        "they did not run in the same transaction on the same connection"
+    )
