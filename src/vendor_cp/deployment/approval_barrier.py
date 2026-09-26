@@ -25,6 +25,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, TypeVar
 from uuid import UUID
 
+from sqlalchemy import text
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -78,6 +80,7 @@ def held_transition(
         subject_id=subject_id,
         content_digest=content_digest,
     )
+    _require_the_hold_is_still_open(db)
     return transition(held)
 
 
@@ -86,12 +89,32 @@ class ApprovalBarrierUnavailable(RuntimeError):
 
 
 def _require_transactional(db: Session) -> None:
-    """Refuse an AUTOCOMMIT connection: there a FOR SHARE lock ends with its
-    own statement, and the barrier would pass while holding nothing."""
-    if db.connection().get_isolation_level() == "AUTOCOMMIT":
+    """Refuse an AUTOCOMMIT connection before holding anything.
+
+    SQLAlchemy's `Connection.get_isolation_level()` never reports AUTOCOMMIT
+    (it asks the server for the real isolation level), so the DBAPI
+    connection's own `autocommit` flag is what is read here. Both psycopg 2
+    and 3 expose it.
+    """
+    dbapi_connection = db.connection().connection.dbapi_connection
+    if getattr(dbapi_connection, "autocommit", False):
         raise ApprovalBarrierUnavailable(
             "held_transition needs a transactional session; on an AUTOCOMMIT "
             "connection the FOR SHARE hold would end with its own statement"
+        )
+
+
+def _require_the_hold_is_still_open(db: Session) -> None:
+    """The database's own answer, independent of any driver flag: a row lock
+    assigns a transaction id, so after the FOR SHARE hold this transaction
+    MUST have one. If it does not, the hold's transaction already ended, for
+    example on an autocommit connection a flag check missed. The barrier then
+    holds nothing, and no transition may run."""
+    assigned = db.execute(text("SELECT txid_current_if_assigned()")).scalar()
+    if assigned is None:
+        raise ApprovalBarrierUnavailable(
+            "the approval hold's transaction is no longer open; the FOR SHARE "
+            "lock is not held, so the transition must not run"
         )
 
 

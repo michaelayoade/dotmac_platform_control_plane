@@ -441,12 +441,61 @@ def test_t5_an_intermediate_commit_inside_the_hold_breaks_the_t3_proof(
         db.commit()
         return held
 
-    with mock.patch.object(approvals, "hold_approval", hold_then_commit):
+    # The barrier's own post-hold check now catches this at runtime (see
+    # `test_t5b_...`). Neutralise that check here so this test measures what it
+    # exists to measure: the T3 lock proof ITSELF fails on a planted commit.
+    with (
+        mock.patch.object(approvals, "hold_approval", hold_then_commit),
+        mock.patch.object(
+            approval_barrier, "_require_the_hold_is_still_open", lambda _db: None
+        ),
+    ):
         # Match the SPECIFIC failure: the withdrawal was no longer blocked. Any
         # other AssertionError (e.g. A never reaching its pause) is not the
         # sensitivity this test exists to measure.
         with pytest.raises(AssertionError, match="did not block"):
             _prove_the_barrier_holds(engine, plan_id, request_id)
+
+
+def test_t5b_the_barrier_refuses_at_runtime_when_the_hold_was_committed(
+    seeded: tuple[uuid.UUID, uuid.UUID], engine: Engine
+) -> None:
+    """The same planted commit, with the barrier's runtime check live: the
+    transaction id the row lock assigned is gone, so `held_transition` refuses
+    with `ApprovalBarrierUnavailable`, Control is never asked, and the plan
+    stays proposed."""
+    plan_id, request_id = seeded
+    real_hold = approvals.hold_approval
+    approve_calls: list[object] = []
+    real_approve_plan = control.approve_plan
+
+    def hold_then_commit(db: Session, **kwargs: object) -> object:
+        held = real_hold(db, **kwargs)
+        db.commit()
+        return held
+
+    def counting_approve_plan(db: Session, cmd: object) -> object:
+        approve_calls.append(cmd)
+        return real_approve_plan(db, cmd)
+
+    with (
+        Session(engine) as db,
+        mock.patch.object(approvals, "hold_approval", hold_then_commit),
+        mock.patch.object(control, "approve_plan", counting_approve_plan),
+    ):
+        with pytest.raises(approval_barrier.ApprovalBarrierUnavailable):
+            approve_issuer_plan(
+                db,
+                command_id=f"approve-{uuid.uuid4()}",
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+        db.rollback()
+    assert approve_calls == []
+    with Session(engine) as db_c:
+        plan = control.get_plan(db_c, plan_id)
+    assert plan is not None
+    assert plan.status == "proposed", plan.status
 
 
 # ── T1 ────────────────────────────────────────────────────────────────────
@@ -808,7 +857,14 @@ def test_i5_an_intermediate_commit_inside_the_issuance_hold_breaks_the_i3_proof(
         db.commit()
         return held
 
-    with mock.patch.object(approvals, "hold_approval", hold_then_commit):
+    # As in T5: neutralise the barrier's runtime post-hold check so this
+    # measures that the I3 lock proof itself fails on a planted commit.
+    with (
+        mock.patch.object(approvals, "hold_approval", hold_then_commit),
+        mock.patch.object(
+            approval_barrier, "_require_the_hold_is_still_open", lambda _db: None
+        ),
+    ):
         # Match the SPECIFIC failure: the withdrawal was no longer blocked.
         # Any other AssertionError (e.g. A never reaching its pause) is not
         # the sensitivity this test exists to measure.

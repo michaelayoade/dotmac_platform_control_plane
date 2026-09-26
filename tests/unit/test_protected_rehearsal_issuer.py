@@ -142,6 +142,9 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     # These fakes are not SQLAlchemy sessions; the AUTOCOMMIT refusal is
     # proved on its own below and against real PostgreSQL.
     monkeypatch.setattr(approval_barrier, "_require_transactional", lambda _db: None)
+    monkeypatch.setattr(
+        approval_barrier, "_require_the_hold_is_still_open", lambda _db: None
+    )
     return SimpleNamespace(
         plan=plan,
         calls=calls,
@@ -427,8 +430,9 @@ def test_the_barrier_refuses_an_autocommit_session_before_holding() -> None:
     calls: list[str] = []
 
     class _Connection:
-        def get_isolation_level(self) -> str:
-            return "AUTOCOMMIT"
+        # SQLAlchemy Connection -> pool proxy -> DBAPI connection, whose
+        # `autocommit` flag is what the barrier reads.
+        connection = SimpleNamespace(dbapi_connection=SimpleNamespace(autocommit=True))
 
     class _AutocommitSession:
         def connection(self) -> _Connection:
