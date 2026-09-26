@@ -15,14 +15,21 @@ the plan with purpose `rehearsal_issuer_operation`, explicit operation `deploy`,
 descriptor digest and Foundation execution-plan digest. Approvals opens its
 real platform request. The subject is the versioned, canonical text
 `v1|<plan UUID>|rehearsal_issuer_operation|deploy|<sha256 execution digest>`;
-Approvals' `content_hash` separately holds Control's plan digest. A genuine
-Approvals decision is checked against that exact subject and digest, then its
-evidence is carried into Control `approve_plan`. No rollout or dispatch call is
-made. The caller commits that transaction before issuance.
+Approvals' `content_hash` separately holds Control's plan digest.
+`held_transition` (`vendor_cp.deployment.approval_barrier`) takes Approvals'
+`hold_platform_approval` — a FOR SHARE lock on the request row, validated under
+the lock against that exact subject and digest — and runs Control `approve_plan`
+in the SAME session and transaction, so a concurrent withdrawal either committed
+first (the hold refuses `withdrawn`) or waits for the caller's commit, which
+releases both together. No rollout or dispatch call is made. The caller commits
+that transaction before issuance.
 
 In a later transaction, the existing three-field
 `RehearsalIssuerInvocation` reaches Control's real
-`issue_rehearsal_issuer_authorization_for_plan`. The harness evidence is
+`issue_rehearsal_issuer_authorization_for_plan` under the same barrier: the
+hold's request id, subject and digest are derived only from Control's frozen
+plan (never the invocation), and the plan is re-read after issuance, before the
+caller's commit, and must still carry the held decision and digest. The harness evidence is
 opaque to this assembly; Control verifies it, checks plan standing and derives
 the signed issuer terms. The caller commits Control's issuer ledger write.
 Neither the subject nor the command accepts caller-supplied signed A6.4 terms.
