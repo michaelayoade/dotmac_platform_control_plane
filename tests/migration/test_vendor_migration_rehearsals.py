@@ -26,7 +26,7 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp.migration_bindings import ASSEMBLY_PREREQUISITE_BINDINGS
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
-KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a98)
+KERNEL_HEAD = "0028_machine_attribution"  # current pin (0.1.0a100); a98 had it too
 PREVIOUS_KERNEL_HEAD = "0012_platform_outbox"  # former pin (0.1.0a9)
 RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 
@@ -51,14 +51,16 @@ RELEASE_CATALOG_HEAD = "rl_0001_release_artifacts"
 # verification revision is not that. Widening a dependency to whatever happens to
 # be at the tip would make every future module release a vendor-lineage change.
 ENTITLEMENT_ALLOCATION_HEAD = "ea_0003_platform_audit_log"
-APPROVALS_HEAD = "ap_0002_outbox_relay"
+# Approvals 0.1.0a7 (Gate-0 adoption) adds `ap_0003_withdrawals` past the a5
+# verification revision; nothing depends on it, so it stays a version row.
+APPROVALS_HEAD = "ap_0003_withdrawals"
 COMMERCIAL_AGREEMENTS_HEAD = "cg_0001_agreements"
 LICENSING_HEAD = "li_0001_licensing"
-# Composed at the ADR-0011 cutover. Unlike approvals and allocation, this
-# module head IS depended on by a vendor revision — `v017` names it — so it
-# is an ancestor and NOT a version row, the same shape `ap_0001` had before
-# a5 moved that lineage past it.
-DEPLOYMENT_CONTROL_HEAD = "dc_0002_canonical_plan_digest"
+# Composed at the ADR-0011 cutover. `v017` depends on the lineage ROOT
+# (`dc_0001_deployment_control`), not its tip, so the tip is depended on by
+# nothing and is a version row. Control 0.1.0a15 (Gate-0 adoption) moves the
+# tip from `dc_0002_canonical_plan_digest` to `dc_0015_plan_purpose`.
+DEPLOYMENT_CONTROL_HEAD = "dc_0015_plan_purpose"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 VENDOR_HEAD = "v019_relay_heartbeat"
@@ -223,8 +225,9 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         #
         # Commercial Agreements depends on kernel `0026`, which kept the kernel
         # tip an ancestor while `0026` WAS the tip. At `0028` it no longer is.
-        # `v017` names `dc_0001` rather than its lineage's tip, so `dc_0002` is
-        # likewise depended on by nothing.
+        # `v017` names `dc_0001` rather than its lineage's tip, so the Control
+        # tip (`dc_0015` since the Gate-0 adoption) is likewise depended on by
+        # nothing.
         KERNEL_HEAD,
         DEPLOYMENT_CONTROL_HEAD,
     }
