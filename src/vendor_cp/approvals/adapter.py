@@ -46,10 +46,12 @@ from uuid import UUID
 from dotmac_approvals import (
     Actor,
     ApprovalLevel,
+    ApprovalNotHeld,
     ApprovalState,
     ApproverKind,
     DecisionAction,
     Evaluation,
+    HeldPlatformApproval,
     PolicyRevision,
 )
 from dotmac_approvals.models import (
@@ -58,6 +60,7 @@ from dotmac_approvals.models import (
 )
 from dotmac_approvals.service import (
     evaluate_platform_approval,
+    hold_platform_approval,
     publish_platform_policy_version,
     record_platform_decision,
     request_platform_approval,
@@ -356,8 +359,35 @@ def approved_request_evidence(
     )
 
 
+def hold_approval(
+    db: Session,
+    *,
+    request_id: UUID,
+    subject_type: str,
+    subject_id: str,
+    content_digest: str,
+) -> HeldPlatformApproval:
+    """Lock the platform approval request FOR SHARE and validate it under the lock.
+
+    The seam `vendor_cp.deployment.approval_barrier.held_transition` composes
+    with a Control transition. It never commits: the lock lives until the
+    caller's transaction ends, and the returned evidence is not the lock.
+    `content_digest` is the module's own `sha256:<hex>` form. It refuses only
+    with `ApprovalNotHeld`.
+    """
+    return hold_platform_approval(
+        db,
+        request_id=request_id,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        content_digest=content_digest,
+    )
+
+
 __all__ = [
+    "ApprovalNotHeld",
     "ApprovedRequestEvidence",
+    "HeldPlatformApproval",
     "OpenRequestCommand",
     "PolicyView",
     "PublishPolicyCommand",
@@ -365,6 +395,7 @@ __all__ = [
     "RequestView",
     "approved_request_evidence",
     "evaluate_request",
+    "hold_approval",
     "open_request",
     "publish_policy_version",
     "record_decision",

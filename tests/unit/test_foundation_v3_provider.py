@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.deployment.host_admission_adapter import (
     ControlFoundationV3Bindings,
+    DispatchApprovalSubjectUnavailable,
     FoundationHostV3Bindings,
     FoundationV3Sources,
     HostAdmissionAdapterUsageError,
@@ -108,6 +109,8 @@ def _composition(
     fail_finalizer: bool = False,
     fail_second_commit: bool = False,
     reuse_session: bool = False,
+    plan_requires_approval: bool | None = False,
+    plan_id: str = "00000000-0000-0000-0000-0000000000a1",
 ):
     events: list[str] = []
     engine = create_engine("sqlite://")
@@ -133,7 +136,7 @@ def _composition(
         operation="deploy",
         release_ref="release",
         rollout_ref="rollout",
-        plan_id="plan",
+        plan_id=plan_id,
         approval_decision_ref="approval",
         control_plan_digest="sha256:plan",
         execution_sequence=1,
@@ -197,11 +200,19 @@ def _composition(
         session.execute(text("INSERT INTO marker VALUES (:id)"), {"id": dispatch_id})
         return object()
 
+    def get_plan(_session: Session, requested: UUID) -> object:
+        events.append("get_plan")
+        assert str(requested) == plan_id
+        if plan_requires_approval is None:
+            return None
+        return SimpleNamespace(id=requested, requires_approval=plan_requires_approval)
+
     control = ControlFoundationV3Bindings(
         resolve_context=resolve,
         finalize=finalize,
         attest_pair=lambda **_: _Receipt(dispatch_id),
         lookup_committed=lambda _db, **_: _Receipt(dispatch_id),
+        get_plan=get_plan,
         foreign_root_type=lambda **values: SimpleNamespace(**values),
         foreign_evidence_type=lambda **values: SimpleNamespace(**values),
         execution_context_type=lambda **values: SimpleNamespace(**values),
@@ -271,6 +282,7 @@ def test_f2_closes_session_before_real_verification_and_v3_commits_before_return
         "commit",
         "close",
         "foundation",
+        "get_plan",
         "finalize",
         "commit",
         "close",
@@ -347,3 +359,56 @@ def test_session_factory_cannot_reuse_the_f2_session_for_v3() -> None:
         )
     assert "finalize" not in events
     assert _marker_count(engine) == 0
+
+
+@pytest.mark.parametrize(
+    ("requires_approval", "plan_id", "match"),
+    [
+        (True, "00000000-0000-0000-0000-0000000000a1", "requires approval"),
+        (None, "00000000-0000-0000-0000-0000000000a1", "does not exist"),
+        (False, "not-a-uuid", "is not a UUID"),
+    ],
+)
+def test_dispatch_fails_closed_for_an_approval_requiring_or_unknown_plan(
+    requires_approval: bool | None, plan_id: str, match: str
+) -> None:
+    """C2-D1 (Michael, 2026-09-26): a FOUNDATION_EXECUTION plan has no Approvals
+    subject for the C2 barrier to hold, so dispatch refuses any plan that
+    requires approval, is missing, or is named by a malformed id. Control's
+    finalizer is never reached, and nothing is committed."""
+    providers, events, _, engine, resolved, _ = _composition(
+        plan_requires_approval=requires_approval, plan_id=plan_id
+    )
+    _, trace = providers.host_source.admit_host_source()
+    with pytest.raises(DispatchApprovalSubjectUnavailable, match=match):
+        providers.execution_authority.consume_dispatch(
+            request=_request(trace, resolved.dispatch_id)
+        )
+    assert "finalize" not in events
+    assert _marker_count(engine) == 0
+
+
+def test_the_approval_check_runs_before_the_finalizer_in_the_same_session() -> None:
+    """Non-vacuity for the refusal above: a plan that explicitly does not
+    require approval still dispatches, and the check comes first."""
+    providers, events, _, engine, resolved, _ = _composition(
+        plan_requires_approval=False
+    )
+    _, trace = providers.host_source.admit_host_source()
+    providers.execution_authority.consume_dispatch(
+        request=_request(trace, resolved.dispatch_id)
+    )
+    assert events.index("get_plan") < events.index("finalize")
+    assert _marker_count(engine) == 1
+
+
+def test_the_composition_refuses_bindings_without_get_plan() -> None:
+    providers, *_ = _composition()
+    control = providers.execution_authority._control  # noqa: SLF001
+    broken = replace(control, get_plan=None)
+    with pytest.raises(HostAdmissionAdapterUsageError, match="incomplete"):
+        compose_foundation_v3_providers(
+            control=broken,
+            foundation=providers.execution_authority._foundation,  # noqa: SLF001
+            sources=providers.execution_authority._sources,  # noqa: SLF001
+        )
