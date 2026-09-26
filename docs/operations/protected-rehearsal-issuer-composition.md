@@ -60,13 +60,13 @@ checks their bytes before installation, then tests installed public signatures
 in an isolated venv. The kernel wheel stays governed by the existing harness
 lock, `rehearsal_issuer_harness/artifacts.json`.
 
-Control already writes `docs/published-versions.json` with these publication
-facts. Starter's current module release recorder does not persist a wheel hash
-for Approvals. The future a7 release must add a checked-in
-`docs/inventories/module-release-verifications.json` with schema
-`ModuleReleaseVerifications.v1` and one `releases` row containing
-`distribution`, `version`, `tag`, `tag_object`, `peeled_commit`, `status`,
-`pinnable`, and `sha256` keyed by the exact wheel filename. Until that record
-exists on Starter `main` at the pinned record commit, this lane refuses even if
-an a7 wheel and tag exist. This lane tests the composition boundary; it is not
+Control records these publication facts in `docs/published-versions.json`, and
+Starter records Approvals' in `docs/inventories/module-release-verifications.json`
+(`ModuleReleaseVerifications.v1`: `distribution`, `version`, `tag`,
+`tag_object`, `peeled_commit`, `status`, `pinnable`, and `sha256` keyed by the
+exact wheel filename). The lane refuses unless each row exists at its pinned
+record commit on the producer's `main`. PR CI checks the manifest's shape,
+that its versions equal the application pins, and that its wheel hashes equal
+`poetry.lock`; the producer records and tags are re-verified in the manual
+lane. This lane tests the composition boundary; it is not
 a protected run or a Gate-0 receipt.

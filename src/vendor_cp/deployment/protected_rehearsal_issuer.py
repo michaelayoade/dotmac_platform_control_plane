@@ -2,8 +2,9 @@
 
 The approval transaction must commit before a different transaction calls
 ``issue_authorization``. Control owns plan standing and issuer issuance;
-Approvals owns the decision and its durable withdrawal event. Imports of the
-successor APIs remain inside functions until their exact wheels are published.
+Approvals owns the decision and its durable withdrawal event. Control and
+Approvals are imported inside functions, so this leaf stays import-light; both
+exact wheels (Control 0.1.0a15, Approvals 0.1.0a7) are published and pinned.
 """
 
 from __future__ import annotations

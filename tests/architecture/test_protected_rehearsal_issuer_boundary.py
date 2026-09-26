@@ -81,6 +81,16 @@ def test_successor_lane_uses_private_index_and_checked_in_evidence() -> None:
     ]
     for distribution, item in manifest["artifacts"].items():
         assert pins[distribution]["version"] == item["version"], distribution
+    # Offline cross-check: each manifest wheel hash is the hash poetry.lock
+    # already resolved for that exact wheel, so a mistyped coordinate fails in
+    # PR CI rather than only in the manual publication lane.
+    lock = tomllib.loads((ROOT / "poetry.lock").read_text())
+    for distribution, item in manifest["artifacts"].items():
+        package = next(p for p in lock["package"] if p["name"] == distribution)
+        assert package["version"] == item["version"], distribution
+        wheel = f"{distribution.replace('-', '_')}-{item['version']}-py3-none-any.whl"
+        hashes = {f["file"]: f["hash"] for f in package["files"]}
+        assert hashes.get(wheel) == f"sha256:{item['sha256']}", distribution
 
 
 def _complete_manifest() -> dict[str, object]:

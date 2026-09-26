@@ -1,4 +1,4 @@
-"""Fail-closed checks for the future isolated successor-wheel lane."""
+"""Fail-closed checks for the isolated successor-wheel lane."""
 
 from __future__ import annotations
 
