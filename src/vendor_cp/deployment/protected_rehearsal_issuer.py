@@ -105,14 +105,18 @@ def propose_issuer_plan(db: object, request: ProposeIssuerPlan) -> object:
 
 
 def open_issuer_approval(
-    db: object, *, command_id: str, plan_id: UUID, requested_by: UUID
+    db: Session, *, command_id: str, plan_id: UUID, requested_by: UUID
 ) -> object:
     """Open the real platform request against the exact frozen plan."""
     from vendor_cp.approvals.adapter import OpenRequestCommand, open_request
     from vendor_cp.approvals_authority import bare_content_hash
 
     plan = _plan(db, plan_id)
-    if not plan.plan_digest or not plan.approval_policy_code:
+    if (
+        not plan.plan_digest
+        or not plan.approval_policy_code
+        or plan.approval_policy_version is None
+    ):
         raise ValueError("issuer plan lacks its digest or approval policy")
     return open_request(
         db,
@@ -129,7 +133,7 @@ def open_issuer_approval(
 
 
 def approve_issuer_plan(
-    db: object,
+    db: Session,
     *,
     command_id: str,
     plan_id: UUID,
