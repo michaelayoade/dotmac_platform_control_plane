@@ -20,6 +20,8 @@ annotation) are declared reachable.
 
 from __future__ import annotations
 
+import ast
+import inspect
 from pathlib import Path
 
 from import_scanner import module_targets, scan_imports
@@ -43,6 +45,57 @@ ALLOWED_TOP_LEVEL_MODULES = frozenset(
         "sqlalchemy",
     }
 )
+
+
+def _provider_calls(source: str, *, function: str) -> list[str]:
+    tree = ast.parse(source)
+    providers = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name in {"_FoundationHostSourceProvider", "_FoundationV3Provider"}
+    }
+    assert set(providers) == {"_FoundationHostSourceProvider", "_FoundationV3Provider"}
+    found: list[str] = []
+    for provider_name, provider in providers.items():
+        for node in ast.walk(provider):
+            if not isinstance(node, ast.Call):
+                continue
+            called = node.func
+            if isinstance(called, ast.Name) and called.id == function:
+                found.append(provider_name)
+            elif isinstance(called, ast.Attribute) and called.attr == function:
+                found.append(provider_name)
+    return found
+
+
+def test_v3_provider_has_no_request_selected_trust_or_legacy_finalizer() -> None:
+    from vendor_cp.deployment.host_admission_adapter import (
+        compose_foundation_v3_providers,
+    )
+
+    signature = inspect.signature(compose_foundation_v3_providers)
+    assert tuple(signature.parameters) == ("control", "foundation", "sources")
+    source = LEAF_MODULE.read_text()
+    assert "def consume_dispatch(self, *, request: object)" in source
+    assert "self._control.finalize(" in source
+    assert _provider_calls(source, function="admit_and_launch_host_source") == []
+    assert _provider_calls(source, function="finalize") == ["_FoundationV3Provider"]
+
+
+def test_the_v3_provider_call_scan_detects_a_planted_legacy_path() -> None:
+    source = LEAF_MODULE.read_text()
+    planted = source.replace(
+        "    def observe(self) -> object:\n",
+        "    def planted(self) -> None:\n"
+        "        self.admit_and_launch_host_source()\n\n"
+        "    def observe(self) -> object:\n",
+        1,
+    )
+    assert planted != source
+    assert _provider_calls(planted, function="admit_and_launch_host_source") == [
+        "_FoundationV3Provider"
+    ]
 
 
 def _top_level(module: str) -> str:

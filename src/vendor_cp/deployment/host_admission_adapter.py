@@ -40,14 +40,23 @@ zero import coupling. This is the same pattern `credential_bootstrap.py`'s
 `SecretResolver` and `CredentialAuthenticator` already use, for the identical
 reason: a port lets the orchestration be exercised, and its failure paths
 proven, without either upstream dependency existing yet.
+
+The V3 successor path below is the startup-bound
+`compose_foundation_v3_providers` pair. It uses Control 0.1.0a15's public
+`FoundationDispatchConsumptionV1` and sole
+`admit_and_consume_host_admission` finalizer, plus Foundation b273337d's
+`HostSourceAdmissionTrace`/`ControlConsumptionRequestV3` contract, through
+constructors/functions installed once by the successor composition. The older
+`admit_and_launch_host_source` helper remains a pre-V3 choreography reference;
+the V3 providers never call it and have no alternate consume/launch path.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -83,6 +92,7 @@ class HostAdmissionResolvedContext(Protocol):
     context_digest: str
     host_id: str
     attempt_id: UUID
+    dispatch_id: str
     expected_foundation_package: str
 
 
@@ -250,7 +260,7 @@ def admit_and_launch_host_source(
         verifier=verification.foundation_verifier,
         trust_policy=build_trust_policy(resolved),
         expected_host_identity=resolved.host_id,
-        expected_observation_id=resolved.attempt_id.hex,
+        expected_observation_id=resolved.dispatch_id,
         expected_package=resolved.expected_foundation_package,
         verification_context_digest=resolved.context_digest,
         now=verification.now,
@@ -265,6 +275,387 @@ def admit_and_launch_host_source(
     return staged
 
 
+@dataclass(frozen=True, slots=True)
+class HostAdmissionObservation:
+    """Current evidence from a startup-installed CP/host observer, not a request."""
+
+    attempt_id: UUID
+    presentation: object
+    candidate: object
+    installed: object
+
+
+@dataclass(frozen=True, slots=True)
+class ControlFoundationV3Bindings:
+    """Control's exact public functions and DTO constructors, bound at startup.
+
+    CP pins Control 0.1.0a15, which exports these symbols; the successor
+    composition passes its public objects in. This leaf never imports a private
+    Control API or selects an implementation during an execution request.
+    """
+
+    resolve_context: Callable[..., object]
+    finalize: Callable[..., object]
+    attest_pair: Callable[..., object]
+    lookup_committed: Callable[..., object]
+    foreign_root_type: Callable[..., object]
+    foreign_evidence_type: Callable[..., object]
+    execution_context_type: Callable[..., object]
+    consumption_request_type: Callable[..., object]
+
+
+@dataclass(frozen=True, slots=True)
+class FoundationHostV3Bindings:
+    """Foundation's real F2 function/types, fixed once by the successor lane."""
+
+    admit_host_source: Callable[..., tuple[object, object]]
+    trust_policy_from_context: Callable[[object], object]
+    verifier: object
+    trace_type: type[object]
+    pair_result_type: type[object]
+    consumption_request_type: type[object]
+    execution_context_type: type[object]
+
+
+@dataclass(frozen=True, slots=True)
+class FoundationV3Sources:
+    """Trusted local factories/observers; none is selected by a request.
+
+    ``sessions`` returns a fresh raw Kernel-owned platform Session each time,
+    not a commit-on-exit wrapper. This adapter explicitly commits each phase
+    and closes the Session with its context manager.
+    """
+
+    sessions: Callable[[], Session]
+    host_admission: Callable[[], HostAdmissionObservation]
+    execution_context: Callable[[], object]
+    clock: Callable[[], datetime]
+
+
+class _ControlReceiptAttester:
+    __slots__ = ("_attest",)
+
+    def __init__(self, attest: Callable[..., object]) -> None:
+        self._attest = attest
+
+    def attest_pair(
+        self,
+        *,
+        authorization_material: object,
+        dispatch_material: object,
+    ) -> dict[str, object]:
+        receipt = self._attest(
+            authorization_material=authorization_material,
+            dispatch_material=dispatch_material,
+        )
+        # Control's public FoundationSignedReceiptV2 is a frozen dataclass.
+        if not is_dataclass(receipt) or isinstance(receipt, type):
+            raise HostAdmissionAdapterUsageError("Control returned no typed receipt")
+        return {
+            "schema": "AuthorizationReceipt.v2",
+            **cast(dict[str, object], asdict(cast(Any, receipt))),
+        }
+
+
+class _FinalizationContinuation:
+    """In-process identity binding, not a serialized bearer credential."""
+
+    __slots__ = (
+        "owner",
+        "context",
+        "execution_facts",
+        "pair",
+        "trace",
+        "resolution_session",
+    )
+
+    def __init__(
+        self,
+        owner: object,
+        context: object,
+        execution_facts: object,
+        pair: object,
+        resolution_session: Session,
+    ) -> None:
+        self.owner = owner
+        self.context = context
+        self.execution_facts = execution_facts
+        self.pair = pair
+        self.trace: object | None = None
+        self.resolution_session = resolution_session
+
+    def __reduce__(self) -> str | tuple[Any, ...]:
+        raise TypeError("host-admission finalization is transient")
+
+
+def _field(value: object, name: str) -> Any:
+    """Read a member of an upstream public DTO without importing its wheel."""
+    try:
+        return getattr(value, name)
+    except AttributeError as exc:
+        raise HostAdmissionAdapterUsageError(
+            f"upstream host-admission contract lacks {name}"
+        ) from exc
+
+
+def _foreign_evidence(pair: object, control: ControlFoundationV3Bindings) -> object:
+    def root(value: object) -> object:
+        return control.foreign_root_type(
+            public_key_fingerprint=_field(value, "public_key_fingerprint"),
+            root_version=_field(value, "trust_root_version"),
+            key_id=_field(value, "key_id"),
+            algorithm=_field(value, "algorithm"),
+            purpose=_field(value, "purpose"),
+            custody_domain=_field(value, "custody_domain"),
+            issuer=_field(value, "issuer"),
+        )
+
+    return control.foreign_evidence_type(
+        candidate_attestation_envelope_digest=_field(
+            pair, "candidate_attestation_envelope_digest"
+        ),
+        installed_attestation_envelope_digest=_field(
+            pair, "installed_attestation_envelope_digest"
+        ),
+        verification_context_digest=_field(pair, "verification_context_digest"),
+        verified_host_identity=_field(pair, "expected_host_identity"),
+        verified_observation_id=_field(pair, "expected_observation_id"),
+        verified_package=_field(pair, "expected_package"),
+        verified_candidate_audience=_field(pair, "candidate_audience"),
+        verified_installed_audience=_field(pair, "installed_audience"),
+        verified_candidate_root=root(_field(pair, "candidate_root")),
+        verified_installed_root=root(_field(pair, "installed_root")),
+    )
+
+
+class _FoundationV3Provider:
+    __slots__ = ("_owner", "_control", "_foundation", "_sources", "_attester")
+
+    _CONTROL_FACTS = (
+        "product_code",
+        "environment",
+        "target_id",
+        "target_ref",
+        "operation",
+        "release_ref",
+        "rollout_ref",
+        "plan_id",
+        "approval_decision_ref",
+        "control_plan_digest",
+        "execution_sequence",
+        "attempt_no",
+    )
+
+    def __init__(
+        self,
+        owner: object,
+        control: ControlFoundationV3Bindings,
+        foundation: FoundationHostV3Bindings,
+        sources: FoundationV3Sources,
+    ) -> None:
+        self._owner = owner
+        self._control = control
+        self._foundation = foundation
+        self._sources = sources
+        self._attester = _ControlReceiptAttester(control.attest_pair)
+
+    @property
+    def attester(self) -> _ControlReceiptAttester:
+        return self._attester
+
+    def observe(self) -> object:
+        facts = self._sources.execution_context()
+        if type(facts) is not self._foundation.execution_context_type:
+            raise HostAdmissionAdapterUsageError(
+                "actual Foundation V3 execution context required"
+            )
+        return facts
+
+    def now(self) -> datetime:
+        return self._sources.clock()
+
+    def consume_dispatch(self, *, request: object) -> None:
+        if type(request) is not self._foundation.consumption_request_type:
+            raise HostAdmissionAdapterUsageError("exact Foundation V3 request required")
+        trace = _field(request, "host_source_trace")
+        continuation = _field(trace, "opaque_finalization")
+        if (
+            type(trace) is not self._foundation.trace_type
+            or not isinstance(continuation, _FinalizationContinuation)
+            or continuation.owner is not self._owner
+            or continuation.trace is not trace
+            or _field(trace, "pair_verification_result") is not continuation.pair
+            or type(continuation.pair) is not self._foundation.pair_result_type
+        ):
+            raise HostAdmissionAdapterUsageError("unrecognized F2 continuation")
+        resolved = continuation.context
+        pair = continuation.pair
+        dispatch_id = _field(resolved, "dispatch_id")
+        if (
+            _field(trace, "host_observation_id") != dispatch_id
+            or _field(pair, "expected_observation_id") != dispatch_id
+            or _field(request, "control_consumption_ref")
+            != f"control-dispatch:{dispatch_id}"
+        ):
+            raise HostAdmissionAdapterUsageError("F2 dispatch coordinate changed")
+        facts = self.observe()
+        if facts != continuation.execution_facts:
+            raise HostAdmissionAdapterUsageError(
+                "execution observation changed since F2 resolution"
+            )
+        if (
+            _field(facts, "target_id") != str(_field(resolved, "target_id"))
+            or _field(facts, "target_ref") != _field(resolved, "target_ref")
+            or _field(facts, "host_id") != _field(resolved, "host_id")
+            or _field(facts, "host_incarnation")
+            != _field(trace, "installed_signer_fingerprint")
+            or _field(facts, "host_enrolment_ref")
+            != _field(trace, "installed_trust_root_version")
+        ):
+            raise HostAdmissionAdapterUsageError("current target or host changed")
+        expected_context = self._control.execution_context_type(
+            **{
+                name: _field(continuation.execution_facts, name)
+                for name in self._CONTROL_FACTS
+            }
+        )
+        execution = self._control.consumption_request_type(
+            authorization_material_json=_field(request, "authorization_material_json"),
+            dispatch_material_json=_field(request, "dispatch_material_json"),
+            expected_context=expected_context,
+            expected_execution_plan_digest=_field(
+                request, "expected_execution_plan_digest"
+            ),
+            control_consumption_ref=_field(request, "control_consumption_ref"),
+        )
+        foreign = _foreign_evidence(pair, self._control)
+        with self._sources.sessions() as session:
+            if session is continuation.resolution_session:
+                raise HostAdmissionAdapterUsageError(
+                    "F2 resolution and V3 finalization require separate sessions"
+                )
+            self._control.finalize(
+                session, context=resolved, foreign_evidence=foreign, execution=execution
+            )
+            session.commit()
+        # No fallible work follows the successful Control commit.
+
+    def lookup_committed(self, *, control_consumption_ref: str) -> object:
+        """Read Control's typed committed marker after a crash, never reconsume."""
+        with self._sources.sessions() as session:
+            return self._control.lookup_committed(
+                session, control_consumption_ref=control_consumption_ref
+            )
+
+
+class _FoundationHostSourceProvider:
+    __slots__ = ("_owner", "_control", "_foundation", "_sources")
+
+    def __init__(
+        self,
+        owner: object,
+        control: ControlFoundationV3Bindings,
+        foundation: FoundationHostV3Bindings,
+        sources: FoundationV3Sources,
+    ) -> None:
+        self._owner = owner
+        self._control = control
+        self._foundation = foundation
+        self._sources = sources
+
+    def admit_host_source(self) -> tuple[object, object]:
+        observed = self._sources.host_admission()
+        if type(observed) is not HostAdmissionObservation:
+            raise HostAdmissionAdapterUsageError("typed host observation required")
+        with self._sources.sessions() as session:
+            resolved = self._control.resolve_context(
+                session,
+                attempt_id=observed.attempt_id,
+                presentation=observed.presentation,
+            )
+            session.commit()
+        # Session A has closed. Foundation reads its own installed artifact and
+        # verifies the real pair with no Control transaction open.
+        host_source, trace = self._foundation.admit_host_source(
+            candidate=observed.candidate,
+            installed=observed.installed,
+            verifier=self._foundation.verifier,
+            trust_policy=self._foundation.trust_policy_from_context(resolved),
+            expected_host_identity=_field(resolved, "host_id"),
+            expected_observation_id=_field(resolved, "dispatch_id"),
+            expected_package=_field(resolved, "expected_foundation_package"),
+            verification_context_digest=_field(resolved, "context_digest"),
+            now=self._sources.clock(),
+        )
+        if type(trace) is not self._foundation.trace_type:
+            raise HostAdmissionAdapterUsageError("actual Foundation F2 trace required")
+        pair = _field(trace, "pair_verification_result")
+        if (
+            type(pair) is not self._foundation.pair_result_type
+            or _field(trace, "host_observation_id") != _field(resolved, "dispatch_id")
+            or _field(pair, "expected_observation_id")
+            != _field(resolved, "dispatch_id")
+            or _field(pair, "verification_context_digest")
+            != _field(resolved, "context_digest")
+        ):
+            raise HostAdmissionAdapterUsageError("F2 result is not bound to Control")
+        execution_facts = self._sources.execution_context()
+        if type(execution_facts) is not self._foundation.execution_context_type:
+            raise HostAdmissionAdapterUsageError(
+                "actual Foundation V3 execution context required"
+            )
+        if (
+            _field(execution_facts, "target_id") != str(_field(resolved, "target_id"))
+            or _field(execution_facts, "target_ref") != _field(resolved, "target_ref")
+            or _field(execution_facts, "host_id") != _field(resolved, "host_id")
+        ):
+            raise HostAdmissionAdapterUsageError(
+                "execution observation disagrees with F2 resolution"
+            )
+        continuation = _FinalizationContinuation(
+            self._owner, resolved, execution_facts, pair, session
+        )
+        bound_trace = replace(cast(Any, trace), opaque_finalization=continuation)
+        continuation.trace = bound_trace
+        return host_source, bound_trace
+
+
+@dataclass(frozen=True, slots=True)
+class FoundationV3ProviderPair:
+    host_source: _FoundationHostSourceProvider
+    execution_authority: _FoundationV3Provider
+
+
+def compose_foundation_v3_providers(
+    *,
+    control: ControlFoundationV3Bindings,
+    foundation: FoundationHostV3Bindings,
+    sources: FoundationV3Sources,
+) -> FoundationV3ProviderPair:
+    """Bind F2 and V3 to one startup trust set and one Control finalizer."""
+    if not all(
+        callable(value)
+        for value in (
+            control.resolve_context,
+            control.finalize,
+            control.attest_pair,
+            control.lookup_committed,
+            foundation.admit_host_source,
+            foundation.trust_policy_from_context,
+            sources.sessions,
+            sources.host_admission,
+            sources.execution_context,
+            sources.clock,
+        )
+    ):
+        raise HostAdmissionAdapterUsageError("startup composition is incomplete")
+    owner = object()
+    return FoundationV3ProviderPair(
+        host_source=_FoundationHostSourceProvider(owner, control, foundation, sources),
+        execution_authority=_FoundationV3Provider(owner, control, foundation, sources),
+    )
+
+
 __all__ = [
     "AttestationPairVerifier",
     "AttestationVerificationInputs",
@@ -274,4 +665,10 @@ __all__ = [
     "HostAdmissionResolvedContext",
     "HostSourceLauncher",
     "admit_and_launch_host_source",
+    "HostAdmissionObservation",
+    "ControlFoundationV3Bindings",
+    "FoundationHostV3Bindings",
+    "FoundationV3Sources",
+    "FoundationV3ProviderPair",
+    "compose_foundation_v3_providers",
 ]
