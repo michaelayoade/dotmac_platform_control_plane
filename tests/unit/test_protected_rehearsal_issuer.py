@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 from dotmac_kernel.messaging import ClaimedPlatformEvent
 
+from vendor_cp.deployment import approval_barrier
 from vendor_cp.deployment import protected_rehearsal_issuer as issuer
 from vendor_cp.deployment.rehearsal_issuer_seam import (
     RehearsalIssuerCommand,
@@ -130,13 +131,19 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         )
 
     dotmac_approvals = ModuleType("dotmac_approvals")
-    dotmac_approvals.hold_platform_approval = hold_platform_approval  # type: ignore[attr-defined]
     dotmac_approvals.ApprovalNotHeld = FakeApprovalNotHeld  # type: ignore[attr-defined]
+    approvals_service = ModuleType("dotmac_approvals.service")
+    approvals_service.hold_platform_approval = hold_platform_approval  # type: ignore[attr-defined]
+    dotmac_approvals.service = approvals_service  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, control.__name__, control)
     monkeypatch.setitem(sys.modules, approvals.__name__, approvals)
     monkeypatch.setitem(sys.modules, authority.__name__, authority)
     monkeypatch.setitem(sys.modules, dotmac_approvals.__name__, dotmac_approvals)
+    monkeypatch.setitem(sys.modules, approvals_service.__name__, approvals_service)
+    # These fakes are not SQLAlchemy sessions; the AUTOCOMMIT refusal is
+    # proved on its own below and against real PostgreSQL.
+    monkeypatch.setattr(approval_barrier, "_require_transactional", lambda _db: None)
     return SimpleNamespace(
         plan=plan,
         calls=calls,
@@ -414,3 +421,28 @@ def test_other_platform_events_do_not_load_successor_control(
     unrelated["subject_type"] = "another.subject.v1"
     consumer.deliver(_claimed(unrelated), object())
     assert ports.calls == []
+
+
+def test_the_barrier_refuses_an_autocommit_session_before_holding() -> None:
+    """On AUTOCOMMIT a FOR SHARE lock ends with its own statement, so the
+    barrier would hold nothing; it must refuse before the hold or transition."""
+    calls: list[str] = []
+
+    class _Connection:
+        def get_isolation_level(self) -> str:
+            return "AUTOCOMMIT"
+
+    class _AutocommitSession:
+        def connection(self) -> _Connection:
+            return _Connection()
+
+    with pytest.raises(approval_barrier.ApprovalBarrierUnavailable):
+        approval_barrier.held_transition(
+            _AutocommitSession(),  # type: ignore[arg-type]
+            request_id=REQUEST_ID,
+            subject_type="x",
+            subject_id="y",
+            content_digest="sha256:" + "a" * 64,
+            transition=lambda _held: calls.append("transition"),
+        )
+    assert calls == []

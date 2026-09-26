@@ -34,33 +34,48 @@ PROTECTED_REHEARSAL_ISSUER = SRC / "deployment" / "protected_rehearsal_issuer.py
 HOST_ADMISSION_ADAPTER = SRC / "deployment" / "host_admission_adapter.py"
 DEPLOYMENT_ADAPTER = SRC / "deployment" / "adapter.py"
 
-#: Control transitions this barrier exists to guard. A call to any of these,
-#: by attribute (`control.approve_plan(...)`) or bare name (imported by
-#: name), must be inside a `held_transition` callback.
+#: Control's approval-dependent entry points. ANY reference to one of these
+#: names -- a call, an attribute read (`fn = control.approve_plan`), a
+#: `functools.partial`, a by-name import (`from ... import approve_plan as x`)
+#: or `getattr(control, "approve_plan")` -- must sit inside a `held_transition`
+#: callback. `admit_and_consume_host_admission` is Control's own name for what
+#: the Foundation V3 composition binds as `finalize`.
 GUARDED_CALL_NAMES = frozenset(
     {
         "approve_plan",
         "request_rollout",
+        "dispatch_attempt",
         "issue_rehearsal_issuer_authorization_for_plan",
+        "stage_rehearsal_issuer_consumption",
         "finalize",
+        "admit_and_consume_host_admission",
     }
 )
 
-#: (file, enclosing-function-name) pairs allowed to call a guarded name
-#: without being inside a `held_transition` callback, each with a premise.
-ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
+#: (file relative to src/vendor_cp, enclosing function, guarded name) triples
+#: allowed outside a `held_transition` callback, each with its premise. Narrow
+#: by NAME: an entry exempts only that one reference, never every guarded
+#: name in the function.
+ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
     {
         # FOUNDATION_EXECUTION plans have no Approvals subject to hold. C2-D1
         # (Michael, 2026-09-26): dispatch fails closed instead —
         # `_refuse_an_approval_requiring_plan` runs before this finalize and
         # refuses any plan without an explicit requires_approval=False
-        # (proved in tests/unit/test_foundation_v3_provider.py). Until Gate 3
-        # gives the plan a subject, there is nothing for a barrier to hold.
-        # Keyed by the path relative to src/vendor_cp, exactly as the scan
-        # reports it.
-        ("deployment/host_admission_adapter.py", "consume_dispatch"),
+        # (proved in tests/unit/test_foundation_v3_provider.py and ordered by
+        # `test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check`).
+        ("deployment/host_admission_adapter.py", "consume_dispatch", "finalize"),
+        # Startup composition only checks that the bound callable IS callable;
+        # it never calls it.
+        (
+            "deployment/host_admission_adapter.py",
+            "compose_foundation_v3_providers",
+            "finalize",
+        ),
     }
 )
+
+_FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 
 
 def _call_name(node: ast.Call) -> str | None:
@@ -72,70 +87,120 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
-def _held_transition_callback_names(tree: ast.AST) -> set[str]:
-    """Names of functions passed as `transition=...` to any `held_transition`
-    call, anywhere in the module (nested or top-level)."""
-    names: set[str] = set()
+def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    parents: dict[ast.AST, ast.AST] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if _call_name(node) != "held_transition":
-            continue
-        for keyword in node.keywords:
-            if keyword.arg == "transition" and isinstance(keyword.value, ast.Name):
-                names.add(keyword.value.id)
-        # A `transition=lambda ...` or an inline `def` would not be a Name;
-        # such a call has no enclosing-function name to match against, so a
-        # guarded call nested inside it is handled by the enclosing-function
-        # walk below instead (the lambda/def node itself is the boundary).
-    return names
-
-
-def _enclosing_function_names(tree: ast.AST, target: ast.Call) -> list[str]:
-    """Names of every function definition lexically enclosing `target`,
-    innermost first, by walking the tree and tracking a def stack."""
-    stack: list[str] = []
-    found: list[str] = []
-
-    def visit(node: ast.AST, in_scope: list[str]) -> None:
-        if node is target:
-            found[:] = list(reversed(in_scope))
-            return
-        new_scope = in_scope
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            new_scope = [*in_scope, node.name]
-        elif isinstance(node, ast.Lambda):
-            new_scope = [*in_scope, "<lambda>"]
         for child in ast.iter_child_nodes(node):
-            visit(child, new_scope)
+            parents[child] = node
+    return parents
 
-    visit(tree, stack)
+
+def _enclosing_functions(
+    node: ast.AST, parents: dict[ast.AST, ast.AST]
+) -> list[ast.AST]:
+    """Function/lambda nodes lexically enclosing `node`, innermost first."""
+    chain: list[ast.AST] = []
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, _FUNCTION_NODES):
+            chain.append(current)
+        current = parents.get(current)
+    return chain
+
+
+def _scope_of(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.AST | None:
+    chain = _enclosing_functions(node, parents)
+    return chain[0] if chain else None
+
+
+def _held_transition_callbacks(
+    tree: ast.AST, parents: dict[ast.AST, ast.AST]
+) -> set[ast.AST]:
+    """The exact function DEFINITIONS passed as `transition=` to a
+    `held_transition` call: a `def` of that name defined in the SAME scope as
+    the call, or an inline lambda. Matching the definition node rather than
+    the bare name means an unrelated `def transition()` elsewhere in the module
+    is not exempt."""
+    callbacks: set[ast.AST] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and _call_name(node) == "held_transition"):
+            continue
+        call_scope = _scope_of(node, parents)
+        for keyword in node.keywords:
+            if keyword.arg != "transition":
+                continue
+            if isinstance(keyword.value, ast.Lambda):
+                callbacks.add(keyword.value)
+            elif isinstance(keyword.value, ast.Name):
+                for candidate in ast.walk(call_scope or tree):
+                    if (
+                        isinstance(candidate, ast.FunctionDef | ast.AsyncFunctionDef)
+                        and candidate.name == keyword.value.id
+                        and _scope_of(candidate, parents) is call_scope
+                    ):
+                        callbacks.add(candidate)
+    return callbacks
+
+
+def _guarded_references(tree: ast.AST) -> list[tuple[ast.AST, str]]:
+    """Every node that names a guarded entry point, however it is spelled."""
+    found: list[tuple[ast.AST, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in GUARDED_CALL_NAMES:
+            found.append((node, node.attr))
+        elif (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in GUARDED_CALL_NAMES
+        ):
+            found.append((node, node.id))
+        elif isinstance(node, ast.ImportFrom):
+            found.extend(
+                (node, alias.name)
+                for alias in node.names
+                if alias.name in GUARDED_CALL_NAMES
+            )
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in GUARDED_CALL_NAMES
+        ):
+            found.append((node, str(node.args[1].value)))
     return found
 
 
+def _function_name(node: ast.AST) -> str:
+    return getattr(node, "name", "<lambda>")
+
+
 def find_unguarded_calls(source: str, *, filename: str) -> list[str]:
-    """Return a description of every guarded-name call not inside a
-    `held_transition` callback and not on the allowlist."""
+    """Return a description of every guarded-name reference that is neither
+    inside a `held_transition` callback nor an allowlisted (file, function,
+    name) triple."""
     tree = ast.parse(source)
-    callback_names = _held_transition_callback_names(tree)
+    parents = _parents(tree)
+    callbacks = _held_transition_callbacks(tree, parents)
     violations: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+    for node, name in _guarded_references(tree):
+        enclosing = _enclosing_functions(node, parents)
+        if any(fn in callbacks for fn in enclosing):
             continue
-        name = _call_name(node)
-        if name not in GUARDED_CALL_NAMES:
+        innermost = _function_name(enclosing[0]) if enclosing else "<module scope>"
+        if (filename, innermost, name) in ALLOWLIST:
             continue
-        enclosing = _enclosing_function_names(tree, node)
-        if any(fn in callback_names for fn in enclosing):
-            continue
-        if enclosing and (filename, enclosing[0]) in ALLOWLIST:
-            continue
-        location = f"line {node.lineno}"
         violations.append(
-            f"{filename}:{location} calls {name!r} outside a held_transition "
-            f"callback (enclosing function(s): {enclosing or '<module scope>'})"
+            f"{filename}:line {getattr(node, 'lineno', '?')} references {name!r} "
+            f"outside a held_transition callback (in {innermost})"
         )
     return violations
+
+
+def _enclosing_function_names(tree: ast.AST, target: ast.AST) -> list[str]:
+    """Names of the functions enclosing `target`, innermost first."""
+    return [_function_name(fn) for fn in _enclosing_functions(target, _parents(tree))]
 
 
 def _iter_source_files() -> list[Path]:
@@ -275,3 +340,55 @@ def test_the_detector_does_not_flag_a_call_inside_a_held_transition_callback() -
         "    )\n"
     )
     assert find_unguarded_calls(clean, filename="clean.py") == []
+
+
+def test_the_detector_flags_aliased_imported_and_getattr_references() -> None:
+    """SENSITIVITY (bypass shapes). Each spelling reaches Control's approval
+    without a call node named `approve_plan`; each must still be flagged."""
+    shapes = {
+        "alias": "def f(control):\n    fn = control.approve_plan\n    return fn()\n",
+        "import": "from dotmac_deployment_control import approve_plan as grant\n",
+        "getattr": "def f(control):\n    return getattr(control, 'approve_plan')()\n",
+        "partial": (
+            "import functools\n"
+            "def f(control):\n"
+            "    return functools.partial(control.dispatch_attempt, 1)\n"
+        ),
+    }
+    for label, source in shapes.items():
+        assert find_unguarded_calls(source, filename="planted.py"), label
+
+
+def test_a_same_named_function_outside_the_barrier_scope_is_not_exempt() -> None:
+    """SENSITIVITY (name collision). Only the definition actually passed to
+    held_transition, in the same scope, is exempt; another `transition`
+    elsewhere in the module is not."""
+    source = (
+        "def guarded(db, control):\n"
+        "    def transition(held):\n"
+        "        return control.approve_plan(db)\n"
+        "    return held_transition(db, request_id=None, subject_type='x',\n"
+        "        subject_id='y', content_digest='sha256:aa', transition=transition)\n"
+        "\n"
+        "def transition(db, control):\n"
+        "    return control.request_rollout(db)\n"
+    )
+    violations = find_unguarded_calls(source, filename="planted.py")
+    assert len(violations) == 1
+    assert "request_rollout" in violations[0]
+
+
+def test_the_allowlist_exempts_one_name_not_the_whole_function() -> None:
+    """An allowlisted (file, function, finalize) entry must not exempt a new
+    guarded call added to the same function."""
+    source = (
+        "class P:\n"
+        "    def consume_dispatch(self):\n"
+        "        self._control.finalize()\n"
+        "        self._control.approve_plan()\n"
+    )
+    violations = find_unguarded_calls(
+        source, filename="deployment/host_admission_adapter.py"
+    )
+    assert len(violations) == 1
+    assert "approve_plan" in violations[0]

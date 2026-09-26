@@ -194,7 +194,7 @@ def approve_issuer_plan(
     )
 
 
-def issue_authorization(db: object, invocation: RehearsalIssuerInvocation) -> object:
+def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> object:
     """Issue in a new transaction, under the same approval hold as approval.
 
     The caller owns the commit. A withdrawal after the approval transaction
@@ -203,8 +203,12 @@ def issue_authorization(db: object, invocation: RehearsalIssuerInvocation) -> ob
     own frozen plan (never the invocation), so the lock covers precisely the
     decision issuance depends on. After issuance returns — still inside the
     hold, still before the caller's commit — the plan is re-read and its
-    approval standing compared against what was held, closing the remaining
-    window left by the unlocked pre-read above.
+    decision ref and digest compared against what was held. Under Control
+    0.1.0a16 those fields are immutable once a plan is approved (approval
+    requires PROPOSED) and Control re-checks standing under its own plan lock,
+    so this comparison is defence in depth. It fails loudly if a future
+    Control could re-bind a plan's decision between the unlocked pre-read and
+    the hold.
     """
     control = import_module("dotmac_deployment_control")
 

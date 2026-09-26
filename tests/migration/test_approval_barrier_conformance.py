@@ -49,6 +49,7 @@ from typing import Final
 from unittest import mock
 
 import dotmac_approvals
+import dotmac_approvals.service as approvals_service
 import dotmac_deployment_control as control
 import pytest
 from alembic import command
@@ -273,6 +274,27 @@ def _prove_the_barrier_holds(
         assert (
             sqlstate == "55P03"
         ), f"expected a lock-timeout SQLSTATE, got {sqlstate!r}"
+
+        # Condition 4, the HELD half: while A is paused after the Control
+        # mutation and before its commit, Control's plan row is still locked
+        # by A. (The released half is the NOWAIT probe after the commit.)
+        plan_sqlstate: str | None = None
+        with Session(engine) as db_c:
+            try:
+                db_c.execute(
+                    text(
+                        "SELECT id FROM mod_deploy.deployment_plans "
+                        "WHERE id = :id FOR UPDATE NOWAIT"
+                    ),
+                    {"id": plan_id},
+                )
+            except OperationalError as exc:
+                plan_sqlstate = getattr(exc.orig, "sqlstate", None)
+            db_c.rollback()
+        assert plan_sqlstate == "55P03", (
+            "Control's plan row was not locked while A's transaction was open "
+            f"(sqlstate {plan_sqlstate!r})"
+        )
     finally:
         release.set()
         thread_a.join(timeout=_LOCK_WAIT)
@@ -315,7 +337,7 @@ def test_t5_an_intermediate_commit_inside_the_hold_breaks_the_t3_proof(
     proof above must then fail, not pass for the wrong reason.
     """
     plan_id, request_id = seeded
-    real_hold = dotmac_approvals.hold_platform_approval
+    real_hold = approvals_service.hold_platform_approval
 
     def hold_then_commit(db: Session, **kwargs: object) -> object:
         held = real_hold(db, **kwargs)
@@ -323,7 +345,7 @@ def test_t5_an_intermediate_commit_inside_the_hold_breaks_the_t3_proof(
         return held
 
     with mock.patch.object(
-        dotmac_approvals, "hold_platform_approval", hold_then_commit
+        approvals_service, "hold_platform_approval", hold_then_commit
     ):
         # Match the SPECIFIC failure: the withdrawal was no longer blocked. Any
         # other AssertionError (e.g. A never reaching its pause) is not the
@@ -340,7 +362,7 @@ def test_t1_the_hold_and_the_transition_run_in_the_same_transaction(
 ) -> None:
     plan_id, request_id = seeded
     captured: dict[str, tuple[int, int]] = {}
-    real_hold = dotmac_approvals.hold_platform_approval
+    real_hold = approvals_service.hold_platform_approval
     real_approve_plan = control.approve_plan
 
     def observing_hold(db: Session, **kwargs: object) -> object:
@@ -357,7 +379,7 @@ def test_t1_the_hold_and_the_transition_run_in_the_same_transaction(
 
     with (
         Session(engine) as db,
-        mock.patch.object(dotmac_approvals, "hold_platform_approval", observing_hold),
+        mock.patch.object(approvals_service, "hold_platform_approval", observing_hold),
         mock.patch.object(control, "approve_plan", observing_approve_plan),
     ):
         approve_issuer_plan(
