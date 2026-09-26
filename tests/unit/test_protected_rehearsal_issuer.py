@@ -27,6 +27,17 @@ class Command(SimpleNamespace):
     pass
 
 
+APPROVER_ID = UUID("60000000-0000-0000-0000-000000000006")
+
+
+class FakeApprovalNotHeld(Exception):
+    """Stand-in for `dotmac_approvals.ApprovalNotHeld` (code + message)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 @pytest.fixture
 def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     plan = SimpleNamespace(
@@ -58,11 +69,14 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         return plan
 
     control.revoke_plan_approval = revoke  # type: ignore[attr-defined]
-    control.issue_rehearsal_issuer_authorization_for_plan = (  # type: ignore[attr-defined]
-        lambda db, request, *, harness_evidence_document: calls.append(
-            ("issue", (request, harness_evidence_document))
-        )
-    )
+
+    def issue(
+        db: object, request: dict[str, object], *, harness_evidence_document: object
+    ) -> object:
+        calls.append(("issue", (request, harness_evidence_document)))
+        return object()
+
+    control.issue_rehearsal_issuer_authorization_for_plan = issue  # type: ignore[attr-defined]
     approvals = ModuleType("vendor_cp.approvals.adapter")
     approvals.OpenRequestCommand = Command  # type: ignore[attr-defined]
     approvals.open_request = lambda db, cmd: calls.append(("open", cmd))  # type: ignore[attr-defined]
@@ -80,10 +94,55 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
     authority = ModuleType("vendor_cp.approvals_authority")
     authority.bare_content_hash = lambda digest: digest.removeprefix("sha256:")  # type: ignore[attr-defined]
+
+    hold_refusal: dict[str, str] = {}
+
+    def hold_platform_approval(
+        db: object,
+        *,
+        request_id: UUID,
+        subject_type: str,
+        subject_id: str,
+        content_digest: str,
+    ) -> SimpleNamespace:
+        calls.append(
+            (
+                "hold",
+                {
+                    "request_id": request_id,
+                    "subject_type": subject_type,
+                    "subject_id": subject_id,
+                    "content_digest": content_digest,
+                },
+            )
+        )
+        if hold_refusal:
+            raise FakeApprovalNotHeld(hold_refusal["code"], hold_refusal["message"])
+        return SimpleNamespace(
+            request_id=request_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            content_digest=content_digest,
+            policy_code="issuer-approval",
+            policy_version=2,
+            decided_at=datetime(2026, 9, 25, tzinfo=UTC),
+            approver_ids=(APPROVER_ID,),
+        )
+
+    dotmac_approvals = ModuleType("dotmac_approvals")
+    dotmac_approvals.hold_platform_approval = hold_platform_approval  # type: ignore[attr-defined]
+    dotmac_approvals.ApprovalNotHeld = FakeApprovalNotHeld  # type: ignore[attr-defined]
+
     monkeypatch.setitem(sys.modules, control.__name__, control)
     monkeypatch.setitem(sys.modules, approvals.__name__, approvals)
     monkeypatch.setitem(sys.modules, authority.__name__, authority)
-    return SimpleNamespace(plan=plan, calls=calls)
+    monkeypatch.setitem(sys.modules, dotmac_approvals.__name__, dotmac_approvals)
+    return SimpleNamespace(
+        plan=plan,
+        calls=calls,
+        control=control,
+        hold_refusal=hold_refusal,
+    )
 
 
 def test_proposal_and_approval_bind_exact_upstream_terms(
@@ -128,14 +187,23 @@ def test_proposal_and_approval_bind_exact_upstream_terms(
         plan_id=PLAN_ID,
         approval_request_id=REQUEST_ID,
     )
-    approved = ports.calls[-1][1]
-    assert vars(approved.evidence) == {
+    held, approved = ports.calls[-2], ports.calls[-1]
+    assert held == (
+        "hold",
+        {
+            "request_id": REQUEST_ID,
+            "subject_type": issuer.SUBJECT_TYPE,
+            "subject_id": issuer._subject(ports.plan),
+            "content_digest": PLAN_DIGEST,
+        },
+    )
+    assert vars(approved[1].evidence) == {
         "policy_code": "issuer-approval",
         "policy_version": 2,
         "decision_ref": str(REQUEST_ID),
         "content_digest": PLAN_DIGEST,
         "decided_at": datetime(2026, 9, 25, tzinfo=UTC),
-        "approver_refs": ("approver-1",),
+        "approver_refs": (str(APPROVER_ID),),
         "decision_status": "granted",
         "operation": "deploy",
         "execution_plan_digest": EXECUTION,
@@ -143,7 +211,7 @@ def test_proposal_and_approval_bind_exact_upstream_terms(
     assert [name for name, _ in ports.calls] == [
         "propose",
         "open",
-        "evidence",
+        "hold",
         "approve",
     ]
 
@@ -167,8 +235,107 @@ def test_issuance_carries_only_existing_seam_fields(ports: SimpleNamespace) -> N
     )
     issuer.issue_authorization(object(), invocation)
     assert ports.calls == [
-        ("issue", ({"command_id": "issue-1", "plan_id": PLAN_ID}, evidence))
+        (
+            "hold",
+            {
+                "request_id": REQUEST_ID,
+                "subject_type": issuer.SUBJECT_TYPE,
+                "subject_id": issuer._subject(ports.plan),
+                "content_digest": PLAN_DIGEST,
+            },
+        ),
+        ("issue", ({"command_id": "issue-1", "plan_id": PLAN_ID}, evidence)),
     ]
+
+
+def test_issuance_derives_request_id_only_from_the_frozen_plan(
+    ports: SimpleNamespace,
+) -> None:
+    """`RehearsalIssuerCommand`/`Invocation` carry no request id at all — the
+    hold's `request_id` can only come from `plan.approval_decision_ref`."""
+    other_request_id = UUID("80000000-0000-0000-0000-000000000008")
+    ports.plan.approval_decision_ref = str(other_request_id)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+    )
+    issuer.issue_authorization(object(), invocation)
+    held = ports.calls[0]
+    assert held[0] == "hold"
+    assert held[1]["request_id"] == other_request_id
+
+
+def test_issuance_refuses_without_a_recorded_approval_decision(
+    ports: SimpleNamespace,
+) -> None:
+    ports.plan.approval_decision_ref = None
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+    )
+    with pytest.raises(ValueError, match="no recorded approval decision"):
+        issuer.issue_authorization(object(), invocation)
+    assert ports.calls == []
+
+
+def test_issuance_refuses_a_malformed_approval_decision_ref(
+    ports: SimpleNamespace,
+) -> None:
+    ports.plan.approval_decision_ref = "not-a-uuid"
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+    )
+    with pytest.raises(ValueError, match="is not a UUID"):
+        issuer.issue_authorization(object(), invocation)
+    assert ports.calls == []
+
+
+def test_issuance_reread_mismatch_after_a_concurrent_change_raises(
+    ports: SimpleNamespace,
+) -> None:
+    """Simulate a projection landing between issuance and the re-read: the
+    window `held_transition`'s re-read check is meant to close."""
+
+    def issue_and_mutate(
+        db: object, request: dict[str, object], *, harness_evidence_document: object
+    ) -> object:
+        ports.plan.approval_decision_ref = str(
+            UUID("90000000-0000-0000-0000-000000000009")
+        )
+        return object()
+
+    ports.control.issue_rehearsal_issuer_authorization_for_plan = issue_and_mutate
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+    )
+    with pytest.raises(ValueError, match="approval standing changed"):
+        issuer.issue_authorization(object(), invocation)
+
+
+def test_approval_not_held_refusal_means_control_never_sees_approve(
+    ports: SimpleNamespace,
+) -> None:
+    ports.hold_refusal["code"] = "withdrawn"
+    ports.hold_refusal["message"] = "withdrawn"
+    with pytest.raises(FakeApprovalNotHeld):
+        issuer.approve_issuer_plan(
+            object(),
+            command_id="approve-1",
+            plan_id=PLAN_ID,
+            approval_request_id=REQUEST_ID,
+        )
+    assert [name for name, _ in ports.calls] == ["hold"]
+
+
+def test_approval_not_held_refusal_means_control_never_sees_issuance(
+    ports: SimpleNamespace,
+) -> None:
+    ports.hold_refusal["code"] = "withdrawn"
+    ports.hold_refusal["message"] = "withdrawn"
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+    )
+    with pytest.raises(FakeApprovalNotHeld):
+        issuer.issue_authorization(object(), invocation)
+    assert [name for name, _ in ports.calls] == ["hold"]
 
 
 def _withdrawal(ports: SimpleNamespace) -> dict[str, object]:

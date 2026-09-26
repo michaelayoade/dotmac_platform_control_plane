@@ -11,13 +11,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 from uuid import UUID
 
 from dotmac_kernel.messaging import ClaimedPlatformEvent
 from sqlalchemy.orm import Session
 
 from vendor_cp.deployment.rehearsal_issuer_seam import RehearsalIssuerInvocation
+
+if TYPE_CHECKING:
+    from dotmac_approvals import HeldPlatformApproval
 
 PLAN_PURPOSE: Final = "rehearsal_issuer_operation"
 ISSUER_OPERATION: Final = "deploy"
@@ -142,55 +145,110 @@ def approve_issuer_plan(
     expected_plan_version: int | None = None,
     actor_ref: str | None = None,
 ) -> object:
-    """Carry Approvals' genuine decision into Control, without a rollout."""
+    """Carry Approvals' held decision into Control, under the same lock.
+
+    `held_transition` locks the platform approval request FOR SHARE and holds
+    that lock through `control.approve_plan` and into the caller's own
+    commit — the barrier, not the relay, is what makes this safe against a
+    concurrent withdrawal.
+    """
     control = import_module("dotmac_deployment_control")
 
-    from vendor_cp.approvals.adapter import approved_request_evidence
-    from vendor_cp.approvals_authority import bare_content_hash
+    from vendor_cp.deployment.approval_barrier import held_transition
 
     plan = _plan(db, plan_id)
     if not plan.plan_digest:
         raise ValueError("issuer plan has no frozen digest")
-    evidence = approved_request_evidence(
+
+    def transition(held: HeldPlatformApproval) -> object:
+        return control.approve_plan(
+            db,
+            control.ApprovePlanCommand(
+                command_id=command_id,
+                plan_id=plan_id,
+                evidence=control.ApprovalEvidence(
+                    policy_code=held.policy_code,
+                    policy_version=held.policy_version,
+                    decision_ref=str(held.request_id),
+                    content_digest=plan.plan_digest,
+                    decided_at=held.decided_at,
+                    approver_refs=tuple(
+                        str(approver_id) for approver_id in held.approver_ids
+                    ),
+                    decision_status="granted",
+                    operation=plan.operation,
+                    execution_plan_digest=plan.execution_plan_digest,
+                ),
+                expected_version=expected_plan_version,
+                actor_ref=actor_ref,
+            ),
+        )
+
+    return held_transition(
         db,
         request_id=approval_request_id,
         subject_type=SUBJECT_TYPE,
         subject_id=_subject(plan),
-        content_hash=bare_content_hash(plan.plan_digest),
-    )
-    return control.approve_plan(
-        db,
-        control.ApprovePlanCommand(
-            command_id=command_id,
-            plan_id=plan_id,
-            evidence=control.ApprovalEvidence(
-                policy_code=evidence.policy_code,
-                policy_version=evidence.policy_version,
-                decision_ref=str(evidence.request_id),
-                content_digest=plan.plan_digest,
-                decided_at=evidence.decided_at,
-                approver_refs=evidence.approver_refs,
-                decision_status="granted",
-                operation=plan.operation,
-                execution_plan_digest=plan.execution_plan_digest,
-            ),
-            expected_version=expected_plan_version,
-            actor_ref=actor_ref,
-        ),
+        content_digest=plan.plan_digest,
+        transition=transition,
     )
 
 
 def issue_authorization(db: object, invocation: RehearsalIssuerInvocation) -> object:
-    """Issue in a new transaction after the approval transaction has committed.
+    """Issue in a new transaction, under the same approval hold as approval.
 
-    The caller owns the commit. Control verifies standing and signed harness
-    evidence before it writes the issuer authorization ledger.
+    The caller owns the commit. A withdrawal after the approval transaction
+    committed but before this one commits is exactly the window
+    `held_transition` closes: the hold's arguments come only from Control's
+    own frozen plan (never the invocation), so the lock covers precisely the
+    decision issuance depends on. After issuance returns — still inside the
+    hold, still before the caller's commit — the plan is re-read and its
+    approval standing compared against what was held, closing the remaining
+    window left by the unlocked pre-read above.
     """
     control = import_module("dotmac_deployment_control")
-    return control.issue_rehearsal_issuer_authorization_for_plan(
+
+    from vendor_cp.deployment.approval_barrier import held_transition
+
+    plan_id = invocation.command.plan_id
+    plan = _plan(db, plan_id)
+    if not plan.approval_decision_ref:
+        raise ValueError(f"issuer plan {plan_id} has no recorded approval decision")
+    try:
+        request_id = UUID(plan.approval_decision_ref)
+    except ValueError as exc:
+        raise ValueError(
+            f"issuer plan {plan_id} approval_decision_ref "
+            f"{plan.approval_decision_ref!r} is not a UUID"
+        ) from exc
+    if not plan.plan_digest:
+        raise ValueError(f"issuer plan {plan_id} has no frozen digest")
+    expected_decision_ref = plan.approval_decision_ref
+    expected_plan_digest = plan.plan_digest
+
+    def transition(held: HeldPlatformApproval) -> object:
+        result = control.issue_rehearsal_issuer_authorization_for_plan(
+            db,
+            dict(invocation.to_control_request()),
+            harness_evidence_document=invocation.harness_evidence_document,
+        )
+        reread = _plan(db, plan_id)
+        if (
+            reread.approval_decision_ref != expected_decision_ref
+            or reread.plan_digest != expected_plan_digest
+        ):
+            raise ValueError(
+                f"issuer plan {plan_id} approval standing changed during issuance"
+            )
+        return result
+
+    return held_transition(
         db,
-        dict(invocation.to_control_request()),
-        harness_evidence_document=invocation.harness_evidence_document,
+        request_id=request_id,
+        subject_type=SUBJECT_TYPE,
+        subject_id=_subject(plan),
+        content_digest=plan.plan_digest,
+        transition=transition,
     )
 
 
