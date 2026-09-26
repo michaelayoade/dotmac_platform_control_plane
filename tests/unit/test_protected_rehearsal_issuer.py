@@ -132,15 +132,13 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     dotmac_approvals = ModuleType("dotmac_approvals")
     dotmac_approvals.ApprovalNotHeld = FakeApprovalNotHeld  # type: ignore[attr-defined]
-    approvals_service = ModuleType("dotmac_approvals.service")
-    approvals_service.hold_platform_approval = hold_platform_approval  # type: ignore[attr-defined]
-    dotmac_approvals.service = approvals_service  # type: ignore[attr-defined]
+    approvals.hold_approval = hold_platform_approval  # type: ignore[attr-defined]
+    approvals.ApprovalNotHeld = FakeApprovalNotHeld  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, control.__name__, control)
     monkeypatch.setitem(sys.modules, approvals.__name__, approvals)
     monkeypatch.setitem(sys.modules, authority.__name__, authority)
     monkeypatch.setitem(sys.modules, dotmac_approvals.__name__, dotmac_approvals)
-    monkeypatch.setitem(sys.modules, approvals_service.__name__, approvals_service)
     # These fakes are not SQLAlchemy sessions; the AUTOCOMMIT refusal is
     # proved on its own below and against real PostgreSQL.
     monkeypatch.setattr(approval_barrier, "_require_transactional", lambda _db: None)

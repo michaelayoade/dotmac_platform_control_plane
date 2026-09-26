@@ -49,7 +49,6 @@ from typing import Final
 from unittest import mock
 
 import dotmac_approvals
-import dotmac_approvals.service as approvals_service
 import dotmac_deployment_control as control
 import pytest
 from alembic import command
@@ -337,16 +336,14 @@ def test_t5_an_intermediate_commit_inside_the_hold_breaks_the_t3_proof(
     proof above must then fail, not pass for the wrong reason.
     """
     plan_id, request_id = seeded
-    real_hold = approvals_service.hold_platform_approval
+    real_hold = approvals.hold_approval
 
     def hold_then_commit(db: Session, **kwargs: object) -> object:
         held = real_hold(db, **kwargs)
         db.commit()
         return held
 
-    with mock.patch.object(
-        approvals_service, "hold_platform_approval", hold_then_commit
-    ):
+    with mock.patch.object(approvals, "hold_approval", hold_then_commit):
         # Match the SPECIFIC failure: the withdrawal was no longer blocked. Any
         # other AssertionError (e.g. A never reaching its pause) is not the
         # sensitivity this test exists to measure.
@@ -362,7 +359,7 @@ def test_t1_the_hold_and_the_transition_run_in_the_same_transaction(
 ) -> None:
     plan_id, request_id = seeded
     captured: dict[str, tuple[int, int]] = {}
-    real_hold = approvals_service.hold_platform_approval
+    real_hold = approvals.hold_approval
     real_approve_plan = control.approve_plan
 
     def observing_hold(db: Session, **kwargs: object) -> object:
@@ -379,7 +376,7 @@ def test_t1_the_hold_and_the_transition_run_in_the_same_transaction(
 
     with (
         Session(engine) as db,
-        mock.patch.object(approvals_service, "hold_platform_approval", observing_hold),
+        mock.patch.object(approvals, "hold_approval", observing_hold),
         mock.patch.object(control, "approve_plan", observing_approve_plan),
     ):
         approve_issuer_plan(
@@ -418,13 +415,20 @@ def test_t2_no_intermediate_commit_and_a_peer_observes_the_row_lock(
         release.wait(timeout=_LOCK_WAIT)
         return result
 
+    # Count REAL database COMMITs only. SQLAlchemy's Session `after_commit`
+    # also fires when a SAVEPOINT is released (Control's `process_once_platform`
+    # uses one), which is not a commit. The engine-level `commit` event fires
+    # only for a root transaction's COMMIT. A dedicated engine for session A
+    # keeps B's probes out of the count.
+    engine_a = create_engine(engine.url, future=True)
+    event.listen(engine_a, "commit", lambda _conn: commits.append(1))
+
     def run_a() -> None:
         try:
             with (
-                Session(engine) as db_a,
+                Session(engine_a) as db_a,
                 mock.patch.object(control, "approve_plan", paused_approve_plan),
             ):
-                event.listen(db_a, "after_commit", lambda _s: commits.append(1))
                 result = approve_issuer_plan(
                     db_a,
                     command_id=f"approve-{uuid.uuid4()}",
@@ -501,6 +505,7 @@ def test_t2_no_intermediate_commit_and_a_peer_observes_the_row_lock(
 
     assert not approve_error, f"session A failed: {approve_error!r}"
     assert approve_result
+    engine_a.dispose()
     assert (
         len(commits) == 1
     ), f"expected exactly one commit after the caller's own commit, got {len(commits)}"

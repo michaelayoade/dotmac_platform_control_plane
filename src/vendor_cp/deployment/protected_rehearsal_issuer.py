@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from vendor_cp.deployment.rehearsal_issuer_seam import RehearsalIssuerInvocation
 
 if TYPE_CHECKING:
-    from dotmac_approvals import HeldPlatformApproval
+    from vendor_cp.approvals.adapter import HeldPlatformApproval
 
 PLAN_PURPOSE: Final = "rehearsal_issuer_operation"
 ISSUER_OPERATION: Final = "deploy"
