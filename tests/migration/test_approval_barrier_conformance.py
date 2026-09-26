@@ -14,8 +14,8 @@ Control 0.1.0a16 and Approvals 0.1.0a8, seeded only through Vendor CP's own
 public seams (`propose_issuer_plan`, `open_issuer_approval`,
 `vendor_cp.approvals.adapter`) — no hand-inserted rows.
 
-Michael's five acceptance conditions (C2), landed T3 and T5 first (the
-minimum useful commit), then T1; T2 and T4 follow in their own commits:
+Michael's five acceptance conditions (C2), each landed in its own commit,
+T3 and T5 first (the minimum useful commit):
 
 - T3 — a withdrawal attempted while the hold is open times out; released, it
   succeeds; and a third session can then take the Control plan row's lock
@@ -25,10 +25,14 @@ minimum useful commit), then T1; T2 and T4 follow in their own commits:
 - T1 — the hold and the transition observe the same `txid_current()` and
   `pg_backend_pid()`: one transaction, one connection.
 - T2 — no commit fires between the hold and `approve_issuer_plan` returning,
-  exactly one after the caller's own commit, and a peer session can observe
-  the row-level lock while A is paused.
+  exactly one after the caller's own commit; while A is paused a peer's
+  `FOR UPDATE NOWAIT` on the approval row is refused (55P03) and its
+  `FOR SHARE NOWAIT` succeeds, so the lock is really held and really shared.
+- T4 — the reverse race: a withdrawal that commits FIRST makes the later
+  `approve_issuer_plan` raise `ApprovalNotHeld(WITHDRAWN)`, and the Control
+  plan is left unapproved.
 
-Every blocking wait below is bounded (a `lock_timeout`, a polling deadline, a
+Every blocking wait below is bounded (a `lock_timeout`, a NOWAIT probe, a
 `Thread.join` timeout) so a real regression here fails fast instead of hanging
 CI.
 """
@@ -38,7 +42,6 @@ CI.
 from __future__ import annotations
 
 import threading
-import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -83,7 +86,6 @@ _EXECUTION_DIGEST: Final = "sha256:" + "cd" * 32
 _POLICY_CODE: Final = "deployment.production"
 _POLICY_VERSION: Final = 1
 _LOCK_WAIT: Final = 10
-_POLL_DEADLINE: Final = 5
 
 
 # ── the database under test ─────────────────────────────────────────────────
@@ -287,7 +289,10 @@ def _prove_the_barrier_holds(
 
     with Session(engine) as db_c:
         row = db_c.execute(
-            text("SELECT id FROM deployment_plans WHERE id = :id FOR UPDATE NOWAIT"),
+            text(
+                "SELECT id FROM mod_deploy.deployment_plans "
+                "WHERE id = :id FOR UPDATE NOWAIT"
+            ),
             {"id": plan_id},
         ).scalar_one()
         assert row == plan_id
@@ -320,7 +325,10 @@ def test_t5_an_intermediate_commit_inside_the_hold_breaks_the_t3_proof(
     with mock.patch.object(
         dotmac_approvals, "hold_platform_approval", hold_then_commit
     ):
-        with pytest.raises(AssertionError):
+        # Match the SPECIFIC failure: the withdrawal was no longer blocked. Any
+        # other AssertionError (e.g. A never reaching its pause) is not the
+        # sensitivity this test exists to measure.
+        with pytest.raises(AssertionError, match="did not block"):
             _prove_the_barrier_holds(engine, plan_id, request_id)
 
 
@@ -416,27 +424,54 @@ def test_t2_no_intermediate_commit_and_a_peer_observes_the_row_lock(
             timeout=_LOCK_WAIT
         ), "session A never reached its pause point"
 
-        observed = False
-        deadline = time.monotonic() + _POLL_DEADLINE
+        # An uncontended row lock lives in the tuple header, not in `pg_locks`
+        # (only the relation-level RowShareLock appears there, and it is the
+        # same for FOR SHARE and FOR UPDATE). So observe it the way PostgreSQL
+        # exposes it: an exclusive NOWAIT probe on the exact row must be
+        # refused (55P03), while a shared NOWAIT probe succeeds — the lock A
+        # holds is SHARE, not UPDATE, and it is really held.
+        exclusive_sqlstate: str | None = None
         with Session(engine) as db_b:
-            while time.monotonic() < deadline:
-                row = db_b.execute(
+            try:
+                db_b.execute(
                     text(
-                        "SELECT 1 FROM pg_locks "
-                        "WHERE locktype = 'tuple' "
-                        "AND relation = 'mod_approvals.platform_approval_requests'"
-                        "::regclass "
-                        "AND granted"
-                    )
-                ).first()
-                db_b.rollback()
-                if row is not None:
-                    observed = True
-                    break
-                time.sleep(0.05)
-        assert observed, (
-            "session B never observed A's row-level lock on "
-            "mod_approvals.platform_approval_requests"
+                        "SELECT id FROM mod_approvals.platform_approval_requests "
+                        "WHERE id = :id FOR UPDATE NOWAIT"
+                    ),
+                    {"id": request_id},
+                )
+            except OperationalError as exc:
+                exclusive_sqlstate = getattr(exc.orig, "sqlstate", None)
+            db_b.rollback()
+        assert exclusive_sqlstate == "55P03", (
+            "session B could take the approval row FOR UPDATE while A's hold was "
+            f"open (sqlstate {exclusive_sqlstate!r}): the hold is not held"
+        )
+        with Session(engine) as db_b:
+            shared = db_b.execute(
+                text(
+                    "SELECT id FROM mod_approvals.platform_approval_requests "
+                    "WHERE id = :id FOR SHARE NOWAIT"
+                ),
+                {"id": request_id},
+            ).scalar_one()
+            db_b.rollback()
+        assert shared == request_id
+
+        with Session(engine) as db_b:
+            relation_lock = db_b.execute(
+                text(
+                    "SELECT 1 FROM pg_locks "
+                    "WHERE locktype = 'relation' AND mode = 'RowShareLock' "
+                    "AND relation = "
+                    "'mod_approvals.platform_approval_requests'::regclass "
+                    "AND granted AND pid <> pg_backend_pid()"
+                )
+            ).first()
+            db_b.rollback()
+        assert relation_lock is not None, (
+            "no peer session holds a RowShareLock on "
+            "mod_approvals.platform_approval_requests while A's hold is open"
         )
     finally:
         release.set()
@@ -447,3 +482,49 @@ def test_t2_no_intermediate_commit_and_a_peer_observes_the_row_lock(
     assert (
         len(commits) == 1
     ), f"expected exactly one commit after the caller's own commit, got {len(commits)}"
+
+
+# ── T4 ────────────────────────────────────────────────────────────────────
+
+
+def test_t4_a_withdrawal_that_commits_first_makes_the_hold_refuse(
+    seeded: tuple[uuid.UUID, uuid.UUID], engine: Engine
+) -> None:
+    """The reverse ordering of T3: the withdrawal wins the row lock and commits
+    before A starts. A's hold must refuse `withdrawn`, Control must never be
+    asked to approve, and the plan must still be unapproved afterwards."""
+    plan_id, request_id = seeded
+    with Session(engine) as db_b:
+        outcome = _withdraw(
+            db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+        )
+        db_b.commit()
+    assert outcome.state is ApprovalState.WITHDRAWN
+
+    approve_calls: list[object] = []
+    real_approve_plan = control.approve_plan
+
+    def counting_approve_plan(db: Session, cmd: object) -> object:
+        approve_calls.append(cmd)
+        return real_approve_plan(db, cmd)
+
+    with (
+        Session(engine) as db_a,
+        mock.patch.object(control, "approve_plan", counting_approve_plan),
+    ):
+        with pytest.raises(dotmac_approvals.ApprovalNotHeld) as refused:
+            approve_issuer_plan(
+                db_a,
+                command_id=f"approve-{uuid.uuid4()}",
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+        db_a.rollback()
+    assert refused.value.code is dotmac_approvals.ApprovalHoldRefusal.WITHDRAWN
+    assert approve_calls == [], "Control was asked to approve a withdrawn decision"
+
+    with Session(engine) as db_c:
+        plan = control.get_plan(db_c, plan_id)
+    assert plan is not None
+    assert plan.status == "proposed", plan.status
+    assert plan.approval_decision_ref is None
