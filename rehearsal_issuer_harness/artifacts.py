@@ -113,7 +113,7 @@ def verify_wheels(control_wheel: Path, kernel_wheel: Path) -> None:
         if name == "dotmac-deployment-control" and (
             "dotmac-kernel (>=0.1.0a100)" not in info.get_all("Requires-Dist", [])
         ):
-            raise ValueError("Control a14 kernel floor differs from lock")
+            raise ValueError("Control a15 kernel floor differs from lock")
 
 
 def _public_wheel_identity(path: Path) -> tuple[str, str]:

@@ -219,7 +219,7 @@ def admin_engine(_scratch_database: _ScratchDatabase) -> Iterator[Engine]:
             raise RuntimeError("Alembic did not parse both installed version locations")
         expected_heads = {
             "0028_machine_attribution",
-            "dc_0014_rehearsal_issuer_ledger",
+            "dc_0015_plan_purpose",
         }
         discovered_heads = set(ScriptDirectory.from_config(cfg).get_heads())
         if discovered_heads != expected_heads:

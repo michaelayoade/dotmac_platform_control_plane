@@ -322,4 +322,4 @@ def test_no_private_key_or_checkout_dependency() -> None:
     assert 'os.environ.get("REHEARSAL_ISSUER_DATABASE_URL")' in guard
     assert "pytest.UsageError" in guard
     assert "versions_dir" in guard and 'command.upgrade(cfg, "heads")' in guard
-    assert "dc_0014_rehearsal_issuer_ledger" in guard
+    assert "dc_0015_plan_purpose" in guard

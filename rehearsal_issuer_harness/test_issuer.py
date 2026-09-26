@@ -1,4 +1,4 @@
-"""Real installed Control a14, real signatures, real migrated PostgreSQL.
+"""Real installed Control a15, real signatures, real migrated PostgreSQL.
 
 Every issuer/standing/revocation/consumption/target/plan call below --
 including the `_seed` helper -- runs against the `engine` fixture, which is
@@ -78,6 +78,7 @@ def _seed(
     environment: str = "rehearsal",
     approve: bool = True,
     suspend: bool = False,
+    purpose: str = "rehearsal_issuer_operation",
 ) -> tuple[str, uuid.UUID]:
     suffix = _id()
     target_ref = f"issuer-harness-{suffix}"
@@ -110,6 +111,10 @@ def _seed(
                 operation="deploy",
                 descriptor_digest=_DIGEST,
                 execution_plan_digest=_PLAN,
+                # Control 0.1.0a15 freezes a closed authority class on every
+                # plan. The issuer's own operation is its own class, never a
+                # Foundation execution plan (ADR-0013 s A7).
+                purpose=purpose,
                 requires_approval=True,
                 approval_policy_code="deployment.production",
                 approval_policy_version=1,
@@ -313,22 +318,43 @@ def test_evidence_refusals_reach_real_control(
         db.rollback()
 
 
+_ISSUER = "rehearsal_issuer_operation"
+
+
 @pytest.mark.parametrize(
-    "environment,approve,suspend,expected",
+    "environment,approve,suspend,purpose,expected",
     [
         (
             "production",
             True,
             False,
+            _ISSUER,
             RehearsalIssuerIssuanceRefusalCode.NOT_A_REHEARSAL_TARGET,
         ),
         (
             "rehearsal",
             False,
             False,
+            _ISSUER,
             RehearsalIssuerIssuanceRefusalCode.APPROVAL_NOT_STANDING,
         ),
-        ("rehearsal", True, True, RehearsalIssuerIssuanceRefusalCode.TARGET_NOT_ACTIVE),
+        (
+            "rehearsal",
+            True,
+            True,
+            _ISSUER,
+            RehearsalIssuerIssuanceRefusalCode.TARGET_NOT_ACTIVE,
+        ),
+        # Control 0.1.0a15: an approved, active, rehearsal-environment plan of
+        # the FOUNDATION EXECUTION class is still not issuer authority. The
+        # environment never selects the class; the frozen purpose does.
+        (
+            "rehearsal",
+            True,
+            False,
+            "foundation_execution",
+            RehearsalIssuerIssuanceRefusalCode.WRONG_PLAN_PURPOSE,
+        ),
     ],
 )
 def test_plan_state_refusals(
@@ -337,11 +363,16 @@ def test_plan_state_refusals(
     environment: str,
     approve: bool,
     suspend: bool,
+    purpose: str,
     expected: RehearsalIssuerIssuanceRefusalCode,
 ) -> None:
     _, harness = security
     target_ref, plan_id = _seed(
-        engine, environment=environment, approve=approve, suspend=suspend
+        engine,
+        environment=environment,
+        approve=approve,
+        suspend=suspend,
+        purpose=purpose,
     )
     _, evidence = _evidence(harness, target_ref)
     with Session(engine) as db:
