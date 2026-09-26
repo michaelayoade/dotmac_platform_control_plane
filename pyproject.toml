@@ -154,7 +154,7 @@ dotmac-approvals = { version = "0.1.0a8", source = "forgejo" }
 # This pin is not deployment authorization: the a98 -> a100 kernel move and the
 # dc_0003..dc_0015 and ap_0003 migrations still owe a rehearsal against a
 # RESTORED isolated database before they reach the running deployment.
-dotmac-deployment-control = { version = "0.1.0a15", source = "forgejo" }
+dotmac-deployment-control = { version = "0.1.0a16", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor
