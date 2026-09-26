@@ -2,10 +2,11 @@
 
 The sibling module `vendor_cp.deployment.protected_rehearsal_issuer` composes
 Control and Approvals for the issuer's own operation. Both producers have
-published: Control `0.1.0a15` (tag object `466f48d2…`, peeled `cd887722…`,
-record Control PR #68) and Approvals `0.1.0a7` (tag object `d59ee6f2…`, peeled
-`7cab65c5…`, record Starter PR #756). Since CP PR #204 (the Gate-0 composition
-adoption) the application pins exactly those versions, so the isolated lane
+published: Control `0.1.0a16` (tag object `884346bf…`, peeled `71264702…`,
+record Control PR #71) and Approvals `0.1.0a8` (tag object `0f307476…`, peeled
+`9e2d69f4…`, record Starter PR #758). CP PR #204 (the Gate-0 composition
+adoption) pinned a15/a7; this repin moves the application to exactly these
+versions, so the isolated lane
 below verifies the same bytes the assembly composes. Mounted routes are
 unchanged; there is no operator CLI in this slice.
 

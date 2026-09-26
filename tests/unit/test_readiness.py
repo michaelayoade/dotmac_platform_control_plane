@@ -100,6 +100,17 @@ class _Row:
         return (self._heartbeat_at, None)
 
 
+def _fresh_session() -> _ReachableSession:
+    """A healthy session whose heartbeat is read from the clock NOW, at request time.
+
+    The route judges the heartbeat by `datetime.now(UTC)` against its configured
+    window (120 s by default), so a heartbeat frozen at import time goes stale
+    once the suite has run for two minutes before reaching a route test — which
+    turned the non-vacuity test red for reasons unrelated to readiness.
+    """
+    return _ReachableSession(heartbeat_at=datetime.now(UTC))
+
+
 def _check(session: object, *, now: datetime = NOW) -> ReadinessReport:
     return check_readiness(
         session,  # type: ignore[arg-type]
@@ -315,7 +326,7 @@ def test_the_route_answers_503_when_the_relay_is_stalled(
         ),
     )
     app = create_app(assembly.build_spec(deployment_profile("full")))
-    app.dependency_overrides[get_platform_db] = lambda: _ReachableSession()
+    app.dependency_overrides[get_platform_db] = lambda: _fresh_session()
     with TestClient(app) as client:
         response = client.get("/health/ready")
     assert response.status_code == 503
@@ -331,7 +342,7 @@ def test_the_route_answers_200_when_the_dependency_answers() -> None:
     from dotmac_kernel.db import get_platform_db
 
     app = create_app(assembly.build_spec(deployment_profile("full")))
-    app.dependency_overrides[get_platform_db] = lambda: _ReachableSession()
+    app.dependency_overrides[get_platform_db] = lambda: _fresh_session()
     with TestClient(app) as client:
         response = client.get("/health/ready")
     assert response.status_code == 200
@@ -350,7 +361,7 @@ def test_the_healthy_fixture_is_healthy_by_the_clock_the_route_reads() -> None:
     at some later hour.
     """
     real_now = datetime.now(UTC)
-    assert _check(_ReachableSession(), now=real_now) == ReadinessReport(
+    assert _check(_fresh_session(), now=real_now) == ReadinessReport(
         ready=True, detail=ReadinessDetail.READY
     )
     # Sensitivity: the same check, same clock, an old heartbeat — the assertion

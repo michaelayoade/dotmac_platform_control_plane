@@ -15,8 +15,8 @@ its retirement machine-provable.  Merely publishing every module contribution
 can never make this command report product readiness.
 
 The module half of the ratchet is ACTIVE under kernel 0.1.0a100: its
-``ModuleManifest`` declares ``database_catalog``. At this pin set Control 0.1.0a15
-and Approvals 0.1.0a7 each publish a contribution; commercial_agreements,
+``ModuleManifest`` declares ``database_catalog``. At this pin set Control 0.1.0a16
+and Approvals 0.1.0a8 each publish a contribution; commercial_agreements,
 entitlement_allocation, licensing and release_catalog are pinned at releases
 that predate theirs and remain the explicit debt below.
 ``pinned_manifest_declares_contribution_field`` and the two-directional debt

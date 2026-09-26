@@ -30,8 +30,8 @@ python = ">=3.12,<3.14"
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
 #
-# a100 is the truthful COMPOSED FLOOR (`scripts/kernel_floor.py`): Control a15
-# and Approvals a7 each declare `dotmac-kernel >=0.1.0a100`, and the pin equals
+# a100 is the truthful COMPOSED FLOOR (`scripts/kernel_floor.py`): Control a16
+# and Approvals a8 each declare `dotmac-kernel >=0.1.0a100`, and the pin equals
 # the highest floor anything composed declares. It is NOT the final kernel
 # state and is NOT independently adoptable: a98, a99 and a100 all reach a
 # product-owned PostgreSQL driver on the public `create_app` import path
@@ -105,7 +105,16 @@ dotmac-entitlement-allocation = { version = "0.1.0a6", source = "forgejo" }
 # `7cab65c56272c1d8e3a2784ce5b91ce601dd9b05`, release run 36151575723, wheel
 # `ef8b804b…3d61b7`, recorded in Starter's
 # `docs/inventories/module-release-verifications.json`.
-dotmac-approvals = { version = "0.1.0a7", source = "forgejo" }
+#
+# a8 adds `hold_platform_approval`: a FOR SHARE hold on the platform request
+# row, validated under the lock, that a caller keeps through its dependent
+# Control transition and commit (the C2 barrier). No migration; kernel floor
+# unchanged. Oracles: tag `dotmac-approvals-v0.1.0a8`, tag object
+# `0f307476725579c0fd22d1e64fb3ad05778ae528`, peeled commit
+# `9e2d69f4913474d9504cfaeca81a9105919b8555`, release run 36235355877, wheel
+# `f37f02ac…8f01d7`, recorded by Starter #758 (`d26324f4`), resolved by
+# protected `kernel-lock.yml` run 36239987393.
+dotmac-approvals = { version = "0.1.0a8", source = "forgejo" }
 # The platform-only owner of deployment identity, desired state, immutable
 # plans, rollouts and authenticated observations (ADR-0011). Atomic: it declares
 # one supported plane set, so no `ModulePlaneSelection` is possible and none is
@@ -142,19 +151,23 @@ dotmac-approvals = { version = "0.1.0a7", source = "forgejo" }
 # purpose: a14 -> a15 needs every a14 process stopped before `dc_0015` (debt
 # D15), and this assembly never ran a14.
 #
+# a16 locks `cancel_plan` target-then-plan, the same order as every other plan
+# transition; no migration, kernel floor unchanged.
+#
 # Oracles (AGENTS.md rule 17). Pinnable — `peeled_tag`
-# `dotmac-deployment-control-v0.1.0a15`, peeled commit
-# `cd887722b3ffc909d98ef624032fd19cf31ba497`, tag object
-# `466f48d2b9a75f6dc46aacb641f9e48c9a37ab8c`. Published and installable —
-# `release_run` 36162943891, verified by run 36163228780 (VERIFIED 7/7, fifteen
-# installed-artifact canaries), recorded by Control PR #68. The resolved
-# artifacts equal that evidence: wheel `edd32c0f…0611532`, sdist
-# `1aba41fd…8b254ad`, resolved by protected `kernel-lock.yml` run 36185761425.
+# `dotmac-deployment-control-v0.1.0a16`, peeled commit
+# `712647025dc312403ad48edd5d58ea60c6f70d6f`, tag object
+# `884346bf9830842cfcf7b1b6be0f72db17a6a789`. Published and installable —
+# `release_run` 36233791667 uploaded (its own read-back timed out, so that run
+# concluded failure), and INDEPENDENT verify run 36234317683 returned VERIFIED
+# (fifteen installed-artifact canaries), recorded by Control PR #71. The
+# resolved artifacts equal that evidence: wheel `da254a50…383a20`, sdist
+# `2a3171d9…52f727`, resolved by protected `kernel-lock.yml` run 36240115789.
 #
 # This pin is not deployment authorization: the a98 -> a100 kernel move and the
 # dc_0003..dc_0015 and ap_0003 migrations still owe a rehearsal against a
 # RESTORED isolated database before they reach the running deployment.
-dotmac-deployment-control = { version = "0.1.0a15", source = "forgejo" }
+dotmac-deployment-control = { version = "0.1.0a16", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor
