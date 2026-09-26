@@ -24,9 +24,13 @@ minimum useful commit), then T1; T2 and T4 follow in their own commits:
   show the T3 proof itself now fails, so T3 is not vacuously green.
 - T1 — the hold and the transition observe the same `txid_current()` and
   `pg_backend_pid()`: one transaction, one connection.
+- T2 — no commit fires between the hold and `approve_issuer_plan` returning,
+  exactly one after the caller's own commit, and a peer session can observe
+  the row-level lock while A is paused.
 
-Every blocking wait below is bounded (a `lock_timeout`, a `Thread.join`
-timeout) so a real regression here fails fast instead of hanging CI.
+Every blocking wait below is bounded (a `lock_timeout`, a polling deadline, a
+`Thread.join` timeout) so a real regression here fails fast instead of hanging
+CI.
 """
 
 # ruff: noqa: S101
@@ -34,6 +38,7 @@ timeout) so a real regression here fails fast instead of hanging CI.
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -52,7 +57,7 @@ from dotmac_deployment_control import (
     register_target,
     set_desired_state,
 )
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -360,3 +365,85 @@ def test_t1_the_hold_and_the_transition_run_in_the_same_transaction(
         "the hold and the transition observed different (txid, pid) pairs — "
         "they did not run in the same transaction on the same connection"
     )
+
+
+# ── T2 ────────────────────────────────────────────────────────────────────
+
+
+def test_t2_no_intermediate_commit_and_a_peer_observes_the_row_lock(
+    seeded: tuple[uuid.UUID, uuid.UUID], engine: Engine
+) -> None:
+    plan_id, request_id = seeded
+    commits: list[int] = []
+    mutated = threading.Event()
+    release = threading.Event()
+    approve_result: list[object] = []
+    approve_error: list[BaseException] = []
+    real_approve_plan = control.approve_plan
+
+    def paused_approve_plan(db: Session, cmd: object) -> object:
+        assert not commits, "a commit happened before the transition ran"
+        result = real_approve_plan(db, cmd)
+        mutated.set()
+        release.wait(timeout=_LOCK_WAIT)
+        return result
+
+    def run_a() -> None:
+        try:
+            with (
+                Session(engine) as db_a,
+                mock.patch.object(control, "approve_plan", paused_approve_plan),
+            ):
+                event.listen(db_a, "after_commit", lambda _s: commits.append(1))
+                result = approve_issuer_plan(
+                    db_a,
+                    command_id=f"approve-{uuid.uuid4()}",
+                    plan_id=plan_id,
+                    approval_request_id=request_id,
+                )
+                assert (
+                    not commits
+                ), "approve_issuer_plan committed before returning to its caller"
+                db_a.commit()
+            approve_result.append(result)
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            approve_error.append(exc)
+
+    thread_a = threading.Thread(target=run_a)
+    thread_a.start()
+    try:
+        assert mutated.wait(
+            timeout=_LOCK_WAIT
+        ), "session A never reached its pause point"
+
+        observed = False
+        deadline = time.monotonic() + _POLL_DEADLINE
+        with Session(engine) as db_b:
+            while time.monotonic() < deadline:
+                row = db_b.execute(
+                    text(
+                        "SELECT 1 FROM pg_locks "
+                        "WHERE locktype = 'tuple' "
+                        "AND relation = 'mod_approvals.platform_approval_requests'"
+                        "::regclass "
+                        "AND granted"
+                    )
+                ).first()
+                db_b.rollback()
+                if row is not None:
+                    observed = True
+                    break
+                time.sleep(0.05)
+        assert observed, (
+            "session B never observed A's row-level lock on "
+            "mod_approvals.platform_approval_requests"
+        )
+    finally:
+        release.set()
+        thread_a.join(timeout=_LOCK_WAIT)
+
+    assert not approve_error, f"session A failed: {approve_error!r}"
+    assert approve_result
+    assert (
+        len(commits) == 1
+    ), f"expected exactly one commit after the caller's own commit, got {len(commits)}"
