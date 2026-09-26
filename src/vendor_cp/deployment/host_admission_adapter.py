@@ -42,7 +42,7 @@ reason: a port lets the orchestration be exercised, and its failure paths
 proven, without either upstream dependency existing yet.
 
 The V3 successor path below is the startup-bound
-`compose_foundation_v3_providers` pair. It uses Control f06dfe1's public
+`compose_foundation_v3_providers` pair. It uses Control 0.1.0a15's public
 `FoundationDispatchConsumptionV1` and sole
 `admit_and_consume_host_admission` finalizer, plus Foundation b273337d's
 `HostSourceAdmissionTrace`/`ControlConsumptionRequestV3` contract, through
@@ -289,8 +289,8 @@ class HostAdmissionObservation:
 class ControlFoundationV3Bindings:
     """Control's exact public functions and DTO constructors, bound at startup.
 
-    The released CP pin predates these symbols. Its successor composition passes
-    the public objects from Control f06dfe1; this leaf never imports a private
+    CP pins Control 0.1.0a15, which exports these symbols; the successor
+    composition passes its public objects in. This leaf never imports a private
     Control API or selects an implementation during an execution request.
     """
 

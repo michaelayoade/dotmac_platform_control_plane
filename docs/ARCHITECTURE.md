@@ -585,8 +585,10 @@ restating its contact; a new registration still requires an explicit contact.
 The deployment path never creates or repairs the marker itself.
 
 The Foundation V3 successor composition is kept in the import-light
-`vendor_cp.deployment.host_admission_adapter` leaf while CP still pins the
-pre-V3 Control wheel and does not install Foundation. Its single startup
+`vendor_cp.deployment.host_admission_adapter` leaf. CP pins Control
+0.1.0a15, which exports these V3 symbols, but does not install Foundation, so
+the factory is not wired at startup until a published Foundation release is
+pinned and conformance-tested against its real types. Its single startup
 factory binds Control's public resolve/finalize/lookup contracts, Foundation's
 real F2 admission function and types, fixed trust and clock, and local session
 and observation sources. F2 resolves in a committed, closed Session A, then
