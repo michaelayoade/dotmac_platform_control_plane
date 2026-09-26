@@ -57,7 +57,8 @@ tag is annotated and peels to the same source, and the producing record binds
 the same version, source commit and wheel hash. It derives exact pins and wheel
 paths from the manifest, downloads Dotmac wheels solely from private Forgejo,
 checks their bytes before installation, then tests installed public signatures
-in an isolated venv. Kernel a100 remains governed by the existing harness lock.
+in an isolated venv. The kernel wheel stays governed by the existing harness
+lock, `rehearsal_issuer_harness/artifacts.json`.
 
 Control already writes `docs/published-versions.json` with these publication
 facts. Starter's current module release recorder does not persist a wheel hash

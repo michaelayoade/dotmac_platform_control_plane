@@ -51,6 +51,7 @@ def test_the_workflow_directory_holds_every_file_the_guard_must_reach() -> None:
         "kernel-lock.yml",
         "production-deploy.yml",
         "production-image.yml",
+        "protected-issuer-successors.yml",
         "rehearsal-issuer-harness.yml",
     }, names
 
