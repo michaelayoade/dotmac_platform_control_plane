@@ -440,6 +440,11 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
         }
     ),
     "dotmac_kernel.audit": frozenset({"write_platform_audit_event"}),
+    # First shipped in 0.1.0a100, which IS the composed maximum, so it raises
+    # nothing and needs no `ASSEMBLY_SYMBOL_FLOORS` entry (ADR-0016 cutover).
+    "dotmac_kernel.api_documentation": frozenset(
+        {"environment_api_documentation_policy"}
+    ),
     "dotmac_kernel.db": frozenset(
         {
             "PlatformSessionLocal",
