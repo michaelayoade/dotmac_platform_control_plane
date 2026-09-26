@@ -299,3 +299,27 @@ out-imports its composition is repaired by a different person in a different
 repository than a composed module that raised its floor. (An earlier placement
 put the step before those conditions and stopped the job at itself; run
 33516674334 is that first shape, kept only for the record.)
+
+## 2026-09-25 — adopted at a100 for the Gate-0 composition adoption
+
+Platform CP now exact-pins `dotmac-kernel 0.1.0a100`, moving from a98, as part
+of the atomic Gate-0 composition adoption (Control `0.1.0a15`, Approvals
+`0.1.0a7`; ADR-0013 § A7). Michael's ruling on the same day:
+
+- a100 is pinned because it is the **truthful composed floor**. Both module
+  releases declare `dotmac-kernel >=0.1.0a100`, and `scripts/kernel_floor.py`
+  makes the pin equal the highest composed floor.
+- a100 **retains** the a98–a100 independent-adoptability defect recorded above:
+  the public `create_app` import path reaches a product-owned PostgreSQL driver.
+  CP stays operational because its assembled environment supplies that driver,
+  exactly as it did at a98. The adoption changes nothing about that boundary.
+- a100 is **not** described as independently adoptable, and it is not the final
+  kernel state. The repair is a101. Adopting it stays held, with Governance
+  schema 11 and a truthful Foundation render check, under debt D2.
+- CP PR #187's Governance-derived a101 repair-pin exception is **not** ported
+  into CP as local authority. Doing so would create a CP-local authority to
+  bypass a recorded Governance hold.
+
+The lock was resolved only through the protected `kernel-lock.yml` workflow
+(runs 36185761425 and 36186925221). Every artifact hash equals its published
+release record.

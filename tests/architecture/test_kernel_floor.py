@@ -1197,9 +1197,9 @@ CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
     "docs/cutover-readiness.md": CurrentVersionClaim(
         assertions=("| `dotmac-kernel` | `{pin}` |",),
         other_kernel_versions={
-            "0.1.0a100": "the newest PUBLISHED kernel, in the table's `Released` "
+            "0.1.0a104": "the newest PUBLISHED kernel, in the table's `Released` "
             "column — a different fact from the pin, and stating it is the point",
-            "0.1.0a101": "the unpublished repair, named as not-yet-available",
+            "0.1.0a101": "the published repair, named as held under debt D2",
             "0.1.0a61": "a LANDED migration step in the cutover table's history "
             "column (`Kernel a61 -> a77`), not a claim about now",
             "0.1.0a77": "the other end of that landed step — see `a61`",
@@ -1212,11 +1212,12 @@ CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
     # a pin claim cannot be added to it without being declared.
     "AGENTS.md": CurrentVersionClaim(
         other_kernel_versions={
-            # `0.1.0a98` is deliberately NOT declared here. It equals the pin
-            # today, so nothing consults it — and the sentence around it says
-            # "a98 is what runs in production", which a repin makes FALSE.
-            # Declaring it would suppress exactly the failure that should
-            # happen on the day the pin moves.
+            # The sentence says "a98 is what runs in production". After the
+            # Gate-0 repin to a100 that is still TRUE — this checkout is not
+            # deployed — so it is declared as the production fact it states.
+            # Revisit it when a deployment of this pin lands.
+            "0.1.0a98": "the kernel production runs today; this checkout pins "
+            "a100 and has not been deployed",
             "0.1.0a99": "a published kernel the example compares against",
             "0.1.0a100": "a published kernel the example compares against",
         },
