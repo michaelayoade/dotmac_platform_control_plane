@@ -489,7 +489,45 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "the decisions that cite it unreadable",
     ),
     _retain("mod_approvals", "platform_approval_requests", "what was asked for"),
+    _retain(
+        "mod_approvals",
+        "platform_approval_withdrawals",
+        "who withdrew which decision, and why. The withdrawal is the durable "
+        "source the issuer's revocation consumes; deleting it erases why an "
+        "authorization stopped standing",
+    ),
     # ── `mod_deploy` (dotmac-deployment-control) ─────────────────────────
+    _gauge(
+        "mod_deploy",
+        "attestation_current_roots",
+        "the rebuildable current-root projection over attestation enrolments and "
+        "closures. Revocation removes a stale pointer rather than evidence; the "
+        "append-only source tables remain, and no mounted path reaches that "
+        "repair or revocation write today",
+    ),
+    _retain(
+        "mod_deploy",
+        "attestation_enrolments",
+        "append-only attestation trust-root enrolment evidence",
+    ),
+    _retain(
+        "mod_deploy",
+        "attestation_fingerprint_closures",
+        "append-only attestation revocation and supersession evidence; its "
+        "fingerprint key is the ordering arbiter",
+    ),
+    _retain(
+        "mod_deploy",
+        "attestation_root_descriptors",
+        "append-only descriptor of each enrolled attestation root (issuer, key, "
+        "purpose, expiry); a trigger refuses UPDATE, DELETE and TRUNCATE",
+    ),
+    _retain(
+        "mod_deploy",
+        "attestation_subject_locks",
+        "the per-subject lock target every admission and root mutation takes "
+        "FOR UPDATE; append-only by trigger, so a row is never removed",
+    ),
     _retain("mod_deploy", "deployment_plans", "what a deployment was told to do"),
     _retain(
         "mod_deploy",
@@ -503,6 +541,30 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "observation_receipts",
         "the signed observation of what a target actually ran",
     ),
+    _retain(
+        "mod_deploy",
+        "recovery_grants",
+        "the durable, bounded authority evidence permitting a recovery action",
+    ),
+    _retain(
+        "mod_deploy",
+        "rehearsal_grants",
+        "the rehearsal replay-coordinate ledger; a grant's standing and "
+        "consumption are the evidence that one rehearsal ran once",
+    ),
+    _retain(
+        "mod_deploy",
+        "rehearsal_issuer_authorizations",
+        "the protected rehearsal issuer's issuance, standing, revocation and "
+        "single-use consumption ledger; a trigger refuses resetting a terminal "
+        "row",
+    ),
+    _retain(
+        "mod_deploy",
+        "rollout_attempt_settlements",
+        "append-only terminal settlement evidence beside the rollout attempt it "
+        "settles",
+    ),
     _retain("mod_deploy", "rollout_attempts", "every attempt, including failures"),
     _retain("mod_deploy", "rollouts", "what was rolled out, where, and when"),
     _retain(
@@ -510,6 +572,41 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "target_credentials",
         "credential custody for a target. Rotation writes a new row; the old "
         "one is how a later review knows what was in use at the time",
+    ),
+    _retain(
+        "mod_deploy",
+        "target_admission_policies",
+        "append-only host-admission policy evidence per target; a trigger "
+        "refuses UPDATE, DELETE and TRUNCATE",
+    ),
+    _retain(
+        "mod_deploy",
+        "target_admission_policy_closures",
+        "append-only closure (revocation or supersession) of an admission " "policy",
+    ),
+    _gauge(
+        "mod_deploy",
+        "target_current_admission_policies",
+        "the rebuildable pointer to a target's current admission policy. "
+        "Revocation deletes the pointer, never the policy or its closure, which "
+        "remain in their append-only tables",
+    ),
+    _gauge(
+        "mod_deploy",
+        "target_current_hosts",
+        "the rebuildable pointer to a target's current admitted host. "
+        "Revocation deletes the pointer, never the association or its closure, "
+        "which remain in their append-only tables",
+    ),
+    _retain(
+        "mod_deploy",
+        "target_host_association_closures",
+        "append-only closure (revocation or supersession) of a host association",
+    ),
+    _retain(
+        "mod_deploy",
+        "target_host_associations",
+        "append-only evidence of which host was admitted to which target",
     ),
     # ── `mod_ealloc` (dotmac-entitlement-allocation) ─────────────────────
     _retain(
@@ -870,6 +967,50 @@ DELETION_SITES: Final[tuple[DeletionSite, ...]] = (
         reachability=Reachability.NOT_COMPOSED,
         premise="a prune an operator schedules; this deployment schedules none, "
         "and the period it would need is a decision nobody has taken",
+    ),
+    DeletionSite(
+        distribution="dotmac-deployment-control",
+        module="dotmac_deployment_control.attestation_trust_registry",
+        symbol="repair_current_root",
+        target="mod_deploy.attestation_current_roots",
+        reachability=Reachability.NOT_COMPOSED,
+        premise="the architecture guard derives every composed source, script "
+        "and migration plus each composed distribution and finds no syntactic "
+        "reference or exact seam-symbol string literal outside this defining "
+        "registry and this ledger declaration; computed dynamic access is not "
+        "claimed proved",
+    ),
+    DeletionSite(
+        distribution="dotmac-deployment-control",
+        module="dotmac_deployment_control.attestation_trust_registry",
+        symbol="revoke_root",
+        target="mod_deploy.attestation_current_roots",
+        reachability=Reachability.NOT_COMPOSED,
+        premise="as `repair_current_root`: revocation clears only the derived "
+        "current-root pointer and the same guard refuses any syntactic seam "
+        "reference or exact symbol literal before a mounted path can reach it",
+    ),
+    DeletionSite(
+        distribution="dotmac-deployment-control",
+        module="dotmac_deployment_control.host_admission_service",
+        symbol="revoke_target_admission_policy",
+        target="mod_deploy.target_current_admission_policies",
+        reachability=Reachability.NOT_COMPOSED,
+        premise="clears only the derived current-policy pointer; the policy and "
+        "its closure stay append-only. Nothing inside Control calls it, its "
+        "browser routes included; it is reachable only through the package's "
+        "public export, and no composed CP source, script or migration "
+        "references it (ADR-0073 host admission is not adopted here yet)",
+    ),
+    DeletionSite(
+        distribution="dotmac-deployment-control",
+        module="dotmac_deployment_control.host_admission_service",
+        symbol="revoke_target_host",
+        target="mod_deploy.target_current_hosts",
+        reachability=Reachability.NOT_COMPOSED,
+        premise="as `revoke_target_admission_policy`: clears only the derived "
+        "current-host pointer while the association and its closure stay "
+        "append-only, and no composed CP path references it",
     ),
 )
 
