@@ -12,7 +12,7 @@ gate reported green on a composition nobody had pinned.
 A module carries a version literal on its `ModuleManifest` and its wheel carries
 one in distribution metadata, and those are two copies of the same fact. They
 can disagree: `dotmac-deployment-control` 0.1.0a6 declared `0.1.0a2` on its
-manifest. From 0.1.0a15 (pinned here) Control derives its manifest version from
+manifest. From 0.1.0a15 (0.1.0a16 pinned here) Control derives its manifest version from
 installed metadata, so the comparison stays for any module that still carries a
 conflicting literal.
 

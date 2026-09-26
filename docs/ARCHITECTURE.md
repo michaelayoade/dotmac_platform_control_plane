@@ -586,7 +586,7 @@ The deployment path never creates or repairs the marker itself.
 
 The Foundation V3 successor composition is kept in the import-light
 `vendor_cp.deployment.host_admission_adapter` leaf. CP pins Control
-0.1.0a15, which exports these V3 symbols, but does not install Foundation, so
+0.1.0a16, which exports these V3 symbols, but does not install Foundation, so
 the factory is not wired at startup until a published Foundation release is
 pinned and conformance-tested against its real types. Its single startup
 factory binds Control's public resolve/finalize/lookup contracts, Foundation's

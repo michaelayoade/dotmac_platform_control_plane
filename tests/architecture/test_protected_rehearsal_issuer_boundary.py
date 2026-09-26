@@ -64,10 +64,10 @@ def test_successor_lane_uses_private_index_and_checked_in_evidence() -> None:
     for source in (workflow, check.EVIDENCE.with_name("check.py").read_text()):
         assert "0.1.0a15" not in source
         assert "0.1.0a7" not in source
-    # Both producers have published (Control 0.1.0a15, record #68; Approvals
-    # 0.1.0a7, record #756), so the manifest carries complete immutable
-    # coordinates and the lane's evidence step accepts it. Since CP #204 the
-    # application pins the SAME versions, so the lane verifies the exact bytes
+    # Both producers have published (Control 0.1.0a16, record #71; Approvals
+    # 0.1.0a8, record #758), so the manifest carries complete immutable
+    # coordinates and the lane's evidence step accepts it. The application
+    # pins the SAME versions, so the lane verifies the exact bytes
     # the assembly composes; the two may not drift apart.
     manifest = json.loads(check.EVIDENCE.read_text())
     for item in manifest["artifacts"].values():
