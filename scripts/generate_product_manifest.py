@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate `deploy/product-manifest.json` from the real composed assembly.
+"""Generate the prospective source-composition record from this checkout.
 
 `assembly.manifest_digest` in the deployment descriptor is what
 `dotmac-deploy drift` uses to tell an approved module set from any other. Until
@@ -11,8 +11,10 @@ gate reported green on a composition nobody had pinned.
 
 A module carries a version literal on its `ModuleManifest` and its wheel carries
 one in distribution metadata, and those are two copies of the same fact. They
-can disagree: at the time of writing `dotmac-deployment-control` declares
-`0.1.0a2` on its manifest while the installed distribution is `0.1.0a6`.
+can disagree: `dotmac-deployment-control` 0.1.0a6 declared `0.1.0a2` on its
+manifest. From 0.1.0a15 (pinned here) Control derives its manifest version from
+installed metadata, so the comparison stays for any module that still carries a
+conflicting literal.
 
 The manifest records the DISTRIBUTION version, because that is artifact
 identity — it is the thing the lockfile pins, the thing the hash covers, and the
@@ -34,7 +36,15 @@ from pathlib import Path
 from vendor_cp.assembly import build_spec
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / "deploy" / "product-manifest.json"
+
+# `deploy/product-manifest.json` is part of the ACCEPTED production descriptor.
+# It stays the bytes the running deployment was promoted with; regenerating it
+# from a branch would falsely claim the branch has been deployed. Branch
+# composition is emitted below `deploy/prospective/` instead (shape from CP
+# PR #187, adopted by the 2026-09-25 Gate-0 composition adoption).
+PROSPECTIVE_DIR = ROOT / "deploy" / "prospective"
+MANIFEST = PROSPECTIVE_DIR / "product-manifest.json"
+SOURCE_COMPOSITION = PROSPECTIVE_DIR / "source-composition.json"
 
 #: Module code -> the distribution that ships it. A module with no entry is
 #: assembled in this repository and has no separate distribution identity.
@@ -104,10 +114,34 @@ def digest(manifest: dict[str, object]) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(manifest)).hexdigest()
 
 
+def build_source_composition(
+    manifest: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """The branch source subject; intentionally not a deployment candidate.
+
+    It names the composition this checkout produces and nothing more: no
+    image, release coordinate, receipt or promotion claim, and no migration
+    heads (those live once, in the accepted descriptor's promotion). A
+    deployment receipt and the promotion mechanism are still required before
+    any value here may replace accepted production truth.
+    """
+    prospective_manifest = build_manifest() if manifest is None else manifest
+    return {
+        "schema": "ProspectiveSourceComposition.v1",
+        "manifest": {
+            "path": "deploy/prospective/product-manifest.json",
+            "digest": digest(prospective_manifest),
+        },
+    }
+
+
 def main() -> int:
     manifest = build_manifest()
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    SOURCE_COMPOSITION.write_text(
+        json.dumps(build_source_composition(manifest), indent=2, sort_keys=True) + "\n"
+    )
     print(digest(manifest))
     return 0
 
