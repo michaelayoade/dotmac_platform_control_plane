@@ -138,6 +138,23 @@ gets `FenceRefused(COMPENSATION_FAILED)` chained from the original exception,
 with `before_acl` set on it, so an operator always holds the exact ACL to
 restore by hand rather than a stack trace alone.
 
+## A restore that reopens and then fails re-drains before reporting
+
+`restore_writers` briefly reopens the ACL (issuing its GRANTs) before it can
+prove the restore matches `prior_grants` exactly. If that GRANT loop fails
+part-way, or the final comparison mismatches, a writer could have reconnected
+during that reopened window — so on EITHER path `restore_writers` re-revokes
+what it just granted (`_refence`) and then TERMINATES AND DRAINS the
+effective role set again with the caller's `session_wait_seconds` (the
+required keyword `restore_writers` takes for exactly this) before reporting
+anything. Ruled 2026-09-27: if the drain converges, the original
+`ACL_NOT_RESTORED` is raised, unchanged. If writers survive the re-drain,
+`WRITER_SESSIONS_SURVIVED` is raised instead, chained from the original
+failure, naming that the re-fence happened but the drain did not converge. If
+the re-fence itself raises, `COMPENSATION_FAILED` is raised, chained from the
+original failure, carrying `prior_acl` as the ACL to restore by hand — never
+a claim that zero writers remain when that was never re-proven.
+
 ## No query after the ACL is restored
 
 Once a mutation has succeeded and every verification it needs has already run
