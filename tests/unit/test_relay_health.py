@@ -791,6 +791,27 @@ def test_a_dead_unrouted_approval_event_outranks_activation_dead_lettered(
     assert health.unrouted_approval_events == 1
 
 
+def test_a_dead_withdrawal_outranks_an_unrouted_approval_event(db: Session) -> None:
+    """Both hold: a dead `approval.withdrawn` (an authorization may still stand)
+    must be the reported verdict, not the stray unrouted `approval.approved`."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.DEAD,
+        available_at=OVERDUE_AT,
+        event_type="approval.approved",
+    )
+    _event(
+        db,
+        status=OutboxStatus.DEAD,
+        available_at=OVERDUE_AT,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.WITHDRAWAL_DEAD_LETTERED
+    assert health.unrouted_approval_events == 1
+
+
 def test_an_approval_withdrawn_row_is_not_counted_as_unrouted(
     db: Session,
 ) -> None:

@@ -144,9 +144,12 @@ class RelayVerdict(str, Enum):
 VERDICT_PRECEDENCE: Final[tuple[RelayVerdict, ...]] = (
     RelayVerdict.RELAY_STATE_UNKNOWN,
     RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED,
-    RelayVerdict.APPROVAL_EVENT_UNROUTED,
     RelayVerdict.WITHDRAWAL_DEAD_LETTERED,
     RelayVerdict.WITHDRAWAL_DELIVERY_FAILING,
+    # Below both withdrawal verdicts: a withdrawal that failed or died means an
+    # authorization may still stand after its approval was withdrawn; an
+    # unrouted non-withdrawal approval event must never hide that from triage.
+    RelayVerdict.APPROVAL_EVENT_UNROUTED,
     RelayVerdict.ACTIVATION_DEAD_LETTERED,
     RelayVerdict.RELAY_NOT_RUNNING,
     RelayVerdict.ACTIVATION_LEASE_STALE,
@@ -349,12 +352,12 @@ def _verdict(
     """First member of `VERDICT_PRECEDENCE` whose condition holds."""
     if unresolved_withdrawal_conflicts > 0:
         return RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED
-    if unrouted_approval_events > 0:
-        return RelayVerdict.APPROVAL_EVENT_UNROUTED
     if withdrawal_dead > 0:
         return RelayVerdict.WITHDRAWAL_DEAD_LETTERED
     if withdrawal_failing > 0:
         return RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+    if unrouted_approval_events > 0:
+        return RelayVerdict.APPROVAL_EVENT_UNROUTED
     if dead_total > 0:
         return RelayVerdict.ACTIVATION_DEAD_LETTERED
     if relay_expected:

@@ -32,6 +32,8 @@ REQUEST_ID = uuid.uuid4()
 #: The platform surface exists ONLY on the platform root host; off it
 #: `require_platform_host` 404s before authentication is reached (same reason
 #: as `tests/unit/test_withdrawal_conflict_resolution_route.py`).
+#: The authenticated admin; the actor must be THIS id, never a body field.
+ADMIN_ID = uuid.uuid4()
 _HOST = settings.platform_root_domain
 URL = f"http://{_HOST}/platform/vendor/approvals/requests/{REQUEST_ID}/withdraw"
 BODY = {
@@ -51,7 +53,7 @@ def app() -> FastAPI:
 
 @pytest.fixture
 def authenticated_client(app: FastAPI) -> Iterator[TestClient]:
-    admin = PlatformAdmin(id=uuid.uuid4(), email="ops@dotmac.io", password_hash="x")
+    admin = PlatformAdmin(id=ADMIN_ID, email="ops@dotmac.io", password_hash="x")
     app.dependency_overrides[get_platform_db] = lambda: object()
     app.dependency_overrides[require_platform_admin] = lambda: admin
     with TestClient(app) as client:
@@ -113,11 +115,13 @@ def test_actor_id_comes_from_the_admin_not_the_body(
         return _view()
 
     monkeypatch.setattr(adapter, "withdraw_request", _fake_withdraw)
+    body_actor = uuid.uuid4()
     response = authenticated_client.post(
-        URL, json={**BODY, "actor_id": str(uuid.uuid4())}
+        URL, json={**BODY, "actor_id": str(body_actor)}
     )
     assert response.status_code == 200
-    assert captured["actor_id"] is not None
+    assert captured["actor_id"] == ADMIN_ID
+    assert captured["actor_id"] != body_actor
 
 
 def test_an_unknown_request_is_not_found(
