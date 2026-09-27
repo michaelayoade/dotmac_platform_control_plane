@@ -232,7 +232,18 @@ def approve_issuer_plan(
                 actor_ref=actor_ref,
             ),
         )
-        control_ref = str(plan_id)
+        if (
+            result.id != plan_id
+            or result.status != "approved"
+            or result.approval_decision_ref != str(held.request_id)
+        ):
+            raise IssuerReceiptMismatch(
+                f"command id {command_id!r} approve_plan call returned "
+                f"id={result.id!r} status={result.status!r} "
+                f"approval_decision_ref={result.approval_decision_ref!r}, "
+                f"which does not match the request it was made under"
+            )
+        control_ref = str(result.id)
         existing = find_receipt(db, command_id)
         if existing is not None and existing.control_ref != control_ref:
             raise IssuerReceiptMismatch(
