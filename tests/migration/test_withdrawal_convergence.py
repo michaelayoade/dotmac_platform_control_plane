@@ -62,7 +62,7 @@ from dotmac_kernel.session_runtime import DatabaseRuntime
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from vendor_cp.allocations.consumer import ContractEventConsumer
@@ -204,6 +204,36 @@ def _composition(dispatcher_url: str, platform: DatabaseRuntime) -> RelayComposi
             contracts=_FixedCatalogueConsumer(), approvals=ApprovalEventRouter()
         ),
     )
+
+
+@contextmanager
+def _composed(
+    dispatcher_url: str, platform: DatabaseRuntime
+) -> Iterator[RelayComposition]:
+    """`_composition`, owned: builds ONE dispatcher runtime for every
+    `drain_once` call a test needs (a poll loop's repeated retries included),
+    and disposes it on the way out. `_composition` itself is left as-is for
+    the single-drain scenarios that already call it once and let the fixture
+    teardown's process exit reclaim the pool."""
+    dispatcher = DatabaseRuntime.from_urls(
+        database_url=dispatcher_url,
+        platform_database_url=dispatcher_url,
+        pool_size=1,
+        max_overflow=0,
+        platform_pool_size=1,
+        platform_max_overflow=0,
+    )
+    try:
+        yield RelayComposition(
+            dispatcher_sessions=dispatcher.platform_session_factory,
+            delivery_sessions=platform.platform_session_factory,
+            transport=PlatformEventConsumers(
+                contracts=_FixedCatalogueConsumer(), approvals=ApprovalEventRouter()
+            ),
+        )
+    finally:
+        dispatcher.platform_engine.dispose()
+        dispatcher.engine.dispose()
 
 
 def _withdrawal_rows(db: Session) -> list[PlatformOutboxEvent]:
@@ -1211,6 +1241,19 @@ def test_a_changed_payload_conflicts_then_resolution_clears_health_and_readiness
             )
 
         with platform.platform_session() as db:
+            # Resolving a conflict clears health/readiness; it does not erase
+            # the append-only history that produced it. BOTH rows persist.
+            outcomes_after_resolution = outcomes_for_event(db, event_id)
+            assert len(outcomes_after_resolution) == 2
+            assert (
+                outcomes_after_resolution[0].disposition
+                is WithdrawalDisposition.APPLIED
+            )
+            assert (
+                outcomes_after_resolution[1].disposition
+                is WithdrawalDisposition.SECURITY_CONFLICT
+            )
+
             health = _observe(db)
             assert health.verdict is not RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED
             assert health.unresolved_withdrawal_conflicts == 0
@@ -1218,6 +1261,30 @@ def test_a_changed_payload_conflicts_then_resolution_clears_health_and_readiness
             report = _ready(db)
             assert report.ready is True
             assert report.detail is ReadinessDetail.READY
+
+        # Append-only, enforced against the ONLINE role too, not just the
+        # ORM's own restraint: an UPDATE or a DELETE by `platform_api` is
+        # refused by the database itself.
+        with platform.platform_engine.connect() as conn:
+            with pytest.raises(ProgrammingError, match="permission denied"):
+                conn.execute(
+                    text(
+                        "UPDATE approval_withdrawal_outcomes SET reason_code = 'x' "
+                        "WHERE id = :id"
+                    ),
+                    {"id": conflict.id},
+                )
+            conn.rollback()
+            with pytest.raises(ProgrammingError, match="permission denied"):
+                conn.execute(
+                    text("DELETE FROM approval_withdrawal_outcomes WHERE id = :id"),
+                    {"id": conflict.id},
+                )
+            conn.rollback()
+
+        with platform.platform_session() as db:
+            still_there = outcomes_for_event(db, event_id)
+            assert len(still_there) == 2, "the refused UPDATE/DELETE must be no-ops"
 
 
 # ── 6: retry (a real retryable failure), then recovery, through the relay ──
@@ -1235,59 +1302,75 @@ def test_a_retryable_failure_then_recovery_through_the_real_relay(
             assert active.approval_request_id is not None
             _withdraw(db, request_id=active.approval_request_id)
 
-        with mock.patch.object(
-            agreements,
-            "module_record_approval_withdrawal",
-            side_effect=OperationalError("statement", {}, Exception("db unavailable")),
-        ):
-            drain_once(
-                worker_id="d18b-convergence",
-                composition=_composition(dispatcher_url, platform),
-                policy=_FAST_RETRY,
-            )
-
-        with platform.platform_session() as db:
-            row = _withdrawal_rows(db)[0]
-            assert row.status == OutboxStatus.PENDING.value
-            assert row.attempts == 1
-            event_id = row.id
-            assert outcomes_for_event(db, event_id) == ()
-
-            health = _observe(db)
-            assert health.verdict is RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
-            assert health.withdrawal_failing == 1
-
-        # NO kernel row is edited. The relay's own backoff (a short
-        # `base_backoff_seconds`, the kernel's own policy knob) makes the row
-        # due again; the test polls the REAL drain until it is claimed and
-        # delivered, bounded so a regression fails instead of hanging.
-        deadline = time.monotonic() + _RETRY_DEADLINE_SECONDS
-        while True:
-            report = drain_once(
-                worker_id="d18b-convergence",
-                composition=_composition(dispatcher_url, platform),
-                policy=_FAST_RETRY,
-            )
-            with platform.platform_session() as db:
-                if outcomes_for_event(db, event_id):
-                    break
-            if time.monotonic() >= deadline:
-                raise AssertionError(
-                    f"the retry never delivered within {_RETRY_DEADLINE_SECONDS}s "
-                    f"(last drain report: {report!r})"
+        # ONE relay composition (and its one dispatcher runtime) for every
+        # `drain_once` call below, including the poll loop's retries —
+        # disposed once, on the way out of this `with` block.
+        with _composed(dispatcher_url, platform) as composition:
+            with mock.patch.object(
+                agreements,
+                "module_record_approval_withdrawal",
+                side_effect=OperationalError(
+                    "statement", {}, Exception("db unavailable")
+                ),
+            ):
+                drain_once(
+                    worker_id="d18b-convergence",
+                    composition=composition,
+                    policy=_FAST_RETRY,
                 )
-            time.sleep(0.2)
 
-        with platform.platform_session() as db:
-            row = _withdrawal_rows(db)[0]
-            assert row.status == OutboxStatus.SENT.value
-            outcomes = outcomes_for_event(db, event_id)
-            assert len(outcomes) == 1
-            assert outcomes[0].disposition is WithdrawalDisposition.APPLIED
+            with platform.platform_session() as db:
+                row = _withdrawal_rows(db)[0]
+                assert row.status == OutboxStatus.PENDING.value
+                assert row.attempts == 1
+                event_id = row.id
+                assert outcomes_for_event(db, event_id) == ()
 
-            health = _observe(db)
-            assert health.verdict is not RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
-            assert health.withdrawal_failing == 0
+                health = _observe(db)
+                assert health.verdict is RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+                assert health.withdrawal_failing == 1
+
+                report = _ready(db)
+                assert report.ready is False
+                assert report.detail is ReadinessDetail.WITHDRAWAL_DELIVERY_FAILING
+
+            # NO kernel row is edited. The relay's own backoff (a short
+            # `base_backoff_seconds`, the kernel's own policy knob) makes the
+            # row due again; the test polls the REAL drain until it is
+            # claimed and delivered, bounded so a regression fails instead of
+            # hanging.
+            deadline = time.monotonic() + _RETRY_DEADLINE_SECONDS
+            while True:
+                drain_report = drain_once(
+                    worker_id="d18b-convergence",
+                    composition=composition,
+                    policy=_FAST_RETRY,
+                )
+                with platform.platform_session() as db:
+                    if outcomes_for_event(db, event_id):
+                        break
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"the retry never delivered within "
+                        f"{_RETRY_DEADLINE_SECONDS}s "
+                        f"(last drain report: {drain_report!r})"
+                    )
+                time.sleep(0.2)
+
+            with platform.platform_session() as db:
+                row = _withdrawal_rows(db)[0]
+                assert row.status == OutboxStatus.SENT.value
+                outcomes = outcomes_for_event(db, event_id)
+                assert len(outcomes) == 1
+                assert outcomes[0].disposition is WithdrawalDisposition.APPLIED
+
+                health = _observe(db)
+                assert health.verdict is not RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+                assert health.withdrawal_failing == 0
+
+                report = _ready(db)
+                assert report.ready is True
+                assert report.detail is ReadinessDetail.READY
 
 
 # ── 7: the CP route, not just the adapter ────────────────────────────────────
@@ -1355,3 +1438,7 @@ def test_the_withdraw_route_drains_to_an_applied_outcome(
             view = agreements.get(db, active.id)
             assert view is not None
             assert _ca_standing_withdrawn(db, view.id) is True
+
+            report = _ready(db)
+            assert report.ready is True
+            assert report.detail is ReadinessDetail.READY
