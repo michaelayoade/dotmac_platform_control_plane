@@ -27,6 +27,7 @@ from vendor_cp.deployment.signers import (
     AuthorizationSignerPointer,
     MaterialKind,
     ObservationSignerPointer,
+    RehearsalIssuerSignerPointer,
     ReleaseEvidenceSignerPointer,
     SignerPointerRefused,
 )
@@ -100,10 +101,19 @@ def test_the_material_table_reads_the_class_var() -> None:
     )
 
 
-def test_three_of_the_five_purposes_now_resolve_to_a_type() -> None:
+def test_four_of_the_six_purposes_now_resolve_to_a_type() -> None:
     """The two that remain literals do so for different reasons, and neither is
     this product's to type: `deployment_dispatch` has no type anywhere yet, and
-    `deployment_recovery` is Control's purpose."""
+    `deployment_recovery` is Control's purpose.
+
+    `deployment_rehearsal_issuer` joined the typed four alongside
+    `RehearsalIssuerSignerPointer` (a Michael-approved cross-repo programme
+    PR) — see that pointer's own docstring for the same "is this product the
+    party making the statement" reasoning `ReleaseEvidenceSignerPointer`
+    followed when IT was added, which is why the count and the assertions
+    below moved from five/three to six/four rather than staying literals
+    frozen at the moment this file was written.
+    """
     typed = {
         POINTER_MATERIAL[p]
         for p in POINTER_MATERIAL
@@ -112,10 +122,11 @@ def test_three_of_the_five_purposes_now_resolve_to_a_type() -> None:
             AuthorizationSignerPointer.purpose,
             ObservationSignerPointer.purpose,
             RELEASE_EVIDENCE_PURPOSE,
+            RehearsalIssuerSignerPointer.purpose,
         }
     }
     assert typed
-    assert len(POINTER_MATERIAL) == 5
+    assert len(POINTER_MATERIAL) == 6
     assert {"deployment_dispatch", "deployment_recovery"} <= set(POINTER_MATERIAL)
 
 

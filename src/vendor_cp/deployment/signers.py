@@ -73,10 +73,12 @@ __all__ = [
     "FORBIDDEN_SIGNING_POINTERS",
     "POINTER_MATERIAL",
     "POINTER_PREFIX",
+    "REHEARSAL_ISSUER_PURPOSE",
     "RELEASE_EVIDENCE_PURPOSE",
     "AuthorizationSignerPointer",
     "MaterialKind",
     "ObservationSignerPointer",
+    "RehearsalIssuerSignerPointer",
     "ReleaseEvidenceSignerPointer",
     "SignerPointerRefused",
     "SignerPointerLike",
@@ -95,6 +97,15 @@ EXECUTION_OBSERVATION_PURPOSE: Final = "target_execution_observation"
 #: here with them so every purpose in `POINTER_MATERIAL` resolves to a symbol
 #: rather than to a string typed twice.
 RELEASE_EVIDENCE_PURPOSE: Final = "platform_release_evidence"
+#: Control's `REHEARSAL_ISSUER_PURPOSE`, verified against
+#: `dotmac_deployment_control.rehearsal_issuer_authorization` (C1). Distinct
+#: from every other purpose in this file for the reason all of them are
+#: separated: one key answering two questions cannot be used to contradict
+#: itself. This purpose authorizes STANDING UP the protected, disposable
+#: rehearsal issuer for one bounded lease — never the production
+#: `deployment_authorization` issuer, and never a step in standing that
+#: issuer up.
+REHEARSAL_ISSUER_PURPOSE: Final = "deployment_rehearsal_issuer"
 
 #: Pointers no deployment signer may name, whatever it is called.
 FORBIDDEN_SIGNING_POINTERS: Final[frozenset[str]] = frozenset(
@@ -281,7 +292,32 @@ class ReleaseEvidenceSignerPointer:
         _validate(self.pointer, purpose="release evidence")
 
 
-#: Every signing purpose and the kind of material its pointer names. THREE now
+@dataclass(frozen=True, slots=True)
+class RehearsalIssuerSignerPointer:
+    """Where the rehearsal-issuer authorization key lives. Never the key.
+
+    Platform CP issues the rehearsal-issuer authorization and holds the key —
+    the same verdict as `deployment_recovery`, by the same rule the whole
+    table follows: THE SIGNER IS THE PARTY MAKING THE STATEMENT. Platform CP
+    asserts that operating the rehearsal issuer for this lease is authorized,
+    so it is the party that must be able to sign one.
+    """
+
+    material: ClassVar[MaterialKind] = MaterialKind.PRIVATE
+
+    pointer: str
+    purpose: str = REHEARSAL_ISSUER_PURPOSE
+
+    def __post_init__(self) -> None:
+        if self.purpose != REHEARSAL_ISSUER_PURPOSE:
+            raise SignerPointerRefused(
+                SignerRefusal.PURPOSE_MISMATCH,
+                f"a rehearsal-issuer signer must declare {REHEARSAL_ISSUER_PURPOSE!r}",
+            )
+        _validate(self.pointer, purpose="rehearsal issuer")
+
+
+#: Every signing purpose and the kind of material its pointer names. FOUR now
 #: have descriptor classes and carry it as a `ClassVar`, and two are still
 #: literals for DIFFERENT reasons:
 #:
@@ -308,6 +344,7 @@ POINTER_MATERIAL: Final[dict[str, MaterialKind]] = {
     #: control plane asserts that a recovery is authorized. The opposite verdict
     #: to `target_execution_observation`, for the same reason.
     "deployment_recovery": MaterialKind.PRIVATE,
+    REHEARSAL_ISSUER_PURPOSE: RehearsalIssuerSignerPointer.material,
 }
 
 
