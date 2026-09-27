@@ -61,6 +61,11 @@ GUARDED_CALL_NAMES = frozenset(
     }
 )
 
+#: Commercial Agreements commands that consume approval evidence (or, for
+#: reinstate, restore standing on it). Guarded by their bound aliases above;
+#: any other spelling of these names from the module is flagged directly.
+_CA_EVIDENCE_COMMANDS = frozenset({"approve", "activate", "reinstate"})
+
 #: (file relative to src/vendor_cp, enclosing function, guarded name) triples
 #: allowed outside a `held_transition` callback, each with its premise. Narrow
 #: by NAME: an entry exempts only that one reference, never every guarded
@@ -169,6 +174,24 @@ def _guarded_references(tree: ast.AST) -> list[tuple[ast.AST, str]]:
                 for alias in node.names
                 if alias.name in GUARDED_CALL_NAMES
             )
+            # Commercial Agreements' evidence-consuming commands are guarded by
+            # their bound aliases (`module_approve` ...). Importing one under
+            # any OTHER name — or unaliased — would slip past that bound-name
+            # match, so the import itself is the reference.
+            if (node.module or "").startswith("dotmac_commercial_agreements"):
+                found.extend(
+                    (node, alias.name)
+                    for alias in node.names
+                    if alias.name in _CA_EVIDENCE_COMMANDS
+                    and (alias.asname or alias.name) not in GUARDED_CALL_NAMES
+                )
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr in _CA_EVIDENCE_COMMANDS
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "dotmac_commercial_agreements"
+        ):
+            found.append((node, node.attr))
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -417,3 +440,25 @@ def test_the_allowlist_exempts_one_name_not_the_whole_function() -> None:
     )
     assert len(violations) == 1
     assert "approve_plan" in violations[0]
+
+
+def test_the_detector_flags_an_unaliased_commercial_agreements_command() -> None:
+    """SENSITIVITY (spelling). The guard matches CA's evidence commands by their
+    bound aliases; an unaliased import, a different alias, or an attribute call
+    on the module must each still be flagged."""
+    shapes = {
+        "unaliased": "from dotmac_commercial_agreements import activate\n",
+        "other alias": "from dotmac_commercial_agreements import approve as ok\n",
+        "attribute": (
+            "import dotmac_commercial_agreements\n"
+            "def f(db, c):\n"
+            "    return dotmac_commercial_agreements.reinstate(db, c)\n"
+        ),
+    }
+    for label, source in shapes.items():
+        assert find_unguarded_calls(source, filename="planted.py"), label
+    # The sanctioned aliased import itself is not a violation.
+    assert not find_unguarded_calls(
+        "from dotmac_commercial_agreements import approve as module_approve\n",
+        filename="planted.py",
+    )

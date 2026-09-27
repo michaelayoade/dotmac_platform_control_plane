@@ -858,3 +858,115 @@ def test_a_committed_activate_retried_after_withdrawal_replays_the_view(
                 ),
             )
         db_a.rollback()
+
+
+def test_a_committed_approve_retried_after_withdrawal_replays_the_view(
+    engine: Engine,
+) -> None:
+    """The approve mirror of the activate replay above: the SAME command_id
+    replays the committed view after a later withdrawal; a NEW one is refused."""
+    agreement_id, request_id = _seed(engine, offer_code="off-approve-retry")
+    command_id = f"approve-{uuid.uuid4()}"
+
+    def _approve(db: Session, cid: str) -> agreements.ContractView:
+        return agreements.approve(
+            db,
+            agreements.ApprovalCommand(
+                command_id=cid,
+                agreement_id=agreement_id,
+                approval_request_id=request_id,
+            ),
+        )
+
+    with Session(engine) as db:
+        first = _approve(db, command_id)
+        db.commit()
+    assert first.status == "approved"
+
+    with Session(engine) as db_b:
+        _withdraw(db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}")
+        db_b.commit()
+
+    with Session(engine) as db:
+        replayed = _approve(db, command_id)
+    assert replayed.status == "approved"
+
+    with Session(engine) as db_a:
+        with pytest.raises(ConflictError, match="not held: withdrawn"):
+            _approve(db_a, f"approve-{uuid.uuid4()}")
+        db_a.rollback()
+    assert _status(engine, agreement_id) == "approved"
+
+
+def test_a_committed_reinstate_retried_after_withdrawal_replays_the_view(
+    engine: Engine,
+) -> None:
+    """The reinstate mirror: the SAME command_id replays the committed view
+    after a later withdrawal; a NEW one (after a fresh suspend) is refused."""
+    agreement_id, request_id = _seed(engine, offer_code="off-reinstate-retry")
+    _approve_and_commit(engine, agreement_id, request_id)
+    _activate_and_commit(engine, agreement_id, request_id)
+    _suspend_and_commit(engine, agreement_id)
+    command_id = f"reinstate-{uuid.uuid4()}"
+
+    def _reinstate(db: Session, cid: str) -> agreements.ContractView:
+        return agreements.reinstate(
+            db, agreements.TransitionCommand(command_id=cid, agreement_id=agreement_id)
+        )
+
+    with Session(engine) as db:
+        first = _reinstate(db, command_id)
+        db.commit()
+    assert first.status == "active"
+
+    with Session(engine) as db_b:
+        _withdraw(db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}")
+        db_b.commit()
+
+    with Session(engine) as db:
+        replayed = _reinstate(db, command_id)
+    assert replayed.status == "active"
+
+    _suspend_and_commit(engine, agreement_id)
+    with Session(engine) as db_a:
+        with pytest.raises(ConflictError, match="not held: withdrawn"):
+            _reinstate(db_a, f"reinstate-{uuid.uuid4()}")
+        db_a.rollback()
+    assert _status(engine, agreement_id) == "suspended"
+
+
+def test_a_command_id_spent_on_approve_cannot_report_an_activate(
+    engine: Engine,
+) -> None:
+    """NEAR MISS. Same command_id, DIFFERENT transition: not a replay. CA's
+    ledger keys on command_id alone, so reusing approve's id for activate makes
+    CA replay the approve result without activating. The adapter must refuse
+    (409) rather than return the still-`approved` view as if activate ran."""
+    agreement_id, request_id = _seed(engine, offer_code="off-near-miss")
+    command_id = f"shared-{uuid.uuid4()}"
+    with Session(engine) as db:
+        agreements.approve(
+            db,
+            agreements.ApprovalCommand(
+                command_id=command_id,
+                agreement_id=agreement_id,
+                approval_request_id=request_id,
+            ),
+        )
+        db.commit()
+
+    with Session(engine) as db:
+        with pytest.raises(ConflictError, match="was not performed"):
+            agreements.activate(
+                db,
+                agreements.ActivateCommand(
+                    command_id=command_id,
+                    agreement_id=agreement_id,
+                    approval_request_id=request_id,
+                    activation_rule="countersigned",
+                    activation_reference="countersignature-1",
+                    activation_satisfied_at=datetime.now(UTC),
+                ),
+            )
+        db.rollback()
+    assert _status(engine, agreement_id) == "approved"
