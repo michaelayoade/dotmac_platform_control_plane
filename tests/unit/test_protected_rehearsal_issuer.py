@@ -715,10 +715,14 @@ def test_consume_authorization_goes_through_held_transition(
         authorization_document=document,
         harness_evidence_document=evidence,
     )
-    # Fix 7: Control receives the PARSED-and-rebuilt document
-    # (`parsed.as_mapping()`), not the caller's raw `document` object --
-    # the fake's `as_mapping()` returns a distinct dict, so this also proves
-    # the seam does not silently pass the raw object through.
+    # Fix 7 (round 3): Control must receive the PARSED-and-rebuilt document
+    # (`parsed.as_mapping()`), never the caller's raw `document` object.
+    # `parsed_document` is an INDEPENDENTLY parsed reference value, equal in
+    # content to what the seam should have built; the `is not document`
+    # identity check below is what actually proves the seam did not silently
+    # pass the raw object through -- content equality alone would not catch
+    # that regression, since `fake_parse_authorization` copies fields
+    # verbatim and could coincidentally produce an equal-but-not-rebuilt dict.
     parsed_document = ports.control.RehearsalIssuerAuthorizationV1.parse(
         document
     ).as_mapping()
@@ -734,6 +738,10 @@ def test_consume_authorization_goes_through_held_transition(
         ),
         ("consume", (parsed_document, evidence)),
     ]
+    consumed_document, _consumed_evidence = next(
+        call for name, call in ports.calls if name == "consume"
+    )
+    assert consumed_document is not document
     assert result.authorization_id == "auth-1"
 
 
@@ -1021,19 +1029,56 @@ def test_superseded_by_revocation_does_attempt_authorization_revocation(
     assert [c.authorization_id for c in revocations] == ["auth-1"]
 
 
+def test_a_conflict_keeps_the_original_results_own_evidence_fields(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 fix 5: building a conflict must not drop the pre-existing
+    result's own evidence -- `approval_revocation_ref` and `withdrawal_ref`
+    (present on the `superseded_by_revocation` result this conflict is built
+    from) must survive alongside the new authorization-revocation fields,
+    which requires `**result.evidence` to be spread in, not replaced by a
+    fresh dict literal."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts, "issued_authorization_refs", lambda db, plan_id: ("auth-1",)
+    )
+    ports.revoke_refusals["auth-1"] = (
+        FakeRehearsalIssuerIssuanceRefusalCode.NOT_RECORDED,
+        "no ledger row for auth-1",
+    )
+    ports.plan.approval_decision_status = "revoked"
+    ports.plan.approval_revocation_ref = "approval.withdrawn:other-event"
+
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.SECURITY_CONFLICT
+    assert (
+        result.evidence["approval_revocation_ref"] == "approval.withdrawn:other-event"
+    )
+    assert result.evidence["withdrawal_ref"] == f"approval.withdrawn:{WITHDRAWAL_ID}"
+    assert result.evidence["withdrawal_disposition"] == "superseded_by_revocation"
+    assert result.evidence["withdrawal_reason_code"] == "superseded_by_revocation"
+
+
 def test_the_classifier_converges_a_cleared_conflict_when_invoked_again(
     ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fix 4 correction: this is NOT a claim that a committed
-    `authorization_revocation_refused` conflict self-heals in production.
-    `approval_router.py` settles each event at most once -- a second delivery
-    with an identical payload digest is a no-op that never reaches the
-    classifier again -- and Approvals' own `withdraw_request` refuses to
-    withdraw a request that is no longer a standing completed approval, so a
-    genuinely SECOND, DIFFERENT withdrawal event for the same plan's approval
-    cannot occur either. Repairing a recorded conflict therefore needs a
-    separate event or an explicit out-of-band repair command, neither of
-    which ships in this change (a tracked follow-up).
+    """Fix 4 correction: this is NOT a general claim that a committed
+    `authorization_revocation_refused` conflict self-heals in production. The
+    scope is PER APPROVAL REQUEST: `approval_router.py` settles each event at
+    most once -- a second delivery with an identical payload digest is a
+    no-op that never reaches the classifier again -- and Approvals' own
+    `withdraw_request` refuses to withdraw a request that is no longer a
+    standing completed approval, so a genuinely SECOND, DIFFERENT withdrawal
+    event for the SAME request cannot occur either. (A SIBLING approval
+    request for the same plan CAN exist and reach `superseded_by_revocation`
+    for that plan, which can incidentally converge an earlier conflict under
+    the sibling's own `revocation_ref` as provenance -- see
+    `_with_authorization_revocation`'s docstring in `protected_rehearsal_
+    issuer.py`; that is a different path than this test.) Deliberately
+    repairing a recorded conflict needs a separate event or an explicit
+    out-of-band repair command, neither of which ships in this change
+    (tracked as a follow-up, Knowledge `cp-gate0-d18-d16-slices-2026-09-27`).
 
     What this DOES prove: `classify_approval_withdrawal` itself is safe to
     invoke again for the SAME event (e.g. from a future repair path) and

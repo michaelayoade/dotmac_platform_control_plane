@@ -18,11 +18,12 @@ exercised here too.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
 from dotmac_kernel import ConflictError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, update
 from sqlalchemy.orm import Session
 
 from vendor_cp.deployment.issuer_receipts import (
@@ -197,11 +198,26 @@ def test_record_receipt_a_disagreeing_reinsert_raises_mismatch(db: Session) -> N
 # ── issued_authorization_refs (D18-D's own index) ────────────────────────────
 
 
+def _set_recorded_at(db: Session, command_id: str, when: datetime) -> None:
+    """`record_receipt` has no `recorded_at` parameter (it is the row's own
+    `server_default=func.now()`), so a test that needs a DETERMINISTIC order
+    sets it explicitly, after the fact, rather than relying on real wall-clock
+    timing -- which ties within one transaction on PostgreSQL, and within one
+    second on SQLite (round-3 correction: `id` alone as a tiebreaker made this
+    test's asserted order random, since `id` is a random uuid4)."""
+    db.execute(
+        update(IssuerCommandReceipt)
+        .where(IssuerCommandReceipt.command_id == command_id)
+        .values(recorded_at=when)
+    )
+
+
 def test_issued_authorization_refs_returns_only_this_plans_issue_receipts(
     db: Session,
 ) -> None:
     plan_id = uuid4()
     other_plan_id = uuid4()
+    base = datetime(2026, 1, 1, tzinfo=UTC)
     record_receipt(
         db,
         **_receipt_kwargs(
@@ -211,6 +227,7 @@ def test_issued_authorization_refs_returns_only_this_plans_issue_receipts(
             control_ref="auth-1",
         ),
     )
+    _set_recorded_at(db, "issue-1", base)
     record_receipt(
         db,
         **_receipt_kwargs(
@@ -220,6 +237,7 @@ def test_issued_authorization_refs_returns_only_this_plans_issue_receipts(
             control_ref="auth-2",
         ),
     )
+    _set_recorded_at(db, "issue-2", base + timedelta(seconds=1))
     # A different plan's issuance must not leak in.
     record_receipt(
         db,
@@ -238,6 +256,42 @@ def test_issued_authorization_refs_returns_only_this_plans_issue_receipts(
     db.commit()
 
     assert issued_authorization_refs(db, plan_id) == ("auth-1", "auth-2")
+
+
+def test_issued_authorization_refs_breaks_a_recorded_at_tie_by_id(
+    db: Session,
+) -> None:
+    """Two receipts recorded at the EXACT same instant (a same-transaction
+    commit on PostgreSQL, or same-second on SQLite) still return in a
+    deterministic order -- the `id` tiebreaker, not insertion-order luck.
+    Computes the expected order from the rows' own `id`s rather than hardcoding
+    one, since `id` is a random uuid4 and either order would otherwise make
+    this test itself flaky."""
+    plan_id = uuid4()
+    same_instant = datetime(2026, 1, 1, tzinfo=UTC)
+    first = record_receipt(
+        db,
+        **_receipt_kwargs(
+            "issue-1", verb=ISSUE_AUTHORIZATION, plan_id=plan_id, control_ref="auth-1"
+        ),
+    )
+    second = record_receipt(
+        db,
+        **_receipt_kwargs(
+            "issue-2", verb=ISSUE_AUTHORIZATION, plan_id=plan_id, control_ref="auth-2"
+        ),
+    )
+    _set_recorded_at(db, "issue-1", same_instant)
+    _set_recorded_at(db, "issue-2", same_instant)
+    db.commit()
+
+    expected = tuple(
+        ref
+        for _id, ref in sorted(
+            ((first.id, "auth-1"), (second.id, "auth-2")), key=lambda pair: pair[0]
+        )
+    )
+    assert issued_authorization_refs(db, plan_id) == expected
 
 
 def test_issued_authorization_refs_is_empty_when_nothing_was_issued(

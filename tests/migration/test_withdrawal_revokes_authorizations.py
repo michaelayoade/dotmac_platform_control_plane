@@ -752,13 +752,14 @@ def test_consuming_a_withdrawn_plans_authorization_under_a_different_plan_id_is_
     standing hold must never authorize spending P2's authority -- and P2's
     authorization must stay ISSUED, untouched.
 
-    Positive control (round-2 correction): with P2's OWN document, fresh P2
-    evidence, and `plan_id=P2` (not P1), a direct call to Control's own
-    `stage_rehearsal_issuer_consumption` -- bypassing CP's plan-match check
-    and barrier entirely -- SUCCEEDS in this window (run inside a SAVEPOINT
-    and rolled back). This proves the plan-mismatch check above is the ONLY
-    thing refusing the P1 case: P2's document, evidence and ledger row were
-    never otherwise unconsumable.
+    Positive control (round-2 correction): with P2's OWN document and fresh P2
+    evidence, a direct call to Control's own `stage_rehearsal_issuer_
+    consumption` -- which takes no `plan_id` at all; it resolves the plan
+    itself from the document's own `statement.immutable_reference`, exactly
+    P2 here -- bypassing CP's plan-match check and barrier entirely, SUCCEEDS
+    in this window (run inside a SAVEPOINT and rolled back). This proves the
+    plan-mismatch check above is the ONLY thing refusing the P1 case: P2's
+    document, evidence and ledger row were never otherwise unconsumable.
 
     Draining the outstanding withdrawal afterwards still revokes P2's
     authorization."""
@@ -814,10 +815,12 @@ def test_consuming_a_withdrawn_plans_authorization_under_a_different_plan_id_is_
             record = _authorization_row(db, authorization_id_2)
             assert record.state == RehearsalIssuerAuthorizationState.ISSUED.value
 
-        # Positive control: P2's OWN document under `plan_id=P2` would have
-        # been consumable -- proving fix 1's refusal in the P1 case above is
-        # the plan-match check, not some other reason P2's authority happens
-        # to be unusable. Inside a SAVEPOINT, rolled back immediately.
+        # Positive control: called directly (no plan_id argument -- Control
+        # resolves the plan itself from the document's own
+        # statement.immutable_reference), P2's OWN document would have been
+        # consumable -- proving fix 1's refusal in the P1 case above is the
+        # plan-match check, not some other reason P2's authority happens to
+        # be unusable. Inside a SAVEPOINT, rolled back immediately.
         with platform.platform_session() as db:
             target_ref_2 = _target_ref_for(db, plan_id_2)
             positive_control_evidence = _consumption_evidence(

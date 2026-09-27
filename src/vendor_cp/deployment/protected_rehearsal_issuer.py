@@ -689,26 +689,51 @@ def _with_authorization_revocation(
 
     This makes the classifier itself idempotent -- calling it again for the
     SAME event, before any outcome has been recorded, safely re-attempts and
-    converges. It is NOT a claim that a committed `authorization_revocation_
-    refused` conflict self-heals in production: `approval_router.py` settles
-    each event at most once (a second delivery with an identical payload
-    digest is a no-op that never reaches this function again), and Approvals'
-    own `withdraw_request` refuses to withdraw a request that is no longer a
-    standing completed approval, so a genuinely SECOND, DIFFERENT withdrawal
-    event for the same plan's approval cannot occur either. Repairing a
-    recorded conflict therefore needs a separate event or an explicit repair
-    command -- neither ships in this change (tracked as a follow-up). Safety
-    stays bounded regardless: once the plan's approval is revoked, Control
-    refuses `stage_rehearsal_issuer_consumption` on `APPROVAL_NOT_STANDING`
-    permanently, whether or not the authorization row itself was revoked.
+    converges. It is NOT a general claim that a committed
+    `authorization_revocation_refused` conflict self-heals in production; the
+    scope of what does and does not converge is PER APPROVAL REQUEST:
+
+    * One approval request gets at most one withdrawal event (Approvals'
+      `withdraw_request` refuses to withdraw a request that is no longer a
+      standing completed approval), and `approval_router.py` settles each
+      event at most once (a second delivery with an identical payload digest
+      is a no-op that never reaches this function again). So a genuinely
+      SECOND, DIFFERENT withdrawal event for the SAME request cannot occur,
+      and a conflict recorded against that request's own withdrawal cannot be
+      converged through the pipeline by that request's withdrawal again.
+    * That does NOT mean the plan's SUBJECT is single-request: `open_issuer_
+      approval` opens one platform approval request per `command_id`, so a
+      SIBLING approval request can exist for the same plan and subject. That
+      sibling's own later withdrawal reaches `superseded_by_revocation`
+      through `_revoked_pre_read` (the plan is already revoked, but under a
+      DIFFERENT ref) and re-enters this function -- which CAN incidentally
+      converge an earlier conflict left by the first request's withdrawal.
+      This is an accepted side effect, not a repair mechanism: the
+      authorization ends up stamped with the SIBLING's `revocation_ref` as
+      provenance, which names the wrong withdrawal for it. Whether the
+      classifier tries the plan-approval transition before or after checking
+      prior standing is an architecture choice kept out of this change; this
+      docstring only names the incidental effect of the existing order.
+    * Repairing a conflict deliberately (rather than incidentally, via a
+      sibling) needs a separate event or an explicit repair command -- neither
+      ships in this change (tracked as a follow-up, Knowledge
+      `cp-gate0-d18-d16-slices-2026-09-27`).
+
+    Safety stays bounded regardless of which of the above applies: once the
+    plan's approval is revoked, Control refuses
+    `stage_rehearsal_issuer_consumption` on `APPROVAL_NOT_STANDING`
+    permanently, whether or not the authorization row itself was revoked, and
+    whichever event's ref ends up recorded as provenance.
     """
     if result.reason_code not in _APPROVAL_NO_LONGER_STANDS:
         return result
-    # actor_ref=None matches the plan revocation on every path that reaches
-    # here: `classify_approval_withdrawal`'s own `control.revoke_plan_approval`
-    # call above never supplies an `actor_ref` either (the `approval.withdrawn`
-    # payload carries no actor identity to forward), so this is the SAME
-    # actor ref the plan revocation used on this path, not a narrower one.
+    # actor_ref=None on both revocations, for consistency. The
+    # `approval.withdrawn` payload DOES carry a top-level `actor_id` and
+    # `authority_ref` (Approvals' `ap_0003_withdrawals.py`), but neither this
+    # authorization revocation nor `classify_approval_withdrawal`'s own
+    # `control.revoke_plan_approval` call above forwards it yet -- forwarding
+    # it on both is a tracked follow-up (Knowledge
+    # `cp-gate0-d18-d16-slices-2026-09-27`), not a gap unique to this call.
     attempt = _revoke_issued_authorizations(
         db, plan_id=plan_id, event_id=event_id, actor_ref=None
     )
@@ -716,7 +741,12 @@ def _with_authorization_revocation(
         return _conflict(
             "authorization_revocation_refused",
             coordinates=result.coordinates,
+            # Round-3 correction: `**result.evidence` FIRST, so a field like
+            # `approval_revocation_ref` (present on an `already_applied` or
+            # `superseded_by_revocation` result) survives into the conflict
+            # instead of being dropped by a fresh dict literal.
             evidence={
+                **result.evidence,
                 "authorizations_revoked": list(attempt.revoked),
                 "authorizations_not_revocable": list(attempt.not_revocable),
                 "authorization_conflicts": list(attempt.conflicts),
