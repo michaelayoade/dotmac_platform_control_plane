@@ -93,7 +93,7 @@ amendment at the owning source. Six slices, three landed.
 | `dotmac-approvals` | `0.1.0a8` | a8 | current — adds the `hold_platform_approval` FOR SHARE barrier C2 composes (a7 brought platform withdrawal) |
 | `dotmac-entitlement-allocation` | `0.1.0a6` | a6 | current (a5 unpublished; never pin it) |
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
-| `dotmac-commercial-agreements` | `0.1.0a2` | a2 | current |
+| `dotmac-commercial-agreements` | `0.1.0a4` | a4 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
 | `dotmac-deployment-control` | `0.1.0a16` | a16 | current — a16 locks `cancel_plan` target-then-plan; a15 was the Gate-0 composition adoption; a14 skipped on purpose (debt D15) |
 | `dotmac-brand-profiles` | not pinned | a1, tagged | deferred by local decision (ADR-0007 § 6) |

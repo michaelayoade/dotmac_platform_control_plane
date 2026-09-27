@@ -145,7 +145,7 @@ it owns and — just as importantly — what it must never become.
   Agreements and Licensing already required those two effects, so this repin
   gave existing bindings a consumer that had been depending on them silently.
   a5 was never published and must not be pinned.
-- `dotmac-commercial-agreements==0.1.0a2` is the commercial-agreement authority
+- `dotmac-commercial-agreements==0.1.0a4` is the commercial-agreement authority
   under ADR-0008. Its platform-only manifest and `cg_0001_agreements` lineage
   are composed. `v015` checks the greenfield premise under lock, drops the empty
   `public.contracts` / `public.contract_lines` estate, and leaves

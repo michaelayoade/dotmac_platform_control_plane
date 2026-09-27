@@ -292,13 +292,16 @@ def test_the_effective_head_derivation_is_not_the_graph_heads() -> None:
 
     If pruning were a no-op the derivation would be `get_heads()` under another
     name, and the test would pass while proving nothing about the version table.
-    Two dependencies really are subtracted here.
+    A dependency really is subtracted here: `li_0001_licensing`, named in
+    vendor `v016`'s `depends_on`. (`cg_0001_agreements` used to be the second;
+    since Commercial Agreements 0.1.0a4 `cg_0002_approval_withdrawals` sits above
+    it, so `cg_0001` is no longer a graph head and `cg_0002` is an effective one.)
     """
     script = ScriptDirectory.from_config(make_alembic_config(OFFLINE_DSN))
     graph_heads = set(script.get_heads())
     effective = set(composed_effective_heads())
     assert effective < graph_heads
-    assert graph_heads - effective == {"cg_0001_agreements", "li_0001_licensing"}
+    assert graph_heads - effective == {"li_0001_licensing"}
 
 
 def test_the_declared_schemas_are_the_schemas_the_lineages_create() -> None:

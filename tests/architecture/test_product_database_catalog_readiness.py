@@ -51,13 +51,14 @@ def test_debt_detector_is_sensitive_to_presence_and_absence() -> None:
 def test_the_module_probe_measures_published_contributions() -> None:
     """Kernel a100 declares the field, so the ratchet now names module debt.
 
-    Control a16 and Approvals a8 publish contributions; the four other stateful
-    modules are pinned at releases that predate theirs. The two-directional
+    Control a16, Approvals a8 and Commercial Agreements a4 publish
+    contributions; the three other stateful modules are pinned at releases that
+    predate theirs. The two-directional
     assertion above holds that observed split against the register instead of
     the former kernel-generation dormancy premise.
     """
     assert pinned_manifest_declares_contribution_field()
-    for published in ("deployment_control", "approvals"):
+    for published in ("deployment_control", "approvals", "commercial_agreements"):
         assert published not in missing_module_database_catalogs()
         assert published not in MODULE_DATABASE_CATALOG_DEBT
 
