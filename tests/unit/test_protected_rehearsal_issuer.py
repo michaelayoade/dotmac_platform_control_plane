@@ -208,11 +208,23 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     def fake_parse_authorization(value: object) -> SimpleNamespace:
         """Stand-in for `RehearsalIssuerAuthorizationV1.parse`: reads
         `value["statement"]`, defaulting a missing `immutable_reference` to
-        `None` (an absent field is a mismatch, not an attribute error)."""
+        `None` (an absent field is a mismatch, not an attribute error).
+        `as_mapping()` rebuilds the same `{"statement": ..., "signature": ...}`
+        shape -- deliberately a DIFFERENT dict instance than `value`, so a test
+        asserting Control receives `parsed.as_mapping()` (fix 7) fails if the
+        seam regresses to passing the raw, unparsed `value` through instead."""
         raw_statement = value.get("statement") if isinstance(value, dict) else None
         statement = dict(raw_statement) if isinstance(raw_statement, dict) else {}
         statement.setdefault("immutable_reference", None)
-        return SimpleNamespace(statement=SimpleNamespace(**statement))
+        signature = (
+            value.get("signature", "fake-signature")
+            if isinstance(value, dict)
+            else "fake-signature"
+        )
+        return SimpleNamespace(
+            statement=SimpleNamespace(**statement),
+            as_mapping=lambda: {"statement": dict(statement), "signature": signature},
+        )
 
     control.RehearsalIssuerAuthorizationV1 = SimpleNamespace(  # type: ignore[attr-defined]
         parse=fake_parse_authorization
@@ -703,6 +715,13 @@ def test_consume_authorization_goes_through_held_transition(
         authorization_document=document,
         harness_evidence_document=evidence,
     )
+    # Fix 7: Control receives the PARSED-and-rebuilt document
+    # (`parsed.as_mapping()`), not the caller's raw `document` object --
+    # the fake's `as_mapping()` returns a distinct dict, so this also proves
+    # the seam does not silently pass the raw object through.
+    parsed_document = ports.control.RehearsalIssuerAuthorizationV1.parse(
+        document
+    ).as_mapping()
     assert ports.calls == [
         (
             "hold",
@@ -713,7 +732,7 @@ def test_consume_authorization_goes_through_held_transition(
                 "content_digest": PLAN_DIGEST,
             },
         ),
-        ("consume", (document, evidence)),
+        ("consume", (parsed_document, evidence)),
     ]
     assert result.authorization_id == "auth-1"
 
@@ -910,6 +929,10 @@ def test_an_unexpected_authorization_refusal_is_a_security_conflict(
                 ),
             }
         ],
+        # Fix 3: provenance -- the plan's own revocation (THIS event) already
+        # committed even though the authorization side did not.
+        "withdrawal_disposition": "applied",
+        "withdrawal_reason_code": "applied",
     }
 
 
@@ -945,6 +968,8 @@ def test_a_conflict_does_not_stop_the_revoke_loop_for_later_refs(
             ),
         }
     ]
+    assert result.evidence["withdrawal_disposition"] == "applied"
+    assert result.evidence["withdrawal_reason_code"] == "applied"
     revocations = [
         command for name, command in ports.calls if name == "revoke_authorization"
     ]
@@ -996,15 +1021,29 @@ def test_superseded_by_revocation_does_attempt_authorization_revocation(
     assert [c.authorization_id for c in revocations] == ["auth-1"]
 
 
-def test_a_redrive_through_superseded_by_revocation_repairs_an_earlier_conflict(
+def test_the_classifier_converges_a_cleared_conflict_when_invoked_again(
     ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fix 3 repairs a fix-2 conflict: the first classification of this event
-    leaves auth-1 stuck ISSUED (`NOT_RECORDED`, a `security_conflict`). A
-    later redrive of the SAME event, after a DIFFERENT withdrawal has since
-    revoked the plan's approval (`superseded_by_revocation`) and the ledger
-    condition that caused the earlier refusal has cleared, must still attempt
-    -- and this time succeed at -- revoking auth-1."""
+    """Fix 4 correction: this is NOT a claim that a committed
+    `authorization_revocation_refused` conflict self-heals in production.
+    `approval_router.py` settles each event at most once -- a second delivery
+    with an identical payload digest is a no-op that never reaches the
+    classifier again -- and Approvals' own `withdraw_request` refuses to
+    withdraw a request that is no longer a standing completed approval, so a
+    genuinely SECOND, DIFFERENT withdrawal event for the same plan's approval
+    cannot occur either. Repairing a recorded conflict therefore needs a
+    separate event or an explicit out-of-band repair command, neither of
+    which ships in this change (a tracked follow-up).
+
+    What this DOES prove: `classify_approval_withdrawal` itself is safe to
+    invoke again for the SAME event (e.g. from a future repair path) and
+    converges the still-outstanding authorization once the condition that
+    caused the earlier refusal (`NOT_RECORDED`) has cleared -- landing on
+    `ALREADY_APPLIED`, since the plan's own revocation already carries THIS
+    event's own ref. (The plan's `approval_revocation_ref` is set manually
+    here because the first call already committed that side of the event in
+    reality; this fake does not mutate plan state as a side effect of
+    `revoke_plan_approval`.)"""
     from vendor_cp.deployment import issuer_receipts
 
     monkeypatch.setattr(
@@ -1019,13 +1058,11 @@ def test_a_redrive_through_superseded_by_revocation_repairs_an_earlier_conflict(
 
     del ports.revoke_refusals["auth-1"]
     ports.plan.approval_decision_status = "revoked"
-    ports.plan.approval_revocation_ref = "approval.withdrawn:other-event"
+    ports.plan.approval_revocation_ref = f"approval.withdrawn:{WITHDRAWAL_ID}"
 
-    redriven = issuer.classify_approval_withdrawal(
-        object(), _claimed(_withdrawal(ports))
-    )
-    assert redriven.disposition == issuer.WithdrawalDisposition.SUPERSEDED_BY_REVOCATION
-    assert redriven.evidence["authorizations_revoked"] == ["auth-1"]
+    again = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert again.disposition == issuer.WithdrawalDisposition.ALREADY_APPLIED
+    assert again.evidence["authorizations_revoked"] == ["auth-1"]
     revocations = [
         command for name, command in ports.calls if name == "revoke_authorization"
     ]

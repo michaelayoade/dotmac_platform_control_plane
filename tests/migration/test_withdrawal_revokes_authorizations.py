@@ -224,10 +224,19 @@ def _propose_issuer(db: Session, *, suffix: str) -> tuple[uuid.UUID, uuid.UUID, 
             approval_policy_version=ISSUER_POLICY_VERSION,
         ),
     )
+    # A STABLE command_id, not `uuid.uuid4().hex`: `publish_policy_version` is
+    # "idempotent by command id" (its own docstring) via
+    # `process_once_platform`, which REPLAYS a duplicate command id rather
+    # than re-executing it. `ISSUER_POLICY_CODE`/`ISSUER_POLICY_VERSION` are
+    # module-level constants shared by every plan this helper proposes, so a
+    # test proposing a SECOND plan in the same database (e.g. a P1/P2
+    # scenario) must reuse this exact id to replay the first publish rather
+    # than attempt a second one -- policy revisions are immutable, and a
+    # fresh random id here would hit `PolicyVersionExists` on the second call.
     approvals.publish_policy_version(
         db,
         approvals.PublishPolicyCommand(
-            command_id=uuid.uuid4().hex,
+            command_id=f"publish-{ISSUER_POLICY_CODE}-v{ISSUER_POLICY_VERSION}",
             policy_code=ISSUER_POLICY_CODE,
             version=ISSUER_POLICY_VERSION,
             quorum=1,
@@ -741,8 +750,18 @@ def test_consuming_a_withdrawn_plans_authorization_under_a_different_plan_id_is_
     presenting P2's authorization document under `plan_id=P1` must be refused
     by `AuthorizationPlanMismatch` before any hold or Control call -- P1's
     standing hold must never authorize spending P2's authority -- and P2's
-    authorization must stay ISSUED, untouched. Draining the outstanding
-    withdrawal afterwards still revokes it."""
+    authorization must stay ISSUED, untouched.
+
+    Positive control (round-2 correction): with P2's OWN document, fresh P2
+    evidence, and `plan_id=P2` (not P1), a direct call to Control's own
+    `stage_rehearsal_issuer_consumption` -- bypassing CP's plan-match check
+    and barrier entirely -- SUCCEEDS in this window (run inside a SAVEPOINT
+    and rolled back). This proves the plan-mismatch check above is the ONLY
+    thing refusing the P1 case: P2's document, evidence and ledger row were
+    never otherwise unconsumable.
+
+    Draining the outstanding withdrawal afterwards still revokes P2's
+    authorization."""
     platform_url, dispatcher_url = migrated
     _, harness = issuer_security
     with _sessions(platform_url) as platform:
@@ -790,6 +809,29 @@ def test_consuming_a_withdrawn_plans_authorization_under_a_different_plan_id_is_
             db.rollback()
         assert excinfo.value.plan_id == plan_id_1
         assert excinfo.value.document_plan_ref == str(plan_id_2)
+
+        with platform.platform_session() as db:
+            record = _authorization_row(db, authorization_id_2)
+            assert record.state == RehearsalIssuerAuthorizationState.ISSUED.value
+
+        # Positive control: P2's OWN document under `plan_id=P2` would have
+        # been consumable -- proving fix 1's refusal in the P1 case above is
+        # the plan-match check, not some other reason P2's authority happens
+        # to be unusable. Inside a SAVEPOINT, rolled back immediately.
+        with platform.platform_session() as db:
+            target_ref_2 = _target_ref_for(db, plan_id_2)
+            positive_control_evidence = _consumption_evidence(
+                harness, target_ref_2, issued_2
+            )
+            savepoint = db.begin_nested()
+            staged = control.stage_rehearsal_issuer_consumption(
+                db,
+                authorization_document=authorization_document_2,
+                harness_evidence_document=positive_control_evidence,
+            )
+            assert staged.authorization_id == authorization_id_2
+            savepoint.rollback()
+            db.rollback()
 
         with platform.platform_session() as db:
             record = _authorization_row(db, authorization_id_2)
@@ -881,3 +923,101 @@ def test_one_plan_with_a_spent_and_an_issued_authorization_after_withdraw(
             assert outcome.disposition is WithdrawalDisposition.APPLIED
             assert outcome.evidence["authorizations_revoked"] == [still_issued_id]
             assert outcome.evidence["authorizations_not_revocable"] == [spent_id]
+
+
+# ── 9: the window before drain -- refusal comes from Approvals, not Control ─
+
+
+def test_the_window_before_drain_is_refused_by_approvals_not_control(
+    migrated: tuple[str, str],
+    issuer_security: tuple[object, object],
+) -> None:
+    """Round-2 correction: before the withdrawal is DRAINED, Control's OWN
+    plan-approval row is untouched -- only Approvals' platform_approval_
+    request row is marked withdrawn, synchronously, the moment `_withdraw`
+    commits. This pins WHERE the refusal comes from in that window:
+
+    (a) `consume_authorization` (through CP's barrier) is refused by
+        `ApprovalNotHeld`/`WITHDRAWN` -- Approvals' hold, not Control. The
+        ledger row stays ISSUED.
+    (b) A DIRECT call to `control.stage_rehearsal_issuer_consumption`,
+        bypassing CP's barrier entirely, SUCCEEDS in this same window:
+        nothing has told Control the approval was withdrawn yet, so it has
+        no reason to refuse. Run inside a SAVEPOINT and rolled back
+        immediately, so this never actually spends the authorization -- it
+        only proves (a)'s refusal is Approvals' barrier, not Control's own
+        authority (contrast with scenario 3, which calls Control directly
+        AFTER draining and IS refused, on `APPROVAL_NOT_STANDING`).
+
+    Only after draining does Control's plan get revoked and the ledger row
+    become REVOKED. Evidence reuses `issued.statement.lease_id`
+    (`_consumption_evidence`)."""
+    from vendor_cp.approvals.adapter import ApprovalHoldRefusal, ApprovalNotHeld
+
+    platform_url, dispatcher_url = migrated
+    _, harness = issuer_security
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            plan_id, request_id, _digest = _propose_issuer(db, suffix="d18d-9")
+            approve_issuer_plan(
+                db,
+                command_id=f"approve-{uuid.uuid4()}",
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+        with platform.platform_session() as db:
+            issued = _issue(db, harness, plan_id, command_id=f"issue-{uuid.uuid4()}")
+            authorization_document = issued.as_mapping()
+            authorization_id = issued.statement.authorization_id
+
+        with platform.platform_session() as db:
+            _withdraw(db, request_id=request_id)
+        # Deliberately NOT drained: Control's own plan-approval row is still
+        # untouched at this point.
+
+        # (a) CP's barrier refuses -- Approvals, not Control.
+        with platform.platform_session() as db:
+            target_ref = _target_ref_for(db, plan_id)
+            fresh_evidence_a = _consumption_evidence(harness, target_ref, issued)
+            with pytest.raises(ApprovalNotHeld) as refused:
+                consume_authorization(
+                    db,
+                    plan_id=plan_id,
+                    authorization_document=authorization_document,
+                    harness_evidence_document=fresh_evidence_a,
+                )
+            db.rollback()
+        assert refused.value.code is ApprovalHoldRefusal.WITHDRAWN
+
+        with platform.platform_session() as db:
+            record = _authorization_row(db, authorization_id)
+            assert record.state == RehearsalIssuerAuthorizationState.ISSUED.value
+
+        # (b) Control's own authority, bypassed entirely, still SUCCEEDS in
+        # this window -- the refusal in (a) was Approvals' barrier, not
+        # Control's. Inside a SAVEPOINT, rolled back immediately.
+        with platform.platform_session() as db:
+            target_ref = _target_ref_for(db, plan_id)
+            fresh_evidence_b = _consumption_evidence(harness, target_ref, issued)
+            savepoint = db.begin_nested()
+            staged = control.stage_rehearsal_issuer_consumption(
+                db,
+                authorization_document=authorization_document,
+                harness_evidence_document=fresh_evidence_b,
+            )
+            assert staged.authorization_id == authorization_id
+            savepoint.rollback()
+            db.rollback()
+
+        with platform.platform_session() as db:
+            record = _authorization_row(db, authorization_id)
+            assert record.state == RehearsalIssuerAuthorizationState.ISSUED.value
+
+        drain_once(
+            worker_id="d18d-scenario-9",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            record = _authorization_row(db, authorization_id)
+            assert record.state == RehearsalIssuerAuthorizationState.REVOKED.value
