@@ -34,6 +34,7 @@ from unittest import mock
 import dotmac_deployment_control as control
 import pytest
 from alembic import command
+from dotmac_commercial_agreements import get as ca_get
 from dotmac_deployment_control import (
     DesiredDeployment,
     RegisterTargetCommand,
@@ -118,6 +119,15 @@ _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 #: relay's OWN backoff rather than by editing the kernel outbox row.
 _FAST_RETRY: Final = RelayPolicy(base_backoff_seconds=0.2, max_backoff_seconds=1.0)
 _RETRY_DEADLINE_SECONDS: Final = 15.0
+
+
+def _ca_standing_withdrawn(db: Session, agreement_id: uuid.UUID) -> bool:
+    """Withdrawal STANDING as its owner records it: Commercial Agreements' own
+    public view (`approval_withdrawn`). CP's `ContractView` adapter does not
+    project that field, and the owner is the right oracle anyway."""
+    view = ca_get(db, agreement_id)
+    assert view is not None
+    return bool(view.approval_withdrawn)
 
 
 @pytest.fixture
@@ -558,7 +568,7 @@ def test_agreement_withdrawal_end_to_end_records_standing_agreement_stays_active
 
             view = agreements.get(db, active.id)
             assert view is not None
-            assert view.approval_withdrawn is True
+            assert _ca_standing_withdrawn(db, view.id) is True
             assert view.status == "active", "standing, not lifecycle, was recorded"
 
         # A later suspend, then reinstate, is refused: the decision behind the
@@ -620,7 +630,7 @@ def test_withdraw_first_refuses_activate_then_drains_to_a_settled_terminal_outco
 
             view = agreements.get(db, approved.id)
             assert view is not None
-            assert view.approval_withdrawn is True
+            assert _ca_standing_withdrawn(db, view.id) is True
             assert view.status == "approved", "still not-yet-active"
 
 
@@ -657,7 +667,7 @@ def test_activate_first_then_withdraw_drains_applied_agreement_stays_active(
 
             view = agreements.get(db, active.id)
             assert view is not None
-            assert view.approval_withdrawn is True
+            assert _ca_standing_withdrawn(db, view.id) is True
             assert view.status == "active"
 
 
@@ -707,7 +717,7 @@ def test_a_replayed_delivery_after_settlement_is_a_no_op(
             view = agreements.get(db, active.id)
             assert view is not None
             assert (
-                view.approval_withdrawn is True
+                _ca_standing_withdrawn(db, view.id) is True
             ), "CA was not asked to withdraw a second time"
 
 
@@ -900,4 +910,4 @@ def test_the_withdraw_route_drains_to_an_applied_outcome(
 
             view = agreements.get(db, active.id)
             assert view is not None
-            assert view.approval_withdrawn is True
+            assert _ca_standing_withdrawn(db, view.id) is True
