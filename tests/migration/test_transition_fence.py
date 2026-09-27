@@ -1097,6 +1097,12 @@ def test_a_restore_that_reopens_and_then_mismatches_redrains_before_reporting(
     and only then is the mismatch reported."""
     with _writer_role(admin_url) as w1, _writer_role(admin_url) as w2:
         with _connect(admin_url, autocommit=True) as conn:
+            # Each writer needs its OWN CONNECT grant in the prior ACL, so the
+            # restore has a per-writer GRANT for the proxy to drop (w2) and to
+            # react to (w1). Writers relying on PUBLIC alone would leave
+            # restore only PUBLIC to re-grant, and nothing would mismatch.
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {w1}'))
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {w2}'))
             proof = fence_writers(
                 conn,
                 database=db,
@@ -1181,8 +1187,13 @@ def test_a_grant_with_a_distinct_grantor_is_refused_before_any_change(
                 assert fence_module._current_grants(conn, db) == prior_grants
         finally:
             with _connect(admin_url, autocommit=True) as conn:
+                # CASCADE is required, and is itself the proof of the rule:
+                # the owner's REVOKE ... FROM w does not remove G's grant to w,
+                # so revoking G's grant option must cascade to it.
+                conn.execute(
+                    text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {role_g} CASCADE')
+                )
                 conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {w}'))
-                conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {role_g}'))
                 conn.execute(text(f"DROP ROLE IF EXISTS {role_g}"))
 
 
