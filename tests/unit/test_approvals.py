@@ -23,7 +23,10 @@ from dotmac_approvals import (
     PolicyNotFound,
     PolicyVersionExists,
     SelfApprovalRefused,
+    WithdrawalReferenceConflict,
+    WithdrawalRefused,
 )
+from dotmac_kernel import ConflictError, NotFoundError
 from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy.orm import Session
 
@@ -194,3 +197,89 @@ def test_a_content_hash_that_cannot_translate_is_refused(db: Session) -> None:
     # Vendor stores bare 64-hex; anything else never reaches the module.
     with pytest.raises(ValueError, match="not translatable"):
         _open(db, requester=uuid.uuid4(), content_hash="not-a-digest")
+
+
+# ── Withdrawal (F-C2 operator path) ─────────────────────────────────────────
+
+
+def _withdraw_command(
+    *,
+    request_id: uuid.UUID | None = None,
+    actor_id: uuid.UUID | None = None,
+    external_ref: str = "ext-1",
+) -> approvals.WithdrawRequestCommand:
+    return approvals.WithdrawRequestCommand(
+        request_id=request_id or uuid.uuid4(),
+        actor_id=actor_id or uuid.uuid4(),
+        authority_ref="authority-1",
+        reason="no longer needed",
+        external_ref=external_ref,
+    )
+
+
+def test_withdraw_carries_the_actor_as_a_platform_admin(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_withdraw(session: Session, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(approvals, "withdraw_platform_approval", fake_withdraw)
+    monkeypatch.setattr(
+        approvals,
+        "evaluate_request",
+        lambda db, *, request_id: "view",  # not under test here
+    )
+    actor_id = uuid.uuid4()
+    command = _withdraw_command(actor_id=actor_id)
+    result = approvals.withdraw_request(db, command)
+    assert result == "view"
+    actor = captured["actor"]
+    assert actor.actor_id == actor_id
+    assert actor.role_ids == frozenset({approvals._PLATFORM_ADMIN_ROLE})
+    assert captured["external_ref"] == command.external_ref
+
+
+def test_withdraw_does_not_use_process_once_platform(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Approvals' own `external_ref` replay is the idempotency here — wrapping
+    in `process_once_platform` would replay other verbs' results, since the
+    kernel ledger keys on `command_id` alone."""
+
+    def fail_if_called(*args: object, **kwargs: object) -> object:
+        raise AssertionError("process_once_platform must not be used for withdraw")
+
+    monkeypatch.setattr(approvals, "process_once_platform", fail_if_called)
+    monkeypatch.setattr(
+        approvals, "withdraw_platform_approval", lambda session, **kwargs: object()
+    )
+    monkeypatch.setattr(approvals, "evaluate_request", lambda db, *, request_id: "view")
+    approvals.withdraw_request(db, _withdraw_command())
+
+
+def test_withdraw_maps_policy_not_found_to_not_found_error(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def raise_not_found(session: Session, **kwargs: object) -> object:
+        raise PolicyNotFound("nope")
+
+    monkeypatch.setattr(approvals, "withdraw_platform_approval", raise_not_found)
+    with pytest.raises(NotFoundError):
+        approvals.withdraw_request(db, _withdraw_command())
+
+
+@pytest.mark.parametrize(
+    "module_error", [WithdrawalRefused, WithdrawalReferenceConflict]
+)
+def test_withdraw_maps_refusals_to_conflict_error(
+    db: Session, monkeypatch: pytest.MonkeyPatch, module_error: type[Exception]
+) -> None:
+    def raise_refused(session: Session, **kwargs: object) -> object:
+        raise module_error("nope")
+
+    monkeypatch.setattr(approvals, "withdraw_platform_approval", raise_refused)
+    with pytest.raises(ConflictError):
+        approvals.withdraw_request(db, _withdraw_command())

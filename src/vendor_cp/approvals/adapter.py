@@ -52,7 +52,10 @@ from dotmac_approvals import (
     DecisionAction,
     Evaluation,
     HeldPlatformApproval,
+    PolicyNotFound,
     PolicyRevision,
+    WithdrawalReferenceConflict,
+    WithdrawalRefused,
 )
 from dotmac_approvals.models import (
     PlatformApprovalDecision,
@@ -64,8 +67,9 @@ from dotmac_approvals.service import (
     publish_platform_policy_version,
     record_platform_decision,
     request_platform_approval,
+    withdraw_platform_approval,
 )
-from dotmac_kernel import ConflictError
+from dotmac_kernel import ConflictError, NotFoundError
 from dotmac_kernel.messaging import process_once_platform
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -116,6 +120,17 @@ class RecordDecisionCommand:
     approver_id: UUID
     content_hash: str
     approve: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class WithdrawRequestCommand:
+    """Withdraw a completed (approved) request — the operator path (F-C2)."""
+
+    request_id: UUID
+    actor_id: UUID
+    authority_ref: str
+    reason: str
+    external_ref: str
 
 
 # ── Views ───────────────────────────────────────────────────────────────────
@@ -283,6 +298,41 @@ def record_decision(db: Session, command: RecordDecisionCommand) -> RequestView:
     return evaluate_request(db, request_id=command.request_id)
 
 
+def withdraw_request(db: Session, command: WithdrawRequestCommand) -> RequestView:
+    """Withdraw a completed approval — the platform-operator path (F-C2).
+
+    NOT wrapped in `process_once_platform`: the module's own idempotency is
+    `external_ref` (an identical replay returns the same outcome with no new
+    event), and the kernel ledger keys solely on `command_id`, which would
+    replay another verb's recorded result for the same id rather than this
+    withdrawal's.
+
+    The module's own refusals are mapped to kernel errors here, at the seam:
+    an unknown request is a `NotFoundError`; a request that isn't a completed
+    approval, a blank/oversized field, a differing replay, or a ref already
+    bound to another request are all `ConflictError`. Messages carry ids only.
+    """
+    try:
+        withdraw_platform_approval(
+            db,
+            request_id=command.request_id,
+            actor=Actor(
+                actor_id=command.actor_id,
+                role_ids=frozenset({_PLATFORM_ADMIN_ROLE}),
+            ),
+            authority_ref=command.authority_ref,
+            reason=command.reason,
+            external_ref=command.external_ref,
+        )
+    except PolicyNotFound as exc:
+        raise NotFoundError(f"approval request {command.request_id} not found") from exc
+    except (WithdrawalRefused, WithdrawalReferenceConflict) as exc:
+        raise ConflictError(
+            f"approval request {command.request_id} cannot be withdrawn"
+        ) from exc
+    return evaluate_request(db, request_id=command.request_id)
+
+
 def evaluate_request(db: Session, *, request_id: UUID) -> RequestView:
     """Is this request approved? Read-only; the module owns the answer."""
     return RequestView.of(
@@ -393,10 +443,12 @@ __all__ = [
     "PublishPolicyCommand",
     "RecordDecisionCommand",
     "RequestView",
+    "WithdrawRequestCommand",
     "approved_request_evidence",
     "evaluate_request",
     "hold_approval",
     "open_request",
     "publish_policy_version",
     "record_decision",
+    "withdraw_request",
 ]
