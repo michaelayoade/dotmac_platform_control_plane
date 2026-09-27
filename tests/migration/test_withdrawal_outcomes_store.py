@@ -150,14 +150,13 @@ def test_a_second_non_conflict_row_for_the_same_event_is_refused(
         db.commit()
 
     with Session(engine) as db:
-        _record(
-            db,
-            event_id=event_id,
-            digest=digest_b,
-            disposition=WithdrawalDisposition.ALREADY_APPLIED,
-        )
         with pytest.raises(IntegrityError):
-            db.flush()
+            _record(
+                db,
+                event_id=event_id,
+                digest=digest_b,
+                disposition=WithdrawalDisposition.ALREADY_APPLIED,
+            )
         db.rollback()
 
 
@@ -195,7 +194,12 @@ def test_app_admin_cannot_update_delete_or_truncate_the_outcomes_table(
             )
         conn.rollback()
         with pytest.raises(ProgrammingError, match="append-only"):
-            conn.execute(text("TRUNCATE approval_withdrawal_outcomes"))
+            conn.execute(
+                text(
+                    "TRUNCATE approval_withdrawal_outcomes, "
+                    "approval_withdrawal_conflict_resolutions"
+                )
+            )
         conn.rollback()
 
 
