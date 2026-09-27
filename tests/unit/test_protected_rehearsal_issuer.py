@@ -99,7 +99,9 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         db: object, request: dict[str, object], *, harness_evidence_document: object
     ) -> object:
         calls.append(("issue", (request, harness_evidence_document)))
-        return object()
+        # Control's issuance result carries its authorization id on
+        # `statement`; the seam records that id (never the envelope).
+        return SimpleNamespace(statement=SimpleNamespace(authorization_id="auth-1"))
 
     control.issue_rehearsal_issuer_authorization_for_plan = issue  # type: ignore[attr-defined]
     approvals = ModuleType("vendor_cp.approvals.adapter")
@@ -332,7 +334,7 @@ def test_issuance_reread_mismatch_after_a_concurrent_change_raises(
         ports.plan.approval_decision_ref = str(
             UUID("90000000-0000-0000-0000-000000000009")
         )
-        return object()
+        return SimpleNamespace(statement=SimpleNamespace(authorization_id="auth-1"))
 
     ports.control.issue_rehearsal_issuer_authorization_for_plan = issue_and_mutate
     invocation = RehearsalIssuerInvocation(
