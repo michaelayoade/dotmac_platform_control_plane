@@ -43,6 +43,7 @@ from dotmac_deployment_control import (
 )
 from dotmac_kernel import ConflictError
 from dotmac_kernel.messaging import (
+    ClaimedPlatformEvent,
     OutboxStatus,
     PlatformOutboxEvent,
 )
@@ -549,3 +550,143 @@ def test_agreement_withdrawal_end_to_end_records_standing_agreement_stays_active
             with pytest.raises(ConflictError, match="not held: withdrawn"):
                 _reinstate(db, active.id)
             db.rollback()
+
+
+# ── 3(a): withdraw-first — activate is refused; drain settles a terminal,
+# not-yet-active outcome ─────────────────────────────────────────────────────
+
+
+def test_withdraw_first_refuses_activate_then_drains_to_a_settled_terminal_outcome(
+    migrated: tuple[str, str],
+) -> None:
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            approved = _propose_and_approve_agreement(db, offer_code="off-scn3a")
+        with platform.platform_session() as db:
+            assert approved.approval_request_id is not None
+            _withdraw(db, request_id=approved.approval_request_id)
+
+        # Withdraw-first: the later activate is refused by the barrier —
+        # Commercial Agreements is never asked to activate a withdrawn
+        # decision.
+        with platform.platform_session() as db:
+            with pytest.raises(ConflictError, match="not held: withdrawn"):
+                _activate(db, approved)
+            db.rollback()
+
+        drain_once(
+            worker_id="d18b-convergence",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            assert (
+                row.status == OutboxStatus.SENT.value
+            ), "the row settles even though the agreement never activated"
+            event_id = row.id
+
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 1
+            outcome = outcomes[0]
+            # CA's own `record_approval_withdrawal` records standing against
+            # the approval decision, not the agreement's lifecycle status —
+            # an approved-but-not-yet-active agreement withdrawal maps
+            # through the identical `RECORDED` branch as the active case
+            # (`vendor_cp.contracts.adapter._WITHDRAWAL_OUTCOME_MAP`).
+            assert outcome.disposition is WithdrawalDisposition.APPLIED
+            assert outcome.reason_code == "recorded"
+            assert outcome.agreement_id == approved.id
+
+            view = agreements.get(db, approved.id)
+            assert view is not None
+            assert view.approval_withdrawn is True
+            assert view.status == "approved", "still not-yet-active"
+
+
+# ── 3(b): transition-first — activate commits, then withdraw+drain applies ──
+
+
+def test_activate_first_then_withdraw_drains_applied_agreement_stays_active(
+    migrated: tuple[str, str],
+) -> None:
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            approved = _propose_and_approve_agreement(db, offer_code="off-scn3b")
+            active = _activate(db, approved)
+        assert active.status == "active"
+
+        with platform.platform_session() as db:
+            assert active.approval_request_id is not None
+            _withdraw(db, request_id=active.approval_request_id)
+
+        drain_once(
+            worker_id="d18b-convergence",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            assert row.status == OutboxStatus.SENT.value
+            event_id = row.id
+
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 1
+            assert outcomes[0].disposition is WithdrawalDisposition.APPLIED
+
+            view = agreements.get(db, active.id)
+            assert view is not None
+            assert view.approval_withdrawn is True
+            assert view.status == "active"
+
+
+# ── 4: replay through the router — a no-op, no second CA call ───────────────
+
+
+def test_a_replayed_delivery_after_settlement_is_a_no_op(
+    migrated: tuple[str, str],
+) -> None:
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            approved = _propose_and_approve_agreement(db, offer_code="off-scn4")
+            active = _activate(db, approved)
+        with platform.platform_session() as db:
+            assert active.approval_request_id is not None
+            _withdraw(db, request_id=active.approval_request_id)
+
+        drain_once(
+            worker_id="d18b-convergence",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            event_id = row.id
+            claimed = ClaimedPlatformEvent(
+                id=row.id,
+                event_type=row.event_type,
+                payload=dict(row.payload),
+                attempts=row.attempts,
+                correlation_id=row.correlation_id,
+            )
+            outcomes_before = outcomes_for_event(db, event_id)
+            assert len(outcomes_before) == 1
+
+            # The identical claimed event, delivered directly through the
+            # router a second time.
+            ApprovalEventRouter().deliver(claimed, db)
+            db.commit()
+
+        with platform.platform_session() as db:
+            replayed = outcomes_for_event(db, event_id)
+            assert len(replayed) == 1, "a replay must not write a second row"
+            assert replayed[0].disposition is WithdrawalDisposition.APPLIED
+
+            view = agreements.get(db, active.id)
+            assert view is not None
+            assert (
+                view.approval_withdrawn is True
+            ), "CA was not asked to withdraw a second time"
