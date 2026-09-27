@@ -26,6 +26,7 @@ from vendor_cp.approvals.schemas import (
     PublishPolicyRequest,
     RecordDecisionRequest,
     RequestResponse,
+    WithdrawRequestBody,
 )
 
 router = APIRouter(prefix="/platform/vendor/approvals", tags=["approvals"])
@@ -67,6 +68,28 @@ def record_decision(
                 approver_id=admin.id,
                 content_hash=body.content_hash,
                 approve=body.approve,
+            ),
+        )
+    )
+
+
+@router.post("/requests/{request_id}/withdraw", response_model=RequestResponse)
+def withdraw_request(
+    request_id: UUID, body: WithdrawRequestBody, admin: Admin, db: Db
+) -> RequestResponse:
+    """Withdraw a completed approval — the platform-operator path (F-C2).
+
+    The actor is the AUTHENTICATED admin, never a body field — same shape as
+    `record_decision` above."""
+    return RequestResponse.of(
+        adapter.withdraw_request(
+            db,
+            adapter.WithdrawRequestCommand(
+                request_id=request_id,
+                actor_id=admin.id,
+                authority_ref=body.authority_ref,
+                reason=body.reason,
+                external_ref=body.external_ref,
             ),
         )
     )

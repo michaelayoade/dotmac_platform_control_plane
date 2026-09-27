@@ -321,6 +321,34 @@ def test_every_ca_outcome_maps_to_its_cp_disposition(
     assert result.coordinates["withdrawal_ref"] == str(WITHDRAWAL_ID)
 
 
+def test_a_withdrawal_id_that_does_not_match_the_event_id_is_a_security_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The payload's withdrawal_id must be the event's own id (F5) — a mismatch
+    (replayed or forged evidence bound to a different event) is refused before
+    CA is ever called, mirroring the issuer path's own `withdrawal_id_mismatch`
+    check."""
+    called = []
+    monkeypatch.setattr(
+        contracts_adapter,
+        "module_record_approval_withdrawal",
+        lambda db, command: called.append(1),
+    )
+    other_event_id = uuid4()
+    payload = _ca_payload()  # withdrawal_id == WITHDRAWAL_ID == EVENT_ID
+    result = contracts_adapter.record_agreement_approval_withdrawal(
+        object(), event_id=other_event_id, payload=payload
+    )
+    assert result.disposition == WithdrawalDisposition.SECURITY_CONFLICT
+    assert result.reason_code == "withdrawal_id_mismatch"
+    assert result.coordinates["agreement_id"] == AGREEMENT_ID
+    assert result.evidence == {
+        "withdrawal_id": str(WITHDRAWAL_ID),
+        "event_id": str(other_event_id),
+    }
+    assert called == []
+
+
 @pytest.mark.parametrize(
     ("field", "broken_value"),
     [

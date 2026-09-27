@@ -54,6 +54,19 @@ class RecordDecisionRequest(BaseModel):
     approve: bool = True
 
 
+class WithdrawRequestBody(BaseModel):
+    """Withdraw a completed approval — the platform-operator path (F-C2).
+
+    `external_ref` is the module's own idempotency key for withdrawal: an
+    identical replay (same request, actor, authority_ref, reason and
+    external_ref) returns the original outcome rather than a new event.
+    """
+
+    authority_ref: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=2000)
+    external_ref: str = Field(min_length=1, max_length=200)
+
+
 class RequestResponse(BaseModel):
     """An approval request's current state."""
 
@@ -81,4 +94,5 @@ __all__ = [
     "PublishPolicyRequest",
     "RecordDecisionRequest",
     "RequestResponse",
+    "WithdrawRequestBody",
 ]
