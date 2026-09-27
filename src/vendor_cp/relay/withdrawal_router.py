@@ -16,7 +16,7 @@ from typing import Annotated
 from uuid import UUID
 
 from dotmac_kernel import ConflictError, NotFoundError, PlatformAdmin
-from dotmac_kernel.db import get_platform_db
+from dotmac_kernel.deps import get_platform_db
 from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session

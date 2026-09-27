@@ -45,12 +45,13 @@ from typing import Any
 from uuid import UUID
 
 from dotmac_kernel import Base, uuid_pk
-from dotmac_kernel.db import conflict_savepoint
-from sqlalchemy import DateTime, ForeignKey, String, Text, func, select
+from dotmac_kernel.transactions import conflict_savepoint
+from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, Uuid, func, select
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
+
+_JSON = JSON().with_variant(JSONB(), "postgresql")
 
 __all__ = [
     "ApprovalWithdrawalConflictResolution",
@@ -106,22 +107,18 @@ class ApprovalWithdrawalOutcome(Base):
     __tablename__ = "approval_withdrawal_outcomes"
 
     id: Mapped[UUID] = uuid_pk()
-    event_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    event_id: Mapped[UUID] = mapped_column(Uuid(), nullable=False)
     payload_digest: Mapped[str] = mapped_column(String(71), nullable=False)
     event_type: Mapped[str] = mapped_column(String(80), nullable=False)
     subject_type: Mapped[str] = mapped_column(String(120), nullable=False)
     subject_id: Mapped[str] = mapped_column(String(200), nullable=False)
-    approval_request_id: Mapped[UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), nullable=True
-    )
-    plan_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
-    agreement_id: Mapped[UUID | None] = mapped_column(
-        PGUUID(as_uuid=True), nullable=True
-    )
+    approval_request_id: Mapped[UUID | None] = mapped_column(Uuid(), nullable=True)
+    plan_id: Mapped[UUID | None] = mapped_column(Uuid(), nullable=True)
+    agreement_id: Mapped[UUID | None] = mapped_column(Uuid(), nullable=True)
     withdrawal_ref: Mapped[str | None] = mapped_column(String(200), nullable=True)
     disposition: Mapped[str] = mapped_column(String(40), nullable=False)
     reason_code: Mapped[str] = mapped_column(String(80), nullable=False)
-    evidence: Mapped[dict[str, Any]] = mapped_column(JSONB(), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -138,7 +135,7 @@ class ApprovalWithdrawalConflictResolution(Base):
 
     id: Mapped[UUID] = uuid_pk()
     outcome_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
+        Uuid(),
         ForeignKey("approval_withdrawal_outcomes.id", ondelete="RESTRICT"),
         nullable=False,
         unique=True,
