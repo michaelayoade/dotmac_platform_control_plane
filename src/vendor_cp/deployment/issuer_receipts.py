@@ -38,6 +38,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -53,6 +54,7 @@ __all__ = [
     "IssuerCommandReceipt",
     "IssuerCommandReused",
     "IssuerReceiptMismatch",
+    "RecordedIssuerReceipt",
     "find_receipt",
     "record_receipt",
     "request_fingerprint",
@@ -86,6 +88,35 @@ class IssuerCommandReceipt(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedIssuerReceipt:
+    """A committed receipt as a plain value, never a live ORM row: it stays
+    readable after the session that loaded it closes, and cannot be mutated
+    into a second story about the command."""
+
+    id: UUID
+    command_id: str
+    verb: str
+    request_fingerprint: str
+    plan_id: UUID
+    approval_request_id: UUID
+    control_ref: str
+    recorded_at: datetime
+
+    @classmethod
+    def _from_row(cls, row: IssuerCommandReceipt) -> RecordedIssuerReceipt:
+        return cls(
+            id=row.id,
+            command_id=row.command_id,
+            verb=row.verb,
+            request_fingerprint=row.request_fingerprint,
+            plan_id=row.plan_id,
+            approval_request_id=row.approval_request_id,
+            control_ref=row.control_ref,
+            recorded_at=row.recorded_at,
+        )
 
 
 class IssuerCommandReused(ConflictError):
@@ -153,13 +184,14 @@ def request_fingerprint(verb: str, request: Mapping[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
-def find_receipt(db: Session, command_id: str) -> IssuerCommandReceipt | None:
+def find_receipt(db: Session, command_id: str) -> RecordedIssuerReceipt | None:
     """The receipt for this command id, or `None`. Read-only."""
-    return db.scalar(
+    row = db.scalar(
         select(IssuerCommandReceipt).where(
             IssuerCommandReceipt.command_id == command_id
         )
     )
+    return None if row is None else RecordedIssuerReceipt._from_row(row)
 
 
 def record_receipt(
@@ -171,7 +203,7 @@ def record_receipt(
     plan_id: UUID,
     approval_request_id: UUID,
     control_ref: str,
-) -> IssuerCommandReceipt:
+) -> RecordedIssuerReceipt:
     """Insert one receipt row and flush, inside the caller's transaction.
 
     RECEIVES a session inside the caller's transaction — the caller's single
@@ -210,4 +242,5 @@ def record_receipt(
                 "concurrently"
             ) from exc
         return existing
-    return row
+    db.refresh(row)
+    return RecordedIssuerReceipt._from_row(row)

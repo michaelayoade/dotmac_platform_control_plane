@@ -39,6 +39,16 @@ class FakeApprovalNotHeld(Exception):
         self.code = code
 
 
+@pytest.fixture(autouse=True)
+def _no_receipt_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These seam tests pass a bare stand-in session; the receipt store (its
+    own unit and real-PG tests cover it) is replaced with an empty one here."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(issuer_receipts, "find_receipt", lambda db, command_id: None)
+    monkeypatch.setattr(issuer_receipts, "record_receipt", lambda db, **kwargs: None)
+
+
 @pytest.fixture
 def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     plan = SimpleNamespace(
