@@ -481,6 +481,107 @@ def _conflict(
     )
 
 
+class _AuthorizationRevocationConflict(Exception):
+    """Control refused a per-authorization revocation for a reason OTHER than
+    `NOT_REVOCABLE` (already spent or revoked, which is exactly "done").
+
+    Raised only inside `_revoke_issued_authorizations`, and always caught in
+    the same module: it never escapes to the router. It carries the exact
+    refusal so the resulting `security_conflict` evidence names the
+    authorization and the code Control actually raised, mirroring how
+    `classify_approval_withdrawal` already reports an unexpected plan state.
+    """
+
+    def __init__(self, authorization_id: str, code: str, detail: str) -> None:
+        self.authorization_id = authorization_id
+        self.code = code
+        self.detail = detail
+        super().__init__(detail)
+
+
+def _revoke_issued_authorizations(
+    db: Session, *, plan_id: UUID, event_id: UUID, actor_ref: str | None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Revoke every authorization CP itself has issued for this plan.
+
+    The index is CP's own receipts (`issuer_receipts.issued_authorization_refs`)
+    -- there is no public Control read listing a plan's authorizations, and
+    this module never imports Control's internal models. `NOT_REVOCABLE`
+    (already spent, or already revoked by an earlier pass) is recorded as
+    "not revocable" rather than raised: a completed action stays history,
+    untouched, and a retry of this same loop after a replay or a race is
+    exactly idempotent because a second `NOT_REVOCABLE` is still "done". Any
+    OTHER refusal (`NOT_RECORDED`, ...) raises `_AuthorizationRevocationConflict`,
+    which the caller turns into a `security_conflict` outcome rather than
+    letting it propagate past the router.
+    """
+    control = import_module("dotmac_deployment_control")
+    from vendor_cp.deployment.issuer_receipts import issued_authorization_refs
+
+    revoked: list[str] = []
+    not_revocable: list[str] = []
+    for ref in issued_authorization_refs(db, plan_id):
+        try:
+            control.revoke_rehearsal_issuer_authorization(
+                db,
+                authorization_id=ref,
+                revocation_ref=f"approval.withdrawn:{event_id}",
+                actor_ref=actor_ref,
+            )
+        except control.RehearsalIssuerIssuanceRefusedError as exc:
+            if exc.code is control.RehearsalIssuerIssuanceRefusalCode.NOT_REVOCABLE:
+                not_revocable.append(ref)
+                continue
+            raise _AuthorizationRevocationConflict(
+                ref, str(exc.code), str(exc)
+            ) from exc
+        else:
+            revoked.append(ref)
+    return tuple(revoked), tuple(not_revocable)
+
+
+def _with_authorization_revocation(
+    db: Session,
+    result: ApprovalWithdrawalResult,
+    *,
+    plan_id: UUID,
+    event_id: UUID,
+) -> ApprovalWithdrawalResult:
+    """Attach authorization-revocation evidence to an `ALREADY_APPLIED` result,
+    so a replay or a raced revocation still converges the authorizations too
+    (item 2's requirement). Every other disposition passes through unchanged:
+    only `ALREADY_APPLIED` means the plan-approval side of this event already
+    landed, standing or raced, with nothing further for THIS call to apply
+    to the plan itself.
+    """
+    if result.disposition is not WithdrawalDisposition.ALREADY_APPLIED:
+        return result
+    try:
+        revoked, not_revocable = _revoke_issued_authorizations(
+            db, plan_id=plan_id, event_id=event_id, actor_ref=None
+        )
+    except _AuthorizationRevocationConflict as exc:
+        return _conflict(
+            "authorization_revocation_refused",
+            coordinates=result.coordinates,
+            evidence={
+                "authorization_id": exc.authorization_id,
+                "code": exc.code,
+                "detail": exc.detail,
+            },
+        )
+    return ApprovalWithdrawalResult(
+        disposition=result.disposition,
+        reason_code=result.reason_code,
+        coordinates=result.coordinates,
+        evidence={
+            **result.evidence,
+            "authorizations_revoked": list(revoked),
+            "authorizations_not_revocable": list(not_revocable),
+        },
+    )
+
+
 def _revoked_pre_read(
     plan: PlanFacts, *, plan_id: UUID, request_id: UUID, event_id: UUID
 ) -> ApprovalWithdrawalResult | None:
@@ -608,7 +709,9 @@ def classify_approval_withdrawal(
         plan, plan_id=plan_id, request_id=request_id, event_id=event.id
     )
     if pre_read is not None:
-        return pre_read
+        return _with_authorization_revocation(
+            db, pre_read, plan_id=plan_id, event_id=event.id
+        )
 
     if plan.status == "approved" and plan.approval_decision_ref != str(request_id):
         return ApprovalWithdrawalResult(
@@ -636,7 +739,9 @@ def classify_approval_withdrawal(
             reread, plan_id=plan_id, request_id=request_id, event_id=event.id
         )
         if raced is not None:
-            return raced
+            return _with_authorization_revocation(
+                db, raced, plan_id=plan_id, event_id=event.id
+            )
         return _conflict(
             "unexpected_plan_state",
             coordinates=coordinates,
@@ -673,9 +778,27 @@ def classify_approval_withdrawal(
     except OperationalError as exc:
         raise RetryableWithdrawal("database_unavailable") from exc
 
+    try:
+        revoked, not_revocable = _revoke_issued_authorizations(
+            db, plan_id=plan_id, event_id=event.id, actor_ref=None
+        )
+    except _AuthorizationRevocationConflict as exc:
+        return _conflict(
+            "authorization_revocation_refused",
+            coordinates=coordinates,
+            evidence={
+                "authorization_id": exc.authorization_id,
+                "code": exc.code,
+                "detail": exc.detail,
+            },
+        )
+
     return ApprovalWithdrawalResult(
         disposition=WithdrawalDisposition.APPLIED,
         reason_code="applied",
         coordinates=coordinates,
-        evidence={},
+        evidence={
+            "authorizations_revoked": list(revoked),
+            "authorizations_not_revocable": list(not_revocable),
+        },
     )
