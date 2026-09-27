@@ -27,12 +27,34 @@ schema, an empty head set, a duplicate within one source, or a real
 disagreement between two sources. A malformed document and a document that
 disagrees are different repairs (a broken build versus an image that is not
 the one authorized), so they get different verdicts rather than one.
+
+## Absent and unreadable are different facts
+
+`read_image_document` returns `None` only when the file itself does not
+exist, and the distinct `UNREADABLE_DOCUMENT` sentinel when it exists but is
+not usable JSON (or not a mapping). "Nobody built this" and "the build wrote
+something broken" call for different repairs, so `compare_heads` gives them
+`DOCUMENT_ABSENT` and `DOCUMENT_UNREADABLE` respectively rather than folding
+both to one generic falsy value.
+
+## `source_revision` is validated, not merely carried
+
+A document's `source_revision` must be exactly 40 lowercase hex characters —
+a peeled git commit, never `unknown`, a branch name, or a short SHA — or
+`compare_heads` returns `SOURCE_REVISION_INVALID` before it looks at heads at
+all. When a caller supplies `expected_source_revision`, a well-formed but
+different revision returns `SOURCE_REVISION_MISMATCH`: the pulled image
+claims to have been built from a commit that is not the one authorized. The
+`--emit` entry point enforces the same 40-hex-character shape at build time
+and exits non-zero rather than freezing a document that could never satisfy
+either check downstream.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from enum import StrEnum
@@ -44,6 +66,8 @@ from alembic.script import ScriptDirectory
 
 __all__ = [
     "IMAGE_HEADS_SCHEMA",
+    "SOURCE_REVISION_PATTERN",
+    "UNREADABLE_DOCUMENT",
     "HeadsVerdict",
     "composed_effective_heads",
     "compare_heads",
@@ -53,9 +77,34 @@ __all__ = [
 
 IMAGE_HEADS_SCHEMA: Final = "ImageMigrationHeads.v1"
 
+#: A peeled git commit: exactly 40 lowercase hex characters. Anything else —
+#: `unknown`, a branch name, a short SHA, uppercase hex — is refused.
+SOURCE_REVISION_PATTERN: Final = re.compile(r"[0-9a-f]{40}")
+
 #: Where the document travels inside the image, beside
 #: `application_foundation_profile.json` and `distributions.json`.
 DEFAULT_IMAGE_HEADS_PATH: Final = Path("/app/migration_heads.json")
+
+
+class _UnreadableDocument:
+    """Sentinel: a document file exists but is not usable JSON.
+
+    Distinct from `None` (`read_image_document` returns that only when the
+    file is absent) so `compare_heads` can tell "nothing was ever written
+    here" from "something was written and it is broken" — a missing document
+    and a malformed one call for different repairs."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "UNREADABLE_DOCUMENT"
+
+
+UNREADABLE_DOCUMENT: Final = _UnreadableDocument()
+
+#: What `read_image_document` can hand back: a parsed mapping, `None` for an
+#: absent file, or `UNREADABLE_DOCUMENT` for a present-but-broken one.
+ImageDocument = Mapping[str, object] | None | _UnreadableDocument
 
 
 class HeadsVerdict(StrEnum):
@@ -64,10 +113,16 @@ class HeadsVerdict(StrEnum):
     MATCHED = "matched"
     #: No document at the given path at all.
     DOCUMENT_ABSENT = "document_absent"
-    #: Present, but not parseable JSON, or not a mapping.
+    #: Present, but not parseable JSON, not a mapping, or the wrong shape once
+    #: parsed (e.g. `heads` is not a list of strings).
     DOCUMENT_UNREADABLE = "document_unreadable"
     #: Parsed, but not this schema.
     CONTRACT_UNKNOWN = "contract_unknown"
+    #: `source_revision` is not exactly 40 lowercase hex characters.
+    SOURCE_REVISION_INVALID = "source_revision_invalid"
+    #: `source_revision` is well-formed but does not equal the revision the
+    #: caller expected.
+    SOURCE_REVISION_MISMATCH = "source_revision_mismatch"
     #: A source (image, descriptor, or database) declared zero heads.
     EMPTY_HEAD_SET = "empty_head_set"
     #: The same head named twice within one source.
@@ -107,12 +162,14 @@ def render_image_document(*, source_revision: str, heads: Sequence[str]) -> str:
     return json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
-def read_image_document(path: Path) -> Mapping[str, object] | None:
-    """Parse `path`, or None when it is absent or unusable.
+def read_image_document(path: Path) -> ImageDocument:
+    """Parse `path`. `None` when it is absent; `UNREADABLE_DOCUMENT` when it
+    exists but is not usable JSON.
 
-    Follows `profile_readback._load`'s style: absence and unreadability are
-    both folded to None here, because `compare_heads` is the place that turns
-    "missing" into a NAMED verdict rather than a generic falsy value.
+    An absent file and a broken one are different facts calling for different
+    repairs — a missing build step versus a corrupted build artifact —  so
+    `compare_heads` turns each into its own NAMED verdict rather than folding
+    both to one generic falsy value.
     """
     try:
         raw = path.read_bytes()
@@ -121,9 +178,9 @@ def read_image_document(path: Path) -> Mapping[str, object] | None:
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
+        return UNREADABLE_DOCUMENT
     if not isinstance(parsed, dict):
-        return None
+        return UNREADABLE_DOCUMENT
     return parsed
 
 
@@ -139,16 +196,31 @@ def _duplicates(values: Iterable[str]) -> tuple[str, ...]:
 
 def compare_heads(
     *,
-    image_document: Mapping[str, object] | None,
+    image_document: ImageDocument,
     descriptor_heads: Sequence[str],
     database_heads: Sequence[str] | None = None,
+    expected_source_revision: str | None = None,
 ) -> HeadsVerdict:
     """Fail closed on a missing document, a malformed one, or a disagreement."""
     if image_document is None:
         return HeadsVerdict.DOCUMENT_ABSENT
 
+    if image_document is UNREADABLE_DOCUMENT:
+        return HeadsVerdict.DOCUMENT_UNREADABLE
+
     if image_document.get("schema") != IMAGE_HEADS_SCHEMA:
         return HeadsVerdict.CONTRACT_UNKNOWN
+
+    source_revision = image_document.get("source_revision")
+    if not isinstance(source_revision, str) or not SOURCE_REVISION_PATTERN.fullmatch(
+        source_revision
+    ):
+        return HeadsVerdict.SOURCE_REVISION_INVALID
+    if (
+        expected_source_revision is not None
+        and source_revision != expected_source_revision
+    ):
+        return HeadsVerdict.SOURCE_REVISION_MISMATCH
 
     raw_heads = image_document.get("heads")
     if not isinstance(raw_heads, list) or not all(
@@ -197,8 +269,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if not SOURCE_REVISION_PATTERN.fullmatch(args.source_revision):
+        print(
+            f"--source-revision {args.source_revision!r} is not 40 lowercase "
+            "hex characters; refusing to emit a document that claims an "
+            "artifact this module cannot identify",
+            file=sys.stderr,
+        )
+        return 1
+
     config = make_alembic_config(args.offline_dsn)
     heads = composed_effective_heads(config)
+    if not heads:
+        print(
+            "composed_effective_heads returned no heads; refusing to emit an "
+            "empty head set",
+            file=sys.stderr,
+        )
+        return 1
+
     args.output.write_text(
         render_image_document(source_revision=args.source_revision, heads=heads),
         encoding="utf-8",

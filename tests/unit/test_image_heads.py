@@ -10,8 +10,11 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from vendor_cp.deployment.image_heads import (
     IMAGE_HEADS_SCHEMA,
+    UNREADABLE_DOCUMENT,
     HeadsVerdict,
     compare_heads,
     composed_effective_heads,
@@ -27,9 +30,13 @@ PRODUCT_TOML = ROOT / "deploy" / "product.toml"
 #: engine, matching `test_descriptor_promotion.py`'s own `OFFLINE_DSN` use.
 OFFLINE_DSN = "postgresql+psycopg://image-heads@127.0.0.1:5432/none"
 
+#: A well-formed 40-lowercase-hex source revision, so tests that are not
+#: about `source_revision` itself do not trip `SOURCE_REVISION_INVALID`.
+_VALID_REVISION = "a" * 40
+
 _VALID_DOCUMENT = {
     "schema": IMAGE_HEADS_SCHEMA,
-    "source_revision": "abc123",
+    "source_revision": _VALID_REVISION,
     "heads": ["h1", "h2"],
 }
 
@@ -73,6 +80,14 @@ def test_document_absent_does_not_fire_when_a_document_is_supplied() -> None:
     assert verdict != HeadsVerdict.DOCUMENT_ABSENT
 
 
+def test_document_absent_does_not_fire_for_the_unreadable_sentinel() -> None:
+    """`UNREADABLE_DOCUMENT` is a PRESENT, broken document — the negative
+    control proving it never collapses into the absent-document verdict."""
+    verdict = compare_heads(image_document=UNREADABLE_DOCUMENT, descriptor_heads=["h1"])
+    assert verdict != HeadsVerdict.DOCUMENT_ABSENT
+    assert verdict == HeadsVerdict.DOCUMENT_UNREADABLE
+
+
 # ── CONTRACT_UNKNOWN ─────────────────────────────────────────────────────────
 
 
@@ -87,6 +102,75 @@ def test_contract_unknown_when_schema_does_not_match() -> None:
 def test_contract_unknown_does_not_fire_when_schema_matches() -> None:
     verdict = compare_heads(image_document=_doc(), descriptor_heads=["h1", "h2"])
     assert verdict != HeadsVerdict.CONTRACT_UNKNOWN
+
+
+# ── SOURCE_REVISION_INVALID ──────────────────────────────────────────────────
+
+
+def test_source_revision_invalid_when_it_is_the_literal_unknown() -> None:
+    verdict = compare_heads(
+        image_document=_doc(source_revision="unknown"), descriptor_heads=["h1", "h2"]
+    )
+    assert verdict == HeadsVerdict.SOURCE_REVISION_INVALID
+
+
+def test_source_revision_invalid_when_it_is_short() -> None:
+    verdict = compare_heads(
+        image_document=_doc(source_revision="abc123"),
+        descriptor_heads=["h1", "h2"],
+    )
+    assert verdict == HeadsVerdict.SOURCE_REVISION_INVALID
+
+
+def test_source_revision_invalid_when_it_has_uppercase_hex() -> None:
+    verdict = compare_heads(
+        image_document=_doc(source_revision="A" * 40),
+        descriptor_heads=["h1", "h2"],
+    )
+    assert verdict == HeadsVerdict.SOURCE_REVISION_INVALID
+
+
+def test_source_revision_invalid_when_it_is_not_a_string() -> None:
+    verdict = compare_heads(
+        image_document=_doc(source_revision=123456),
+        descriptor_heads=["h1", "h2"],
+    )
+    assert verdict == HeadsVerdict.SOURCE_REVISION_INVALID
+
+
+def test_source_revision_invalid_does_not_fire_on_40_lowercase_hex_chars() -> None:
+    verdict = compare_heads(image_document=_doc(), descriptor_heads=["h1", "h2"])
+    assert verdict != HeadsVerdict.SOURCE_REVISION_INVALID
+
+
+# ── SOURCE_REVISION_MISMATCH ─────────────────────────────────────────────────
+
+
+def test_source_revision_mismatch_when_it_disagrees_with_the_expected_one() -> None:
+    verdict = compare_heads(
+        image_document=_doc(),
+        descriptor_heads=["h1", "h2"],
+        expected_source_revision="b" * 40,
+    )
+    assert verdict == HeadsVerdict.SOURCE_REVISION_MISMATCH
+
+
+def test_source_revision_mismatch_does_not_fire_when_it_agrees() -> None:
+    verdict = compare_heads(
+        image_document=_doc(),
+        descriptor_heads=["h1", "h2"],
+        expected_source_revision=_VALID_REVISION,
+    )
+    assert verdict != HeadsVerdict.SOURCE_REVISION_MISMATCH
+    assert verdict == HeadsVerdict.MATCHED
+
+
+def test_source_revision_mismatch_does_not_fire_when_no_expectation_is_given() -> None:
+    """The negative control for `expected_source_revision=None`: no expected
+    revision means no opinion at all, even on a well-formed but arbitrary
+    source_revision."""
+    verdict = compare_heads(image_document=_doc(), descriptor_heads=["h1", "h2"])
+    assert verdict == HeadsVerdict.MATCHED
 
 
 # ── DOCUMENT_UNREADABLE ──────────────────────────────────────────────────────
@@ -255,24 +339,30 @@ def test_read_image_document_returns_none_for_a_missing_file(tmp_path: Path) -> 
     assert read_image_document(missing) is None
 
 
-def test_read_image_document_gives_the_malformed_verdict_for_bad_json(
+def test_read_image_document_gives_the_unreadable_sentinel_for_bad_json(
     tmp_path: Path,
 ) -> None:
+    """A PRESENT but broken file is a different fact from an ABSENT one — it
+    means a build wrote something, and that something is corrupt — so it must
+    not be conflated with `None` (see `test_read_image_document_returns_none_
+    for_a_missing_file` for the true-absence case)."""
     path = tmp_path / "migration_heads.json"
     path.write_text("not valid json {{{", encoding="utf-8")
 
     document = read_image_document(path)
 
-    assert document is None
-    # And `compare_heads` turns that None into a NAMED verdict, not a crash.
+    assert document is UNREADABLE_DOCUMENT
+    assert document is not None
+    # And `compare_heads` turns the sentinel into its OWN named verdict,
+    # never the absent-document one.
     verdict = compare_heads(image_document=document, descriptor_heads=["h1"])
-    assert verdict == HeadsVerdict.DOCUMENT_ABSENT
+    assert verdict == HeadsVerdict.DOCUMENT_UNREADABLE
 
 
-def test_read_image_document_returns_none_for_a_json_array() -> None:
+def test_read_image_document_returns_the_unreadable_sentinel_for_a_json_array() -> None:
     """Parsed JSON that is not a mapping (a list, a bare string, a number) is
-    folded to None the same as unparseable bytes — `compare_heads` cannot ask
-    `.get("schema")` of a list."""
+    a PRESENT, broken document — `UNREADABLE_DOCUMENT`, not `None` —
+    `compare_heads` cannot ask `.get("schema")` of a list."""
     import json
     import tempfile
 
@@ -280,7 +370,7 @@ def test_read_image_document_returns_none_for_a_json_array() -> None:
         json.dump(["h1", "h2"], handle)
         temp_path = Path(handle.name)
     try:
-        assert read_image_document(temp_path) is None
+        assert read_image_document(temp_path) is UNREADABLE_DOCUMENT
     finally:
         temp_path.unlink()
 
@@ -295,3 +385,74 @@ def test_composed_effective_heads_equals_the_descriptors_expected_heads() -> Non
     migration = tomllib.loads(PRODUCT_TOML.read_text(encoding="utf-8"))["migration"]
     config = make_alembic_config(OFFLINE_DSN)
     assert tuple(migration["expected_heads"]) == composed_effective_heads(config)
+
+
+# ── `--emit` fails closed ────────────────────────────────────────────────────
+
+
+def test_emit_exits_non_zero_on_a_source_revision_that_is_not_40_hex_chars(
+    tmp_path: Path,
+) -> None:
+    from vendor_cp.deployment.image_heads import main
+
+    output = tmp_path / "migration_heads.json"
+    exit_code = main(
+        [
+            "--emit",
+            "--source-revision",
+            "unknown",
+            "--output",
+            str(output),
+            "--offline-dsn",
+            OFFLINE_DSN,
+        ]
+    )
+    assert exit_code != 0
+    assert not output.exists()
+
+
+def test_emit_exits_non_zero_on_an_empty_head_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import vendor_cp.deployment.image_heads as image_heads_module
+
+    monkeypatch.setattr(
+        image_heads_module, "composed_effective_heads", lambda config: ()
+    )
+    output = tmp_path / "migration_heads.json"
+    exit_code = image_heads_module.main(
+        [
+            "--emit",
+            "--source-revision",
+            _VALID_REVISION,
+            "--output",
+            str(output),
+            "--offline-dsn",
+            OFFLINE_DSN,
+        ]
+    )
+    assert exit_code != 0
+    assert not output.exists()
+
+
+def test_emit_succeeds_and_writes_the_document_on_a_valid_revision(
+    tmp_path: Path,
+) -> None:
+    from vendor_cp.deployment.image_heads import main
+
+    output = tmp_path / "migration_heads.json"
+    exit_code = main(
+        [
+            "--emit",
+            "--source-revision",
+            _VALID_REVISION,
+            "--output",
+            str(output),
+            "--offline-dsn",
+            OFFLINE_DSN,
+        ]
+    )
+    assert exit_code == 0
+    document = read_image_document(output)
+    assert document is not None and document is not UNREADABLE_DOCUMENT
+    assert document["source_revision"] == _VALID_REVISION
