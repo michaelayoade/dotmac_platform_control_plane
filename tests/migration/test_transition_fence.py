@@ -283,28 +283,13 @@ def test_refencing_with_prior_keeps_the_original_prior_acl(
 # ── (f) CONNECT inherited through an INTERMEDIATE role's own grant ─────────
 
 
-def test_connect_inherited_through_an_intermediate_roles_own_grant_is_caught(
+def test_connect_inherited_through_an_intermediate_roles_own_grant_is_refused_first(
     admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
 ) -> None:
-    """DIVERGENCE FROM THE PACKET, PINNED RATHER THAN GUESSED AT.
-
-    `_reject_inherited_connect` only refuses `writer_inherits_connect` for a
-    writer that owns the database, is a member of the owner, or is a member of
-    `MIGRATION_ROLE` (read the function: those are the only three checks). A
-    writer that is a member of some UNRELATED intermediate role R — where R
-    itself independently holds an explicit `GRANT CONNECT` — is neither the
-    packet's "refuses up front" branch nor its "revokes R's grant" branch:
-    `fence_writers` proceeds, REVOKES CONNECT FROM PUBLIC (a real ACL change),
-    finds `has_database_privilege(w, ...)` still true (resolved through R's
-    membership, since `REVOKE ... FROM w` only ever touches w's own ACL
-    entry), and raises `writer_still_has_connect` — AFTER PUBLIC's entry was
-    already revoked. This is the third, undocumented outcome; this test pins
-    it rather than asserting either alternative the packet named. Because the
-    writer's own ACL entry never existed, PostgreSQL's per-writer REVOKE is a
-    no-op here and the ACL is, in this specific case, left byte-identical
-    anyway — but that is incidental to this path, not a rule the module
-    states or the exception carries a proof to verify.
-    """
+    """Writer W is a member of an unrelated role R that holds its OWN CONNECT
+    grant. No REVOKE this module issues removes W's inherited CONNECT, so the
+    fence refuses `writer_inherits_connect` BEFORE any ACL change: the ACL is
+    byte-identical afterwards, and nothing was half-fenced."""
     intermediate = f"fence_intermediate_{uuid.uuid4().hex[:10]}"
     with _connect(admin_url, autocommit=True) as conn:
         conn.execute(text(f"CREATE ROLE {intermediate} NOLOGIN"))
@@ -324,41 +309,86 @@ def test_connect_inherited_through_an_intermediate_roles_own_grant_is_caught(
                             session_wait_seconds=SESSION_WAIT_SECONDS,
                         )
                     assert (
-                        refused.value.code == FenceRefusalCode.WRITER_STILL_HAS_CONNECT
+                        refused.value.code == FenceRefusalCode.WRITER_INHERITS_CONNECT
                     )
-                    # No writer can connect while the fence is in this state,
-                    # even though it never returned a holding proof.
-                    with pytest.raises(OperationalError, match="permission denied"):
-                        with _connect(url_for(postgres_url, db, user=w)):
-                            pass
-                    # PUBLIC was revoked; the intermediate role's own grant is
-                    # untouched, so R itself can still connect.
-                    with _connect(admin_url, autocommit=True) as check_conn:
-                        r_can_connect = check_conn.execute(
-                            text("SELECT has_database_privilege(:r, :d, 'CONNECT')"),
-                            {"r": intermediate, "d": db},
-                        ).scalar_one()
-                        assert r_can_connect is True
+                    assert (
+                        fence_module._current_acl_text(conn, db) == prior_acl
+                    ), "a refusal must leave the ACL untouched"
             finally:
                 with _connect(admin_url, autocommit=True) as conn:
                     conn.execute(text(f"REVOKE {intermediate} FROM {w}"))
-                    # Repair the PUBLIC ACL entry this refusal path revoked,
-                    # so later tests in this module see the ACL they expect.
-                    current = fence_module._current_acl_text(conn, db)
-                    if not fence_module._had_connect(
-                        fence_module._parse_acl(current), ""
-                    ):
-                        conn.execute(
-                            text(f'GRANT CONNECT ON DATABASE "{db}" TO PUBLIC')
-                        )
-                    repaired = fence_module._current_acl_text(conn, db)
-                    assert fence_module._parse_acl(repaired) == fence_module._parse_acl(
-                        prior_acl
-                    )
     finally:
         with _connect(admin_url, autocommit=True) as conn:
             conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {intermediate}'))
             conn.execute(text(f"DROP ROLE IF EXISTS {intermediate}"))
+
+
+class _SkipWriterRevoke:
+    """Test-side proxy: drops the per-writer REVOKE (but not PUBLIC's), so the
+    fence MUTATES the ACL and only then fails verification."""
+
+    def __init__(self, real: Connection, writer: str) -> None:
+        self._real = real
+        self._writer = writer
+
+    def execute(self, statement: object, *args: object, **kwargs: object) -> object:
+        sql = str(statement)
+        if sql.startswith("REVOKE CONNECT") and self._writer in sql:
+            return None
+        return self._real.execute(statement, *args, **kwargs)  # type: ignore[arg-type]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def test_a_refusal_after_the_first_revoke_restores_the_starting_acl(
+    admin_url: str, db: str
+) -> None:
+    """COMPENSATION. W holds a DIRECT grant; its own REVOKE is dropped, so
+    PUBLIC is really revoked and verification then refuses. The fence must put
+    the ACL back to exactly where this call started — never leave a
+    half-fenced database with no proof to restore from."""
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {w}'))
+            before = fence_module._current_acl_text(conn, db)
+            assert fence_module._had_connect(fence_module._parse_acl(before), "")
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    _SkipWriterRevoke(conn, w),  # type: ignore[arg-type]
+                    database=db,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.WRITER_STILL_HAS_CONNECT
+            after = fence_module._current_acl_text(conn, db)
+            assert fence_module._parse_acl(after) == fence_module._parse_acl(before)
+            assert fence_module._had_connect(fence_module._parse_acl(after), "")
+            conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {w}'))
+
+
+def test_a_superuser_writer_is_refused_first(
+    admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """A superuser keeps CONNECT through every REVOKE: refused before any change."""
+    role = f"fence_super_{uuid.uuid4().hex[:10]}"
+    with _connect(postgres_url, autocommit=True) as conn:
+        conn.execute(text(f"CREATE ROLE {role} LOGIN SUPERUSER"))
+    try:
+        with _connect(admin_url, autocommit=True) as conn:
+            prior_acl = fence_module._current_acl_text(conn, db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    conn,
+                    database=db,
+                    writer_roles=(role,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.WRITER_INHERITS_CONNECT
+            assert fence_module._current_acl_text(conn, db) == prior_acl
+    finally:
+        with _connect(postgres_url, autocommit=True) as conn:
+            conn.execute(text(f"DROP ROLE IF EXISTS {role}"))
 
 
 # ── (g) ownership: a writer that is a member of the database owner ─────────

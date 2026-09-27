@@ -257,8 +257,15 @@ def _reject_shared_writer_roles(
             )
 
 
+def _unquote_grantee(name: str) -> str:
+    """ACL text double-quotes a grantee that needs it (`"odd name"=c/owner`)."""
+    if len(name) >= 2 and name.startswith('"') and name.endswith('"'):
+        return name[1:-1].replace('""', '"')
+    return name
+
+
 def _reject_inherited_connect(
-    conn: Connection, fenced: tuple[str, ...], database: str
+    conn: Connection, fenced: tuple[str, ...], database: str, acl_text: str
 ) -> None:
     """`writer_inherits_connect`, checked before any ACL change.
 
@@ -270,7 +277,38 @@ def _reject_inherited_connect(
     proof that lies.
     """
     owner = _database_owner(conn, database)
+    # Every explicit CONNECT grantee in the ACL this call starts from, other
+    # than PUBLIC (revoked) and the fenced writers themselves (each revoked).
+    # A writer that is a member of ANY such grantee keeps CONNECT through that
+    # membership after every REVOKE this module issues.
+    other_grantees = tuple(
+        grantee
+        for grantee in (
+            _unquote_grantee(raw)
+            for raw, privs in _parse_acl(acl_text).items()
+            if "c" in privs and raw
+        )
+        if grantee not in fenced
+    )
     for role in fenced:
+        is_superuser = conn.execute(
+            text("SELECT rolsuper FROM pg_roles WHERE rolname = :role"),
+            {"role": role},
+        ).scalar_one()
+        if is_superuser:
+            raise FenceRefused(
+                FenceRefusalCode.WRITER_INHERITS_CONNECT,
+                f"writer role {role!r} is a superuser; no REVOKE removes its "
+                "CONNECT",
+            )
+        for grantee in other_grantees:
+            if _is_member_of(conn, role, grantee):
+                raise FenceRefused(
+                    FenceRefusalCode.WRITER_INHERITS_CONNECT,
+                    f"writer role {role!r} is a member of {grantee!r}, which "
+                    f"holds its own CONNECT on {database!r}; that inherited "
+                    "CONNECT survives every REVOKE this module can issue",
+                )
         if role == owner:
             raise FenceRefused(
                 FenceRefusalCode.WRITER_INHERITS_CONNECT,
@@ -370,13 +408,50 @@ def fence_writers(
     # fence the migration along with it — so both are refused rather than
     # revoked and then "verified" against a privilege check that was never
     # going to move.
+    before_acl = _current_acl_text(conn, database)
     _reject_shared_writer_roles(conn, fenced, writer_roles)
-    _reject_inherited_connect(conn, fenced, database)
+    _reject_inherited_connect(conn, fenced, database, before_acl)
 
-    prior_acl = (
-        prior.prior_acl if prior is not None else _current_acl_text(conn, database)
-    )
+    prior_acl = prior.prior_acl if prior is not None else before_acl
 
+    try:
+        return _apply_fence(
+            conn,
+            database=database,
+            fenced=fenced,
+            absent=absent,
+            prior_acl=prior_acl,
+            session_wait_seconds=session_wait_seconds,
+        )
+    except FenceRefused:
+        # Any refusal AFTER the first REVOKE puts the ACL back to what THIS call
+        # started from — never leaves a half-fenced database with no proof to
+        # restore from. On a re-fence that is the still-holding fence, not the
+        # original prior ACL.
+        restore_writers(
+            conn,
+            FenceProof(
+                database=database,
+                prior_acl=before_acl,
+                fenced_roles=fenced,
+                absent_roles=absent,
+                terminated_count=0,
+                fenced_at=conn.execute(text("SELECT now()")).scalar_one(),
+            ),
+        )
+        raise
+
+
+def _apply_fence(
+    conn: Connection,
+    *,
+    database: str,
+    fenced: tuple[str, ...],
+    absent: tuple[str, ...],
+    prior_acl: str,
+    session_wait_seconds: float,
+) -> FenceProof:
+    """The mutating half of `fence_writers`; its caller compensates a refusal."""
     quoted_db = _quote_ident(conn, database)
     conn.execute(text(f"REVOKE CONNECT ON DATABASE {quoted_db} FROM PUBLIC"))
     for role in fenced:
