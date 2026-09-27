@@ -257,8 +257,10 @@ The rehearsal-issuer signer is Ed25519, held at the already-declared path
          consumption until a refresh succeeds. It must never keep the working
          set, because the working set is what is compromised.
        - **Startup also fails closed.** If the trust-state record cannot be
-         read or fails validation (missing, malformed, or a version lower
-         than any this process has ever installed) at process start, the
+         read or fails validation (missing, malformed, or a version below
+         the DURABLE version floor, `<decision: Michael>`, § 10 item 4; a
+         freshly started process has installed nothing, so an in-memory
+         high-water mark alone cannot refuse a rollback) at process start, the
          process refuses to start, or — if it must stay up for other reasons
          — refuses every rehearsal-issuer-authorization consumption rather
          than proceeding. It never falls back to trusting whatever the
@@ -447,6 +449,13 @@ here so none is missed before provisioning:
 1. **Who signs the harness evidence (§ 1, § 5, § 7, § 9).** Same key as the
    § 4 rehearsal-issuer signer, or a dedicated harness-evidence signing key
    with its own custody path and (if separate) its own trust state.
+   **Trade-off to decide knowingly:** reusing the § 4 signer puts fact 3
+   (issuer signature) and fact 4 (controller-key proof via signed harness
+   evidence) under ONE key and ONE compromise domain. § 1 treats collapsing
+   any two of the four facts as the failure to refuse, and ADR-0013 § A7.3 /
+   § A7.4 require the evidence to be "independently signed". A shared key may
+   still meet the letter only if the two checks stay separate; a dedicated
+   key keeps the compromise domains apart.
 2. **Where the reuse-detection check lives (§ 5).** An extension of
    Control's existing single-use consumption logic, or a separate
    fingerprint index consulted before Control's consumption check.
@@ -455,21 +464,32 @@ here so none is missed before provisioning:
    path, or an OpenBao Transit key configured exportable — the ADR does not
    decide this, and a KV engine cannot generate the key itself while a
    typical non-exportable Transit key cannot be loaded at process start.
-4. Every `<placeholder: ...>` value throughout §§ 2–8 (Environment name,
+4. **Startup rollback protection for the trust state (§ 4).** Refresh refuses
+   a version lower than the installed one, but a freshly started process has
+   installed nothing, so on its own it would accept a stale or tampered record
+   and could re-admit a revoked key. A DURABLE version floor is needed. Options:
+   a minimum trust-state version pinned in CP's configuration at deploy time,
+   or a floor recorded by the provisioning identity alongside the record and
+   read at startup. Until one is chosen, § 4's startup rule is incomplete.
+5. Every `<placeholder: ...>` value throughout §§ 2–8 (Environment name,
    OpenBao role/policy names, audience, workflow_ref, trust-state path, SSH
    CA role/TTL/`valid_principals`/extensions/key ID, runner label/group,
-   runner cleanup mode, and the rotation overlap window in item 5 below) is
+   runner cleanup mode, and the rotation overlap window in item 6 below) is
    Michael's to choose at provisioning time, not a decision this spec makes.
 
 Design choices already made in this spec, listed here for Michael to
 explicitly confirm rather than silently accept by not objecting:
 
-5. **The signer-rotation overlap window (§ 4)** — the verifier accepts
+6. **The signer-rotation overlap window (§ 4)** — the verifier accepts
    authorizations signed under either the retiring or the new key version
    for a defined window (`<placeholder>`); confirm this two-version-overlap
    approach itself, separately from picking the window's length.
-6. **"D does not use a reusable workflow" (§ 3)** — `workflow_ref` (not
+7. **"D does not use a reusable workflow" (§ 3)** — `workflow_ref` (not
    `job_workflow_ref`) is bound because this spec assumes the protected job
    runs as a normal workflow, not a reusable-workflow call. Confirm this
    assumption; if a reusable workflow is later wanted, § 3's bound-claims
    choice changes.
+8. **Trust-state hardening rules (§ 4)** — Michael-only writes, a monotonic
+   version with rollback refusal, revoked-wins over trusted, and fail-closed
+   startup. These are fail-closed extensions of Michael's key-compromise
+   decision rather than new owners; confirm them.
