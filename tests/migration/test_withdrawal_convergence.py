@@ -22,6 +22,7 @@ the issuer-issuance helpers (`issuer_security`, `_target_ref_for`,
 from __future__ import annotations
 
 import sys
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -50,6 +51,7 @@ from dotmac_kernel.messaging import (
     ClaimedPlatformEvent,
     OutboxStatus,
     PlatformOutboxEvent,
+    RelayPolicy,
 )
 from dotmac_kernel.platform_auth import require_platform_admin
 from dotmac_kernel.session_runtime import DatabaseRuntime
@@ -110,6 +112,12 @@ _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 
 
 # ── the database under test (same shape as test_withdrawal_routing.py) ──────
+
+
+#: A short base backoff for scenario 6, so the retry becomes due through the
+#: relay's OWN backoff rather than by editing the kernel outbox row.
+_FAST_RETRY: Final = RelayPolicy(base_backoff_seconds=0.2, max_backoff_seconds=1.0)
+_RETRY_DEADLINE_SECONDS: Final = 15.0
 
 
 @pytest.fixture
@@ -794,6 +802,7 @@ def test_a_retryable_failure_then_recovery_through_the_real_relay(
             drain_once(
                 worker_id="d18b-convergence",
                 composition=_composition(dispatcher_url, platform),
+                policy=_FAST_RETRY,
             )
 
         with platform.platform_session() as db:
@@ -807,23 +816,26 @@ def test_a_retryable_failure_then_recovery_through_the_real_relay(
             assert health.verdict is RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
             assert health.withdrawal_failing == 1
 
-        # Make the row due again. `platform_api` already owns `available_at`
-        # on this table — the online delivery session advances it on every
-        # ordinary backoff and settlement — so this is not a kernel-row write
-        # the grants forbid; it is the same column the real relay writes.
-        with platform.platform_session() as db:
-            db.execute(
-                text(
-                    "UPDATE platform_outbox_events SET available_at = now() "
-                    "WHERE id = :id"
-                ),
-                {"id": event_id},
+        # NO kernel row is edited. The relay's own backoff (a short
+        # `base_backoff_seconds`, the kernel's own policy knob) makes the row
+        # due again; the test polls the REAL drain until it is claimed and
+        # delivered, bounded so a regression fails instead of hanging.
+        deadline = time.monotonic() + _RETRY_DEADLINE_SECONDS
+        while True:
+            report = drain_once(
+                worker_id="d18b-convergence",
+                composition=_composition(dispatcher_url, platform),
+                policy=_FAST_RETRY,
             )
-
-        drain_once(
-            worker_id="d18b-convergence",
-            composition=_composition(dispatcher_url, platform),
-        )
+            with platform.platform_session() as db:
+                if outcomes_for_event(db, event_id):
+                    break
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"the retry never delivered within {_RETRY_DEADLINE_SECONDS}s "
+                    f"(last drain report: {report!r})"
+                )
+            time.sleep(0.2)
 
         with platform.platform_session() as db:
             row = _withdrawal_rows(db)[0]
