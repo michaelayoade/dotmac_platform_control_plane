@@ -158,8 +158,18 @@ KERNEL_MUTABLE_FIELDS = frozenset({"version", "files"})
 #: a100) cannot move Approvals without moving the kernel with it. A dispatch
 #: still declares ONE movement; the two modules move in two chained runs, each
 #: resolved against the exact commit the previous run's pair produced.
+#:
+#: `dotmac-commercial-agreements` joined on 2026-09-27 for the Gate-0 C2 S4
+#: repin (a2 -> a4, Michael 2026-09-27): its 0.1.0a3/0.1.0a4 releases declare
+#: `dotmac-kernel >=0.1.0a100`, the same composed-maximum relationship, so it
+#: too can only move through this protected, credential-isolated resolver —
+#: never by a local `poetry lock` holding the registry credential.
 DECLARABLE_DEPENDENCIES: Final = frozenset(
-    {"dotmac-deployment-control", "dotmac-approvals"}
+    {
+        "dotmac-deployment-control",
+        "dotmac-approvals",
+        "dotmac-commercial-agreements",
+    }
 )
 
 #: The only two fields a DECLARED dependency's entry may change. Identical
