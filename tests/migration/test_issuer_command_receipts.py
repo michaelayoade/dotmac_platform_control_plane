@@ -34,9 +34,13 @@ Plus the append-only triggers, the grants, and the downgrade refusal.
 
 from __future__ import annotations
 
+import sys
 import threading
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import timedelta
+from pathlib import Path
+from typing import Final
 from unittest import mock
 
 import dotmac_approvals
@@ -48,18 +52,23 @@ from dotmac_deployment_control import (
     DesiredDeployment,
     RegisterTargetCommand,
     SetDesiredStateCommand,
+    get_target,
+    install_rehearsal_issuer_security,
     register_target,
     set_desired_state,
 )
+from dotmac_deployment_control.models import RehearsalIssuerAuthorizationRecord
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
+import vendor_cp.deployment.issuer_receipts as issuer_receipts_module
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.approvals_authority import bare_content_hash
 from vendor_cp.deployment.issuer_receipts import (
     APPROVE_PLAN,
+    ISSUE_AUTHORIZATION,
     IssuerCommandCommittedButWithdrawn,
     IssuerCommandReceipt,
     IssuerCommandReused,
@@ -70,11 +79,22 @@ from vendor_cp.deployment.issuer_receipts import (
 )
 from vendor_cp.deployment.protected_rehearsal_issuer import (
     ProposeIssuerPlan,
+    _evidence_digest,
     approve_issuer_plan,
+    issue_authorization,
     open_issuer_approval,
     propose_issuer_plan,
 )
+from vendor_cp.deployment.rehearsal_issuer_seam import (
+    RehearsalIssuerCommand,
+    RehearsalIssuerInvocation,
+)
 from vendor_cp.migrations import make_alembic_config
+
+#: `rehearsal_issuer_harness` lives outside `src/` and outside `tests/`, so it
+#: is reached the same way `test_approval_barrier_conformance.py` reaches it:
+#: a scoped `sys.path` insert around one import.
+_REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 
 PLATFORM_ROLE = "platform_api"
 ADMIN_ROLE = "app_admin"
@@ -178,6 +198,73 @@ def _seed(engine: Engine) -> tuple[uuid.UUID, uuid.UUID]:
 @pytest.fixture
 def seeded(engine: Engine) -> tuple[uuid.UUID, uuid.UUID]:
     return _seed(engine)
+
+
+@pytest.fixture
+def issuer_security() -> Iterator[tuple[object, object]]:
+    """Install disposable, in-process rehearsal-issuer security for exactly
+    one test, and uninstall it before the next. Copied from
+    `test_approval_barrier_conformance.py`'s own fixture of the same name --
+    `tests` is not a package."""
+    from dotmac_deployment_control.rehearsal_issuer_issuance import (
+        _reset_rehearsal_issuer_security_for_tests,
+    )
+
+    sys.path.insert(0, str(_REPO_ROOT))
+    try:
+        from rehearsal_issuer_harness.security import (
+            AuthorizationSecurity,
+            HarnessSecurity,
+        )
+    finally:
+        sys.path.remove(str(_REPO_ROOT))
+
+    authorization = AuthorizationSecurity()
+    harness = HarnessSecurity()
+    install_rehearsal_issuer_security(
+        signer=authorization,
+        authorization_verifier=authorization,
+        harness_verifier=harness,
+        authorization_ttl=timedelta(hours=1),
+    )
+    try:
+        yield authorization, harness
+    finally:
+        _reset_rehearsal_issuer_security_for_tests()
+
+
+def _target_ref_for(engine: Engine, plan_id: uuid.UUID) -> str:
+    """The plan's own frozen target_ref -- issuance refuses a mismatch."""
+    with Session(engine) as db:
+        plan = control.get_plan(db, plan_id)
+        assert plan is not None
+        target = get_target(db, plan.target_id)
+        assert target is not None
+    return target.target_ref
+
+
+def _harness_evidence(
+    harness: object, target_ref: str
+) -> tuple[str, dict[str, object]]:
+    """Build signed harness evidence exactly as
+    `test_approval_barrier_conformance.py::_harness_evidence` does."""
+    lease_id = f"lease-{uuid.uuid4()}"
+    return lease_id, harness.document(lease_id=lease_id, target_ref=target_ref)
+
+
+def _approve_and_commit(
+    engine: Engine, plan_id: uuid.UUID, request_id: uuid.UUID
+) -> None:
+    """Turn a `seeded` (proposed, decided) plan into an APPROVED one, the
+    precondition `issue_authorization` needs."""
+    with Session(engine) as db:
+        approve_issuer_plan(
+            db,
+            command_id=f"approve-{uuid.uuid4()}",
+            plan_id=plan_id,
+            approval_request_id=request_id,
+        )
+        db.commit()
 
 
 def _withdraw(db: Session, *, request_id: uuid.UUID, external_ref: str) -> object:
@@ -462,6 +549,276 @@ def test_f_a_journal_control_mismatch_fails_closed(
     assert plan is not None
     assert plan.status == "proposed", plan.status
     assert plan.approval_decision_ref is None
+
+
+# ── (a) issuance: same-ID/different-evidence gives IssuerCommandReused ──────
+
+
+def test_a2_issuance_same_command_id_with_different_evidence_is_refused_before_control(
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    engine: Engine,
+    issuer_security: tuple[object, object],
+) -> None:
+    plan_id, request_id = seeded
+    _approve_and_commit(engine, plan_id, request_id)
+    _, harness = issuer_security
+    target_ref = _target_ref_for(engine, plan_id)
+    command_id = f"issue-{uuid.uuid4()}"
+
+    _, evidence = _harness_evidence(harness, target_ref)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(command_id, plan_id, "operator-rehearsal"), evidence
+    )
+    with Session(engine) as db:
+        issue_authorization(db, invocation)
+        db.commit()
+
+    issue_calls: list[object] = []
+    real_issue = control.issue_rehearsal_issuer_authorization_for_plan
+
+    def counting_issue(
+        db: Session, request: object, *, harness_evidence_document: object
+    ) -> object:
+        issue_calls.append(request)
+        return real_issue(
+            db, request, harness_evidence_document=harness_evidence_document
+        )
+
+    # Same command id, same plan/actor -- but DIFFERENT evidence (a fresh
+    # lease id), so to_control_request() is identical while the harness
+    # evidence differs: only the digest folded in by fix 3 tells them apart.
+    _, different_evidence = _harness_evidence(harness, target_ref)
+    reused_invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(command_id, plan_id, "operator-rehearsal"),
+        different_evidence,
+    )
+    with (
+        Session(engine) as db,
+        mock.patch.object(
+            control, "issue_rehearsal_issuer_authorization_for_plan", counting_issue
+        ),
+    ):
+        with pytest.raises(IssuerCommandReused):
+            issue_authorization(db, reused_invocation)
+        db.rollback()
+    assert issue_calls == [], "Control was called for a reused command id"
+
+
+# ── (e) issuance: a retry after withdrawal reports the commit ───────────────
+
+
+def test_e2_issuance_retry_after_withdrawal_reports_the_commit_without_the_envelope(
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    engine: Engine,
+    issuer_security: tuple[object, object],
+) -> None:
+    plan_id, request_id = seeded
+    _approve_and_commit(engine, plan_id, request_id)
+    _, harness = issuer_security
+    target_ref = _target_ref_for(engine, plan_id)
+    command_id = f"issue-{uuid.uuid4()}"
+    _, evidence = _harness_evidence(harness, target_ref)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(command_id, plan_id, "operator-rehearsal"), evidence
+    )
+
+    with Session(engine) as db:
+        result = issue_authorization(db, invocation)
+        db.commit()
+    control_ref = result.statement.authorization_id
+
+    with Session(engine) as db:
+        outcome = _withdraw(
+            db, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+        )
+        db.commit()
+    assert outcome.state is ApprovalState.WITHDRAWN
+
+    with Session(engine) as db:
+        with pytest.raises(IssuerCommandCommittedButWithdrawn) as refused:
+            issue_authorization(db, invocation)
+        db.rollback()
+
+    exc = refused.value
+    assert exc.command_id == command_id
+    assert exc.verb == ISSUE_AUTHORIZATION
+    assert exc.control_ref == control_ref
+    # ONLY these three fields -- never Control's signed envelope or any other
+    # result field -- anywhere in vars, args or the message.
+    assert vars(exc) == {
+        "command_id": command_id,
+        "verb": ISSUE_AUTHORIZATION,
+        "control_ref": control_ref,
+    }
+    assert exc.args == (str(exc),)
+
+
+# ── (f) issuance: a planted receipt disagreeing with Control fails closed ──
+
+
+def test_f2_issuance_journal_control_mismatch_fails_closed(
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    engine: Engine,
+    issuer_security: tuple[object, object],
+) -> None:
+    plan_id, request_id = seeded
+    _approve_and_commit(engine, plan_id, request_id)
+    _, harness = issuer_security
+    target_ref = _target_ref_for(engine, plan_id)
+    command_id = f"issue-{uuid.uuid4()}"
+    _, evidence = _harness_evidence(harness, target_ref)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(command_id, plan_id, "operator-rehearsal"), evidence
+    )
+    fingerprint = request_fingerprint(
+        ISSUE_AUTHORIZATION,
+        {
+            "command_id": command_id,
+            "plan_id": plan_id,
+            "actor_ref": "operator-rehearsal",
+            "harness_evidence_digest": _evidence_digest(evidence),
+        },
+    )
+    # Planted as `platform_api` -- `engine` connects as that role, matching
+    # the grant this migration gives it.
+    with Session(engine) as db:
+        db.add(
+            IssuerCommandReceipt(
+                command_id=command_id,
+                verb=ISSUE_AUTHORIZATION,
+                request_fingerprint=fingerprint,
+                plan_id=plan_id,
+                approval_request_id=request_id,
+                control_ref=str(uuid.uuid4()),  # deliberately wrong
+            )
+        )
+        db.commit()
+
+    with Session(engine) as db:
+        with pytest.raises(IssuerReceiptMismatch):
+            issue_authorization(db, invocation)
+        db.rollback()
+
+    with Session(engine) as db:
+        record = db.scalar(
+            select(RehearsalIssuerAuthorizationRecord).where(
+                RehearsalIssuerAuthorizationRecord.plan_id == plan_id
+            )
+        )
+    assert record is None
+
+
+# ── an approve_plan mismatch driven by Control's own replay ─────────────────
+
+
+def test_control_replay_across_plans_under_a_reused_command_id_fails_closed(
+    engine: Engine,
+) -> None:
+    """Fix 1's sensitivity proof: Control 0.1.0a16's `approve_plan` replays a
+    reused `command_id` by returning `_plan_view(_load_plan(db,
+    command.plan_id))` -- the CALLER's plan, not the plan the original
+    command actually decided (see this packet's "Verified facts"). Committing
+    plan A's approval under `command_id` with receipt-writing monkeypatched
+    off leaves Control's own ledger holding that command id, with no Vendor
+    receipt. Reusing the same command id for a DIFFERENT, still-proposed plan
+    B then hits Control's replay path: Control's handler never re-runs (B is
+    never actually approved), but `approve_plan` returns a `PlanView` for B
+    anyway. Fix 1 must catch that B's returned view disagrees with the
+    request it was supposedly approved under (status stays "proposed") and
+    raise `IssuerReceiptMismatch`, writing no receipt and leaving B proposed.
+    """
+
+    def _noop_record_receipt(db: Session, **kwargs: object) -> None:
+        return None
+
+    plan_a, request_a = _seed(engine)
+    command_id = f"approve-{uuid.uuid4()}"
+    with (
+        Session(engine) as db,
+        mock.patch.object(
+            issuer_receipts_module, "record_receipt", _noop_record_receipt
+        ),
+    ):
+        approve_issuer_plan(
+            db, command_id=command_id, plan_id=plan_a, approval_request_id=request_a
+        )
+        db.commit()
+
+    with Session(engine) as db:
+        assert find_receipt(db, command_id) is None
+        plan_a_view = control.get_plan(db, plan_a)
+    assert plan_a_view is not None
+    assert plan_a_view.status == "approved", plan_a_view.status
+
+    plan_b, request_b = _seed(engine)
+
+    with Session(engine) as db:
+        with pytest.raises(IssuerReceiptMismatch):
+            approve_issuer_plan(
+                db,
+                command_id=command_id,
+                plan_id=plan_b,
+                approval_request_id=request_b,
+            )
+        db.rollback()
+
+    with Session(engine) as db:
+        assert find_receipt(db, command_id) is None
+        plan_b_view = control.get_plan(db, plan_b)
+    assert plan_b_view is not None
+    assert plan_b_view.status == "proposed", plan_b_view.status
+    assert plan_b_view.approval_decision_ref is None
+
+
+# ── seam-level concurrency: same command id, different actor_ref ───────────
+
+
+def test_seam_concurrent_approvals_with_different_actor_ref_leave_one_receipt(
+    seeded: tuple[uuid.UUID, uuid.UUID], engine: Engine
+) -> None:
+    plan_id, request_id = seeded
+    command_id = f"approve-{uuid.uuid4()}"
+    start = threading.Barrier(2, timeout=_LOCK_WAIT)
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    def call(actor_ref: str) -> None:
+        try:
+            start.wait()
+            with Session(engine) as db:
+                result = approve_issuer_plan(
+                    db,
+                    command_id=command_id,
+                    plan_id=plan_id,
+                    approval_request_id=request_id,
+                    actor_ref=actor_ref,
+                )
+                db.commit()
+            results.append(result)
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            errors.append(exc)
+
+    thread_a = threading.Thread(target=call, args=("actor-a",))
+    thread_b = threading.Thread(target=call, args=("actor-b",))
+    thread_a.start()
+    thread_b.start()
+    thread_a.join(timeout=_LOCK_WAIT)
+    thread_b.join(timeout=_LOCK_WAIT)
+
+    assert len(results) == 1, f"expected exactly one success, got {results!r}"
+    assert len(errors) == 1, f"expected exactly one failure, got {errors!r}"
+    (error,) = errors
+    assert isinstance(
+        error, IssuerCommandReused | IssuerReceiptMismatch
+    ), f"a concurrent actor_ref race leaked {error!r} instead of a named conflict"
+
+    with Session(engine) as db:
+        count = db.scalar(
+            select(func.count())
+            .select_from(IssuerCommandReceipt)
+            .where(IssuerCommandReceipt.command_id == command_id)
+        )
+    assert count == 1
 
 
 # ── append-only triggers and grants ──────────────────────────────────────────
