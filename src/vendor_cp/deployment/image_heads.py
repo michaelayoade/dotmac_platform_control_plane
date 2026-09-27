@@ -173,8 +173,12 @@ def read_image_document(path: Path) -> ImageDocument:
     """
     try:
         raw = path.read_bytes()
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError:
+        # Present but unreadable (permission denied, a directory at the
+        # path, ...): a broken artifact, not a missing build step.
+        return UNREADABLE_DOCUMENT
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):

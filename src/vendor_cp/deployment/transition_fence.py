@@ -26,7 +26,9 @@ On a transactional connection the REVOKE is invisible to every OTHER backend
 until this connection commits, and a rollback silently erases the fence while
 a `FenceProof` claiming otherwise still exists. `fence_writers` and
 `restore_writers` both refuse (`connection_not_autocommit`) before touching
-anything unless `conn.get_isolation_level() == "AUTOCOMMIT"`.
+anything unless the DRIVER connection's own `autocommit` flag is True
+(`Connection.get_isolation_level()` is not used: it reports the server's
+isolation level, which still reads "read committed" under autocommit).
 
 ## The prior ACL is the thing being protected, not the fence's own state
 

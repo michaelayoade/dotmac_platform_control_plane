@@ -339,6 +339,14 @@ def test_read_image_document_returns_none_for_a_missing_file(tmp_path: Path) -> 
     assert read_image_document(missing) is None
 
 
+def test_a_present_but_unreadable_path_is_unreadable_not_absent(tmp_path: Path) -> None:
+    """A directory at the path exists but cannot be read as a file: a broken
+    artifact, never a missing build step."""
+    directory = tmp_path / "migration_heads.json"
+    directory.mkdir()
+    assert read_image_document(directory) is UNREADABLE_DOCUMENT
+
+
 def test_read_image_document_gives_the_unreadable_sentinel_for_bad_json(
     tmp_path: Path,
 ) -> None:
