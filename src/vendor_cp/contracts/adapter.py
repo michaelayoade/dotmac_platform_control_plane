@@ -874,6 +874,21 @@ def record_agreement_approval_withdrawal(
         "withdrawal_ref": withdrawal_ref,
     }
 
+    # Mirrors the issuer path (`protected_rehearsal_issuer.py`'s own
+    # `withdrawal_id_mismatch` check): the payload's withdrawal_id must be the
+    # event's own id, or a replayed/forged payload could bind to evidence that
+    # was never actually delivered as this event. CA is never called.
+    if withdrawal_id != event_id:
+        return ApprovalWithdrawalResult(
+            disposition=WithdrawalDisposition.SECURITY_CONFLICT,
+            reason_code="withdrawal_id_mismatch",
+            coordinates=coordinates,
+            evidence={
+                "withdrawal_id": str(withdrawal_id),
+                "event_id": str(event_id),
+            },
+        )
+
     try:
         # CA's command validates its own fields (lengths, an aware
         # `withdrawn_at`); a refusal there is a malformed payload, recorded

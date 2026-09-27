@@ -533,8 +533,9 @@ def test_agreement_withdrawal_of_a_different_approved_request_is_not_carried(
             assert approved.content_hash is not None
 
             other_request_id = uuid.uuid4()
+            event_id = uuid.uuid4()
             event = ClaimedPlatformEvent(
-                id=uuid.uuid4(),
+                id=event_id,
                 event_type="approval.withdrawn",
                 payload={
                     "request_id": str(other_request_id),
@@ -544,7 +545,9 @@ def test_agreement_withdrawal_of_a_different_approved_request_is_not_carried(
                     "policy_version": POLICY_VERSION,
                     "content_digest": f"sha256:{approved.content_hash}",
                     "state": "withdrawn",
-                    "withdrawal_id": str(uuid.uuid4()),
+                    # Must equal the event id — the adapter now refuses a
+                    # mismatch as SECURITY_CONFLICT before CA is ever called.
+                    "withdrawal_id": str(event_id),
                     "reason": "withdrawing a request this agreement never bound",
                     "effective_at": datetime.now(UTC).isoformat(),
                     "external_ref": f"withdraw-{uuid.uuid4()}",
