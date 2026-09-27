@@ -442,6 +442,27 @@ def test_redriven_proof_must_be_applied_class_same_request_and_cited_once(
                     redrive_ref=str(proof),
                 )
             db.rollback()
+
+        # The same proof re-spelled (upper-case, braced, undashed) is still the
+        # same proof.
+        for spelling in (
+            str(proof).upper(),
+            "{" + str(proof) + "}",
+            proof.hex,
+        ):
+            with platform.platform_session() as db:
+                with pytest.raises(ConflictNotResolvable, match="already proves"):
+                    resolve_conflict(
+                        db,
+                        outcome_id=second,
+                        resolution=WithdrawalResolution.REDRIVEN,
+                        actor_ref="platform-admin:bob",
+                        reason="redriven",
+                        redrive_ref=spelling,
+                    )
+                db.rollback()
+
+        with platform.platform_session() as db:
             assert unresolved_conflicts(db) == 1
 
 

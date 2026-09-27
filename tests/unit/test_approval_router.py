@@ -351,6 +351,32 @@ def test_a_malformed_ca_payload_is_a_security_conflict_before_any_call(
     assert called == []
 
 
+def test_a_refusal_building_the_ca_command_is_malformed_not_dead_lettered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CA's command validates its own fields. A refusal there is recorded as a
+    malformed payload, and CA is never called — rather than escaping and
+    dead-lettering the delivery."""
+    called = []
+
+    def refuse(**kwargs: object) -> object:
+        raise ValueError("withdrawn_at must be timezone-aware")
+
+    monkeypatch.setattr(contracts_adapter, "RecordApprovalWithdrawalCommand", refuse)
+    monkeypatch.setattr(
+        contracts_adapter,
+        "module_record_approval_withdrawal",
+        lambda db, command: called.append(1),
+    )
+    result = contracts_adapter.record_agreement_approval_withdrawal(
+        object(), event_id=EVENT_ID, payload=_ca_payload()
+    )
+    assert result.disposition == WithdrawalDisposition.SECURITY_CONFLICT
+    assert result.reason_code == "malformed_withdrawal_payload"
+    assert result.coordinates["agreement_id"] == AGREEMENT_ID
+    assert called == []
+
+
 def test_an_agreement_error_from_ca_is_a_security_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

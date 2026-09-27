@@ -411,25 +411,30 @@ def resolve_conflict(
         raise ConflictAlreadyResolved(
             f"withdrawal outcome {outcome_id} was already resolved"
         )
-    _require_redrive_evidence(db, outcome, resolution, redrive_ref)
+    canonical_ref = _require_redrive_evidence(db, outcome, resolution, redrive_ref)
 
     row = ApprovalWithdrawalConflictResolution(
         outcome_id=outcome_id,
         resolution=resolution.value,
         actor_ref=actor_ref,
         reason=reason,
-        redrive_ref=redrive_ref,
+        redrive_ref=canonical_ref,
     )
-    # The pre-check above answers the ordinary second resolve; the unique
-    # constraint on `outcome_id` answers a concurrent one. The savepoint keeps
-    # that collision from poisoning the caller's transaction.
+    # The pre-checks above answer the ordinary cases; the unique constraints on
+    # `outcome_id` and `redrive_ref` answer concurrent ones. The savepoint keeps
+    # that collision from poisoning the caller's transaction, and the re-check
+    # says which of the two it was.
     try:
         with conflict_savepoint(db):
             db.add(row)
             db.flush()
     except IntegrityError as exc:
-        raise ConflictAlreadyResolved(
-            f"withdrawal outcome {outcome_id} was already resolved"
+        if _resolution_exists(db, outcome_id):
+            raise ConflictAlreadyResolved(
+                f"withdrawal outcome {outcome_id} was already resolved"
+            ) from exc
+        raise ConflictNotResolvable(
+            f"redrive_ref {canonical_ref} already proves another resolution"
         ) from exc
     return RecordedConflictResolution._from_row(row)
 
@@ -452,11 +457,15 @@ def _require_redrive_evidence(
     conflict: ApprovalWithdrawalOutcome,
     resolution: WithdrawalResolution,
     redrive_ref: str | None,
-) -> None:
+) -> str | None:
     """`redriven` is a claim that the withdrawal's consequence WAS applied, so
     it must cite the proof: the id of a later applied-class outcome for the
     same subject and (when the conflict names one) the same approval request,
     not already cited by another resolution. `dismissed` cites nothing.
+
+    Returns the ref in its CANONICAL spelling (`str(UUID)`), which is what is
+    compared and stored: `UUID()` accepts upper-case, braced and undashed
+    forms, and a raw-string comparison would let one proof be cited twice.
 
     Without this, one admin could turn health green by asserting a redrive
     that never happened, leaving the withdrawn authorization standing.
@@ -464,7 +473,7 @@ def _require_redrive_evidence(
     if resolution is WithdrawalResolution.DISMISSED:
         if redrive_ref is not None:
             raise ConflictNotResolvable("a dismissal cites no redrive_ref")
-        return
+        return None
     if redrive_ref is None or not redrive_ref.strip():
         raise ConflictNotResolvable(
             "a redriven resolution must cite the redriven outcome as redrive_ref"
@@ -492,15 +501,17 @@ def _require_redrive_evidence(
             f"redrive_ref {redrive_ref} is not a later outcome that applied the "
             "withdrawal to the same subject and approval request"
         )
+    canonical_ref = str(redriven_id)
     already_cited = db.scalar(
         select(ApprovalWithdrawalConflictResolution.id).where(
-            ApprovalWithdrawalConflictResolution.redrive_ref == redrive_ref
+            ApprovalWithdrawalConflictResolution.redrive_ref == canonical_ref
         )
     )
     if already_cited is not None:
         raise ConflictNotResolvable(
-            f"redrive_ref {redrive_ref} already proves another resolution"
+            f"redrive_ref {canonical_ref} already proves another resolution"
         )
+    return canonical_ref
 
 
 def _resolution_exists(db: Session, outcome_id: UUID) -> bool:

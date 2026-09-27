@@ -191,6 +191,16 @@ def upgrade() -> None:
             name="uq_approval_withdrawal_conflict_resolutions_outcome",
         ),
     )
+    # One redriven proof clears at most one conflict, enforced here rather than
+    # only by the resolver's check, so two concurrent resolutions cannot both
+    # cite it. The resolver stores the canonical UUID spelling.
+    op.create_index(
+        "uq_approval_withdrawal_conflict_resolutions_redrive_ref",
+        _RESOLUTIONS,
+        ["redrive_ref"],
+        unique=True,
+        postgresql_where=sa.text("redrive_ref IS NOT NULL"),
+    )
     _append_only_guard(_RESOLUTIONS)
     op.execute(f"GRANT SELECT, INSERT ON public.{_RESOLUTIONS} TO platform_api;")
     op.execute(f"GRANT SELECT, INSERT ON public.{_RESOLUTIONS} TO app_admin;")
