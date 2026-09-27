@@ -209,7 +209,7 @@ def approve_issuer_plan(
     """
     control = import_module("dotmac_deployment_control")
 
-    from vendor_cp.approvals.adapter import ApprovalNotHeld
+    from vendor_cp.approvals.adapter import ApprovalHoldRefusal, ApprovalNotHeld
     from vendor_cp.deployment.approval_barrier import held_transition
     from vendor_cp.deployment.issuer_receipts import (
         APPROVE_PLAN,
@@ -318,7 +318,7 @@ def approve_issuer_plan(
             transition=transition,
         )
     except ApprovalNotHeld as exc:
-        if receipt is not None:
+        if receipt is not None and exc.code is ApprovalHoldRefusal.WITHDRAWN:
             raise IssuerCommandCommittedButWithdrawn(
                 command_id, APPROVE_PLAN, receipt.control_ref
             ) from exc
@@ -358,7 +358,7 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
     """
     control = import_module("dotmac_deployment_control")
 
-    from vendor_cp.approvals.adapter import ApprovalNotHeld
+    from vendor_cp.approvals.adapter import ApprovalHoldRefusal, ApprovalNotHeld
     from vendor_cp.deployment.approval_barrier import held_transition
     from vendor_cp.deployment.issuer_receipts import (
         ISSUE_AUTHORIZATION,
@@ -460,7 +460,7 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
             transition=transition,
         )
     except ApprovalNotHeld as exc:
-        if receipt is not None:
+        if receipt is not None and exc.code is ApprovalHoldRefusal.WITHDRAWN:
             raise IssuerCommandCommittedButWithdrawn(
                 command_id, ISSUE_AUTHORIZATION, receipt.control_ref
             ) from exc
