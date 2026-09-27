@@ -569,45 +569,72 @@ def _conflict(
     )
 
 
-class _AuthorizationRevocationConflict(Exception):
-    """Control refused a per-authorization revocation for a reason OTHER than
-    `NOT_REVOCABLE` (already spent or revoked, which is exactly "done").
+#: Every `reason_code` `classify_approval_withdrawal` can return for which the
+#: plan's approval no longer stands AFTER this event, so any authorization CP
+#: itself issued under it must be revoked too (idempotently -- `NOT_REVOCABLE`
+#: counts as done). `decision_not_carried` and `never_approved` are
+#: deliberately ABSENT: the former means a DIFFERENT decision currently
+#: carries the plan's approval (nothing about THIS decision to revoke), and
+#: the latter means the plan was never approved at all (no authorization
+#: could exist to have been issued under it). Every `security_conflict`
+#: reason_code is likewise absent -- a conflict means standing is UNRESOLVED,
+#: not known to no longer stand. Lock order on each path (never authorization
+#: then plan):
+#:   * "applied" -- `control.revoke_plan_approval` already succeeded and its
+#:     row lock is held until the caller's commit: plan, then authorization.
+#:   * "already_applied", "superseded_by_revocation" -- reached via
+#:     `_revoked_pre_read`'s plain read (no lock taken by this module) or,
+#:     on the race branch, after `revoke_plan_approval` itself raised (no
+#:     lock survives the raise): authorization only.
+#:   * "cancelled_before_execution", "plan_superseded" -- reached only after
+#:     `control.revoke_plan_approval` raised `ExpectedStateError` (the
+#:     attempted transition failed; no lock survives): authorization only.
+_APPROVAL_NO_LONGER_STANDS: Final[frozenset[str]] = frozenset(
+    {
+        "applied",
+        "already_applied",
+        "superseded_by_revocation",
+        "cancelled_before_execution",
+        "plan_superseded",
+    }
+)
 
-    Raised only inside `_revoke_issued_authorizations`, and always caught in
-    the same module: it never escapes to the router. It carries the exact
-    refusal so the resulting `security_conflict` evidence names the
-    authorization and the code Control actually raised, mirroring how
-    `classify_approval_withdrawal` already reports an unexpected plan state.
-    """
 
-    def __init__(self, authorization_id: str, code: str, detail: str) -> None:
-        self.authorization_id = authorization_id
-        self.code = code
-        self.detail = detail
-        super().__init__(detail)
+@dataclass(frozen=True, slots=True)
+class _RevocationAttempt:
+    """Every ref in `issuer_receipts.issued_authorization_refs` was attempted
+    -- `conflicts` names every refusal OTHER than `NOT_REVOCABLE`, so a caller
+    can see exactly which refs still need repair rather than stopping at the
+    first one (item 2)."""
+
+    revoked: tuple[str, ...]
+    not_revocable: tuple[str, ...]
+    conflicts: tuple[dict[str, str], ...]
 
 
 def _revoke_issued_authorizations(
     db: Session, *, plan_id: UUID, event_id: UUID, actor_ref: str | None
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Revoke every authorization CP itself has issued for this plan.
+) -> _RevocationAttempt:
+    """Attempt to revoke EVERY authorization CP itself has issued for this
+    plan -- never stopping at the first unexpected refusal.
 
     The index is CP's own receipts (`issuer_receipts.issued_authorization_refs`)
     -- there is no public Control read listing a plan's authorizations, and
     this module never imports Control's internal models. `NOT_REVOCABLE`
     (already spent, or already revoked by an earlier pass) is recorded as
-    "not revocable" rather than raised: a completed action stays history,
-    untouched, and a retry of this same loop after a replay or a race is
-    exactly idempotent because a second `NOT_REVOCABLE` is still "done". Any
-    OTHER refusal (`NOT_RECORDED`, ...) raises `_AuthorizationRevocationConflict`,
-    which the caller turns into a `security_conflict` outcome rather than
-    letting it propagate past the router.
+    "not revocable": a completed action stays history, untouched, and a retry
+    of this same loop after a replay or a race is exactly idempotent because a
+    second `NOT_REVOCABLE` is still "done". Any OTHER refusal (`NOT_RECORDED`,
+    ...) is recorded in `conflicts` and the loop CONTINUES to the next ref --
+    a caller stopping at the first refusal would leave every later ref stuck
+    ISSUED even though nothing prevents revoking it.
     """
     control = import_module("dotmac_deployment_control")
     from vendor_cp.deployment.issuer_receipts import issued_authorization_refs
 
     revoked: list[str] = []
     not_revocable: list[str] = []
+    conflicts: list[dict[str, str]] = []
     for ref in issued_authorization_refs(db, plan_id):
         try:
             control.revoke_rehearsal_issuer_authorization(
@@ -619,13 +646,21 @@ def _revoke_issued_authorizations(
         except control.RehearsalIssuerIssuanceRefusedError as exc:
             if exc.code is control.RehearsalIssuerIssuanceRefusalCode.NOT_REVOCABLE:
                 not_revocable.append(ref)
-                continue
-            raise _AuthorizationRevocationConflict(
-                ref, str(exc.code), str(exc)
-            ) from exc
+            else:
+                conflicts.append(
+                    {
+                        "authorization_id": ref,
+                        "code": str(exc.code),
+                        "detail": str(exc),
+                    }
+                )
         else:
             revoked.append(ref)
-    return tuple(revoked), tuple(not_revocable)
+    return _RevocationAttempt(
+        revoked=tuple(revoked),
+        not_revocable=tuple(not_revocable),
+        conflicts=tuple(conflicts),
+    )
 
 
 def _with_authorization_revocation(
@@ -635,27 +670,24 @@ def _with_authorization_revocation(
     plan_id: UUID,
     event_id: UUID,
 ) -> ApprovalWithdrawalResult:
-    """Attach authorization-revocation evidence to an `ALREADY_APPLIED` result,
-    so a replay or a raced revocation still converges the authorizations too
-    (item 2's requirement). Every other disposition passes through unchanged:
-    only `ALREADY_APPLIED` means the plan-approval side of this event already
-    landed, standing or raced, with nothing further for THIS call to apply
-    to the plan itself.
+    """Attempt authorization revocation on any result whose `reason_code` is
+    in `_APPROVAL_NO_LONGER_STANDS`, so a replay or a repaired redrive of ANY
+    of those paths still converges the authorizations (item 3's requirement).
+    Every other result passes through unchanged.
     """
-    if result.disposition is not WithdrawalDisposition.ALREADY_APPLIED:
+    if result.reason_code not in _APPROVAL_NO_LONGER_STANDS:
         return result
-    try:
-        revoked, not_revocable = _revoke_issued_authorizations(
-            db, plan_id=plan_id, event_id=event_id, actor_ref=None
-        )
-    except _AuthorizationRevocationConflict as exc:
+    attempt = _revoke_issued_authorizations(
+        db, plan_id=plan_id, event_id=event_id, actor_ref=None
+    )
+    if attempt.conflicts:
         return _conflict(
             "authorization_revocation_refused",
             coordinates=result.coordinates,
             evidence={
-                "authorization_id": exc.authorization_id,
-                "code": exc.code,
-                "detail": exc.detail,
+                "authorizations_revoked": list(attempt.revoked),
+                "authorizations_not_revocable": list(attempt.not_revocable),
+                "authorization_conflicts": list(attempt.conflicts),
             },
         )
     return ApprovalWithdrawalResult(
@@ -664,8 +696,8 @@ def _with_authorization_revocation(
         coordinates=result.coordinates,
         evidence={
             **result.evidence,
-            "authorizations_revoked": list(revoked),
-            "authorizations_not_revocable": list(not_revocable),
+            "authorizations_revoked": list(attempt.revoked),
+            "authorizations_not_revocable": list(attempt.not_revocable),
         },
     )
 
@@ -838,11 +870,16 @@ def classify_approval_withdrawal(
     except control.ExpectedStateError as exc:
         status = exc.actual_status
         if status == "cancelled":
-            return ApprovalWithdrawalResult(
-                disposition=WithdrawalDisposition.CANCELLED_BEFORE_EXECUTION,
-                reason_code="cancelled_before_execution",
-                coordinates=coordinates,
-                evidence={"status": status},
+            return _with_authorization_revocation(
+                db,
+                ApprovalWithdrawalResult(
+                    disposition=WithdrawalDisposition.CANCELLED_BEFORE_EXECUTION,
+                    reason_code="cancelled_before_execution",
+                    coordinates=coordinates,
+                    evidence={"status": status},
+                ),
+                plan_id=plan_id,
+                event_id=event.id,
             )
         if status == "proposed":
             return ApprovalWithdrawalResult(
@@ -852,11 +889,16 @@ def classify_approval_withdrawal(
                 evidence={"status": status},
             )
         if status == "superseded":
-            return ApprovalWithdrawalResult(
-                disposition=WithdrawalDisposition.NOT_CARRIED,
-                reason_code="plan_superseded",
-                coordinates=coordinates,
-                evidence={"status": status},
+            return _with_authorization_revocation(
+                db,
+                ApprovalWithdrawalResult(
+                    disposition=WithdrawalDisposition.NOT_CARRIED,
+                    reason_code="plan_superseded",
+                    coordinates=coordinates,
+                    evidence={"status": status},
+                ),
+                plan_id=plan_id,
+                event_id=event.id,
             )
         return _conflict(
             "unexpected_plan_state",
@@ -866,27 +908,14 @@ def classify_approval_withdrawal(
     except OperationalError as exc:
         raise RetryableWithdrawal("database_unavailable") from exc
 
-    try:
-        revoked, not_revocable = _revoke_issued_authorizations(
-            db, plan_id=plan_id, event_id=event.id, actor_ref=None
-        )
-    except _AuthorizationRevocationConflict as exc:
-        return _conflict(
-            "authorization_revocation_refused",
+    return _with_authorization_revocation(
+        db,
+        ApprovalWithdrawalResult(
+            disposition=WithdrawalDisposition.APPLIED,
+            reason_code="applied",
             coordinates=coordinates,
-            evidence={
-                "authorization_id": exc.authorization_id,
-                "code": exc.code,
-                "detail": exc.detail,
-            },
-        )
-
-    return ApprovalWithdrawalResult(
-        disposition=WithdrawalDisposition.APPLIED,
-        reason_code="applied",
-        coordinates=coordinates,
-        evidence={
-            "authorizations_revoked": list(revoked),
-            "authorizations_not_revocable": list(not_revocable),
-        },
+            evidence={},
+        ),
+        plan_id=plan_id,
+        event_id=event.id,
     )
