@@ -467,6 +467,58 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
         raise
 
 
+def consume_authorization(
+    db: Session,
+    *,
+    plan_id: UUID,
+    authorization_document: object,
+    harness_evidence_document: object,
+) -> object:
+    """Consume one issued authorization under the same approval hold as
+    approval and issuance (D18-D's consumption seam).
+
+    Follows `issue_authorization`'s exact shape: the hold's `request_id`
+    comes only from Control's own frozen plan, never from either document,
+    and `held_transition` runs `control.stage_rehearsal_issuer_consumption`
+    while still holding the row -- a withdrawal racing this call either
+    committed first (and the hold refuses `WITHDRAWN` before Control is ever
+    reached) or blocks until this transaction ends. The caller owns the
+    single commit.
+    """
+    control = import_module("dotmac_deployment_control")
+
+    from vendor_cp.deployment.approval_barrier import held_transition
+
+    plan = _plan(db, plan_id)
+    if not plan.approval_decision_ref:
+        raise ValueError(f"issuer plan {plan_id} has no recorded approval decision")
+    try:
+        request_id = UUID(plan.approval_decision_ref)
+    except ValueError as exc:
+        raise ValueError(
+            f"issuer plan {plan_id} approval_decision_ref "
+            f"{plan.approval_decision_ref!r} is not a UUID"
+        ) from exc
+    if not plan.plan_digest:
+        raise ValueError(f"issuer plan {plan_id} has no frozen digest")
+
+    def transition(held: HeldPlatformApproval) -> object:
+        return control.stage_rehearsal_issuer_consumption(
+            db,
+            authorization_document=authorization_document,
+            harness_evidence_document=harness_evidence_document,
+        )
+
+    return held_transition(
+        db,
+        request_id=request_id,
+        subject_type=SUBJECT_TYPE,
+        subject_id=_subject(plan),
+        content_digest=plan.plan_digest,
+        transition=transition,
+    )
+
+
 def _conflict(
     reason_code: str,
     *,

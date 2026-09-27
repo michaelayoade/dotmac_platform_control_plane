@@ -666,6 +666,68 @@ def test_evidence_digest_raises_on_an_unrecognised_type() -> None:
         issuer._evidence_digest(12345)
 
 
+# ── D18-D: consume_authorization, the seam under the barrier ────────────────
+
+
+def test_consume_authorization_goes_through_held_transition(
+    ports: SimpleNamespace,
+) -> None:
+    document = {"statement": {"authorization_id": "auth-1"}}
+    evidence = {"lease": "L-2"}
+    result = issuer.consume_authorization(
+        object(),
+        plan_id=PLAN_ID,
+        authorization_document=document,
+        harness_evidence_document=evidence,
+    )
+    assert ports.calls == [
+        (
+            "hold",
+            {
+                "request_id": REQUEST_ID,
+                "subject_type": issuer.SUBJECT_TYPE,
+                "subject_id": issuer._subject(ports.plan),
+                "content_digest": PLAN_DIGEST,
+            },
+        ),
+        ("consume", (document, evidence)),
+    ]
+    assert result.authorization_id == "auth-1"
+
+
+def test_consume_authorization_derives_request_id_only_from_the_frozen_plan(
+    ports: SimpleNamespace,
+) -> None:
+    """The documents carry no request id at all -- the hold's `request_id`
+    can only come from `plan.approval_decision_ref`, exactly like issuance."""
+    other_request_id = UUID("80000000-0000-0000-0000-000000000008")
+    ports.plan.approval_decision_ref = str(other_request_id)
+    issuer.consume_authorization(
+        object(),
+        plan_id=PLAN_ID,
+        authorization_document={"statement": {}},
+        harness_evidence_document={},
+    )
+    held = ports.calls[0]
+    assert held[0] == "hold"
+    assert held[1]["request_id"] == other_request_id
+
+
+def test_consume_authorization_refused_by_a_withdrawn_hold_never_reaches_control(
+    ports: SimpleNamespace,
+) -> None:
+    ports.hold_refusal["code"] = "withdrawn"
+    ports.hold_refusal["message"] = "withdrawn"
+    with pytest.raises(FakeApprovalNotHeld):
+        issuer.consume_authorization(
+            object(),
+            plan_id=PLAN_ID,
+            authorization_document={"statement": {}},
+            harness_evidence_document={},
+        )
+    assert [name for name, _ in ports.calls] == ["hold"]
+
+
 def _withdrawal(ports: SimpleNamespace) -> dict[str, object]:
     return {
         "state": "withdrawn",
