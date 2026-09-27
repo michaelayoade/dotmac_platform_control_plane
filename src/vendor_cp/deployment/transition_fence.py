@@ -68,6 +68,23 @@ not hold; a role that was never there is a different fact, and collapsing the
 two would let a typo'd role name pass as "fenced" when nothing was ever
 checked.
 
+## The effective set: a writer's own members are fenced too
+
+`WRITER_ROLES` names login roles, but PostgreSQL role membership is
+transitive: a role M that is a member of a fenced writer W can `SET ROLE W`
+from an already-open session and keep writing, and if M holds its own CONNECT
+grant it can reconnect on its own identity regardless of what happens to W's.
+Ruled 2026-09-27: `fence_writers` resolves the EFFECTIVE set once, after the
+named writers are resolved against the cluster — `effective = fenced ∪ {r :
+r != w, pg_has_role(r, w, 'MEMBER') for some fenced writer w}` — and records
+the members on `FenceProof.member_roles` (never silently dropped, the same
+`absent_roles` discipline as unknown roles). Every pre-check (superuser,
+shared identity with `MIGRATION_ROLE`, inherited CONNECT), the REVOKE, the
+`has_database_privilege` verification and the drain all run over this
+effective set, not only the named writers. `restore_writers` re-derives the
+same effective set from `fenced_roles + member_roles` on the proof, so
+`allowed_grantees` and a `prior=` binding both cover it too.
+
 ## Inherited CONNECT cannot be revoked away, so it is refused up front
 
 `REVOKE CONNECT ON DATABASE ... FROM <role>` only ever touches that role's own
@@ -224,6 +241,13 @@ class FenceProof:
     prior_acl: str
     prior_grants: _Grants
     fenced_roles: tuple[str, ...]
+    #: Every role, other than a named writer itself, that transitively holds
+    #: membership in a named writer (`pg_has_role(role, writer, 'MEMBER')`).
+    #: These roles can `SET ROLE` to a fenced writer and keep writing, or
+    #: reconnect under their own CONNECT grant, so every pre-check and the
+    #: revoke/verify/drain all run over `fenced_roles + member_roles`
+    #: together (see the module docstring's "effective set" section).
+    member_roles: tuple[str, ...]
     absent_roles: tuple[str, ...]
     terminated_count: int
     fenced_at: datetime
@@ -302,6 +326,25 @@ def _duplicates(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted(dupes))
 
 
+_MEMBER_ROLES_QUERY: Final = text(
+    "SELECT DISTINCT r.rolname FROM pg_roles r "
+    "JOIN unnest(CAST(:writers AS text[])) AS w(rolname) ON true "
+    "WHERE r.rolname <> ALL(CAST(:writers AS text[])) "
+    "AND pg_has_role(r.rolname, w.rolname, 'MEMBER')"
+)
+
+
+def _member_roles(conn: Connection, fenced: tuple[str, ...]) -> tuple[str, ...]:
+    """Every role, other than a fenced writer itself, that is a (transitive)
+    member of any fenced writer — the roles that inherit a writer's CONNECT
+    through `SET ROLE` and are therefore part of the effective set (see the
+    module docstring)."""
+    if not fenced:
+        return ()
+    rows = conn.execute(_MEMBER_ROLES_QUERY, {"writers": list(fenced)})
+    return tuple(sorted({str(row[0]) for row in rows}))
+
+
 def _database_owner(conn: Connection, database: str) -> str:
     """The database owner's role name, resolved from `pg_database.datdba`."""
     return str(
@@ -324,9 +367,11 @@ def _is_member_of(conn: Connection, member: str, role: str) -> bool:
 
 
 def _reject_shared_writer_roles(
-    conn: Connection, fenced: tuple[str, ...], writer_roles: tuple[str, ...]
+    conn: Connection, effective: tuple[str, ...], writer_roles: tuple[str, ...]
 ) -> None:
-    """`shared_writer_role`, checked before any ACL change.
+    """`shared_writer_role`, checked before any ACL change, against every
+    EFFECTIVE role (named writers plus every role that is a member of one —
+    see the module docstring's "effective set" section).
 
     Fencing a role that IS the migrator, or that shares membership with it in
     either direction, would fence the migration it exists to protect. The
@@ -340,26 +385,31 @@ def _reject_shared_writer_roles(
             f"{duplicates} named more than once in the writer set — the same "
             "login role fenced under two names would race with itself",
         )
-    for role in fenced:
+    for role in effective:
         if role == MIGRATION_ROLE:
             raise FenceRefused(
                 FenceRefusalCode.SHARED_WRITER_ROLE,
-                f"writer role {role!r} IS the migration role {MIGRATION_ROLE!r}",
+                f"effective writer role {role!r} IS the migration role "
+                f"{MIGRATION_ROLE!r}",
             )
         if _is_member_of(conn, MIGRATION_ROLE, role) or _is_member_of(
             conn, role, MIGRATION_ROLE
         ):
             raise FenceRefused(
                 FenceRefusalCode.SHARED_WRITER_ROLE,
-                f"writer role {role!r} shares role membership with the "
-                f"migration role {MIGRATION_ROLE!r}",
+                f"effective writer role {role!r} shares role membership with "
+                f"the migration role {MIGRATION_ROLE!r}",
             )
 
 
-def _reject_superuser_writers(conn: Connection, fenced: tuple[str, ...]) -> None:
+def _reject_superuser_writers(conn: Connection, effective: tuple[str, ...]) -> None:
     """A superuser keeps CONNECT through every REVOKE (and is a member of every
-    role, so it would otherwise surface as a shared role): refused first."""
-    for role in fenced:
+    role, so it would otherwise surface as a shared role): refused first.
+
+    Runs over the EFFECTIVE role set (named writers plus every role that is a
+    member of one), not only the named writers.
+    """
+    for role in effective:
         is_superuser = conn.execute(
             text("SELECT rolsuper FROM pg_roles WHERE rolname = :role"),
             {"role": role},
@@ -367,8 +417,8 @@ def _reject_superuser_writers(conn: Connection, fenced: tuple[str, ...]) -> None
         if is_superuser:
             raise FenceRefused(
                 FenceRefusalCode.WRITER_INHERITS_CONNECT,
-                f"writer role {role!r} is a superuser; no REVOKE removes its "
-                "CONNECT",
+                f"effective writer role {role!r} is a superuser; no REVOKE "
+                "removes its CONNECT",
             )
 
 
@@ -396,9 +446,11 @@ def _require_migration_connect_without_public(
 
 
 def _reject_inherited_connect(
-    conn: Connection, fenced: tuple[str, ...], database: str, grants: _Grants
+    conn: Connection, effective: tuple[str, ...], database: str, grants: _Grants
 ) -> None:
-    """`writer_inherits_connect`, checked before any ACL change.
+    """`writer_inherits_connect`, checked before any ACL change, against every
+    EFFECTIVE role (named writers plus every role that is a member of one —
+    see the module docstring's "effective set" section).
 
     `REVOKE CONNECT ON DATABASE ... FROM <role>` only ever edits that role's
     own ACL entry. A database owner (and every member of the owner) holds an
@@ -409,15 +461,15 @@ def _reject_inherited_connect(
     """
     owner = _database_owner(conn, database)
     # Every explicit CONNECT grantee in the ACL this call starts from, other
-    # than PUBLIC (revoked) and the fenced writers themselves (each revoked).
-    # A writer that is a member of ANY such grantee keeps CONNECT through that
-    # membership after every REVOKE this module issues.
+    # than PUBLIC (revoked) and every effective role itself (each revoked). An
+    # effective role that is a member of ANY such grantee keeps CONNECT
+    # through that membership after every REVOKE this module issues.
     other_grantees = tuple(
         grantee
         for grantee, priv, _ in grants
-        if priv == "CONNECT" and grantee and grantee not in fenced
+        if priv == "CONNECT" and grantee and grantee not in effective
     )
-    for role in fenced:
+    for role in effective:
         for grantee in other_grantees:
             if _is_member_of(conn, role, grantee):
                 raise FenceRefused(
@@ -519,30 +571,42 @@ def fence_writers(
     existing = _existing_roles(conn, writer_roles)
     absent = tuple(role for role in writer_roles if role not in existing)
     fenced = tuple(role for role in writer_roles if role in existing)
+    # The EFFECTIVE set: every named writer, plus every role that is a
+    # (transitive) member of one. A login role that is a member of a fenced
+    # writer can `SET ROLE` to it and keep writing, or hold its own CONNECT
+    # grant and reconnect — so every pre-check, the revoke, the verification
+    # and the drain below all run over this set, not just `fenced`. See the
+    # module docstring's "effective set" section.
+    member_roles = _member_roles(conn, fenced)
+    effective = tuple(dict.fromkeys((*fenced, *member_roles)))
 
     if prior is not None and (
-        prior.database != database or set(prior.fenced_roles) != set(fenced)
+        prior.database != database
+        or set(prior.fenced_roles) != set(fenced)
+        or set(prior.member_roles) != set(member_roles)
     ):
         raise FenceRefused(
             FenceRefusalCode.PRIOR_MISMATCH,
-            f"prior proof names database {prior.database!r} and fenced roles "
-            f"{sorted(prior.fenced_roles)}, but this call resolved "
-            f"{database!r} and {sorted(fenced)} — a mismatched prior would "
-            "restore the wrong ACL",
+            f"prior proof names database {prior.database!r}, fenced roles "
+            f"{sorted(prior.fenced_roles)} and member roles "
+            f"{sorted(prior.member_roles)}, but this call resolved "
+            f"{database!r}, {sorted(fenced)} and {sorted(member_roles)} — a "
+            "mismatched prior would restore the wrong ACL",
         )
 
-    # Both checks below run before any ACL change. Neither hazard can be
-    # repaired by revoking — a role that inherits CONNECT through ownership or
-    # membership keeps it regardless, and a role sharing identity with the
-    # migrator would fence the migration along with it — so both are refused
-    # rather than revoked and then "verified" against a privilege check that
-    # was never going to move.
+    # Every check below runs before any ACL change, and over the EFFECTIVE
+    # role set. None of these hazards can be repaired by revoking — a role
+    # that inherits CONNECT through ownership or membership keeps it
+    # regardless, and a role sharing identity with the migrator would fence
+    # the migration along with it — so all are refused rather than revoked
+    # and then "verified" against a privilege check that was never going to
+    # move.
     before_acl = _current_acl_text(conn, database)
     before_grants = _current_grants(conn, database)
-    _reject_superuser_writers(conn, fenced)
+    _reject_superuser_writers(conn, effective)
     _require_migration_connect_without_public(conn, database, before_grants)
-    _reject_shared_writer_roles(conn, fenced, writer_roles)
-    _reject_inherited_connect(conn, fenced, database, before_grants)
+    _reject_shared_writer_roles(conn, effective, writer_roles)
+    _reject_inherited_connect(conn, effective, database, before_grants)
 
     prior_acl = prior.prior_acl if prior is not None else before_acl
     prior_grants = prior.prior_grants if prior is not None else before_grants
@@ -552,6 +616,8 @@ def fence_writers(
             conn,
             database=database,
             fenced=fenced,
+            member_roles=member_roles,
+            effective=effective,
             absent=absent,
             prior_acl=prior_acl,
             prior_grants=prior_grants,
@@ -567,6 +633,7 @@ def fence_writers(
             database=database,
             prior_acl=before_acl,
             prior_grants=before_grants,
+            member_roles=member_roles,
             fenced_roles=fenced,
             absent_roles=absent,
             terminated_count=0,
@@ -615,24 +682,72 @@ def _writer_pids(
     )
 
 
+def _terminate_and_drain(
+    conn: Connection,
+    database: str,
+    roles: tuple[str, ...],
+    session_wait_seconds: float,
+) -> int:
+    """Terminate every open backend for `roles` and block until TWO
+    CONSECUTIVE polls, a full `_POLL_INTERVAL_SECONDS` apart, both find zero
+    remaining — `pg_terminate_backend` merely requests termination, and a
+    single zero reading can race a backend that is mid-termination and about
+    to be replaced by a reconnect. Raises `WRITER_SESSIONS_SURVIVED` if the
+    drain does not converge within `session_wait_seconds` (the deadline
+    bounds the whole drain, not the two-poll confirmation). Returns the
+    number of backends terminated on entry."""
+    if not roles:
+        return 0
+    backends = _writer_pids(conn, database, roles)
+    terminated_count = len(backends)
+    for pid in backends:
+        conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+
+    deadline = time.monotonic() + session_wait_seconds
+    while True:
+        remaining = _writer_pids(conn, database, roles)
+        if not remaining:
+            time.sleep(_POLL_INTERVAL_SECONDS)
+            confirm = _writer_pids(conn, database, roles)
+            if not confirm:
+                return terminated_count
+            remaining = confirm
+        if time.monotonic() >= deadline:
+            raise FenceRefused(
+                FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
+                f"{len(remaining)} writer backend(s) on {database!r} "
+                f"survived {session_wait_seconds}s of draining",
+            )
+        for pid in remaining:
+            conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+        time.sleep(_POLL_INTERVAL_SECONDS)
+
+
 def _apply_fence(
     conn: Connection,
     *,
     database: str,
     fenced: tuple[str, ...],
+    member_roles: tuple[str, ...],
+    effective: tuple[str, ...],
     absent: tuple[str, ...],
     prior_acl: str,
     prior_grants: _Grants,
     session_wait_seconds: float,
 ) -> FenceProof:
-    """The mutating half of `fence_writers`; its caller compensates a refusal."""
+    """The mutating half of `fence_writers`; its caller compensates a refusal.
+
+    Every revoke, verification and drain below runs over the EFFECTIVE role
+    set (`fenced` plus `member_roles`) — see the module docstring's
+    "effective set" section.
+    """
     quoted_db = _quote_ident(conn, database)
     conn.execute(text(f"REVOKE CONNECT ON DATABASE {quoted_db} FROM PUBLIC"))
-    for role in fenced:
+    for role in effective:
         quoted_role = _quote_ident(conn, role)
         conn.execute(text(f"REVOKE CONNECT ON DATABASE {quoted_db} FROM {quoted_role}"))
 
-    for role in fenced:
+    for role in effective:
         still_connect = conn.execute(
             text("SELECT has_database_privilege(:role, :db, 'CONNECT')"),
             {"role": role, "db": database},
@@ -658,37 +773,9 @@ def _apply_fence(
             f"migration role {MIGRATION_ROLE!r} lost CONNECT on {database!r}",
         )
 
-    terminated_count = 0
-    if fenced:
-        backends = _writer_pids(conn, database, fenced)
-        terminated_count = len(backends)
-        for pid in backends:
-            conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
-
-        # The drain only returns once TWO CONSECUTIVE polls, a full
-        # `_POLL_INTERVAL_SECONDS` apart, both find zero writer backends —
-        # `pg_terminate_backend` merely requests termination, and a single
-        # zero reading can race a backend that is mid-termination and about
-        # to be replaced by a reconnect. The deadline is unchanged by this:
-        # it bounds the whole drain, not the two-poll confirmation.
-        deadline = time.monotonic() + session_wait_seconds
-        while True:
-            remaining = _writer_pids(conn, database, fenced)
-            if not remaining:
-                time.sleep(_POLL_INTERVAL_SECONDS)
-                confirm = _writer_pids(conn, database, fenced)
-                if not confirm:
-                    break
-                remaining = confirm
-            if time.monotonic() >= deadline:
-                raise FenceRefused(
-                    FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
-                    f"{len(remaining)} writer backend(s) on {database!r} "
-                    f"survived {session_wait_seconds}s of draining",
-                )
-            for pid in remaining:
-                conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
-            time.sleep(_POLL_INTERVAL_SECONDS)
+    terminated_count = _terminate_and_drain(
+        conn, database, effective, session_wait_seconds
+    )
 
     fenced_at = conn.execute(text("SELECT now()")).scalar_one()
     return FenceProof(
@@ -696,6 +783,7 @@ def _apply_fence(
         prior_acl=prior_acl,
         prior_grants=prior_grants,
         fenced_roles=fenced,
+        member_roles=member_roles,
         absent_roles=absent,
         terminated_count=terminated_count,
         fenced_at=fenced_at,
@@ -743,7 +831,12 @@ def restore_writers(conn: Connection, proof: FenceProof) -> UnfenceProof:
             "the ACL while it was fenced, so nothing was granted",
         )
 
-    allowed_grantees = {"", *proof.fenced_roles}
+    # The EFFECTIVE set this proof fenced: named writers plus every role that
+    # was a member of one at fence time (see the module docstring's
+    # "effective set" section) — the only grantees `fence_writers` could ever
+    # have revoked, and so the only ones `restore_writers` may re-grant.
+    effective = tuple(dict.fromkeys((*proof.fenced_roles, *proof.member_roles)))
+    allowed_grantees = {"", *effective}
     missing = sorted(
         grant for grant in (proof.prior_grants - current) if grant[1] == "CONNECT"
     )

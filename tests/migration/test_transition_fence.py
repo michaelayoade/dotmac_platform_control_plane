@@ -142,6 +142,137 @@ def test_a_new_connection_as_a_fenced_writer_is_refused_app_admin_still_connects
             assert conn.execute(text("SELECT 1")).scalar_one() == 1
 
 
+# ── (a2) a MEMBER of a fenced writer, with an OPEN session, is terminated ──
+
+
+def test_a_member_of_a_fenced_writer_with_an_open_session_is_terminated(
+    admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """M is a plain LOGIN member of writer W (no grant of its own). Before the
+    effective-set fix M's own session and reconnect were untouched by fencing
+    W, since `_apply_fence` only ever revoked/verified/drained the NAMED
+    writers — M inherits CONNECT through membership and `SET ROLE W`."""
+    with _writer_role(admin_url) as w:
+        member = f"fence_member_{uuid.uuid4().hex[:10]}"
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f"CREATE ROLE {member} LOGIN NOSUPERUSER NOBYPASSRLS"))
+            conn.execute(text(f"GRANT {w} TO {member}"))
+        try:
+            member_engine = create_engine(url_for(postgres_url, db, user=member))
+            member_conn = member_engine.connect()
+            try:
+                assert member_conn.execute(text("SELECT 1")).scalar_one() == 1
+
+                with _connect(admin_url, autocommit=True) as conn:
+                    proof = fence_writers(
+                        conn,
+                        database=db,
+                        writer_roles=(w,),
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                    )
+                assert member in proof.member_roles
+
+                # The open session is terminated...
+                with pytest.raises(OperationalError):
+                    member_conn.execute(text("SELECT 1"))
+            finally:
+                member_conn.close()
+                member_engine.dispose()
+
+            # ...and a NEW connection as the member is refused too: membership
+            # alone, absent this fix, would still let it through.
+            with pytest.raises(OperationalError, match="permission denied"):
+                with _connect(url_for(postgres_url, db, user=member)):
+                    pass
+        finally:
+            with _connect(admin_url, autocommit=True) as conn:
+                conn.execute(text(f"REVOKE {w} FROM {member}"))
+                conn.execute(text(f"DROP OWNED BY {member}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {member}"))
+
+
+# ── (a3) a MEMBER holding its OWN direct CONNECT grant is fenced and restored
+
+
+def test_a_member_with_its_own_connect_grant_is_fenced_and_restored_exactly(
+    admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """M is a member of writer W AND separately holds its own CONNECT grant.
+    Before the effective-set fix, `_apply_fence` never revoked M's own grant
+    (it only revoked the named writers), so M could reconnect on its own
+    identity after the fence claimed to hold."""
+    with _writer_role(admin_url) as w:
+        member = f"fence_member_{uuid.uuid4().hex[:10]}"
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f"CREATE ROLE {member} LOGIN NOSUPERUSER NOBYPASSRLS"))
+            conn.execute(text(f"GRANT {w} TO {member}"))
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {member}'))
+        try:
+            with _connect(admin_url, autocommit=True) as conn:
+                before = fence_module._current_grants(conn, db)
+                proof = fence_writers(
+                    conn,
+                    database=db,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+                assert member in proof.member_roles
+
+            with pytest.raises(OperationalError, match="permission denied"):
+                with _connect(url_for(postgres_url, db, user=member)):
+                    pass
+
+            with _connect(admin_url, autocommit=True) as conn:
+                restore_writers(conn, proof)
+                assert fence_module._current_grants(conn, db) == before
+
+            with _connect(url_for(postgres_url, db, user=member)) as conn:
+                assert conn.execute(text("SELECT 1")).scalar_one() == 1
+        finally:
+            with _connect(admin_url, autocommit=True) as conn:
+                conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {member}'))
+                conn.execute(text(f"REVOKE {w} FROM {member}"))
+                conn.execute(text(f"DROP OWNED BY {member}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {member}"))
+
+
+# ── (a4) a MEMBER sharing identity with app_admin is refused, unchanged ────
+
+
+def test_a_member_of_a_fenced_writer_sharing_identity_with_app_admin_is_refused(
+    admin_url: str, db: str
+) -> None:
+    """M is a member of writer W, and app_admin is (separately) a member of
+    M. M lands in the effective set through W, and the shared-identity check
+    must run over the effective set — refused before any change."""
+    with _writer_role(admin_url) as w:
+        member = f"fence_member_{uuid.uuid4().hex[:10]}"
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f"CREATE ROLE {member} LOGIN NOSUPERUSER NOBYPASSRLS"))
+            conn.execute(text(f"GRANT {w} TO {member}"))
+            conn.execute(text(f"GRANT {member} TO {MIGRATION_ROLE}"))
+        try:
+            with _connect(admin_url, autocommit=True) as conn:
+                prior_acl = fence_module._current_acl_text(conn, db)
+                with pytest.raises(FenceRefused) as refused:
+                    fence_writers(
+                        conn,
+                        database=db,
+                        writer_roles=(w,),
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                    )
+                assert refused.value.code == FenceRefusalCode.SHARED_WRITER_ROLE
+                assert (
+                    fence_module._current_acl_text(conn, db) == prior_acl
+                ), "a refusal must leave the ACL untouched"
+        finally:
+            with _connect(admin_url, autocommit=True) as conn:
+                conn.execute(text(f"REVOKE {member} FROM {MIGRATION_ROLE}"))
+                conn.execute(text(f"REVOKE {w} FROM {member}"))
+                conn.execute(text(f"DROP OWNED BY {member}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {member}"))
+
+
 # ── (b) an OPEN writer session is terminated and counted ────────────────────
 
 
@@ -685,6 +816,7 @@ def test_a_prior_naming_a_different_database_is_refused_as_prior_mismatch(
         prior_acl="",
         prior_grants=frozenset(),
         fenced_roles=("app_user",),
+        member_roles=(),
         absent_roles=(),
         terminated_count=0,
         fenced_at=datetime.now(UTC),
@@ -712,6 +844,7 @@ def test_a_prior_naming_a_different_writer_set_is_refused_as_prior_mismatch(
             prior_acl="",
             prior_grants=frozenset(),
             fenced_roles=(w2,),
+            member_roles=(),
             absent_roles=(),
             terminated_count=0,
             fenced_at=datetime.now(UTC),
