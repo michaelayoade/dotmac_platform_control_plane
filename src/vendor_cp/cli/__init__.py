@@ -71,6 +71,7 @@ GROUPS: Final[tuple[str, ...]] = (
     "allocation",
     "licence",
     "relay",
+    "withdrawal-conflicts",
     "deployment",
     "recovery",
     "diagnose",
@@ -333,6 +334,26 @@ def build_parser() -> _Parser:
         relay_sub, "relay", "health", "report whether the outbox is being drained"
     )
     relay_health_command.set_defaults(handler=commands.relay_health)
+
+    # ── withdrawal-conflicts ───────────────────────────────────────────────
+    withdrawal_conflicts = groups.add_parser(
+        "withdrawal-conflicts",
+        help="unresolved approval-withdrawal security_conflict outcomes",
+    )
+    withdrawal_conflicts_sub = withdrawal_conflicts.add_subparsers(
+        dest="name", parser_class=_Parser
+    )
+
+    withdrawal_conflicts_list_command = _command(
+        withdrawal_conflicts_sub,
+        "withdrawal-conflicts",
+        "list",
+        "list unresolved security_conflict outcomes (id, event_id, reason_code, "
+        "recorded_at)",
+    )
+    withdrawal_conflicts_list_command.set_defaults(
+        handler=commands.withdrawal_conflicts_list
+    )
 
     # ── deployment ─────────────────────────────────────────────────────────
     deployment = groups.add_parser(

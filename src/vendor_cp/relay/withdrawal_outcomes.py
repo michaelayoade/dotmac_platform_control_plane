@@ -61,6 +61,7 @@ __all__ = [
     "payload_digest",
     "recorded_outcome",
     "outcomes_for_event",
+    "list_unresolved_conflicts",
     "record_outcome",
     "resolve_conflict",
     "unresolved_conflicts",
@@ -337,6 +338,29 @@ def unresolved_conflicts(db: Session) -> int:
         )
     )
     return int(count or 0)
+
+
+def list_unresolved_conflicts(db: Session) -> tuple[RecordedOutcome, ...]:
+    """Every `security_conflict` outcome with no resolution row yet, oldest
+    first.
+
+    Read-only, and named alongside `unresolved_conflicts` (the count) rather
+    than replacing it: the CLI's `withdrawal-conflicts list` prints identity
+    (`id`, `event_id`, `reason_code`, `recorded_at`) only, never the `evidence`
+    payload — evidence stays for the resolution decision, not for a terminal
+    listing.
+    """
+    resolved = select(ApprovalWithdrawalConflictResolution.outcome_id)
+    rows = db.scalars(
+        select(ApprovalWithdrawalOutcome)
+        .where(
+            ApprovalWithdrawalOutcome.disposition
+            == WithdrawalDisposition.SECURITY_CONFLICT.value,
+            ApprovalWithdrawalOutcome.id.not_in(resolved),
+        )
+        .order_by(ApprovalWithdrawalOutcome.recorded_at)
+    )
+    return tuple(RecordedOutcome._from_row(row) for row in rows)
 
 
 def resolve_conflict(
