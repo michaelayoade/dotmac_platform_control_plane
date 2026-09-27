@@ -737,6 +737,9 @@ Work Packet D owns closing all three. This amendment records their absence
 as a precondition Gate 0 has not yet met, not as a defect in anything merged
 so far — PRs #194/#195 never claimed to close them.
 
+Work Packet D's proposed implementation spec, awaiting Michael's acceptance,
+is `docs/design/gate0-d-implementation-spec.md`.
+
 ### A7.6 Ownership, restated for the rehearsal issuer the way § 7 states it for the real one
 
 | Owner | Owns |
