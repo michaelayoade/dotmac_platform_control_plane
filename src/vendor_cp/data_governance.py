@@ -442,6 +442,14 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
     ),
     _retain(
         "public",
+        "issuer_command_receipts",
+        "the append-only record of which issuer command committed and the "
+        "Control result it named; a receipt, never an authority. `v021`'s "
+        "trigger already refuses row updates, row deletion and table "
+        "truncation for every role",
+    ),
+    _retain(
+        "public",
         "licence_ack_records",
         "a deployment's acknowledgement of a licence — delivery evidence",
     ),

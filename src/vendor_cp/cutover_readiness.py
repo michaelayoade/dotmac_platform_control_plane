@@ -105,6 +105,8 @@ VENDOR_OWNED_TABLES: Final[frozenset[str]] = frozenset(
         # delivery table.
         "approval_withdrawal_outcomes",
         "approval_withdrawal_conflict_resolutions",
+        # `v021`'s non-authorizing issuer command receipt (D18).
+        "issuer_command_receipts",
     }
 )
 

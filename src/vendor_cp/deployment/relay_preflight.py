@@ -86,6 +86,7 @@ _HEARTBEAT_REVISION: Final = "v019_relay_heartbeat"
 _HEARTBEAT_OR_DESCENDANT: Final = (
     "v019_relay_heartbeat",
     "v020_withdrawal_outcomes",
+    "v021_issuer_command_receipts",
 )
 
 
