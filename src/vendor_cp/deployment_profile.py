@@ -434,7 +434,7 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_COMPOSED_V1,
-        version="4",
+        version="5",
         withheld_surfaces=frozenset(
             {
                 "accounts",
@@ -444,13 +444,13 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
                 "offers",
                 "provisioning",
                 "vendor_approvals",
-                "withdrawal_conflicts",
             }
         ),
         surface_inventory=(
             "console",
             "allocations",
             "readiness",
+            "withdrawal_conflicts",
         ),
         laboratory=False,
         production_accepted=True,
@@ -483,10 +483,12 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "Version 2 adds the readiness surface, published "
             "here for the same reason it is published everywhere: a "
             "dependency-aware probe is what makes a successful deploy mean the "
-            "application can serve. Version 4 withholds the withdrawal-conflict "
-            "resolution surface: it is an operator WRITE surface, withheld here "
-            "under the same unexercised-in-production discipline as accounts, "
-            "contracts and vendor approvals until its publication is decided."
+            "application can serve. Version 5 publishes the platform-admin "
+            "withdrawal-conflict resolution surface (decided by Michael, "
+            "2026-09-27): an unresolved security_conflict holds relay health and "
+            "readiness red by design, so a conflict arising after the switch to "
+            "this profile must have an authenticated, append-only resolution "
+            "path here, or readiness stays red with no way to clear it."
         ),
     ),
 )
