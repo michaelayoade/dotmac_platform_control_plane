@@ -40,6 +40,13 @@ import dotmac_approvals
 import pytest
 from alembic import command
 from dotmac_approvals import Actor, ApprovalState
+from dotmac_commercial_agreements import (
+    ApprovalWithdrawalOutcome,
+    RecordApprovalWithdrawalCommand,
+)
+from dotmac_commercial_agreements import (
+    record_approval_withdrawal as module_record_approval_withdrawal,
+)
 from dotmac_kernel import ConflictError
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -670,4 +677,119 @@ def test_activate_committed_first_then_withdrawal_leaves_the_agreement_active(
         db_b.commit()
     assert outcome.state is ApprovalState.WITHDRAWN
 
+    assert _status(engine, agreement_id) == "active"
+
+
+def _record_standing(
+    engine: Engine,
+    *,
+    agreement_id: uuid.UUID,
+    request_id: uuid.UUID,
+    outcome: object,
+) -> object:
+    """Build and submit CA's own `RecordApprovalWithdrawalCommand` exactly as
+    CP's withdrawal consumer (S4-B) will: from the withdrawal event's own
+    evidence and the agreement's current bare `content_hash` — never a
+    hand-built payload."""
+    event = outcome.events[0]
+    withdrawal = event.withdrawal
+    assert withdrawal is not None
+    with Session(engine) as db:
+        view = agreements.get(db, agreement_id)
+        assert view is not None
+        assert view.content_hash is not None
+        result = module_record_approval_withdrawal(
+            db,
+            RecordApprovalWithdrawalCommand(
+                command_id=f"approval-withdrawal:{withdrawal.withdrawal_id}",
+                agreement_id=agreement_id,
+                approval_request_ref=str(request_id),
+                approval_decision_ref=str(request_id),
+                policy_code=event.policy_code,
+                policy_version=event.policy_version,
+                subject_ref=str(agreement_id),
+                content_hash=view.content_hash,
+                withdrawal_ref=str(withdrawal.withdrawal_id),
+                reason=withdrawal.reason,
+                withdrawn_at=withdrawal.effective_at,
+            ),
+        )
+        db.commit()
+    return result
+
+
+def test_activate_committed_then_recorded_standing_refuses_a_later_reinstate(
+    engine: Engine,
+) -> None:
+    """Activate commits, the withdrawal commits, and CA's own
+    `record_approval_withdrawal` is called directly (as S4-B's withdrawal
+    consumer will) — recording standing without reversing the already-active
+    agreement. A later reinstate (after a valid suspend) is still refused: the
+    approval request is permanently withdrawn, not just momentarily held."""
+    agreement_id, request_id = _seed(engine, offer_code="off-activate-then-standing")
+    _approve_and_commit(engine, agreement_id, request_id)
+    _activate_and_commit(engine, agreement_id, request_id)
+    assert _status(engine, agreement_id) == "active"
+
+    with Session(engine) as db_b:
+        outcome = _withdraw(
+            db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+        )
+        db_b.commit()
+    assert outcome.state is ApprovalState.WITHDRAWN
+
+    result = _record_standing(
+        engine, agreement_id=agreement_id, request_id=request_id, outcome=outcome
+    )
+    assert result.outcome is ApprovalWithdrawalOutcome.RECORDED
+    assert result.approval_carried is True
+    assert result.status == "active"
+    assert _status(engine, agreement_id) == "active"
+
+    _suspend_and_commit(engine, agreement_id)
+    with Session(engine) as db_a:
+        with pytest.raises(ConflictError, match="not held: withdrawn"):
+            agreements.reinstate(
+                db_a,
+                agreements.TransitionCommand(
+                    command_id=f"reinstate-{uuid.uuid4()}",
+                    agreement_id=agreement_id,
+                ),
+            )
+        db_a.rollback()
+
+
+def test_reinstate_committed_then_recorded_standing_leaves_the_agreement_active(
+    engine: Engine,
+) -> None:
+    """The reinstate-first mirror: suspend then reinstate both commit, and
+    only THEN does the withdrawal commit and get recorded as standing. The
+    already-committed reinstate is never reversed."""
+    agreement_id, request_id = _seed(engine, offer_code="off-reinstate-then-standing")
+    _approve_and_commit(engine, agreement_id, request_id)
+    _activate_and_commit(engine, agreement_id, request_id)
+    _suspend_and_commit(engine, agreement_id)
+    with Session(engine) as db:
+        agreements.reinstate(
+            db,
+            agreements.TransitionCommand(
+                command_id=f"reinstate-{uuid.uuid4()}", agreement_id=agreement_id
+            ),
+        )
+        db.commit()
+    assert _status(engine, agreement_id) == "active"
+
+    with Session(engine) as db_b:
+        outcome = _withdraw(
+            db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+        )
+        db_b.commit()
+    assert outcome.state is ApprovalState.WITHDRAWN
+
+    result = _record_standing(
+        engine, agreement_id=agreement_id, request_id=request_id, outcome=outcome
+    )
+    assert result.outcome is ApprovalWithdrawalOutcome.RECORDED
+    assert result.approval_carried is True
+    assert result.status == "active"
     assert _status(engine, agreement_id) == "active"
