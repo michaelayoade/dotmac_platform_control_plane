@@ -274,6 +274,173 @@ def test_a_member_of_a_fenced_writer_sharing_identity_with_app_admin_is_refused(
                 conn.execute(text(f"DROP ROLE IF EXISTS {member}"))
 
 
+# ── (a5) a MEMBER inheriting CONNECT via an UNRELATED grantee X ─────────────
+
+
+def test_a_member_inheriting_connect_through_an_unrelated_grantee_is_refused_first(
+    admin_url: str, db: str
+) -> None:
+    """M is a member of writer W (landing in the effective set through W) and
+    SEPARATELY a member of an unrelated role X that holds its own CONNECT
+    grant. M's CONNECT inherited via X survives every REVOKE this module can
+    issue, so the fence must refuse `writer_inherits_connect` for a MEMBER,
+    not only for a named writer — before any change, ACL untouched."""
+    grantee_x = f"fence_grantee_x_{uuid.uuid4().hex[:10]}"
+    with _connect(admin_url, autocommit=True) as conn:
+        conn.execute(text(f"CREATE ROLE {grantee_x} NOLOGIN"))
+        conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {grantee_x}'))
+    try:
+        with _writer_role(admin_url) as w:
+            member = f"fence_member_{uuid.uuid4().hex[:10]}"
+            with _connect(admin_url, autocommit=True) as conn:
+                conn.execute(
+                    text(f"CREATE ROLE {member} LOGIN NOSUPERUSER NOBYPASSRLS")
+                )
+                conn.execute(text(f"GRANT {w} TO {member}"))
+                conn.execute(text(f"GRANT {grantee_x} TO {member}"))
+            try:
+                with _connect(admin_url, autocommit=True) as conn:
+                    prior_acl = fence_module._current_acl_text(conn, db)
+                    with pytest.raises(FenceRefused) as refused:
+                        fence_writers(
+                            conn,
+                            database=db,
+                            writer_roles=(w,),
+                            session_wait_seconds=SESSION_WAIT_SECONDS,
+                        )
+                    assert (
+                        refused.value.code == FenceRefusalCode.WRITER_INHERITS_CONNECT
+                    )
+                    assert (
+                        fence_module._current_acl_text(conn, db) == prior_acl
+                    ), "a refusal must leave the ACL untouched"
+            finally:
+                with _connect(admin_url, autocommit=True) as conn:
+                    conn.execute(text(f"REVOKE {grantee_x} FROM {member}"))
+                    conn.execute(text(f"REVOKE {w} FROM {member}"))
+                    conn.execute(text(f"DROP OWNED BY {member}"))
+                    conn.execute(text(f"DROP ROLE IF EXISTS {member}"))
+    finally:
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {grantee_x}'))
+            conn.execute(text(f"DROP ROLE IF EXISTS {grantee_x}"))
+
+
+# ── (a6) a THREE-LEVEL chain through a NOLOGIN intermediate ─────────────────
+
+
+def test_a_three_level_membership_chain_through_a_nologin_intermediate_is_fenced(
+    admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """login L -> NOLOGIN N -> writer W. L never appears in `WRITER_ROLES` and
+    is not a DIRECT member of W, only of the intermediate N — proving
+    `_member_roles`'s recursive walk, not just one hop. L's open session is
+    terminated, and it cannot reconnect afterwards."""
+    with _writer_role(admin_url) as w:
+        intermediate = f"fence_chain_n_{uuid.uuid4().hex[:10]}"
+        login_role = f"fence_chain_l_{uuid.uuid4().hex[:10]}"
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f"CREATE ROLE {intermediate} NOLOGIN"))
+            conn.execute(
+                text(f"CREATE ROLE {login_role} LOGIN NOSUPERUSER NOBYPASSRLS")
+            )
+            conn.execute(text(f"GRANT {w} TO {intermediate}"))
+            conn.execute(text(f"GRANT {intermediate} TO {login_role}"))
+        try:
+            login_engine = create_engine(url_for(postgres_url, db, user=login_role))
+            login_conn = login_engine.connect()
+            try:
+                assert login_conn.execute(text("SELECT 1")).scalar_one() == 1
+
+                with _connect(admin_url, autocommit=True) as conn:
+                    proof = fence_writers(
+                        conn,
+                        database=db,
+                        writer_roles=(w,),
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                    )
+                assert login_role in proof.member_roles
+                assert intermediate in proof.member_roles
+
+                with pytest.raises(OperationalError):
+                    login_conn.execute(text("SELECT 1"))
+            finally:
+                login_conn.close()
+                login_engine.dispose()
+
+            with pytest.raises(OperationalError, match="permission denied"):
+                with _connect(url_for(postgres_url, db, user=login_role)):
+                    pass
+        finally:
+            with _connect(admin_url, autocommit=True) as conn:
+                conn.execute(text(f"REVOKE {intermediate} FROM {login_role}"))
+                conn.execute(text(f"REVOKE {w} FROM {intermediate}"))
+                conn.execute(text(f"DROP OWNED BY {login_role}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {login_role}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {intermediate}"))
+
+
+# ── (a7) a member session that `SET ROLE`s to the writer and WRITES ─────────
+
+
+def test_a_member_session_using_set_role_to_write_is_terminated_by_the_fence(
+    admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """M is a plain member of writer W with no CONNECT grant of its own. Its
+    session does `SET ROLE W` and inserts a row into a table W owns BEFORE
+    the fence closes — proving the fence terminates a session that is
+    actively writing under the writer's identity, not merely one that is
+    idle. After the fence, the session's next statement raises, and M cannot
+    reconnect."""
+    with _writer_role(admin_url) as w:
+        member = f"fence_setrole_member_{uuid.uuid4().hex[:10]}"
+        schema = f"fence_scratch_{uuid.uuid4().hex[:8]}"
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f"CREATE ROLE {member} LOGIN NOSUPERUSER NOBYPASSRLS"))
+            conn.execute(text(f"GRANT {w} TO {member}"))
+            conn.execute(text(f'CREATE SCHEMA "{schema}" AUTHORIZATION {w}'))
+            conn.execute(text(f'CREATE TABLE "{schema}".probe (id int)'))
+        try:
+            member_engine = create_engine(
+                url_for(postgres_url, db, user=member), isolation_level="AUTOCOMMIT"
+            )
+            member_conn = member_engine.connect()
+            try:
+                member_conn.execute(text(f"SET ROLE {w}"))
+                # `schema` is this test's own uuid-suffixed local name, never
+                # caller input; S608's premise (a value of unknown provenance
+                # reaching a query) does not hold here.
+                member_conn.execute(
+                    text(f'INSERT INTO "{schema}".probe VALUES (1)')  # noqa: S608
+                )
+
+                with _connect(admin_url, autocommit=True) as conn:
+                    proof = fence_writers(
+                        conn,
+                        database=db,
+                        writer_roles=(w,),
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                    )
+                assert member in proof.member_roles
+
+                with pytest.raises(OperationalError):
+                    member_conn.execute(text("SELECT 1"))
+            finally:
+                member_conn.close()
+                member_engine.dispose()
+
+            with pytest.raises(OperationalError, match="permission denied"):
+                with _connect(url_for(postgres_url, db, user=member)):
+                    pass
+        finally:
+            with _connect(admin_url, autocommit=True) as conn:
+                conn.execute(text(f'DROP TABLE IF EXISTS "{schema}".probe'))
+                conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+                conn.execute(text(f"REVOKE {w} FROM {member}"))
+                conn.execute(text(f"DROP OWNED BY {member}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {member}"))
+
+
 # ── (b) an OPEN writer session is terminated and counted ────────────────────
 
 
