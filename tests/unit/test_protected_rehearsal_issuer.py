@@ -480,6 +480,100 @@ def test_a_non_withdrawn_hold_refusal_propagates_with_a_receipt_present_on_issua
         issuer.issue_authorization(object(), invocation)
 
 
+# ── D18-C: the in-hold fingerprint branch, deterministically ────────────────
+
+
+def test_approve_in_hold_fingerprint_mismatch_raises_issuer_command_reused(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`find_receipt` answers `None` on its FIRST call (the pre-hold check,
+    which must therefore let this request through) and a receipt with a
+    DIFFERENT fingerprint on its SECOND call, made from inside
+    `transition()` after Control's `approve_plan` has already run. That
+    second call is the branch this test pins: `approve_issuer_plan` must
+    raise `IssuerCommandReused` from inside the hold, not treat the
+    disagreeing receipt as its own."""
+    from vendor_cp.deployment import issuer_receipts
+
+    command_id = "approve-1"
+    different_fingerprint = request_fingerprint(
+        APPROVE_PLAN,
+        {
+            "command_id": command_id,
+            "plan_id": PLAN_ID,
+            "approval_request_id": REQUEST_ID,
+            "expected_plan_version": None,
+            "actor_ref": "someone-else",
+        },
+    )
+    receipt = SimpleNamespace(
+        verb=APPROVE_PLAN,
+        request_fingerprint=different_fingerprint,
+        plan_id=PLAN_ID,
+        approval_request_id=REQUEST_ID,
+        control_ref=str(PLAN_ID),
+    )
+    calls = {"n": 0}
+
+    def fake_find_receipt(db: object, command_id: str) -> object | None:
+        calls["n"] += 1
+        return None if calls["n"] == 1 else receipt
+
+    monkeypatch.setattr(issuer_receipts, "find_receipt", fake_find_receipt)
+
+    with pytest.raises(issuer_receipts.IssuerCommandReused):
+        issuer.approve_issuer_plan(
+            object(),
+            command_id=command_id,
+            plan_id=PLAN_ID,
+            approval_request_id=REQUEST_ID,
+        )
+    assert calls["n"] == 2, "the in-hold branch must re-check find_receipt"
+    assert [name for name, _ in ports.calls] == ["hold", "approve"]
+
+
+def test_issuance_in_hold_fingerprint_mismatch_raises_issuer_command_reused(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The issuance equivalent of the test above, using the file's own dict
+    harness evidence document (`_EVIDENCE`)."""
+    from vendor_cp.deployment import issuer_receipts
+
+    command_id = "issue-1"
+    evidence = dict(_EVIDENCE)
+    different_evidence = {**_EVIDENCE, "lease": "L-2"}
+    different_fingerprint = request_fingerprint(
+        ISSUE_AUTHORIZATION,
+        {
+            "command_id": command_id,
+            "plan_id": PLAN_ID,
+            "harness_evidence_digest": issuer._evidence_digest(different_evidence),
+        },
+    )
+    receipt = SimpleNamespace(
+        verb=ISSUE_AUTHORIZATION,
+        request_fingerprint=different_fingerprint,
+        plan_id=PLAN_ID,
+        approval_request_id=REQUEST_ID,
+        control_ref="auth-0",
+    )
+    calls = {"n": 0}
+
+    def fake_find_receipt(db: object, command_id: str) -> object | None:
+        calls["n"] += 1
+        return None if calls["n"] == 1 else receipt
+
+    monkeypatch.setattr(issuer_receipts, "find_receipt", fake_find_receipt)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(command_id, PLAN_ID), evidence
+    )
+
+    with pytest.raises(issuer_receipts.IssuerCommandReused):
+        issuer.issue_authorization(object(), invocation)
+    assert calls["n"] == 2, "the in-hold branch must re-check find_receipt"
+    assert [name for name, _ in ports.calls] == ["hold", "issue"]
+
+
 # ── fix 3: the issuance fingerprint covers the harness evidence ─────────────
 
 
