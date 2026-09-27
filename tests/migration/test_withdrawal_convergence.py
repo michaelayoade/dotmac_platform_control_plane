@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Final
+from unittest import mock
 
 import dotmac_deployment_control as control
 import pytest
@@ -49,6 +50,7 @@ from dotmac_kernel.messaging import (
 )
 from dotmac_kernel.session_runtime import DatabaseRuntime
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from vendor_cp.allocations.consumer import ContractEventConsumer
@@ -72,11 +74,13 @@ from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 from vendor_cp.readiness.service import ReadinessDetail, check_readiness
 from vendor_cp.relay.approval_router import ApprovalEventRouter
-from vendor_cp.relay.health import relay_health
+from vendor_cp.relay.health import RelayVerdict, relay_health
 from vendor_cp.relay.runner import PlatformEventConsumers, RelayComposition, drain_once
 from vendor_cp.relay.withdrawal_outcomes import (
     WithdrawalDisposition,
+    WithdrawalResolution,
     outcomes_for_event,
+    resolve_conflict,
 )
 
 PRODUCT = "dotmac-sub"
@@ -690,3 +694,137 @@ def test_a_replayed_delivery_after_settlement_is_a_no_op(
             assert (
                 view.approval_withdrawn is True
             ), "CA was not asked to withdraw a second time"
+
+
+# ── 5: changed payload -> conflict -> health/readiness red -> resolved ──────
+
+
+def test_a_changed_payload_conflicts_then_resolution_clears_health_and_readiness(
+    migrated: tuple[str, str],
+) -> None:
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            approved = _propose_and_approve_agreement(db, offer_code="off-scn5")
+            active = _activate(db, approved)
+        with platform.platform_session() as db:
+            assert active.approval_request_id is not None
+            _withdraw(db, request_id=active.approval_request_id)
+
+        drain_once(
+            worker_id="d18b-convergence",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            event_id = row.id
+            mutated_payload = dict(row.payload)
+            mutated_payload["reason"] = "a different reason than what was recorded"
+            mutated = ClaimedPlatformEvent(
+                id=row.id,
+                event_type=row.event_type,
+                payload=mutated_payload,
+                attempts=row.attempts,
+                correlation_id=row.correlation_id,
+            )
+            ApprovalEventRouter().deliver(mutated, db)
+            db.commit()
+
+        with platform.platform_session() as db:
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 2
+            conflict = outcomes[1]
+            assert conflict.disposition is WithdrawalDisposition.SECURITY_CONFLICT
+
+            health = _observe(db)
+            assert health.verdict is RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED
+            assert health.unresolved_withdrawal_conflicts == 1
+
+            report = _ready(db)
+            assert report.ready is False
+            assert report.detail is ReadinessDetail.WITHDRAWAL_CONFLICT_UNRESOLVED
+
+        with platform.platform_session() as db:
+            resolve_conflict(
+                db,
+                outcome_id=conflict.id,
+                resolution=WithdrawalResolution.DISMISSED,
+                actor_ref="platform-admin:d18b",
+                reason="reviewed: benign reason-field drift, no re-application needed",
+            )
+
+        with platform.platform_session() as db:
+            health = _observe(db)
+            assert health.verdict is not RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED
+            assert health.unresolved_withdrawal_conflicts == 0
+
+            report = _ready(db)
+            assert report.ready is True
+            assert report.detail is ReadinessDetail.READY
+
+
+# ── 6: retry (a real retryable failure), then recovery, through the relay ──
+
+
+def test_a_retryable_failure_then_recovery_through_the_real_relay(
+    migrated: tuple[str, str],
+) -> None:
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            approved = _propose_and_approve_agreement(db, offer_code="off-scn6")
+            active = _activate(db, approved)
+        with platform.platform_session() as db:
+            assert active.approval_request_id is not None
+            _withdraw(db, request_id=active.approval_request_id)
+
+        with mock.patch.object(
+            agreements,
+            "module_record_approval_withdrawal",
+            side_effect=OperationalError("statement", {}, Exception("db unavailable")),
+        ):
+            drain_once(
+                worker_id="d18b-convergence",
+                composition=_composition(dispatcher_url, platform),
+            )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            assert row.status == OutboxStatus.PENDING.value
+            assert row.attempts == 1
+            event_id = row.id
+            assert outcomes_for_event(db, event_id) == ()
+
+            health = _observe(db)
+            assert health.verdict is RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+            assert health.withdrawal_failing == 1
+
+        # Make the row due again. `platform_api` already owns `available_at`
+        # on this table — the online delivery session advances it on every
+        # ordinary backoff and settlement — so this is not a kernel-row write
+        # the grants forbid; it is the same column the real relay writes.
+        with platform.platform_session() as db:
+            db.execute(
+                text(
+                    "UPDATE platform_outbox_events SET available_at = now() "
+                    "WHERE id = :id"
+                ),
+                {"id": event_id},
+            )
+
+        drain_once(
+            worker_id="d18b-convergence",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            assert row.status == OutboxStatus.SENT.value
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 1
+            assert outcomes[0].disposition is WithdrawalDisposition.APPLIED
+
+            health = _observe(db)
+            assert health.verdict is not RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+            assert health.withdrawal_failing == 0
