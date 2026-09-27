@@ -41,6 +41,33 @@ the fence reports on. A role that exists and keeps CONNECT is a fence that did
 not hold; a role that was never there is a different fact, and collapsing the
 two would let a typo'd role name pass as "fenced" when nothing was ever
 checked.
+
+## Inherited CONNECT cannot be revoked away, so it is refused up front
+
+`REVOKE CONNECT ON DATABASE ... FROM <role>` only ever touches that role's own
+ACL entry. `has_database_privilege` still resolves role membership and
+ownership when it answers "can this role connect" — PostgreSQL grants a
+database's owner (and every member of the owner) an implicit CONNECT that no
+`REVOKE` on the database's ACL removes, and a role that is a member of another
+role holding CONNECT keeps it through that membership regardless of what its
+own ACL entry says. Ruled 2026-09-26: a writer that is the database owner, a
+member of the owner, or a member of `MIGRATION_ROLE` cannot be fenced by
+revoking, so `fence_writers` REFUSES (`writer_inherits_connect`) before
+touching the ACL at all, rather than revoking, "verifying" against a
+privilege check that was never going to change, and returning a proof that
+lies.
+
+## A writer role sharing identity with the migrator is refused, not fenced
+
+Fencing "the migrator" would defeat the migration it is meant to protect. If a
+role named in `WRITER_ROLES` IS `MIGRATION_ROLE`, or the two share role
+membership in either direction (`pg_has_role` both ways), there is no ACL
+state that fences one without the other — so `fence_writers` refuses
+(`shared_writer_role`) before any change, the same as the inherited-CONNECT
+case above. The identical check also catches one login role appearing twice
+in the writer set after resolution, which is the same hazard by a different
+route: revoking and re-granting the same role under two names would race with
+itself.
 """
 
 from __future__ import annotations
@@ -95,6 +122,15 @@ class FenceRefusalCode(StrEnum):
     WRITER_SESSIONS_SURVIVED = "writer_sessions_survived"
     ACL_NOT_RESTORED = "acl_not_restored"
     UNKNOWN_DATABASE = "unknown_database"
+    #: A writer owns the database, or is a member of its owner or of
+    #: `MIGRATION_ROLE`: CONNECT it holds through that path survives every
+    #: REVOKE this module can issue, so nothing is changed and this is raised
+    #: instead.
+    WRITER_INHERITS_CONNECT = "writer_inherits_connect"
+    #: A writer role is `MIGRATION_ROLE` itself, shares role membership with
+    #: it in either direction, or the same login role was named twice in the
+    #: writer set.
+    SHARED_WRITER_ROLE = "shared_writer_role"
 
 
 class FenceRefused(Exception):
@@ -157,6 +193,104 @@ def _existing_roles(conn: Connection, roles: tuple[str, ...]) -> set[str]:
         {"roles": list(roles)},
     )
     return {row[0] for row in rows}
+
+
+def _duplicates(values: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    dupes: set[str] = set()
+    for value in values:
+        if value in seen:
+            dupes.add(value)
+        seen.add(value)
+    return tuple(sorted(dupes))
+
+
+def _database_owner(conn: Connection, database: str) -> str:
+    """The database owner's role name, resolved from `pg_database.datdba`."""
+    return conn.execute(
+        text("SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = :db"),
+        {"db": database},
+    ).scalar_one()
+
+
+def _is_member_of(conn: Connection, member: str, role: str) -> bool:
+    """`pg_has_role(member, role, 'MEMBER')` — resolves the full membership
+    chain, not only a direct GRANT."""
+    return bool(
+        conn.execute(
+            text("SELECT pg_has_role(:member, :role, 'MEMBER')"),
+            {"member": member, "role": role},
+        ).scalar_one()
+    )
+
+
+def _reject_shared_writer_roles(
+    conn: Connection, fenced: tuple[str, ...], writer_roles: tuple[str, ...]
+) -> None:
+    """`shared_writer_role`, checked before any ACL change.
+
+    Fencing a role that IS the migrator, or that shares membership with it in
+    either direction, would fence the migration it exists to protect. The
+    identical hazard shows up as one login role named twice in the writer set,
+    so that is checked here too.
+    """
+    duplicates = _duplicates(writer_roles)
+    if duplicates:
+        raise FenceRefused(
+            FenceRefusalCode.SHARED_WRITER_ROLE,
+            f"{duplicates} named more than once in the writer set — the same "
+            "login role fenced under two names would race with itself",
+        )
+    for role in fenced:
+        if role == MIGRATION_ROLE:
+            raise FenceRefused(
+                FenceRefusalCode.SHARED_WRITER_ROLE,
+                f"writer role {role!r} IS the migration role {MIGRATION_ROLE!r}",
+            )
+        if _is_member_of(conn, MIGRATION_ROLE, role) or _is_member_of(
+            conn, role, MIGRATION_ROLE
+        ):
+            raise FenceRefused(
+                FenceRefusalCode.SHARED_WRITER_ROLE,
+                f"writer role {role!r} shares role membership with the "
+                f"migration role {MIGRATION_ROLE!r}",
+            )
+
+
+def _reject_inherited_connect(
+    conn: Connection, fenced: tuple[str, ...], database: str
+) -> None:
+    """`writer_inherits_connect`, checked before any ACL change.
+
+    `REVOKE CONNECT ON DATABASE ... FROM <role>` only ever edits that role's
+    own ACL entry. A database owner (and every member of the owner) holds an
+    implicit CONNECT no such REVOKE removes, and a member of `MIGRATION_ROLE`
+    inherits that role's CONNECT the same way — so this cannot be fenced by
+    revoking, and is refused instead of revoked, "verified", and returned as a
+    proof that lies.
+    """
+    owner = _database_owner(conn, database)
+    for role in fenced:
+        if role == owner:
+            raise FenceRefused(
+                FenceRefusalCode.WRITER_INHERITS_CONNECT,
+                f"writer role {role!r} owns database {database!r}; CONNECT "
+                "through ownership survives every REVOKE this module can issue",
+            )
+        if _is_member_of(conn, role, owner):
+            raise FenceRefused(
+                FenceRefusalCode.WRITER_INHERITS_CONNECT,
+                f"writer role {role!r} is a member of database owner "
+                f"{owner!r}; CONNECT inherited through membership survives "
+                "every REVOKE this module can issue",
+            )
+        if _is_member_of(conn, role, MIGRATION_ROLE):
+            raise FenceRefused(
+                FenceRefusalCode.WRITER_INHERITS_CONNECT,
+                f"writer role {role!r} is a member of the migration role "
+                f"{MIGRATION_ROLE!r}; CONNECT inherited through membership "
+                "survives every REVOKE this module can issue",
+            )
 
 
 def _current_acl_text(conn: Connection, database: str) -> str:
@@ -229,6 +363,15 @@ def fence_writers(
     existing = _existing_roles(conn, writer_roles)
     absent = tuple(role for role in writer_roles if role not in existing)
     fenced = tuple(role for role in writer_roles if role in existing)
+
+    # Both checks run before any ACL change. Neither hazard can be repaired by
+    # revoking — a role that inherits CONNECT through ownership or membership
+    # keeps it regardless, and a role sharing identity with the migrator would
+    # fence the migration along with it — so both are refused rather than
+    # revoked and then "verified" against a privilege check that was never
+    # going to move.
+    _reject_shared_writer_roles(conn, fenced, writer_roles)
+    _reject_inherited_connect(conn, fenced, database)
 
     prior_acl = (
         prior.prior_acl if prior is not None else _current_acl_text(conn, database)
