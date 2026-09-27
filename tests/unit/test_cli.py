@@ -374,3 +374,74 @@ def test_an_absent_spec_file_is_an_absence_not_a_usage_fault(tmp_path: Path) -> 
     with pytest.raises(Refusal) as caught:
         commands.deployment_set_desired_state(args)
     assert caught.value.exit_code is ExitCode.UNAVAILABLE
+
+
+# ── withdrawal-conflicts list ────────────────────────────────────────────────
+
+
+def test_withdrawal_conflicts_list_prints_identity_and_no_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identity only — `id`, `event_id`, `reason_code`, `recorded_at` — and
+    never the `evidence` payload a `security_conflict` outcome carries."""
+    import uuid
+    from contextlib import contextmanager
+    from datetime import UTC, datetime
+
+    from vendor_cp.cli import commands
+    from vendor_cp.relay.withdrawal_outcomes import (
+        RecordedOutcome,
+        WithdrawalDisposition,
+    )
+
+    outcome = RecordedOutcome(
+        id=uuid.uuid4(),
+        event_id=uuid.uuid4(),
+        payload_digest="sha256:" + "0" * 64,
+        event_type="approval.withdrawn",
+        subject_type="agreement",
+        subject_id="agreement-1",
+        approval_request_id=None,
+        plan_id=None,
+        agreement_id=None,
+        withdrawal_ref=None,
+        disposition=WithdrawalDisposition.SECURITY_CONFLICT,
+        reason_code="payload_changed",
+        evidence={"secret": "do-not-print"},
+        recorded_at=datetime(2026, 9, 27, 12, 0, tzinfo=UTC),
+    )
+
+    @contextmanager
+    def _fake_platform_db():
+        yield object()
+
+    monkeypatch.setattr(commands, "platform_db", _fake_platform_db)
+    monkeypatch.setattr(
+        "vendor_cp.relay.withdrawal_outcomes.list_unresolved_conflicts",
+        lambda _db: (outcome,),
+    )
+
+    result = commands.withdrawal_conflicts_list(argparse.Namespace())
+
+    assert result.data["count"] == 1
+    assert result.data["outcomes"] == [
+        {
+            "id": str(outcome.id),
+            "event_id": str(outcome.event_id),
+            "reason_code": "payload_changed",
+            "recorded_at": outcome.recorded_at.isoformat(),
+        }
+    ]
+    rendered = json.dumps(result.data)
+    assert "do-not-print" not in rendered
+    assert "secret" not in rendered
+
+
+def test_withdrawal_conflicts_list_is_a_read_never_a_mutating_owner() -> None:
+    """The design refuses a `resolve` command from the CLI (no authenticated-
+    admin seam here); `list` stays a read so the owner table's mutation check
+    still holds."""
+    from vendor_cp.cli.owners import by_command
+
+    owner = by_command()["withdrawal-conflicts list"]
+    assert owner.mutates is False
