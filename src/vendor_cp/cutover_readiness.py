@@ -100,6 +100,11 @@ VENDOR_OWNED_TABLES: Final[frozenset[str]] = frozenset(
         # total quiescence be distinguished from an idle one, and it retires
         # with the relay rather than with ADR-0010's transport ledger.
         "relay_heartbeats",
+        # `v020`'s append-only withdrawal-settlement record and the human
+        # decision that clears a `security_conflict` row. Vendor's own, not a
+        # delivery table.
+        "approval_withdrawal_outcomes",
+        "approval_withdrawal_conflict_resolutions",
     }
 )
 
