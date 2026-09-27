@@ -39,6 +39,9 @@ from vendor_cp.migration_bindings import ASSEMBLY_MODULE_PLANES
 from vendor_cp.offers.feature import feature as offers_feature
 from vendor_cp.provisioning.feature import feature as provisioning_feature
 from vendor_cp.readiness.feature import feature as readiness_feature
+from vendor_cp.relay.withdrawal_conflicts_feature import (
+    feature as withdrawal_conflicts_feature,
+)
 from vendor_cp.release_evidence.feature import feature as release_evidence_feature
 
 ASSEMBLY_NAME = "dotmac-vendor-control-plane"
@@ -106,6 +109,7 @@ VENDOR_SURFACES = (
     allocations_feature,
     licensing_feature,
     provisioning_feature,
+    withdrawal_conflicts_feature,
 )
 
 
