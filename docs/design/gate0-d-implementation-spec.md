@@ -86,23 +86,33 @@ narrowly scoped OpenBao token. No other job, and no job outside that
 Environment, requests this exchange.
 
 The OpenBao JWT auth role (`auth/jwt` backend, role name
-`<placeholder: e.g. rehearsal-issuer-protected>`) binds `bound_claims` on:
+`<placeholder: e.g. rehearsal-issuer-protected>`) sets `bound_audiences` to
+the audience below and binds `bound_claims` on the rest. The audience is NOT a
+`bound_claims` entry: OpenBao checks it through `bound_audiences`.
 
 | Claim | Bound value | Why binding the Environment name alone is not enough |
 | --- | --- | --- |
 | `repository` | `<placeholder: org/repo>` | Scopes the role to this repository only. |
 | `environment` | `<placeholder>` (the § 2 Environment name) | GitHub's environment-based `sub` claim can omit the branch entirely — an Environment-only bound claim would accept the same job running from a non-`main` ref if the Environment's own branch policy were ever misconfigured or bypassed by a different trigger. |
 | `ref` | `refs/heads/main` | Independently pins the branch at the OpenBao layer, so OpenBao's own policy does not rely solely on GitHub's Environment configuration remaining correct. |
-| `job_workflow_ref` | `<placeholder: org/repo/.github/workflows/<file>.yml@refs/heads/main>` | Pins the exact called workflow file and ref, not just "some workflow in this repo." |
-| `aud` (audience) | `<placeholder: e.g. https://openbao.dotmac.internal>` | OpenBao's JWT role should also set `bound_audiences` to this same value; the workflow's `id-token: write` step must request a token for this exact audience. |
+| `workflow_ref` | `<placeholder: org/repo/.github/workflows/<file>.yml@refs/heads/main>` | Pins the exact workflow file and ref of a normal (non-reusable) workflow, not just "some workflow in this repo." `job_workflow_ref` is bound instead ONLY if D deliberately runs the protected job as a reusable-workflow call; this spec does not. |
+
+Audience (`bound_audiences`, not `bound_claims`): `<placeholder: e.g. https://openbao.dotmac.internal>`.
+The protected job requests its OIDC token for exactly this audience.
+
+`ref` is bound to `refs/heads/main` as its own claim, separately from
+`environment`; neither substitutes for the other. The bound values are
+checked against the ACTUAL claims of the protected job (captured from a real
+run of that job, not assumed from documentation) before the role is accepted.
 
 Token TTL: `<placeholder, short — e.g. 5m>`, no renewal. Policy scope: the
-resulting OpenBao token's attached policy grants read-only access to exactly
-the signer path named in § 4 (`secret/dotmac/platform-cp/rehearsal-issuer/signing-key`)
-and the SSH CA signing endpoint named in § 5 — nothing else.
+resulting OpenBao token's attached policy grants exactly the SSH CA signing
+endpoint named in § 5, for the per-run controller certificate, and nothing
+else. It grants NO read on the issuer signer path in § 4: only CP's service
+identity reads the signer, never the runner or its workflow token.
 
 Refusal (see § 7 table for the paired test): a token presented with any
-other `ref`, a `job_workflow_ref` naming a different workflow file or ref, a
+other `ref`, a `workflow_ref` naming a different workflow file or ref, a
 `repository` or `environment` claim mismatch, a wrong or missing `aud`, or an
 expired token is refused by OpenBao's JWT role at the login step, before any
 OpenBao path is read.
@@ -198,7 +208,7 @@ it — these are written when D's workflow YAML and harness code exist.
 | Missing/invalid condition | Enforced where | Expected refusal | Planned test |
 | --- | --- | --- | --- |
 | Wrong `ref` (not `refs/heads/main`) | OpenBao JWT role `bound_claims.ref` | OpenBao login denied, no token issued | `test_oidc_login_refuses_non_main_ref` |
-| Wrong `job_workflow_ref` | OpenBao JWT role `bound_claims.job_workflow_ref` | OpenBao login denied | `test_oidc_login_refuses_wrong_workflow` |
+| Wrong `workflow_ref` | OpenBao JWT role `bound_claims.workflow_ref` | OpenBao login denied | `test_oidc_login_refuses_wrong_workflow` |
 | Wrong `environment` claim | OpenBao JWT role `bound_claims.environment` | OpenBao login denied | `test_oidc_login_refuses_wrong_environment` |
 | Wrong or missing `aud` | OpenBao JWT role `bound_audiences` | OpenBao login denied | `test_oidc_login_refuses_wrong_audience` |
 | Expired OIDC or OpenBao token | Token TTL enforcement, both layers | Login/token-use denied | `test_expired_token_is_refused` |
