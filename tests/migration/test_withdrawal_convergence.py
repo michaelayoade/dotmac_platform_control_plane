@@ -35,6 +35,7 @@ from unittest import mock
 import dotmac_deployment_control as control
 import pytest
 from alembic import command
+from dotmac_approvals.models import PlatformApprovalWithdrawal
 from dotmac_commercial_agreements import get as ca_get
 from dotmac_deployment_control import (
     DesiredDeployment,
@@ -515,6 +516,19 @@ def test_issuer_withdrawal_end_to_end_revokes_and_refuses_later_issuance(
             assert row.status == OutboxStatus.SENT.value
             event_id = row.id
 
+            # The outbox id is bound to the SAME Approvals withdrawal record
+            # the payload names -- not merely equal to it by coincidence.
+            withdrawal = db.execute(
+                select(PlatformApprovalWithdrawal).where(
+                    PlatformApprovalWithdrawal.request_id == request_id
+                )
+            ).scalar_one()
+            assert (
+                withdrawal.id
+                == event_id
+                == uuid.UUID(str(row.payload["withdrawal_id"]))
+            )
+
             plan = control.get_plan(db, plan_id)
             assert plan is not None
             assert plan.approval_revocation_ref == f"approval.withdrawn:{event_id}"
@@ -574,6 +588,17 @@ def test_agreement_withdrawal_end_to_end_records_standing_agreement_stays_active
             row = _withdrawal_rows(db)[0]
             assert row.status == OutboxStatus.SENT.value
             event_id = row.id
+
+            withdrawal = db.execute(
+                select(PlatformApprovalWithdrawal).where(
+                    PlatformApprovalWithdrawal.request_id == active.approval_request_id
+                )
+            ).scalar_one()
+            assert (
+                withdrawal.id
+                == event_id
+                == uuid.UUID(str(row.payload["withdrawal_id"]))
+            )
 
             outcomes = outcomes_for_event(db, event_id)
             assert len(outcomes) == 1
@@ -1310,6 +1335,19 @@ def test_the_withdraw_route_drains_to_an_applied_outcome(
         with platform.platform_session() as db:
             row = _withdrawal_rows(db)[0]
             assert row.status == OutboxStatus.SENT.value
+
+            withdrawal = db.execute(
+                select(PlatformApprovalWithdrawal).where(
+                    PlatformApprovalWithdrawal.request_id == active.approval_request_id
+                )
+            ).scalar_one()
+            assert (
+                withdrawal.id == row.id == uuid.UUID(str(row.payload["withdrawal_id"]))
+            )
+            # The actor recorded on the withdrawal is the admin the route's
+            # `require_platform_admin` override returned, not a synthetic id.
+            assert withdrawal.actor_id == admin.id
+
             outcomes = outcomes_for_event(db, row.id)
             assert len(outcomes) == 1
             assert outcomes[0].disposition is WithdrawalDisposition.APPLIED
