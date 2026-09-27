@@ -56,6 +56,7 @@ __all__ = [
     "IssuerReceiptMismatch",
     "RecordedIssuerReceipt",
     "find_receipt",
+    "issued_authorization_refs",
     "record_receipt",
     "request_fingerprint",
 ]
@@ -202,6 +203,30 @@ def find_receipt(db: Session, command_id: str) -> RecordedIssuerReceipt | None:
         )
     )
     return None if row is None else RecordedIssuerReceipt._from_row(row)
+
+
+def issued_authorization_refs(db: Session, plan_id: UUID) -> tuple[str, ...]:
+    """The `control_ref` of every `issue_authorization` receipt for this plan,
+    oldest first. Read-only.
+
+    D18-D's index: CP asks only about authorizations IT ITSELF issued, which
+    is exactly this ledger. There is no public Control read listing a plan's
+    authorizations, and this module never imports Control's internal models.
+    A receipt-less authorization (one issued without going through
+    `issue_authorization`, hence never recorded here) is out of scope: every
+    caller-facing issuance path in this codebase records a receipt in the
+    same transaction as Control's call, so this index is complete for
+    everything CP itself can have issued.
+    """
+    rows = db.execute(
+        select(IssuerCommandReceipt.control_ref)
+        .where(
+            IssuerCommandReceipt.plan_id == plan_id,
+            IssuerCommandReceipt.verb == ISSUE_AUTHORIZATION,
+        )
+        .order_by(IssuerCommandReceipt.recorded_at)
+    )
+    return tuple(row[0] for row in rows)
 
 
 def record_receipt(

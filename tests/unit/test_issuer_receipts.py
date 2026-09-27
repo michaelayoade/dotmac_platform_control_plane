@@ -34,6 +34,7 @@ from vendor_cp.deployment.issuer_receipts import (
     IssuerReceiptMismatch,
     _normalize,
     find_receipt,
+    issued_authorization_refs,
     record_receipt,
     request_fingerprint,
 )
@@ -191,3 +192,55 @@ def test_record_receipt_a_disagreeing_reinsert_raises_mismatch(db: Session) -> N
 
     with pytest.raises(IssuerReceiptMismatch):
         record_receipt(db, **_receipt_kwargs("cmd-3", control_ref="control-ref-b"))
+
+
+# ── issued_authorization_refs (D18-D's own index) ────────────────────────────
+
+
+def test_issued_authorization_refs_returns_only_this_plans_issue_receipts(
+    db: Session,
+) -> None:
+    plan_id = uuid4()
+    other_plan_id = uuid4()
+    record_receipt(
+        db,
+        **_receipt_kwargs(
+            "issue-1",
+            verb=ISSUE_AUTHORIZATION,
+            plan_id=plan_id,
+            control_ref="auth-1",
+        ),
+    )
+    record_receipt(
+        db,
+        **_receipt_kwargs(
+            "issue-2",
+            verb=ISSUE_AUTHORIZATION,
+            plan_id=plan_id,
+            control_ref="auth-2",
+        ),
+    )
+    # A different plan's issuance must not leak in.
+    record_receipt(
+        db,
+        **_receipt_kwargs(
+            "issue-3",
+            verb=ISSUE_AUTHORIZATION,
+            plan_id=other_plan_id,
+            control_ref="auth-3",
+        ),
+    )
+    # A same-plan `approve_plan` receipt (not an issuance) must not appear.
+    record_receipt(
+        db,
+        **_receipt_kwargs("approve-1", verb=APPROVE_PLAN, plan_id=plan_id),
+    )
+    db.commit()
+
+    assert issued_authorization_refs(db, plan_id) == ("auth-1", "auth-2")
+
+
+def test_issued_authorization_refs_is_empty_when_nothing_was_issued(
+    db: Session,
+) -> None:
+    assert issued_authorization_refs(db, uuid4()) == ()
