@@ -114,6 +114,25 @@ RUN DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
         --lock /app/poetry.lock \
         --output /app/application_foundation_profile.json
 
+# The migration lineage travels as data (see the runtime stage's own COPY of
+# it below), and the builder stage otherwise never sees it — `image_heads`
+# needs it to compute the composed effective heads offline, so it lands here
+# too, ahead of that step and nowhere else in the builder stage.
+COPY --chown=root:root alembic ./alembic
+COPY --chown=root:root alembic.ini ./alembic.ini
+
+# `migration_heads.json`: the composed effective migration heads THIS image's
+# installed lineages produce, frozen at build time so a deploy-time check can
+# compare a pulled image's claim against a live database without re-deriving
+# it from a checkout that may not be the one that built the image (D16 PR 1;
+# `vendor_cp.deployment.image_heads`). No database is dialled — the same
+# `make_alembic_config` offline-`Config` construction
+# `tests/architecture/test_descriptor_promotion.py` already relies on.
+RUN python -m vendor_cp.deployment.image_heads \
+        --emit \
+        --source-revision "$SOURCE_REVISION" \
+        --output /app/migration_heads.json
+
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 
 ARG SOURCE_REVISION=unknown
@@ -153,6 +172,12 @@ COPY --from=builder --chown=10001:10001 /app/distributions.json ./distributions.
 # DOCUMENT_ABSENT against every real image — which was the honest answer.
 COPY --from=builder --chown=10001:10001 /app/application_foundation_profile.json \
      ./application_foundation_profile.json
+# The composed effective migration heads THIS image's lineages produce,
+# frozen at build time (D16 PR 1). PR 2's deploy-time check extracts this file
+# from a pulled image before anything is running, so it has to be a document
+# rather than a live computation against a database.
+COPY --from=builder --chown=10001:10001 /app/migration_heads.json \
+     ./migration_heads.json
 
 USER 10001:10001
 

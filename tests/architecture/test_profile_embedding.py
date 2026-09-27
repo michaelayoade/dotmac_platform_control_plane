@@ -26,6 +26,7 @@ import ast
 import re
 from pathlib import Path
 
+from vendor_cp.deployment.image_heads import DEFAULT_IMAGE_HEADS_PATH
 from vendor_cp.deployment.profile_readback import (
     DEFAULT_PROFILE_PATH,
     ProfileVerdict,
@@ -195,3 +196,38 @@ def test_the_probe_names_the_concerns_it_expects_to_be_unsatisfied() -> None:
     assert "request_evidence_context" in step
     assert "integration" in step
     assert re.search(r"len\(bound\) != 11", step), step[:0] or "no bound-count check"
+
+
+# ── the image-heads document (D16 PR 1) ─────────────────────────────────────
+
+
+def test_the_builder_stage_emits_migration_heads_before_the_runtime_copy() -> None:
+    """`python -m vendor_cp.deployment.image_heads --emit`, in the builder
+    stage, next to the profile-build step — not a Dockerfile heredoc, for the
+    same reason the profile document is built by running installed code
+    rather than by a literal."""
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert "python -m vendor_cp.deployment.image_heads" in dockerfile
+    assert "--emit" in dockerfile
+    assert '--source-revision "$SOURCE_REVISION"' in dockerfile
+    build_index = dockerfile.index("python -m vendor_cp.deployment.image_heads")
+    runtime_stage_index = dockerfile.index("AS runtime")
+    assert build_index < runtime_stage_index, (
+        "the image-heads document must be emitted in the BUILDER stage, "
+        "before the runtime stage begins"
+    )
+    assert dockerfile.index("COPY --chown=root:root alembic") < build_index
+
+
+def test_the_runtime_stage_carries_migration_heads_where_the_checker_reads_it() -> None:
+    """Same rule as the profile document: the path is DERIVED from the
+    checker's own constant, not written twice."""
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    assert str(DEFAULT_IMAGE_HEADS_PATH.parent) == "/app"
+    assert f"/app/{DEFAULT_IMAGE_HEADS_PATH.name}" in dockerfile
+    assert f"./{DEFAULT_IMAGE_HEADS_PATH.name}" in dockerfile
+    assert "COPY --from=builder" in dockerfile
+    assert (
+        f"/app/{DEFAULT_IMAGE_HEADS_PATH.name}"
+        in dockerfile.split("COPY --from=builder", 1)[1]
+    )
