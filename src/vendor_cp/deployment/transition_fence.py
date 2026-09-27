@@ -76,9 +76,15 @@ transitive: a role M that is a member of a fenced writer W can `SET ROLE W`
 from an already-open session and keep writing, and if M holds its own CONNECT
 grant it can reconnect on its own identity regardless of what happens to W's.
 Ruled 2026-09-27: `fence_writers` resolves the EFFECTIVE set once, after the
-named writers are resolved against the cluster — `effective = fenced ∪ {r :
-r != w, pg_has_role(r, w, 'MEMBER') for some fenced writer w}` — and records
-the members on `FenceProof.member_roles` (never silently dropped, the same
+named writers are resolved against the cluster — every role that is a
+(transitive) member of a fenced writer, found by walking `pg_auth_members`
+explicitly (`_member_roles`), never `pg_has_role(r, w, 'MEMBER')`: that
+built-in answers true for EVERY superuser against every role, which would
+pull `postgres` itself into the effective set of any fence in this cluster
+and refuse it as a shared writer role. A superuser that was actually
+GRANTed a writer role is still found by the explicit `pg_auth_members` walk,
+and is refused as it should be. The members found this way are recorded on
+`FenceProof.member_roles` (never silently dropped, the same
 `absent_roles` discipline as unknown roles). Every pre-check (superuser,
 shared identity with `MIGRATION_ROLE`, inherited CONNECT), the REVOKE, the
 `has_database_privilege` verification and the drain all run over this
@@ -169,6 +175,29 @@ successful mutation in this module is load-bearing verification (a
 `has_database_privilege` check, a drain poll, the post-GRANT
 `_current_grants` comparison) — never a courtesy read whose only job was a
 timestamp.
+
+## Known limits, carried into PR 2 as inputs — not solved here
+
+- **The startup race.** A backend that has already passed the CONNECT check
+  (so it holds an open socket) but has not yet appeared in
+  `pg_stat_activity` is invisible to `_writer_pids`, and so to the drain, to
+  `fence_is_holding`'s backend check, and to whatever PR 2 does with either.
+  The fence proves no writer backend it could SEE was left open; it cannot
+  prove one was never mid-authentication when the drain or the
+  holding-check ran.
+- **Membership is frozen at fence time.** `FenceProof.member_roles` is the
+  effective set as `fence_writers` resolved it at that moment; a role
+  granted membership in a writer AFTER that moment is invisible to the
+  revoke, the verification and the drain that already ran, and is only
+  caught later if something re-derives membership (`fence_is_holding` does,
+  by comparing a fresh `_member_roles` call against the recorded set). This
+  is why PR 2 must call `fence_is_holding` right before AND right after
+  migrating — a fence proven to hold at t0 is not evidence it still holds at
+  t1.
+- **`WRITER_ROLES` completeness is not proven.** This module fences exactly
+  the roles it is told about; nothing here derives or verifies that
+  `WRITER_ROLES` actually names every role in the cluster capable of writing
+  to the database.
 """
 
 from __future__ import annotations
@@ -297,7 +326,10 @@ class FenceProof:
     prior_grants: _Grants
     fenced_roles: tuple[str, ...]
     #: Every role, other than a named writer itself, that transitively holds
-    #: membership in a named writer (`pg_has_role(role, writer, 'MEMBER')`).
+    #: membership in a named writer, found by walking `pg_auth_members`
+    #: explicitly (`_member_roles`) — never `pg_has_role(role, writer,
+    #: 'MEMBER')`, which answers true for every superuser against every role
+    #: and would wrongly pull every superuser in the cluster into this set.
     #: These roles can `SET ROLE` to a fenced writer and keep writing, or
     #: reconnect under their own CONNECT grant, so every pre-check and the
     #: revoke/verify/drain all run over `fenced_roles + member_roles`
