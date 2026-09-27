@@ -156,9 +156,42 @@ def _held_transition_callbacks(
     return callbacks
 
 
+def _is_ca_module(module: str | None) -> bool:
+    return module == "dotmac_commercial_agreements" or (module or "").startswith(
+        "dotmac_commercial_agreements."
+    )
+
+
+def _root_name(node: ast.AST) -> str | None:
+    """`a` for `a`, `a.b`, `a.b.c` — the Name an attribute chain hangs off."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _ca_module_names(tree: ast.AST) -> set[str]:
+    """Every local name bound to Commercial Agreements or one of its
+    submodules: `import dotmac_commercial_agreements[.x] [as n]` and
+    `from dotmac_commercial_agreements import service [as n]`."""
+    names = {"dotmac_commercial_agreements"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_ca_module(alias.name):
+                    names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and _is_ca_module(node.module):
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name not in _CA_EVIDENCE_COMMANDS and alias.name != "*"
+            )
+    return names
+
+
 def _guarded_references(tree: ast.AST) -> list[tuple[ast.AST, str]]:
     """Every node that names a guarded entry point, however it is spelled."""
     found: list[tuple[ast.AST, str]] = []
+    ca_modules = _ca_module_names(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in GUARDED_CALL_NAMES:
             found.append((node, node.attr))
@@ -178,18 +211,20 @@ def _guarded_references(tree: ast.AST) -> list[tuple[ast.AST, str]]:
             # their bound aliases (`module_approve` ...). Importing one under
             # any OTHER name — or unaliased — would slip past that bound-name
             # match, so the import itself is the reference.
-            if (node.module or "").startswith("dotmac_commercial_agreements"):
+            if _is_ca_module(node.module):
                 found.extend(
                     (node, alias.name)
                     for alias in node.names
-                    if alias.name in _CA_EVIDENCE_COMMANDS
-                    and (alias.asname or alias.name) not in GUARDED_CALL_NAMES
+                    if alias.name == "*"
+                    or (
+                        alias.name in _CA_EVIDENCE_COMMANDS
+                        and (alias.asname or alias.name) not in GUARDED_CALL_NAMES
+                    )
                 )
         elif (
             isinstance(node, ast.Attribute)
             and node.attr in _CA_EVIDENCE_COMMANDS
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "dotmac_commercial_agreements"
+            and _root_name(node.value) in ca_modules
         ):
             found.append((node, node.attr))
         elif (
@@ -198,7 +233,10 @@ def _guarded_references(tree: ast.AST) -> list[tuple[ast.AST, str]]:
             and node.func.id == "getattr"
             and len(node.args) >= 2
             and isinstance(node.args[1], ast.Constant)
-            and node.args[1].value in GUARDED_CALL_NAMES
+            and (
+                node.args[1].value in GUARDED_CALL_NAMES
+                or node.args[1].value in _CA_EVIDENCE_COMMANDS
+            )
         ):
             found.append((node, str(node.args[1].value)))
     return found
@@ -454,6 +492,27 @@ def test_the_detector_flags_an_unaliased_commercial_agreements_command() -> None
             "def f(db, c):\n"
             "    return dotmac_commercial_agreements.reinstate(db, c)\n"
         ),
+        "module alias": (
+            "import dotmac_commercial_agreements as ca\n"
+            "def f(db, c):\n"
+            "    return ca.approve(db, c)\n"
+        ),
+        "submodule attribute": (
+            "import dotmac_commercial_agreements.service\n"
+            "def f(db, c):\n"
+            "    return dotmac_commercial_agreements.service.activate(db, c)\n"
+        ),
+        "from-imported submodule": (
+            "from dotmac_commercial_agreements import service as svc\n"
+            "def f(db, c):\n"
+            "    return svc.reinstate(db, c)\n"
+        ),
+        "getattr": (
+            "import dotmac_commercial_agreements as ca\n"
+            "def f(db, c):\n"
+            "    return getattr(ca, 'activate')(db, c)\n"
+        ),
+        "star import": "from dotmac_commercial_agreements import *\n",
     }
     for label, source in shapes.items():
         assert find_unguarded_calls(source, filename="planted.py"), label

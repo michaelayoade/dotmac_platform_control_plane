@@ -970,3 +970,45 @@ def test_a_command_id_spent_on_approve_cannot_report_an_activate(
             )
         db.rollback()
     assert _status(engine, agreement_id) == "approved"
+
+
+def test_a_command_id_spent_on_suspend_cannot_report_a_reinstate(
+    engine: Engine,
+) -> None:
+    """NEAR MISS, reinstate side: an id spent on `suspend` and reused for
+    `reinstate` makes CA replay the suspend result; the adapter refuses (409)
+    rather than report the still-`suspended` agreement as reinstated. A fresh
+    id then reinstates normally (positive control)."""
+    agreement_id, request_id = _seed(engine, offer_code="off-near-miss-reinstate")
+    _approve_and_commit(engine, agreement_id, request_id)
+    _activate_and_commit(engine, agreement_id, request_id)
+    command_id = f"shared-{uuid.uuid4()}"
+    with Session(engine) as db:
+        agreements.suspend(
+            db,
+            agreements.TransitionCommand(
+                command_id=command_id, agreement_id=agreement_id, reason="near miss"
+            ),
+        )
+        db.commit()
+
+    with Session(engine) as db:
+        with pytest.raises(ConflictError, match="was not performed"):
+            agreements.reinstate(
+                db,
+                agreements.TransitionCommand(
+                    command_id=command_id, agreement_id=agreement_id
+                ),
+            )
+        db.rollback()
+    assert _status(engine, agreement_id) == "suspended"
+
+    with Session(engine) as db:
+        agreements.reinstate(
+            db,
+            agreements.TransitionCommand(
+                command_id=f"reinstate-{uuid.uuid4()}", agreement_id=agreement_id
+            ),
+        )
+        db.commit()
+    assert _status(engine, agreement_id) == "active"
