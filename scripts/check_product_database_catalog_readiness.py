@@ -15,10 +15,10 @@ its retirement machine-provable.  Merely publishing every module contribution
 can never make this command report product readiness.
 
 The module half of the ratchet is ACTIVE under kernel 0.1.0a100: its
-``ModuleManifest`` declares ``database_catalog``. At this pin set Control 0.1.0a16
-and Approvals 0.1.0a8 each publish a contribution; commercial_agreements,
-entitlement_allocation, licensing and release_catalog are pinned at releases
-that predate theirs and remain the explicit debt below.
+``ModuleManifest`` declares ``database_catalog``. At this pin set Control 0.1.0a16,
+Approvals 0.1.0a8 and Commercial Agreements 0.1.0a4 each publish a
+contribution; entitlement_allocation, licensing and release_catalog are pinned
+at releases that predate theirs and remain the explicit debt below.
 ``pinned_manifest_declares_contribution_field`` and the two-directional debt
 test make that premise executable: if the field or a contribution changes, the
 register changes in the same review. Retiring an entry here does not retire
@@ -50,7 +50,6 @@ CONTRIBUTION_FIELD: Final = "database_catalog"
 
 MODULE_DATABASE_CATALOG_DEBT: Final[frozenset[str]] = frozenset(
     {
-        "commercial_agreements",
         "entitlement_allocation",
         "licensing",
         "release_catalog",

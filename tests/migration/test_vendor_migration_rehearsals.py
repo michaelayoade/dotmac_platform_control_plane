@@ -54,7 +54,11 @@ ENTITLEMENT_ALLOCATION_HEAD = "ea_0003_platform_audit_log"
 # Approvals 0.1.0a7 (Gate-0 adoption) adds `ap_0003_withdrawals` past the a5
 # verification revision; nothing depends on it, so it stays a version row.
 APPROVALS_HEAD = "ap_0003_withdrawals"
-COMMERCIAL_AGREEMENTS_HEAD = "cg_0001_agreements"
+# Commercial Agreements 0.1.0a4 adds `cg_0002_approval_withdrawals` above
+# `cg_0001_agreements`. `v015` depends on the lineage ROOT `cg_0001`, so the new
+# tip is depended on by nothing and becomes a version ROW, like the approvals and
+# Control tips (before a4 the root WAS the tip, so it was an ancestor, not a row).
+COMMERCIAL_AGREEMENTS_HEAD = "cg_0002_approval_withdrawals"
 LICENSING_HEAD = "li_0001_licensing"
 # Composed at the ADR-0011 cutover. `v017` depends on the lineage ROOT
 # (`dc_0001_deployment_control`), not its tip, so the tip is depended on by
@@ -218,6 +222,7 @@ def test_fresh_install_creates_vendor_accounts(scratch_db: str) -> None:
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        COMMERCIAL_AGREEMENTS_HEAD,
         # Two more became version ROWS with the a98 / Control-a6 repin, by the
         # same rule the approvals and allocation tips already follow: a head
         # nothing depends on is a row, a head something depends on is an
@@ -478,6 +483,7 @@ def test_upgrade_from_kernel_only(scratch_db: str) -> None:
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        COMMERCIAL_AGREEMENTS_HEAD,
         KERNEL_HEAD,
         DEPLOYMENT_CONTROL_HEAD,
     }
@@ -529,6 +535,7 @@ def test_upgrade_from_previous_vendor_deployment_preserves_data(
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        COMMERCIAL_AGREEMENTS_HEAD,
         KERNEL_HEAD,
         DEPLOYMENT_CONTROL_HEAD,
     }
@@ -580,6 +587,7 @@ def test_kernel_advance_keeps_vendor_head_independent(
         VENDOR_HEAD,
         APPROVALS_HEAD,
         ENTITLEMENT_ALLOCATION_HEAD,
+        COMMERCIAL_AGREEMENTS_HEAD,
         DEPLOYMENT_CONTROL_HEAD,
     }
 

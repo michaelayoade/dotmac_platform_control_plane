@@ -364,18 +364,18 @@ reference = "forgejo"
 
 [[package]]
 name = "dotmac-commercial-agreements"
-version = "0.1.0a2"
+version = "0.1.0a4"
 description = "DotMac Commercial Agreements — the durable commercial agreement between the platform operator and a counterparty, its immutable accepted snapshot, its evidence-bound lifecycle and its append-only history (ADR-0057 § 1)"
 optional = false
 python-versions = ">=3.11,<3.14"
 groups = ["main"]
 files = [
-    {file = "dotmac_commercial_agreements-0.1.0a2-py3-none-any.whl", hash = "sha256:303195fc9f17b37d3a0a1e2395e6e7e92f9316b3a1b71bba8ad287310bb66a86"},
-    {file = "dotmac_commercial_agreements-0.1.0a2.tar.gz", hash = "sha256:a736340349426c47dd50e678e18e54c00ab6c80cd63ca2a9d9ed270aedc87e9c"},
+    {file = "dotmac_commercial_agreements-0.1.0a4-py3-none-any.whl", hash = "sha256:4f71041baa02b9959360f091b83d9e4d420ad5f77749fc625a843b04499c29bc"},
+    {file = "dotmac_commercial_agreements-0.1.0a4.tar.gz", hash = "sha256:efd37f8471c6e46a976471faf1ca09ccb7b10b31f8d7313738da4776c5d9760c"},
 ]
 
 [package.dependencies]
-dotmac-kernel = ">=0.1.0a77"
+dotmac-kernel = ">=0.1.0a100"
 sqlalchemy = ">=2.0,<3.0"
 
 [package.source]
@@ -1647,4 +1647,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.5.0)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "2d8a1c068cafd3fcc38607b93019dfd8576c018f61b64c0916e88a054cb6b94d"
+content-hash = "53e991960f6259bc1b92e448d9082fa425581894b5841d3eb5eb1af9a38dbae5"

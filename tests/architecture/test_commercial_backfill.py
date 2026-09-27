@@ -461,7 +461,7 @@ def test_agreement_enumeration_is_the_exact_pinned_owner_reader() -> None:
     dependency = project["tool"]["poetry"]["dependencies"][
         "dotmac-commercial-agreements"
     ]
-    assert dependency["version"] == "0.1.0a2"
+    assert dependency["version"] == "0.1.0a4"
 
     adapter_path = ROOT / "src" / "vendor_cp" / "contracts" / "adapter.py"
     tree = _module(adapter_path)
@@ -530,7 +530,7 @@ def test_agreements_a2_pin_has_immutable_release_oracles() -> None:
     assert not any(marker in text for marker in _A2_ORACLE_MARKERS)
     assert "Commercial Agreements a2 is deliberately absent" not in text
     assert "release oracle pending" not in text
-    assert "| `dotmac-commercial-agreements` | `0.1.0a2` | a2 | current |" in text
+    assert "| `dotmac-commercial-agreements` | `0.1.0a4` | a4 | current |" in text
     assert re.search(
         r"dotmac-commercial-agreements` `0\.1\.0a2` is published and "
         r"installable \| `release_run` \| `dotmac_starter_mt` release run "
