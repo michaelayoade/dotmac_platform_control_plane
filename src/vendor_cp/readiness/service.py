@@ -86,6 +86,9 @@ class ReadinessDetail(str, Enum):
     ACTIVATION_LEASE_STALE = RelayVerdict.ACTIVATION_LEASE_STALE.value
     ACTIVATION_DEAD_LETTERED = RelayVerdict.ACTIVATION_DEAD_LETTERED.value
     RELAY_STATE_UNKNOWN = RelayVerdict.RELAY_STATE_UNKNOWN.value
+    WITHDRAWAL_CONFLICT_UNRESOLVED = RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED.value
+    WITHDRAWAL_DEAD_LETTERED = RelayVerdict.WITHDRAWAL_DEAD_LETTERED.value
+    WITHDRAWAL_DELIVERY_FAILING = RelayVerdict.WITHDRAWAL_DELIVERY_FAILING.value
 
 
 #: TOTAL over `RelayVerdict`. A verdict with no entry here would fall through to
@@ -102,6 +105,13 @@ _FROM_RELAY: Final[dict[RelayVerdict, ReadinessDetail]] = {
     RelayVerdict.ACTIVATION_LEASE_STALE: ReadinessDetail.ACTIVATION_LEASE_STALE,
     RelayVerdict.ACTIVATION_DEAD_LETTERED: ReadinessDetail.ACTIVATION_DEAD_LETTERED,
     RelayVerdict.RELAY_STATE_UNKNOWN: ReadinessDetail.RELAY_STATE_UNKNOWN,
+    RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED: (
+        ReadinessDetail.WITHDRAWAL_CONFLICT_UNRESOLVED
+    ),
+    RelayVerdict.WITHDRAWAL_DEAD_LETTERED: ReadinessDetail.WITHDRAWAL_DEAD_LETTERED,
+    RelayVerdict.WITHDRAWAL_DELIVERY_FAILING: (
+        ReadinessDetail.WITHDRAWAL_DELIVERY_FAILING
+    ),
 }
 
 

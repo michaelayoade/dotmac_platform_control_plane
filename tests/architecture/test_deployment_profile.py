@@ -591,6 +591,10 @@ def test_production_composed_v1_publishes_exactly_its_declared_inventory() -> No
         # deployment that cannot say whether it is ready is one an orchestrator
         # assumes is. No profile may withhold it.
         "readiness",
+        # Version 5: an unresolved security_conflict holds relay health and
+        # readiness red by design, so the deployed profile must carry the one
+        # authenticated path that records its append-only resolution.
+        "withdrawal_conflicts",
     }
     # `release_evidence` is absent because it bears no route. That absence is
     # derived, not decided: an inventory says what a deployment PUBLISHES, and a

@@ -96,7 +96,7 @@ def test_a_descriptor_still_naming_the_old_head_is_refused(tree: Path) -> None:
     _patch(
         tree,
         "deploy/product.toml",
-        '"v019_relay_heartbeat"',
+        '"v020_withdrawal_outcomes"',
         '"v018_licence_delivery_intents"',
     )
     packet = build_preflight_packet(tree)

@@ -175,6 +175,18 @@ def test_the_probe_is_the_cheapest_statement_that_proves_a_round_trip() -> None:
             ReadinessDetail.ACTIVATION_DEAD_LETTERED,
         ),
         (RelayVerdict.RELAY_STATE_UNKNOWN, ReadinessDetail.RELAY_STATE_UNKNOWN),
+        (
+            RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED,
+            ReadinessDetail.WITHDRAWAL_CONFLICT_UNRESOLVED,
+        ),
+        (
+            RelayVerdict.WITHDRAWAL_DEAD_LETTERED,
+            ReadinessDetail.WITHDRAWAL_DEAD_LETTERED,
+        ),
+        (
+            RelayVerdict.WITHDRAWAL_DELIVERY_FAILING,
+            ReadinessDetail.WITHDRAWAL_DELIVERY_FAILING,
+        ),
     ],
 )
 def test_every_relay_verdict_reaches_readiness_unchanged(
@@ -221,6 +233,9 @@ def test_the_detail_vocabulary_is_closed_and_carries_no_driver_text() -> None:
         "activation_lease_stale",
         "activation_dead_lettered",
         "relay_state_unknown",
+        "withdrawal_conflict_unresolved",
+        "withdrawal_dead_lettered",
+        "withdrawal_delivery_failing",
     }
     report = _check(_UnreachableSession())
     assert "connection refused" not in report.detail.value

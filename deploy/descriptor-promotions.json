@@ -140,6 +140,30 @@
       "deploy_ordering": "cg_0002_approval_withdrawals is additive (one new append-only platform table, no change to existing tables), but the deploy path still migrates before replacing the serving app; the D16 transition fence governs any production application of this or the earlier Gate-0 heads, and nothing here is applied to production until Michael names the host.",
       "drift_reading": "Until deployed, descriptor drift against production additionally reports cg_0002_approval_withdrawals as declared-absent. That is the expected reading of a composition change, not a fault.",
       "authored_by": "Hand-authored, not written by scripts/promote_descriptor.py: a composition change has no deployment receipt. tests/architecture/test_descriptor_promotion.py recomputes the declared heads from the installed lineages and enforces byte equality, changed_sections and the carried-forward values."
+    },
+    {
+      "promoted_at": "2026-09-27",
+      "kind": "composition_change",
+      "candidate": "deploy/candidates/2026-09-27-approval-withdrawal-outcomes.toml",
+      "descriptor_sha256": "sha256:578941142fccbdb94ff771018e794fc5f3575531c62ba75fa2a3dee22a239af4",
+      "supersedes": "sha256:0f8e1f7b5d71c63eed66664e6a64c61fbcf45406291b22c820246a8e5a97fb54",
+      "summary": "Declares the migration heads Gate-0 C2 S4 will reach: the vendor lineage's v020_withdrawal_outcomes (append-only withdrawal-outcome and conflict-resolution evidence) replaces v019_relay_heartbeat. Mechanically derived: the head change is exactly the difference between the old declaration and the composed effective heads recomputed by tests/architecture/test_descriptor_promotion.py. NON-AUTHORIZING: no deployment is claimed, performed or licensed, and nothing here authorizes an execution.",
+      "changed_sections": [
+        "migration"
+      ],
+      "carried_forward": {
+        "why": "This promotion declares what a deployment WILL run and performs none, so every half of the descriptor describing the APPLICATION ARTIFACT is carried across unchanged. assembly.manifest_digest names the manifest the running deployment was promoted with (deploy/product-manifest.json, byte-unchanged); the adoption's own composition is recorded separately as deploy/prospective/product-manifest.json and may replace it only through a deployment receipt and a later promotion. Advancing it here would claim a deployment nobody performed.",
+        "image.reference": "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
+        "image.source_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
+        "assembly.manifest_digest": "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
+      },
+      "plan_input_assessment": {
+        "rule": "dotmac_platform_control_plane ADR-0013 amendment A6.4 (ratified 2026-09-25), cited with its repository.",
+        "answer": "Not a plan input, unchanged from the 2026-09-04 assessment: this is the Foundation's accepted descriptor, and no code path feeds it into propose_deployment_plan. Under Control 0.1.0a15 that path now refuses outright (a6_4_derivation_not_available) until Gate 3 supplies a derived execution plan."
+      },
+      "deploy_ordering": "v020 is additive (two new append-only platform tables, no change to existing tables); the deploy path still migrates before replacing the serving app, and the D16 transition fence governs any production application. Nothing here is applied to production until Michael names the host.",
+      "drift_reading": "Until deployed, descriptor drift against production additionally reports v020_withdrawal_outcomes as declared-absent and v019_relay_heartbeat as present-undeclared. That is the expected reading of a composition change, not a fault.",
+      "authored_by": "Hand-authored, not written by scripts/promote_descriptor.py: a composition change has no deployment receipt. tests/architecture/test_descriptor_promotion.py recomputes the declared heads from the installed lineages and enforces byte equality, changed_sections and the carried-forward values."
     }
   ]
 }

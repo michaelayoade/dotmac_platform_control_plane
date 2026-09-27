@@ -22,8 +22,7 @@ from vendor_cp.cli.exits import ExitCode, Refusal
 from vendor_cp.cli.runtime import translate
 from vendor_cp.config import ProductionConfigurationError, load_vendor_settings
 from vendor_cp.config import vendor_settings as configured
-from vendor_cp.deployment import protected_rehearsal_issuer as issuer
-from vendor_cp.deployment.protected_rehearsal_issuer import ApprovalWithdrawalConsumer
+from vendor_cp.relay.approval_router import ApprovalEventRouter
 from vendor_cp.relay.runner import (
     PlatformEventConsumers,
     RelayNotConfiguredError,
@@ -103,7 +102,7 @@ def test_production_composition_includes_both_platform_consumers() -> None:
     transport = composed(settings).transport
     assert isinstance(transport, PlatformEventConsumers)
     assert isinstance(transport.contracts, ContractEventConsumer)
-    assert isinstance(transport.approval_withdrawals, ApprovalWithdrawalConsumer)
+    assert isinstance(transport.approvals, ApprovalEventRouter)
 
 
 def test_the_consumer_matches_the_kernel_delivery_signature() -> None:
@@ -121,7 +120,7 @@ def test_the_consumer_matches_the_kernel_delivery_signature() -> None:
     ]
 
 
-def test_the_multiplexer_delivers_one_claimed_row_to_both_consumers(
+def test_the_multiplexer_routes_an_approval_event_to_the_router_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, object, object]] = []
@@ -131,9 +130,9 @@ def test_the_multiplexer_delivers_one_claimed_row_to_both_consumers(
         lambda self, event, db: calls.append(("contracts", event, db)),
     )
     monkeypatch.setattr(
-        ApprovalWithdrawalConsumer,
+        ApprovalEventRouter,
         "deliver",
-        lambda self, event, db: calls.append(("withdrawals", event, db)),
+        lambda self, event, db: calls.append(("approvals", event, db)),
     )
     event = ClaimedPlatformEvent(
         id=UUID("30000000-0000-0000-0000-000000000003"),
@@ -143,29 +142,33 @@ def test_the_multiplexer_delivers_one_claimed_row_to_both_consumers(
         correlation_id=None,
     )
     db = object()
-    PlatformEventConsumers(
-        ContractEventConsumer(), ApprovalWithdrawalConsumer()
-    ).deliver(event, db)
-    assert calls == [("contracts", event, db), ("withdrawals", event, db)]
+    PlatformEventConsumers(ContractEventConsumer(), ApprovalEventRouter()).deliver(
+        event, db
+    )
+    assert calls == [("approvals", event, db)]
 
 
-def test_current_pin_delivers_unrelated_event_without_successor_import(
+def test_the_multiplexer_routes_an_unrelated_event_to_contracts_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def unexpected_import(name: str) -> None:
-        raise AssertionError(f"unrelated delivery imported successor {name}")
-
-    monkeypatch.setattr(issuer, "import_module", unexpected_import)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        ContractEventConsumer, "deliver", lambda self, event, db: calls.append("c")
+    )
+    monkeypatch.setattr(
+        ApprovalEventRouter, "deliver", lambda self, event, db: calls.append("a")
+    )
     event = ClaimedPlatformEvent(
         id=UUID("30000000-0000-0000-0000-000000000003"),
-        event_type="unrelated.event",
+        event_type="contract.activated",
         payload={},
         attempts=0,
         correlation_id=None,
     )
-    PlatformEventConsumers(
-        ContractEventConsumer(), ApprovalWithdrawalConsumer()
-    ).deliver(event, object())
+    PlatformEventConsumers(ContractEventConsumer(), ApprovalEventRouter()).deliver(
+        event, object()
+    )
+    assert calls == ["c"]
 
 
 def test_the_signature_comparison_can_still_fail() -> None:

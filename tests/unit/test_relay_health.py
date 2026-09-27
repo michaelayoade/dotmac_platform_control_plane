@@ -27,6 +27,8 @@ from dotmac_kernel.testing import create_test_engine, isolated_session
 from sqlalchemy.orm import Session
 
 from vendor_cp.contracts.adapter import ACTIVATED_EVENT_TYPE
+from vendor_cp.relay import health as health_module
+from vendor_cp.relay.approval_router import APPROVAL_WITHDRAWN_EVENT_TYPE
 from vendor_cp.relay.health import (
     VERDICT_PRECEDENCE,
     RelayHealth,
@@ -84,12 +86,13 @@ def _event(
     event_type: str = ACTIVATED_EVENT_TYPE,
     leased_at: datetime | None = None,
     sent_at: datetime | None = None,
+    attempts: int = 0,
 ) -> PlatformOutboxEvent:
     row = PlatformOutboxEvent(
         event_type=event_type,
         payload={"agreement_id": str(uuid.uuid4())},
         status=status.value,
-        attempts=0,
+        attempts=attempts,
         available_at=available_at,
         leased_at=leased_at,
         leased_by="worker-1" if leased_at else None,
@@ -356,6 +359,9 @@ def test_an_unreadable_source_is_unknown_with_no_counts_at_all() -> None:
         health.activation_pending,
         health.activation_overdue,
         health.activation_dead,
+        health.withdrawal_failing,
+        health.withdrawal_dead,
+        health.unresolved_withdrawal_conflicts,
         health.oldest_overdue_age_seconds,
         health.heartbeat_age_seconds,
         health.last_settled_age_seconds,
@@ -419,6 +425,9 @@ def test_the_verdict_vocabulary_is_closed() -> None:
         "activation_lease_stale",
         "activation_dead_lettered",
         "relay_state_unknown",
+        "withdrawal_conflict_unresolved",
+        "withdrawal_dead_lettered",
+        "withdrawal_delivery_failing",
     }
 
 
@@ -501,6 +510,223 @@ def test_a_deployment_with_no_relay_still_reports_dead_letters(db: Session) -> N
         _observe(db, relay_expected=False).verdict
         is RelayVerdict.ACTIVATION_DEAD_LETTERED
     )
+
+
+# ── withdrawal health: failing, dead-lettered, unresolved conflict ─────────
+
+
+def test_a_failed_withdrawal_delivery_is_reported_from_the_first_attempt(
+    db: Session,
+) -> None:
+    """The ruling: CP health must expose it from the FIRST failure, not only
+    after attempt eight. `available_at` is not overdue — only `attempts > 0`
+    matters."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.PENDING,
+        available_at=NOW,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        attempts=1,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+    assert health.withdrawal_failing == 1
+
+
+def test_a_failed_withdrawal_being_retried_stays_failing(db: Session) -> None:
+    """A failed row is re-CLAIMED for each retry (and a crashed worker can leave
+    it claimed). Counting only PENDING would drop it out of health during every
+    retry window; health must stay red from the first failure onward."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.CLAIMED,
+        available_at=NOW,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        leased_at=NOW,
+        attempts=1,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+    assert health.withdrawal_failing == 1
+
+
+def test_a_first_claim_of_a_withdrawal_is_not_failing(db: Session) -> None:
+    """NON-VACUITY for the claimed case: a claimed row that has never failed
+    (attempts == 0) is an ordinary first delivery, not a failure."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.CLAIMED,
+        available_at=NOW,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        leased_at=NOW,
+        attempts=0,
+    )
+    health = _observe(db)
+    assert health.withdrawal_failing == 0
+    assert health.verdict is not RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+
+
+def test_a_withdrawal_row_with_no_failed_attempt_yet_is_not_failing(
+    db: Session,
+) -> None:
+    """NON-VACUITY: the same pending row, before any attempt, must not trip the
+    verdict — proving `attempts > 0` is what the count actually measures."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.PENDING,
+        available_at=NOW,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        attempts=0,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.DRAINING
+    assert health.withdrawal_failing == 0
+
+
+def test_a_dead_lettered_withdrawal_is_its_own_verdict(db: Session) -> None:
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.DEAD,
+        available_at=OVERDUE_AT,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.WITHDRAWAL_DEAD_LETTERED
+    assert health.withdrawal_dead == 1
+
+
+def test_a_dead_lettered_activation_is_not_reported_as_a_withdrawal_dead_letter(
+    db: Session,
+) -> None:
+    """NON-VACUITY / sensitivity: `withdrawal_dead` is scoped to
+    `approval.withdrawn`, so a dead-lettered ACTIVATION event must fall through
+    to `ACTIVATION_DEAD_LETTERED` rather than the withdrawal verdict."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.DEAD,
+        available_at=OVERDUE_AT,
+        event_type=ACTIVATED_EVENT_TYPE,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.ACTIVATION_DEAD_LETTERED
+    assert health.withdrawal_dead == 0
+
+
+def test_an_unresolved_withdrawal_conflict_is_red(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `security_conflict` outcome table uses PostgreSQL-only column types
+    (JSONB, `postgresql.UUID`) and cannot be created on the in-memory SQLite
+    engine this file uses (see `tests/unit/test_withdrawal_outcomes.py`'s own
+    docstring) — the live proof is `tests/migration/test_withdrawal_health.py`.
+    Here the count is monkeypatched, exactly as `heartbeat.read` is elsewhere
+    in this file, to drive every branch of `_verdict` without a database that
+    cannot exist."""
+    _alive(db)
+    monkeypatch.setattr(health_module, "unresolved_conflicts", lambda _db: 1)
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED
+    assert health.unresolved_withdrawal_conflicts == 1
+
+
+def test_a_zero_conflict_count_is_not_red(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NON-VACUITY for the test above: a module that always reported
+    `WITHDRAWAL_CONFLICT_UNRESOLVED` would pass it while measuring nothing."""
+    _alive(db)
+    monkeypatch.setattr(health_module, "unresolved_conflicts", lambda _db: 0)
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.DRAINING
+    assert health.unresolved_withdrawal_conflicts == 0
+
+
+def test_an_unresolved_conflict_outranks_a_withdrawal_dead_letter(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PRECEDENCE. A red conflict must never read as ready, and it must never
+    read as merely a dead letter either — resolving neither is the same
+    action, but only one of the two names the security question."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.DEAD,
+        available_at=OVERDUE_AT,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+    )
+    monkeypatch.setattr(health_module, "unresolved_conflicts", lambda _db: 1)
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED
+
+
+def test_a_withdrawal_dead_letter_outranks_a_failing_withdrawal(
+    db: Session,
+) -> None:
+    """PRECEDENCE. Terminal outranks retryable, exactly as
+    `ACTIVATION_DEAD_LETTERED` outranks the activation stall verdicts."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.DEAD,
+        available_at=OVERDUE_AT,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+    )
+    _event(
+        db,
+        status=OutboxStatus.PENDING,
+        available_at=NOW,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        attempts=1,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.WITHDRAWAL_DEAD_LETTERED
+
+
+def test_a_withdrawal_dead_letter_outranks_an_activation_dead_letter(
+    db: Session,
+) -> None:
+    """PRECEDENCE. Both are terminal; the withdrawal fault is diagnosed first
+    because it is the one Michael's ruling requires never to hide."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.DEAD,
+        available_at=OVERDUE_AT,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+    )
+    _event(
+        db,
+        status=OutboxStatus.DEAD,
+        available_at=OVERDUE_AT,
+        event_type=ACTIVATED_EVENT_TYPE,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.WITHDRAWAL_DEAD_LETTERED
+    assert health.dead_total == 2
+    assert health.activation_dead == 1
+    assert health.withdrawal_dead == 1
+
+
+def test_a_failing_withdrawal_outranks_a_stopped_relay(db: Session) -> None:
+    """PRECEDENCE. Placed directly after `RELAY_STATE_UNKNOWN`: the withdrawal
+    family is diagnosed before the generic activation/liveness verdicts, so it
+    is never hidden behind a symptom it could also produce."""
+    _alive(db, polled_at=NOW - timedelta(seconds=3600))
+    _event(
+        db,
+        status=OutboxStatus.PENDING,
+        available_at=NOW,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        attempts=1,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
 
 
 def test_expecting_a_relay_is_the_default(db: Session) -> None:

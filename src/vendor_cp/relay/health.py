@@ -82,6 +82,8 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.contracts.adapter import ACTIVATED_EVENT_TYPE
 from vendor_cp.relay import heartbeat
+from vendor_cp.relay.approval_router import APPROVAL_WITHDRAWN_EVENT_TYPE
+from vendor_cp.relay.withdrawal_outcomes import unresolved_conflicts
 
 
 class RelayVerdict(str, Enum):
@@ -111,6 +113,18 @@ class RelayVerdict(str, Enum):
     ACTIVATION_DEAD_LETTERED = "activation_dead_lettered"
     #: A source could not be read. Not a green zero, and not a guess.
     RELAY_STATE_UNKNOWN = "relay_state_unknown"
+    #: A recorded `security_conflict` withdrawal outcome has no resolution row
+    #: yet. Michael's ruling (2026-09-26/27): health stays RED until an
+    #: explicit append-only resolution/redrive record exists — a red conflict
+    #: must never read as ready.
+    WITHDRAWAL_CONFLICT_UNRESOLVED = "withdrawal_conflict_unresolved"
+    #: An `approval.withdrawn` delivery exhausted `max_attempts` and the row is
+    #: retained as a dead letter. Terminal, like `ACTIVATION_DEAD_LETTERED`.
+    WITHDRAWAL_DEAD_LETTERED = "withdrawal_dead_lettered"
+    #: An `approval.withdrawn` delivery has failed at least once and is still
+    #: pending. Reported from the FIRST failed attempt, not only after the
+    #: row is dead-lettered — the ruling requires this to surface early.
+    WITHDRAWAL_DELIVERY_FAILING = "withdrawal_delivery_failing"
 
 
 #: Severity order, most severe first. The verdict is the first member whose
@@ -124,6 +138,9 @@ class RelayVerdict(str, Enum):
 #: state that needs a human rather than a restart.
 VERDICT_PRECEDENCE: Final[tuple[RelayVerdict, ...]] = (
     RelayVerdict.RELAY_STATE_UNKNOWN,
+    RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED,
+    RelayVerdict.WITHDRAWAL_DEAD_LETTERED,
+    RelayVerdict.WITHDRAWAL_DELIVERY_FAILING,
     RelayVerdict.ACTIVATION_DEAD_LETTERED,
     RelayVerdict.RELAY_NOT_RUNNING,
     RelayVerdict.ACTIVATION_LEASE_STALE,
@@ -153,6 +170,12 @@ class RelayHealth:
     activation_pending: int | None = None
     activation_overdue: int | None = None
     activation_dead: int | None = None
+    #: The same shape, narrowed to `approval.withdrawn`: pending rows that have
+    #: failed at least once, dead-lettered rows, and unresolved
+    #: `security_conflict` outcomes. See the module docstring's ruling.
+    withdrawal_failing: int | None = None
+    withdrawal_dead: int | None = None
+    unresolved_withdrawal_conflicts: int | None = None
     #: Age of the freshest heartbeat, and of the freshest settled delivery.
     #: `None` for "never" — which is a different fact from "long ago" and the
     #: two must not be collapsed: a relay that has never reported and one that
@@ -243,6 +266,22 @@ def relay_health(
         activation_dead = _count(
             db, status=OutboxStatus.DEAD, event_type=ACTIVATED_EVENT_TYPE
         )
+        # PENDING *and* CLAIMED: a failed row is re-claimed for every retry,
+        # and a crashed worker can leave it claimed. Counting only PENDING
+        # would drop a failing withdrawal out of health during each retry.
+        withdrawal_failing = sum(
+            _count(
+                db,
+                status=status,
+                event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+                attempts_greater_than=0,
+            )
+            for status in (OutboxStatus.PENDING, OutboxStatus.CLAIMED)
+        )
+        withdrawal_dead = _count(
+            db, status=OutboxStatus.DEAD, event_type=APPROVAL_WITHDRAWN_EVENT_TYPE
+        )
+        unresolved_withdrawal_conflicts = unresolved_conflicts(db)
     except Exception:  # noqa: BLE001 - every failure mode is the same answer
         return RelayHealth(verdict=RelayVerdict.RELAY_STATE_UNKNOWN)
 
@@ -258,6 +297,9 @@ def relay_health(
             heartbeat_stale_after=heartbeat_stale_after,
             settled_within=settled_within,
             relay_expected=relay_expected,
+            withdrawal_failing=withdrawal_failing,
+            withdrawal_dead=withdrawal_dead,
+            unresolved_withdrawal_conflicts=unresolved_withdrawal_conflicts,
         ),
         pending_total=pending_total,
         overdue_total=overdue_total,
@@ -267,6 +309,9 @@ def relay_health(
         activation_pending=activation_pending,
         activation_overdue=activation_overdue,
         activation_dead=activation_dead,
+        withdrawal_failing=withdrawal_failing,
+        withdrawal_dead=withdrawal_dead,
+        unresolved_withdrawal_conflicts=unresolved_withdrawal_conflicts,
         heartbeat_age_seconds=heartbeat_age,
         last_settled_age_seconds=settled_age,
         relay_ever_reported=beat.ever_reported if beat.observed else None,
@@ -284,8 +329,17 @@ def _verdict(
     heartbeat_stale_after: timedelta,
     settled_within: timedelta,
     relay_expected: bool,
+    withdrawal_failing: int,
+    withdrawal_dead: int,
+    unresolved_withdrawal_conflicts: int,
 ) -> RelayVerdict:
     """First member of `VERDICT_PRECEDENCE` whose condition holds."""
+    if unresolved_withdrawal_conflicts > 0:
+        return RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED
+    if withdrawal_dead > 0:
+        return RelayVerdict.WITHDRAWAL_DEAD_LETTERED
+    if withdrawal_failing > 0:
+        return RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
     if dead_total > 0:
         return RelayVerdict.ACTIVATION_DEAD_LETTERED
     if relay_expected:
@@ -323,6 +377,7 @@ def _count(
     event_type: str | None = None,
     due_at_or_before: datetime | None = None,
     leased_at_or_before: datetime | None = None,
+    attempts_greater_than: int | None = None,
 ) -> int:
     statement = (
         select(func.count())
@@ -338,6 +393,10 @@ def _count(
     if leased_at_or_before is not None:
         statement = statement.where(
             PlatformOutboxEvent.leased_at <= leased_at_or_before
+        )
+    if attempts_greater_than is not None:
+        statement = statement.where(
+            PlatformOutboxEvent.attempts > attempts_greater_than
         )
     return int(db.execute(statement).scalar_one())
 

@@ -251,6 +251,14 @@ OWNERS: Final[tuple[Owner, ...]] = (
         False,
         "report whether the platform outbox is being drained",
     ),
+    # ── withdrawal-conflicts ───────────────────────────────────────────────
+    Owner(
+        "withdrawal-conflicts list",
+        "vendor_cp.relay.withdrawal_outcomes",
+        "list_unresolved_conflicts",
+        False,
+        "list unresolved approval-withdrawal security_conflict outcomes",
+    ),
     # ── deployment ─────────────────────────────────────────────────────────
     Owner(
         "deployment register-target",

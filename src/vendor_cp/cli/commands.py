@@ -632,6 +632,41 @@ def relay_health(args: argparse.Namespace) -> Result:
     return Result(command="relay health", data=_fields(health))
 
 
+def withdrawal_conflicts_list(args: argparse.Namespace) -> Result:
+    """Every unresolved `security_conflict` withdrawal outcome, oldest first.
+
+    Read-only. Prints identity only (`id`, `event_id`, `reason_code`,
+    `recorded_at`) — never the `evidence` payload a conflict outcome carries.
+
+    There is deliberately no `withdrawal-conflicts resolve` command here yet:
+    the design calls for the actor to come from an authenticated platform
+    admin, never a free-text flag, and this CLI has no authenticated-admin
+    session pattern to draw that actor from — every existing mutating command
+    (`deployment register-target`, `deployment set-desired-state`, ...) takes
+    `--actor-ref` as plain text instead. Inventing an auth path here was
+    explicitly out of scope; see the S4-C packet.
+    """
+    from vendor_cp.relay.withdrawal_outcomes import list_unresolved_conflicts
+
+    with platform_db() as db:
+        outcomes = list_unresolved_conflicts(db)
+    return Result(
+        command="withdrawal-conflicts list",
+        data={
+            "count": len(outcomes),
+            "outcomes": [
+                {
+                    "id": str(outcome.id),
+                    "event_id": str(outcome.event_id),
+                    "reason_code": outcome.reason_code,
+                    "recorded_at": outcome.recorded_at.isoformat(),
+                }
+                for outcome in outcomes
+            ],
+        },
+    )
+
+
 # ── deployment ──────────────────────────────────────────────────────────────
 
 
@@ -987,4 +1022,5 @@ __all__ = [
     "release_catalogue",
     "release_pins",
     "release_record",
+    "withdrawal_conflicts_list",
 ]

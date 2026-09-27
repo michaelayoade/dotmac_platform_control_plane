@@ -457,6 +457,10 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
             "runtime",
         }
     ),
+    # The engine-free FastAPI adapter for the platform session, used by new
+    # routers instead of widening the retiring `dotmac_kernel.db` import. Ships
+    # in the pinned 0.1.0a100 and below, so it raises nothing.
+    "dotmac_kernel.deps": frozenset({"get_platform_db"}),
     "dotmac_kernel.features": frozenset({"FeatureManifest"}),
     "dotmac_kernel.idempotency": frozenset(
         {"IdempotentOutcome", "execute_once_platform", "fingerprint_of"}
@@ -522,6 +526,8 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
     ),
     "dotmac_kernel.security": frozenset({"decode_access_token", "hash_token"}),
     "dotmac_kernel.session_runtime": frozenset({"DatabaseRuntime"}),
+    # The engine-free re-export of `conflict_savepoint`; same reason as `deps`.
+    "dotmac_kernel.transactions": frozenset({"conflict_savepoint"}),
 }
 
 #: The subset of the above whose FIRST-SHIPPING kernel version is established

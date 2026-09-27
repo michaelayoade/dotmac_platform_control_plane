@@ -3,9 +3,10 @@
 This module owns no decision. The kernel owns leasing, backoff, dead-lettering
 and the two connection identities; `dotmac-entitlement-allocation` owns what a
 valid allocation is; `dotmac-commercial-agreements` owns whether an agreement is
-active. The composed transport routes activation facts to ContractEventConsumer
-and issuer withdrawal facts to ApprovalWithdrawalConsumer. The latter's future
-Control API stays lazily imported until that event is delivered.
+active. The composed transport routes activation facts to `ContractEventConsumer`
+and every `approval.*` fact to `ApprovalEventRouter`, which refuses an event type
+or subject type it does not own rather than settling it silently. Both Control
+and Commercial Agreements stay lazily imported until such an event is delivered.
 
 ## Two connections, THREE ROLES, ONE DATABASE
 
@@ -64,8 +65,8 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.allocations.consumer import ContractEventConsumer
 from vendor_cp.config import VendorSettings, vendor_settings
-from vendor_cp.deployment.protected_rehearsal_issuer import ApprovalWithdrawalConsumer
 from vendor_cp.relay import heartbeat
+from vendor_cp.relay.approval_router import ApprovalEventRouter
 
 logger = logging.getLogger("vendor_cp.relay.runner")
 
@@ -87,14 +88,22 @@ class RelayNotConfiguredError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class PlatformEventConsumers:
-    """Route the one claimed event to each composed platform consumer."""
+    """Route the one claimed event to its owning platform consumer.
+
+    An `approval.` event goes ONLY to the router — never also to
+    `contracts` — because the router is the explicit, refusing gate S4-B2
+    put in front of every approval-withdrawal subject (Knowledge
+    `approval-withdrawal-barrier-ruling-2026-09-26` v5, ruling 1).
+    """
 
     contracts: ContractEventConsumer
-    approval_withdrawals: ApprovalWithdrawalConsumer
+    approvals: ApprovalEventRouter
 
     def deliver(self, event: ClaimedPlatformEvent, platform_db: Session) -> None:
+        if event.event_type.startswith("approval."):
+            self.approvals.deliver(event, platform_db)
+            return
         self.contracts.deliver(event, platform_db)
-        self.approval_withdrawals.deliver(event, platform_db)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +187,7 @@ def composed(settings: VendorSettings = vendor_settings) -> RelayComposition:
         delivery_sessions=runtime.platform_session_factory,
         transport=PlatformEventConsumers(
             contracts=ContractEventConsumer(),
-            approval_withdrawals=ApprovalWithdrawalConsumer(),
+            approvals=ApprovalEventRouter(),
         ),
     )
 
