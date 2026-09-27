@@ -258,7 +258,11 @@ def _require_autocommit(conn: Connection) -> None:
     On a transactional connection the REVOKE is invisible to every other
     backend until this connection commits, and a rollback would erase the
     fence while a `FenceProof` claiming otherwise still exists."""
-    if conn.get_isolation_level() != "AUTOCOMMIT":
+    # The DRIVER connection's own autocommit flag, not
+    # `Connection.get_isolation_level()`: that queries the server's isolation
+    # level, which still reads "read committed" under autocommit.
+    dbapi_connection = conn.connection.dbapi_connection
+    if getattr(dbapi_connection, "autocommit", False) is not True:
         raise FenceRefused(
             FenceRefusalCode.CONNECTION_NOT_AUTOCOMMIT,
             "the connection is not AUTOCOMMIT; a REVOKE issued on it is "

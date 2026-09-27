@@ -205,7 +205,8 @@ def compare_heads(
     if image_document is None:
         return HeadsVerdict.DOCUMENT_ABSENT
 
-    if image_document is UNREADABLE_DOCUMENT:
+    if not isinstance(image_document, Mapping):
+        # `UNREADABLE_DOCUMENT`, the only non-Mapping value left here.
         return HeadsVerdict.DOCUMENT_UNREADABLE
 
     if image_document.get("schema") != IMAGE_HEADS_SCHEMA:
