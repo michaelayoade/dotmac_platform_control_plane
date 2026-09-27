@@ -207,16 +207,22 @@ def find_receipt(db: Session, command_id: str) -> RecordedIssuerReceipt | None:
 
 def issued_authorization_refs(db: Session, plan_id: UUID) -> tuple[str, ...]:
     """The `control_ref` of every `issue_authorization` receipt for this plan,
-    oldest first. Read-only.
+    oldest first (`recorded_at`, with `id` as a tiebreaker for rows recorded
+    in the same instant, so two concurrent drains lock authorizations in the
+    same order rather than racing on tie order). Read-only.
 
-    D18-D's index: CP asks only about authorizations IT ITSELF issued, which
-    is exactly this ledger. There is no public Control read listing a plan's
-    authorizations, and this module never imports Control's internal models.
-    A receipt-less authorization (one issued without going through
-    `issue_authorization`, hence never recorded here) is out of scope: every
-    caller-facing issuance path in this codebase records a receipt in the
-    same transaction as Control's call, so this index is complete for
-    everything CP itself can have issued.
+    D18-D's index: CP asks only about authorizations IT ITSELF issued through
+    THIS module's own `issue_authorization` seam, from migration `v021`
+    onward, in a transaction that committed as a whole. There is no public
+    Control read listing a plan's authorizations, and this module never
+    imports Control's internal models. This is NOT a claim of completeness
+    against Control's own ledger: an authorization issued before `v021`
+    existed, or one issued by a caller that itself swallowed a post-issuance
+    error and still committed (bypassing `record_receipt`), would be invisible
+    here. Both are bounded by Control's own permanent refusal once the plan's
+    approval is revoked (`APPROVAL_NOT_STANDING`) -- this index is what makes
+    revocation an active, converging step rather than the only backstop, not
+    the only thing standing between a withdrawn plan and a live authorization.
     """
     rows = db.execute(
         select(IssuerCommandReceipt.control_ref)
@@ -224,7 +230,7 @@ def issued_authorization_refs(db: Session, plan_id: UUID) -> tuple[str, ...]:
             IssuerCommandReceipt.plan_id == plan_id,
             IssuerCommandReceipt.verb == ISSUE_AUTHORIZATION,
         )
-        .order_by(IssuerCommandReceipt.recorded_at)
+        .order_by(IssuerCommandReceipt.recorded_at, IssuerCommandReceipt.id)
     )
     return tuple(row[0] for row in rows)
 

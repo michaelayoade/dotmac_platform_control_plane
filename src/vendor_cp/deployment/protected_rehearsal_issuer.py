@@ -515,6 +515,19 @@ def consume_authorization(
     against) must equal `plan_id`, checked with Control's public parser
     (`RehearsalIssuerAuthorizationV1.parse`) before the hold is taken or
     Control is called at all. See `AuthorizationPlanMismatch` for why.
+
+    Control is then handed `parsed.as_mapping()` -- the PARSED-and-rebuilt
+    document -- rather than the raw `authorization_document` the caller
+    passed in. Confirmed against Control a16's own source
+    (`rehearsal_issuer_authorization.py`): `.as_mapping()` is `.parse()`'s
+    exact inverse (it is how the envelope is canonicalised for signing and
+    for the ledger's stored `authorization_envelope` in the first place), so
+    Control's own re-parse of it reproduces an identical statement, and its
+    byte-for-byte ledger comparison is unaffected. Handing Control the
+    document CP itself just verified -- rather than trusting a second,
+    independent read of the caller's raw object -- means Control can never
+    see a different document than the one this function's own
+    `AuthorizationPlanMismatch` check just passed.
     """
     control = import_module("dotmac_deployment_control")
 
@@ -541,7 +554,7 @@ def consume_authorization(
     def transition(held: HeldPlatformApproval) -> object:
         return control.stage_rehearsal_issuer_consumption(
             db,
-            authorization_document=authorization_document,
+            authorization_document=parsed.as_mapping(),
             harness_evidence_document=harness_evidence_document,
         )
 
@@ -671,12 +684,31 @@ def _with_authorization_revocation(
     event_id: UUID,
 ) -> ApprovalWithdrawalResult:
     """Attempt authorization revocation on any result whose `reason_code` is
-    in `_APPROVAL_NO_LONGER_STANDS`, so a replay or a repaired redrive of ANY
-    of those paths still converges the authorizations (item 3's requirement).
-    Every other result passes through unchanged.
+    in `_APPROVAL_NO_LONGER_STANDS` (item 3's requirement). Every other result
+    passes through unchanged.
+
+    This makes the classifier itself idempotent -- calling it again for the
+    SAME event, before any outcome has been recorded, safely re-attempts and
+    converges. It is NOT a claim that a committed `authorization_revocation_
+    refused` conflict self-heals in production: `approval_router.py` settles
+    each event at most once (a second delivery with an identical payload
+    digest is a no-op that never reaches this function again), and Approvals'
+    own `withdraw_request` refuses to withdraw a request that is no longer a
+    standing completed approval, so a genuinely SECOND, DIFFERENT withdrawal
+    event for the same plan's approval cannot occur either. Repairing a
+    recorded conflict therefore needs a separate event or an explicit repair
+    command -- neither ships in this change (tracked as a follow-up). Safety
+    stays bounded regardless: once the plan's approval is revoked, Control
+    refuses `stage_rehearsal_issuer_consumption` on `APPROVAL_NOT_STANDING`
+    permanently, whether or not the authorization row itself was revoked.
     """
     if result.reason_code not in _APPROVAL_NO_LONGER_STANDS:
         return result
+    # actor_ref=None matches the plan revocation on every path that reaches
+    # here: `classify_approval_withdrawal`'s own `control.revoke_plan_approval`
+    # call above never supplies an `actor_ref` either (the `approval.withdrawn`
+    # payload carries no actor identity to forward), so this is the SAME
+    # actor ref the plan revocation used on this path, not a narrower one.
     attempt = _revoke_issued_authorizations(
         db, plan_id=plan_id, event_id=event_id, actor_ref=None
     )
@@ -688,6 +720,13 @@ def _with_authorization_revocation(
                 "authorizations_revoked": list(attempt.revoked),
                 "authorizations_not_revocable": list(attempt.not_revocable),
                 "authorization_conflicts": list(attempt.conflicts),
+                # Provenance (finding 3): the plan-revocation side of THIS
+                # event still committed even though the authorization side
+                # did not, so an operator reading this conflict sees that
+                # the plan is settled and only the named authorizations need
+                # repair.
+                "withdrawal_disposition": result.disposition.value,
+                "withdrawal_reason_code": result.reason_code,
             },
         )
     return ApprovalWithdrawalResult(
