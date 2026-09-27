@@ -153,10 +153,47 @@ The rehearsal-issuer signer is Ed25519, held at the already-declared path
     source raises rather than starting degraded). The rehearsal-issuer
     verifier must accept authorizations signed under either the retiring or
     the new version for a defined overlap window, `<placeholder>`.
-  - *Revocation:* the key version is marked revoked in OpenBao's version
-    metadata; any authorization signed under a revoked version is refused by
-    the rehearsal issuer's verifier at consumption time (§ 7, "use after
-    revocation").
+  - *Revocation* has TWO distinct meanings, with different owners. Do not
+    conflate them.
+    1. **Authorization / lease revocation stays with Control.** Revoking an
+       issued authorization or its lease is Control's decision
+       (`revoke_rehearsal_issuer_authorization`), recorded in Control's
+       ledger, and consumption refuses a revoked authorization by reading that
+       ledger. It involves no key operation.
+    2. **Key compromise is an explicit, tested verifier trust state.** Marking
+       an OpenBao KV version deleted, destroyed or otherwise revoked does NOT,
+       by itself, revoke anything. A verifier holding the public key it loaded
+       at process start still verifies every signature that key made, and
+       learns nothing from a metadata change it never reads (OpenBao KV v2
+       version operations: https://openbao.org/docs/secrets/kv/kv-v2/).
+       Therefore:
+       - The verifier's trust state is an explicit, installed value:
+         `trusted_key_ids` (key ID plus fingerprint per trusted version) and
+         `revoked_key_ids`. It holds public key material and identifiers only,
+         never the private key. It is sourced from a non-secret, access-
+         controlled record, `<placeholder: trust-state path>`, and installed at
+         process start alongside the signer.
+       - **Refusal gate:** at consumption, a signature whose key ID is in
+         `revoked_key_ids`, or is absent from `trusted_key_ids`, is refused,
+         independently of the signature verifying.
+       - **Refresh is explicit, never a TTL or background poll** (the kernel
+         secret-source rule): a named, audited operator command that re-reads
+         the trust state and installs it on every running CP process.
+       - **Unlike rotation, a failed compromise refresh FAILS CLOSED.** If the
+         trust state cannot be read or installed, the verifier refuses every
+         consumption until a refresh succeeds. It must never keep the working
+         set, because the working set is what is compromised.
+       - **The cache window is explicit.** Between marking a key compromised
+         and the refresh completing on every process, a cached verifier still
+         accepts that key's signatures. The compromise runbook is therefore:
+         (a) add the key ID to `revoked_key_ids` in the trust-state record;
+         (b) run the refresh on every CP process and confirm each reports the
+         new trust-state version;
+         (c) revoke every outstanding authorization signed by that key through
+         Control (meaning 1);
+         (d) rotate the signer.
+         The runbook is complete only when (b) is confirmed. Marking the
+         OpenBao version alone is never the step that stops acceptance.
 
 ## 5. Controller identity — per-run OpenSSH key
 
@@ -217,7 +254,11 @@ it — these are written when D's workflow YAML and harness code exist.
 | Reused controller key across runs | Per-run key-generation step (§ 5) plus fingerprint-freshness check in harness evidence validation | Harness evidence refused as stale/reused identity | `test_harness_evidence_refuses_reused_controller_key` |
 | Fingerprint mismatch between evidence and lease | Rehearsal-issuer consumption check cross-referencing harness-evidence fingerprint against the lease record (§ A7.4) | Consumption refused | `test_consumption_refuses_fingerprint_mismatch` |
 | Replayed consumption | `dotmac-deployment-control`'s existing single-use consumption logic | Second consumption refused | `test_consumption_refuses_replay` (extends existing single-use coverage per § A7.1's mechanism proof) |
-| Use after revocation | Rehearsal-issuer verifier checking key-version revocation status (§ 4) | Verification refused | `test_verification_refuses_revoked_key_version` |
+| Use after authorization/lease revocation | Control's authorization ledger, read at consumption (§ 4, meaning 1) | Consumption refused | `test_consumption_refuses_a_control_revoked_authorization` |
+| Use of a compromised key before the trust-state refresh | Verifier trust state (§ 4, meaning 2): the cache window is explicit | Still ACCEPTED (documents the window; the runbook closes it) | `test_cached_trust_state_accepts_until_refreshed` |
+| Use of a compromised key after the trust-state refresh | Verifier refusal gate on `revoked_key_ids` (§ 4, meaning 2) | Consumption refused, even though the signature verifies | `test_refreshed_trust_state_refuses_a_revoked_key_id` |
+| A key ID absent from the trusted set | Verifier refusal gate on `trusted_key_ids` (§ 4) | Consumption refused | `test_untrusted_key_id_is_refused` |
+| A failed compromise refresh | Verifier trust-state refresh (§ 4, meaning 2) | FAIL CLOSED: every consumption refused until a refresh succeeds | `test_failed_trust_state_refresh_fails_closed` |
 
 ## 8. Who does what
 
@@ -228,6 +269,7 @@ Provisioning — Michael only; no agent performs any of these:
 | Create the § 2 GitHub Environment and configure the required reviewer + `main`-only branch policy | Michael |
 | Create the OpenBao JWT auth role and its policies (§ 3, § 4) | Michael |
 | Generate and store the Ed25519 signer at `secret/dotmac/platform-cp/rehearsal-issuer/signing-key` (§ 4) | Michael |
+| Create the verifier trust-state record (`trusted_key_ids`, `revoked_key_ids`; public identifiers only) at `<placeholder: trust-state path>` and grant CP's service identity read on it (§ 4) | Michael |
 | Configure the OpenBao SSH CA / signing role for controller certificates (§ 5) | Michael |
 | Set the repository variables — the observer user, the jump key reference, and the inside-vantage variable that `docs/inventories/lane3-acceptance-criteria.md` requires, alongside the existing `LANE3_PROBE_HOST` (§ A7.5) | Michael |
 
@@ -239,6 +281,10 @@ Agent-doable source work, once the above is accepted and provisioned:
 - The controller-fingerprint derivation code (§ 5).
 - The startup signer install call site (`install_rehearsal_issuer_security`,
   § 4) wiring CP's process start to the OpenBao read.
+- The verifier trust state (§ 4, meaning 2): its install at start, the
+  explicit audited refresh command (which fails closed on failure), and the
+  consumption refusal gate on `revoked_key_ids`/`trusted_key_ids`, with the
+  five § 7 trust-state tests. Authorization/lease revocation stays Control's.
 - Work Packet E's harness and receipt, once D's workflow evidence exists to
   consume (§ 9).
 
