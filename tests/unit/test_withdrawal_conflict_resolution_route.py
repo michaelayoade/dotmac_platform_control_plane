@@ -22,7 +22,8 @@ from datetime import UTC, datetime
 
 import pytest
 from dotmac_kernel import PlatformAdmin
-from dotmac_kernel.db import get_platform_db
+from dotmac_kernel.config import settings
+from dotmac_kernel.deps import get_platform_db
 from dotmac_kernel.errors import register_error_handlers
 from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import FastAPI
@@ -39,6 +40,13 @@ from vendor_cp.relay.withdrawal_outcomes import (
 )
 
 OUTCOME_ID = uuid.uuid4()
+
+#: The platform surface exists ONLY on the platform root host — off it
+#: `require_platform_host` 404s before authentication is ever reached (see
+#: `tests/unit/test_console_browser_authentication.py`, which reads the same
+#: setting for the same reason).
+_HOST = settings.platform_root_domain
+RESOLVE_URL = f"http://{_HOST}/platform/relay/withdrawal-conflicts/{OUTCOME_ID}/resolve"
 
 
 @pytest.fixture
@@ -75,7 +83,7 @@ def test_no_admin_is_unauthorized(app: FastAPI) -> None:
     app.dependency_overrides[get_platform_db] = lambda: object()
     with TestClient(app) as client:
         response = client.post(
-            f"/platform/relay/withdrawal-conflicts/{OUTCOME_ID}/resolve",
+            RESOLVE_URL,
             json={"resolution": "dismissed", "reason": "x"},
         )
     assert response.status_code == 401
@@ -92,7 +100,7 @@ def test_an_authenticated_admin_resolves(
 
     monkeypatch.setattr(withdrawal_router, "resolve_conflict", _fake_resolve)
     response = authenticated_client.post(
-        f"/platform/relay/withdrawal-conflicts/{OUTCOME_ID}/resolve",
+        RESOLVE_URL,
         json={"resolution": "dismissed", "reason": "reviewed and safe"},
     )
     assert response.status_code == 200
@@ -111,7 +119,7 @@ def test_a_second_resolve_is_a_conflict(
 
     monkeypatch.setattr(withdrawal_router, "resolve_conflict", _fake_resolve)
     response = authenticated_client.post(
-        f"/platform/relay/withdrawal-conflicts/{OUTCOME_ID}/resolve",
+        RESOLVE_URL,
         json={"resolution": "dismissed", "reason": "reviewed and safe"},
     )
     assert response.status_code == 409
@@ -125,7 +133,7 @@ def test_an_unknown_outcome_is_not_found(
 
     monkeypatch.setattr(withdrawal_router, "resolve_conflict", _fake_resolve)
     response = authenticated_client.post(
-        f"/platform/relay/withdrawal-conflicts/{OUTCOME_ID}/resolve",
+        RESOLVE_URL,
         json={"resolution": "dismissed", "reason": "reviewed and safe"},
     )
     assert response.status_code == 404
@@ -141,7 +149,7 @@ def test_a_non_conflict_outcome_is_a_conflict_response(
 
     monkeypatch.setattr(withdrawal_router, "resolve_conflict", _fake_resolve)
     response = authenticated_client.post(
-        f"/platform/relay/withdrawal-conflicts/{OUTCOME_ID}/resolve",
+        RESOLVE_URL,
         json={"resolution": "dismissed", "reason": "reviewed and safe"},
     )
     assert response.status_code == 409
@@ -159,7 +167,7 @@ def test_an_empty_reason_is_rejected_before_the_owner_is_called(
 
     monkeypatch.setattr(withdrawal_router, "resolve_conflict", _fake_resolve)
     response = authenticated_client.post(
-        f"/platform/relay/withdrawal-conflicts/{OUTCOME_ID}/resolve",
+        RESOLVE_URL,
         json={"resolution": "dismissed", "reason": ""},
     )
     assert response.status_code == 422
