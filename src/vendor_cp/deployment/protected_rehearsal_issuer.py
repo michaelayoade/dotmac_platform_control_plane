@@ -245,12 +245,22 @@ def approve_issuer_plan(
             )
         control_ref = str(result.id)
         existing = find_receipt(db, command_id)
-        if existing is not None and existing.control_ref != control_ref:
-            raise IssuerReceiptMismatch(
-                f"command id {command_id!r} recorded control_ref "
-                f"{existing.control_ref!r}, but this approve_plan call "
-                f"produced {control_ref!r}"
-            )
+        if existing is not None:
+            if (
+                existing.verb != APPROVE_PLAN
+                or existing.request_fingerprint != fingerprint
+            ):
+                raise IssuerCommandReused(
+                    f"command id {command_id!r} was already used for a "
+                    "different approve_plan request"
+                )
+            if existing.plan_id != plan_id or existing.control_ref != control_ref:
+                raise IssuerReceiptMismatch(
+                    f"command id {command_id!r} recorded plan_id "
+                    f"{existing.plan_id!r} control_ref {existing.control_ref!r}, "
+                    f"but this approve_plan call produced plan_id {plan_id!r} "
+                    f"control_ref {control_ref!r}"
+                )
         if existing is None:
             record_receipt(
                 db,
@@ -367,12 +377,22 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
             )
         control_ref = result.statement.authorization_id
         existing = find_receipt(db, command_id)
-        if existing is not None and existing.control_ref != control_ref:
-            raise IssuerReceiptMismatch(
-                f"command id {command_id!r} recorded control_ref "
-                f"{existing.control_ref!r}, but this issue_authorization call "
-                f"produced {control_ref!r}"
-            )
+        if existing is not None:
+            if (
+                existing.verb != ISSUE_AUTHORIZATION
+                or existing.request_fingerprint != fingerprint
+            ):
+                raise IssuerCommandReused(
+                    f"command id {command_id!r} was already used for a "
+                    "different issue_authorization request"
+                )
+            if existing.plan_id != plan_id or existing.control_ref != control_ref:
+                raise IssuerReceiptMismatch(
+                    f"command id {command_id!r} recorded plan_id "
+                    f"{existing.plan_id!r} control_ref {existing.control_ref!r}, "
+                    f"but this issue_authorization call produced plan_id "
+                    f"{plan_id!r} control_ref {control_ref!r}"
+                )
         if existing is None:
             record_receipt(
                 db,
