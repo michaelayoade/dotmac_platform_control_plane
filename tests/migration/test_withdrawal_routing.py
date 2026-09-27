@@ -422,3 +422,86 @@ def test_agreement_withdrawal_applies_then_replays_then_conflicts_on_change(
             view_after = ca_get(db, active.id)
             assert view_after is not None
             assert view_after.approval_withdrawn is True
+
+
+# ── 4: issuer `applied` ──────────────────────────────────────────────────────
+
+
+def test_issuer_withdrawal_revokes_the_plan_approval_and_records_applied(
+    migrated: tuple[str, str],
+) -> None:
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            plan_id, request_id, _digest = _propose_issuer(db, suffix="applied")
+            approve_issuer_plan(
+                db,
+                command_id=f"approve-{uuid.uuid4()}",
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+        with platform.platform_session() as db:
+            _withdraw(
+                db, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+            )
+
+        drain_once(
+            worker_id="withdrawal-test",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_row(db)
+            assert row.status == OutboxStatus.SENT.value
+            event_id = row.id
+
+            plan = control.get_plan(db, plan_id)
+            assert plan is not None
+            assert plan.approval_revocation_ref == f"approval.withdrawn:{event_id}"
+
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 1
+            outcome = outcomes[0]
+            assert outcome.disposition is WithdrawalDisposition.APPLIED
+            assert outcome.plan_id == plan_id
+            assert outcome.approval_request_id == request_id
+
+
+# ── 5: issuer `not_carried`, never approved ─────────────────────────────────
+
+
+def test_issuer_withdrawal_of_a_never_approved_plan_is_not_carried(
+    migrated: tuple[str, str],
+) -> None:
+    """The request was decided (approved by Approvals) but Vendor CP never
+    carried it into Control (`approve_issuer_plan` was never called) — the
+    plan is still `proposed`."""
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            plan_id, request_id, _digest = _propose_issuer(db, suffix="never-approved")
+        with platform.platform_session() as db:
+            _withdraw(
+                db, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+            )
+
+        drain_once(
+            worker_id="withdrawal-test",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_row(db)
+            assert row.status == OutboxStatus.SENT.value
+            event_id = row.id
+
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 1
+            outcome = outcomes[0]
+            assert outcome.disposition is WithdrawalDisposition.NOT_CARRIED
+            assert outcome.reason_code == "never_approved"
+
+            plan = control.get_plan(db, plan_id)
+            assert plan is not None
+            assert plan.status == "proposed"
+            assert plan.approval_decision_ref is None
