@@ -28,7 +28,6 @@ import hashlib
 import json
 import re
 import tomllib
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Final
 
@@ -36,6 +35,9 @@ import pytest
 from alembic.script import ScriptDirectory
 from dotmac_deployment_control import versions_dir as deployment_control_versions_dir
 
+from vendor_cp.deployment.image_heads import (
+    composed_effective_heads as _composed_effective_heads,
+)
 from vendor_cp.migrations import composed_version_locations, make_alembic_config
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -143,15 +145,13 @@ def composed_effective_heads() -> tuple[str, ...]:
     never hold
     — and it is the SAME pruning that explains why the pre-bootstrap descriptor
     declared four heads with no kernel revision among them.
+
+    Delegates to `vendor_cp.deployment.image_heads.composed_effective_heads`
+    (D16 PR 1): the image-heads document baked into the production image at
+    build time needs the identical computation, and a second inline copy here
+    would let the two silently drift apart.
     """
-    script = ScriptDirectory.from_config(make_alembic_config(OFFLINE_DSN))
-    heads = set(script.get_heads())
-    dependencies: set[str] = set()
-    for revision in script.walk_revisions("base", "heads"):
-        declared = revision.dependencies or ()
-        names: Iterable[str] = (declared,) if isinstance(declared, str) else declared
-        dependencies.update(names)
-    return tuple(sorted(heads - dependencies))
+    return _composed_effective_heads(make_alembic_config(OFFLINE_DSN))
 
 
 def composed_schemas() -> frozenset[str]:
