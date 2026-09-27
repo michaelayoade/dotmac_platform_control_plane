@@ -16,6 +16,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import Connection, create_engine, text
@@ -24,6 +25,7 @@ from sqlalchemy.exc import OperationalError
 from vendor_cp.deployment import transition_fence as fence_module
 from vendor_cp.deployment.transition_fence import (
     MIGRATION_ROLE,
+    FenceProof,
     FenceRefusalCode,
     FenceRefused,
     fence_writers,
@@ -47,6 +49,12 @@ def _connect(url: str, *, autocommit: bool = False) -> Iterator[Connection]:
 
 def _dbname(url: str) -> str:
     return url.rpartition("/")[2]
+
+
+def _has_connect(grants: frozenset[tuple[str, str, bool]], grantee: str) -> bool:
+    """`grantee` (`""` for PUBLIC) holds a CONNECT grant in the decomposed
+    ACL `fence_module._current_grants` returns."""
+    return any(g == grantee and priv == "CONNECT" for g, priv, _ in grants)
 
 
 @contextmanager
@@ -155,7 +163,7 @@ def test_an_open_writer_session_is_terminated_and_counted(
                 )
             assert proof.terminated_count >= 1
 
-            with pytest.raises(Exception):  # noqa: B017 -- driver-specific
+            with pytest.raises(OperationalError):
                 writer_conn.execute(text("SELECT 1"))
         finally:
             writer_conn.close()
@@ -175,13 +183,9 @@ def test_fence_then_restore_on_a_null_datacl_database_reproduces_the_default(
             {"n": bare_db},
         ).scalar_one()
         assert acl is None, "fixture must start with a NULL (default) ACL"
-        default_acl = conn.execute(
-            text(
-                "SELECT acldefault('d', datdba)::text FROM pg_database "
-                "WHERE datname = :n"
-            ),
-            {"n": bare_db},
-        ).scalar_one()
+        # The materialised default, decomposed the same way `fence_writers`
+        # and `restore_writers` compare every ACL.
+        default_grants = fence_module._current_grants(conn, bare_db)
 
     probe = f"fence_probe_{uuid.uuid4().hex[:10]}"
     with _writer_role(bare_admin_url) as w:
@@ -197,9 +201,7 @@ def test_fence_then_restore_on_a_null_datacl_database_reproduces_the_default(
                 )
                 # `fence_writers` read the NULL column and materialised the
                 # identical default this test computed independently.
-                assert fence_module._parse_acl(
-                    proof.prior_acl
-                ) == fence_module._parse_acl(default_acl)
+                assert proof.prior_grants == default_grants
 
                 probe_while_fenced = conn.execute(
                     text("SELECT has_database_privilege(:r, :d, 'CONNECT')"),
@@ -215,10 +217,7 @@ def test_fence_then_restore_on_a_null_datacl_database_reproduces_the_default(
                 ).scalar_one()
                 assert probe_after_restore is True
 
-                restored_acl = fence_module._current_acl_text(conn, bare_db)
-                assert fence_module._parse_acl(restored_acl) == fence_module._parse_acl(
-                    default_acl
-                )
+                assert fence_module._current_grants(conn, bare_db) == default_grants
         finally:
             with _connect(bare_admin_url, autocommit=True) as conn:
                 conn.execute(text(f"DROP ROLE IF EXISTS {probe}"))
@@ -233,6 +232,7 @@ def test_restore_returns_the_exact_prior_acl_and_a_second_restore_changes_nothin
     with _writer_role(admin_url) as w:
         with _connect(admin_url, autocommit=True) as conn:
             prior_before = fence_module._current_acl_text(conn, db)
+            prior_grants_before = fence_module._current_grants(conn, db)
 
             proof = fence_writers(
                 conn,
@@ -241,16 +241,18 @@ def test_restore_returns_the_exact_prior_acl_and_a_second_restore_changes_nothin
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
             assert proof.prior_acl == prior_before
+            assert proof.prior_grants == prior_grants_before
 
             first = restore_writers(conn, proof)
-            restored_acl = fence_module._current_acl_text(conn, db)
-            assert fence_module._parse_acl(restored_acl) == fence_module._parse_acl(
-                prior_before
-            )
+            assert fence_module._current_grants(conn, db) == prior_grants_before
 
+            # The ACL already matches prior_grants, so a second restore has
+            # nothing left to grant — idempotent means "changes nothing",
+            # not "re-grants the same roles again".
             second = restore_writers(conn, proof)
-            assert second.roles_restored == first.roles_restored
-            assert fence_module._current_acl_text(conn, db) == restored_acl
+            assert second.roles_restored == ()
+            assert first.roles_restored != ()
+            assert fence_module._current_grants(conn, db) == prior_grants_before
 
 
 # ── (e) re-fencing with prior= keeps the ORIGINAL prior ACL ─────────────────
@@ -275,12 +277,10 @@ def test_refencing_with_prior_keeps_the_original_prior_acl(
                 prior=first_proof,
             )
             assert second_proof.prior_acl == first_proof.prior_acl
+            assert second_proof.prior_grants == first_proof.prior_grants
 
             restore_writers(conn, second_proof)
-            restored_acl = fence_module._current_acl_text(conn, db)
-            assert fence_module._parse_acl(restored_acl) == fence_module._parse_acl(
-                first_proof.prior_acl
-            )
+            assert fence_module._current_grants(conn, db) == first_proof.prior_grants
 
 
 # ── (f) CONNECT inherited through an INTERMEDIATE role's own grant ─────────
@@ -354,8 +354,8 @@ def test_a_refusal_after_the_first_revoke_restores_the_starting_acl(
     with _writer_role(admin_url) as w:
         with _connect(admin_url, autocommit=True) as conn:
             conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {w}'))
-            before = fence_module._current_acl_text(conn, db)
-            assert fence_module._had_connect(fence_module._parse_acl(before), "")
+            before = fence_module._current_grants(conn, db)
+            assert _has_connect(before, "")
             with pytest.raises(FenceRefused) as refused:
                 fence_writers(
                     _SkipWriterRevoke(conn, w),  # type: ignore[arg-type]
@@ -364,9 +364,9 @@ def test_a_refusal_after_the_first_revoke_restores_the_starting_acl(
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
             assert refused.value.code == FenceRefusalCode.WRITER_STILL_HAS_CONNECT
-            after = fence_module._current_acl_text(conn, db)
-            assert fence_module._parse_acl(after) == fence_module._parse_acl(before)
-            assert fence_module._had_connect(fence_module._parse_acl(after), "")
+            after = fence_module._current_grants(conn, db)
+            assert after == before
+            assert _has_connect(after, "")
             conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {w}'))
 
 
@@ -557,3 +557,320 @@ def test_a_migrator_whose_connect_rests_only_on_public_is_refused_first(
     finally:
         with _connect(postgres_url, autocommit=True) as conn:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+
+
+# ── (j) a driver error mid-fence is compensated as FENCE_INTERRUPTED ────────
+
+
+class _RaiseOnWriterRevoke:
+    """PUBLIC's own REVOKE goes through for real; the per-writer REVOKE
+    raises an `OperationalError`-shaped error, simulating a dropped
+    connection or a DB error mid-fence — NOT a `FenceRefused`."""
+
+    def __init__(self, real: Connection, writer: str) -> None:
+        self._real = real
+        self._writer = writer
+
+    def execute(self, statement: object, *args: object, **kwargs: object) -> object:
+        sql = str(statement)
+        if sql.startswith("REVOKE CONNECT") and self._writer in sql:
+            raise OperationalError("REVOKE CONNECT", {}, Exception("connection lost"))
+        return self._real.execute(statement, *args, **kwargs)  # type: ignore[arg-type]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def test_a_db_error_mid_fence_is_compensated_as_fence_interrupted(
+    admin_url: str, db: str
+) -> None:
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            before = fence_module._current_grants(conn, db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    _RaiseOnWriterRevoke(conn, w),  # type: ignore[arg-type]
+                    database=db,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.FENCE_INTERRUPTED
+            assert refused.value.before_acl is not None
+            assert isinstance(refused.value.__cause__, OperationalError)
+            assert fence_module._current_grants(conn, db) == before
+
+
+# ── (k) a restore that itself fails raises COMPENSATION_FAILED ─────────────
+
+
+class _SkipWriterRevokeAndFailGrant:
+    """Drops the per-writer REVOKE (producing the original
+    `WRITER_STILL_HAS_CONNECT` refusal, exactly like `_SkipWriterRevoke`) AND
+    makes every compensating GRANT raise, so the restore itself fails too."""
+
+    def __init__(self, real: Connection, writer: str) -> None:
+        self._real = real
+        self._writer = writer
+
+    def execute(self, statement: object, *args: object, **kwargs: object) -> object:
+        sql = str(statement)
+        if sql.startswith("REVOKE CONNECT") and self._writer in sql:
+            return None
+        if sql.startswith("GRANT CONNECT"):
+            raise OperationalError("GRANT CONNECT", {}, Exception("grant failed"))
+        return self._real.execute(statement, *args, **kwargs)  # type: ignore[arg-type]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def test_a_restore_that_itself_fails_raises_compensation_failed(
+    admin_url: str, db: str
+) -> None:
+    """The database may still be fenced after this — cleaned up by hand in
+    the `finally`, exactly what `COMPENSATION_FAILED.before_acl` exists for."""
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {w}'))
+            before = fence_module._current_grants(conn, db)
+            try:
+                with pytest.raises(FenceRefused) as refused:
+                    fence_writers(
+                        _SkipWriterRevokeAndFailGrant(conn, w),  # type: ignore[arg-type]
+                        database=db,
+                        writer_roles=(w,),
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                    )
+                assert refused.value.code == FenceRefusalCode.COMPENSATION_FAILED
+                assert refused.value.before_acl is not None
+                assert isinstance(refused.value.__cause__, FenceRefused)
+                assert (
+                    refused.value.__cause__.code
+                    == FenceRefusalCode.WRITER_STILL_HAS_CONNECT
+                )
+            finally:
+                # Manual cleanup: the compensating GRANT to PUBLIC never
+                # landed, so restore it by hand.
+                conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO PUBLIC'))
+                assert fence_module._current_grants(conn, db) == before
+
+
+# ── (l) a non-AUTOCOMMIT connection is refused before any change ───────────
+
+
+def test_a_non_autocommit_connection_is_refused_before_any_change(
+    postgres_url: str, db: str, url_for: Callable[..., str]
+) -> None:
+    with _connect(url_for(postgres_url, db)) as conn:  # default: NOT autocommit
+        before = fence_module._current_grants(conn, db)
+        with pytest.raises(FenceRefused) as refused:
+            fence_writers(
+                conn,
+                database=db,
+                writer_roles=("app_user",),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+        assert refused.value.code == FenceRefusalCode.CONNECTION_NOT_AUTOCOMMIT
+        assert fence_module._current_grants(conn, db) == before
+
+
+# ── (m) a stale `prior=` is refused as PRIOR_MISMATCH ───────────────────────
+
+
+def test_a_prior_naming_a_different_database_is_refused_as_prior_mismatch(
+    admin_url: str, db: str
+) -> None:
+    stale = FenceProof(
+        database=f"not_{db}",
+        prior_acl="",
+        prior_grants=frozenset(),
+        fenced_roles=("app_user",),
+        absent_roles=(),
+        terminated_count=0,
+        fenced_at=datetime.now(UTC),
+    )
+    with _connect(admin_url, autocommit=True) as conn:
+        before = fence_module._current_grants(conn, db)
+        with pytest.raises(FenceRefused) as refused:
+            fence_writers(
+                conn,
+                database=db,
+                writer_roles=("app_user",),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                prior=stale,
+            )
+        assert refused.value.code == FenceRefusalCode.PRIOR_MISMATCH
+        assert fence_module._current_grants(conn, db) == before
+
+
+def test_a_prior_naming_a_different_writer_set_is_refused_as_prior_mismatch(
+    admin_url: str, db: str
+) -> None:
+    with _writer_role(admin_url) as w1, _writer_role(admin_url) as w2:
+        stale = FenceProof(
+            database=db,
+            prior_acl="",
+            prior_grants=frozenset(),
+            fenced_roles=(w2,),
+            absent_roles=(),
+            terminated_count=0,
+            fenced_at=datetime.now(UTC),
+        )
+        with _connect(admin_url, autocommit=True) as conn:
+            before = fence_module._current_grants(conn, db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    conn,
+                    database=db,
+                    writer_roles=(w1,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    prior=stale,
+                )
+            assert refused.value.code == FenceRefusalCode.PRIOR_MISMATCH
+            assert fence_module._current_grants(conn, db) == before
+
+
+# ── (n) a quoted grantee fences and restores exactly ────────────────────────
+
+
+def test_a_quoted_grantee_fences_and_restores_exactly(admin_url: str, db: str) -> None:
+    """A writer role named with a capital letter and a space needs real
+    identifier quoting — this proves `aclexplode`-based comparison (not
+    naive text splitting on `,`/`=`/`/`) handles it."""
+    role = "Fence Writer X"
+    with _connect(admin_url, autocommit=True) as conn:
+        conn.execute(text(f'CREATE ROLE "{role}" LOGIN NOSUPERUSER NOBYPASSRLS'))
+    try:
+        with _connect(admin_url, autocommit=True) as conn:
+            before = fence_module._current_grants(conn, db)
+            proof = fence_writers(
+                conn,
+                database=db,
+                writer_roles=(role,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            fenced_can_connect = conn.execute(
+                text("SELECT has_database_privilege(:r, :d, 'CONNECT')"),
+                {"r": role, "d": db},
+            ).scalar_one()
+            assert fenced_can_connect is False
+
+            restore_writers(conn, proof)
+            assert fence_module._current_grants(conn, db) == before
+    finally:
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f'DROP OWNED BY "{role}"'))
+            conn.execute(text(f'DROP ROLE IF EXISTS "{role}"'))
+
+
+# ── (o) a grant option is restored with the grant option ────────────────────
+
+
+def test_a_writer_with_grant_option_restores_with_the_grant_option(
+    admin_url: str, db: str
+) -> None:
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(
+                text(f'GRANT CONNECT ON DATABASE "{db}" TO {w} WITH GRANT OPTION')
+            )
+            before = fence_module._current_grants(conn, db)
+            assert any(
+                grantee == w and priv == "CONNECT" and grantable
+                for grantee, priv, grantable in before
+            )
+
+            proof = fence_writers(
+                conn,
+                database=db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            restore_writers(conn, proof)
+
+            after = fence_module._current_grants(conn, db)
+            assert after == before
+            assert any(
+                grantee == w and priv == "CONNECT" and grantable
+                for grantee, priv, grantable in after
+            )
+
+
+# ── (p) restore refuses an ACL that gained an unexpected extra grant ───────
+
+
+def test_restore_refuses_an_unexpected_extra_grant_and_stays_fenced(
+    admin_url: str, db: str
+) -> None:
+    with _writer_role(admin_url) as w, _writer_role(admin_url) as intruder:
+        with _connect(admin_url, autocommit=True) as conn:
+            proof = fence_writers(
+                conn,
+                database=db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            # Something grants CONNECT to an unrelated role while fenced.
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {intruder}'))
+
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(conn, proof)
+            assert refused.value.code == FenceRefusalCode.ACL_NOT_RESTORED
+            # Still fenced: PUBLIC was never re-granted by the refused restore.
+            assert not _has_connect(fence_module._current_grants(conn, db), "")
+
+            conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {intruder}'))
+            restore_writers(conn, proof)
+
+
+# ── (q) a drain that never reaches zero survives and is compensated ────────
+
+
+class _AlwaysWriterPresent:
+    """The writer-backend query always reports one survivor and every
+    `pg_terminate_backend` call is a no-op, so the drain can never confirm
+    zero — proving `WRITER_SESSIONS_SURVIVED` fires at the deadline and the
+    compensating restore runs."""
+
+    def __init__(self, real: Connection) -> None:
+        self._real = real
+
+    def execute(self, statement: object, *args: object, **kwargs: object) -> object:
+        sql = str(statement)
+        if sql.startswith("SELECT pid FROM pg_stat_activity"):
+            return _FakePidRows([999999999])
+        if sql.startswith("SELECT pg_terminate_backend"):
+            return None
+        return self._real.execute(statement, *args, **kwargs)  # type: ignore[arg-type]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+class _FakePidRows:
+    def __init__(self, pids: list[int]) -> None:
+        self._pids = pids
+
+    def scalars(self) -> _FakePidRows:
+        return self
+
+    def all(self) -> list[int]:
+        return list(self._pids)
+
+
+def test_a_drain_that_never_reaches_zero_survives_and_is_compensated(
+    admin_url: str, db: str
+) -> None:
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            before = fence_module._current_grants(conn, db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    _AlwaysWriterPresent(conn),  # type: ignore[arg-type]
+                    database=db,
+                    writer_roles=(w,),
+                    session_wait_seconds=0.3,
+                )
+            assert refused.value.code == FenceRefusalCode.WRITER_SESSIONS_SURVIVED
+            assert refused.value.before_acl is not None
+            assert fence_module._current_grants(conn, db) == before
