@@ -29,29 +29,18 @@ from vendor_cp.contracts.terms import (
     TermEndNotRepresentable,
     end_exclusive_from_inclusive,
 )
-from vendor_cp.deployment import approval_barrier
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
 PRODUCT = "dotmac-sub"
 
-
-@pytest.fixture(autouse=True)
-def _bypass_the_postgres_only_barrier_checks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`approve`/`activate`/`reinstate` now run through
-    `approval_barrier.held_transition`, whose own runtime checks
-    (`_require_transactional`, `_require_the_hold_is_still_open`) issue a
-    Postgres-only `txid_current_if_assigned()` probe. The FOR SHARE lock
-    itself and that probe are proved for real against PostgreSQL in
-    `tests/migration/test_agreement_approval_barrier.py`; this in-memory
-    SQLite suite exercises only the agreement/evidence logic those checks
-    would otherwise short-circuit, matching
-    `tests/unit/test_protected_rehearsal_issuer.py`'s own bypass.
-    """
-    monkeypatch.setattr(approval_barrier, "_require_transactional", lambda _db: None)
-    monkeypatch.setattr(
-        approval_barrier, "_require_the_hold_is_still_open", lambda _db: None
-    )
+# `approve`/`activate`/`reinstate` now run through
+# `approval_barrier.held_transition`. Its runtime checks are dialect-aware
+# (`_require_the_hold_is_still_open` skips on a non-PostgreSQL bind, and
+# `_require_transactional` only refuses a driver's real `autocommit is True`,
+# never SQLite's `-1`/`False`), so this in-memory SQLite suite needs no
+# bypass — the FOR SHARE lock and both runtime checks are proved for real
+# against PostgreSQL in `tests/migration/test_agreement_approval_barrier.py`.
 
 
 @pytest.fixture
@@ -280,7 +269,7 @@ def test_a_requester_cannot_approve_their_own_agreement(db: Session) -> None:
         _decide(db, proposed, requester)
 
     assert proposed.approval_request_id is not None
-    with pytest.raises(ConflictError, match="not approved"):
+    with pytest.raises(ConflictError, match="not held: not_approved"):
         agreements.approve(
             db,
             agreements.ApprovalCommand(

@@ -93,11 +93,16 @@ def _require_transactional(db: Session) -> None:
 
     SQLAlchemy's `Connection.get_isolation_level()` never reports AUTOCOMMIT
     (it asks the server for the real isolation level), so the DBAPI
-    connection's own `autocommit` flag is what is read here. Both psycopg 2
-    and 3 expose it.
+    connection's own `autocommit` flag is what is read here. psycopg 2 and 3
+    expose a real bool there. `sqlite3.Connection.autocommit` is a different
+    animal: on Python 3.12+ its DEFAULT is `sqlite3.LEGACY_TRANSACTION_CONTROL`
+    (`-1`), which is truthy but means "PEP 249 legacy, transactional" — not
+    autocommit. Comparing by IDENTITY to `True` (never plain truthiness) is
+    what keeps a SQLite session (`-1` or `False`) from being wrongly refused
+    while still catching a real driver's `True`.
     """
     dbapi_connection = db.connection().connection.dbapi_connection
-    if getattr(dbapi_connection, "autocommit", False):
+    if getattr(dbapi_connection, "autocommit", None) is True:
         raise ApprovalBarrierUnavailable(
             "held_transition needs a transactional session; on an AUTOCOMMIT "
             "connection the FOR SHARE hold would end with its own statement"
@@ -109,7 +114,19 @@ def _require_the_hold_is_still_open(db: Session) -> None:
     assigns a transaction id, so after the FOR SHARE hold this transaction
     MUST have one. If it does not, the hold's transaction already ended, for
     example on an autocommit connection a flag check missed. The barrier then
-    holds nothing, and no transition may run."""
+    holds nothing, and no transition may run.
+
+    `txid_current_if_assigned()` is PostgreSQL-only. The invariant it proves
+    is PostgreSQL's own (a real row lock on a real transaction id), and it is
+    proved for real against PostgreSQL by the migration conformance suites
+    (`tests/migration/test_approval_barrier_conformance.py`,
+    `tests/migration/test_agreement_approval_barrier.py`); a non-PostgreSQL
+    session (every in-memory SQLite unit fixture) has no such function to call
+    and skips this check rather than erroring on a probe that means nothing
+    there.
+    """
+    if db.get_bind().dialect.name != "postgresql":
+        return
     assigned = db.execute(text("SELECT txid_current_if_assigned()")).scalar()
     if assigned is None:
         raise ApprovalBarrierUnavailable(

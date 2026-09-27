@@ -15,6 +15,8 @@ from uuid import UUID
 
 from dotmac_commercial_agreements import (
     AGREEMENT_ACTIVATED_V1,
+    AGREEMENT_APPROVED_V1,
+    AGREEMENT_REINSTATED_V1,
     DEFAULT_AGREEMENT_PAGE_SIZE,
     ActivationEvidence,
     AgreementError,
@@ -61,6 +63,9 @@ from dotmac_commercial_agreements import (
 )
 from dotmac_commercial_agreements import (
     get as module_get,
+)
+from dotmac_commercial_agreements import (
+    history as module_history,
 )
 from dotmac_commercial_agreements import (
     list_agreements as module_list_agreements,
@@ -445,10 +450,79 @@ def _held_evidence(
     )
 
 
+def _replayed_view(
+    db: Session,
+    current: AgreementView,
+    *,
+    command_id: str,
+    event_type: str,
+    approval_request_id: UUID | None,
+) -> ContractView | None:
+    """`command_id` already produced `event_type` for this agreement — return
+    the current (already-committed) view without holding anything or calling
+    into the module again.
+
+    CA's own at-most-once ledger is what makes this a REPLAY rather than a
+    second effect: `current` was read fresh by `_required` above, so it
+    already reflects whatever `event_type` committed. Without this check, a
+    retry of an already-committed command after a LATER withdrawal would be
+    refused by the barrier for a transition that already succeeded — the
+    barrier protects the transition from a concurrent withdrawal, not a
+    retry of one that already happened. A `command_id` reused for a
+    DIFFERENT `event_type` is not a replay: this returns `None` and the
+    normal path runs, so CA's own ledger (not the barrier) refuses it.
+    """
+    for record in module_history(db, current.id):
+        if record.command_id == command_id and record.event_type == event_type:
+            return _view(current, approval_request_id=approval_request_id)
+    return None
+
+
+def _parsed_decision_ref(value: str | None) -> UUID | None:
+    """`current.approval_decision_ref` as a `UUID`, or `None` if it is unset
+    or not one. Used only to label a REPLAY's returned view — a genuine
+    replay's decision ref was already validated the first time this command
+    ran, so a parse failure here (should one somehow occur) degrades to an
+    unlabelled view rather than blocking the replay."""
+    if value is None:
+        return None
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
+
+
+def _not_held_conflict(
+    request_id: UUID, exc: approvals.ApprovalNotHeld
+) -> ConflictError:
+    """`ApprovalNotHeld` is `dotmac_approvals`' own error, not a kernel
+    `DomainError` — uncaught, it would surface as a 500 rather than the 409 a
+    withdrawn, unapproved or mismatched approval request actually is. Naming
+    the refusal's `.code` keeps the message specific (e.g. "...: withdrawn")
+    without leaking anything beyond the closed `ApprovalHoldRefusal`
+    vocabulary the barrier itself already refuses with.
+
+    `ApprovalBarrierUnavailable`, the barrier's OTHER refusal, is deliberately
+    never caught anywhere in this module: it means the session cannot hold a
+    lock at all, a deployment defect rather than something the caller did, so
+    it propagates unchanged rather than becoming a 409.
+    """
+    return ConflictError(f"approval request {request_id} is not held: {exc.code.value}")
+
+
 def approve(db: Session, command: ApprovalCommand) -> ContractView:
     from vendor_cp.deployment.approval_barrier import held_transition
 
     current = _required(db, command.agreement_id)
+    replayed = _replayed_view(
+        db,
+        current,
+        command_id=command.command_id,
+        event_type=AGREEMENT_APPROVED_V1,
+        approval_request_id=command.approval_request_id,
+    )
+    if replayed is not None:
+        return replayed
     if current.content_hash is None:
         raise ConflictError(f"agreement {current.id} has no frozen content hash")
     content_hash = current.content_hash
@@ -465,14 +539,17 @@ def approve(db: Session, command: ApprovalCommand) -> ContractView:
             ),
         )
 
-    value = held_transition(
-        db,
-        request_id=command.approval_request_id,
-        subject_type=APPROVAL_SUBJECT_TYPE,
-        subject_id=str(current.id),
-        content_digest=translate_digest(content_hash),
-        transition=transition,
-    )
+    try:
+        value = held_transition(
+            db,
+            request_id=command.approval_request_id,
+            subject_type=APPROVAL_SUBJECT_TYPE,
+            subject_id=str(current.id),
+            content_digest=translate_digest(content_hash),
+            transition=transition,
+        )
+    except approvals.ApprovalNotHeld as exc:
+        raise _not_held_conflict(command.approval_request_id, exc) from exc
     return _view(value, approval_request_id=command.approval_request_id)
 
 
@@ -480,6 +557,15 @@ def activate(db: Session, command: ActivateCommand) -> ContractView:
     from vendor_cp.deployment.approval_barrier import held_transition
 
     current = _required(db, command.agreement_id)
+    replayed = _replayed_view(
+        db,
+        current,
+        command_id=command.command_id,
+        event_type=AGREEMENT_ACTIVATED_V1,
+        approval_request_id=_parsed_decision_ref(current.approval_decision_ref),
+    )
+    if replayed is not None:
+        return replayed
     if current.content_hash is None:
         raise ConflictError(f"agreement {current.id} has no frozen content hash")
     content_hash = current.content_hash
@@ -519,14 +605,17 @@ def activate(db: Session, command: ActivateCommand) -> ContractView:
             ),
         )
 
-    value = held_transition(
-        db,
-        request_id=request_id,
-        subject_type=APPROVAL_SUBJECT_TYPE,
-        subject_id=str(current.id),
-        content_digest=translate_digest(content_hash),
-        transition=transition,
-    )
+    try:
+        value = held_transition(
+            db,
+            request_id=request_id,
+            subject_type=APPROVAL_SUBJECT_TYPE,
+            subject_id=str(current.id),
+            content_digest=translate_digest(content_hash),
+            transition=transition,
+        )
+    except approvals.ApprovalNotHeld as exc:
+        raise _not_held_conflict(request_id, exc) from exc
     return _view(value, approval_request_id=request_id)
 
 
@@ -561,6 +650,15 @@ def reinstate(db: Session, command: TransitionCommand) -> ContractView:
     from vendor_cp.deployment.approval_barrier import held_transition
 
     current = _required(db, command.agreement_id)
+    replayed = _replayed_view(
+        db,
+        current,
+        command_id=command.command_id,
+        event_type=AGREEMENT_REINSTATED_V1,
+        approval_request_id=None,
+    )
+    if replayed is not None:
+        return replayed
     if current.content_hash is None:
         raise ConflictError(f"agreement {current.id} has no frozen content hash")
     if current.approval_decision_ref is None:
@@ -579,14 +677,17 @@ def reinstate(db: Session, command: TransitionCommand) -> ContractView:
     def transition(_held: HeldPlatformApproval) -> AgreementView:
         return module_reinstate(db, _transition(command))
 
-    value = held_transition(
-        db,
-        request_id=request_id,
-        subject_type=APPROVAL_SUBJECT_TYPE,
-        subject_id=str(current.id),
-        content_digest=translate_digest(current.content_hash),
-        transition=transition,
-    )
+    try:
+        value = held_transition(
+            db,
+            request_id=request_id,
+            subject_type=APPROVAL_SUBJECT_TYPE,
+            subject_id=str(current.id),
+            content_digest=translate_digest(current.content_hash),
+            transition=transition,
+        )
+    except approvals.ApprovalNotHeld as exc:
+        raise _not_held_conflict(request_id, exc) from exc
     return _view(value)
 
 

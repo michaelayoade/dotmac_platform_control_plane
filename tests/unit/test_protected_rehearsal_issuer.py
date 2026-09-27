@@ -448,3 +448,29 @@ def test_the_barrier_refuses_an_autocommit_session_before_holding() -> None:
             transition=lambda _held: calls.append("transition"),
         )
     assert calls == []
+
+
+def test_the_autocommit_check_is_not_fooled_by_sqlites_legacy_sentinel() -> None:
+    """SENSITIVITY (near-miss). `sqlite3.Connection.autocommit` defaults to
+    `sqlite3.LEGACY_TRANSACTION_CONTROL` (`-1`) on Python 3.12+ -- truthy, but
+    meaning "PEP 249 legacy, transactional", not autocommit. `-1` and `False`
+    must both pass; only `True` (identity, not truthiness) may refuse."""
+
+    class _Connection:
+        def __init__(self, autocommit: object) -> None:
+            self.connection = SimpleNamespace(
+                dbapi_connection=SimpleNamespace(autocommit=autocommit)
+            )
+
+    class _Session:
+        def __init__(self, autocommit: object) -> None:
+            self._connection = _Connection(autocommit)
+
+        def connection(self) -> _Connection:
+            return self._connection
+
+    for non_autocommit in (-1, False):
+        approval_barrier._require_transactional(_Session(non_autocommit))  # type: ignore[arg-type]
+
+    with pytest.raises(approval_barrier.ApprovalBarrierUnavailable):
+        approval_barrier._require_transactional(_Session(True))  # type: ignore[arg-type]
