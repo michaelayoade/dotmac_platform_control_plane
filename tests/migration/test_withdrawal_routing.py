@@ -505,3 +505,61 @@ def test_issuer_withdrawal_of_a_never_approved_plan_is_not_carried(
             assert plan is not None
             assert plan.status == "proposed"
             assert plan.approval_decision_ref is None
+
+
+# ── 6: agreement `not_carried`, `decision_not_carried` ──────────────────────
+
+
+def test_agreement_withdrawal_of_a_different_approved_request_is_not_carried(
+    migrated: tuple[str, str],
+) -> None:
+    """An agreement approved under request A; a withdrawal citing a different
+    (never actually opened) approved request B for the same subject and
+    digest. Approvals refuses a second request at an identical content
+    digest for the same subject (it is the same decision, not a new one), so
+    there is no real production call chain that produces this exact claimed
+    event — this drives `ApprovalEventRouter.deliver` directly with a
+    constructed event, as the packet allows.
+    """
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            approved = _propose_and_approve_agreement(db)
+            assert approved.approval_request_id is not None
+            assert approved.content_hash is not None
+
+            other_request_id = uuid.uuid4()
+            event = ClaimedPlatformEvent(
+                id=uuid.uuid4(),
+                event_type="approval.withdrawn",
+                payload={
+                    "request_id": str(other_request_id),
+                    "subject_type": APPROVAL_SUBJECT_TYPE,
+                    "subject_id": str(approved.id),
+                    "policy_code": POLICY_CODE,
+                    "policy_version": POLICY_VERSION,
+                    "content_digest": f"sha256:{approved.content_hash}",
+                    "state": "withdrawn",
+                    "withdrawal_id": str(uuid.uuid4()),
+                    "reason": "withdrawing a request this agreement never bound",
+                    "effective_at": datetime.now(UTC).isoformat(),
+                    "external_ref": f"withdraw-{uuid.uuid4()}",
+                },
+                attempts=1,
+                correlation_id=None,
+            )
+            ApprovalEventRouter().deliver(event, db)
+            db.commit()
+
+        with platform.platform_session() as db:
+            outcomes = outcomes_for_event(db, event.id)
+            assert len(outcomes) == 1
+            outcome = outcomes[0]
+            assert outcome.disposition is WithdrawalDisposition.NOT_CARRIED
+            assert outcome.reason_code == "decision_not_carried"
+            assert outcome.agreement_id == approved.id
+
+            view = ca_get(db, approved.id)
+            assert view is not None
+            assert view.approval_withdrawn is False
+            assert view.status == "approved"
