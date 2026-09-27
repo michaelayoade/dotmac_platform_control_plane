@@ -1,0 +1,382 @@
+"""Fence every writer role off a database, hold the fence, then release it.
+
+Today `scripts/deploy_production.sh` backs up, migrates, then replaces the
+relay and the app WHILE the old writers stay connected (deploy_production.sh
+lines 438, 446-447). A backend that opens between the backup and the schema
+change observes a database mid-migration and can write through it. D16 fences
+every writer role for the whole transition; PR 2 wires that fence into the
+deploy script's maintenance window. This module is that fence, on its own: a
+pure library over a caller-supplied connection, no process and no environment
+access.
+
+## Why REVOKE CONNECT rather than a lock or a flag
+
+A row-level flag only stops writers that check it. `REVOKE CONNECT ON
+DATABASE ... FROM <role>` stops a NEW backend from authenticating as that role
+against this database at all, independently of what the application does or
+does not check, and `has_database_privilege` lets the fence PROVE the revoke
+took rather than merely issuing it and hoping. A backend already connected
+when the fence closes is a separate hazard REVOKE CONNECT does not touch,
+which is why `fence_writers` also terminates and waits for every open writer
+session.
+
+## The prior ACL is the thing being protected, not the fence's own state
+
+`restore_writers` puts the database back to EXACTLY the ACL that was there
+before the fence closed — never a hardcoded default, and never "whatever
+GRANT CONNECT TO PUBLIC would produce" — because a database's prior ACL can
+carry privileges (CREATE, TEMPORARY, a narrower grant to a third role) this
+module never touched and has no business re-deriving. Re-fencing an
+already-fenced database (`fence_writers(..., prior=proof)`) keeps that same
+original ACL rather than recording the already-revoked one as "prior",
+because the second call's own view of `pg_database.datacl` is the fence's own
+handiwork, not evidence about what the database looked like before anyone
+fenced it.
+
+## Unknown is not absent
+
+A writer role named in `WRITER_ROLES` that does not exist in this cluster is
+recorded in `FenceProof.absent_roles`, never silently dropped from the roles
+the fence reports on. A role that exists and keeps CONNECT is a fence that did
+not hold; a role that was never there is a different fact, and collapsing the
+two would let a typo'd role name pass as "fenced" when nothing was ever
+checked.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from typing import Final
+
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+
+__all__ = [
+    "MIGRATION_ROLE",
+    "WRITER_ROLES",
+    "FenceProof",
+    "FenceRefusalCode",
+    "FenceRefused",
+    "UnfenceProof",
+    "fence_is_holding",
+    "fence_writers",
+    "restore_writers",
+]
+
+#: The long-running application, relay and dispatcher identities (see
+#: `docker-compose.production.yml` and the deploy script's role list). Every
+#: one of these is a role that can hold an open session against the database
+#: while a migration runs.
+WRITER_ROLES: Final[tuple[str, ...]] = (
+    "app_user",
+    "platform_api",
+    "platform_outbox_dispatcher",
+    "outbox_dispatcher",
+)
+
+#: The migrator. Never fenced, and its CONNECT privilege is part of what
+#: `fence_writers` verifies rather than merely assumes.
+MIGRATION_ROLE: Final = "app_admin"
+
+#: How often to re-poll `pg_stat_activity` while waiting for terminated writer
+#: backends to actually disappear.
+_POLL_INTERVAL_SECONDS: Final = 0.05
+
+
+class FenceRefusalCode(StrEnum):
+    """A closed set. Exception messages carry one of these plus role names —
+    never a DSN, never a query result beyond a role or database name."""
+
+    WRITER_STILL_HAS_CONNECT = "writer_still_has_connect"
+    MIGRATION_ROLE_LOST_CONNECT = "migration_role_lost_connect"
+    WRITER_SESSIONS_SURVIVED = "writer_sessions_survived"
+    ACL_NOT_RESTORED = "acl_not_restored"
+    UNKNOWN_DATABASE = "unknown_database"
+
+
+class FenceRefused(Exception):
+    """Raised instead of returning a proof that lies about the fence state."""
+
+    def __init__(self, code: FenceRefusalCode, detail: str) -> None:
+        self.code = code
+        self.detail = detail
+        super().__init__(f"{code}: {detail}")
+
+
+@dataclass(frozen=True, slots=True)
+class FenceProof:
+    """What the fence did, verified rather than assumed.
+
+    `prior_acl` is the database's ACL exactly as `pg_database.datacl::text`
+    read it (or the materialised `acldefault('d', datdba)` when that was
+    NULL) before this fence's first REVOKE — see `restore_writers`."""
+
+    database: str
+    prior_acl: str
+    fenced_roles: tuple[str, ...]
+    absent_roles: tuple[str, ...]
+    terminated_count: int
+    fenced_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class UnfenceProof:
+    """The result of `restore_writers`: the ACL is back, verified equal."""
+
+    database: str
+    restored_at: datetime
+    roles_restored: tuple[str, ...]
+
+
+def _quote_ident(conn: Connection, name: str) -> str:
+    """Delegate quoting to PostgreSQL itself rather than reimplementing it.
+
+    `quote_ident` is the server's own answer to "how do I write this
+    identifier back into SQL safely" — no format-string interpolation of a
+    role or database name ever happens in this module."""
+    return conn.execute(text("SELECT quote_ident(:name)"), {"name": name}).scalar_one()
+
+
+def _database_exists(conn: Connection, database: str) -> bool:
+    return (
+        conn.execute(
+            text("SELECT 1 FROM pg_database WHERE datname = :db"), {"db": database}
+        ).first()
+        is not None
+    )
+
+
+def _existing_roles(conn: Connection, roles: tuple[str, ...]) -> set[str]:
+    if not roles:
+        return set()
+    rows = conn.execute(
+        text("SELECT rolname FROM pg_roles WHERE rolname = ANY(:roles)"),
+        {"roles": list(roles)},
+    )
+    return {row[0] for row in rows}
+
+
+def _current_acl_text(conn: Connection, database: str) -> str:
+    """`pg_database.datacl::text`, or the materialised default when NULL.
+
+    NULL `datacl` means "nobody has ever explicitly GRANTed or REVOKEd" —
+    PostgreSQL answers privilege checks against the implicit default in that
+    case, and `acldefault('d', datdba)` is that default made explicit so the
+    prior state this module restores to is never a guess."""
+    row = conn.execute(
+        text("SELECT datacl::text, datdba FROM pg_database WHERE datname = :db"),
+        {"db": database},
+    ).one()
+    acl_text, owner_oid = row
+    if acl_text is not None:
+        return acl_text
+    return conn.execute(
+        text("SELECT acldefault('d', :owner)::text"), {"owner": owner_oid}
+    ).scalar_one()
+
+
+def _parse_acl(acl_text: str) -> dict[str, str]:
+    """`{grantee=privs/grantor,...}` -> `{grantee: privs}`.
+
+    PUBLIC's own entry has an empty grantee before the `=` (`=privs/grantor`),
+    and this module represents that with the key `""`. Only the privilege
+    letters matter here — `CONNECT` is `c` — so the grantor half is discarded.
+    """
+    body = acl_text.strip()
+    if body.startswith("{") and body.endswith("}"):
+        body = body[1:-1]
+    result: dict[str, str] = {}
+    if not body:
+        return result
+    for item in body.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        grantee, _, rest = item.partition("=")
+        privs, _, _grantor = rest.partition("/")
+        result[grantee] = privs
+    return result
+
+
+def _had_connect(parsed: dict[str, str], grantee: str) -> bool:
+    return "c" in parsed.get(grantee, "")
+
+
+def fence_writers(
+    conn: Connection,
+    *,
+    database: str,
+    writer_roles: tuple[str, ...] = WRITER_ROLES,
+    session_wait_seconds: float,
+    prior: FenceProof | None = None,
+) -> FenceProof:
+    """Revoke CONNECT from every existing writer role, verify it, then drain.
+
+    `conn` must be held by a role that owns `database` or is superuser —
+    terminating another role's backends needs that. Production holds this
+    over the cluster superuser's socket connection, the same identity
+    `pg_dumpall` already uses.
+    """
+    if not _database_exists(conn, database):
+        raise FenceRefused(
+            FenceRefusalCode.UNKNOWN_DATABASE,
+            f"no database named {database!r} exists in this cluster",
+        )
+
+    existing = _existing_roles(conn, writer_roles)
+    absent = tuple(role for role in writer_roles if role not in existing)
+    fenced = tuple(role for role in writer_roles if role in existing)
+
+    prior_acl = (
+        prior.prior_acl if prior is not None else _current_acl_text(conn, database)
+    )
+
+    quoted_db = _quote_ident(conn, database)
+    conn.execute(text(f"REVOKE CONNECT ON DATABASE {quoted_db} FROM PUBLIC"))
+    for role in fenced:
+        quoted_role = _quote_ident(conn, role)
+        conn.execute(text(f"REVOKE CONNECT ON DATABASE {quoted_db} FROM {quoted_role}"))
+
+    for role in fenced:
+        still_connect = conn.execute(
+            text("SELECT has_database_privilege(:role, :db, 'CONNECT')"),
+            {"role": role, "db": database},
+        ).scalar_one()
+        if still_connect:
+            raise FenceRefused(
+                FenceRefusalCode.WRITER_STILL_HAS_CONNECT,
+                f"role {role!r} still has CONNECT on {database!r} after revoke",
+            )
+
+    if not _existing_roles(conn, (MIGRATION_ROLE,)):
+        raise FenceRefused(
+            FenceRefusalCode.MIGRATION_ROLE_LOST_CONNECT,
+            f"migration role {MIGRATION_ROLE!r} does not exist in this cluster",
+        )
+    migration_can_connect = conn.execute(
+        text("SELECT has_database_privilege(:role, :db, 'CONNECT')"),
+        {"role": MIGRATION_ROLE, "db": database},
+    ).scalar_one()
+    if not migration_can_connect:
+        raise FenceRefused(
+            FenceRefusalCode.MIGRATION_ROLE_LOST_CONNECT,
+            f"migration role {MIGRATION_ROLE!r} lost CONNECT on {database!r}",
+        )
+
+    terminated_count = 0
+    if fenced:
+        backends = (
+            conn.execute(
+                text(
+                    "SELECT pid FROM pg_stat_activity WHERE datname = :db "
+                    "AND usename = ANY(:writers) AND pid <> pg_backend_pid()"
+                ),
+                {"db": database, "writers": list(fenced)},
+            )
+            .scalars()
+            .all()
+        )
+        terminated_count = len(backends)
+        for pid in backends:
+            conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+
+        deadline = time.monotonic() + session_wait_seconds
+        while True:
+            remaining = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = :db "
+                    "AND usename = ANY(:writers) AND pid <> pg_backend_pid()"
+                ),
+                {"db": database, "writers": list(fenced)},
+            ).scalar_one()
+            if remaining == 0:
+                break
+            if time.monotonic() >= deadline:
+                raise FenceRefused(
+                    FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
+                    f"{remaining} writer backend(s) on {database!r} survived "
+                    f"{session_wait_seconds}s of draining",
+                )
+            for pid in (
+                conn.execute(
+                    text(
+                        "SELECT pid FROM pg_stat_activity WHERE datname = :db "
+                        "AND usename = ANY(:writers) AND pid <> pg_backend_pid()"
+                    ),
+                    {"db": database, "writers": list(fenced)},
+                )
+                .scalars()
+                .all()
+            ):
+                conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+            time.sleep(_POLL_INTERVAL_SECONDS)
+
+    fenced_at = conn.execute(text("SELECT now()")).scalar_one()
+    return FenceProof(
+        database=database,
+        prior_acl=prior_acl,
+        fenced_roles=fenced,
+        absent_roles=absent,
+        terminated_count=terminated_count,
+        fenced_at=fenced_at,
+    )
+
+
+def restore_writers(conn: Connection, proof: FenceProof) -> UnfenceProof:
+    """Put the ACL back to exactly `proof.prior_acl`. Idempotent.
+
+    Only re-grants CONNECT to a grantee the prior ACL actually held it for —
+    never PUBLIC, never a fenced role, unless the parsed prior ACL says so —
+    and then verifies the restored ACL is byte-for-byte the prior one before
+    returning."""
+    prior_parsed = _parse_acl(proof.prior_acl)
+    quoted_db = _quote_ident(conn, proof.database)
+
+    restored: list[str] = []
+    if _had_connect(prior_parsed, ""):
+        conn.execute(text(f"GRANT CONNECT ON DATABASE {quoted_db} TO PUBLIC"))
+        restored.append("PUBLIC")
+    for role in proof.fenced_roles:
+        if _had_connect(prior_parsed, role):
+            quoted_role = _quote_ident(conn, role)
+            conn.execute(
+                text(f"GRANT CONNECT ON DATABASE {quoted_db} TO {quoted_role}")
+            )
+            restored.append(role)
+
+    current_acl = _current_acl_text(conn, proof.database)
+    if _parse_acl(current_acl) != prior_parsed:
+        raise FenceRefused(
+            FenceRefusalCode.ACL_NOT_RESTORED,
+            f"restored ACL for {proof.database!r} does not equal the prior ACL "
+            "recorded in the fence proof",
+        )
+
+    restored_at = conn.execute(text("SELECT now()")).scalar_one()
+    return UnfenceProof(
+        database=proof.database,
+        restored_at=restored_at,
+        roles_restored=tuple(restored),
+    )
+
+
+def fence_is_holding(conn: Connection, proof: FenceProof) -> bool:
+    """Read-only: is the fence this proof describes still in effect?
+
+    True only when every fenced role still lacks CONNECT and the migration
+    role still has it — never merely "the ACL looks different from prior"."""
+    for role in proof.fenced_roles:
+        still_connect = conn.execute(
+            text("SELECT has_database_privilege(:role, :db, 'CONNECT')"),
+            {"role": role, "db": proof.database},
+        ).scalar_one()
+        if still_connect:
+            return False
+    migration_can_connect = conn.execute(
+        text("SELECT has_database_privilege(:role, :db, 'CONNECT')"),
+        {"role": MIGRATION_ROLE, "db": proof.database},
+    ).scalar_one()
+    return bool(migration_can_connect)
