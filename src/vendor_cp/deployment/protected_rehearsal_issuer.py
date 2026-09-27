@@ -9,6 +9,8 @@ exact wheels (Control 0.1.0a16, Approvals 0.1.0a8) are published and pinned.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
@@ -88,6 +90,39 @@ def _subject(plan: PlanFacts) -> str:
     return subject
 
 
+def _evidence_digest(document: object) -> str:
+    """A canonical `sha256:<64 hex>` digest of harness evidence.
+
+    Folded into the issuance fingerprint so a same-command-id retry that
+    carries DIFFERENT evidence is `IssuerCommandReused`, not silently treated
+    as the same request. `document` is opaque data the caller passes through
+    to Control (`rehearsal_issuer_seam.py`); only the shapes Control actually
+    accepts today -- a `Mapping` (canonicalised as sorted-key JSON, same
+    style as `issuer_receipts.request_fingerprint`) or raw `bytes`/`str` --
+    can be digested deterministically. Anything else raises `TypeError`
+    rather than silently falling back to a representation
+    (`repr`/`str`/pickle) that would not be stable across processes.
+    """
+    if isinstance(document, Mapping):
+        encoded = json.dumps(
+            document,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+    elif isinstance(document, bytes):
+        encoded = document
+    elif isinstance(document, str):
+        encoded = document.encode("utf-8")
+    else:
+        raise TypeError(
+            "cannot fingerprint harness evidence of type "
+            f"{type(document).__name__}; issue_authorization requires a "
+            "Mapping, bytes, or str evidence document"
+        )
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
 def _plan(db: object, plan_id: UUID) -> PlanFacts:
     plan = import_module("dotmac_deployment_control").get_plan(db, plan_id)
     if plan is None:
@@ -163,17 +198,54 @@ def approve_issuer_plan(
     that lock through `control.approve_plan` and into the caller's own
     commit — the barrier, not the relay, is what makes this safe against a
     concurrent withdrawal.
+
+    A non-authorizing receipt (`issuer_receipts.py`) is written in the SAME
+    transaction as `control.approve_plan`, keyed by `command_id` and a
+    fingerprint of this request. It never bypasses or replaces the hold
+    above: a NEW command id still takes the hold and refuses exactly as
+    before. It only lets a retry of an ALREADY-COMMITTED command, made after
+    a later withdrawal, report that fact (`IssuerCommandCommittedButWithdrawn`)
+    instead of a bare "not held" with no explanation.
     """
     control = import_module("dotmac_deployment_control")
 
+    from vendor_cp.approvals.adapter import ApprovalHoldRefusal, ApprovalNotHeld
     from vendor_cp.deployment.approval_barrier import held_transition
+    from vendor_cp.deployment.issuer_receipts import (
+        APPROVE_PLAN,
+        IssuerCommandCommittedButWithdrawn,
+        IssuerCommandReused,
+        IssuerReceiptMismatch,
+        find_receipt,
+        record_receipt,
+        request_fingerprint,
+    )
 
     plan = _plan(db, plan_id)
     if not plan.plan_digest:
         raise ValueError("issuer plan has no frozen digest")
 
+    fingerprint = request_fingerprint(
+        APPROVE_PLAN,
+        {
+            "command_id": command_id,
+            "plan_id": plan_id,
+            "approval_request_id": approval_request_id,
+            "expected_plan_version": expected_plan_version,
+            "actor_ref": actor_ref,
+        },
+    )
+    receipt = find_receipt(db, command_id)
+    if receipt is not None and (
+        receipt.verb != APPROVE_PLAN or receipt.request_fingerprint != fingerprint
+    ):
+        raise IssuerCommandReused(
+            f"command id {command_id!r} was already used for a different "
+            "approve_plan request"
+        )
+
     def transition(held: HeldPlatformApproval) -> object:
-        return control.approve_plan(
+        result = control.approve_plan(
             db,
             control.ApprovePlanCommand(
                 command_id=command_id,
@@ -195,15 +267,62 @@ def approve_issuer_plan(
                 actor_ref=actor_ref,
             ),
         )
+        if (
+            result.id != plan_id
+            or result.status != "approved"
+            or result.approval_decision_ref != str(held.request_id)
+        ):
+            raise IssuerReceiptMismatch(
+                f"command id {command_id!r} approve_plan call returned "
+                f"id={result.id!r} status={result.status!r} "
+                f"approval_decision_ref={result.approval_decision_ref!r}, "
+                f"which does not match the request it was made under"
+            )
+        control_ref = str(result.id)
+        existing = find_receipt(db, command_id)
+        if existing is not None:
+            if (
+                existing.verb != APPROVE_PLAN
+                or existing.request_fingerprint != fingerprint
+            ):
+                raise IssuerCommandReused(
+                    f"command id {command_id!r} was already used for a "
+                    "different approve_plan request"
+                )
+            if existing.plan_id != plan_id or existing.control_ref != control_ref:
+                raise IssuerReceiptMismatch(
+                    f"command id {command_id!r} recorded plan_id "
+                    f"{existing.plan_id!r} control_ref {existing.control_ref!r}, "
+                    f"but this approve_plan call produced plan_id {plan_id!r} "
+                    f"control_ref {control_ref!r}"
+                )
+        if existing is None:
+            record_receipt(
+                db,
+                command_id=command_id,
+                verb=APPROVE_PLAN,
+                fingerprint=fingerprint,
+                plan_id=plan_id,
+                approval_request_id=approval_request_id,
+                control_ref=control_ref,
+            )
+        return result
 
-    return held_transition(
-        db,
-        request_id=approval_request_id,
-        subject_type=SUBJECT_TYPE,
-        subject_id=_subject(plan),
-        content_digest=plan.plan_digest,
-        transition=transition,
-    )
+    try:
+        return held_transition(
+            db,
+            request_id=approval_request_id,
+            subject_type=SUBJECT_TYPE,
+            subject_id=_subject(plan),
+            content_digest=plan.plan_digest,
+            transition=transition,
+        )
+    except ApprovalNotHeld as exc:
+        if receipt is not None and exc.code is ApprovalHoldRefusal.WITHDRAWN:
+            raise IssuerCommandCommittedButWithdrawn(
+                command_id, APPROVE_PLAN, receipt.control_ref
+            ) from exc
+        raise
 
 
 def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> object:
@@ -221,12 +340,38 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
     so this comparison is defence in depth. It fails loudly if a future
     Control could re-bind a plan's decision between the unlocked pre-read and
     the hold.
+
+    A non-authorizing receipt (`issuer_receipts.py`) is written in the SAME
+    transaction as `control.issue_rehearsal_issuer_authorization_for_plan`,
+    keyed by `command_id` and a fingerprint of both
+    `invocation.to_control_request()` (deterministic — it carries only
+    `command_id`, `plan_id`, and an optional `actor_ref`, none of which vary
+    between a genuine retry and its original) and a canonical digest of
+    `invocation.harness_evidence_document` (`_evidence_digest`), so a retry
+    that swaps in different evidence under the same command id is refused as
+    `IssuerCommandReused` rather than silently accepted as the same request.
+    `control_ref` is the authorization's own `statement.authorization_id`,
+    never the signed envelope itself. A NEW command id still takes the hold
+    and refuses exactly as before; only a retry of an ALREADY-COMMITTED
+    command, made after a later withdrawal, is reported via
+    `IssuerCommandCommittedButWithdrawn` instead of a bare "not held".
     """
     control = import_module("dotmac_deployment_control")
 
+    from vendor_cp.approvals.adapter import ApprovalHoldRefusal, ApprovalNotHeld
     from vendor_cp.deployment.approval_barrier import held_transition
+    from vendor_cp.deployment.issuer_receipts import (
+        ISSUE_AUTHORIZATION,
+        IssuerCommandCommittedButWithdrawn,
+        IssuerCommandReused,
+        IssuerReceiptMismatch,
+        find_receipt,
+        record_receipt,
+        request_fingerprint,
+    )
 
     plan_id = invocation.command.plan_id
+    command_id = invocation.command.command_id
     plan = _plan(db, plan_id)
     if not plan.approval_decision_ref:
         raise ValueError(f"issuer plan {plan_id} has no recorded approval decision")
@@ -242,6 +387,25 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
     expected_decision_ref = plan.approval_decision_ref
     expected_plan_digest = plan.plan_digest
 
+    fingerprint = request_fingerprint(
+        ISSUE_AUTHORIZATION,
+        {
+            **dict(invocation.to_control_request()),
+            "harness_evidence_digest": _evidence_digest(
+                invocation.harness_evidence_document
+            ),
+        },
+    )
+    receipt = find_receipt(db, command_id)
+    if receipt is not None and (
+        receipt.verb != ISSUE_AUTHORIZATION
+        or receipt.request_fingerprint != fingerprint
+    ):
+        raise IssuerCommandReused(
+            f"command id {command_id!r} was already used for a different "
+            "issue_authorization request"
+        )
+
     def transition(held: HeldPlatformApproval) -> object:
         result = control.issue_rehearsal_issuer_authorization_for_plan(
             db,
@@ -256,16 +420,51 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
             raise ValueError(
                 f"issuer plan {plan_id} approval standing changed during issuance"
             )
+        control_ref = result.statement.authorization_id
+        existing = find_receipt(db, command_id)
+        if existing is not None:
+            if (
+                existing.verb != ISSUE_AUTHORIZATION
+                or existing.request_fingerprint != fingerprint
+            ):
+                raise IssuerCommandReused(
+                    f"command id {command_id!r} was already used for a "
+                    "different issue_authorization request"
+                )
+            if existing.plan_id != plan_id or existing.control_ref != control_ref:
+                raise IssuerReceiptMismatch(
+                    f"command id {command_id!r} recorded plan_id "
+                    f"{existing.plan_id!r} control_ref {existing.control_ref!r}, "
+                    f"but this issue_authorization call produced plan_id "
+                    f"{plan_id!r} control_ref {control_ref!r}"
+                )
+        if existing is None:
+            record_receipt(
+                db,
+                command_id=command_id,
+                verb=ISSUE_AUTHORIZATION,
+                fingerprint=fingerprint,
+                plan_id=plan_id,
+                approval_request_id=request_id,
+                control_ref=control_ref,
+            )
         return result
 
-    return held_transition(
-        db,
-        request_id=request_id,
-        subject_type=SUBJECT_TYPE,
-        subject_id=_subject(plan),
-        content_digest=plan.plan_digest,
-        transition=transition,
-    )
+    try:
+        return held_transition(
+            db,
+            request_id=request_id,
+            subject_type=SUBJECT_TYPE,
+            subject_id=_subject(plan),
+            content_digest=plan.plan_digest,
+            transition=transition,
+        )
+    except ApprovalNotHeld as exc:
+        if receipt is not None and exc.code is ApprovalHoldRefusal.WITHDRAWN:
+            raise IssuerCommandCommittedButWithdrawn(
+                command_id, ISSUE_AUTHORIZATION, receipt.control_ref
+            ) from exc
+        raise
 
 
 def _conflict(

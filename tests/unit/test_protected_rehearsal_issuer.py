@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from datetime import UTC, datetime
+from enum import StrEnum
 from types import ModuleType, SimpleNamespace
 from uuid import UUID
 
@@ -12,10 +13,30 @@ from dotmac_kernel.messaging import ClaimedPlatformEvent
 
 from vendor_cp.deployment import approval_barrier
 from vendor_cp.deployment import protected_rehearsal_issuer as issuer
+from vendor_cp.deployment.issuer_receipts import (
+    APPROVE_PLAN,
+    ISSUE_AUTHORIZATION,
+    request_fingerprint,
+)
 from vendor_cp.deployment.rehearsal_issuer_seam import (
     RehearsalIssuerCommand,
     RehearsalIssuerInvocation,
 )
+
+
+class FakeApprovalHoldRefusal(StrEnum):
+    """Stand-in for `dotmac_approvals.ApprovalHoldRefusal` -- same seven
+    members, so `exc.code is ApprovalHoldRefusal.WITHDRAWN` in
+    `protected_rehearsal_issuer.py` can be exercised without the real wheel."""
+
+    MALFORMED_DIGEST = "malformed_digest"
+    REQUEST_NOT_FOUND = "request_not_found"
+    SUBJECT_MISMATCH = "subject_mismatch"
+    DIGEST_MISMATCH = "digest_mismatch"
+    WITHDRAWN = "withdrawn"
+    NOT_APPROVED = "not_approved"
+    NO_APPROVE_DECISION = "no_approve_decision"
+
 
 PLAN_ID = UUID("10000000-0000-0000-0000-000000000001")
 REQUEST_ID = UUID("20000000-0000-0000-0000-000000000002")
@@ -37,6 +58,22 @@ class FakeApprovalNotHeld(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+#: A JSON-native harness evidence document, the shape the real harness emits
+#: (`rehearsal_issuer_harness/security.py::document()` returns a plain dict);
+#: the issuance fingerprint refuses anything it cannot digest canonically.
+_EVIDENCE: dict[str, object] = {"schema": "test-harness-evidence", "lease": "L-1"}
+
+
+@pytest.fixture(autouse=True)
+def _no_receipt_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These seam tests pass a bare stand-in session; the receipt store (its
+    own unit and real-PG tests cover it) is replaced with an empty one here."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(issuer_receipts, "find_receipt", lambda db, command_id: None)
+    monkeypatch.setattr(issuer_receipts, "record_receipt", lambda db, **kwargs: None)
 
 
 @pytest.fixture
@@ -89,10 +126,13 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         db: object, request: dict[str, object], *, harness_evidence_document: object
     ) -> object:
         calls.append(("issue", (request, harness_evidence_document)))
-        return object()
+        # Control's issuance result carries its authorization id on
+        # `statement`; the seam records that id (never the envelope).
+        return SimpleNamespace(statement=SimpleNamespace(authorization_id="auth-1"))
 
     control.issue_rehearsal_issuer_authorization_for_plan = issue  # type: ignore[attr-defined]
     approvals = ModuleType("vendor_cp.approvals.adapter")
+    approvals.ApprovalHoldRefusal = FakeApprovalHoldRefusal  # type: ignore[attr-defined]
     approvals.OpenRequestCommand = Command  # type: ignore[attr-defined]
     approvals.open_request = lambda db, cmd: calls.append(("open", cmd))  # type: ignore[attr-defined]
     approvals.approved_request_evidence = (  # type: ignore[attr-defined]
@@ -251,7 +291,7 @@ def test_mutated_approval_subject_is_refused(
 
 
 def test_issuance_carries_only_existing_seam_fields(ports: SimpleNamespace) -> None:
-    evidence = object()
+    evidence = dict(_EVIDENCE)
     invocation = RehearsalIssuerInvocation(
         RehearsalIssuerCommand("issue-1", PLAN_ID), evidence
     )
@@ -278,7 +318,7 @@ def test_issuance_derives_request_id_only_from_the_frozen_plan(
     other_request_id = UUID("80000000-0000-0000-0000-000000000008")
     ports.plan.approval_decision_ref = str(other_request_id)
     invocation = RehearsalIssuerInvocation(
-        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+        RehearsalIssuerCommand("issue-1", PLAN_ID), dict(_EVIDENCE)
     )
     issuer.issue_authorization(object(), invocation)
     held = ports.calls[0]
@@ -291,7 +331,7 @@ def test_issuance_refuses_without_a_recorded_approval_decision(
 ) -> None:
     ports.plan.approval_decision_ref = None
     invocation = RehearsalIssuerInvocation(
-        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+        RehearsalIssuerCommand("issue-1", PLAN_ID), dict(_EVIDENCE)
     )
     with pytest.raises(ValueError, match="no recorded approval decision"):
         issuer.issue_authorization(object(), invocation)
@@ -303,7 +343,7 @@ def test_issuance_refuses_a_malformed_approval_decision_ref(
 ) -> None:
     ports.plan.approval_decision_ref = "not-a-uuid"
     invocation = RehearsalIssuerInvocation(
-        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+        RehearsalIssuerCommand("issue-1", PLAN_ID), dict(_EVIDENCE)
     )
     with pytest.raises(ValueError, match="is not a UUID"):
         issuer.issue_authorization(object(), invocation)
@@ -322,11 +362,11 @@ def test_issuance_reread_mismatch_after_a_concurrent_change_raises(
         ports.plan.approval_decision_ref = str(
             UUID("90000000-0000-0000-0000-000000000009")
         )
-        return object()
+        return SimpleNamespace(statement=SimpleNamespace(authorization_id="auth-1"))
 
     ports.control.issue_rehearsal_issuer_authorization_for_plan = issue_and_mutate
     invocation = RehearsalIssuerInvocation(
-        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+        RehearsalIssuerCommand("issue-1", PLAN_ID), dict(_EVIDENCE)
     )
     with pytest.raises(ValueError, match="approval standing changed"):
         issuer.issue_authorization(object(), invocation)
@@ -353,11 +393,208 @@ def test_approval_not_held_refusal_means_control_never_sees_issuance(
     ports.hold_refusal["code"] = "withdrawn"
     ports.hold_refusal["message"] = "withdrawn"
     invocation = RehearsalIssuerInvocation(
-        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+        RehearsalIssuerCommand("issue-1", PLAN_ID), dict(_EVIDENCE)
     )
     with pytest.raises(FakeApprovalNotHeld):
         issuer.issue_authorization(object(), invocation)
     assert [name for name, _ in ports.calls] == ["hold"]
+
+
+# ── fix 4: only a WITHDRAWN hold refusal is translated ───────────────────────
+
+
+def test_a_non_withdrawn_hold_refusal_propagates_even_with_a_receipt_present_on_approve(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SENSITIVITY (near-miss) for fix 4: a receipt exists (a genuine retry of
+    an already-committed command), but the hold's refusal is NOT_APPROVED, not
+    WITHDRAWN. It must propagate unchanged rather than being reported as
+    `IssuerCommandCommittedButWithdrawn` -- overriding the autouse
+    `_no_receipt_store` fixture with a store that returns a matching receipt.
+    """
+    from vendor_cp.deployment import issuer_receipts
+
+    fingerprint = request_fingerprint(
+        APPROVE_PLAN,
+        {
+            "command_id": "approve-1",
+            "plan_id": PLAN_ID,
+            "approval_request_id": REQUEST_ID,
+            "expected_plan_version": None,
+            "actor_ref": None,
+        },
+    )
+    receipt = SimpleNamespace(
+        verb=APPROVE_PLAN,
+        request_fingerprint=fingerprint,
+        plan_id=PLAN_ID,
+        approval_request_id=REQUEST_ID,
+        control_ref=str(PLAN_ID),
+    )
+    monkeypatch.setattr(issuer_receipts, "find_receipt", lambda db, command_id: receipt)
+    ports.hold_refusal["code"] = FakeApprovalHoldRefusal.NOT_APPROVED
+    ports.hold_refusal["message"] = "not approved"
+
+    with pytest.raises(FakeApprovalNotHeld) as excinfo:
+        issuer.approve_issuer_plan(
+            object(),
+            command_id="approve-1",
+            plan_id=PLAN_ID,
+            approval_request_id=REQUEST_ID,
+        )
+    assert not isinstance(
+        excinfo.value, issuer_receipts.IssuerCommandCommittedButWithdrawn
+    )
+
+
+def test_a_non_withdrawn_hold_refusal_propagates_with_a_receipt_present_on_issuance(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same sensitivity as above, at the issuance call site."""
+    from vendor_cp.deployment import issuer_receipts
+
+    evidence = b"placeholder"
+    fingerprint = request_fingerprint(
+        ISSUE_AUTHORIZATION,
+        {
+            "command_id": "issue-1",
+            "plan_id": PLAN_ID,
+            "harness_evidence_digest": issuer._evidence_digest(b"placeholder"),
+        },
+    )
+    receipt = SimpleNamespace(
+        verb=ISSUE_AUTHORIZATION,
+        request_fingerprint=fingerprint,
+        plan_id=PLAN_ID,
+        approval_request_id=REQUEST_ID,
+        control_ref="auth-0",
+    )
+    monkeypatch.setattr(issuer_receipts, "find_receipt", lambda db, command_id: receipt)
+    ports.hold_refusal["code"] = FakeApprovalHoldRefusal.NOT_APPROVED
+    ports.hold_refusal["message"] = "not approved"
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand("issue-1", PLAN_ID), evidence
+    )
+
+    with pytest.raises(FakeApprovalNotHeld):
+        issuer.issue_authorization(object(), invocation)
+
+
+# ── D18-C: the in-hold fingerprint branch, deterministically ────────────────
+
+
+def test_approve_in_hold_fingerprint_mismatch_raises_issuer_command_reused(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`find_receipt` answers `None` on its FIRST call (the pre-hold check,
+    which must therefore let this request through) and a receipt with a
+    DIFFERENT fingerprint on its SECOND call, made from inside
+    `transition()` after Control's `approve_plan` has already run. That
+    second call is the branch this test pins: `approve_issuer_plan` must
+    raise `IssuerCommandReused` from inside the hold, not treat the
+    disagreeing receipt as its own."""
+    from vendor_cp.deployment import issuer_receipts
+
+    command_id = "approve-1"
+    different_fingerprint = request_fingerprint(
+        APPROVE_PLAN,
+        {
+            "command_id": command_id,
+            "plan_id": PLAN_ID,
+            "approval_request_id": REQUEST_ID,
+            "expected_plan_version": None,
+            "actor_ref": "someone-else",
+        },
+    )
+    receipt = SimpleNamespace(
+        verb=APPROVE_PLAN,
+        request_fingerprint=different_fingerprint,
+        plan_id=PLAN_ID,
+        approval_request_id=REQUEST_ID,
+        control_ref=str(PLAN_ID),
+    )
+    calls = {"n": 0}
+
+    def fake_find_receipt(db: object, command_id: str) -> object | None:
+        calls["n"] += 1
+        return None if calls["n"] == 1 else receipt
+
+    monkeypatch.setattr(issuer_receipts, "find_receipt", fake_find_receipt)
+
+    with pytest.raises(issuer_receipts.IssuerCommandReused):
+        issuer.approve_issuer_plan(
+            object(),
+            command_id=command_id,
+            plan_id=PLAN_ID,
+            approval_request_id=REQUEST_ID,
+        )
+    assert calls["n"] == 2, "the in-hold branch must re-check find_receipt"
+    assert [name for name, _ in ports.calls] == ["hold", "approve"]
+
+
+def test_issuance_in_hold_fingerprint_mismatch_raises_issuer_command_reused(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The issuance equivalent of the test above, using the file's own dict
+    harness evidence document (`_EVIDENCE`)."""
+    from vendor_cp.deployment import issuer_receipts
+
+    command_id = "issue-1"
+    evidence = dict(_EVIDENCE)
+    different_evidence = {**_EVIDENCE, "lease": "L-2"}
+    different_fingerprint = request_fingerprint(
+        ISSUE_AUTHORIZATION,
+        {
+            "command_id": command_id,
+            "plan_id": PLAN_ID,
+            "harness_evidence_digest": issuer._evidence_digest(different_evidence),
+        },
+    )
+    receipt = SimpleNamespace(
+        verb=ISSUE_AUTHORIZATION,
+        request_fingerprint=different_fingerprint,
+        plan_id=PLAN_ID,
+        approval_request_id=REQUEST_ID,
+        control_ref="auth-0",
+    )
+    calls = {"n": 0}
+
+    def fake_find_receipt(db: object, command_id: str) -> object | None:
+        calls["n"] += 1
+        return None if calls["n"] == 1 else receipt
+
+    monkeypatch.setattr(issuer_receipts, "find_receipt", fake_find_receipt)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(command_id, PLAN_ID), evidence
+    )
+
+    with pytest.raises(issuer_receipts.IssuerCommandReused):
+        issuer.issue_authorization(object(), invocation)
+    assert calls["n"] == 2, "the in-hold branch must re-check find_receipt"
+    assert [name for name, _ in ports.calls] == ["hold", "issue"]
+
+
+# ── fix 3: the issuance fingerprint covers the harness evidence ─────────────
+
+
+def test_evidence_digest_changes_when_the_document_changes() -> None:
+    a = issuer._evidence_digest({"lease_id": "lease-1"})
+    b = issuer._evidence_digest({"lease_id": "lease-2"})
+    assert a != b
+    assert a.startswith("sha256:")
+
+
+def test_evidence_digest_is_key_order_insensitive_for_a_mapping() -> None:
+    a = issuer._evidence_digest({"a": 1, "b": 2})
+    b = issuer._evidence_digest({"b": 2, "a": 1})
+    assert a == b
+
+
+def test_evidence_digest_raises_on_an_unrecognised_type() -> None:
+    with pytest.raises(TypeError):
+        issuer._evidence_digest(object())
+    with pytest.raises(TypeError):
+        issuer._evidence_digest(12345)
 
 
 def _withdrawal(ports: SimpleNamespace) -> dict[str, object]:

@@ -45,6 +45,7 @@ from uuid import UUID
 
 from dotmac_approvals import (
     Actor,
+    ApprovalHoldRefusal,
     ApprovalLevel,
     ApprovalNotHeld,
     ApprovalState,
@@ -439,6 +440,7 @@ def hold_approval(
 
 
 __all__ = [
+    "ApprovalHoldRefusal",
     "ApprovalNotHeld",
     "ApprovedRequestEvidence",
     "HeldPlatformApproval",
