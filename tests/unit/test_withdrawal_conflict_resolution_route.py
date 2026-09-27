@@ -27,12 +27,13 @@ from dotmac_kernel.errors import register_error_handlers
 from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from vendor_cp.relay import withdrawal_router
 from vendor_cp.relay.withdrawal_outcomes import (
-    ConflictResolutionRefusal,
+    ConflictAlreadyResolved,
+    ConflictNotResolvable,
+    ConflictOutcomeNotFound,
     RecordedConflictResolution,
     WithdrawalResolution,
 )
@@ -104,7 +105,9 @@ def test_a_second_resolve_is_a_conflict(
     authenticated_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def _fake_resolve(db: Session, **kwargs: object) -> RecordedConflictResolution:
-        raise IntegrityError("insert", {}, Exception("duplicate key"))
+        raise ConflictAlreadyResolved(
+            f"withdrawal outcome {OUTCOME_ID} was already resolved"
+        )
 
     monkeypatch.setattr(withdrawal_router, "resolve_conflict", _fake_resolve)
     response = authenticated_client.post(
@@ -118,7 +121,7 @@ def test_an_unknown_outcome_is_not_found(
     authenticated_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def _fake_resolve(db: Session, **kwargs: object) -> RecordedConflictResolution:
-        raise ConflictResolutionRefusal(f"no withdrawal outcome {OUTCOME_ID} exists")
+        raise ConflictOutcomeNotFound(f"no withdrawal outcome {OUTCOME_ID} exists")
 
     monkeypatch.setattr(withdrawal_router, "resolve_conflict", _fake_resolve)
     response = authenticated_client.post(
@@ -132,7 +135,7 @@ def test_a_non_conflict_outcome_is_a_conflict_response(
     authenticated_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def _fake_resolve(db: Session, **kwargs: object) -> RecordedConflictResolution:
-        raise ConflictResolutionRefusal(
+        raise ConflictNotResolvable(
             f"withdrawal outcome {OUTCOME_ID} is 'applied', not security_conflict"
         )
 

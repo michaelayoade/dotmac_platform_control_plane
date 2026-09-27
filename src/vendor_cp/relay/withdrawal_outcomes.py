@@ -45,14 +45,19 @@ from typing import Any
 from uuid import UUID
 
 from dotmac_kernel import Base, uuid_pk
+from dotmac_kernel.db import conflict_savepoint
 from sqlalchemy import DateTime, ForeignKey, String, Text, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 __all__ = [
     "ApprovalWithdrawalConflictResolution",
     "ApprovalWithdrawalOutcome",
+    "ConflictAlreadyResolved",
+    "ConflictNotResolvable",
+    "ConflictOutcomeNotFound",
     "ConflictResolutionRefusal",
     "RecordedConflictResolution",
     "RecordedOutcome",
@@ -217,6 +222,18 @@ class ConflictResolutionRefusal(ValueError):
     """`resolve_conflict` was asked to resolve an outcome it may not touch."""
 
 
+class ConflictOutcomeNotFound(ConflictResolutionRefusal):
+    """No withdrawal outcome has this id."""
+
+
+class ConflictNotResolvable(ConflictResolutionRefusal):
+    """The outcome is not a `security_conflict`, or the request is invalid."""
+
+
+class ConflictAlreadyResolved(ConflictResolutionRefusal):
+    """A resolution for this outcome already exists; the first one stands."""
+
+
 def _normalize(value: object) -> object:
     """UUIDs and datetimes as the plain strings a claimed JSONB payload
     already carries them as; anything else falls back to `str`."""
@@ -377,21 +394,26 @@ def resolve_conflict(
     Refuses an outcome that is not a `security_conflict` — there is nothing
     to resolve on a row that already reached a clean terminal disposition.
     Append-only, like the outcome table it points at: a second resolution for
-    the same `outcome_id` collides on that column's unique constraint rather
-    than silently overwriting the first human's decision.
+    the same `outcome_id` is refused (`ConflictAlreadyResolved`) — by an
+    explicit check, and by that column's unique constraint for a concurrent
+    one — rather than silently overwriting the first human's decision.
     """
     outcome = db.get(ApprovalWithdrawalOutcome, outcome_id)
     if outcome is None:
-        raise ConflictResolutionRefusal(
+        raise ConflictOutcomeNotFound(
             f"no withdrawal outcome {outcome_id} exists to resolve"
         )
     if outcome.disposition != WithdrawalDisposition.SECURITY_CONFLICT.value:
-        raise ConflictResolutionRefusal(
+        raise ConflictNotResolvable(
             f"withdrawal outcome {outcome_id} is {outcome.disposition!r}, not "
             "security_conflict — there is nothing to resolve"
         )
     if not reason.strip():
-        raise ConflictResolutionRefusal("a conflict resolution must state a reason")
+        raise ConflictNotResolvable("a conflict resolution must state a reason")
+    if _resolution_exists(db, outcome_id):
+        raise ConflictAlreadyResolved(
+            f"withdrawal outcome {outcome_id} was already resolved"
+        )
 
     row = ApprovalWithdrawalConflictResolution(
         outcome_id=outcome_id,
@@ -400,6 +422,26 @@ def resolve_conflict(
         reason=reason,
         redrive_ref=redrive_ref,
     )
-    db.add(row)
-    db.flush()
+    # The pre-check above answers the ordinary second resolve; the unique
+    # constraint on `outcome_id` answers a concurrent one. The savepoint keeps
+    # that collision from poisoning the caller's transaction.
+    try:
+        with conflict_savepoint(db):
+            db.add(row)
+            db.flush()
+    except IntegrityError as exc:
+        raise ConflictAlreadyResolved(
+            f"withdrawal outcome {outcome_id} was already resolved"
+        ) from exc
     return RecordedConflictResolution._from_row(row)
+
+
+def _resolution_exists(db: Session, outcome_id: UUID) -> bool:
+    return (
+        db.scalar(
+            select(ApprovalWithdrawalConflictResolution.id).where(
+                ApprovalWithdrawalConflictResolution.outcome_id == outcome_id
+            )
+        )
+        is not None
+    )

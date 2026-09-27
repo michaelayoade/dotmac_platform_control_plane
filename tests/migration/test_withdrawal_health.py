@@ -27,7 +27,6 @@ from alembic import command
 from dotmac_kernel.messaging import OutboxStatus, PlatformOutboxEvent
 from dotmac_kernel.session_runtime import DatabaseRuntime
 from sqlalchemy import create_engine, select, text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from vendor_cp.migrations import make_alembic_config
@@ -38,6 +37,7 @@ from vendor_cp.relay.approval_router import (
 from vendor_cp.relay.health import RelayVerdict, relay_health
 from vendor_cp.relay.runner import RelayComposition, drain_once
 from vendor_cp.relay.withdrawal_outcomes import (
+    ConflictAlreadyResolved,
     ConflictResolutionRefusal,
     WithdrawalDisposition,
     WithdrawalResolution,
@@ -242,11 +242,9 @@ def test_a_recorded_conflict_is_red_until_resolved_then_clears(
 
 
 def test_a_second_resolve_is_refused(migrated: tuple[str, str]) -> None:
-    """Append-only, at the database: `outcome_id` is unique on the resolution
-    table, so a second resolve collides on that constraint — `resolve_conflict`
-    never catches its own `IntegrityError` any more than `record_outcome` does
-    (see that function's docstring). It never silently overwrites the first
-    human's decision."""
+    """A second resolve is a typed refusal (`ConflictAlreadyResolved`), never a
+    silent overwrite of the first human's decision, and the conflict stays
+    resolved by the FIRST record."""
     platform_url, _dispatcher_url = migrated
     with _sessions(platform_url) as platform:
         with platform.platform_session() as db:
@@ -262,7 +260,7 @@ def test_a_second_resolve_is_refused(migrated: tuple[str, str]) -> None:
             db.commit()
 
         with platform.platform_session() as db:
-            with pytest.raises(IntegrityError):
+            with pytest.raises(ConflictAlreadyResolved):
                 resolve_conflict(
                     db,
                     outcome_id=outcome_id,

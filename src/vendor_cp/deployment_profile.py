@@ -365,7 +365,7 @@ class VendorDeploymentProfile:
 PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     VendorDeploymentProfile(
         code=FULL,
-        version="4",
+        version="5",
         withheld_surfaces=frozenset(),
         surface_inventory=(
             "accounts",
@@ -389,12 +389,13 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "declared a laboratory and can never be production-accepted. "
             "Version 4 includes the deployment-control browser surface and "
             "readiness surface, which every profile publishes or explicitly "
-            "withholds."
+            "withholds. Version 5 adds the withdrawal-conflict resolution "
+            "surface."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_BOOTSTRAP,
-        version="5",
+        version="6",
         withheld_surfaces=frozenset(
             {"deployment_control", "licence_delivery", "offers", "provisioning"}
         ),
@@ -424,12 +425,16 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "surface: until it existed, `docker compose up -d app --wait` was "
             "satisfied by a liveness route that does not touch the database, "
             "so a deploy could be declared successful while the application "
-            "could not serve a single request."
+            "could not serve a single request. Version 6 publishes the "
+            "platform-admin withdrawal-conflict resolution surface: an "
+            "unresolved security_conflict holds relay health and readiness red "
+            "by design, and the deployed profile must carry the one "
+            "authenticated path that records its append-only resolution."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_COMPOSED_V1,
-        version="3",
+        version="4",
         withheld_surfaces=frozenset(
             {
                 "accounts",
@@ -439,13 +444,13 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
                 "offers",
                 "provisioning",
                 "vendor_approvals",
+                "withdrawal_conflicts",
             }
         ),
         surface_inventory=(
             "console",
             "allocations",
             "readiness",
-            "withdrawal_conflicts",
         ),
         laboratory=False,
         production_accepted=True,
@@ -478,7 +483,10 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "Version 2 adds the readiness surface, published "
             "here for the same reason it is published everywhere: a "
             "dependency-aware probe is what makes a successful deploy mean the "
-            "application can serve."
+            "application can serve. Version 4 withholds the withdrawal-conflict "
+            "resolution surface: it is an operator WRITE surface, withheld here "
+            "under the same unexercised-in-production discipline as accounts, "
+            "contracts and vendor approvals until its publication is decided."
         ),
     ),
 )

@@ -19,10 +19,10 @@ from dotmac_kernel import ConflictError, NotFoundError, PlatformAdmin
 from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.platform_auth import require_platform_admin
 from fastapi import APIRouter, Depends
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from vendor_cp.relay.withdrawal_outcomes import (
+    ConflictOutcomeNotFound,
     ConflictResolutionRefusal,
     resolve_conflict,
 )
@@ -35,10 +35,6 @@ router = APIRouter(prefix="/platform/relay/withdrawal-conflicts", tags=["relay"]
 
 Admin = Annotated[PlatformAdmin, Depends(require_platform_admin)]
 Db = Annotated[Session, Depends(get_platform_db)]
-
-#: `resolve_conflict`'s own refusal text, split by which HTTP status it earns.
-#: See that function's docstring: these are the only two reasons it raises.
-_NOT_FOUND_PREFIX = "no withdrawal outcome"
 
 
 @router.post("/{outcome_id}/resolve", response_model=ConflictResolutionResponse)
@@ -57,21 +53,11 @@ def resolve(
             reason=body.reason,
             redrive_ref=body.redrive_ref,
         )
+    except ConflictOutcomeNotFound as exc:
+        raise NotFoundError(str(exc)) from exc
     except ConflictResolutionRefusal as exc:
-        message = str(exc)
-        if message.startswith(_NOT_FOUND_PREFIX):
-            raise NotFoundError(message) from exc
-        # Not a `security_conflict` (a clean terminal disposition already
-        # reached) — a state conflict, not a missing resource.
-        raise ConflictError(message) from exc
-    except IntegrityError as exc:
-        # `outcome_id` is unique on the resolution table (append-only): a
-        # second resolve for the same outcome collides here rather than
-        # overwriting the first human's decision — see `resolve_conflict`'s
-        # own docstring. A state conflict, not a validation fault.
-        raise ConflictError(
-            f"withdrawal outcome {outcome_id} was already resolved"
-        ) from exc
+        # Not a `security_conflict`, or already resolved: a state conflict.
+        raise ConflictError(str(exc)) from exc
     return ConflictResolutionResponse.of(value)
 
 

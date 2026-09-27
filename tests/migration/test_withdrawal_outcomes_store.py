@@ -22,6 +22,8 @@ from sqlalchemy.orm import Session
 
 from vendor_cp.migrations import make_alembic_config
 from vendor_cp.relay.withdrawal_outcomes import (
+    ApprovalWithdrawalConflictResolution,
+    ConflictAlreadyResolved,
     WithdrawalDisposition,
     WithdrawalResolution,
     outcomes_for_event,
@@ -284,12 +286,26 @@ def test_a_second_resolution_for_the_same_outcome_is_refused(engine: Engine) -> 
         db.commit()
 
     with Session(engine) as db:
-        resolve_conflict(
-            db,
-            outcome_id=outcome.id,
-            resolution=WithdrawalResolution.REDRIVEN,
-            actor_ref="ops:bob",
-            reason="second resolution attempt",
+        with pytest.raises(ConflictAlreadyResolved):
+            resolve_conflict(
+                db,
+                outcome_id=outcome.id,
+                resolution=WithdrawalResolution.REDRIVEN,
+                actor_ref="ops:bob",
+                reason="second resolution attempt",
+            )
+        db.rollback()
+
+    # The backstop for a CONCURRENT second resolve, which the explicit check
+    # cannot see: the unique constraint on `outcome_id` still bites.
+    with Session(engine) as db:
+        db.add(
+            ApprovalWithdrawalConflictResolution(
+                outcome_id=outcome.id,
+                resolution=WithdrawalResolution.REDRIVEN.value,
+                actor_ref="ops:carol",
+                reason="raced past the check",
+            )
         )
         with pytest.raises(IntegrityError):
             db.flush()
