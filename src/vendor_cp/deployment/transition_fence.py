@@ -121,6 +121,21 @@ the failure reported. If the compensating restore itself fails, the caller
 gets `FenceRefused(COMPENSATION_FAILED)` chained from the original exception,
 with `before_acl` set on it, so an operator always holds the exact ACL to
 restore by hand rather than a stack trace alone.
+
+## No query after the ACL is restored
+
+Once a mutation has succeeded and every verification it needs has already run
+(the drain that confirms zero writer backends; the `_current_grants` compare
+against `prior_grants`), `FenceProof.fenced_at` and `UnfenceProof.restored_at`
+are stamped with `datetime.now(UTC)` — a local timestamp, never a further
+query. A `SELECT now()` at that point would be a non-essential query: one that
+could fail for a reason having nothing to do with the fence or restore (a
+dropped connection, a statement timeout) and, by raising, flip an outcome that
+genuinely succeeded into a reported exception. Every remaining query after a
+successful mutation in this module is load-bearing verification (a
+`has_database_privilege` check, a drain poll, the post-GRANT
+`_current_grants` comparison) — never a courtesy read whose only job was a
+timestamp.
 """
 
 from __future__ import annotations
@@ -779,7 +794,12 @@ def _apply_fence(
         conn, database, effective, session_wait_seconds
     )
 
-    fenced_at = conn.execute(text("SELECT now()")).scalar_one()
+    # A local timestamp, never a query: every ACL mutation and the drain that
+    # verifies it have already succeeded by this point, and a `SELECT now()`
+    # here would be a non-essential query that could fail and flip a fence
+    # that genuinely holds into a reported exception (see the module
+    # docstring's "no query after the ACL is restored" section).
+    fenced_at = datetime.now(UTC)
     return FenceProof(
         database=database,
         prior_acl=prior_acl,
@@ -961,7 +981,11 @@ def restore_writers(
         )
         raise mismatch
 
-    restored_at = conn.execute(text("SELECT now()")).scalar_one()
+    # A local timestamp, never a query: the ACL is already restored and
+    # verified equal to `proof.prior_grants` by this point, and a `SELECT
+    # now()` here would be a non-essential query that could fail and flip a
+    # restore that genuinely succeeded into a reported exception.
+    restored_at = datetime.now(UTC)
     return UnfenceProof(
         database=proof.database,
         restored_at=restored_at,
