@@ -67,8 +67,8 @@ LICENSING_HEAD = "li_0001_licensing"
 DEPLOYMENT_CONTROL_HEAD = "dc_0015_plan_purpose"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
-# C2 S4 adds `v020_approval_withdrawal_outcomes` above `v019_relay_heartbeat`.
-VENDOR_HEAD = "v020_approval_withdrawal_outcomes"
+# C2 S4 adds `v020_withdrawal_outcomes` above `v019_relay_heartbeat`.
+VENDOR_HEAD = "v020_withdrawal_outcomes"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:

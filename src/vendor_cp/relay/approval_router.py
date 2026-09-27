@@ -34,9 +34,10 @@ six terminal dispositions `withdrawal_outcomes` owns.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Final, Protocol, TypedDict
+from uuid import UUID
 
 from dotmac_kernel.messaging import ClaimedPlatformEvent
 from sqlalchemy.orm import Session
@@ -174,15 +175,59 @@ class ApprovalEventRouter:
             disposition=result.disposition,
             reason_code=result.reason_code,
             evidence=dict(result.evidence),
-            **result.coordinates,
+            **_coordinates(result.coordinates),
         )
 
 
-def _agreement_handler_adapter(fn: object) -> WithdrawalHandler:
+class _Coordinates(TypedDict, total=False):
+    approval_request_id: UUID | None
+    plan_id: UUID | None
+    agreement_id: UUID | None
+    withdrawal_ref: str | None
+
+
+_UUID_COORDINATES: Final = ("approval_request_id", "plan_id", "agreement_id")
+
+
+def _coordinates(given: Mapping[str, object]) -> _Coordinates:
+    """Narrow a handler's coordinates to `record_outcome`'s typed keywords.
+
+    A key outside the four columns, or a value of the wrong type, is a handler
+    bug: it raises rather than being dropped, so no coordinate is silently
+    lost from the evidence row.
+    """
+    unknown = set(given) - {*_UUID_COORDINATES, "withdrawal_ref"}
+    if unknown:
+        raise TypeError(f"unknown withdrawal coordinates: {sorted(unknown)}")
+    out: _Coordinates = {}
+    if "approval_request_id" in given:
+        out["approval_request_id"] = _uuid_coordinate(given, "approval_request_id")
+    if "plan_id" in given:
+        out["plan_id"] = _uuid_coordinate(given, "plan_id")
+    if "agreement_id" in given:
+        out["agreement_id"] = _uuid_coordinate(given, "agreement_id")
+    if "withdrawal_ref" in given:
+        ref = given["withdrawal_ref"]
+        if ref is not None and not isinstance(ref, str):
+            raise TypeError("withdrawal coordinate withdrawal_ref must be a str")
+        out["withdrawal_ref"] = ref
+    return out
+
+
+def _uuid_coordinate(given: Mapping[str, object], key: str) -> UUID | None:
+    value = given[key]
+    if value is not None and not isinstance(value, UUID):
+        raise TypeError(f"withdrawal coordinate {key} must be a UUID")
+    return value
+
+
+def _agreement_handler_adapter(
+    fn: Callable[..., ApprovalWithdrawalResult],
+) -> WithdrawalHandler:
     """Adapt `record_agreement_approval_withdrawal`'s keyword-only shape."""
 
     def handler(db: Session, event: ClaimedPlatformEvent) -> ApprovalWithdrawalResult:
-        return fn(db, event_id=event.id, payload=event.payload)  # type: ignore[operator]
+        return fn(db, event_id=event.id, payload=event.payload)
 
     return handler
 

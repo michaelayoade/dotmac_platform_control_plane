@@ -34,7 +34,7 @@ would make the outcome table no longer append-only). `outcome_id` is
 attempt hits that constraint rather than silently overwriting the first
 human's decision.
 
-Revision ID: v020_approval_withdrawal_outcomes
+Revision ID: v020_withdrawal_outcomes
 Revises: v019_relay_heartbeat
 Create Date: 2026-09-27
 """
@@ -45,7 +45,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "v020_approval_withdrawal_outcomes"
+revision = "v020_withdrawal_outcomes"
 down_revision = "v019_relay_heartbeat"
 branch_labels = None
 depends_on = None
@@ -211,7 +211,7 @@ def downgrade() -> None:
             populated.append(f"{table}={count}")
     if populated:
         raise RuntimeError(
-            "v020_approval_withdrawal_outcomes cannot be downgraded while "
+            "v020_withdrawal_outcomes cannot be downgraded while "
             f"evidence rows remain: {', '.join(populated)}. This table is the "
             "durable record of how a withdrawal was settled; dropping it with "
             "rows present would destroy audit evidence rather than reverse a "

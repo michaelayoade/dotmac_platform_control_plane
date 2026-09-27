@@ -850,7 +850,10 @@ def record_agreement_approval_withdrawal(
         request_id = UUID(str(payload["request_id"]))
         withdrawal_id = UUID(str(payload["withdrawal_id"]))
         policy_code = str(payload["policy_code"])
-        policy_version = int(payload["policy_version"])  # type: ignore[arg-type]
+        raw_version = payload["policy_version"]
+        if isinstance(raw_version, bool) or not isinstance(raw_version, int | str):
+            raise TypeError("policy_version must be an integer")
+        policy_version = int(raw_version)
         content_digest = str(payload["content_digest"])
         reason = payload.get("reason")
         if not isinstance(reason, str) or not reason.strip():

@@ -27,7 +27,7 @@
 #   supersedes   deploy/candidates/2026-09-27-commercial-agreements-withdrawal-standing.toml
 #
 # This promotion declares the migration heads Gate-0 C2 S4 will reach: the
-# vendor lineage's `v020_approval_withdrawal_outcomes` (append-only withdrawal
+# vendor lineage's `v020_withdrawal_outcomes` (append-only withdrawal
 # outcome evidence) replaces `v019_relay_heartbeat` as its head, on top of the
 # earlier 2026-09-27 Commercial Agreements 0.1.0a2 -> 0.1.0a4 repin
 # (`cg_0002_approval_withdrawals`) and the 2026-09-25
@@ -65,7 +65,7 @@
 #   [migration] AHEAD OF THE TARGET. `expected_heads` names what the NEXT
 #               deployment will reach (`ap_0003_withdrawals`,
 #               `cg_0002_approval_withdrawals`, `dc_0015_plan_purpose`,
-#               `v020_approval_withdrawal_outcomes`), not what the running
+#               `v020_withdrawal_outcomes`), not what the running
 #               database holds. Until that deployment lands, a drift check
 #               against production reports those four as declared-absent and
 #               `ap_0002`/`dc_0002`/`v019` as present-undeclared.
@@ -374,7 +374,7 @@ owner_material = "MIGRATION_DATABASE_URL"
 # it becomes an EFFECTIVE head of its own and the count rises from six to seven.
 # Again this declares what the next deployment will run; nothing is deployed.
 #
-# 2026-09-27, Gate-0 C2 S4 (second promotion): `v020_approval_withdrawal_outcomes`
+# 2026-09-27, Gate-0 C2 S4 (second promotion): `v020_withdrawal_outcomes`
 # replaces `v019_relay_heartbeat` as the vendor lineage's head. It creates the
 # append-only `public.approval_withdrawal_outcomes` and
 # `public.approval_withdrawal_conflict_resolutions` evidence tables.
@@ -385,7 +385,7 @@ expected_heads = [
   "dc_0015_plan_purpose",
   "ea_0003_platform_audit_log",
   "rl_0001_release_artifacts",
-  "v020_approval_withdrawal_outcomes",
+  "v020_withdrawal_outcomes",
 ]
 compatibility = "maintenance_required"
 lock_timeout_seconds = 300
