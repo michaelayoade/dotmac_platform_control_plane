@@ -108,7 +108,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final
 
@@ -562,7 +562,10 @@ def fence_writers(
             fenced_roles=fenced,
             absent_roles=absent,
             terminated_count=0,
-            fenced_at=conn.execute(text("SELECT now()")).scalar_one(),
+            # A local timestamp, never a query: on a dropped connection a
+            # `SELECT now()` here would raise raw and lose `before_acl` on the
+            # very path that guarantee exists for.
+            fenced_at=datetime.now(UTC),
         )
         try:
             restore_writers(conn, compensating)
