@@ -29,10 +29,29 @@ from vendor_cp.contracts.terms import (
     TermEndNotRepresentable,
     end_exclusive_from_inclusive,
 )
+from vendor_cp.deployment import approval_barrier
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
 PRODUCT = "dotmac-sub"
+
+
+@pytest.fixture(autouse=True)
+def _bypass_the_postgres_only_barrier_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`approve`/`activate`/`reinstate` now run through
+    `approval_barrier.held_transition`, whose own runtime checks
+    (`_require_transactional`, `_require_the_hold_is_still_open`) issue a
+    Postgres-only `txid_current_if_assigned()` probe. The FOR SHARE lock
+    itself and that probe are proved for real against PostgreSQL in
+    `tests/migration/test_agreement_approval_barrier.py`; this in-memory
+    SQLite suite exercises only the agreement/evidence logic those checks
+    would otherwise short-circuit, matching
+    `tests/unit/test_protected_rehearsal_issuer.py`'s own bypass.
+    """
+    monkeypatch.setattr(approval_barrier, "_require_transactional", lambda _db: None)
+    monkeypatch.setattr(
+        approval_barrier, "_require_the_hold_is_still_open", lambda _db: None
+    )
 
 
 @pytest.fixture

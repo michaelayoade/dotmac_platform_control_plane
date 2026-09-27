@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
 from uuid import UUID
 
 from dotmac_commercial_agreements import (
@@ -93,6 +93,7 @@ from dotmac_kernel import BadRequestError, ConflictError, DomainError, NotFoundE
 from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import adapter as approvals
+from vendor_cp.approvals_authority import translate_digest
 from vendor_cp.contracts.terms import (
     TermEndNotRepresentable,
     end_exclusive_from_inclusive,
@@ -100,6 +101,9 @@ from vendor_cp.contracts.terms import (
 from vendor_cp.contracts_authority import APPROVAL_SUBJECT_TYPE
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.service import get_offer_version
+
+if TYPE_CHECKING:
+    from vendor_cp.approvals.adapter import HeldPlatformApproval
 
 ACTIVATED_EVENT_TYPE = AGREEMENT_ACTIVATED_V1
 
@@ -415,26 +419,6 @@ def propose(
     return _view(value, approval_request_id=request.request_id)
 
 
-def _approval_evidence(
-    db: Session, *, agreement_id: UUID, request_id: UUID, content_hash: str
-) -> ApprovalEvidence:
-    evidence = approvals.approved_request_evidence(
-        db,
-        request_id=request_id,
-        subject_type=APPROVAL_SUBJECT_TYPE,
-        subject_id=str(agreement_id),
-        content_hash=content_hash,
-    )
-    return ApprovalEvidence(
-        policy_code=evidence.policy_code,
-        policy_version=evidence.policy_version,
-        decision_ref=str(evidence.request_id),
-        content_digest=evidence.content_hash,
-        decided_at=evidence.decided_at,
-        approver_refs=evidence.approver_refs,
-    )
-
-
 def _required(db: Session, agreement_id: UUID) -> AgreementView:
     value = module_get(db, agreement_id)
     if value is None:
@@ -442,54 +426,108 @@ def _required(db: Session, agreement_id: UUID) -> AgreementView:
     return value
 
 
+def _held_evidence(
+    held: HeldPlatformApproval, *, content_digest: str
+) -> ApprovalEvidence:
+    """Content-bound evidence built from a barrier-held decision.
+
+    `content_digest` is the bare form Commercial Agreements stores (its own
+    frozen `content_hash`), never the approvals module's `sha256:`-prefixed
+    form the barrier's own lock arguments use.
+    """
+    return ApprovalEvidence(
+        policy_code=held.policy_code,
+        policy_version=held.policy_version,
+        decision_ref=str(held.request_id),
+        content_digest=content_digest,
+        decided_at=held.decided_at,
+        approver_refs=tuple(str(approver_id) for approver_id in held.approver_ids),
+    )
+
+
 def approve(db: Session, command: ApprovalCommand) -> ContractView:
+    from vendor_cp.deployment.approval_barrier import held_transition
+
     current = _required(db, command.agreement_id)
     if current.content_hash is None:
         raise ConflictError(f"agreement {current.id} has no frozen content hash")
-    value = module_approve(
-        db,
-        ModuleApproveCommand(
-            command_id=command.command_id,
-            agreement_id=command.agreement_id,
-            evidence=_approval_evidence(
-                db,
+    content_hash = current.content_hash
+
+    def transition(held: HeldPlatformApproval) -> AgreementView:
+        return module_approve(
+            db,
+            ModuleApproveCommand(
+                command_id=command.command_id,
                 agreement_id=command.agreement_id,
-                request_id=command.approval_request_id,
-                content_hash=current.content_hash,
+                evidence=_held_evidence(held, content_digest=content_hash),
+                expected_version=command.expected_version,
+                actor_admin_id=command.actor_admin_id,
             ),
-            expected_version=command.expected_version,
-            actor_admin_id=command.actor_admin_id,
-        ),
+        )
+
+    value = held_transition(
+        db,
+        request_id=command.approval_request_id,
+        subject_type=APPROVAL_SUBJECT_TYPE,
+        subject_id=str(current.id),
+        content_digest=translate_digest(content_hash),
+        transition=transition,
     )
     return _view(value, approval_request_id=command.approval_request_id)
 
 
 def activate(db: Session, command: ActivateCommand) -> ContractView:
+    from vendor_cp.deployment.approval_barrier import held_transition
+
     current = _required(db, command.agreement_id)
     if current.content_hash is None:
         raise ConflictError(f"agreement {current.id} has no frozen content hash")
-    approval = _approval_evidence(
-        db,
-        agreement_id=command.agreement_id,
-        request_id=command.approval_request_id,
-        content_hash=current.content_hash,
-    )
-    value = module_activate(
-        db,
-        ModuleActivateCommand(
-            command_id=command.command_id,
-            agreement_id=command.agreement_id,
-            approval_evidence=approval,
-            activation_evidence=ActivationEvidence(
-                rule=command.activation_rule,
-                reference=command.activation_reference,
-                satisfied_at=command.activation_satisfied_at,
+    content_hash = current.content_hash
+    if current.approval_decision_ref is None:
+        raise ConflictError(
+            f"agreement {current.id} has no recorded approval decision to "
+            "activate from"
+        )
+    try:
+        request_id = UUID(current.approval_decision_ref)
+    except ValueError as exc:
+        raise ConflictError(
+            f"agreement {current.id} approval_decision_ref "
+            f"{current.approval_decision_ref!r} is not a UUID"
+        ) from exc
+    if command.approval_request_id != request_id:
+        raise ConflictError(
+            f"agreement {current.id} activation names approval request "
+            f"{command.approval_request_id}, but the agreement's recorded "
+            f"decision is {request_id}"
+        )
+
+    def transition(held: HeldPlatformApproval) -> AgreementView:
+        return module_activate(
+            db,
+            ModuleActivateCommand(
+                command_id=command.command_id,
+                agreement_id=command.agreement_id,
+                approval_evidence=_held_evidence(held, content_digest=content_hash),
+                activation_evidence=ActivationEvidence(
+                    rule=command.activation_rule,
+                    reference=command.activation_reference,
+                    satisfied_at=command.activation_satisfied_at,
+                ),
+                expected_version=command.expected_version,
+                actor_admin_id=command.actor_admin_id,
             ),
-            expected_version=command.expected_version,
-            actor_admin_id=command.actor_admin_id,
-        ),
+        )
+
+    value = held_transition(
+        db,
+        request_id=request_id,
+        subject_type=APPROVAL_SUBJECT_TYPE,
+        subject_id=str(current.id),
+        content_digest=translate_digest(content_hash),
+        transition=transition,
     )
-    return _view(value, approval_request_id=command.approval_request_id)
+    return _view(value, approval_request_id=request_id)
 
 
 def _transition(command: TransitionCommand) -> ModuleTransitionCommand:
@@ -512,7 +550,44 @@ def suspend(db: Session, command: TransitionCommand) -> ContractView:
 
 
 def reinstate(db: Session, command: TransitionCommand) -> ContractView:
-    return _view(module_reinstate(db, _transition(command)))
+    """Hold the agreement's own recorded decision through the transition.
+
+    CA's own guard only fires once the relay has recorded standing, so a
+    reinstate that raced a not-yet-relayed withdrawal would otherwise be
+    unprotected. The request comes from the agreement row's
+    `approval_decision_ref` — never from the caller, since `TransitionCommand`
+    carries no approval reference at all.
+    """
+    from vendor_cp.deployment.approval_barrier import held_transition
+
+    current = _required(db, command.agreement_id)
+    if current.content_hash is None:
+        raise ConflictError(f"agreement {current.id} has no frozen content hash")
+    if current.approval_decision_ref is None:
+        raise ConflictError(
+            f"agreement {current.id} has no recorded approval decision to "
+            "reinstate from"
+        )
+    try:
+        request_id = UUID(current.approval_decision_ref)
+    except ValueError as exc:
+        raise ConflictError(
+            f"agreement {current.id} approval_decision_ref "
+            f"{current.approval_decision_ref!r} is not a UUID"
+        ) from exc
+
+    def transition(_held: HeldPlatformApproval) -> AgreementView:
+        return module_reinstate(db, _transition(command))
+
+    value = held_transition(
+        db,
+        request_id=request_id,
+        subject_type=APPROVAL_SUBJECT_TYPE,
+        subject_id=str(current.id),
+        content_digest=translate_digest(current.content_hash),
+        transition=transition,
+    )
+    return _view(value)
 
 
 def cancel(db: Session, command: TransitionCommand) -> ContractView:
