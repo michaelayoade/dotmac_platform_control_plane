@@ -9,6 +9,8 @@ exact wheels (Control 0.1.0a16, Approvals 0.1.0a8) are published and pinned.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
@@ -86,6 +88,39 @@ def _subject(plan: PlanFacts) -> str:
             "issuer approval subject exceeds Approvals' 200-character limit"
         )
     return subject
+
+
+def _evidence_digest(document: object) -> str:
+    """A canonical `sha256:<64 hex>` digest of harness evidence.
+
+    Folded into the issuance fingerprint so a same-command-id retry that
+    carries DIFFERENT evidence is `IssuerCommandReused`, not silently treated
+    as the same request. `document` is opaque data the caller passes through
+    to Control (`rehearsal_issuer_seam.py`); only the shapes Control actually
+    accepts today -- a `Mapping` (canonicalised as sorted-key JSON, same
+    style as `issuer_receipts.request_fingerprint`) or raw `bytes`/`str` --
+    can be digested deterministically. Anything else raises `TypeError`
+    rather than silently falling back to a representation
+    (`repr`/`str`/pickle) that would not be stable across processes.
+    """
+    if isinstance(document, Mapping):
+        encoded = json.dumps(
+            document,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+    elif isinstance(document, bytes):
+        encoded = document
+    elif isinstance(document, str):
+        encoded = document.encode("utf-8")
+    else:
+        raise TypeError(
+            "cannot fingerprint harness evidence of type "
+            f"{type(document).__name__}; issue_authorization requires a "
+            "Mapping, bytes, or str evidence document"
+        )
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _plan(db: object, plan_id: UUID) -> PlanFacts:
@@ -308,9 +343,13 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
 
     A non-authorizing receipt (`issuer_receipts.py`) is written in the SAME
     transaction as `control.issue_rehearsal_issuer_authorization_for_plan`,
-    keyed by `command_id` and a fingerprint of `invocation.to_control_request()`
-    (deterministic — it carries only `command_id`, `plan_id`, and an optional
-    `actor_ref`, none of which vary between a genuine retry and its original).
+    keyed by `command_id` and a fingerprint of both
+    `invocation.to_control_request()` (deterministic — it carries only
+    `command_id`, `plan_id`, and an optional `actor_ref`, none of which vary
+    between a genuine retry and its original) and a canonical digest of
+    `invocation.harness_evidence_document` (`_evidence_digest`), so a retry
+    that swaps in different evidence under the same command id is refused as
+    `IssuerCommandReused` rather than silently accepted as the same request.
     `control_ref` is the authorization's own `statement.authorization_id`,
     never the signed envelope itself. A NEW command id still takes the hold
     and refuses exactly as before; only a retry of an ALREADY-COMMITTED
@@ -349,7 +388,13 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
     expected_plan_digest = plan.plan_digest
 
     fingerprint = request_fingerprint(
-        ISSUE_AUTHORIZATION, dict(invocation.to_control_request())
+        ISSUE_AUTHORIZATION,
+        {
+            **dict(invocation.to_control_request()),
+            "harness_evidence_digest": _evidence_digest(
+                invocation.harness_evidence_document
+            ),
+        },
     )
     receipt = find_receipt(db, command_id)
     if receipt is not None and (
