@@ -157,15 +157,25 @@ class IssuerCommandCommittedButWithdrawn(ConflictError):
 
 
 def _normalize(value: object) -> object:
-    """UUIDs and datetimes as plain strings; anything else falls back to
-    `str`. Mirrors `relay/withdrawal_outcomes.py`'s `_normalize`, kept local
-    rather than imported so a caller here is never tempted to fingerprint an
-    unrelated payload with it."""
+    """UUIDs and datetimes as plain strings; anything else raises `TypeError`.
+
+    A silent `str()` fallback would make the fingerprint depend on whatever
+    `repr`/`str` an unanticipated type happens to produce -- not guaranteed
+    stable across processes or versions, which would make the fingerprint
+    non-deterministic for exactly the requests it exists to protect. Mirrors
+    `relay/withdrawal_outcomes.py`'s `_normalize`, kept local rather than
+    imported so a caller here is never tempted to fingerprint an unrelated
+    payload with it.
+    """
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, datetime):
         return value.isoformat()
-    return str(value)
+    raise TypeError(
+        f"cannot fingerprint a value of type {type(value).__name__}; "
+        "request_fingerprint only accepts JSON-native types, UUID, and "
+        "datetime"
+    )
 
 
 def request_fingerprint(verb: str, request: Mapping[str, Any]) -> str:
