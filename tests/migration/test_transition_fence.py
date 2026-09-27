@@ -1145,6 +1145,115 @@ def test_a_restore_that_reopens_and_then_mismatches_redrains_before_reporting(
             restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
 
 
+# ── (r2) the re-fence after a failed restore is ground truth, not `restored`
+
+
+class _GrantLandsThenRaises:
+    """The GRANT for `writer` reaches the server for real, then this raises
+    `exc_factory()` — simulating an interruption AFTER the GRANT lands but
+    BEFORE `restore_writers`'s own loop reaches `restored.append(...)`, so
+    the re-fence cannot rely on that Python list naming `writer`."""
+
+    def __init__(
+        self, real: Connection, writer: str, exc_factory: Callable[[], BaseException]
+    ) -> None:
+        self._real = real
+        self._writer = writer
+        self._exc_factory = exc_factory
+
+    def execute(self, statement: object, *args: object, **kwargs: object) -> object:
+        sql = str(statement)
+        if sql.startswith("GRANT CONNECT") and self._writer in sql:
+            self._real.execute(statement, *args, **kwargs)  # type: ignore[arg-type]
+            raise self._exc_factory()
+        return self._real.execute(statement, *args, **kwargs)  # type: ignore[arg-type]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def test_a_keyboardinterrupt_mid_restore_propagates_and_the_writer_stays_fenced(
+    admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """The GRANT for W reaches the server, then `KeyboardInterrupt` is raised
+    BEFORE `restore_writers`'s loop records it in `restored`. The re-fence
+    must revoke W anyway (ground truth from the proof's effective set, not
+    the incomplete `restored` list), and `KeyboardInterrupt` itself must
+    propagate — never wrapped."""
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {w}'))
+            proof = fence_writers(
+                conn,
+                database=db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+
+            proxy = _GrantLandsThenRaises(conn, w, KeyboardInterrupt)
+            with pytest.raises(KeyboardInterrupt):
+                restore_writers(
+                    proxy,  # type: ignore[arg-type]
+                    proof,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+
+            still_connect = conn.execute(
+                text("SELECT has_database_privilege(:r, :d, 'CONNECT')"),
+                {"r": w, "d": db},
+            ).scalar_one()
+            assert still_connect is False
+
+            with pytest.raises(OperationalError, match="permission denied"):
+                with _connect(url_for(postgres_url, db, user=w)):
+                    pass
+
+
+def test_an_operationalerror_mid_restore_stays_fenced_via_the_ground_truth_refence(
+    admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """Same shape as the `KeyboardInterrupt` case above, but with an
+    `OperationalError` instead: this is not re-raised bare, but the fence
+    must still hold afterwards."""
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {w}'))
+            proof = fence_writers(
+                conn,
+                database=db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+
+            proxy = _GrantLandsThenRaises(
+                conn,
+                w,
+                lambda: OperationalError(
+                    "GRANT CONNECT", {}, Exception("connection lost")
+                ),
+            )
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(
+                    proxy,  # type: ignore[arg-type]
+                    proof,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code in (
+                FenceRefusalCode.ACL_NOT_RESTORED,
+                FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
+            )
+
+            still_connect = conn.execute(
+                text("SELECT has_database_privilege(:r, :d, 'CONNECT')"),
+                {"r": w, "d": db},
+            ).scalar_one()
+            assert still_connect is False
+
+            with pytest.raises(OperationalError, match="permission denied"):
+                with _connect(url_for(postgres_url, db, user=w)):
+                    pass
+
+
 # ── (s) a grant with a DISTINCT grantor is refused before any change ───────
 
 

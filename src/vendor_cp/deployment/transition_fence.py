@@ -150,16 +150,31 @@ restore by hand rather than a stack trace alone.
 prove the restore matches `prior_grants` exactly. If that GRANT loop fails
 part-way, or the final comparison mismatches, a writer could have reconnected
 during that reopened window — so on EITHER path `restore_writers` re-revokes
-what it just granted (`_refence`) and then TERMINATES AND DRAINS the
-effective role set again with the caller's `session_wait_seconds` (the
-required keyword `restore_writers` takes for exactly this) before reporting
-anything. Ruled 2026-09-27: if the drain converges, the original
+CONNECT from PUBLIC and every role in the EFFECTIVE set (`_refence`) and then
+TERMINATES AND DRAINS that same set again with the caller's
+`session_wait_seconds` (the required keyword `restore_writers` takes for
+exactly this) before reporting anything. Ruled 2026-09-27: `_refence` acts on
+the EFFECTIVE set from the proof — `fenced_roles + member_roles`, the ground
+truth of what this fence ever touched — never on the Python list of what this
+particular restore attempt happened to grant before failing, since a failure
+can leave that list short of the full effective set or empty outright. The
+re-revoke is then VERIFIED with `has_database_privilege`, the same discipline
+`_apply_fence` uses for the original REVOKE: if PUBLIC or any effective role
+still has CONNECT afterwards, that is `COMPENSATION_FAILED`, chained from the
+original failure, before the drain is even attempted — only once the
+re-fence is verified may anything downstream claim "stays fenced" or
+"re-revoked". If the verified re-fence's drain converges, the original
 `ACL_NOT_RESTORED` is raised, unchanged. If writers survive the re-drain,
 `WRITER_SESSIONS_SURVIVED` is raised instead, chained from the original
-failure, naming that the re-fence happened but the drain did not converge. If
-the re-fence itself raises, `COMPENSATION_FAILED` is raised, chained from the
-original failure, carrying `prior_acl` as the ACL to restore by hand — never
-a claim that zero writers remain when that was never re-proven.
+failure, naming that the re-fence happened but the drain did not converge. A
+non-`FenceRefused` exception from the drain (a driver error, not a timeout)
+is wrapped as `COMPENSATION_FAILED` too, chained from the original failure,
+rather than escaping raw. `KeyboardInterrupt`/`SystemExit` caught while
+restoring are re-raised as themselves once the re-fence-and-redrain attempt
+has run, mirroring `fence_writers`. If the re-fence itself raises,
+`COMPENSATION_FAILED` is raised, chained from the original failure, carrying
+`prior_acl` as the ACL to restore by hand — never a claim that zero writers
+remain when that was never re-proven.
 
 ## No query after the ACL is restored
 
@@ -931,18 +946,41 @@ def _apply_fence(
     )
 
 
-def _refence(conn: Connection, quoted_db: str, restored: list[str]) -> None:
-    """Re-revoke CONNECT from PUBLIC and every role a failed restore granted."""
-    revoke_grantees = dict.fromkeys(
-        ["", *(role for role in restored if role != "PUBLIC")]
-    )
-    for grantee in revoke_grantees:
-        conn.execute(
-            text(
-                f"REVOKE CONNECT ON DATABASE {quoted_db} FROM "
-                f"{_role_ref_sql(conn, grantee)}"
-            )
-        )
+def _refence(conn: Connection, quoted_db: str, effective: tuple[str, ...]) -> None:
+    """Re-revoke CONNECT from PUBLIC and every role in the EFFECTIVE set.
+
+    By construction the effective set — `fenced_roles + member_roles` on the
+    proof this restore was reversing — IS the fenced state; this never
+    consults `restored` (the list of what a failed restore happened to grant
+    before it failed), because a failure can leave that list short of the
+    full effective set, or empty entirely if the failure was in the final
+    comparison rather than partway through the GRANT loop. Re-revoking the
+    ground-truth effective set is correct either way; a Python list built
+    from a partial success is not."""
+    conn.execute(text(f"REVOKE CONNECT ON DATABASE {quoted_db} FROM PUBLIC"))
+    for role in effective:
+        quoted_role = _quote_ident(conn, role)
+        conn.execute(text(f"REVOKE CONNECT ON DATABASE {quoted_db} FROM {quoted_role}"))
+
+
+def _refence_holds(conn: Connection, database: str, effective: tuple[str, ...]) -> bool:
+    """True only when PUBLIC and every effective role has VERIFIABLY lost
+    CONNECT — `has_database_privilege`, never assumed from the REVOKE having
+    merely been issued (see `_apply_fence`'s identical discipline)."""
+    public_can_connect = conn.execute(
+        text("SELECT has_database_privilege('public', :db, 'CONNECT')"),
+        {"db": database},
+    ).scalar_one()
+    if public_can_connect:
+        return False
+    for role in effective:
+        still_connect = conn.execute(
+            text("SELECT has_database_privilege(:role, :db, 'CONNECT')"),
+            {"role": role, "db": database},
+        ).scalar_one()
+        if still_connect:
+            return False
+    return True
 
 
 def _refence_and_redrain(
@@ -950,32 +988,47 @@ def _refence_and_redrain(
     quoted_db: str,
     database: str,
     effective: tuple[str, ...],
-    restored: list[str],
     session_wait_seconds: float,
     *,
     original: BaseException,
     detail: str,
     before_acl: str,
 ) -> None:
-    """Re-revoke what a failed restore just granted, then re-drain the
-    effective set before the caller reports its own failure.
+    """Re-revoke the effective set as ground truth, VERIFY the re-fence
+    actually holds, then re-drain it before the caller reports its own
+    failure.
 
     A restore that briefly re-opened the ACL and then failed must not claim
     the database is fenced without re-proving it: a writer could have
-    reconnected during the re-opened window. Returning normally here means
-    the re-fence and re-drain both succeeded, and the caller raises its own
-    `ACL_NOT_RESTORED`. Raising here (this function never returns in that
-    case) supersedes that with a sharper diagnosis: `COMPENSATION_FAILED` if
-    the re-revoke itself failed, or `WRITER_SESSIONS_SURVIVED` if the drain
-    never converged — both chained from `original`, the failure this restore
-    was reacting to."""
+    reconnected during the re-opened window, and the re-revoke itself could
+    fail to take. Returning normally here means the re-fence was verified
+    AND the re-drain converged, and only then may the caller's own message
+    say "stays fenced" or "re-revoked" — the caller raises its own
+    `ACL_NOT_RESTORED` in that case. Raising here (this function never
+    returns on any other path) supersedes that with a sharper diagnosis:
+    `COMPENSATION_FAILED` if the re-revoke could not be issued OR could not
+    be verified, or `WRITER_SESSIONS_SURVIVED` if the drain never converged
+    — both chained from `original`, the failure this restore was reacting
+    to. A non-`FenceRefused` exception from the drain (a driver error, not a
+    timeout) is wrapped as `COMPENSATION_FAILED` too, chained from
+    `original`, rather than escaping raw."""
     try:
-        _refence(conn, quoted_db, restored)
+        _refence(conn, quoted_db, effective)
+        holds = _refence_holds(conn, database, effective)
     except BaseException as refence_exc:
         raise FenceRefused(
             FenceRefusalCode.COMPENSATION_FAILED,
             f"re-fencing {database!r} after a failed restore itself failed: "
             f"{refence_exc!r}; the database may not be fenced — restore to "
+            "prior_acl by hand",
+            before_acl=before_acl,
+        ) from original
+    if not holds:
+        raise FenceRefused(
+            FenceRefusalCode.COMPENSATION_FAILED,
+            f"re-fencing {database!r} after a failed restore could not be "
+            "verified: an effective role or PUBLIC still holds CONNECT after "
+            "the re-revoke; the database may not be fenced — restore to "
             "prior_acl by hand",
             before_acl=before_acl,
         ) from original
@@ -985,6 +1038,14 @@ def _refence_and_redrain(
         raise FenceRefused(
             FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
             f"{detail}; re-fenced, but the drain did not converge: {drain_exc!r}",
+        ) from original
+    except BaseException as drain_exc:
+        raise FenceRefused(
+            FenceRefusalCode.COMPENSATION_FAILED,
+            f"re-draining {database!r} after a failed restore raised "
+            f"{drain_exc!r}; the ACL re-fence was verified but the drain "
+            "state is unproven — restore to prior_acl by hand",
+            before_acl=before_acl,
         ) from original
 
 
@@ -1076,13 +1137,16 @@ def restore_writers(
             quoted_db,
             proof.database,
             effective,
-            restored,
             session_wait_seconds,
             original=exc,
             detail=f"restoring the ACL for {proof.database!r} failed part-way "
             f"({exc!r}); re-revoked what was granted to stay fenced",
             before_acl=proof.prior_acl,
         )
+        # Mirrors `fence_writers`: an interrupt is reported AS ITSELF, never
+        # wrapped, once the re-fence and re-drain attempt has run.
+        if isinstance(exc, KeyboardInterrupt | SystemExit):
+            raise
         raise FenceRefused(
             FenceRefusalCode.ACL_NOT_RESTORED,
             f"restoring the ACL for {proof.database!r} failed part-way "
@@ -1102,7 +1166,6 @@ def restore_writers(
             quoted_db,
             proof.database,
             effective,
-            restored,
             session_wait_seconds,
             original=mismatch,
             detail=str(mismatch),
