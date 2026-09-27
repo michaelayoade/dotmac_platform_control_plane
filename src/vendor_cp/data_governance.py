@@ -430,15 +430,15 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "approval_withdrawal_conflict_resolutions",
         "the human decision that cleared a security_conflict outcome — the "
         "resolution IS the audit evidence, and `v020`'s trigger already refuses "
-        "UPDATE, DELETE and TRUNCATE regardless of role",
+        "row updates, row deletion and table truncation regardless of role",
     ),
     _retain(
         "public",
         "approval_withdrawal_outcomes",
         "append-only evidence of how each approval.withdrawn event was settled. "
-        "`v020`'s trigger already refuses UPDATE, DELETE and TRUNCATE for every "
-        "role including app_admin; this classification is that seal generalised, "
-        "not a new one",
+        "`v020`'s trigger already refuses row updates, row deletion and table "
+        "truncation for every role including app_admin; this classification is "
+        "that seal generalised, not a new one",
     ),
     _retain(
         "public",
