@@ -56,6 +56,11 @@ from dotmac_approvals import (
     PolicyRevision,
     WithdrawalReferenceConflict,
     WithdrawalRefused,
+    # The PUBLIC, atomic command (root export of `dotmac_approvals.outbox`):
+    # it takes the request FOR UPDATE and, on PostgreSQL, its trigger enqueues
+    # exactly one `approval.withdrawn` event. `service._withdraw_platform_approval`
+    # is private and must never be called directly.
+    withdraw_platform_approval,
 )
 from dotmac_approvals.models import (
     PlatformApprovalDecision,
@@ -67,7 +72,6 @@ from dotmac_approvals.service import (
     publish_platform_policy_version,
     record_platform_decision,
     request_platform_approval,
-    withdraw_platform_approval,
 )
 from dotmac_kernel import ConflictError, NotFoundError
 from dotmac_kernel.messaging import process_once_platform
