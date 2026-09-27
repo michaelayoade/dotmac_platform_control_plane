@@ -17,6 +17,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from uuid import UUID
 
+from dotmac_kernel import ConflictError
 from dotmac_kernel.messaging import ClaimedPlatformEvent
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -467,6 +468,30 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
         raise
 
 
+class AuthorizationPlanMismatch(ConflictError):
+    """The presented authorization document names a DIFFERENT plan than the
+    caller's `plan_id` -- carries ids only, never the document itself.
+
+    Control's `stage_rehearsal_issuer_consumption` derives the plan it
+    actually spends against from the PRESENTED DOCUMENT's own
+    `statement.immutable_reference` (`rehearsal_issuer_issuance.py` around
+    lines 704-712) -- never from a caller-supplied `plan_id`. Without this
+    check, `consume_authorization` would take its hold on the caller's
+    `plan_id` while Control silently consumed whatever plan the document
+    itself names: a caller holding P1's still-standing approval could spend
+    P2's authorization document if P2 was withdrawn but not yet drained,
+    because the hold covers P1's decision, not P2's.
+    """
+
+    def __init__(self, plan_id: UUID, document_plan_ref: str) -> None:
+        self.plan_id = plan_id
+        self.document_plan_ref = document_plan_ref
+        super().__init__(
+            f"authorization document names plan {document_plan_ref!r}, not "
+            f"the requested plan {plan_id}"
+        )
+
+
 def consume_authorization(
     db: Session,
     *,
@@ -484,10 +509,21 @@ def consume_authorization(
     committed first (and the hold refuses `WITHDRAWN` before Control is ever
     reached) or blocks until this transaction ends. The caller owns the
     single commit.
+
+    Before any of that: the presented document's OWN plan reference
+    (`statement.immutable_reference`, the field Control itself resolves
+    against) must equal `plan_id`, checked with Control's public parser
+    (`RehearsalIssuerAuthorizationV1.parse`) before the hold is taken or
+    Control is called at all. See `AuthorizationPlanMismatch` for why.
     """
     control = import_module("dotmac_deployment_control")
 
     from vendor_cp.deployment.approval_barrier import held_transition
+
+    parsed = control.RehearsalIssuerAuthorizationV1.parse(authorization_document)
+    document_plan_ref = parsed.statement.immutable_reference
+    if document_plan_ref != str(plan_id):
+        raise AuthorizationPlanMismatch(plan_id, document_plan_ref)
 
     plan = _plan(db, plan_id)
     if not plan.approval_decision_ref:

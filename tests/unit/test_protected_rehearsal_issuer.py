@@ -199,6 +199,19 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         )
 
     control.stage_rehearsal_issuer_consumption = stage_consumption  # type: ignore[attr-defined]
+
+    def fake_parse_authorization(value: object) -> SimpleNamespace:
+        """Stand-in for `RehearsalIssuerAuthorizationV1.parse`: reads
+        `value["statement"]`, defaulting a missing `immutable_reference` to
+        `None` (an absent field is a mismatch, not an attribute error)."""
+        raw_statement = value.get("statement") if isinstance(value, dict) else None
+        statement = dict(raw_statement) if isinstance(raw_statement, dict) else {}
+        statement.setdefault("immutable_reference", None)
+        return SimpleNamespace(statement=SimpleNamespace(**statement))
+
+    control.RehearsalIssuerAuthorizationV1 = SimpleNamespace(  # type: ignore[attr-defined]
+        parse=fake_parse_authorization
+    )
     approvals = ModuleType("vendor_cp.approvals.adapter")
     approvals.ApprovalHoldRefusal = FakeApprovalHoldRefusal  # type: ignore[attr-defined]
     approvals.OpenRequestCommand = Command  # type: ignore[attr-defined]
@@ -672,7 +685,12 @@ def test_evidence_digest_raises_on_an_unrecognised_type() -> None:
 def test_consume_authorization_goes_through_held_transition(
     ports: SimpleNamespace,
 ) -> None:
-    document = {"statement": {"authorization_id": "auth-1"}}
+    document = {
+        "statement": {
+            "authorization_id": "auth-1",
+            "immutable_reference": str(PLAN_ID),
+        }
+    }
     evidence = {"lease": "L-2"}
     result = issuer.consume_authorization(
         object(),
@@ -705,7 +723,7 @@ def test_consume_authorization_derives_request_id_only_from_the_frozen_plan(
     issuer.consume_authorization(
         object(),
         plan_id=PLAN_ID,
-        authorization_document={"statement": {}},
+        authorization_document={"statement": {"immutable_reference": str(PLAN_ID)}},
         harness_evidence_document={},
     )
     held = ports.calls[0]
@@ -722,10 +740,50 @@ def test_consume_authorization_refused_by_a_withdrawn_hold_never_reaches_control
         issuer.consume_authorization(
             object(),
             plan_id=PLAN_ID,
-            authorization_document={"statement": {}},
+            authorization_document={"statement": {"immutable_reference": str(PLAN_ID)}},
             harness_evidence_document={},
         )
     assert [name for name, _ in ports.calls] == ["hold"]
+
+
+# ── fix 1: consumption binds to the DOCUMENT's own plan, not the caller's ──
+
+
+def test_consume_authorization_refuses_a_document_naming_a_different_plan(
+    ports: SimpleNamespace,
+) -> None:
+    """The failure this fix closes: P2's authorization document is presented
+    under `plan_id=P1` (P1's hold, standing or not, must never apply to P2's
+    authority). Neither `held_transition` (no "hold" call) nor Control's
+    consumption call may be reached."""
+    other_plan_id = UUID("70000000-0000-0000-0000-000000000007")
+    document = {"statement": {"immutable_reference": str(other_plan_id)}}
+
+    with pytest.raises(issuer.AuthorizationPlanMismatch) as excinfo:
+        issuer.consume_authorization(
+            object(),
+            plan_id=PLAN_ID,
+            authorization_document=document,
+            harness_evidence_document={},
+        )
+    assert excinfo.value.plan_id == PLAN_ID
+    assert excinfo.value.document_plan_ref == str(other_plan_id)
+    assert ports.calls == []
+
+
+def test_consume_authorization_accepts_a_document_naming_the_same_plan(
+    ports: SimpleNamespace,
+) -> None:
+    """SENSITIVITY (near-miss): the identical shape, with the document's
+    `immutable_reference` matching `plan_id`, must proceed normally."""
+    document = {"statement": {"immutable_reference": str(PLAN_ID)}}
+    issuer.consume_authorization(
+        object(),
+        plan_id=PLAN_ID,
+        authorization_document=document,
+        harness_evidence_document={},
+    )
+    assert [name for name, _ in ports.calls] == ["hold", "consume"]
 
 
 def _withdrawal(ports: SimpleNamespace) -> dict[str, object]:

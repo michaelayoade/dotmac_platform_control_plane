@@ -6,6 +6,15 @@ issuance receipts are the index of what CP itself issued
 (`issuer_receipts.issued_authorization_refs`); a completed (spent)
 authorization stays history, untouched, by name.
 
+Stated plainly (scenario 3): when a caller bypasses CP's barrier entirely and
+calls Control's `stage_rehearsal_issuer_consumption` directly, Control refuses
+on the PLAN's no-longer-standing approval (`APPROVAL_NOT_STANDING`) -- this
+check runs BEFORE Control ever re-checks the authorization row's own revoked
+state. The authorization ledger's `REVOKED` state (proved via
+`_authorization_row` in every scenario here) is therefore defence in depth,
+not the primary barrier: even if the ledger row had not yet been marked
+revoked, `APPROVAL_NOT_STANDING` alone would already refuse the consumption.
+
 The seeding, issuance, harness-evidence and drain helpers below are copied,
 not imported (`tests` is not a package): `migrated`/`_connect`/`_sessions`/
 `_composition`/`_withdrawal_rows`/`_withdraw`/`_propose_issuer`/
@@ -59,6 +68,7 @@ from vendor_cp.allocations.consumer import ContractEventConsumer
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.approvals_authority import bare_content_hash
 from vendor_cp.deployment.protected_rehearsal_issuer import (
+    AuthorizationPlanMismatch,
     ProposeIssuerPlan,
     approve_issuer_plan,
     consume_authorization,
@@ -717,3 +727,157 @@ def test_a_replayed_delivery_is_a_no_op_and_does_not_call_control_revoke_again(
 
             record = _authorization_row(db, authorization_id)
             assert record.state == RehearsalIssuerAuthorizationState.REVOKED.value
+
+
+# ── 7: consumption binds to the DOCUMENT's own plan, not the caller's ───────
+
+
+def test_consuming_a_withdrawn_plans_authorization_under_a_different_plan_id_is_refused(
+    migrated: tuple[str, str],
+    issuer_security: tuple[object, object],
+) -> None:
+    """Fix 1: P1 is approved and standing. P2 is approved, issued, withdrawn
+    but NOT YET DRAINED (still ISSUED in Control's own ledger). A caller
+    presenting P2's authorization document under `plan_id=P1` must be refused
+    by `AuthorizationPlanMismatch` before any hold or Control call -- P1's
+    standing hold must never authorize spending P2's authority -- and P2's
+    authorization must stay ISSUED, untouched. Draining the outstanding
+    withdrawal afterwards still revokes it."""
+    platform_url, dispatcher_url = migrated
+    _, harness = issuer_security
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            plan_id_1, request_id_1, _digest_1 = _propose_issuer(db, suffix="d18d-7-p1")
+            approve_issuer_plan(
+                db,
+                command_id=f"approve-{uuid.uuid4()}",
+                plan_id=plan_id_1,
+                approval_request_id=request_id_1,
+            )
+        with platform.platform_session() as db:
+            plan_id_2, request_id_2, _digest_2 = _propose_issuer(db, suffix="d18d-7-p2")
+            approve_issuer_plan(
+                db,
+                command_id=f"approve-{uuid.uuid4()}",
+                plan_id=plan_id_2,
+                approval_request_id=request_id_2,
+            )
+        with platform.platform_session() as db:
+            issued_2 = _issue(
+                db, harness, plan_id_2, command_id=f"issue-{uuid.uuid4()}"
+            )
+            authorization_document_2 = issued_2.as_mapping()
+            authorization_id_2 = issued_2.statement.authorization_id
+
+        with platform.platform_session() as db:
+            _withdraw(db, request_id=request_id_2)
+        # Deliberately NOT drained yet: P2's authorization is still ISSUED in
+        # Control's own ledger at this point.
+
+        with platform.platform_session() as db:
+            record = _authorization_row(db, authorization_id_2)
+            assert record.state == RehearsalIssuerAuthorizationState.ISSUED.value
+
+            target_ref_2 = _target_ref_for(db, plan_id_2)
+            fresh_evidence = _consumption_evidence(harness, target_ref_2, issued_2)
+            with pytest.raises(AuthorizationPlanMismatch) as excinfo:
+                consume_authorization(
+                    db,
+                    plan_id=plan_id_1,
+                    authorization_document=authorization_document_2,
+                    harness_evidence_document=fresh_evidence,
+                )
+            db.rollback()
+        assert excinfo.value.plan_id == plan_id_1
+        assert excinfo.value.document_plan_ref == str(plan_id_2)
+
+        with platform.platform_session() as db:
+            record = _authorization_row(db, authorization_id_2)
+            assert record.state == RehearsalIssuerAuthorizationState.ISSUED.value
+
+        drain_once(
+            worker_id="d18d-scenario-7",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            record = _authorization_row(db, authorization_id_2)
+            assert record.state == RehearsalIssuerAuthorizationState.REVOKED.value
+
+
+# ── 8: one plan, two authorizations -- one spent, one issued ───────────────
+
+
+def test_one_plan_with_a_spent_and_an_issued_authorization_after_withdraw(
+    migrated: tuple[str, str],
+    issuer_security: tuple[object, object],
+) -> None:
+    """Item 6's test gap: a plan with TWO authorizations, one already consumed
+    (spent) and one still issued. After withdraw and drain, the spent one is
+    unchanged history and the issued one is revoked."""
+    platform_url, dispatcher_url = migrated
+    _, harness = issuer_security
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            plan_id, request_id, _digest = _propose_issuer(db, suffix="d18d-8")
+            approve_issuer_plan(
+                db,
+                command_id=f"approve-{uuid.uuid4()}",
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+        with platform.platform_session() as db:
+            spent_issued = _issue(
+                db, harness, plan_id, command_id=f"issue-spent-{uuid.uuid4()}"
+            )
+            spent_document = spent_issued.as_mapping()
+            spent_id = spent_issued.statement.authorization_id
+        with platform.platform_session() as db:
+            still_issued = _issue(
+                db, harness, plan_id, command_id=f"issue-still-{uuid.uuid4()}"
+            )
+            still_issued_id = still_issued.statement.authorization_id
+
+        with platform.platform_session() as db:
+            target_ref = _target_ref_for(db, plan_id)
+            consumption_evidence = _consumption_evidence(
+                harness, target_ref, spent_issued
+            )
+            consume_authorization(
+                db,
+                plan_id=plan_id,
+                authorization_document=spent_document,
+                harness_evidence_document=consumption_evidence,
+            )
+
+        with platform.platform_session() as db:
+            record = _authorization_row(db, spent_id)
+            assert record.state == RehearsalIssuerAuthorizationState.SPENT.value
+            spent_at = record.spent_at
+
+        with platform.platform_session() as db:
+            _withdraw(db, request_id=request_id)
+        drain_once(
+            worker_id="d18d-scenario-8",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            event_id = row.id
+
+            spent_record = _authorization_row(db, spent_id)
+            assert spent_record.state == RehearsalIssuerAuthorizationState.SPENT.value
+            assert spent_record.spent_at == spent_at
+            assert spent_record.revocation_ref is None
+
+            still_record = _authorization_row(db, still_issued_id)
+            assert still_record.state == RehearsalIssuerAuthorizationState.REVOKED.value
+            assert still_record.revocation_ref == f"approval.withdrawn:{event_id}"
+
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 1
+            outcome = outcomes[0]
+            assert outcome.disposition is WithdrawalDisposition.APPLIED
+            assert outcome.evidence["authorizations_revoked"] == [still_issued_id]
+            assert outcome.evidence["authorizations_not_revocable"] == [spent_id]
