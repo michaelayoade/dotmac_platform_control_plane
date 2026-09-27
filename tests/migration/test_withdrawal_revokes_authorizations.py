@@ -288,6 +288,17 @@ def _harness_evidence(harness: object, target_ref: str) -> dict[str, object]:
     return harness.document(lease_id=lease_id, target_ref=target_ref)
 
 
+def _consumption_evidence(
+    harness: object, target_ref: str, issued: object
+) -> dict[str, object]:
+    """Fresh harness evidence for CONSUMING `issued`: the SAME lease the
+    authorization binds (a different lease is refused as
+    `LEASE_MISMATCH`/`ENVELOPE_MISMATCH` before any standing or state
+    check), with a later `issued_at` than the issuance evidence (an
+    identical or older one is `STALE_HARNESS_EVIDENCE`)."""
+    return harness.document(lease_id=issued.statement.lease_id, target_ref=target_ref)
+
+
 def _authorization_row(
     db: Session, authorization_id: str
 ) -> RehearsalIssuerAuthorizationRecord:
@@ -393,7 +404,7 @@ def test_later_use_refused_through_cp_barrier(
 
         with platform.platform_session() as db:
             target_ref = _target_ref_for(db, plan_id)
-            fresh_evidence = _harness_evidence(harness, target_ref)
+            fresh_evidence = _consumption_evidence(harness, target_ref, issued)
             with pytest.raises(ApprovalNotHeld) as refused:
                 consume_authorization(
                     db,
@@ -437,7 +448,7 @@ def test_later_use_refused_by_controls_own_authority_bypassing_the_barrier(
 
         with platform.platform_session() as db:
             target_ref = _target_ref_for(db, plan_id)
-            fresh_evidence = _harness_evidence(harness, target_ref)
+            fresh_evidence = _consumption_evidence(harness, target_ref, issued)
             # Direct call to Control's own entry point -- no held_transition,
             # no CP barrier at all. Pinned: `_standing_plan_terms` refuses the
             # plan's no-longer-standing approval BEFORE Control ever re-checks
@@ -486,7 +497,7 @@ def test_a_completed_action_is_preserved_as_history(
 
         with platform.platform_session() as db:
             target_ref = _target_ref_for(db, plan_id)
-            consumption_evidence = _harness_evidence(harness, target_ref)
+            consumption_evidence = _consumption_evidence(harness, target_ref, issued)
             consume_authorization(
                 db,
                 plan_id=plan_id,
@@ -554,7 +565,7 @@ def test_a_consumption_in_flight_versus_a_withdrawal_is_a_genuine_race(
 
         with Session(engine) as db:
             target_ref = _target_ref_for(db, plan_id)
-        consumption_evidence = _harness_evidence(harness, target_ref)
+        consumption_evidence = _consumption_evidence(harness, target_ref, issued)
 
         mutated = threading.Event()
         release = threading.Event()
