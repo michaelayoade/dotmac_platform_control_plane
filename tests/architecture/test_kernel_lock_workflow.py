@@ -801,11 +801,20 @@ def test_manifest_problems_with_a_delta_is_clean_when_declared_correctly() -> No
     assert manifest_problems(manifest, "0.1.0a99", CONTROL_DELTA) == []
 
 
-def test_the_closed_allowlist_is_exactly_control_and_approvals() -> None:
-    """Both modules declare a kernel floor that the composed maximum makes the
+def test_the_closed_allowlist_is_exactly_its_reviewed_members() -> None:
+    """Each member declares a kernel floor that the composed maximum makes the
     kernel pin equal, so each can only move together with the kernel. The set
-    is compared by equality: a third name arriving here without review fails."""
-    assert DECLARABLE_DEPENDENCIES == frozenset({CONTROL, "dotmac-approvals"})
+    is compared by equality: a fourth name arriving here without review fails."""
+    assert DECLARABLE_DEPENDENCIES == frozenset(
+        {CONTROL, "dotmac-approvals", "dotmac-commercial-agreements"}
+    )
+
+
+def test_a_commercial_agreements_movement_is_declarable() -> None:
+    delta = parse_dependency_delta("dotmac-commercial-agreements", "0.1.0a2", "0.1.0a4")
+    assert delta == DependencyDelta(
+        name="dotmac-commercial-agreements", before="0.1.0a2", after="0.1.0a4"
+    )
 
 
 def test_an_approvals_movement_is_declarable() -> None:
