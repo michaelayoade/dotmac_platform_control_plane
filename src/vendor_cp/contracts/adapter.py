@@ -470,7 +470,10 @@ def _replayed_view(
     barrier protects the transition from a concurrent withdrawal, not a
     retry of one that already happened. A `command_id` reused for a
     DIFFERENT `event_type` is not a replay: this returns `None` and the
-    normal path runs, so CA's own ledger (not the barrier) refuses it.
+    normal (held) path runs. CA's at-most-once ledger keys on `command_id`
+    alone, so that path may itself replay the OTHER transition's result
+    without running this one; `_require_recorded` after the held transition
+    is what refuses that, rather than reporting the wrong transition as done.
     """
     for record in module_history(db, current.id):
         if record.command_id == command_id and record.event_type == event_type:
@@ -490,6 +493,27 @@ def _parsed_decision_ref(value: str | None) -> UUID | None:
         return UUID(value)
     except ValueError:
         return None
+
+
+def _require_recorded(
+    db: Session, agreement_id: UUID, *, command_id: str, event_type: str
+) -> None:
+    """Refuse unless CA's history now holds THIS transition under THIS id.
+
+    CA's at-most-once ledger (`process_once_platform`) keys on `command_id`
+    alone. A `command_id` already spent on a different transition makes CA
+    replay that earlier result without running the requested one, and CA
+    then returns the current view — which a caller would read as success.
+    The held transition therefore proves its own effect: the pair
+    (`command_id`, `event_type`) must be in the history after it returns.
+    """
+    for record in module_history(db, agreement_id):
+        if record.command_id == command_id and record.event_type == event_type:
+            return
+    raise ConflictError(
+        f"command id {command_id!r} was already used for a different agreement "
+        f"transition; {event_type} was not performed"
+    )
 
 
 def _not_held_conflict(
@@ -552,6 +576,9 @@ def approve(db: Session, command: ApprovalCommand) -> ContractView:
         )
     except approvals.ApprovalNotHeld as exc:
         raise _not_held_conflict(command.approval_request_id, exc) from exc
+    _require_recorded(
+        db, current.id, command_id=command.command_id, event_type=AGREEMENT_APPROVED_V1
+    )
     return _view(value, approval_request_id=command.approval_request_id)
 
 
@@ -618,6 +645,9 @@ def activate(db: Session, command: ActivateCommand) -> ContractView:
         )
     except approvals.ApprovalNotHeld as exc:
         raise _not_held_conflict(request_id, exc) from exc
+    _require_recorded(
+        db, current.id, command_id=command.command_id, event_type=AGREEMENT_ACTIVATED_V1
+    )
     return _view(value, approval_request_id=request_id)
 
 
@@ -690,6 +720,12 @@ def reinstate(db: Session, command: TransitionCommand) -> ContractView:
         )
     except approvals.ApprovalNotHeld as exc:
         raise _not_held_conflict(request_id, exc) from exc
+    _require_recorded(
+        db,
+        current.id,
+        command_id=command.command_id,
+        event_type=AGREEMENT_REINSTATED_V1,
+    )
     return _view(value)
 
 
