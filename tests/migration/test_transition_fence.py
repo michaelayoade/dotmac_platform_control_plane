@@ -92,7 +92,10 @@ def bare_db(postgres_url: str) -> Iterator[str]:
     cannot exercise the NULL-datacl case."""
     name = f"vcp_fence_bare_{uuid.uuid4().hex[:12]}"
     with _connect(postgres_url, autocommit=True) as conn:
-        conn.execute(text(f'CREATE DATABASE "{name}"'))
+        # Owned by app_admin, as production's contract requires (the deploy
+        # script refuses any other owner): the migrator's CONNECT then rests
+        # on ownership, not on PUBLIC, and survives the fence.
+        conn.execute(text(f'CREATE DATABASE "{name}" OWNER app_admin'))
     try:
         yield name
     finally:
@@ -525,3 +528,32 @@ def test_skipping_the_public_revoke_is_caught_by_writer_still_has_connect(
                 {"r": w, "d": db},
             ).scalar_one()
             assert still_connect is True
+
+
+def test_a_migrator_whose_connect_rests_only_on_public_is_refused_first(
+    postgres_url: str,
+) -> None:
+    """A database app_admin does not own, with a NULL (default) ACL: the
+    migrator's CONNECT rests on PUBLIC alone, so fencing would lock it out.
+    Refused as `migration_role_lost_connect` BEFORE any change."""
+    name = f"vcp_fence_notowned_{uuid.uuid4().hex[:12]}"
+    with _connect(postgres_url, autocommit=True) as conn:
+        conn.execute(text(f'CREATE DATABASE "{name}"'))
+    try:
+        with _connect(postgres_url, autocommit=True) as conn:
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    conn,
+                    database=name,
+                    writer_roles=("app_user",),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.MIGRATION_ROLE_LOST_CONNECT
+            acl = conn.execute(
+                text("SELECT datacl FROM pg_database WHERE datname = :n"),
+                {"n": name},
+            ).scalar_one()
+            assert acl is None, "a refusal must leave the ACL untouched"
+    finally:
+        with _connect(postgres_url, autocommit=True) as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))

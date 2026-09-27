@@ -128,7 +128,7 @@ COPY --chown=root:root alembic.ini ./alembic.ini
 # `vendor_cp.deployment.image_heads`). No database is dialled — the same
 # `make_alembic_config` offline-`Config` construction
 # `tests/architecture/test_descriptor_promotion.py` already relies on.
-RUN python -m vendor_cp.deployment.image_heads \
+RUN VENDOR_MIGRATION_ROOT=/app python -m vendor_cp.deployment.image_heads \
         --emit \
         --source-revision "$SOURCE_REVISION" \
         --output /app/migration_heads.json

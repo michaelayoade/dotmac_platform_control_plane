@@ -173,7 +173,9 @@ def _quote_ident(conn: Connection, name: str) -> str:
     `quote_ident` is the server's own answer to "how do I write this
     identifier back into SQL safely" — no format-string interpolation of a
     role or database name ever happens in this module."""
-    return conn.execute(text("SELECT quote_ident(:name)"), {"name": name}).scalar_one()
+    return str(
+        conn.execute(text("SELECT quote_ident(:name)"), {"name": name}).scalar_one()
+    )
 
 
 def _database_exists(conn: Connection, database: str) -> bool:
@@ -207,10 +209,12 @@ def _duplicates(values: tuple[str, ...]) -> tuple[str, ...]:
 
 def _database_owner(conn: Connection, database: str) -> str:
     """The database owner's role name, resolved from `pg_database.datdba`."""
-    return conn.execute(
-        text("SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = :db"),
-        {"db": database},
-    ).scalar_one()
+    return str(
+        conn.execute(
+            text("SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = :db"),
+            {"db": database},
+        ).scalar_one()
+    )
 
 
 def _is_member_of(conn: Connection, member: str, role: str) -> bool:
@@ -264,6 +268,49 @@ def _unquote_grantee(name: str) -> str:
     return name
 
 
+def _reject_superuser_writers(conn: Connection, fenced: tuple[str, ...]) -> None:
+    """A superuser keeps CONNECT through every REVOKE (and is a member of every
+    role, so it would otherwise surface as a shared role): refused first."""
+    for role in fenced:
+        is_superuser = conn.execute(
+            text("SELECT rolsuper FROM pg_roles WHERE rolname = :role"),
+            {"role": role},
+        ).scalar_one()
+        if is_superuser:
+            raise FenceRefused(
+                FenceRefusalCode.WRITER_INHERITS_CONNECT,
+                f"writer role {role!r} is a superuser; no REVOKE removes its "
+                "CONNECT",
+            )
+
+
+def _require_migration_connect_without_public(
+    conn: Connection, database: str, acl_text: str
+) -> None:
+    """`migration_role_lost_connect`, checked before any ACL change.
+
+    The fence revokes PUBLIC. If the migration role's CONNECT rests only on
+    PUBLIC (it neither owns the database, nor is a member of the owner, nor is
+    a member of any explicit non-PUBLIC grantee), the fence would lock the
+    migrator out with the writers. Production's contract is that `app_admin`
+    owns the database, so this refuses anything else up front."""
+    owner = _database_owner(conn, database)
+    if MIGRATION_ROLE == owner or _is_member_of(conn, MIGRATION_ROLE, owner):
+        return
+    grantees = (
+        _unquote_grantee(raw)
+        for raw, privs in _parse_acl(acl_text).items()
+        if "c" in privs and raw
+    )
+    if any(_is_member_of(conn, MIGRATION_ROLE, grantee) for grantee in grantees):
+        return
+    raise FenceRefused(
+        FenceRefusalCode.MIGRATION_ROLE_LOST_CONNECT,
+        f"migration role {MIGRATION_ROLE!r} holds CONNECT on {database!r} only "
+        "through PUBLIC; fencing would lock the migrator out too",
+    )
+
+
 def _reject_inherited_connect(
     conn: Connection, fenced: tuple[str, ...], database: str, acl_text: str
 ) -> None:
@@ -291,16 +338,6 @@ def _reject_inherited_connect(
         if grantee not in fenced
     )
     for role in fenced:
-        is_superuser = conn.execute(
-            text("SELECT rolsuper FROM pg_roles WHERE rolname = :role"),
-            {"role": role},
-        ).scalar_one()
-        if is_superuser:
-            raise FenceRefused(
-                FenceRefusalCode.WRITER_INHERITS_CONNECT,
-                f"writer role {role!r} is a superuser; no REVOKE removes its "
-                "CONNECT",
-            )
         for grantee in other_grantees:
             if _is_member_of(conn, role, grantee):
                 raise FenceRefused(
@@ -344,10 +381,12 @@ def _current_acl_text(conn: Connection, database: str) -> str:
     ).one()
     acl_text, owner_oid = row
     if acl_text is not None:
-        return acl_text
-    return conn.execute(
-        text("SELECT acldefault('d', :owner)::text"), {"owner": owner_oid}
-    ).scalar_one()
+        return str(acl_text)
+    return str(
+        conn.execute(
+            text("SELECT acldefault('d', :owner)::text"), {"owner": owner_oid}
+        ).scalar_one()
+    )
 
 
 def _parse_acl(acl_text: str) -> dict[str, str]:
@@ -409,6 +448,8 @@ def fence_writers(
     # revoked and then "verified" against a privilege check that was never
     # going to move.
     before_acl = _current_acl_text(conn, database)
+    _reject_superuser_writers(conn, fenced)
+    _require_migration_connect_without_public(conn, database, before_acl)
     _reject_shared_writer_roles(conn, fenced, writer_roles)
     _reject_inherited_connect(conn, fenced, database, before_acl)
 
