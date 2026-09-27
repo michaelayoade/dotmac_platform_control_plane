@@ -10,7 +10,7 @@ settlement. This file proves that path end to end, including races, replay,
 conflicts and readiness — never through a mocked handler.
 
 The seeding and composition helpers below are copied, not imported (`tests`
-is not a package): `migrated`/`_sessions`/`_composition`/`_withdrawal_row`/
+is not a package): `migrated`/`_sessions`/`_composition`/`_withdrawal_rows`/
 `_propose_and_approve_agreement`/`_activate`/`_propose_issuer` mirror
 `test_withdrawal_routing.py`; `_observe` mirrors `test_withdrawal_health.py`;
 the issuer-issuance helpers (`issuer_security`, `_target_ref_for`,
