@@ -62,6 +62,7 @@ from dotmac_kernel.session_runtime import DatabaseRuntime
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
@@ -132,7 +133,6 @@ _LOCK_WAIT: Final = 10
 #: proved here is a real, unbounded Postgres row lock wait — this window is
 #: only the probe, never a `lock_timeout` on the blocked side, because that
 #: side must still be able to succeed once released.
-_BLOCK_PROBE_SECONDS: Final = 1.0
 
 
 def _ca_standing_withdrawn(db: Session, agreement_id: uuid.UUID) -> bool:
@@ -142,6 +142,33 @@ def _ca_standing_withdrawn(db: Session, agreement_id: uuid.UUID) -> bool:
     view = ca_get(db, agreement_id)
     assert view is not None
     return bool(view.approval_withdrawn)
+
+
+def _await_lock_wait_on(engine: Engine, blocker_pid: int) -> None:
+    """Deterministic proof that another backend is WAITING ON A LOCK held by
+    `blocker_pid` — not merely slow. Polls `pg_stat_activity` (bounded) for a
+    backend with `wait_event_type = 'Lock'` whose `pg_blocking_pids` names the
+    blocker. A thread that is slow for any other reason (host load, pool wait,
+    imports) never satisfies this, so a missing lock cannot pass as a block."""
+    deadline = time.monotonic() + _LOCK_WAIT
+    with engine.connect() as probe:
+        while True:
+            waiting = probe.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE wait_event_type = 'Lock' "
+                    "AND CAST(:blocker AS integer) = ANY(pg_blocking_pids(pid))"
+                ),
+                {"blocker": blocker_pid},
+            ).scalar_one()
+            probe.rollback()
+            if waiting:
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"no backend ever waited on a lock held by pid {blocker_pid}"
+                )
+            time.sleep(0.05)
 
 
 @pytest.fixture
@@ -690,11 +717,12 @@ def test_race_a_agreement_withdrawal_in_flight_blocks_activation(
 
         with Session(engine) as db_w:
             _withdraw(db_w, request_id=request_id)  # FOR UPDATE, held, uncommitted
+            blocker_pid = db_w.execute(text("SELECT pg_backend_pid()")).scalar_one()
 
             thread_a = threading.Thread(target=run_activate)
             thread_a.start()
             try:
-                thread_a.join(timeout=_BLOCK_PROBE_SECONDS)
+                _await_lock_wait_on(engine, blocker_pid)
                 assert (
                     thread_a.is_alive()
                 ), "activate did not block on the in-flight withdrawal's hold"
@@ -724,7 +752,8 @@ def test_race_a_agreement_withdrawal_in_flight_blocks_activation(
 
             view = agreements.get(db, approved.id)
             assert view is not None
-            assert view.status != "active"
+            assert view.status == "approved"
+            assert _ca_standing_withdrawn(db, view.id) is True
 
 
 def test_race_b_agreement_activation_in_flight_blocks_withdrawal(
@@ -874,11 +903,12 @@ def test_race_c_issuer_withdrawal_in_flight_blocks_issuance(
 
         with Session(engine) as db_w:
             _withdraw(db_w, request_id=request_id)  # FOR UPDATE, held, uncommitted
+            blocker_pid = db_w.execute(text("SELECT pg_backend_pid()")).scalar_one()
 
             thread_c = threading.Thread(target=run_issue)
             thread_c.start()
             try:
-                thread_c.join(timeout=_BLOCK_PROBE_SECONDS)
+                _await_lock_wait_on(engine, blocker_pid)
                 assert (
                     thread_c.is_alive()
                 ), "issuance did not block on the in-flight withdrawal's hold"
@@ -1028,6 +1058,15 @@ def test_race_d_issuer_issuance_in_flight_blocks_withdrawal(
             plan = control.get_plan(db, plan_id)
             assert plan is not None
             assert plan.approval_revocation_ref == f"approval.withdrawn:{event_id}"
+
+            # The issuance committed first and is NOT reversed by the drain:
+            # exactly one authorization record for the plan survives.
+            issued = db.scalar(
+                select(func.count())
+                .select_from(RehearsalIssuerAuthorizationRecord)
+                .where(RehearsalIssuerAuthorizationRecord.plan_id == plan_id)
+            )
+            assert issued == 1
 
 
 # ── 3(a): withdraw-first — activate is refused; drain settles a terminal,
