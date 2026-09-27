@@ -28,6 +28,7 @@ from vendor_cp.deployment.transition_fence import (
     FenceProof,
     FenceRefusalCode,
     FenceRefused,
+    fence_is_holding,
     fence_writers,
     restore_writers,
 )
@@ -1256,3 +1257,126 @@ def test_an_ungranted_superuser_is_not_a_member_of_every_writer(
     finally:
         with _connect(postgres_url, autocommit=True) as conn:
             conn.execute(text(f"DROP ROLE IF EXISTS {superuser}"))
+
+
+# ── (u) fence_is_holding really answers "is the fence holding, right now" ──
+
+
+def test_fence_is_holding_returns_true_after_a_normal_fence(
+    admin_url: str, db: str
+) -> None:
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            proof = fence_writers(
+                conn,
+                database=db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            assert fence_is_holding(conn, proof) is True
+            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+
+
+def test_fence_is_holding_returns_false_when_a_member_is_regranted_connect(
+    admin_url: str, db: str
+) -> None:
+    """M is a member of writer W and separately held its own CONNECT grant
+    before the fence. A superuser re-grants CONNECT to M mid-fence, and the
+    resulting (grantee, priv, grantable, grantor) tuple is IDENTICAL to the
+    one the prior ACL held (both recorded with the owner as grantor) — a
+    comparison against `prior_grants` alone could not distinguish this from
+    "restored". `fence_is_holding` must catch it directly via
+    `has_database_privilege`, not by comparing ACLs."""
+    with _writer_role(admin_url) as w:
+        member = f"fence_member_{uuid.uuid4().hex[:10]}"
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f"CREATE ROLE {member} LOGIN NOSUPERUSER NOBYPASSRLS"))
+            conn.execute(text(f"GRANT {w} TO {member}"))
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {member}'))
+        try:
+            with _connect(admin_url, autocommit=True) as conn:
+                proof = fence_writers(
+                    conn,
+                    database=db,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+                assert member in proof.member_roles
+                assert fence_is_holding(conn, proof) is True
+
+                conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {member}'))
+                assert fence_is_holding(conn, proof) is False
+
+                conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {member}'))
+                assert fence_is_holding(conn, proof) is True
+                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+        finally:
+            with _connect(admin_url, autocommit=True) as conn:
+                conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {member}'))
+                conn.execute(text(f"REVOKE {w} FROM {member}"))
+                conn.execute(text(f"DROP OWNED BY {member}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {member}"))
+
+
+def test_fence_is_holding_returns_false_when_a_new_member_is_granted_mid_fence(
+    admin_url: str, db: str
+) -> None:
+    """A role granted membership in W AFTER the fence closed holds no CONNECT
+    of its own (so the plain `has_database_privilege` checks see nothing),
+    but it IS now a member of a fenced writer — `_member_roles` re-derived
+    right now must disagree with `proof.member_roles` and fail the check."""
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            proof = fence_writers(
+                conn,
+                database=db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            assert fence_is_holding(conn, proof) is True
+
+            new_member = f"fence_new_member_{uuid.uuid4().hex[:10]}"
+            conn.execute(
+                text(f"CREATE ROLE {new_member} LOGIN NOSUPERUSER NOBYPASSRLS")
+            )
+            conn.execute(text(f"GRANT {w} TO {new_member}"))
+            try:
+                assert fence_is_holding(conn, proof) is False
+            finally:
+                conn.execute(text(f"REVOKE {w} FROM {new_member}"))
+                conn.execute(text(f"DROP OWNED BY {new_member}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {new_member}"))
+
+            assert fence_is_holding(conn, proof) is True
+            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+
+
+def test_fence_is_holding_returns_false_when_a_writer_backend_is_open(
+    admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """CONNECT stays revoked throughout, so the privilege checks alone would
+    see nothing wrong; an open writer backend must still fail the check."""
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            proof = fence_writers(
+                conn,
+                database=db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            assert fence_is_holding(conn, proof) is True
+
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO PUBLIC'))
+            writer_engine = create_engine(url_for(postgres_url, db, user=w))
+            writer_conn = writer_engine.connect()
+            try:
+                assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+                conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM PUBLIC'))
+
+                assert fence_is_holding(conn, proof) is False
+            finally:
+                writer_conn.close()
+                writer_engine.dispose()
+
+            assert fence_is_holding(conn, proof) is True
+            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)

@@ -1123,19 +1123,40 @@ def restore_writers(
 
 
 def fence_is_holding(conn: Connection, proof: FenceProof) -> bool:
-    """Read-only: is the fence this proof describes still in effect?
+    """Read-only: is the fence this proof describes STILL in effect, right now?
 
-    True only when every fenced role still lacks CONNECT and the migration
-    role still has it — never merely "the ACL looks different from prior"."""
-    for role in proof.fenced_roles:
+    True only when ALL of:
+
+    - every role in the EFFECTIVE set (`fenced_roles + member_roles`) still
+      lacks CONNECT (`has_database_privilege`);
+    - `MIGRATION_ROLE` still has CONNECT;
+    - re-deriving `_member_roles` from `proof.fenced_roles` RIGHT NOW gives
+      back exactly `proof.member_roles` — membership can drift after a fence
+      closes (see the module docstring's "known limits" section), and a
+      role granted membership in a writer after the fence would otherwise
+      go unnoticed by every other check here;
+    - zero backends remain open for the effective set.
+
+    Never mutates anything — this is a read of the current state, not a
+    re-fence."""
+    effective = tuple(dict.fromkeys((*proof.fenced_roles, *proof.member_roles)))
+    for role in effective:
         still_connect = conn.execute(
             text("SELECT has_database_privilege(:role, :db, 'CONNECT')"),
             {"role": role, "db": proof.database},
         ).scalar_one()
         if still_connect:
             return False
+
     migration_can_connect = conn.execute(
         text("SELECT has_database_privilege(:role, :db, 'CONNECT')"),
         {"role": MIGRATION_ROLE, "db": proof.database},
     ).scalar_one()
-    return bool(migration_can_connect)
+    if not migration_can_connect:
+        return False
+
+    current_members = _member_roles(conn, proof.fenced_roles)
+    if set(current_members) != set(proof.member_roles):
+        return False
+
+    return _writer_pids(conn, proof.database, effective) == []
