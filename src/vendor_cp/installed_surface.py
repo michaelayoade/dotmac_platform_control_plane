@@ -258,6 +258,11 @@ BASELINE: Final[dict[tuple[str, str], tuple[str, ...]]] = {
     ("python_scripts", "scripts/verify_ghcr_package_state.py"): (
         "python3 scripts/verify_ghcr_package_state.py",
     ),
+    ("python_scripts", ".github/workflows/product-manifest-regenerate.yml"): (
+        "python scripts/generate_product_manifest.py",
+        "python scripts/product_manifest_acquire.py",
+        "python scripts/product_manifest_bundle_check.py",
+    ),
     ("pythonpath_src", ".github/workflows/production-deploy.yml"): ("PYTHONPATH=src",),
     ("pythonpath_src", "docs/operations/production-deployment.md"): ("PYTHONPATH=src",),
     ("pythonpath_src", "src/vendor_cp/production_secrets.py"): (
@@ -353,6 +358,23 @@ BASELINE_REASONS: Final[dict[str, str]] = {
         "`read:packages` credential CI must not hold, so it deliberately runs "
         "nowhere near production. Retires when the rename equality it checks is "
         "closed out."
+    ),
+    ".github/workflows/product-manifest-regenerate.yml": (
+        "Exact-ref, hosted-CI tooling, not a production operator surface. "
+        "`product_manifest_acquire.py` must run TRUSTED checkout code while the "
+        "`acquire` job still holds the read-only registry credential — it cannot "
+        "wait for an installed console script, because installing one would mean "
+        "resolving the untrusted candidate ref's own manifest first, the exact "
+        "ordering defect this workflow's credential/checkout split exists to "
+        "close. `product_manifest_bundle_check.py` and "
+        "`generate_product_manifest.py` then run in the separate `regenerate` "
+        "job, which holds no credential at all and asserts its own absence "
+        "before installing anything — there is no secret left for an installed "
+        "entry point to protect there either. No operator ever runs this "
+        "workflow's steps directly and no deployment depends on them. Retires "
+        "when the workflow is removed, or when it is replaced by trusted "
+        "installed tooling that preserves both the exact-ref requirement and "
+        "the credential/candidate-code separation between the two jobs."
     ),
 }
 
