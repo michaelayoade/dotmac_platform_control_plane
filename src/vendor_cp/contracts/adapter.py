@@ -519,7 +519,9 @@ def approve(db: Session, command: ApprovalCommand) -> ContractView:
         current,
         command_id=command.command_id,
         event_type=AGREEMENT_APPROVED_V1,
-        approval_request_id=command.approval_request_id,
+        # Label a replay with the decision that actually carried approval,
+        # never a caller-supplied request id.
+        approval_request_id=_parsed_decision_ref(current.approval_decision_ref),
     )
     if replayed is not None:
         return replayed
