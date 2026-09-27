@@ -1099,9 +1099,21 @@ def test_a_replayed_delivery_after_settlement_is_a_no_op(
             assert len(outcomes_before) == 1
 
             # The identical claimed event, delivered directly through the
-            # router a second time.
-            ApprovalEventRouter().deliver(claimed, db)
-            db.commit()
+            # router a second time. Wrapping (not stubbing) CA's own
+            # `module_record_approval_withdrawal` proves the replay never
+            # reaches CA at all -- `call_count == 0` -- while the real
+            # function still runs for every OTHER call in this test module.
+            real_record_approval_withdrawal = (
+                agreements.module_record_approval_withdrawal
+            )
+            with mock.patch.object(
+                agreements,
+                "module_record_approval_withdrawal",
+                wraps=real_record_approval_withdrawal,
+            ) as wrapped_record:
+                ApprovalEventRouter().deliver(claimed, db)
+                db.commit()
+            assert wrapped_record.call_count == 0, "CA was called again on replay"
 
         with platform.platform_session() as db:
             replayed = outcomes_for_event(db, event_id)
