@@ -169,7 +169,10 @@ def _seed(engine: Engine) -> tuple[uuid.UUID, uuid.UUID]:
         approvals.publish_policy_version(
             db,
             approvals.PublishPolicyCommand(
-                command_id=uuid.uuid4().hex,
+                # One stable command id per policy revision: a second `_seed`
+                # in the same database replays this publish instead of
+                # tripping Approvals' immutable-revision refusal.
+                command_id=f"policy-{_POLICY_CODE}-v{_POLICY_VERSION}",
                 policy_code=_POLICY_CODE,
                 version=_POLICY_VERSION,
                 quorum=1,
@@ -808,9 +811,13 @@ def test_seam_concurrent_approvals_with_different_actor_ref_leave_one_receipt(
     assert len(results) == 1, f"expected exactly one success, got {results!r}"
     assert len(errors) == 1, f"expected exactly one failure, got {errors!r}"
     (error,) = errors
+    # The loser fails CLOSED, with no result. Which refusal it gets depends on
+    # interleaving: CP's receipt check (reused / mismatch) if the winner's
+    # receipt is visible first, or Control's own plan-moved refusal if the
+    # loser's Control call runs after the winner committed the approval.
     assert isinstance(
-        error, IssuerCommandReused | IssuerReceiptMismatch
-    ), f"a concurrent actor_ref race leaked {error!r} instead of a named conflict"
+        error, IssuerCommandReused | IssuerReceiptMismatch | control.ExpectedStateError
+    ), f"a concurrent actor_ref race leaked {error!r} instead of a refusal"
 
     with Session(engine) as db:
         count = db.scalar(
