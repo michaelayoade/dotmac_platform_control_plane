@@ -1,6 +1,6 @@
 {
   "manifest": {
-    "digest": "sha256:d8a573e94e3ea40c796c2c197a231ddb82481c31e70aa9719faa87f9961c8bb7",
+    "digest": "sha256:22e0959f410b1bac3e77a8a53f7392154ca33bc1e5932e85ec5e6776ade4b759",
     "path": "deploy/prospective/product-manifest.json"
   },
   "schema": "ProspectiveSourceComposition.v1"

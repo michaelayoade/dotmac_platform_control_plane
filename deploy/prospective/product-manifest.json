@@ -86,6 +86,10 @@
     {
       "code": "vendor_approvals",
       "source": "assembly"
+    },
+    {
+      "code": "withdrawal_conflicts",
+      "source": "assembly"
     }
   ],
   "schema": "ProductAssemblyManifest.v1",
