@@ -28,7 +28,6 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
-from typing import Any
 from unittest import mock
 
 import dotmac_approvals
@@ -44,7 +43,11 @@ from dotmac_deployment_control import (
     register_target,
     set_desired_state,
 )
-from dotmac_kernel.messaging import ClaimedPlatformEvent, OutboxStatus, PlatformOutboxEvent
+from dotmac_kernel.messaging import (
+    ClaimedPlatformEvent,
+    OutboxStatus,
+    PlatformOutboxEvent,
+)
 from dotmac_kernel.messaging.outbox import enqueue_platform_event
 from dotmac_kernel.session_runtime import DatabaseRuntime
 from sqlalchemy import create_engine, select, text
@@ -55,11 +58,7 @@ from vendor_cp.allocations.consumer import ContractEventConsumer
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.approvals_authority import bare_content_hash
 from vendor_cp.contracts import adapter as agreements
-from vendor_cp.contracts import adapter as contracts_adapter
 from vendor_cp.contracts_authority import APPROVAL_SUBJECT_TYPE
-from vendor_cp.deployment.protected_rehearsal_issuer import (
-    SUBJECT_TYPE as ISSUER_SUBJECT_TYPE,
-)
 from vendor_cp.deployment.protected_rehearsal_issuer import (
     ProposeIssuerPlan,
     approve_issuer_plan,
@@ -72,7 +71,10 @@ from vendor_cp.offers.models import OfferVersion
 from vendor_cp.relay import approval_router
 from vendor_cp.relay.approval_router import ApprovalEventRouter
 from vendor_cp.relay.runner import PlatformEventConsumers, RelayComposition, drain_once
-from vendor_cp.relay.withdrawal_outcomes import WithdrawalDisposition, outcomes_for_event
+from vendor_cp.relay.withdrawal_outcomes import (
+    WithdrawalDisposition,
+    outcomes_for_event,
+)
 
 PRODUCT = "dotmac-sub"
 CAPABILITIES = ("cap.a", "cap.b")
@@ -252,7 +254,9 @@ def _propose_and_approve_agreement(db: Session) -> agreements.ContractView:
     )
 
 
-def _activate(db: Session, approved: agreements.ContractView) -> agreements.ContractView:
+def _activate(
+    db: Session, approved: agreements.ContractView
+) -> agreements.ContractView:
     assert approved.approval_request_id is not None
     return agreements.activate(
         db,
@@ -563,3 +567,141 @@ def test_agreement_withdrawal_of_a_different_approved_request_is_not_carried(
             assert view is not None
             assert view.approval_withdrawn is False
             assert view.status == "approved"
+
+
+# ── 7: retryable leaves nothing ─────────────────────────────────────────────
+
+
+def test_a_retryable_ca_failure_leaves_no_outcome_and_no_ca_row(
+    migrated: tuple[str, str],
+) -> None:
+    """The CA call path (`vendor_cp.contracts.adapter`'s bound name for
+    `dotmac_commercial_agreements.record_approval_withdrawal`) raises
+    `OperationalError`; the handler converts it to `RetryableWithdrawal`,
+    which is not a terminal disposition and writes no outcome row. The
+    kernel worker backs the row off, unsettled."""
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            approved = _propose_and_approve_agreement(db)
+            active = _activate(db, approved)
+        with platform.platform_session() as db:
+            assert active.approval_request_id is not None
+            _withdraw(
+                db,
+                request_id=active.approval_request_id,
+                external_ref=f"withdraw-{uuid.uuid4()}",
+            )
+
+        with mock.patch.object(
+            agreements,
+            "module_record_approval_withdrawal",
+            side_effect=OperationalError("statement", {}, Exception("db unavailable")),
+        ):
+            drain_once(
+                worker_id="withdrawal-test",
+                composition=_composition(dispatcher_url, platform),
+            )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_row(db)
+            assert row.status == OutboxStatus.PENDING.value
+            assert row.attempts == 1
+            assert row.last_error is not None
+            assert "db unavailable" not in row.last_error
+            assert active.content_hash not in (row.last_error or "")
+
+            outcomes = outcomes_for_event(db, row.id)
+            assert outcomes == ()
+
+            view = ca_get(db, active.id)
+            assert view is not None
+            assert view.approval_withdrawn is False
+
+
+# ── 8: unknown subject type is refused ──────────────────────────────────────
+
+
+def test_an_unknown_subject_type_is_refused_not_settled(
+    migrated: tuple[str, str],
+) -> None:
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            enqueue_platform_event(
+                db,
+                event_type="approval.withdrawn",
+                payload={
+                    "subject_type": "totally_unrecognised_subject_type",
+                    "subject_id": "whatever",
+                    "request_id": str(uuid.uuid4()),
+                    "withdrawal_id": str(uuid.uuid4()),
+                    "reason": "irrelevant",
+                    "effective_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            db.commit()
+
+        drain_once(
+            worker_id="withdrawal-test",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_row(db)
+            assert row.status == OutboxStatus.PENDING.value
+            assert row.attempts == 1
+            assert row.last_error is not None
+            assert "UnroutableApprovalEvent(subject_type)" in row.last_error
+
+            outcomes = outcomes_for_event(db, row.id)
+            assert outcomes == ()
+
+
+# ── 9: atomicity — record_outcome raising after the CA call succeeded ──────
+
+
+def test_record_outcome_raising_after_the_ca_call_rolls_back_the_ca_row_too(
+    migrated: tuple[str, str],
+) -> None:
+    """The consequence, the outcome row and the event-id record are ONE unit.
+    If `record_outcome` raises after the CA call already ran (uncommitted, in
+    the same session), the whole delivery transaction rolls back — the CA
+    withdrawal is not left standing on its own."""
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            approved = _propose_and_approve_agreement(db)
+            active = _activate(db, approved)
+        with platform.platform_session() as db:
+            assert active.approval_request_id is not None
+            _withdraw(
+                db,
+                request_id=active.approval_request_id,
+                external_ref=f"withdraw-{uuid.uuid4()}",
+            )
+
+        with mock.patch.object(
+            approval_router,
+            "record_outcome",
+            side_effect=RuntimeError("planted failure after the CA call succeeded"),
+        ):
+            drain_once(
+                worker_id="withdrawal-test",
+                composition=_composition(dispatcher_url, platform),
+            )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_row(db)
+            assert row.status == OutboxStatus.PENDING.value
+            assert row.attempts == 1
+
+            outcomes = outcomes_for_event(db, row.id)
+            assert outcomes == ()
+
+            view = ca_get(db, active.id)
+            assert view is not None
+            assert view.approval_withdrawn is False, (
+                "the CA withdrawal must be rolled back together with the "
+                "outcome row it failed to write alongside"
+            )
