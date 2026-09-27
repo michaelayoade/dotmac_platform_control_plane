@@ -369,3 +369,112 @@ def _record_applied(db: Session, *, subject_id: str) -> uuid.UUID:
     )
     db.commit()
     return outcome.id
+
+
+def test_redriven_proof_must_be_applied_class_same_request_and_cited_once(
+    migrated: tuple[str, str],
+) -> None:
+    """A `not_carried` outcome on the same subject proves nothing about THIS
+    withdrawal; an applied outcome for a DIFFERENT approval request proves
+    nothing either; and one proof cannot clear two conflicts."""
+    platform_url, _dispatcher_url = migrated
+    subject_id = str(uuid.uuid4())
+    request_id = uuid.uuid4()
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            first = _record_conflict_for(
+                db, subject_id=subject_id, request_id=request_id
+            )
+            second = _record_conflict_for(
+                db, subject_id=subject_id, request_id=request_id
+            )
+            not_carried = _record_for(
+                db,
+                subject_id=subject_id,
+                request_id=request_id,
+                disposition=WithdrawalDisposition.NOT_CARRIED,
+            )
+            other_request = _record_for(
+                db,
+                subject_id=subject_id,
+                request_id=uuid.uuid4(),
+                disposition=WithdrawalDisposition.APPLIED,
+            )
+            proof = _record_for(
+                db,
+                subject_id=subject_id,
+                request_id=request_id,
+                disposition=WithdrawalDisposition.APPLIED,
+            )
+
+        for bad in (not_carried, other_request):
+            with platform.platform_session() as db:
+                with pytest.raises(ConflictNotResolvable):
+                    resolve_conflict(
+                        db,
+                        outcome_id=first,
+                        resolution=WithdrawalResolution.REDRIVEN,
+                        actor_ref="platform-admin:alice",
+                        reason="redriven",
+                        redrive_ref=str(bad),
+                    )
+                db.rollback()
+
+        with platform.platform_session() as db:
+            resolve_conflict(
+                db,
+                outcome_id=first,
+                resolution=WithdrawalResolution.REDRIVEN,
+                actor_ref="platform-admin:alice",
+                reason="redriven",
+                redrive_ref=str(proof),
+            )
+            db.commit()
+
+        with platform.platform_session() as db:
+            with pytest.raises(ConflictNotResolvable, match="already proves"):
+                resolve_conflict(
+                    db,
+                    outcome_id=second,
+                    resolution=WithdrawalResolution.REDRIVEN,
+                    actor_ref="platform-admin:bob",
+                    reason="redriven",
+                    redrive_ref=str(proof),
+                )
+            db.rollback()
+            assert unresolved_conflicts(db) == 1
+
+
+def _record_for(
+    db: Session,
+    *,
+    subject_id: str,
+    request_id: uuid.UUID,
+    disposition: WithdrawalDisposition,
+) -> uuid.UUID:
+    event_id = uuid.uuid4()
+    outcome = record_outcome(
+        db,
+        event_id=event_id,
+        digest=payload_digest(APPROVAL_WITHDRAWN_EVENT_TYPE, {"e": str(event_id)}),
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        subject_type="deployment_plan",
+        subject_id=subject_id,
+        disposition=disposition,
+        reason_code="test",
+        evidence={},
+        approval_request_id=request_id,
+    )
+    db.commit()
+    return outcome.id
+
+
+def _record_conflict_for(
+    db: Session, *, subject_id: str, request_id: uuid.UUID
+) -> uuid.UUID:
+    return _record_for(
+        db,
+        subject_id=subject_id,
+        request_id=request_id,
+        disposition=WithdrawalDisposition.SECURITY_CONFLICT,
+    )

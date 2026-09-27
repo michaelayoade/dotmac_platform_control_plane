@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from dotmac_kernel.messaging import ClaimedPlatformEvent
+from sqlalchemy.exc import OperationalError
 
 from vendor_cp.contracts import adapter as contracts_adapter
 from vendor_cp.deployment import protected_rehearsal_issuer as issuer
@@ -221,6 +222,25 @@ def test_a_retryable_handler_writes_no_row_and_propagates(
     with pytest.raises(RetryableWithdrawal) as caught:
         ApprovalEventRouter().deliver(_event(payload=payload), object())
     assert caught.value.code == "database_unavailable"
+    assert store.recorded == []
+
+
+def test_a_database_error_anywhere_on_the_path_is_a_redacted_retryable(
+    store: _FakeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The router's OWN reads and writes are covered too, not just the
+    handlers': an OperationalError from the outcome lookup becomes the typed,
+    redacted retryable, so no SQL or parameter reaches the kernel row."""
+
+    def failing_lookup(db: object, event_id: object) -> object:
+        raise OperationalError("SELECT secret-param", {"p": "secret"}, Exception())
+
+    monkeypatch.setattr(approval_router, "outcomes_for_event", failing_lookup)
+    payload = {"subject_type": issuer.SUBJECT_TYPE, "subject_id": "x"}
+    with pytest.raises(RetryableWithdrawal) as caught:
+        ApprovalEventRouter().deliver(_event(payload=payload), object())
+    assert caught.value.code == "database_unavailable"
+    assert "secret" not in repr(caught.value)
     assert store.recorded == []
 
 

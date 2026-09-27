@@ -41,7 +41,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 from dotmac_kernel import Base, uuid_pk
@@ -434,6 +434,19 @@ def resolve_conflict(
     return RecordedConflictResolution._from_row(row)
 
 
+#: The dispositions that prove a withdrawal's consequence actually holds: the
+#: authorization was revoked now, earlier, or by a later revocation. A
+#: `not_carried` outcome proves nothing about THIS withdrawal, and a
+#: cancellation is not a redrive.
+_REDRIVE_PROOF_DISPOSITIONS: Final = frozenset(
+    {
+        WithdrawalDisposition.APPLIED.value,
+        WithdrawalDisposition.ALREADY_APPLIED.value,
+        WithdrawalDisposition.SUPERSEDED_BY_REVOCATION.value,
+    }
+)
+
+
 def _require_redrive_evidence(
     db: Session,
     conflict: ApprovalWithdrawalOutcome,
@@ -441,8 +454,9 @@ def _require_redrive_evidence(
     redrive_ref: str | None,
 ) -> None:
     """`redriven` is a claim that the withdrawal's consequence WAS applied, so
-    it must cite the proof: the id of a later terminal, non-conflict outcome
-    for the same subject. `dismissed` cites nothing.
+    it must cite the proof: the id of a later applied-class outcome for the
+    same subject and (when the conflict names one) the same approval request,
+    not already cited by another resolution. `dismissed` cites nothing.
 
     Without this, one admin could turn health green by asserting a redrive
     that never happened, leaving the withdrawn authorization standing.
@@ -465,14 +479,27 @@ def _require_redrive_evidence(
     if (
         redriven is None
         or redriven.id == conflict.id
-        or redriven.disposition == WithdrawalDisposition.SECURITY_CONFLICT.value
+        or redriven.disposition not in _REDRIVE_PROOF_DISPOSITIONS
         or redriven.subject_type != conflict.subject_type
         or redriven.subject_id != conflict.subject_id
         or redriven.recorded_at < conflict.recorded_at
+        or (
+            conflict.approval_request_id is not None
+            and redriven.approval_request_id != conflict.approval_request_id
+        )
     ):
         raise ConflictNotResolvable(
-            f"redrive_ref {redrive_ref} is not a later terminal, non-conflict "
-            "outcome for the same subject"
+            f"redrive_ref {redrive_ref} is not a later outcome that applied the "
+            "withdrawal to the same subject and approval request"
+        )
+    already_cited = db.scalar(
+        select(ApprovalWithdrawalConflictResolution.id).where(
+            ApprovalWithdrawalConflictResolution.redrive_ref == redrive_ref
+        )
+    )
+    if already_cited is not None:
+        raise ConflictNotResolvable(
+            f"redrive_ref {redrive_ref} already proves another resolution"
         )
 
 

@@ -875,6 +875,9 @@ def record_agreement_approval_withdrawal(
     }
 
     try:
+        # CA's command validates its own fields (lengths, an aware
+        # `withdrawn_at`); a refusal there is a malformed payload, recorded
+        # like the parse failures above rather than dead-lettered.
         command = RecordApprovalWithdrawalCommand(
             command_id=f"approval-withdrawal:{event_id}",
             agreement_id=agreement_id,
@@ -888,6 +891,15 @@ def record_agreement_approval_withdrawal(
             reason=reason,
             withdrawn_at=withdrawn_at,
         )
+    except (ValueError, TypeError) as exc:
+        return ApprovalWithdrawalResult(
+            disposition=WithdrawalDisposition.SECURITY_CONFLICT,
+            reason_code="malformed_withdrawal_payload",
+            coordinates=coordinates,
+            evidence={"error": repr(exc)},
+        )
+
+    try:
         result = module_record_approval_withdrawal(db, command)
     except AgreementError as exc:
         reason_code = (

@@ -13,8 +13,9 @@ disposition record, and `public.approval_withdrawal_conflict_resolutions`,
 the append-only human resolution of a `security_conflict` row. Both are made
 append-only by a BEFORE UPDATE OR DELETE row trigger plus a BEFORE TRUNCATE
 statement trigger — a privilege revoke alone cannot stop `app_admin`, the
-migration/offline role, from rewriting a row, and this evidence must survive
-even that role.
+migration/offline role, from rewriting a row through ordinary DML. The triggers
+refuse that DML for every role; they do not stop a deliberate table owner from
+disabling or dropping a trigger, which is a reviewed migration, not a write.
 
 ## Idempotency, encoded in the constraints rather than trusted to the caller
 

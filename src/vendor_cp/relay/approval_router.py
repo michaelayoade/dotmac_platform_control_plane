@@ -40,6 +40,7 @@ from typing import Final, Protocol, TypedDict
 from uuid import UUID
 
 from dotmac_kernel.messaging import ClaimedPlatformEvent
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from vendor_cp.relay.withdrawal_outcomes import (
@@ -121,6 +122,16 @@ class ApprovalEventRouter:
     """
 
     def deliver(self, event: ClaimedPlatformEvent, db: Session) -> None:
+        """Route, record and never leak: an `OperationalError` from ANY read or
+        write on this path (the outcome lookup, the handler, `record_outcome`)
+        becomes the typed, redacted `RetryableWithdrawal`, so the kernel row's
+        stored error never carries SQL or parameter values."""
+        try:
+            self._deliver(event, db)
+        except OperationalError as exc:
+            raise RetryableWithdrawal("database_unavailable") from exc
+
+    def _deliver(self, event: ClaimedPlatformEvent, db: Session) -> None:
         if event.event_type != APPROVAL_WITHDRAWN_EVENT_TYPE:
             raise UnroutableApprovalEvent("event_type")
 

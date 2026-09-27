@@ -266,11 +266,17 @@ def relay_health(
         activation_dead = _count(
             db, status=OutboxStatus.DEAD, event_type=ACTIVATED_EVENT_TYPE
         )
-        withdrawal_failing = _count(
-            db,
-            status=OutboxStatus.PENDING,
-            event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
-            attempts_greater_than=0,
+        # PENDING *and* CLAIMED: a failed row is re-claimed for every retry,
+        # and a crashed worker can leave it claimed. Counting only PENDING
+        # would drop a failing withdrawal out of health during each retry.
+        withdrawal_failing = sum(
+            _count(
+                db,
+                status=status,
+                event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+                attempts_greater_than=0,
+            )
+            for status in (OutboxStatus.PENDING, OutboxStatus.CLAIMED)
         )
         withdrawal_dead = _count(
             db, status=OutboxStatus.DEAD, event_type=APPROVAL_WITHDRAWN_EVENT_TYPE

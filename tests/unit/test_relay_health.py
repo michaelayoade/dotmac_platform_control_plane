@@ -534,6 +534,41 @@ def test_a_failed_withdrawal_delivery_is_reported_from_the_first_attempt(
     assert health.withdrawal_failing == 1
 
 
+def test_a_failed_withdrawal_being_retried_stays_failing(db: Session) -> None:
+    """A failed row is re-CLAIMED for each retry (and a crashed worker can leave
+    it claimed). Counting only PENDING would drop it out of health during every
+    retry window; health must stay red from the first failure onward."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.CLAIMED,
+        available_at=NOW,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        leased_at=NOW,
+        attempts=1,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+    assert health.withdrawal_failing == 1
+
+
+def test_a_first_claim_of_a_withdrawal_is_not_failing(db: Session) -> None:
+    """NON-VACUITY for the claimed case: a claimed row that has never failed
+    (attempts == 0) is an ordinary first delivery, not a failure."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.CLAIMED,
+        available_at=NOW,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        leased_at=NOW,
+        attempts=0,
+    )
+    health = _observe(db)
+    assert health.withdrawal_failing == 0
+    assert health.verdict is not RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+
+
 def test_a_withdrawal_row_with_no_failed_attempt_yet_is_not_failing(
     db: Session,
 ) -> None:
