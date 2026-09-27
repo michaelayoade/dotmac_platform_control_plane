@@ -376,6 +376,186 @@ def test_an_approve_in_flight_blocks_a_concurrent_withdrawal_until_commit(
     _prove_the_approve_barrier_holds(engine, agreement_id, request_id)
 
 
+# ── activate in flight: a concurrent withdrawal blocks, then succeeds ───────
+
+
+def _prove_the_activate_barrier_holds(
+    engine: Engine, agreement_id: uuid.UUID, request_id: uuid.UUID
+) -> None:
+    """Same shape as `_prove_the_approve_barrier_holds`, paused inside
+    `module_activate` instead: a concurrent withdrawal under a bounded
+    `lock_timeout` blocks and times out while A is paused inside the module
+    call, and succeeds once A's single commit releases the row lock."""
+    mutated = threading.Event()
+    release = threading.Event()
+    activate_result: list[object] = []
+    activate_error: list[BaseException] = []
+    real_module_activate = agreements.module_activate
+
+    def paused_module_activate(db: Session, cmd: object) -> object:
+        result = real_module_activate(db, cmd)
+        mutated.set()
+        release.wait(timeout=_LOCK_WAIT)
+        return result
+
+    def run_a() -> None:
+        try:
+            with (
+                Session(engine) as db_a,
+                mock.patch.object(
+                    agreements, "module_activate", paused_module_activate
+                ),
+            ):
+                result = agreements.activate(
+                    db_a,
+                    agreements.ActivateCommand(
+                        command_id=f"activate-{uuid.uuid4()}",
+                        agreement_id=agreement_id,
+                        approval_request_id=request_id,
+                        activation_rule="countersigned",
+                        activation_reference="countersignature-1",
+                        activation_satisfied_at=datetime.now(UTC),
+                    ),
+                )
+                db_a.commit()
+            activate_result.append(result)
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            activate_error.append(exc)
+
+    thread_a = threading.Thread(target=run_a)
+    thread_a.start()
+    try:
+        assert mutated.wait(
+            timeout=_LOCK_WAIT
+        ), "session A never reached its pause point"
+
+        timed_out = False
+        sqlstate: str | None = None
+        with Session(engine) as db_b:
+            db_b.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            try:
+                _withdraw(
+                    db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+                )
+            except OperationalError as exc:
+                timed_out = True
+                sqlstate = getattr(exc.orig, "sqlstate", None)
+            db_b.rollback()
+        assert timed_out, "a withdrawal under A's hold did not block at all"
+        assert (
+            sqlstate == "55P03"
+        ), f"expected a lock-timeout SQLSTATE, got {sqlstate!r}"
+    finally:
+        release.set()
+        thread_a.join(timeout=_LOCK_WAIT)
+
+    assert not activate_error, f"session A failed: {activate_error!r}"
+    assert activate_result, "session A never returned"
+
+    with Session(engine) as db_b:
+        outcome = _withdraw(
+            db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+        )
+        db_b.commit()
+    assert outcome.state is ApprovalState.WITHDRAWN
+
+
+def test_an_activate_in_flight_blocks_a_concurrent_withdrawal_until_commit(
+    engine: Engine,
+) -> None:
+    agreement_id, request_id = _seed(engine, offer_code="off-activate-inflight")
+    _approve_and_commit(engine, agreement_id, request_id)
+    _prove_the_activate_barrier_holds(engine, agreement_id, request_id)
+
+
+# ── reinstate in flight: a concurrent withdrawal blocks, then succeeds ──────
+
+
+def _prove_the_reinstate_barrier_holds(
+    engine: Engine, agreement_id: uuid.UUID, request_id: uuid.UUID
+) -> None:
+    """Same shape again, paused inside `module_reinstate` on a suspended
+    agreement."""
+    mutated = threading.Event()
+    release = threading.Event()
+    reinstate_result: list[object] = []
+    reinstate_error: list[BaseException] = []
+    real_module_reinstate = agreements.module_reinstate
+
+    def paused_module_reinstate(db: Session, cmd: object) -> object:
+        result = real_module_reinstate(db, cmd)
+        mutated.set()
+        release.wait(timeout=_LOCK_WAIT)
+        return result
+
+    def run_a() -> None:
+        try:
+            with (
+                Session(engine) as db_a,
+                mock.patch.object(
+                    agreements, "module_reinstate", paused_module_reinstate
+                ),
+            ):
+                result = agreements.reinstate(
+                    db_a,
+                    agreements.TransitionCommand(
+                        command_id=f"reinstate-{uuid.uuid4()}",
+                        agreement_id=agreement_id,
+                    ),
+                )
+                db_a.commit()
+            reinstate_result.append(result)
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            reinstate_error.append(exc)
+
+    thread_a = threading.Thread(target=run_a)
+    thread_a.start()
+    try:
+        assert mutated.wait(
+            timeout=_LOCK_WAIT
+        ), "session A never reached its pause point"
+
+        timed_out = False
+        sqlstate: str | None = None
+        with Session(engine) as db_b:
+            db_b.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            try:
+                _withdraw(
+                    db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+                )
+            except OperationalError as exc:
+                timed_out = True
+                sqlstate = getattr(exc.orig, "sqlstate", None)
+            db_b.rollback()
+        assert timed_out, "a withdrawal under A's hold did not block at all"
+        assert (
+            sqlstate == "55P03"
+        ), f"expected a lock-timeout SQLSTATE, got {sqlstate!r}"
+    finally:
+        release.set()
+        thread_a.join(timeout=_LOCK_WAIT)
+
+    assert not reinstate_error, f"session A failed: {reinstate_error!r}"
+    assert reinstate_result, "session A never returned"
+
+    with Session(engine) as db_b:
+        outcome = _withdraw(
+            db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+        )
+        db_b.commit()
+    assert outcome.state is ApprovalState.WITHDRAWN
+
+
+def test_a_reinstate_in_flight_blocks_a_concurrent_withdrawal_until_commit(
+    engine: Engine,
+) -> None:
+    agreement_id, request_id = _seed(engine, offer_code="off-reinstate-inflight")
+    _approve_and_commit(engine, agreement_id, request_id)
+    _activate_and_commit(engine, agreement_id, request_id)
+    _suspend_and_commit(engine, agreement_id)
+    _prove_the_reinstate_barrier_holds(engine, agreement_id, request_id)
+
+
 # ── activate: withdrawal-first refuses ──────────────────────────────────────
 
 
