@@ -42,13 +42,19 @@ from dotmac_deployment_control import (
     register_target,
     set_desired_state,
 )
-from dotmac_kernel import ConflictError
+from dotmac_kernel import ConflictError, PlatformAdmin
+from dotmac_kernel.config import settings
+from dotmac_kernel.db import get_platform_db
+from dotmac_kernel.errors import register_error_handlers
 from dotmac_kernel.messaging import (
     ClaimedPlatformEvent,
     OutboxStatus,
     PlatformOutboxEvent,
 )
+from dotmac_kernel.platform_auth import require_platform_admin
 from dotmac_kernel.session_runtime import DatabaseRuntime
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -56,6 +62,7 @@ from sqlalchemy.orm import Session
 from vendor_cp.allocations.consumer import ContractEventConsumer
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.approvals.adapter import ApprovalHoldRefusal, ApprovalNotHeld
+from vendor_cp.approvals.router import router as approvals_router
 from vendor_cp.approvals_authority import bare_content_hash
 from vendor_cp.contracts import adapter as agreements
 from vendor_cp.deployment.protected_rehearsal_issuer import (
@@ -828,3 +835,57 @@ def test_a_retryable_failure_then_recovery_through_the_real_relay(
             health = _observe(db)
             assert health.verdict is not RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
             assert health.withdrawal_failing == 0
+
+
+# ── 7: the CP route, not just the adapter ────────────────────────────────────
+
+
+def test_the_withdraw_route_drains_to_an_applied_outcome(
+    migrated: tuple[str, str],
+) -> None:
+    platform_url, dispatcher_url = migrated
+    admin = PlatformAdmin(id=uuid.uuid4(), email="ops@dotmac.io", password_hash="x")
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            approved = _propose_and_approve_agreement(db, offer_code="off-scn7")
+            active = _activate(db, approved)
+        assert active.approval_request_id is not None
+
+        app = FastAPI()
+        register_error_handlers(app)
+        app.include_router(approvals_router)
+        app.dependency_overrides[get_platform_db] = platform.platform_request_session
+        app.dependency_overrides[require_platform_admin] = lambda: admin
+
+        host = settings.platform_root_domain
+        url = (
+            f"http://{host}/platform/vendor/approvals/requests/"
+            f"{active.approval_request_id}/withdraw"
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                url,
+                json={
+                    "authority_ref": "ops-ticket-d18b-route",
+                    "reason": "D18-B route-level convergence proof",
+                    "external_ref": f"withdraw-{uuid.uuid4()}",
+                },
+            )
+        assert response.status_code == 200
+        assert response.json()["state"] == "withdrawn"
+
+        drain_once(
+            worker_id="d18b-convergence",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            assert row.status == OutboxStatus.SENT.value
+            outcomes = outcomes_for_event(db, row.id)
+            assert len(outcomes) == 1
+            assert outcomes[0].disposition is WithdrawalDisposition.APPLIED
+
+            view = agreements.get(db, active.id)
+            assert view is not None
+            assert view.approval_withdrawn is True
