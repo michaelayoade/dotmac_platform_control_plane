@@ -22,6 +22,7 @@ the issuer-issuance helpers (`issuer_security`, `_target_ref_for`,
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -44,6 +45,7 @@ from dotmac_deployment_control import (
     register_target,
     set_desired_state,
 )
+from dotmac_deployment_control.models import RehearsalIssuerAuthorizationRecord
 from dotmac_kernel import ConflictError, PlatformAdmin
 from dotmac_kernel.config import settings
 from dotmac_kernel.db import get_platform_db
@@ -58,7 +60,7 @@ from dotmac_kernel.platform_auth import require_platform_admin
 from dotmac_kernel.session_runtime import DatabaseRuntime
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -119,6 +121,17 @@ _REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 #: relay's OWN backoff rather than by editing the kernel outbox row.
 _FAST_RETRY: Final = RelayPolicy(base_backoff_seconds=0.2, max_backoff_seconds=1.0)
 _RETRY_DEADLINE_SECONDS: Final = 15.0
+
+#: A bounded `Thread.join` wait so a race proof fails fast rather than hanging
+#: CI, matching `test_agreement_approval_barrier.py`'s `_LOCK_WAIT`.
+_LOCK_WAIT: Final = 10
+
+#: How long to wait, with nothing else happening, before treating a thread
+#: that has not returned as genuinely blocked (not merely slow). The block
+#: proved here is a real, unbounded Postgres row lock wait — this window is
+#: only the probe, never a `lock_timeout` on the blocked side, because that
+#: side must still be able to succeed once released.
+_BLOCK_PROBE_SECONDS: Final = 1.0
 
 
 def _ca_standing_withdrawn(db: Session, agreement_id: uuid.UUID) -> bool:
@@ -579,6 +592,387 @@ def test_agreement_withdrawal_end_to_end_records_standing_agreement_stays_active
             with pytest.raises(ConflictError, match="not held: withdrawn"):
                 _reinstate(db, active.id)
             db.rollback()
+
+
+# ── real concurrent races: both orderings, both subjects, converged by the
+# relay. Every wait below is bounded (`Thread.join(timeout=...)`, or a
+# `lock_timeout` on the side that must still be able to succeed once
+# released), so a regression here fails fast instead of hanging CI. ────────
+
+
+def test_race_a_agreement_withdrawal_in_flight_blocks_activation(
+    migrated: tuple[str, str],
+) -> None:
+    """(a) Withdrawal in flight versus activation.
+
+    Session W's `withdraw_request` holds the Approvals request FOR UPDATE,
+    uncommitted. Session A's `activate` blocks trying to take it FOR SHARE —
+    proved by a bounded `Thread.join` that does NOT complete while W is still
+    open. Committing W releases the lock; A then completes on its own, and
+    fails with "not held: withdrawn" because the row it finally reads is
+    already withdrawn.
+    """
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        engine = platform.platform_engine
+        with Session(engine) as db:
+            approved = _propose_and_approve_agreement(db, offer_code="off-race-a")
+            db.commit()
+        assert approved.approval_request_id is not None
+        request_id = approved.approval_request_id
+
+        activate_result: list[agreements.ContractView] = []
+        activate_error: list[BaseException] = []
+
+        def run_activate() -> None:
+            try:
+                with Session(engine) as db_a:
+                    result = _activate(db_a, approved)
+                    db_a.commit()
+                activate_result.append(result)
+            except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+                activate_error.append(exc)
+
+        with Session(engine) as db_w:
+            _withdraw(db_w, request_id=request_id)  # FOR UPDATE, held, uncommitted
+
+            thread_a = threading.Thread(target=run_activate)
+            thread_a.start()
+            try:
+                thread_a.join(timeout=_BLOCK_PROBE_SECONDS)
+                assert (
+                    thread_a.is_alive()
+                ), "activate did not block on the in-flight withdrawal's hold"
+            finally:
+                db_w.commit()
+                thread_a.join(timeout=_LOCK_WAIT)
+
+        assert not thread_a.is_alive(), "activate never returned after W committed"
+        assert not activate_result, "activate must not succeed once withdrawn"
+        assert len(activate_error) == 1, f"expected one failure, got {activate_error!r}"
+        assert isinstance(activate_error[0], ConflictError)
+        assert "not held: withdrawn" in str(activate_error[0])
+
+        drain_once(
+            worker_id="d18b-convergence",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            assert row.status == OutboxStatus.SENT.value
+            event_id = row.id
+
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 1
+            assert outcomes[0].disposition is WithdrawalDisposition.APPLIED
+
+            view = agreements.get(db, approved.id)
+            assert view is not None
+            assert view.status != "active"
+
+
+def test_race_b_agreement_activation_in_flight_blocks_withdrawal(
+    migrated: tuple[str, str],
+) -> None:
+    """(b) Activation in flight versus withdrawal.
+
+    Session A pauses INSIDE the held transition (after `module_activate` runs,
+    before A's commit) — the same wrapped-Event pattern
+    `test_agreement_approval_barrier.py::_prove_the_activate_barrier_holds`
+    uses. While A is paused, a concurrent withdrawal under a bounded
+    `lock_timeout` blocks and times out (SQLSTATE 55P03). Releasing A lets it
+    commit; the withdrawal then succeeds, and the drain applies it without
+    reversing the already-active agreement.
+    """
+    platform_url, dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        engine = platform.platform_engine
+        with Session(engine) as db:
+            approved = _propose_and_approve_agreement(db, offer_code="off-race-b")
+            db.commit()
+        assert approved.approval_request_id is not None
+        request_id = approved.approval_request_id
+
+        mutated = threading.Event()
+        release = threading.Event()
+        activate_result: list[agreements.ContractView] = []
+        activate_error: list[BaseException] = []
+        real_module_activate = agreements.module_activate
+
+        def paused_module_activate(db: Session, cmd: object) -> object:
+            result = real_module_activate(db, cmd)
+            mutated.set()
+            release.wait(timeout=_LOCK_WAIT)
+            return result
+
+        def run_activate() -> None:
+            try:
+                with (
+                    Session(engine) as db_a,
+                    mock.patch.object(
+                        agreements, "module_activate", paused_module_activate
+                    ),
+                ):
+                    result = _activate(db_a, approved)
+                    db_a.commit()
+                activate_result.append(result)
+            except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+                activate_error.append(exc)
+
+        thread_a = threading.Thread(target=run_activate)
+        thread_a.start()
+        try:
+            assert mutated.wait(
+                timeout=_LOCK_WAIT
+            ), "activation never reached its pause point"
+
+            timed_out = False
+            sqlstate: str | None = None
+            with Session(engine) as db_w:
+                db_w.execute(text("SET LOCAL lock_timeout = '500ms'"))
+                try:
+                    _withdraw(db_w, request_id=request_id)
+                except OperationalError as exc:
+                    timed_out = True
+                    sqlstate = getattr(exc.orig, "sqlstate", None)
+                db_w.rollback()
+            assert timed_out, "a withdrawal did not block on the in-flight activation"
+            assert (
+                sqlstate == "55P03"
+            ), f"expected a lock-timeout SQLSTATE, got {sqlstate!r}"
+        finally:
+            release.set()
+            thread_a.join(timeout=_LOCK_WAIT)
+
+        assert not activate_error, f"activation failed: {activate_error!r}"
+        assert activate_result, "activation never returned"
+
+        with Session(engine) as db_w:
+            _withdraw(db_w, request_id=request_id)
+            db_w.commit()
+
+        drain_once(
+            worker_id="d18b-convergence",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            assert row.status == OutboxStatus.SENT.value
+            event_id = row.id
+
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 1
+            assert outcomes[0].disposition is WithdrawalDisposition.APPLIED
+
+            view = agreements.get(db, approved.id)
+            assert view is not None
+            assert view.status == "active"
+            assert _ca_standing_withdrawn(db, view.id) is True
+
+
+def test_race_c_issuer_withdrawal_in_flight_blocks_issuance(
+    migrated: tuple[str, str],
+    issuer_security: tuple[object, object],
+) -> None:
+    """(c) The same shape as (a), at the issuer: withdrawal in flight blocks a
+    concurrent `issue_authorization`, which then fails refused (WITHDRAWN)
+    once W commits, and the drain settles a terminal outcome with no issued
+    authorization for the plan.
+    """
+    platform_url, dispatcher_url = migrated
+    _, harness = issuer_security
+    with _sessions(platform_url) as platform:
+        engine = platform.platform_engine
+        with Session(engine) as db:
+            plan_id, request_id, _digest = _propose_issuer(db, suffix="d18b-race-c")
+            approve_issuer_plan(
+                db,
+                command_id=f"approve-{uuid.uuid4()}",
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+            db.commit()
+
+        with Session(engine) as db:
+            target_ref = _target_ref_for(db, plan_id)
+        evidence = _harness_evidence(harness, target_ref)
+        invocation = RehearsalIssuerInvocation(
+            RehearsalIssuerCommand(
+                f"issue-{uuid.uuid4()}", plan_id, "operator-rehearsal"
+            ),
+            evidence,
+        )
+
+        issue_result: list[object] = []
+        issue_error: list[BaseException] = []
+
+        def run_issue() -> None:
+            try:
+                with Session(engine) as db_c:
+                    result = issue_authorization(db_c, invocation)
+                    db_c.commit()
+                issue_result.append(result)
+            except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+                issue_error.append(exc)
+
+        with Session(engine) as db_w:
+            _withdraw(db_w, request_id=request_id)  # FOR UPDATE, held, uncommitted
+
+            thread_c = threading.Thread(target=run_issue)
+            thread_c.start()
+            try:
+                thread_c.join(timeout=_BLOCK_PROBE_SECONDS)
+                assert (
+                    thread_c.is_alive()
+                ), "issuance did not block on the in-flight withdrawal's hold"
+            finally:
+                db_w.commit()
+                thread_c.join(timeout=_LOCK_WAIT)
+
+        assert not thread_c.is_alive(), "issuance never returned after W committed"
+        assert not issue_result, "issuance must not succeed once withdrawn"
+        assert len(issue_error) == 1, f"expected one failure, got {issue_error!r}"
+        assert isinstance(issue_error[0], ApprovalNotHeld)
+        assert issue_error[0].code is ApprovalHoldRefusal.WITHDRAWN
+
+        drain_once(
+            worker_id="d18b-convergence",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            assert row.status == OutboxStatus.SENT.value
+            event_id = row.id
+
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 1
+            assert outcomes[0].disposition is WithdrawalDisposition.APPLIED
+
+            count = db.scalar(
+                select(func.count())
+                .select_from(RehearsalIssuerAuthorizationRecord)
+                .where(RehearsalIssuerAuthorizationRecord.plan_id == plan_id)
+            )
+            assert count == 0, "issuance created a ledger row despite the withdrawal"
+
+
+def test_race_d_issuer_issuance_in_flight_blocks_withdrawal(
+    migrated: tuple[str, str],
+    issuer_security: tuple[object, object],
+) -> None:
+    """(d) The same shape as (b), at the issuer: issuance in flight blocks a
+    concurrent withdrawal; issuance commits, the withdrawal commits after, and
+    the drain applies it — revoking the plan (`approval_revocation_ref` set)
+    without reversing the already-issued authorization.
+    """
+    platform_url, dispatcher_url = migrated
+    _, harness = issuer_security
+    with _sessions(platform_url) as platform:
+        engine = platform.platform_engine
+        with Session(engine) as db:
+            plan_id, request_id, _digest = _propose_issuer(db, suffix="d18b-race-d")
+            approve_issuer_plan(
+                db,
+                command_id=f"approve-{uuid.uuid4()}",
+                plan_id=plan_id,
+                approval_request_id=request_id,
+            )
+            db.commit()
+
+        with Session(engine) as db:
+            target_ref = _target_ref_for(db, plan_id)
+        evidence = _harness_evidence(harness, target_ref)
+        invocation = RehearsalIssuerInvocation(
+            RehearsalIssuerCommand(
+                f"issue-{uuid.uuid4()}", plan_id, "operator-rehearsal"
+            ),
+            evidence,
+        )
+
+        mutated = threading.Event()
+        release = threading.Event()
+        issue_result: list[object] = []
+        issue_error: list[BaseException] = []
+        real_issue = control.issue_rehearsal_issuer_authorization_for_plan
+
+        def paused_issue(
+            db: Session, request: object, *, harness_evidence_document: object
+        ) -> object:
+            result = real_issue(
+                db, request, harness_evidence_document=harness_evidence_document
+            )
+            mutated.set()
+            release.wait(timeout=_LOCK_WAIT)
+            return result
+
+        def run_issue() -> None:
+            try:
+                with (
+                    Session(engine) as db_a,
+                    mock.patch.object(
+                        control,
+                        "issue_rehearsal_issuer_authorization_for_plan",
+                        paused_issue,
+                    ),
+                ):
+                    result = issue_authorization(db_a, invocation)
+                    db_a.commit()
+                issue_result.append(result)
+            except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+                issue_error.append(exc)
+
+        thread_a = threading.Thread(target=run_issue)
+        thread_a.start()
+        try:
+            assert mutated.wait(
+                timeout=_LOCK_WAIT
+            ), "issuance never reached its pause point"
+
+            timed_out = False
+            sqlstate: str | None = None
+            with Session(engine) as db_w:
+                db_w.execute(text("SET LOCAL lock_timeout = '500ms'"))
+                try:
+                    _withdraw(db_w, request_id=request_id)
+                except OperationalError as exc:
+                    timed_out = True
+                    sqlstate = getattr(exc.orig, "sqlstate", None)
+                db_w.rollback()
+            assert timed_out, "a withdrawal did not block on the in-flight issuance"
+            assert (
+                sqlstate == "55P03"
+            ), f"expected a lock-timeout SQLSTATE, got {sqlstate!r}"
+        finally:
+            release.set()
+            thread_a.join(timeout=_LOCK_WAIT)
+
+        assert not issue_error, f"issuance failed: {issue_error!r}"
+        assert issue_result, "issuance never returned"
+
+        with Session(engine) as db_w:
+            _withdraw(db_w, request_id=request_id)
+            db_w.commit()
+
+        drain_once(
+            worker_id="d18b-convergence",
+            composition=_composition(dispatcher_url, platform),
+        )
+
+        with platform.platform_session() as db:
+            row = _withdrawal_rows(db)[0]
+            assert row.status == OutboxStatus.SENT.value
+            event_id = row.id
+
+            outcomes = outcomes_for_event(db, event_id)
+            assert len(outcomes) == 1
+            assert outcomes[0].disposition is WithdrawalDisposition.APPLIED
+
+            plan = control.get_plan(db, plan_id)
+            assert plan is not None
+            assert plan.approval_revocation_ref == f"approval.withdrawn:{event_id}"
 
 
 # ── 3(a): withdraw-first — activate is refused; drain settles a terminal,
