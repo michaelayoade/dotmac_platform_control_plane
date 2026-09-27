@@ -33,6 +33,7 @@ APPROVAL_BARRIER = SRC / "deployment" / "approval_barrier.py"
 PROTECTED_REHEARSAL_ISSUER = SRC / "deployment" / "protected_rehearsal_issuer.py"
 HOST_ADMISSION_ADAPTER = SRC / "deployment" / "host_admission_adapter.py"
 DEPLOYMENT_ADAPTER = SRC / "deployment" / "adapter.py"
+CONTRACTS_ADAPTER = SRC / "contracts" / "adapter.py"
 
 #: Control's approval-dependent entry points. ANY reference to one of these
 #: names -- a call, an attribute read (`fn = control.approve_plan`), a
@@ -49,6 +50,14 @@ GUARDED_CALL_NAMES = frozenset(
         "stage_rehearsal_issuer_consumption",
         "finalize",
         "admit_and_consume_host_admission",
+        # Commercial Agreements' approve/activate/reinstate, bound under these
+        # exact names by contracts/adapter.py's own aliased imports
+        # (`from dotmac_commercial_agreements import approve as module_approve`,
+        # etc.) — the bound identifier at the real call site is what this
+        # detector matches, however the name arrived (S4-A).
+        "module_approve",
+        "module_activate",
+        "module_reinstate",
     }
 )
 
@@ -215,6 +224,7 @@ def test_the_owned_source_files_exist() -> None:
         PROTECTED_REHEARSAL_ISSUER,
         HOST_ADMISSION_ADAPTER,
         DEPLOYMENT_ADAPTER,
+        CONTRACTS_ADAPTER,
     ):
         assert path.exists(), path
 
@@ -376,6 +386,21 @@ def test_a_same_named_function_outside_the_barrier_scope_is_not_exempt() -> None
     violations = find_unguarded_calls(source, filename="planted.py")
     assert len(violations) == 1
     assert "request_rollout" in violations[0]
+
+
+def test_the_detector_flags_a_planted_bare_agreement_module_approve_call() -> None:
+    """SENSITIVITY (positive, S4-A). A bare `module_approve(...)` outside any
+    `held_transition` callback must be flagged, the same as Control's own
+    `approve_plan` above -- this is the agreement-side call site the barrier
+    now also covers."""
+    planted = (
+        "def approve_without_a_barrier(db, command):\n"
+        "    return module_approve(db, command)\n"
+    )
+    violations = find_unguarded_calls(planted, filename="contracts/adapter.py")
+    assert len(violations) == 1
+    assert "module_approve" in violations[0]
+    assert "approve_without_a_barrier" in violations[0]
 
 
 def test_the_allowlist_exempts_one_name_not_the_whole_function() -> None:
