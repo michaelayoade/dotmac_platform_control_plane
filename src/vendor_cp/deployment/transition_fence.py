@@ -46,18 +46,19 @@ database and the same fenced-role set this call resolved, or `fence_writers`
 refuses (`prior_mismatch`) before any change — a mismatched `prior` would let
 one database's proof restore a different one's ACL.
 
-## The ACL is compared as decomposed grants, never as text
+## The ACL is compared as decomposed grants, GRANTOR INCLUDED, never as text
 
 `pg_database.datacl::text` is PostgreSQL's own rendering, and a grantee that
 needs quoting (a capital letter, a space, a literal `,` `=` or `/`) renders
 quoted in ways that are easy to mis-parse by hand. Every comparison in this
 module instead reads `aclexplode()` — the server's own decomposition of the
-ACL into `(grantee, privilege_type, is_grantable)` rows, with PUBLIC's
-grantee oid (0) resolved to `""` — and compares frozensets of that tuple.
-`FenceProof.prior_acl` keeps the raw text for the human record, but nothing
-compares it. Grantors are dropped from the comparison entirely; a role that
-re-grants the identical privilege under a different grantor is not a
-disagreement this module is in a position to police.
+ACL into `(grantee, privilege_type, is_grantable, grantor)` rows, with
+PUBLIC's grantee oid (0) resolved to `""` — and compares frozensets of that
+4-tuple. `FenceProof.prior_acl` keeps the raw text for the human record, but
+nothing compares it. Ruled 2026-09-27: the grantor is part of the comparison,
+not dropped from it — see "Grantor-exact restore" below for why a grant whose
+grantor differs from the owner cannot be fenced or restored faithfully at
+all, and is refused before either happens.
 
 ## Unknown is not absent
 
@@ -84,6 +85,21 @@ shared identity with `MIGRATION_ROLE`, inherited CONNECT), the REVOKE, the
 effective set, not only the named writers. `restore_writers` re-derives the
 same effective set from `fenced_roles + member_roles` on the proof, so
 `allowed_grantees` and a `prior=` binding both cover it too.
+
+## Grantor-exact restore
+
+An owner-or-superuser `REVOKE CONNECT ON DATABASE ... FROM <role>` only ever
+removes grants whose recorded GRANTOR is the owner — a grant some other role
+made (holding its own GRANT OPTION) survives that REVOKE untouched, and if it
+did not, `restore_writers` could not recreate it afterwards with its original
+grantor, because a GRANT this module issues records ITS OWN executing
+identity as grantor (the owner, when that identity is a superuser — see the
+grantor-preservation test). Ruled 2026-09-27: before any change,
+`fence_writers` requires every CONNECT grant held by an effective role or by
+PUBLIC to have the database owner as grantor, and refuses
+(`grant_not_owner_granted`) otherwise, naming the grantee and the actual
+grantor. `restore_writers` compares the full 4-tuple, grantor included, so
+"restored exactly" means the grantor too.
 
 ## Inherited CONNECT cannot be revoked away, so it is refused up front
 
@@ -211,6 +227,11 @@ class FenceRefusalCode(StrEnum):
     #: database may still be fenced; `before_acl` is the ACL to restore by
     #: hand.
     COMPENSATION_FAILED = "compensation_failed"
+    #: An effective role or PUBLIC holds a CONNECT grant whose recorded
+    #: grantor is not the database owner. An owner/superuser REVOKE cannot
+    #: remove such a grant, and a restore could not recreate it with its
+    #: original grantor. Checked before any change.
+    GRANT_NOT_OWNER_GRANTED = "grant_not_owner_granted"
 
 
 class FenceRefused(Exception):
@@ -235,9 +256,10 @@ class FenceRefused(Exception):
         super().__init__(f"{code}: {detail}")
 
 
-#: A decomposed ACL: `(grantee, privilege_type, is_grantable)`. PUBLIC's
-#: grantee is `""`. Grantors are never part of this comparison.
-_Grants = frozenset[tuple[str, str, bool]]
+#: A decomposed ACL: `(grantee, privilege_type, is_grantable, grantor)`.
+#: PUBLIC's grantee is `""`. The grantor IS part of this comparison — see the
+#: module docstring's "Grantor-exact restore" section.
+_Grants = frozenset[tuple[str, str, bool, str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,9 +270,10 @@ class FenceProof:
     read it (or the materialised `acldefault('d', datdba)` when that was
     NULL) before this fence's first REVOKE — kept for the human record, but
     `prior_grants` (the identical ACL decomposed into `(grantee,
-    privilege_type, is_grantable)` tuples via `aclexplode`) is what
+    privilege_type, is_grantable, grantor)` tuples via `aclexplode`) is what
     `restore_writers` actually compares against; see the module docstring for
-    why text comparison is refused."""
+    why text comparison is refused and why the grantor is part of the
+    comparison."""
 
     database: str
     prior_acl: str
@@ -450,7 +473,11 @@ def _require_migration_connect_without_public(
     owner = _database_owner(conn, database)
     if MIGRATION_ROLE == owner or _is_member_of(conn, MIGRATION_ROLE, owner):
         return
-    grantees = (grantee for grantee, priv, _ in grants if priv == "CONNECT" and grantee)
+    grantees = (
+        grantee
+        for grantee, priv, _, _grantor in grants
+        if priv == "CONNECT" and grantee
+    )
     if any(_is_member_of(conn, MIGRATION_ROLE, grantee) for grantee in grantees):
         return
     raise FenceRefused(
@@ -481,7 +508,7 @@ def _reject_inherited_connect(
     # through that membership after every REVOKE this module issues.
     other_grantees = tuple(
         grantee
-        for grantee, priv, _ in grants
+        for grantee, priv, _, _grantor in grants
         if priv == "CONNECT" and grantee and grantee not in effective
     )
     for role in effective:
@@ -515,6 +542,34 @@ def _reject_inherited_connect(
             )
 
 
+def _reject_grants_not_owner_granted(
+    conn: Connection, database: str, effective: tuple[str, ...], grants: _Grants
+) -> None:
+    """`grant_not_owner_granted`, checked before any ACL change.
+
+    An owner-or-superuser `REVOKE ... FROM role` only removes grants whose
+    recorded grantor is the owner (see the module docstring's "Grantor-exact
+    restore" section). A CONNECT grant recorded with a different grantor
+    survives every REVOKE this module issues, and a restore could not recreate
+    it afterwards with its original grantor — so it is refused instead of
+    silently kept fenced-in or silently dropped on restore.
+    """
+    owner = _database_owner(conn, database)
+    checked_grantees = {"", *effective}
+    for grantee, priv, _is_grantable, grantor in grants:
+        if priv != "CONNECT" or grantee not in checked_grantees:
+            continue
+        if grantor != owner:
+            display_grantee = "PUBLIC" if grantee == "" else grantee
+            raise FenceRefused(
+                FenceRefusalCode.GRANT_NOT_OWNER_GRANTED,
+                f"CONNECT on {database!r} granted to {display_grantee!r} by "
+                f"{grantor!r}, not the database owner {owner!r}; an owner or "
+                "superuser REVOKE cannot remove this grant, and restore could "
+                "not recreate it with its original grantor",
+            )
+
+
 def _current_acl_text(conn: Connection, database: str) -> str:
     """`pg_database.datacl::text`, or the materialised default when NULL.
 
@@ -539,10 +594,12 @@ def _current_acl_text(conn: Connection, database: str) -> str:
 
 
 _GRANTS_QUERY: Final = text(
-    "SELECT COALESCE(r.rolname, '') AS grantee, a.privilege_type, a.is_grantable "
+    "SELECT COALESCE(ge.rolname, '') AS grantee, a.privilege_type, "
+    "a.is_grantable, gr.rolname AS grantor "
     "FROM pg_database d, "
     "aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a "
-    "LEFT JOIN pg_roles r ON r.oid = a.grantee "
+    "LEFT JOIN pg_roles ge ON ge.oid = a.grantee "
+    "JOIN pg_roles gr ON gr.oid = a.grantor "
     "WHERE d.datname = :db"
 )
 
@@ -551,11 +608,15 @@ def _current_grants(conn: Connection, database: str) -> _Grants:
     """The database's ACL, decomposed by the server itself via `aclexplode`.
 
     PUBLIC's grantee oid is 0, which `pg_roles` never matches, so
-    `COALESCE(r.rolname, '')` resolves it to `""` — the same sentinel used
-    throughout this module. Grantors are discarded: nothing here compares
-    them."""
+    `COALESCE(ge.rolname, '')` resolves it to `""` — the same sentinel used
+    throughout this module. The grantor is always a real role (an ACL entry's
+    grantor oid is never 0), so it is joined with a plain `JOIN`, never
+    `COALESCE`-d — see the module docstring's "Grantor-exact restore"
+    section for why the grantor is part of every comparison here."""
     rows = conn.execute(_GRANTS_QUERY, {"db": database})
-    return frozenset((str(row[0]), str(row[1]), bool(row[2])) for row in rows)
+    return frozenset(
+        (str(row[0]), str(row[1]), bool(row[2]), str(row[3])) for row in rows
+    )
 
 
 def fence_writers(
@@ -622,6 +683,7 @@ def fence_writers(
     _require_migration_connect_without_public(conn, database, before_grants)
     _reject_shared_writer_roles(conn, effective, writer_roles)
     _reject_inherited_connect(conn, effective, database, before_grants)
+    _reject_grants_not_owner_granted(conn, database, effective, before_grants)
 
     prior_acl = prior.prior_acl if prior is not None else before_acl
     prior_grants = prior.prior_grants if prior is not None else before_grants
@@ -919,7 +981,9 @@ def restore_writers(
     # PUBLIC first, so a refusal found mid-loop would already have reopened
     # the database to every writer.
     disallowed = [
-        grantee for grantee, _p, _g in missing if grantee not in allowed_grantees
+        grantee
+        for grantee, _p, _g, _grantor in missing
+        if grantee not in allowed_grantees
     ]
     if disallowed:
         raise FenceRefused(
@@ -931,7 +995,15 @@ def restore_writers(
 
     restored: list[str] = []
     try:
-        for grantee, _priv, is_grantable in missing:
+        for grantee, _priv, is_grantable, _grantor in missing:
+            # The GRANT below does not (and cannot, for an object privilege)
+            # specify a grantor: it always records the EXECUTING identity —
+            # the database owner, when that identity is a superuser (see the
+            # module docstring's "Grantor-exact restore" section). The
+            # pre-fence check already refused any grant whose recorded
+            # grantor was not the owner, so this reproduces it exactly; the
+            # post-loop comparison against `proof.prior_grants` (grantor
+            # included) is what actually proves it.
             option_sql = " WITH GRANT OPTION" if is_grantable else ""
             conn.execute(
                 text(

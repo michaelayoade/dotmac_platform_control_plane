@@ -51,10 +51,10 @@ def _dbname(url: str) -> str:
     return url.rpartition("/")[2]
 
 
-def _has_connect(grants: frozenset[tuple[str, str, bool]], grantee: str) -> bool:
+def _has_connect(grants: frozenset[tuple[str, str, bool, str]], grantee: str) -> bool:
     """`grantee` (`""` for PUBLIC) holds a CONNECT grant in the decomposed
     ACL `fence_module._current_grants` returns."""
-    return any(g == grantee and priv == "CONNECT" for g, priv, _ in grants)
+    return any(g == grantee and priv == "CONNECT" for g, priv, _, _grantor in grants)
 
 
 @contextmanager
@@ -916,7 +916,7 @@ def test_a_writer_with_grant_option_restores_with_the_grant_option(
             before = fence_module._current_grants(conn, db)
             assert any(
                 grantee == w and priv == "CONNECT" and grantable
-                for grantee, priv, grantable in before
+                for grantee, priv, grantable, _grantor in before
             )
 
             proof = fence_writers(
@@ -931,7 +931,7 @@ def test_a_writer_with_grant_option_restores_with_the_grant_option(
             assert after == before
             assert any(
                 grantee == w and priv == "CONNECT" and grantable
-                for grantee, priv, grantable in after
+                for grantee, priv, grantable, _grantor in after
             )
 
 
@@ -1136,3 +1136,85 @@ def test_a_restore_that_reopens_and_then_mismatches_redrains_before_reporting(
             # PUBLIC) — restore it for real so fixture teardown can drop the
             # roles.
             restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+
+
+# ── (s) a grant with a DISTINCT grantor is refused before any change ───────
+
+
+def test_a_grant_with_a_distinct_grantor_is_refused_before_any_change(
+    admin_url: str, db: str
+) -> None:
+    """G holds CONNECT WITH GRANT OPTION granted by the owner, then GRANTs
+    CONNECT to writer W as ITSELF (`SET ROLE G`) — so W's CONNECT grant is
+    recorded with grantor G, not the database owner. An owner/superuser
+    REVOKE cannot remove a grant made by another grantor, so this must be
+    refused before any change, and the ACL — grantor included — must stay
+    byte-identical."""
+    role_g = f"fence_grantor_{uuid.uuid4().hex[:10]}"
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f"CREATE ROLE {role_g} NOLOGIN"))
+            conn.execute(
+                text(f'GRANT CONNECT ON DATABASE "{db}" TO {role_g} WITH GRANT OPTION')
+            )
+            conn.execute(text(f"SET ROLE {role_g}"))
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {w}'))
+            conn.execute(text("RESET ROLE"))
+        try:
+            with _connect(admin_url, autocommit=True) as conn:
+                prior_grants = fence_module._current_grants(conn, db)
+                w_grant = next(
+                    g for g in prior_grants if g[0] == w and g[1] == "CONNECT"
+                )
+                # Direct assertion on the grantor rolname: G, not the owner.
+                assert w_grant[3] == role_g
+
+                with pytest.raises(FenceRefused) as refused:
+                    fence_writers(
+                        conn,
+                        database=db,
+                        writer_roles=(w,),
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                    )
+                assert refused.value.code == FenceRefusalCode.GRANT_NOT_OWNER_GRANTED
+                # The ACL, grantor included, is untouched by the refusal.
+                assert fence_module._current_grants(conn, db) == prior_grants
+        finally:
+            with _connect(admin_url, autocommit=True) as conn:
+                conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {w}'))
+                conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {role_g}'))
+                conn.execute(text(f"DROP ROLE IF EXISTS {role_g}"))
+
+
+# ── (t) a superuser GRANT is recorded, and restored, with the owner as grantor
+
+
+def test_a_superuser_grant_is_recorded_with_the_owner_as_grantor(
+    postgres_url: str, bare_db: str, url_for: Callable[..., str]
+) -> None:
+    """The normal path: fencing with the superuser connection (`postgres_url`)
+    over a database owned by `app_admin`. Proves a superuser GRANT is
+    recorded with the owner as grantor, and that `restore_writers` reproduces
+    the full 4-tuple — grantor included — exactly."""
+    bare_admin_url = url_for(postgres_url, bare_db)
+    with _writer_role(bare_admin_url) as w:
+        with _connect(bare_admin_url, autocommit=True) as conn:
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{bare_db}" TO {w}'))
+            prior_grants = fence_module._current_grants(conn, bare_db)
+            w_grant = next(g for g in prior_grants if g[0] == w and g[1] == "CONNECT")
+            # Direct assertion on the grantor rolname: the owner, app_admin —
+            # not the superuser identity that actually executed the GRANT.
+            assert w_grant[3] == MIGRATION_ROLE
+
+            proof = fence_writers(
+                conn,
+                database=bare_db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+
+            after = fence_module._current_grants(conn, bare_db)
+            assert after == prior_grants
+            after_w_grant = next(g for g in after if g[0] == w and g[1] == "CONNECT")
+            assert after_w_grant[3] == MIGRATION_ROLE
