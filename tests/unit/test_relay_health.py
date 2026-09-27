@@ -426,6 +426,7 @@ def test_the_verdict_vocabulary_is_closed() -> None:
         "activation_dead_lettered",
         "relay_state_unknown",
         "withdrawal_conflict_unresolved",
+        "approval_event_unrouted",
         "withdrawal_dead_lettered",
         "withdrawal_delivery_failing",
     }

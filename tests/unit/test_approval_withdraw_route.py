@@ -17,6 +17,7 @@ from collections.abc import Iterator
 
 import pytest
 from dotmac_kernel import ConflictError, NotFoundError, PlatformAdmin
+from dotmac_kernel.config import settings
 from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.errors import register_error_handlers
 from dotmac_kernel.platform_auth import require_platform_admin
@@ -28,7 +29,11 @@ from vendor_cp.approvals import adapter
 from vendor_cp.approvals.router import router
 
 REQUEST_ID = uuid.uuid4()
-URL = f"/platform/vendor/approvals/requests/{REQUEST_ID}/withdraw"
+#: The platform surface exists ONLY on the platform root host; off it
+#: `require_platform_host` 404s before authentication is reached (same reason
+#: as `tests/unit/test_withdrawal_conflict_resolution_route.py`).
+_HOST = settings.platform_root_domain
+URL = f"http://{_HOST}/platform/vendor/approvals/requests/{REQUEST_ID}/withdraw"
 BODY = {
     "authority_ref": "authority-1",
     "reason": "no longer needed",
