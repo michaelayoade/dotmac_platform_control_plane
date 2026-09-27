@@ -76,6 +76,18 @@ _DISPATCHER_ENV: Final = "VENDOR_DB_DISPATCHER_PASSWORD"
 _SECRET_PATH: Final = "secret/dotmac/vendor-control-plane/production/relay-dispatcher"
 _HEARTBEAT_REVISION: Final = "v019_relay_heartbeat"
 
+#: Every revision that satisfies "at least the heartbeat revision", in descent
+#: order starting at `_HEARTBEAT_REVISION` itself. The precondition is that the
+#: heartbeat table exists, which holds for `v019_relay_heartbeat` and for every
+#: descendant migrated on top of it — not only for that exact literal. Kept as
+#: an explicit, ordered tuple rather than derived from the alembic script
+#: directory, so this module stays import-light; append the vendor lineage's
+#: new head here each time it moves forward, in the same change that moves it.
+_HEARTBEAT_OR_DESCENDANT: Final = (
+    "v019_relay_heartbeat",
+    "v020_withdrawal_outcomes",
+)
+
 
 class Finding(StrEnum):
     """What one precondition's check concluded."""
@@ -315,8 +327,10 @@ def _check_descriptor(root: Path) -> list[PreflightResult]:
     )
     head_result = PreflightResult(
         checks[2],
-        Finding.SATISFIED if _HEARTBEAT_REVISION in heads else Finding.REFUSED,
-        f"{_HEARTBEAT_REVISION} in [migration].expected_heads",
+        Finding.SATISFIED
+        if any(head in _HEARTBEAT_OR_DESCENDANT for head in heads)
+        else Finding.REFUSED,
+        f"{_HEARTBEAT_REVISION} or a known descendant in [migration].expected_heads",
     )
     return [role_result, material_result, head_result]
 
