@@ -854,7 +854,7 @@ def record_agreement_approval_withdrawal(
         if isinstance(raw_version, bool) or not isinstance(raw_version, int | str):
             raise TypeError("policy_version must be an integer")
         policy_version = int(raw_version)
-        content_digest = str(payload["content_digest"])
+        bound_content_hash = bare_content_hash(str(payload["content_digest"]))
         reason = payload.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("withdrawal has no reason")
@@ -875,7 +875,6 @@ def record_agreement_approval_withdrawal(
     }
 
     try:
-        bound_content_hash = bare_content_hash(content_digest)
         command = RecordApprovalWithdrawalCommand(
             command_id=f"approval-withdrawal:{event_id}",
             agreement_id=agreement_id,

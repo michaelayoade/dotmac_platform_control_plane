@@ -37,13 +37,16 @@ from vendor_cp.relay.approval_router import (
 from vendor_cp.relay.health import RelayVerdict, relay_health
 from vendor_cp.relay.runner import RelayComposition, drain_once
 from vendor_cp.relay.withdrawal_outcomes import (
+    ApprovalWithdrawalOutcome,
     ConflictAlreadyResolved,
+    ConflictNotResolvable,
     ConflictResolutionRefusal,
     WithdrawalDisposition,
     WithdrawalResolution,
     payload_digest,
     record_outcome,
     resolve_conflict,
+    unresolved_conflicts,
 )
 
 DISPATCHER_ROLE = "platform_outbox_dispatcher"
@@ -252,10 +255,9 @@ def test_a_second_resolve_is_refused(migrated: tuple[str, str]) -> None:
             resolve_conflict(
                 db,
                 outcome_id=outcome_id,
-                resolution=WithdrawalResolution.REDRIVEN,
+                resolution=WithdrawalResolution.DISMISSED,
                 actor_ref="platform-admin:alice",
-                reason="redriven after a fix",
-                redrive_ref="redrive-1",
+                reason="reviewed: a duplicate delivery, nothing to apply",
             )
             db.commit()
 
@@ -306,3 +308,64 @@ def test_resolving_something_that_is_not_a_conflict_is_refused(
                     actor_ref="platform-admin:alice",
                     reason="nothing to resolve",
                 )
+
+
+def test_redriven_must_cite_a_later_applied_outcome_for_the_same_subject(
+    migrated: tuple[str, str],
+) -> None:
+    """`redriven` is a claim the consequence WAS applied. With no ref, a
+    free-text ref, the conflict itself, or another subject's outcome it is
+    refused and health stays red; citing a later non-conflict outcome for the
+    SAME subject resolves it."""
+    platform_url, _dispatcher_url = migrated
+    with _sessions(platform_url) as platform:
+        with platform.platform_session() as db:
+            conflict_id = _record_conflict(db, event_id=uuid.uuid4())
+            conflict = db.get(ApprovalWithdrawalOutcome, conflict_id)
+            assert conflict is not None
+            subject_id = conflict.subject_id
+            other = _record_applied(db, subject_id=str(uuid.uuid4()))
+            same = _record_applied(db, subject_id=subject_id)
+
+        for bad in (None, "  ", "redrive-1", str(conflict_id), str(other)):
+            with platform.platform_session() as db:
+                with pytest.raises(ConflictNotResolvable):
+                    resolve_conflict(
+                        db,
+                        outcome_id=conflict_id,
+                        resolution=WithdrawalResolution.REDRIVEN,
+                        actor_ref="platform-admin:alice",
+                        reason="redriven after a fix",
+                        redrive_ref=bad,
+                    )
+                db.rollback()
+                assert unresolved_conflicts(db) == 1, bad
+
+        with platform.platform_session() as db:
+            resolve_conflict(
+                db,
+                outcome_id=conflict_id,
+                resolution=WithdrawalResolution.REDRIVEN,
+                actor_ref="platform-admin:alice",
+                reason="redriven after a fix",
+                redrive_ref=str(same),
+            )
+            db.commit()
+            assert unresolved_conflicts(db) == 0
+
+
+def _record_applied(db: Session, *, subject_id: str) -> uuid.UUID:
+    event_id = uuid.uuid4()
+    outcome = record_outcome(
+        db,
+        event_id=event_id,
+        digest=payload_digest(APPROVAL_WITHDRAWN_EVENT_TYPE, {"e": str(event_id)}),
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        subject_type="deployment_plan",
+        subject_id=subject_id,
+        disposition=WithdrawalDisposition.APPLIED,
+        reason_code="revoked",
+        evidence={},
+    )
+    db.commit()
+    return outcome.id

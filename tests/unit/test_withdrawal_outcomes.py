@@ -17,6 +17,7 @@ which is enough to drive every branch that runs before a real INSERT.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -80,7 +81,8 @@ class _FakeOutcome:
 
 
 class _FakeSession:
-    """The narrowest double `resolve_conflict` needs: `get`, `add`, `flush`."""
+    """The narrowest double `resolve_conflict` needs: `get`, `add`, `flush`,
+    `scalar` (the existing-resolution check) and `begin_nested`."""
 
     def __init__(self, outcome: _FakeOutcome | None) -> None:
         self._outcome = outcome
@@ -97,6 +99,12 @@ class _FakeSession:
 
     def flush(self) -> None:
         self.flushed = True
+
+    def scalar(self, _statement: object) -> None:
+        return None  # no existing resolution
+
+    def begin_nested(self) -> contextlib.nullcontext[None]:
+        return contextlib.nullcontext()
 
 
 def test_resolve_conflict_refuses_a_non_conflict_outcome() -> None:
@@ -149,10 +157,9 @@ def test_resolve_conflict_accepts_a_real_conflict_and_writes_one_row() -> None:
     resolve_conflict(
         session,  # type: ignore[arg-type]
         outcome_id=outcome_id,
-        resolution=WithdrawalResolution.REDRIVEN,
+        resolution=WithdrawalResolution.DISMISSED,
         actor_ref="ops:alice",
-        reason="reviewed and redriven",
-        redrive_ref="redrive-1",
+        reason="reviewed and dismissed",
     )
     assert len(session.added) == 1
     assert session.flushed

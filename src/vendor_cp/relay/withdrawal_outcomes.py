@@ -414,6 +414,7 @@ def resolve_conflict(
         raise ConflictAlreadyResolved(
             f"withdrawal outcome {outcome_id} was already resolved"
         )
+    _require_redrive_evidence(db, outcome, resolution, redrive_ref)
 
     row = ApprovalWithdrawalConflictResolution(
         outcome_id=outcome_id,
@@ -434,6 +435,48 @@ def resolve_conflict(
             f"withdrawal outcome {outcome_id} was already resolved"
         ) from exc
     return RecordedConflictResolution._from_row(row)
+
+
+def _require_redrive_evidence(
+    db: Session,
+    conflict: ApprovalWithdrawalOutcome,
+    resolution: WithdrawalResolution,
+    redrive_ref: str | None,
+) -> None:
+    """`redriven` is a claim that the withdrawal's consequence WAS applied, so
+    it must cite the proof: the id of a later terminal, non-conflict outcome
+    for the same subject. `dismissed` cites nothing.
+
+    Without this, one admin could turn health green by asserting a redrive
+    that never happened, leaving the withdrawn authorization standing.
+    """
+    if resolution is WithdrawalResolution.DISMISSED:
+        if redrive_ref is not None:
+            raise ConflictNotResolvable("a dismissal cites no redrive_ref")
+        return
+    if redrive_ref is None or not redrive_ref.strip():
+        raise ConflictNotResolvable(
+            "a redriven resolution must cite the redriven outcome as redrive_ref"
+        )
+    try:
+        redriven_id = UUID(redrive_ref)
+    except ValueError as exc:
+        raise ConflictNotResolvable(
+            "redrive_ref must be the id of the redriven withdrawal outcome"
+        ) from exc
+    redriven = db.get(ApprovalWithdrawalOutcome, redriven_id)
+    if (
+        redriven is None
+        or redriven.id == conflict.id
+        or redriven.disposition == WithdrawalDisposition.SECURITY_CONFLICT.value
+        or redriven.subject_type != conflict.subject_type
+        or redriven.subject_id != conflict.subject_id
+        or redriven.recorded_at < conflict.recorded_at
+    ):
+        raise ConflictNotResolvable(
+            f"redrive_ref {redrive_ref} is not a later terminal, non-conflict "
+            "outcome for the same subject"
+        )
 
 
 def _resolution_exists(db: Session, outcome_id: UUID) -> bool:
