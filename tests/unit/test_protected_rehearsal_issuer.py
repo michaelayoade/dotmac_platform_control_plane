@@ -51,6 +51,9 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         approval_policy_code="issuer-approval",
         approval_policy_version=2,
         approval_decision_ref=str(REQUEST_ID),
+        status="approved",
+        approval_decision_status="granted",
+        approval_revocation_ref=None,
     )
     calls: list[tuple[str, object]] = []
     control = ModuleType("dotmac_deployment_control")
@@ -70,6 +73,17 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         return plan
 
     control.revoke_plan_approval = revoke  # type: ignore[attr-defined]
+
+    class FakeTransitionRefusedError(Exception):
+        pass
+
+    class FakeExpectedStateError(Exception):
+        def __init__(self, subject_ref: str, **kwargs: object) -> None:
+            super().__init__(subject_ref)
+            self.actual_status = kwargs["actual_status"]
+
+    control.TransitionRefusedError = FakeTransitionRefusedError  # type: ignore[attr-defined]
+    control.ExpectedStateError = FakeExpectedStateError  # type: ignore[attr-defined]
 
     def issue(
         db: object, request: dict[str, object], *, harness_evidence_document: object
@@ -372,15 +386,28 @@ def _claimed(
     )
 
 
-def test_withdrawal_replay_uses_one_stable_control_command(
+def test_withdrawal_applies_and_revokes_with_a_stable_command_id(
     ports: SimpleNamespace,
 ) -> None:
     event = _withdrawal(ports)
-    for _ in range(2):
-        issuer.ApprovalWithdrawalConsumer().deliver(_claimed(event), object())
+    result = issuer.classify_approval_withdrawal(object(), _claimed(event))
+    assert result.disposition == issuer.WithdrawalDisposition.APPLIED
+    assert result.reason_code == "applied"
     commands = [command for name, command in ports.calls if name == "revoke"]
     assert len(commands) == 1
     assert commands[0].revocation_ref == f"approval.withdrawn:{WITHDRAWAL_ID}"
+
+
+def test_withdrawal_replay_reuses_one_stable_control_command_id(
+    ports: SimpleNamespace,
+) -> None:
+    """The fake's own dedup on `command_id` proves the id is stable across
+    two independent classifications of the identical event."""
+    event = _withdrawal(ports)
+    for _ in range(2):
+        issuer.classify_approval_withdrawal(object(), _claimed(event))
+    commands = [command for name, command in ports.calls if name == "revoke"]
+    assert len(commands) == 1
 
 
 @pytest.mark.parametrize(
@@ -392,36 +419,160 @@ def test_withdrawal_must_match_frozen_control_plan(
 ) -> None:
     event = _withdrawal(ports)
     event[field] = "wrong"
-    with pytest.raises(ValueError):
-        issuer.ApprovalWithdrawalConsumer().deliver(_claimed(event), object())
+    result = issuer.classify_approval_withdrawal(object(), _claimed(event))
+    assert result.disposition == issuer.WithdrawalDisposition.SECURITY_CONFLICT
     assert ports.calls == []
 
 
 def test_withdrawal_id_must_be_the_claimed_outbox_row(
     ports: SimpleNamespace,
 ) -> None:
-    with pytest.raises(ValueError, match="claimed outbox row"):
-        issuer.ApprovalWithdrawalConsumer().deliver(
-            _claimed(
-                _withdrawal(ports), id=UUID("50000000-0000-0000-0000-000000000005")
-            ),
-            object(),
-        )
+    result = issuer.classify_approval_withdrawal(
+        object(),
+        _claimed(_withdrawal(ports), id=UUID("50000000-0000-0000-0000-000000000005")),
+    )
+    assert result.disposition == issuer.WithdrawalDisposition.SECURITY_CONFLICT
+    assert result.reason_code == "withdrawal_id_mismatch"
     assert ports.calls == []
 
 
-def test_other_platform_events_do_not_load_successor_control(
-    ports: SimpleNamespace,
+def test_an_unrecognised_subject_type_is_a_security_conflict_without_loading_control(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    consumer = issuer.ApprovalWithdrawalConsumer()
-    consumer.deliver(
-        ClaimedPlatformEvent(WITHDRAWAL_ID, "contract.activated", {}, 0, None),
-        object(),
-    )
+    def unexpected_import(name: str) -> None:
+        raise AssertionError(f"unrecognised subject loaded {name}")
+
+    monkeypatch.setattr(issuer, "import_module", unexpected_import)
     unrelated = _withdrawal(ports)
     unrelated["subject_type"] = "another.subject.v1"
-    consumer.deliver(_claimed(unrelated), object())
+    result = issuer.classify_approval_withdrawal(object(), _claimed(unrelated))
+    assert result.disposition == issuer.WithdrawalDisposition.SECURITY_CONFLICT
+    assert result.reason_code == "subject_type_mismatch"
     assert ports.calls == []
+
+
+def test_d2_a_superseded_plan_maps_to_not_carried_plan_superseded(
+    ports: SimpleNamespace,
+) -> None:
+    def refuse(db: object, command: object) -> object:
+        raise ports.control.ExpectedStateError(
+            "plan",
+            expected_status="approved",
+            actual_status="superseded",
+            expected_version=None,
+            actual_version=1,
+        )
+
+    ports.control.revoke_plan_approval = refuse
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.NOT_CARRIED
+    assert result.reason_code == "plan_superseded"
+
+
+def test_d4_a_cancelled_plan_is_a_terminal_cancelled_before_execution(
+    ports: SimpleNamespace,
+) -> None:
+    def refuse(db: object, command: object) -> object:
+        raise ports.control.ExpectedStateError(
+            "plan",
+            expected_status="approved",
+            actual_status="cancelled",
+            expected_version=None,
+            actual_version=1,
+        )
+
+    ports.control.revoke_plan_approval = refuse
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.CANCELLED_BEFORE_EXECUTION
+    assert result.reason_code == "cancelled_before_execution"
+
+
+def test_a_proposed_plan_was_never_approved_and_is_not_carried(
+    ports: SimpleNamespace,
+) -> None:
+    def refuse(db: object, command: object) -> object:
+        raise ports.control.ExpectedStateError(
+            "plan",
+            expected_status="approved",
+            actual_status="proposed",
+            expected_version=None,
+            actual_version=1,
+        )
+
+    ports.control.revoke_plan_approval = refuse
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.NOT_CARRIED
+    assert result.reason_code == "never_approved"
+
+
+def test_an_unexpected_plan_status_is_a_security_conflict(
+    ports: SimpleNamespace,
+) -> None:
+    def refuse(db: object, command: object) -> object:
+        raise ports.control.ExpectedStateError(
+            "plan",
+            expected_status="approved",
+            actual_status="draft",
+            expected_version=None,
+            actual_version=1,
+        )
+
+    ports.control.revoke_plan_approval = refuse
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.SECURITY_CONFLICT
+    assert result.reason_code == "unexpected_plan_state"
+
+
+def test_already_revoked_under_this_event_replays_as_already_applied(
+    ports: SimpleNamespace,
+) -> None:
+    ports.plan.approval_decision_status = "revoked"
+    ports.plan.approval_revocation_ref = f"approval.withdrawn:{WITHDRAWAL_ID}"
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.ALREADY_APPLIED
+    assert ports.calls == []
+
+
+def test_revoked_under_a_different_reference_is_superseded_by_revocation(
+    ports: SimpleNamespace,
+) -> None:
+    ports.plan.approval_decision_status = "revoked"
+    ports.plan.approval_revocation_ref = "approval.withdrawn:other-event"
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.SUPERSEDED_BY_REVOCATION
+    assert ports.calls == []
+
+
+def test_a_decision_that_no_longer_matches_the_approved_plan_is_not_carried(
+    ports: SimpleNamespace,
+) -> None:
+    """The plan moved on (re-approved under a new decision) while this
+    withdrawal still names the old one: the withdrawal simply no longer
+    applies, which is `not_carried`, not a security conflict."""
+    ports.plan.approval_decision_ref = str(UUID("90000000-0000-0000-0000-000000000009"))
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.NOT_CARRIED
+    assert result.reason_code == "decision_not_carried"
+    assert ports.calls == []
+
+
+def test_a_database_lock_during_revocation_is_retryable_not_a_recorded_row(
+    ports: SimpleNamespace,
+) -> None:
+    from sqlalchemy.exc import OperationalError
+
+    def refuse(db: object, command: object) -> object:
+        raise OperationalError("revoke", {}, Exception("lock timeout"))
+
+    ports.control.revoke_plan_approval = refuse
+    with pytest.raises(issuer.RetryableWithdrawal):
+        issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+
+
+def test_retryable_repr_carries_only_a_bounded_code() -> None:
+    exc = issuer.RetryableWithdrawal("database_unavailable")
+    assert repr(exc) == "RetryableWithdrawal(database_unavailable)"
+    assert str(exc) == "RetryableWithdrawal(database_unavailable)"
 
 
 def test_the_barrier_refuses_an_autocommit_session_before_holding() -> None:
