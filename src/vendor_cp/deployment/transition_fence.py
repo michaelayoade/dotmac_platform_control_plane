@@ -20,6 +20,14 @@ when the fence closes is a separate hazard REVOKE CONNECT does not touch,
 which is why `fence_writers` also terminates and waits for every open writer
 session.
 
+## The connection must be AUTOCOMMIT
+
+On a transactional connection the REVOKE is invisible to every OTHER backend
+until this connection commits, and a rollback silently erases the fence while
+a `FenceProof` claiming otherwise still exists. `fence_writers` and
+`restore_writers` both refuse (`connection_not_autocommit`) before touching
+anything unless `conn.get_isolation_level() == "AUTOCOMMIT"`.
+
 ## The prior ACL is the thing being protected, not the fence's own state
 
 `restore_writers` puts the database back to EXACTLY the ACL that was there
@@ -31,7 +39,23 @@ already-fenced database (`fence_writers(..., prior=proof)`) keeps that same
 original ACL rather than recording the already-revoked one as "prior",
 because the second call's own view of `pg_database.datacl` is the fence's own
 handiwork, not evidence about what the database looked like before anyone
-fenced it.
+fenced it. A `prior=` a caller passes is bound: it must name the same
+database and the same fenced-role set this call resolved, or `fence_writers`
+refuses (`prior_mismatch`) before any change — a mismatched `prior` would let
+one database's proof restore a different one's ACL.
+
+## The ACL is compared as decomposed grants, never as text
+
+`pg_database.datacl::text` is PostgreSQL's own rendering, and a grantee that
+needs quoting (a capital letter, a space, a literal `,` `=` or `/`) renders
+quoted in ways that are easy to mis-parse by hand. Every comparison in this
+module instead reads `aclexplode()` — the server's own decomposition of the
+ACL into `(grantee, privilege_type, is_grantable)` rows, with PUBLIC's
+grantee oid (0) resolved to `""` — and compares frozensets of that tuple.
+`FenceProof.prior_acl` keeps the raw text for the human record, but nothing
+compares it. Grantors are dropped from the comparison entirely; a role that
+re-grants the identical privilege under a different grantor is not a
+disagreement this module is in a position to police.
 
 ## Unknown is not absent
 
@@ -68,6 +92,16 @@ case above. The identical check also catches one login role appearing twice
 in the writer set after resolution, which is the same hazard by a different
 route: revoking and re-granting the same role under two names would race with
 itself.
+
+## Every exception after the first ACL change is compensated
+
+Once `_apply_fence` has issued its first REVOKE, any exception at all —
+another `FenceRefused`, a driver error, a timeout, `KeyboardInterrupt` — is
+caught, the ACL is restored to what this call started from, and only then is
+the failure reported. If the compensating restore itself fails, the caller
+gets `FenceRefused(COMPENSATION_FAILED)` chained from the original exception,
+with `before_acl` set on it, so an operator always holds the exact ACL to
+restore by hand rather than a stack trace alone.
 """
 
 from __future__ import annotations
@@ -131,15 +165,45 @@ class FenceRefusalCode(StrEnum):
     #: it in either direction, or the same login role was named twice in the
     #: writer set.
     SHARED_WRITER_ROLE = "shared_writer_role"
+    #: `conn` is not AUTOCOMMIT. Checked before any change.
+    CONNECTION_NOT_AUTOCOMMIT = "connection_not_autocommit"
+    #: A `prior=` proof named a different database, or a different fenced-role
+    #: set, than this call resolved. Checked before any change.
+    PRIOR_MISMATCH = "prior_mismatch"
+    #: An exception (not itself a `FenceRefused`) interrupted fencing after the
+    #: first ACL change; the ACL was successfully restored.
+    FENCE_INTERRUPTED = "fence_interrupted"
+    #: The compensating restore after an interrupted fence itself failed. The
+    #: database may still be fenced; `before_acl` is the ACL to restore by
+    #: hand.
+    COMPENSATION_FAILED = "compensation_failed"
 
 
 class FenceRefused(Exception):
-    """Raised instead of returning a proof that lies about the fence state."""
+    """Raised instead of returning a proof that lies about the fence state.
 
-    def __init__(self, code: FenceRefusalCode, detail: str) -> None:
+    `before_acl` is set on every refusal raised after the pre-checks (i.e.
+    once `fence_writers` has read the database's starting ACL) — an operator
+    who sees this exception always has the exact ACL to restore to, even when
+    the automatic compensation itself failed.
+    """
+
+    def __init__(
+        self,
+        code: FenceRefusalCode,
+        detail: str,
+        *,
+        before_acl: str | None = None,
+    ) -> None:
         self.code = code
         self.detail = detail
+        self.before_acl = before_acl
         super().__init__(f"{code}: {detail}")
+
+
+#: A decomposed ACL: `(grantee, privilege_type, is_grantable)`. PUBLIC's
+#: grantee is `""`. Grantors are never part of this comparison.
+_Grants = frozenset[tuple[str, str, bool]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,10 +212,15 @@ class FenceProof:
 
     `prior_acl` is the database's ACL exactly as `pg_database.datacl::text`
     read it (or the materialised `acldefault('d', datdba)` when that was
-    NULL) before this fence's first REVOKE — see `restore_writers`."""
+    NULL) before this fence's first REVOKE — kept for the human record, but
+    `prior_grants` (the identical ACL decomposed into `(grantee,
+    privilege_type, is_grantable)` tuples via `aclexplode`) is what
+    `restore_writers` actually compares against; see the module docstring for
+    why text comparison is refused."""
 
     database: str
     prior_acl: str
+    prior_grants: _Grants
     fenced_roles: tuple[str, ...]
     absent_roles: tuple[str, ...]
     terminated_count: int
@@ -176,6 +245,26 @@ def _quote_ident(conn: Connection, name: str) -> str:
     return str(
         conn.execute(text("SELECT quote_ident(:name)"), {"name": name}).scalar_one()
     )
+
+
+def _role_ref_sql(conn: Connection, grantee: str) -> str:
+    """`""` (PUBLIC, from `aclexplode`) or a quoted role identifier."""
+    return "PUBLIC" if grantee == "" else _quote_ident(conn, grantee)
+
+
+def _require_autocommit(conn: Connection) -> None:
+    """`connection_not_autocommit`, checked before any change.
+
+    On a transactional connection the REVOKE is invisible to every other
+    backend until this connection commits, and a rollback would erase the
+    fence while a `FenceProof` claiming otherwise still exists."""
+    if conn.get_isolation_level() != "AUTOCOMMIT":
+        raise FenceRefused(
+            FenceRefusalCode.CONNECTION_NOT_AUTOCOMMIT,
+            "the connection is not AUTOCOMMIT; a REVOKE issued on it is "
+            "invisible to other backends until commit, and a rollback would "
+            "erase the fence while a proof of it exists",
+        )
 
 
 def _database_exists(conn: Connection, database: str) -> bool:
@@ -261,13 +350,6 @@ def _reject_shared_writer_roles(
             )
 
 
-def _unquote_grantee(name: str) -> str:
-    """ACL text double-quotes a grantee that needs it (`"odd name"=c/owner`)."""
-    if len(name) >= 2 and name.startswith('"') and name.endswith('"'):
-        return name[1:-1].replace('""', '"')
-    return name
-
-
 def _reject_superuser_writers(conn: Connection, fenced: tuple[str, ...]) -> None:
     """A superuser keeps CONNECT through every REVOKE (and is a member of every
     role, so it would otherwise surface as a shared role): refused first."""
@@ -285,7 +367,7 @@ def _reject_superuser_writers(conn: Connection, fenced: tuple[str, ...]) -> None
 
 
 def _require_migration_connect_without_public(
-    conn: Connection, database: str, acl_text: str
+    conn: Connection, database: str, grants: _Grants
 ) -> None:
     """`migration_role_lost_connect`, checked before any ACL change.
 
@@ -297,11 +379,7 @@ def _require_migration_connect_without_public(
     owner = _database_owner(conn, database)
     if MIGRATION_ROLE == owner or _is_member_of(conn, MIGRATION_ROLE, owner):
         return
-    grantees = (
-        _unquote_grantee(raw)
-        for raw, privs in _parse_acl(acl_text).items()
-        if "c" in privs and raw
-    )
+    grantees = (grantee for grantee, priv, _ in grants if priv == "CONNECT" and grantee)
     if any(_is_member_of(conn, MIGRATION_ROLE, grantee) for grantee in grantees):
         return
     raise FenceRefused(
@@ -312,7 +390,7 @@ def _require_migration_connect_without_public(
 
 
 def _reject_inherited_connect(
-    conn: Connection, fenced: tuple[str, ...], database: str, acl_text: str
+    conn: Connection, fenced: tuple[str, ...], database: str, grants: _Grants
 ) -> None:
     """`writer_inherits_connect`, checked before any ACL change.
 
@@ -330,12 +408,8 @@ def _reject_inherited_connect(
     # membership after every REVOKE this module issues.
     other_grantees = tuple(
         grantee
-        for grantee in (
-            _unquote_grantee(raw)
-            for raw, privs in _parse_acl(acl_text).items()
-            if "c" in privs and raw
-        )
-        if grantee not in fenced
+        for grantee, priv, _ in grants
+        if priv == "CONNECT" and grantee and grantee not in fenced
     )
     for role in fenced:
         for grantee in other_grantees:
@@ -374,7 +448,9 @@ def _current_acl_text(conn: Connection, database: str) -> str:
     NULL `datacl` means "nobody has ever explicitly GRANTed or REVOKEd" —
     PostgreSQL answers privilege checks against the implicit default in that
     case, and `acldefault('d', datdba)` is that default made explicit so the
-    prior state this module restores to is never a guess."""
+    prior state this module restores to is never a guess. Kept for the human
+    record on `FenceProof.prior_acl`; see `_current_grants` for the form
+    every comparison in this module actually uses."""
     row = conn.execute(
         text("SELECT datacl::text, datdba FROM pg_database WHERE datname = :db"),
         {"db": database},
@@ -389,31 +465,24 @@ def _current_acl_text(conn: Connection, database: str) -> str:
     )
 
 
-def _parse_acl(acl_text: str) -> dict[str, str]:
-    """`{grantee=privs/grantor,...}` -> `{grantee: privs}`.
-
-    PUBLIC's own entry has an empty grantee before the `=` (`=privs/grantor`),
-    and this module represents that with the key `""`. Only the privilege
-    letters matter here — `CONNECT` is `c` — so the grantor half is discarded.
-    """
-    body = acl_text.strip()
-    if body.startswith("{") and body.endswith("}"):
-        body = body[1:-1]
-    result: dict[str, str] = {}
-    if not body:
-        return result
-    for item in body.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        grantee, _, rest = item.partition("=")
-        privs, _, _grantor = rest.partition("/")
-        result[grantee] = privs
-    return result
+_GRANTS_QUERY: Final = text(
+    "SELECT COALESCE(r.rolname, '') AS grantee, a.privilege_type, a.is_grantable "
+    "FROM pg_database d, "
+    "aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a "
+    "LEFT JOIN pg_roles r ON r.oid = a.grantee "
+    "WHERE d.datname = :db"
+)
 
 
-def _had_connect(parsed: dict[str, str], grantee: str) -> bool:
-    return "c" in parsed.get(grantee, "")
+def _current_grants(conn: Connection, database: str) -> _Grants:
+    """The database's ACL, decomposed by the server itself via `aclexplode`.
+
+    PUBLIC's grantee oid is 0, which `pg_roles` never matches, so
+    `COALESCE(r.rolname, '')` resolves it to `""` — the same sentinel used
+    throughout this module. Grantors are discarded: nothing here compares
+    them."""
+    rows = conn.execute(_GRANTS_QUERY, {"db": database})
+    return frozenset((str(row[0]), str(row[1]), bool(row[2])) for row in rows)
 
 
 def fence_writers(
@@ -431,6 +500,8 @@ def fence_writers(
     over the cluster superuser's socket connection, the same identity
     `pg_dumpall` already uses.
     """
+    _require_autocommit(conn)
+
     if not _database_exists(conn, database):
         raise FenceRefused(
             FenceRefusalCode.UNKNOWN_DATABASE,
@@ -441,19 +512,32 @@ def fence_writers(
     absent = tuple(role for role in writer_roles if role not in existing)
     fenced = tuple(role for role in writer_roles if role in existing)
 
-    # Both checks run before any ACL change. Neither hazard can be repaired by
-    # revoking — a role that inherits CONNECT through ownership or membership
-    # keeps it regardless, and a role sharing identity with the migrator would
-    # fence the migration along with it — so both are refused rather than
-    # revoked and then "verified" against a privilege check that was never
-    # going to move.
+    if prior is not None and (
+        prior.database != database or set(prior.fenced_roles) != set(fenced)
+    ):
+        raise FenceRefused(
+            FenceRefusalCode.PRIOR_MISMATCH,
+            f"prior proof names database {prior.database!r} and fenced roles "
+            f"{sorted(prior.fenced_roles)}, but this call resolved "
+            f"{database!r} and {sorted(fenced)} — a mismatched prior would "
+            "restore the wrong ACL",
+        )
+
+    # Both checks below run before any ACL change. Neither hazard can be
+    # repaired by revoking — a role that inherits CONNECT through ownership or
+    # membership keeps it regardless, and a role sharing identity with the
+    # migrator would fence the migration along with it — so both are refused
+    # rather than revoked and then "verified" against a privilege check that
+    # was never going to move.
     before_acl = _current_acl_text(conn, database)
+    before_grants = _current_grants(conn, database)
     _reject_superuser_writers(conn, fenced)
-    _require_migration_connect_without_public(conn, database, before_acl)
+    _require_migration_connect_without_public(conn, database, before_grants)
     _reject_shared_writer_roles(conn, fenced, writer_roles)
-    _reject_inherited_connect(conn, fenced, database, before_acl)
+    _reject_inherited_connect(conn, fenced, database, before_grants)
 
     prior_acl = prior.prior_acl if prior is not None else before_acl
+    prior_grants = prior.prior_grants if prior is not None else before_grants
 
     try:
         return _apply_fence(
@@ -462,25 +546,62 @@ def fence_writers(
             fenced=fenced,
             absent=absent,
             prior_acl=prior_acl,
+            prior_grants=prior_grants,
             session_wait_seconds=session_wait_seconds,
         )
-    except FenceRefused:
-        # Any refusal AFTER the first REVOKE puts the ACL back to what THIS call
-        # started from — never leaves a half-fenced database with no proof to
-        # restore from. On a re-fence that is the still-holding fence, not the
-        # original prior ACL.
-        restore_writers(
-            conn,
-            FenceProof(
-                database=database,
-                prior_acl=before_acl,
-                fenced_roles=fenced,
-                absent_roles=absent,
-                terminated_count=0,
-                fenced_at=conn.execute(text("SELECT now()")).scalar_one(),
-            ),
+    except BaseException as exc:
+        # Any exception at all after the first REVOKE — another refusal, a
+        # driver error, a timeout, KeyboardInterrupt — puts the ACL back to
+        # what THIS call started from, never leaves a half-fenced database
+        # with no proof to restore from. On a re-fence that is the
+        # still-holding fence, not the original prior ACL.
+        compensating = FenceProof(
+            database=database,
+            prior_acl=before_acl,
+            prior_grants=before_grants,
+            fenced_roles=fenced,
+            absent_roles=absent,
+            terminated_count=0,
+            fenced_at=conn.execute(text("SELECT now()")).scalar_one(),
         )
-        raise
+        try:
+            restore_writers(conn, compensating)
+        except BaseException as restore_exc:
+            failure = FenceRefused(
+                FenceRefusalCode.COMPENSATION_FAILED,
+                f"restoring the ACL for {database!r} after {exc!r} itself "
+                f"failed: {restore_exc!r}; the database may still be fenced "
+                "— restore to before_acl by hand",
+                before_acl=before_acl,
+            )
+            raise failure from exc
+        if isinstance(exc, KeyboardInterrupt | SystemExit):
+            raise
+        if isinstance(exc, FenceRefused):
+            exc.before_acl = before_acl
+            raise
+        raise FenceRefused(
+            FenceRefusalCode.FENCE_INTERRUPTED,
+            f"fencing {database!r} was interrupted after the first ACL "
+            f"change: {exc!r}",
+            before_acl=before_acl,
+        ) from exc
+
+
+def _writer_pids(
+    conn: Connection, database: str, writers: tuple[str, ...]
+) -> list[int]:
+    return list(
+        conn.execute(
+            text(
+                "SELECT pid FROM pg_stat_activity WHERE datname = :db "
+                "AND usename = ANY(:writers) AND pid <> pg_backend_pid()"
+            ),
+            {"db": database, "writers": list(writers)},
+        )
+        .scalars()
+        .all()
+    )
 
 
 def _apply_fence(
@@ -490,6 +611,7 @@ def _apply_fence(
     fenced: tuple[str, ...],
     absent: tuple[str, ...],
     prior_acl: str,
+    prior_grants: _Grants,
     session_wait_seconds: float,
 ) -> FenceProof:
     """The mutating half of `fence_writers`; its caller compensates a refusal."""
@@ -527,49 +649,33 @@ def _apply_fence(
 
     terminated_count = 0
     if fenced:
-        backends = (
-            conn.execute(
-                text(
-                    "SELECT pid FROM pg_stat_activity WHERE datname = :db "
-                    "AND usename = ANY(:writers) AND pid <> pg_backend_pid()"
-                ),
-                {"db": database, "writers": list(fenced)},
-            )
-            .scalars()
-            .all()
-        )
+        backends = _writer_pids(conn, database, fenced)
         terminated_count = len(backends)
         for pid in backends:
             conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
 
+        # The drain only returns once TWO CONSECUTIVE polls, a full
+        # `_POLL_INTERVAL_SECONDS` apart, both find zero writer backends —
+        # `pg_terminate_backend` merely requests termination, and a single
+        # zero reading can race a backend that is mid-termination and about
+        # to be replaced by a reconnect. The deadline is unchanged by this:
+        # it bounds the whole drain, not the two-poll confirmation.
         deadline = time.monotonic() + session_wait_seconds
         while True:
-            remaining = conn.execute(
-                text(
-                    "SELECT count(*) FROM pg_stat_activity WHERE datname = :db "
-                    "AND usename = ANY(:writers) AND pid <> pg_backend_pid()"
-                ),
-                {"db": database, "writers": list(fenced)},
-            ).scalar_one()
-            if remaining == 0:
-                break
+            remaining = _writer_pids(conn, database, fenced)
+            if not remaining:
+                time.sleep(_POLL_INTERVAL_SECONDS)
+                confirm = _writer_pids(conn, database, fenced)
+                if not confirm:
+                    break
+                remaining = confirm
             if time.monotonic() >= deadline:
                 raise FenceRefused(
                     FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
-                    f"{remaining} writer backend(s) on {database!r} survived "
-                    f"{session_wait_seconds}s of draining",
+                    f"{len(remaining)} writer backend(s) on {database!r} "
+                    f"survived {session_wait_seconds}s of draining",
                 )
-            for pid in (
-                conn.execute(
-                    text(
-                        "SELECT pid FROM pg_stat_activity WHERE datname = :db "
-                        "AND usename = ANY(:writers) AND pid <> pg_backend_pid()"
-                    ),
-                    {"db": database, "writers": list(fenced)},
-                )
-                .scalars()
-                .all()
-            ):
+            for pid in remaining:
                 conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
             time.sleep(_POLL_INTERVAL_SECONDS)
 
@@ -577,6 +683,7 @@ def _apply_fence(
     return FenceProof(
         database=database,
         prior_acl=prior_acl,
+        prior_grants=prior_grants,
         fenced_roles=fenced,
         absent_roles=absent,
         terminated_count=terminated_count,
@@ -585,33 +692,72 @@ def _apply_fence(
 
 
 def restore_writers(conn: Connection, proof: FenceProof) -> UnfenceProof:
-    """Put the ACL back to exactly `proof.prior_acl`. Idempotent.
+    """Put the ACL back to exactly `proof.prior_grants`. Idempotent.
 
     Only re-grants CONNECT to a grantee the prior ACL actually held it for —
-    never PUBLIC, never a fenced role, unless the parsed prior ACL says so —
-    and then verifies the restored ACL is byte-for-byte the prior one before
-    returning."""
-    prior_parsed = _parse_acl(proof.prior_acl)
+    never PUBLIC, never a fenced role, unless `prior_grants` says so — and
+    then verifies the restored ACL exactly matches the prior one (compared as
+    decomposed grants, never as raw text; see the module docstring) before
+    returning. Refuses, before granting anything, if the current ACL holds a
+    grant the prior ACL never had — something changed the ACL while it was
+    fenced — and, if the restored ACL still does not match afterwards,
+    re-revokes everything it just granted (plus PUBLIC) so the database stays
+    fenced rather than silently half-open.
+    """
+    _require_autocommit(conn)
+
     quoted_db = _quote_ident(conn, proof.database)
+    current = _current_grants(conn, proof.database)
 
-    restored: list[str] = []
-    if _had_connect(prior_parsed, ""):
-        conn.execute(text(f"GRANT CONNECT ON DATABASE {quoted_db} TO PUBLIC"))
-        restored.append("PUBLIC")
-    for role in proof.fenced_roles:
-        if _had_connect(prior_parsed, role):
-            quoted_role = _quote_ident(conn, role)
-            conn.execute(
-                text(f"GRANT CONNECT ON DATABASE {quoted_db} TO {quoted_role}")
-            )
-            restored.append(role)
-
-    current_acl = _current_acl_text(conn, proof.database)
-    if _parse_acl(current_acl) != prior_parsed:
+    unexpected = current - proof.prior_grants
+    if unexpected:
         raise FenceRefused(
             FenceRefusalCode.ACL_NOT_RESTORED,
-            f"restored ACL for {proof.database!r} does not equal the prior ACL "
-            "recorded in the fence proof",
+            f"the ACL for {proof.database!r} holds grant(s) {sorted(unexpected)} "
+            "absent from the fence's recorded prior ACL; something changed "
+            "the ACL while it was fenced, so nothing was granted",
+        )
+
+    allowed_grantees = {"", *proof.fenced_roles}
+    missing = sorted(
+        grant for grant in (proof.prior_grants - current) if grant[1] == "CONNECT"
+    )
+    restored: list[str] = []
+    for grantee, _priv, is_grantable in missing:
+        if grantee not in allowed_grantees:
+            raise FenceRefused(
+                FenceRefusalCode.ACL_NOT_RESTORED,
+                f"the prior ACL for {proof.database!r} granted CONNECT to "
+                f"{grantee!r}, which this fence never revoked and will not "
+                "re-grant",
+            )
+        option_sql = " WITH GRANT OPTION" if is_grantable else ""
+        conn.execute(
+            text(
+                f"GRANT CONNECT ON DATABASE {quoted_db} TO "
+                f"{_role_ref_sql(conn, grantee)}{option_sql}"
+            )
+        )
+        restored.append("PUBLIC" if grantee == "" else grantee)
+
+    final = _current_grants(conn, proof.database)
+    if final != proof.prior_grants:
+        # Stay fenced: re-revoke PUBLIC and every role just granted, rather
+        # than returning a proof claiming the restore worked.
+        revoke_grantees = dict.fromkeys(
+            ["", *(role for role in restored if role != "PUBLIC")]
+        )
+        for grantee in revoke_grantees:
+            conn.execute(
+                text(
+                    f"REVOKE CONNECT ON DATABASE {quoted_db} FROM "
+                    f"{_role_ref_sql(conn, grantee)}"
+                )
+            )
+        raise FenceRefused(
+            FenceRefusalCode.ACL_NOT_RESTORED,
+            f"restored ACL for {proof.database!r} does not equal the prior "
+            "ACL recorded in the fence proof; re-revoked to stay fenced",
         )
 
     restored_at = conn.execute(text("SELECT now()")).scalar_one()
