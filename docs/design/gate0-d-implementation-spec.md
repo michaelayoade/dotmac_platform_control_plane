@@ -1,10 +1,15 @@
 # Gate-0 Work Packet D — protected rehearsal-issuer identity, custody and runner isolation
 
-> **Status — proposed, awaiting Michael's acceptance, 2026-09-27.** This is
-> not a new ADR; it implements ADR-0013 § A7 Work Packet D. **Provisioning:
-> none performed.** No GitHub Environment, OpenBao role, OpenBao SSH CA, or
-> signing key exists yet as a result of this document. Every value below
-> marked `<placeholder>` is Michael's to choose at provisioning time.
+> **Status — proposed amendment; the execution topology and § 10 rulings are
+> pending Michael's approval; provisioning blocked until approved,
+> 2026-09-27.** This is not a new ADR; it implements ADR-0013 § A7 Work
+> Packet D. **Provisioning: none performed.** No GitHub Environment, OpenBao
+> role, OpenBao SSH CA, or signing key exists yet as a result of this
+> document. Every value below marked `<placeholder>` is Michael's to choose
+> at provisioning time. See "Runner placement blocker" below: the topology
+> assumed by §§ 2, 3, 6, 7 and 8 as originally written cannot be provisioned
+> as-is — those sections now depend on a recommended, not yet approved,
+> execution-repository topology.
 
 ## 0. Scope and citations
 
@@ -29,6 +34,35 @@ logic (owned per § A7.6), `dotmac-approvals`'s decision flow (owned per
 § A7.3's document-purpose matrix). D supplies identity, custody and runner
 configuration; it decides no plan legality, no approval, and no execution
 authorization.
+
+## Runner placement blocker
+
+**This blocks §§ 2, 3, 6, 7 and 8 as originally written. Nothing in this
+section is approved.**
+
+Facts, as found by a live check on 2026-09-27:
+
+- CP (`michaelayoade/dotmac_platform_control_plane`) is a public,
+  personal-account repository with ZERO registered runners.
+- `control-runner-starter-mt` is registered to the Starter repository, so a
+  CP workflow cannot use it.
+- A runner label routes jobs; it does NOT restrict which workflow can use
+  the runner.
+- GitHub's workflow-restricted runner groups are organization/enterprise
+  controls, unavailable on a personal account
+  (https://docs.github.com/en/actions/concepts/runners/runner-groups).
+- **Consequence:** the current § 6 isolation cannot be met by the existing
+  runner and label. Do not claim it is.
+
+**Recommended topology (pending Michael's approval):**
+
+- a dedicated PRIVATE execution repository, holding only the protected,
+  directly defined, non-reusable workflow;
+- its own isolated, EPHEMERAL runner for that job;
+- Starter's runner stays dedicated to Lane 3.
+
+Until Michael approves an execution repository, §§ 2, 3, 6, 7 and 8 below
+describe the recommended shape only, not a provisionable configuration.
 
 ## 1. Four separate facts — why OIDC is only one of them
 
@@ -66,6 +100,11 @@ necessarily the key that signs the evidence envelope). This is
   signer — the runner presents harness evidence and controller identity, it
   does not produce the signature over them.
 
+  **Recommended ruling — pending Michael's approval (§ 10 item 1):** Option
+  B — a DEDICATED signer, held by a distinct attester identity (not the
+  issuer, not the runner), with its own trust state. A second key readable
+  by the same compromised principal gives no meaningful separation.
+
 OIDC (fact 1) proves only that a specific GitHub Actions job, running under a
 specific ref/workflow/environment, is the caller asking OpenBao for a
 short-lived credential. It is not, and does not substitute for, facts 2, 3,
@@ -78,8 +117,13 @@ level down at the identity layer.
 
 ## 2. Human approval — the rehearsal-issuer GitHub Environment
 
+**Recommended — pending Michael's approval:** per the "Runner placement
+blocker" above, this Environment is created on the approved execution
+repository, `<derived from the approved execution repository>`, not on CP or
+Starter.
+
 A dedicated GitHub Environment, name `<placeholder: e.g. rehearsal-issuer-protected>`,
-is created on this repository with:
+is created on that repository with:
 
 - **Required reviewer:** Michael Ayoade, one reviewer required.
 - **Deployment branch policy:** `main` only — no other branch, and no tag
@@ -102,6 +146,12 @@ enforces this before the job starts.
 
 ## 3. Workflow identity — GitHub OIDC to a scoped OpenBao token
 
+**Recommended — pending Michael's approval:** per the "Runner placement
+blocker" above, the `repository`, `environment` and `workflow_ref` claims
+bound below are `<derived from the approved execution repository>`, not from
+CP. `workflow_ref` names the directly defined, non-reusable protected
+workflow held in that repository — see § 10 item 7.
+
 Only the protected job (the one running inside the `<placeholder>`
 Environment from § 2) exchanges its GitHub OIDC token for a short-lived,
 narrowly scoped OpenBao token. No other job, and no job outside that
@@ -114,10 +164,10 @@ the audience below and binds `bound_claims` on the rest. The audience is NOT a
 
 | Claim | Bound value | Why binding the Environment name alone is not enough |
 | --- | --- | --- |
-| `repository` | `<placeholder: org/repo>` | Scopes the role to this repository only. |
+| `repository` | `<derived from the approved execution repository>` | Scopes the role to the approved execution repository only. |
 | `environment` | `<placeholder>` (the § 2 Environment name) | GitHub's environment-based `sub` claim can omit the branch entirely — an Environment-only bound claim would accept the same job running from a non-`main` ref if the Environment's own branch policy were ever misconfigured or bypassed by a different trigger. |
 | `ref` | `refs/heads/main` | Independently pins the branch at the OpenBao layer, so OpenBao's own policy does not rely solely on GitHub's Environment configuration remaining correct. |
-| `workflow_ref` | `<placeholder: org/repo/.github/workflows/<file>.yml@refs/heads/main>` | Pins the exact workflow file and ref of a normal (non-reusable) workflow, not just "some workflow in this repo." `job_workflow_ref` is bound instead ONLY if D deliberately runs the protected job as a reusable-workflow call; this spec does not. |
+| `workflow_ref` | `<derived from the approved execution repository>` (the directly defined, non-reusable protected workflow's file and ref, e.g. `<execution-repo>/.github/workflows/<file>.yml@refs/heads/main>`) | Pins the exact workflow file and ref of a normal (non-reusable) workflow, not just "some workflow in this repo." `job_workflow_ref` is bound instead ONLY if D deliberately runs the protected job as a reusable-workflow call; this spec does not (§ 10 item 7). |
 
 Audience (`bound_audiences`, not `bound_claims`): `<placeholder: e.g. https://openbao.dotmac.internal>`.
 The protected job requests its OIDC token for exactly this audience.
@@ -127,7 +177,9 @@ The protected job requests its OIDC token for exactly this audience.
 checked against the ACTUAL claims of the protected job (captured from a real
 run of that job, not assumed from documentation) before the role is accepted.
 
-Token TTL: `<placeholder, short — e.g. 5m>`, no renewal. Policy scope: the
+Token TTL: `<placeholder, short — e.g. 5m>`, no renewal.
+**Recommended — pending Michael's approval (§ 10 item 5):** a starting
+OIDC-derived OpenBao token TTL of five minutes, non-renewable. Policy scope: the
 resulting OpenBao token's attached policy grants exactly the SSH CA signing
 endpoint named in § 5, for the per-run controller certificate, and nothing
 else. It grants NO read on the issuer signer path in § 4: only CP's service
@@ -194,6 +246,13 @@ The rehearsal-issuer signer is Ed25519, held at the already-declared path
     key is never copied into a GitHub secret, workflow artifact, log line,
     or this document (unchanged from the rule already stated above).
     Michael performs this (§ 8).
+
+    **Recommended ruling — pending Michael's approval (§ 10 item 3):**
+    Option A — each Ed25519 key is generated under Michael's controlled,
+    short-lived provisioning process and sealed into KV v2. Not exportable
+    Transit merely to satisfy the load-at-start contract: exportability
+    cannot later be disabled
+    (https://openbao.org/docs/next/api/secret/transit/).
   - *Rotation:* a new key VERSION is written to the same path, followed by
     the explicit reload the kernel's secret-source rules require — this is
     `refresh_secrets()`/an equivalent explicit re-install call, never a TTL
@@ -202,6 +261,11 @@ The rehearsal-issuer signer is Ed25519, held at the already-declared path
     source raises rather than starting degraded). The rehearsal-issuer
     verifier must accept authorizations signed under either the retiring or
     the new version for a defined overlap window, `<placeholder>`.
+
+    **Recommended ruling — pending Michael's approval (§ 10 item 6):** two
+    signing versions only, for a bounded overlap equal to the maximum
+    outstanding authorization lifetime plus clock skew. Establish that
+    maximum before setting the duration.
   - *Revocation* has TWO distinct meanings, with different owners. Do not
     conflate them.
     1. **Authorization / lease revocation stays with Control.** Revoking an
@@ -267,6 +331,11 @@ The rehearsal-issuer signer is Ed25519, held at the already-declared path
          signer's own public half verifies: the public key alone answers
          "did this key sign it," not "is this key still trusted," and only
          the trust state answers the second question.
+
+         **Recommended ruling — pending Michael's approval (§ 10 item 4):**
+         the durable version floor is pinned in independently controlled,
+         IMMUTABLE CP deployment configuration, not beside the mutable
+         trust-state record.
        - **The cache window is explicit.** Between marking a key compromised
          and the refresh completing on every process, a cached verifier still
          accepts that key's signatures. The compromise runbook is therefore:
@@ -278,6 +347,11 @@ The rehearsal-issuer signer is Ed25519, held at the already-declared path
          (d) rotate the signer.
          The runbook is complete only when (b) is confirmed. Marking the
          OpenBao version alone is never the step that stops acceptance.
+
+       **Recommended ruling — pending Michael's approval (§ 10 item 8):**
+       trust-state hardening confirmed — Michael-only writes, monotonic
+       rollback refusal, revoked-wins, and fail-closed startup and
+       failed-compromise refresh, as specified above.
 
 ## 5. Controller identity — per-run OpenSSH key
 
@@ -309,13 +383,20 @@ protected run — never a persistent, reused runner key.
   way, a fingerprint already bound to an earlier run or lease is refused as
   a stale/reused controller identity, never treated as evidence of the
   current run.
+
+  **Recommended ruling — pending Michael's approval (§ 10 item 2):**
+  cross-run fingerprint uniqueness lives in Control's durable
+  lease/consumption authority, enforced transactionally ACROSS leases. The
+  single use of one lease does not catch reuse on another.
 - **Recommended:** rather than a long-lived key trusted by the target host,
   the controller requests a short-lived OpenBao-issued SSH certificate
   (`secret/ssh` engine, `<placeholder>` role) signed over the per-run public
   key, scoped to the target(s) named by `LANE3_PROBE_HOST` and the vantage
   variables in § 6, with:
   - **TTL:** `<placeholder, short — e.g. matching or shorter than the run's
-    expected duration>`.
+    expected duration>`. **Recommended — pending Michael's approval (§ 10
+    item 5):** measure the SSH certificate lifetime against the real run
+    before fixing this value.
   - **`valid_principals`:** `<placeholder, restricted to the exact
     controller/service account(s) the target(s) accept for this role — not
     a wildcard>`.
@@ -336,36 +417,56 @@ protected run — never a persistent, reused runner key.
 
 ## 6. Runner isolation
 
+**Recommended — pending Michael's approval:** per the "Runner placement
+blocker" above, isolation comes from the dedicated execution repository
+holding only the protected workflow, plus that workflow's own isolated,
+EPHEMERAL runner — not from a label or runner-group on
+`control-runner-starter-mt` or any CP runner. `control-runner-starter-mt`
+stays dedicated to Lane 3 and is never used for this protected job. The
+no-`pull_request*` rule below still applies to whichever runner is
+approved.
+
 A protected GitHub Environment (§ 2) gates which jobs may target it; it does
-not, by itself, isolate the self-hosted runner (`control-runner-starter-mt`,
-per § A7.5) from other workloads that runner might execute. This spec
-therefore requires, independently of the Environment gate:
+not, by itself, isolate a self-hosted runner from other workloads that
+runner might execute. This spec therefore requires, independently of the
+Environment gate:
 
 - No workflow triggered by `pull_request` or `pull_request_target` may
-  select this runner's label/runner-group, WHATEVER the pull request's
+  select the protected job's runner, WHATEVER the pull request's
   origin — including a pull request opened from a branch of this same
   repository, not only a fork. `pull_request_target` runs with base-repo
   context and base-repo secrets even for a fork-originated PR, which is
   exactly why scoping this rule to "from a fork" would miss it: a
   `pull_request_target`-triggered workflow already executes as if it were
-  trusted, regardless of where the PR came from, so the runner-label/group
-  restriction below is what must exclude it, not the trigger's PR-origin
-  check.
-- The runner is restricted by label or runner-group (`<placeholder>`) to
-  only the protected workflow(s) that use the § 2 Environment.
-- The runner is cleaned between runs (workspace wipe) or is ephemeral
-  (recreated per run), `<placeholder: which mode Michael selects>`.
+  trusted, regardless of where the PR came from, so the runner isolation
+  below is what must exclude it, not the trigger's PR-origin check.
+- The runner is dedicated to the execution repository's protected
+  workflow(s) that use the § 2 Environment — not shared by label or
+  runner-group with any other repository or workflow, since a label alone
+  does not restrict which workflow may use a runner (see "Runner placement
+  blocker").
+- The runner is ephemeral (recreated per run), per the recommended topology
+  above — `<derived from the approved execution repository>`'s actual
+  runner configuration confirms this at provisioning time.
 
 Reference: GitHub Actions secure-use guidance —
 https://docs.github.com/en/actions/reference/security/secure-use
 
 ## 7. Refusal tests
 
+**Recommended — pending Michael's approval:** per the "Runner placement
+blocker" above, the runner-isolation refusal tests below are stated against
+the recommended execution-repository-plus-ephemeral-runner topology, not
+against `control-runner-starter-mt`'s label. The OIDC rows are tested
+against the provisioned JWT role for the approved execution repository's
+real claims, once that repository exists.
+
 Each row names the planned test's intent; naming a test here does not create
 it — these are written when D's workflow YAML and harness code exist. Every
 row below whose "Enforced where" cites OpenBao's JWT role runs against the
 PROVISIONED role configuration from § 3/§ 8 (the actual bound claims and
-policy Michael configures), not a mock or a hand-constructed stand-in role.
+policy Michael configures, for the approved execution repository's real
+claims), not a mock or a hand-constructed stand-in role.
 
 | Missing/invalid condition | Enforced where | Expected refusal | Planned test |
 | --- | --- | --- | --- |
@@ -375,7 +476,10 @@ policy Michael configures), not a mock or a hand-constructed stand-in role.
 | Wrong `repository` claim | OpenBao JWT role `bound_claims.repository` (§ 3) | OpenBao login denied | `test_oidc_login_refuses_wrong_repository` |
 | Wrong or missing `aud` | OpenBao JWT role `bound_audiences` | OpenBao login denied | `test_oidc_login_refuses_wrong_audience` |
 | Expired OIDC or OpenBao token | Token TTL enforcement, both layers | Login/token-use denied | `test_expired_token_is_refused` |
-| A `pull_request`/`pull_request_target`-triggered workflow selects this runner's label/group | Runner label/runner-group restriction (§ 6), independent of the § 2 Environment gate | Job never dispatches to `control-runner-starter-mt` | `test_pull_request_triggered_workflow_cannot_select_the_protected_runner` |
+| **Recommended — pending Michael's approval:** A job from any OTHER repository reaches the protected job's runner | Runner isolation via the dedicated execution repository (§ 6), independent of the § 2 Environment gate | Job cannot reach the runner | `test_other_repository_job_cannot_reach_the_protected_runner` |
+| **Recommended — pending Michael's approval:** A workflow other than the protected one selects the runner | Runner isolation via the dedicated, single-workflow execution repository (§ 6) | Runner is not selected | `test_only_the_protected_workflow_can_select_the_runner` |
+| **Recommended — pending Michael's approval:** The runner retains state between runs | Ephemeral-runner recreation (§ 6) | No state carries across runs; runner holds no state between runs | `test_the_runner_is_ephemeral_and_holds_no_state_between_runs` |
+| A `pull_request`/`pull_request_target`-triggered workflow selects the protected job's runner | Runner isolation (§ 6), independent of the § 2 Environment gate | Job never dispatches to the protected job's runner | `test_pull_request_triggered_workflow_cannot_select_the_protected_runner` |
 | A non-`main` run reaches the protected job | § 2's Environment branch policy (`main`-only) AND § 3's `bound_claims.ref` (defense in depth — see § 3's own note that `ref` is independently pinned at the OpenBao layer) | Environment protection blocks the run before the job starts; OpenBao would independently refuse the token exchange even if it did | `test_non_main_run_cannot_reach_the_protected_job` |
 | Runner attempts a signer read | OpenBao policy attached to the runner's scoped token (§ 4) excludes the signer path | OpenBao permission denied | `test_runner_token_cannot_read_signer_path` |
 | A per-request OpenBao read occurs on the consumption path | `install_rehearsal_issuer_security`'s load-once-at-start pattern (§ 4); no per-request call is wired | No OpenBao call observed during consumption (structural/static check, not a live-OpenBao assertion) | `test_no_per_request_openbao_read_on_the_consumption_path` |
@@ -396,10 +500,17 @@ policy Michael configures), not a mock or a hand-constructed stand-in role.
 
 ## 8. Who does what
 
+**Recommended — pending Michael's approval:** the two rows below (create the
+private execution repository, register its ephemeral runner) are new,
+required by the "Runner placement blocker" above, and must happen before the
+§ 2 Environment row can be created on that repository.
+
 Provisioning — Michael only; no agent performs any of these:
 
 | Action | Owner |
 | --- | --- |
+| **Recommended, pending approval:** Create the private execution repository | Michael |
+| **Recommended, pending approval:** Register its isolated, ephemeral runner | Michael |
 | Create the § 2 GitHub Environment and configure the required reviewer + `main`-only branch policy | Michael |
 | Create the OpenBao JWT auth role and its policies (§ 3, § 4) | Michael |
 | Generate and store the Ed25519 signer at `secret/dotmac/platform-cp/rehearsal-issuer/signing-key` (§ 4) | Michael |
@@ -411,7 +522,9 @@ Agent-doable source work, once the above is accepted and provisioned:
 
 - The workflow YAML implementing §§ 2–6 (Environment reference, OIDC step,
   OpenBao token exchange, per-run key generation and destruction, runner
-  label/group restriction).
+  isolation) — **recommended, pending Michael's approval:** in the approved
+  execution repository, per "Runner placement blocker" above, not via a
+  label/group restriction on a shared runner.
 - The controller-fingerprint derivation code (§ 5).
 - The startup signer install call site (`install_rehearsal_issuer_security`,
   § 4) wiring CP's process start to the OpenBao read.
@@ -434,7 +547,9 @@ the § 3 OIDC-derived job identity, the § 4 signer's key ID/fingerprint/version
 to cite (never its value), and the § 5 per-run controller fingerprint bound
 into independently verified harness evidence. That harness-evidence
 verification depends on § 1's still-open `<decision: Michael>` (which key
-signs the harness evidence) being resolved before D can hand E a genuinely
+signs the harness evidence; **recommended ruling, pending Michael's
+approval, § 10 item 1: a dedicated signer distinct from the § 4
+rehearsal-issuer signer**) being resolved before D can hand E a genuinely
 independently-verified evidence digest — E cannot accept a digest verified
 against an unnamed or ambiguous signer. E performs no provisioning of
 its own and consumes D's evidence as-is; D does not itself produce the
@@ -456,14 +571,27 @@ here so none is missed before provisioning:
    § A7.4 require the evidence to be "independently signed". A shared key may
    still meet the letter only if the two checks stay separate; a dedicated
    key keeps the compromise domains apart.
+   **Recommended ruling — pending Michael's approval:** a DEDICATED signer,
+   held by a distinct attester identity (not the issuer, not the runner),
+   with its own trust state. A second key readable by the same compromised
+   principal gives no meaningful separation.
 2. **Where the reuse-detection check lives (§ 5).** An extension of
    Control's existing single-use consumption logic, or a separate
    fingerprint index consulted before Control's consumption check.
+   **Recommended ruling — pending Michael's approval:** cross-run fingerprint
+   uniqueness lives in Control's durable lease/consumption authority,
+   enforced transactionally ACROSS leases. The single use of one lease does
+   not catch reuse on another.
 3. **Where the Ed25519 signer keypair is actually generated (§ 4).** An
    offline process under Michael's control writing into the declared KV v2
    path, or an OpenBao Transit key configured exportable — the ADR does not
    decide this, and a KV engine cannot generate the key itself while a
    typical non-exportable Transit key cannot be loaded at process start.
+   **Recommended ruling — pending Michael's approval:** each Ed25519 key is
+   generated under Michael's controlled, short-lived provisioning process
+   and sealed into KV v2. Not exportable Transit merely to satisfy the
+   load-at-start contract: exportability cannot later be disabled
+   (https://openbao.org/docs/next/api/secret/transit/).
 4. **Startup rollback protection for the trust state (§ 4).** Refresh refuses
    a version lower than the installed one, but a freshly started process has
    installed nothing, so on its own it would accept a stale or tampered record
@@ -471,11 +599,20 @@ here so none is missed before provisioning:
    a minimum trust-state version pinned in CP's configuration at deploy time,
    or a floor recorded by the provisioning identity alongside the record and
    read at startup. Until one is chosen, § 4's startup rule is incomplete.
+   **Recommended ruling — pending Michael's approval:** the minimum
+   trust-state version is pinned in independently controlled, IMMUTABLE CP
+   deployment configuration, not beside the mutable trust-state record.
 5. Every `<placeholder: ...>` value throughout §§ 2–8 (Environment name,
    OpenBao role/policy names, audience, workflow_ref, trust-state path, SSH
    CA role/TTL/`valid_principals`/extensions/key ID, runner label/group,
    runner cleanup mode, and the rotation overlap window in item 6 below) is
    Michael's to choose at provisioning time, not a decision this spec makes.
+   **Recommended ruling — pending Michael's approval:** fix plain names now
+   (e.g. the JWT role `rehearsal-issuer-protected`). DERIVE the repository,
+   `workflow_ref`, runner identity, SSH principals and key fingerprints from
+   the chosen topology and the actual keys; never guess them. Propose a
+   starting OIDC-derived OpenBao token TTL of five minutes, non-renewable.
+   Measure the SSH certificate lifetime against the real run.
 
 Design choices already made in this spec, listed here for Michael to
 explicitly confirm rather than silently accept by not objecting:
@@ -484,12 +621,22 @@ explicitly confirm rather than silently accept by not objecting:
    authorizations signed under either the retiring or the new key version
    for a defined window (`<placeholder>`); confirm this two-version-overlap
    approach itself, separately from picking the window's length.
+   **Recommended ruling — pending Michael's approval:** two signing versions
+   only, for a bounded overlap equal to the maximum outstanding
+   authorization lifetime plus clock skew. Establish that maximum before
+   setting the duration.
 7. **"D does not use a reusable workflow" (§ 3)** — `workflow_ref` (not
    `job_workflow_ref`) is bound because this spec assumes the protected job
    runs as a normal workflow, not a reusable-workflow call. Confirm this
    assumption; if a reusable workflow is later wanted, § 3's bound-claims
    choice changes.
+   **Recommended ruling — pending Michael's approval:** the protected
+   workflow is directly defined, non-reusable, in the chosen execution
+   repository (see "Runner placement blocker"); bind `workflow_ref`.
 8. **Trust-state hardening rules (§ 4)** — Michael-only writes, a monotonic
    version with rollback refusal, revoked-wins over trusted, and fail-closed
    startup. These are fail-closed extensions of Michael's key-compromise
    decision rather than new owners; confirm them.
+   **Recommended ruling — pending Michael's approval:** trust-state
+   hardening confirmed — Michael-only writes, monotonic rollback refusal,
+   revoked-wins, and fail-closed startup and failed-compromise refresh.
