@@ -387,7 +387,7 @@ def test_a_member_session_using_set_role_to_write_is_terminated_by_the_fence(
     admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
 ) -> None:
     """M is a plain member of writer W with no CONNECT grant of its own. Its
-    session does `SET ROLE W` and inserts a row into a table W owns BEFORE
+    session does `SET ROLE W` and inserts a row into a table W may write BEFORE
     the fence closes — proving the fence terminates a session that is
     actively writing under the writer's identity, not merely one that is
     idle. After the fence, the session's next statement raises, and M cannot
@@ -400,6 +400,10 @@ def test_a_member_session_using_set_role_to_write_is_terminated_by_the_fence(
             conn.execute(text(f"GRANT {w} TO {member}"))
             conn.execute(text(f'CREATE SCHEMA "{schema}" AUTHORIZATION {w}'))
             conn.execute(text(f'CREATE TABLE "{schema}".probe (id int)'))
+            # app_admin created (and owns) the table; W writes to it by grant.
+            # Transferring ownership to W would need app_admin to be a member
+            # of W, which the fence rightly refuses as a shared role.
+            conn.execute(text(f'GRANT INSERT ON "{schema}".probe TO {w}'))
         try:
             member_engine = create_engine(
                 url_for(postgres_url, db, user=member), isolation_level="AUTOCOMMIT"
