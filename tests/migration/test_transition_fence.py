@@ -823,6 +823,38 @@ def test_restore_refuses_an_unexpected_extra_grant_and_stays_fenced(
             restore_writers(conn, proof)
 
 
+def test_restore_refuses_a_disallowed_grantee_before_regranting_public(
+    admin_url: str, db: str
+) -> None:
+    """A role the fence never revoked held CONNECT in the prior ACL and lost it
+    while fenced. Restore must refuse BEFORE any GRANT: `missing` sorts PUBLIC
+    first, so a refusal found mid-loop would already have reopened the
+    database to every writer."""
+    with _writer_role(admin_url) as w, _writer_role(admin_url) as bystander:
+        with _connect(admin_url, autocommit=True) as conn:
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {bystander}'))
+            proof = fence_writers(
+                conn,
+                database=db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            # An operator revokes the bystander's CONNECT by hand while fenced.
+            conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {bystander}'))
+
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(conn, proof)
+            assert refused.value.code == FenceRefusalCode.ACL_NOT_RESTORED
+            # Still fenced: PUBLIC was never re-granted, and neither was w.
+            grants = fence_module._current_grants(conn, db)
+            assert not _has_connect(grants, "")
+            assert not _has_connect(grants, w)
+
+            conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {bystander}'))
+            restore_writers(conn, proof)
+            conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {bystander}'))
+
+
 # ── (q) a drain that never reaches zero survives and is compensated ────────
 
 

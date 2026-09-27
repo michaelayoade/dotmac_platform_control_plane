@@ -501,10 +501,12 @@ def fence_writers(
 ) -> FenceProof:
     """Revoke CONNECT from every existing writer role, verify it, then drain.
 
-    `conn` must be held by a role that owns `database` or is superuser —
-    terminating another role's backends needs that. Production holds this
-    over the cluster superuser's socket connection, the same identity
-    `pg_dumpall` already uses.
+    `conn` must be held by a superuser (or a role with `pg_signal_backend`):
+    terminating another role's backends needs that, and database ownership
+    alone does not grant it. Without it the drain times out and the fence is
+    compensated, so it fails safe. Production holds this over the cluster
+    superuser's socket connection, the same identity `pg_dumpall` already
+    uses.
     """
     _require_autocommit(conn)
 
@@ -700,6 +702,20 @@ def _apply_fence(
     )
 
 
+def _refence(conn: Connection, quoted_db: str, restored: list[str]) -> None:
+    """Re-revoke CONNECT from PUBLIC and every role a failed restore granted."""
+    revoke_grantees = dict.fromkeys(
+        ["", *(role for role in restored if role != "PUBLIC")]
+    )
+    for grantee in revoke_grantees:
+        conn.execute(
+            text(
+                f"REVOKE CONNECT ON DATABASE {quoted_db} FROM "
+                f"{_role_ref_sql(conn, grantee)}"
+            )
+        )
+
+
 def restore_writers(conn: Connection, proof: FenceProof) -> UnfenceProof:
     """Put the ACL back to exactly `proof.prior_grants`. Idempotent.
 
@@ -731,38 +747,44 @@ def restore_writers(conn: Connection, proof: FenceProof) -> UnfenceProof:
     missing = sorted(
         grant for grant in (proof.prior_grants - current) if grant[1] == "CONNECT"
     )
-    restored: list[str] = []
-    for grantee, _priv, is_grantable in missing:
-        if grantee not in allowed_grantees:
-            raise FenceRefused(
-                FenceRefusalCode.ACL_NOT_RESTORED,
-                f"the prior ACL for {proof.database!r} granted CONNECT to "
-                f"{grantee!r}, which this fence never revoked and will not "
-                "re-grant",
-            )
-        option_sql = " WITH GRANT OPTION" if is_grantable else ""
-        conn.execute(
-            text(
-                f"GRANT CONNECT ON DATABASE {quoted_db} TO "
-                f"{_role_ref_sql(conn, grantee)}{option_sql}"
-            )
+    # Every grantee is validated BEFORE the first GRANT. `missing` sorts
+    # PUBLIC first, so a refusal found mid-loop would already have reopened
+    # the database to every writer.
+    disallowed = [
+        grantee for grantee, _p, _g in missing if grantee not in allowed_grantees
+    ]
+    if disallowed:
+        raise FenceRefused(
+            FenceRefusalCode.ACL_NOT_RESTORED,
+            f"the prior ACL for {proof.database!r} granted CONNECT to "
+            f"{sorted(disallowed)}, which this fence never revoked and will not "
+            "re-grant; nothing was granted, so the database stays fenced",
         )
-        restored.append("PUBLIC" if grantee == "" else grantee)
 
-    final = _current_grants(conn, proof.database)
+    restored: list[str] = []
+    try:
+        for grantee, _priv, is_grantable in missing:
+            option_sql = " WITH GRANT OPTION" if is_grantable else ""
+            conn.execute(
+                text(
+                    f"GRANT CONNECT ON DATABASE {quoted_db} TO "
+                    f"{_role_ref_sql(conn, grantee)}{option_sql}"
+                )
+            )
+            restored.append("PUBLIC" if grantee == "" else grantee)
+        final = _current_grants(conn, proof.database)
+    except BaseException as exc:
+        _refence(conn, quoted_db, restored)
+        raise FenceRefused(
+            FenceRefusalCode.ACL_NOT_RESTORED,
+            f"restoring the ACL for {proof.database!r} failed part-way "
+            f"({exc!r}); re-revoked what was granted to stay fenced",
+        ) from exc
+
     if final != proof.prior_grants:
         # Stay fenced: re-revoke PUBLIC and every role just granted, rather
         # than returning a proof claiming the restore worked.
-        revoke_grantees = dict.fromkeys(
-            ["", *(role for role in restored if role != "PUBLIC")]
-        )
-        for grantee in revoke_grantees:
-            conn.execute(
-                text(
-                    f"REVOKE CONNECT ON DATABASE {quoted_db} FROM "
-                    f"{_role_ref_sql(conn, grantee)}"
-                )
-            )
+        _refence(conn, quoted_db, restored)
         raise FenceRefused(
             FenceRefusalCode.ACL_NOT_RESTORED,
             f"restored ACL for {proof.database!r} does not equal the prior "
