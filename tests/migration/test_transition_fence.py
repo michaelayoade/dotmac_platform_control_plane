@@ -1218,3 +1218,30 @@ def test_a_superuser_grant_is_recorded_with_the_owner_as_grantor(
             assert after == prior_grants
             after_w_grant = next(g for g in after if g[0] == w and g[1] == "CONNECT")
             assert after_w_grant[3] == MIGRATION_ROLE
+
+
+def test_an_ungranted_superuser_is_not_a_member_of_every_writer(
+    admin_url: str, db: str, postgres_url: str
+) -> None:
+    """`pg_has_role` says every superuser is a member of every role; the
+    effective set follows explicit grants only. A superuser that was never
+    granted the writer role is NOT pulled into the fence, so a normal fence
+    over a cluster that has superusers succeeds."""
+    superuser = f"fence_bystander_super_{uuid.uuid4().hex[:8]}"
+    with _connect(postgres_url, autocommit=True) as conn:
+        conn.execute(text(f"CREATE ROLE {superuser} LOGIN SUPERUSER"))
+    try:
+        with _writer_role(admin_url) as w:
+            with _connect(admin_url, autocommit=True) as conn:
+                proof = fence_writers(
+                    conn,
+                    database=db,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+                assert superuser not in proof.member_roles
+                assert "postgres" not in proof.member_roles
+                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+    finally:
+        with _connect(postgres_url, autocommit=True) as conn:
+            conn.execute(text(f"DROP ROLE IF EXISTS {superuser}"))

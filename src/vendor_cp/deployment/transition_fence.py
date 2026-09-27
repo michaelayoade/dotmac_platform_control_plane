@@ -381,11 +381,19 @@ def _duplicates(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted(dupes))
 
 
+#: Explicit, transitive membership through `pg_auth_members` — NOT
+#: `pg_has_role(..., 'MEMBER')`, which answers true for every superuser against
+#: every role and would pull `postgres` into every effective set (and so refuse
+#: every fence as a superuser writer). A superuser that was actually GRANTed a
+#: writer role still appears here, and is refused.
 _MEMBER_ROLES_QUERY: Final = text(
-    "SELECT DISTINCT r.rolname FROM pg_roles r "
-    "JOIN unnest(CAST(:writers AS text[])) AS w(rolname) ON true "
-    "WHERE r.rolname <> ALL(CAST(:writers AS text[])) "
-    "AND pg_has_role(r.rolname, w.rolname, 'MEMBER')"
+    "WITH RECURSIVE members(oid) AS ("
+    " SELECT r.oid FROM pg_roles r WHERE r.rolname = ANY(CAST(:writers AS text[]))"
+    " UNION"
+    " SELECT am.member FROM pg_auth_members am JOIN members m ON am.roleid = m.oid"
+    ") "
+    "SELECT DISTINCT r.rolname FROM members m JOIN pg_roles r ON r.oid = m.oid "
+    "WHERE r.rolname <> ALL(CAST(:writers AS text[]))"
 )
 
 
