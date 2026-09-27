@@ -9,15 +9,22 @@ exact wheels (Control 0.1.0a16, Approvals 0.1.0a8) are published and pinned.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib import import_module
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from uuid import UUID
 
 from dotmac_kernel.messaging import ClaimedPlatformEvent
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from vendor_cp.deployment.rehearsal_issuer_seam import RehearsalIssuerInvocation
+from vendor_cp.relay.approval_router import (
+    ApprovalWithdrawalResult,
+    RetryableWithdrawal,
+)
+from vendor_cp.relay.withdrawal_outcomes import WithdrawalDisposition
 
 if TYPE_CHECKING:
     from vendor_cp.approvals.adapter import HeldPlatformApproval
@@ -50,6 +57,11 @@ class PlanFacts(Protocol):
     approval_policy_code: str | None
     approval_policy_version: int | None
     approval_decision_ref: str | None
+    #: Read by `classify_approval_withdrawal`'s pre-read and status branches
+    #: only; every other function above ignores these three.
+    status: str
+    approval_decision_status: str | None
+    approval_revocation_ref: str | None
 
 
 def _subject(plan: PlanFacts) -> str:
@@ -256,60 +268,215 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
     )
 
 
-def apply_approval_withdrawal(db: Session, event: ClaimedPlatformEvent) -> object:
-    """Project a claimed Approvals outbox row in the kernel delivery transaction."""
+def _conflict(
+    reason_code: str,
+    *,
+    coordinates: Mapping[str, object] | None = None,
+    evidence: Mapping[str, object] | None = None,
+) -> ApprovalWithdrawalResult:
+    return ApprovalWithdrawalResult(
+        disposition=WithdrawalDisposition.SECURITY_CONFLICT,
+        reason_code=reason_code,
+        coordinates=coordinates or {},
+        evidence=evidence or {},
+    )
+
+
+def _revoked_pre_read(
+    plan: PlanFacts, *, plan_id: UUID, request_id: UUID, event_id: UUID
+) -> ApprovalWithdrawalResult | None:
+    """Standing revocation state, checked BEFORE calling `revoke_plan_approval`.
+
+    `None` means the plan's approval still stands and the caller should go on
+    to attempt the revocation itself.
+    """
+    if plan.approval_decision_status != "revoked":
+        return None
+    own_ref = f"approval.withdrawn:{event_id}"
+    coordinates: dict[str, object] = {
+        "plan_id": plan_id,
+        "approval_request_id": request_id,
+        "withdrawal_ref": str(event_id),
+    }
+    if plan.approval_revocation_ref == own_ref:
+        return ApprovalWithdrawalResult(
+            disposition=WithdrawalDisposition.ALREADY_APPLIED,
+            reason_code="already_applied",
+            coordinates=coordinates,
+            evidence={"approval_revocation_ref": plan.approval_revocation_ref},
+        )
+    return ApprovalWithdrawalResult(
+        disposition=WithdrawalDisposition.SUPERSEDED_BY_REVOCATION,
+        reason_code="superseded_by_revocation",
+        coordinates=coordinates,
+        evidence={
+            "approval_revocation_ref": plan.approval_revocation_ref,
+            "withdrawal_ref": own_ref,
+        },
+    )
+
+
+def classify_approval_withdrawal(
+    db: Session, event: ClaimedPlatformEvent
+) -> ApprovalWithdrawalResult:
+    """Classify one `approval.withdrawn` event against the frozen issuer plan.
+
+    Returns a terminal `ApprovalWithdrawalResult` for the router to record, or
+    raises `RetryableWithdrawal` when the database itself is the obstacle.
+    The Control call — the one domain consequence this handler owns — happens
+    HERE, inside the router's delivery transaction; the caller commits.
+    """
     payload = event.payload
-    if event.event_type != "approval.withdrawn" or payload.get("state") != "withdrawn":
-        raise ValueError("expected an approval.withdrawn event")
     if payload.get("subject_type") != SUBJECT_TYPE:
-        raise ValueError("withdrawal is for another subject type")
+        return _conflict(
+            "subject_type_mismatch",
+            evidence={"subject_type": payload.get("subject_type")},
+        )
+
     try:
         subject_id = str(payload["subject_id"])
         version, plan_id_text, purpose, operation, digest = subject_id.split("|")
         if version != "v1" or purpose != PLAN_PURPOSE or operation != ISSUER_OPERATION:
             raise ValueError("unexpected issuer approval subject")
         plan_id = UUID(plan_id_text)
-    except (KeyError, ValueError) as exc:
-        raise ValueError("withdrawal has no canonical issuer approval subject") from exc
-    plan = _plan(db, plan_id)
+    except (KeyError, ValueError):
+        return _conflict(
+            "malformed_subject", evidence={"subject_id": payload.get("subject_id")}
+        )
+
+    try:
+        control = import_module("dotmac_deployment_control")
+        plan = cast(PlanFacts, control.get_plan(db, plan_id))
+    except OperationalError as exc:
+        raise RetryableWithdrawal("database_unavailable") from exc
+    if plan is None:
+        return _conflict("plan_not_found", coordinates={"plan_id": plan_id})
+    try:
+        _subject(plan)
+    except ValueError:
+        return _conflict("plan_not_found", coordinates={"plan_id": plan_id})
+
     if subject_id != _subject(plan) or digest != plan.execution_plan_digest:
-        raise ValueError("withdrawal subject differs from the frozen plan")
+        return _conflict(
+            "subject_mismatch",
+            coordinates={"plan_id": plan_id},
+            evidence={"subject_id": subject_id, "expected_subject": _subject(plan)},
+        )
     if not plan.plan_digest or payload.get("content_digest") != plan.plan_digest:
-        raise ValueError("withdrawal digest differs from the frozen plan")
+        return _conflict(
+            "digest_mismatch",
+            coordinates={"plan_id": plan_id},
+            evidence={
+                "content_digest": payload.get("content_digest"),
+                "plan_digest": plan.plan_digest,
+            },
+        )
+
     try:
         request_id = UUID(str(payload["request_id"]))
         withdrawal_id = UUID(str(payload["withdrawal_id"]))
-    except (KeyError, ValueError) as exc:
-        raise ValueError("withdrawal lacks durable evidence ids") from exc
+    except (KeyError, ValueError):
+        return _conflict("missing_ids", coordinates={"plan_id": plan_id})
+
     if withdrawal_id != event.id:
-        raise ValueError("withdrawal id differs from the claimed outbox row")
-    if plan.approval_decision_ref != str(request_id):
-        raise ValueError("withdrawal is for another approval decision")
+        return _conflict(
+            "withdrawal_id_mismatch",
+            coordinates={"plan_id": plan_id, "approval_request_id": request_id},
+            evidence={"withdrawal_id": str(withdrawal_id), "event_id": str(event.id)},
+        )
     if (
         payload.get("policy_code") != plan.approval_policy_code
         or payload.get("policy_version") != plan.approval_policy_version
     ):
-        raise ValueError("withdrawal policy differs from the frozen plan")
+        return _conflict(
+            "policy_mismatch",
+            coordinates={"plan_id": plan_id, "approval_request_id": request_id},
+        )
     reason = payload.get("reason")
     if not isinstance(reason, str) or not reason.strip():
-        raise ValueError("withdrawal has no reason")
-    control = import_module("dotmac_deployment_control")
-    return control.revoke_plan_approval(
-        db,
-        control.RevokePlanApprovalCommand(
-            command_id=f"rehearsal-issuer:withdrawal:{event.id}",
-            plan_id=plan_id,
-            revocation_ref=f"approval.withdrawn:{event.id}",
-            reason=reason,
-        ),
+        return _conflict(
+            "missing_reason",
+            coordinates={"plan_id": plan_id, "approval_request_id": request_id},
+        )
+
+    coordinates: dict[str, object] = {
+        "plan_id": plan_id,
+        "approval_request_id": request_id,
+        "withdrawal_ref": str(event.id),
+    }
+
+    pre_read = _revoked_pre_read(
+        plan, plan_id=plan_id, request_id=request_id, event_id=event.id
     )
+    if pre_read is not None:
+        return pre_read
 
+    if plan.status == "approved" and plan.approval_decision_ref != str(request_id):
+        return ApprovalWithdrawalResult(
+            disposition=WithdrawalDisposition.NOT_CARRIED,
+            reason_code="decision_not_carried",
+            coordinates=coordinates,
+            evidence={"approval_decision_ref": plan.approval_decision_ref},
+        )
 
-class ApprovalWithdrawalConsumer:
-    """Relay transport for the Approvals event affecting issuer plan standing."""
+    try:
+        control.revoke_plan_approval(
+            db,
+            control.RevokePlanApprovalCommand(
+                command_id=f"rehearsal-issuer:withdrawal:{event.id}",
+                plan_id=plan_id,
+                revocation_ref=f"approval.withdrawn:{event.id}",
+                reason=reason,
+            ),
+        )
+    except control.TransitionRefusedError:
+        # The race: revoked between the pre-read above and this call. Re-read
+        # and apply the same revoked rules against the now-current row.
+        reread = cast(PlanFacts, control.get_plan(db, plan_id))
+        raced = _revoked_pre_read(
+            reread, plan_id=plan_id, request_id=request_id, event_id=event.id
+        )
+        if raced is not None:
+            return raced
+        return _conflict(
+            "unexpected_plan_state",
+            coordinates=coordinates,
+            evidence={"status": reread.status},
+        )
+    except control.ExpectedStateError as exc:
+        status = exc.actual_status
+        if status == "cancelled":
+            return ApprovalWithdrawalResult(
+                disposition=WithdrawalDisposition.CANCELLED_BEFORE_EXECUTION,
+                reason_code="cancelled_before_execution",
+                coordinates=coordinates,
+                evidence={"status": status},
+            )
+        if status == "proposed":
+            return ApprovalWithdrawalResult(
+                disposition=WithdrawalDisposition.NOT_CARRIED,
+                reason_code="never_approved",
+                coordinates=coordinates,
+                evidence={"status": status},
+            )
+        if status == "superseded":
+            return ApprovalWithdrawalResult(
+                disposition=WithdrawalDisposition.NOT_CARRIED,
+                reason_code="plan_superseded",
+                coordinates=coordinates,
+                evidence={"status": status},
+            )
+        return _conflict(
+            "unexpected_plan_state",
+            coordinates=coordinates,
+            evidence={"status": status},
+        )
+    except OperationalError as exc:
+        raise RetryableWithdrawal("database_unavailable") from exc
 
-    def deliver(self, event: ClaimedPlatformEvent, platform_db: Session) -> None:
-        if event.event_type == "approval.withdrawn":
-            if event.payload.get("subject_type") != SUBJECT_TYPE:
-                return
-            apply_approval_withdrawal(platform_db, event)
+    return ApprovalWithdrawalResult(
+        disposition=WithdrawalDisposition.APPLIED,
+        reason_code="applied",
+        coordinates=coordinates,
+        evidence={},
+    )
