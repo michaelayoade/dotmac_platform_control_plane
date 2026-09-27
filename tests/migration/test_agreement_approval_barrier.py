@@ -793,3 +793,68 @@ def test_reinstate_committed_then_recorded_standing_leaves_the_agreement_active(
     assert result.approval_carried is True
     assert result.status == "active"
     assert _status(engine, agreement_id) == "active"
+
+
+# ── committed retry, after a later withdrawal: replay vs. a fresh attempt ───
+
+
+def test_a_committed_activate_retried_after_withdrawal_replays_the_view(
+    engine: Engine,
+) -> None:
+    """`command_id` X commits `activate`; only THEN does the withdrawal
+    commit. A retry of the SAME command_id X is a REPLAY: CA's own history
+    already carries this exact (command_id, event_type), so
+    `_replayed_view` returns the already-committed view without ever calling
+    `held_transition` again — it raises nothing, even though the request is
+    now withdrawn. A retry under a NEW command_id is not a replay, so it takes
+    the normal path and is refused the same way a live withdrawal-first race
+    is."""
+    agreement_id, request_id = _seed(engine, offer_code="off-activate-retry")
+    _approve_and_commit(engine, agreement_id, request_id)
+
+    command_id = f"activate-{uuid.uuid4()}"
+
+    def _activate(db: Session) -> agreements.ContractView:
+        return agreements.activate(
+            db,
+            agreements.ActivateCommand(
+                command_id=command_id,
+                agreement_id=agreement_id,
+                approval_request_id=request_id,
+                activation_rule="countersigned",
+                activation_reference="countersignature-1",
+                activation_satisfied_at=datetime.now(UTC),
+            ),
+        )
+
+    with Session(engine) as db:
+        first = _activate(db)
+        db.commit()
+    assert first.status == "active"
+
+    with Session(engine) as db_b:
+        outcome = _withdraw(
+            db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+        )
+        db_b.commit()
+    assert outcome.state is ApprovalState.WITHDRAWN
+
+    with Session(engine) as db:
+        replayed = _activate(db)
+    assert replayed.status == "active"
+    assert _status(engine, agreement_id) == "active"
+
+    with Session(engine) as db_a:
+        with pytest.raises(ConflictError, match="not held: withdrawn"):
+            agreements.activate(
+                db_a,
+                agreements.ActivateCommand(
+                    command_id=f"activate-{uuid.uuid4()}",
+                    agreement_id=agreement_id,
+                    approval_request_id=request_id,
+                    activation_rule="countersigned",
+                    activation_reference="countersignature-1",
+                    activation_satisfied_at=datetime.now(UTC),
+                ),
+            )
+        db_a.rollback()
