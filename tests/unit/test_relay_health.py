@@ -729,6 +729,84 @@ def test_a_failing_withdrawal_outranks_a_stopped_relay(db: Session) -> None:
     assert health.verdict is RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
 
 
+# ── unrouted approval.* events (F9) ─────────────────────────────────────────
+
+
+def test_a_failing_unrouted_approval_event_gives_its_own_verdict(
+    db: Session,
+) -> None:
+    """`approval.requested` has no handler; a failed delivery of it is prompt
+    health, not silence — same first-attempt reporting as the withdrawal
+    family."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.PENDING,
+        available_at=NOW,
+        event_type="approval.requested",
+        attempts=1,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.APPROVAL_EVENT_UNROUTED
+    assert health.unrouted_approval_events == 1
+
+
+def test_an_unrouted_approval_event_with_no_failed_attempt_is_not_reported(
+    db: Session,
+) -> None:
+    """NON-VACUITY: the same event type, before any attempt, must not trip the
+    verdict — proving `attempts > 0` is what the count actually measures."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.PENDING,
+        available_at=NOW,
+        event_type="approval.requested",
+        attempts=0,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.DRAINING
+    assert health.unrouted_approval_events == 0
+
+
+def test_a_dead_unrouted_approval_event_outranks_activation_dead_lettered(
+    db: Session,
+) -> None:
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.DEAD,
+        available_at=OVERDUE_AT,
+        event_type="approval.approved",
+    )
+    _event(
+        db,
+        status=OutboxStatus.DEAD,
+        available_at=OVERDUE_AT,
+        event_type=ACTIVATED_EVENT_TYPE,
+    )
+    health = _observe(db)
+    assert health.verdict is RelayVerdict.APPROVAL_EVENT_UNROUTED
+    assert health.unrouted_approval_events == 1
+
+
+def test_an_approval_withdrawn_row_is_not_counted_as_unrouted(
+    db: Session,
+) -> None:
+    """`approval.withdrawn` IS routed — it must never inflate this count."""
+    _alive(db)
+    _event(
+        db,
+        status=OutboxStatus.PENDING,
+        available_at=NOW,
+        event_type=APPROVAL_WITHDRAWN_EVENT_TYPE,
+        attempts=1,
+    )
+    health = _observe(db)
+    assert health.unrouted_approval_events == 0
+    assert health.verdict is RelayVerdict.WITHDRAWAL_DELIVERY_FAILING
+
+
 def test_expecting_a_relay_is_the_default(db: Session) -> None:
     """FAIL-CLOSED. A deployment that forgot to say gets the strict answer, so
     the permissive reading is never the one nobody chose."""

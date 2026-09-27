@@ -77,7 +77,7 @@ from enum import Enum
 from typing import Final
 
 from dotmac_kernel.messaging import OutboxStatus, PlatformOutboxEvent
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from vendor_cp.contracts.adapter import ACTIVATED_EVENT_TYPE
@@ -118,6 +118,11 @@ class RelayVerdict(str, Enum):
     #: explicit append-only resolution/redrive record exists — a red conflict
     #: must never read as ready.
     WITHDRAWAL_CONFLICT_UNRESOLVED = "withdrawal_conflict_unresolved"
+    #: An `approval.*` event other than `approval.withdrawn` is failing or dead
+    #: with no handler ever written for it (F9) — a policy/decision/request
+    #: event this deployment defines no route for, not a delivery retrying a
+    #: known handler.
+    APPROVAL_EVENT_UNROUTED = "approval_event_unrouted"
     #: An `approval.withdrawn` delivery exhausted `max_attempts` and the row is
     #: retained as a dead letter. Terminal, like `ACTIVATION_DEAD_LETTERED`.
     WITHDRAWAL_DEAD_LETTERED = "withdrawal_dead_lettered"
@@ -139,6 +144,7 @@ class RelayVerdict(str, Enum):
 VERDICT_PRECEDENCE: Final[tuple[RelayVerdict, ...]] = (
     RelayVerdict.RELAY_STATE_UNKNOWN,
     RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED,
+    RelayVerdict.APPROVAL_EVENT_UNROUTED,
     RelayVerdict.WITHDRAWAL_DEAD_LETTERED,
     RelayVerdict.WITHDRAWAL_DELIVERY_FAILING,
     RelayVerdict.ACTIVATION_DEAD_LETTERED,
@@ -176,6 +182,9 @@ class RelayHealth:
     withdrawal_failing: int | None = None
     withdrawal_dead: int | None = None
     unresolved_withdrawal_conflicts: int | None = None
+    #: `approval.*` events (excluding `approval.withdrawn`) failing or dead with
+    #: no route ever written for them (F9). See `RelayVerdict.APPROVAL_EVENT_UNROUTED`.
+    unrouted_approval_events: int | None = None
     #: Age of the freshest heartbeat, and of the freshest settled delivery.
     #: `None` for "never" — which is a different fact from "long ago" and the
     #: two must not be collapsed: a relay that has never reported and one that
@@ -282,6 +291,7 @@ def relay_health(
             db, status=OutboxStatus.DEAD, event_type=APPROVAL_WITHDRAWN_EVENT_TYPE
         )
         unresolved_withdrawal_conflicts = unresolved_conflicts(db)
+        unrouted_approval_events = _unrouted_approval_events_total(db)
     except Exception:  # noqa: BLE001 - every failure mode is the same answer
         return RelayHealth(verdict=RelayVerdict.RELAY_STATE_UNKNOWN)
 
@@ -300,6 +310,7 @@ def relay_health(
             withdrawal_failing=withdrawal_failing,
             withdrawal_dead=withdrawal_dead,
             unresolved_withdrawal_conflicts=unresolved_withdrawal_conflicts,
+            unrouted_approval_events=unrouted_approval_events,
         ),
         pending_total=pending_total,
         overdue_total=overdue_total,
@@ -312,6 +323,7 @@ def relay_health(
         withdrawal_failing=withdrawal_failing,
         withdrawal_dead=withdrawal_dead,
         unresolved_withdrawal_conflicts=unresolved_withdrawal_conflicts,
+        unrouted_approval_events=unrouted_approval_events,
         heartbeat_age_seconds=heartbeat_age,
         last_settled_age_seconds=settled_age,
         relay_ever_reported=beat.ever_reported if beat.observed else None,
@@ -332,10 +344,13 @@ def _verdict(
     withdrawal_failing: int,
     withdrawal_dead: int,
     unresolved_withdrawal_conflicts: int,
+    unrouted_approval_events: int,
 ) -> RelayVerdict:
     """First member of `VERDICT_PRECEDENCE` whose condition holds."""
     if unresolved_withdrawal_conflicts > 0:
         return RelayVerdict.WITHDRAWAL_CONFLICT_UNRESOLVED
+    if unrouted_approval_events > 0:
+        return RelayVerdict.APPROVAL_EVENT_UNROUTED
     if withdrawal_dead > 0:
         return RelayVerdict.WITHDRAWAL_DEAD_LETTERED
     if withdrawal_failing > 0:
@@ -398,6 +413,37 @@ def _count(
         statement = statement.where(
             PlatformOutboxEvent.attempts > attempts_greater_than
         )
+    return int(db.execute(statement).scalar_one())
+
+
+def _unrouted_approval_events_total(db: Session) -> int:
+    """Count `approval.*` events, excluding `approval.withdrawn`, that are
+    failing or dead with no route ever written for them (F9): PENDING or
+    CLAIMED with at least one failed attempt, or DEAD outright. Read-only,
+    like every other count here.
+    """
+    unrouted = and_(
+        PlatformOutboxEvent.event_type.like("approval.%"),
+        PlatformOutboxEvent.event_type != APPROVAL_WITHDRAWN_EVENT_TYPE,
+    )
+    statement = (
+        select(func.count())
+        .select_from(PlatformOutboxEvent)
+        .where(
+            unrouted,
+            or_(
+                and_(
+                    PlatformOutboxEvent.status == OutboxStatus.PENDING.value,
+                    PlatformOutboxEvent.attempts > 0,
+                ),
+                and_(
+                    PlatformOutboxEvent.status == OutboxStatus.CLAIMED.value,
+                    PlatformOutboxEvent.attempts > 0,
+                ),
+                PlatformOutboxEvent.status == OutboxStatus.DEAD.value,
+            ),
+        )
+    )
     return int(db.execute(statement).scalar_one())
 
 

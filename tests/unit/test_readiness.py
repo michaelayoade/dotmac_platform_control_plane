@@ -180,6 +180,10 @@ def test_the_probe_is_the_cheapest_statement_that_proves_a_round_trip() -> None:
             ReadinessDetail.WITHDRAWAL_CONFLICT_UNRESOLVED,
         ),
         (
+            RelayVerdict.APPROVAL_EVENT_UNROUTED,
+            ReadinessDetail.APPROVAL_EVENT_UNROUTED,
+        ),
+        (
             RelayVerdict.WITHDRAWAL_DEAD_LETTERED,
             ReadinessDetail.WITHDRAWAL_DEAD_LETTERED,
         ),
@@ -234,6 +238,7 @@ def test_the_detail_vocabulary_is_closed_and_carries_no_driver_text() -> None:
         "activation_dead_lettered",
         "relay_state_unknown",
         "withdrawal_conflict_unresolved",
+        "approval_event_unrouted",
         "withdrawal_dead_lettered",
         "withdrawal_delivery_failing",
     }
