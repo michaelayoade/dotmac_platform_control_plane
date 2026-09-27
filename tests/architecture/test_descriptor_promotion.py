@@ -136,10 +136,11 @@ def composed_effective_heads() -> tuple[str, ...]:
     """The revisions `alembic_version` holds after the composed lineage runs.
 
     NOT `ScriptDirectory.get_heads()`, which answers a different question. The
-    graph has eight heads; two of them are named in another revision's
-    `depends_on`, and Alembic prunes a subsumed dependency from the version
-    table rather than leaving it there as a second row. Comparing the descriptor
-    against the graph's heads would demand two rows the database will never hold
+    graph has eight heads; one of them (`li_0001_licensing`) is named in another
+    revision's `depends_on`, and Alembic prunes a subsumed dependency from the
+    version table rather than leaving it there as a second row. Comparing the
+    descriptor against the graph's heads would demand a row the database will
+    never hold
     — and it is the SAME pruning that explains why the pre-bootstrap descriptor
     declared four heads with no kernel revision among them.
     """

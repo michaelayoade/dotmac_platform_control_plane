@@ -21,16 +21,18 @@
 # indistinguishable from the next CORRECTION.
 #
 # Provenance of these bytes:
-#   candidate    deploy/candidates/2026-09-25-gate0-composition-adoption.toml
-#   promoted     2026-09-25, as a COMPOSITION CHANGE rather than a deployment
-#   record       deploy/descriptor-promotions.json (its 2026-09-25 entry)
-#   supersedes   deploy/candidates/2026-09-04-activation-relay-service.toml
+#   candidate    deploy/candidates/2026-09-27-commercial-agreements-withdrawal-standing.toml
+#   promoted     2026-09-27, as a COMPOSITION CHANGE rather than a deployment
+#   record       deploy/descriptor-promotions.json (its 2026-09-27 entry)
+#   supersedes   deploy/candidates/2026-09-25-gate0-composition-adoption.toml
 #
-# This promotion declares the migration heads the Gate-0 composition adoption
-# (Control 0.1.0a15, Approvals 0.1.0a7, kernel 0.1.0a100; ADR-0013 s A7) will
-# reach. ONE section moves and no other: `migration`, and within it only
-# `expected_heads`. It is non-authorizing: it licenses no deployment and
-# performs none.
+# This promotion declares the migration heads the Commercial Agreements
+# 0.1.0a2 -> 0.1.0a4 repin (Gate-0 C2 S4) will reach, on top of the 2026-09-25
+# Gate-0 composition adoption (Control 0.1.0a15 -> now a16, Approvals 0.1.0a7 ->
+# now a8, kernel 0.1.0a100; ADR-0013 s A7). ONE section moves and no other:
+# `migration`, and within it only `expected_heads` (adding
+# `cg_0002_approval_withdrawals`). It is non-authorizing: it licenses no
+# deployment and performs none.
 #
 # The image half is UNCHANGED and deliberately so. `[image]` still names the
 # artifact the application is running and `[assembly].manifest_digest` still
@@ -59,10 +61,11 @@
 #               deployment nobody performed — ADR-0017 § 2's refusal.
 #   [migration] AHEAD OF THE TARGET. `expected_heads` names what the NEXT
 #               deployment will reach (`ap_0003_withdrawals`,
-#               `dc_0015_plan_purpose`), not what the running database holds.
-#               Until that deployment lands, a drift check against production
-#               reports those two as declared-absent and `ap_0002`/`dc_0002` as
-#               present-undeclared. That is the expected reading, not an alarm.
+#               `cg_0002_approval_withdrawals`, `dc_0015_plan_purpose`), not
+#               what the running database holds. Until that deployment lands, a
+#               drift check against production reports those three as
+#               declared-absent and `ap_0002`/`dc_0002` as present-undeclared.
+#               That is the expected reading, not an alarm.
 #   [database]  UNCHANGED by this promotion.
 #
 # ─────────────────────────────────────────────────────────────────────────────
@@ -77,8 +80,9 @@
 #   expected_heads      the composed revision graph's heads, minus every
 #                       revision another applied revision names in `depends_on`
 #                       (Alembic prunes a subsumed dependency from
-#                       `alembic_version`, which is why `cg_0001` and `li_0001`
-#                       are heads of the graph and not rows in the table).
+#                       `alembic_version`, which is why `li_0001` is a head of
+#                       the graph and not a row in the table; `cg_0001` was the
+#                       same until `cg_0002` was composed above it).
 #                       Recomputed offline, from the installed lineages, by
 #                       `tests/architecture/test_descriptor_promotion.py`.
 #   expected_schemas    `public` plus every schema a composed migration creates,

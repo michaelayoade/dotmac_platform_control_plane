@@ -121,7 +121,7 @@
       "promoted_at": "2026-09-27",
       "kind": "composition_change",
       "candidate": "deploy/candidates/2026-09-27-commercial-agreements-withdrawal-standing.toml",
-      "descriptor_sha256": "sha256:7c1f2a4ca629631a7aa84a1d6fd9a0a219ffcd33755af4962748955067ab3c8d",
+      "descriptor_sha256": "sha256:0f8e1f7b5d71c63eed66664e6a64c61fbcf45406291b22c820246a8e5a97fb54",
       "supersedes": "sha256:f3adaff6a23b21d78fe870522d817b874e0fe33c6adacc642b932f622e5c898d",
       "summary": "Declares the migration heads the Commercial Agreements 0.1.0a2 -> 0.1.0a4 repin (Gate-0 C2 S4, Michael 2026-09-27) will reach: a4's cg_0002_approval_withdrawals becomes a seventh effective head (cg_0001 stays pruned because vendor v015 depends on it). Mechanically derived: the new head is exactly the difference between the old declaration and the composed effective heads recomputed by tests/architecture/test_descriptor_promotion.py. NON-AUTHORIZING: no deployment is claimed, performed or licensed, and nothing here authorizes an execution.",
       "changed_sections": [

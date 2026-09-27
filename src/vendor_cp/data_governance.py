@@ -473,6 +473,13 @@ GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
         "agreement, allocation and licence hangs off",
     ),
     # ── `mod_agreements` (dotmac-commercial-agreements) ──────────────────
+    _retain(
+        "mod_agreements",
+        "agreement_approval_withdrawals",
+        "append-only evidence that an approval no longer stands; it is what blocks "
+        "re-approval, activation and reinstatement, so deleting it would silently "
+        "re-enable every withdrawn agreement",
+    ),
     _retain("mod_agreements", "agreement_events", "the agreement lifecycle history"),
     _retain("mod_agreements", "agreement_lines", "what was agreed, at what price"),
     _retain("mod_agreements", "agreements", "the commercial agreement record"),

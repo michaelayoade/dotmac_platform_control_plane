@@ -19,7 +19,8 @@ manifests without a database-catalogue contribution:
 `approvals` (0.1.0a7, now 0.1.0a8) and `deployment_control` (0.1.0a15, now 0.1.0a16) left this set with the
 2026-09-25 Gate-0 composition adoption: each exact-pinned release publishes a
 contribution. `commercial_agreements` left it with the 2026-09-27 repin to
-0.1.0a4 (a contribution first published in 0.1.0a3).
+0.1.0a4 (a contribution first declared in 0.1.0a3, tag
+`dotmac-commercial-agreements-v0.1.0a3`, peeled `5005e998a4cac9b4f7e3ba91f371967b0ee8b2a2`).
 
 `scripts/check_product_database_catalog_readiness.py` derives that set from
 `assembly.STATEFUL_MODULES`. Its test compares the result with the declared debt

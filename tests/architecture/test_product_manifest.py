@@ -99,7 +99,8 @@ def test_the_accepted_and_prospective_manifests_differ_only_by_the_adoption() ->
     after = {m["code"]: m for m in prospective["modules"]}
     assert set(before) == set(after)
     changed = sorted(code for code in before if before[code] != after[code])
-    assert changed == ["approvals", "deployment_control"]
+    # The adopted modules: Approvals, Commercial Agreements and Control.
+    assert changed == ["approvals", "commercial_agreements", "deployment_control"]
 
 
 def test_the_descriptor_carries_no_placeholder_digest() -> None:
