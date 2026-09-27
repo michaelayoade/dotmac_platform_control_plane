@@ -33,6 +33,7 @@ APPROVAL_BARRIER = SRC / "deployment" / "approval_barrier.py"
 PROTECTED_REHEARSAL_ISSUER = SRC / "deployment" / "protected_rehearsal_issuer.py"
 HOST_ADMISSION_ADAPTER = SRC / "deployment" / "host_admission_adapter.py"
 DEPLOYMENT_ADAPTER = SRC / "deployment" / "adapter.py"
+CONTRACTS_ADAPTER = SRC / "contracts" / "adapter.py"
 
 #: Control's approval-dependent entry points. ANY reference to one of these
 #: names -- a call, an attribute read (`fn = control.approve_plan`), a
@@ -49,8 +50,21 @@ GUARDED_CALL_NAMES = frozenset(
         "stage_rehearsal_issuer_consumption",
         "finalize",
         "admit_and_consume_host_admission",
+        # Commercial Agreements' approve/activate/reinstate, bound under these
+        # exact names by contracts/adapter.py's own aliased imports
+        # (`from dotmac_commercial_agreements import approve as module_approve`,
+        # etc.) — the bound identifier at the real call site is what this
+        # detector matches, however the name arrived (S4-A).
+        "module_approve",
+        "module_activate",
+        "module_reinstate",
     }
 )
+
+#: Commercial Agreements commands that consume approval evidence (or, for
+#: reinstate, restore standing on it). Guarded by their bound aliases above;
+#: any other spelling of these names from the module is flagged directly.
+_CA_EVIDENCE_COMMANDS = frozenset({"approve", "activate", "reinstate"})
 
 #: (file relative to src/vendor_cp, enclosing function, guarded name) triples
 #: allowed outside a `held_transition` callback, each with its premise. Narrow
@@ -142,9 +156,42 @@ def _held_transition_callbacks(
     return callbacks
 
 
+def _is_ca_module(module: str | None) -> bool:
+    return module == "dotmac_commercial_agreements" or (module or "").startswith(
+        "dotmac_commercial_agreements."
+    )
+
+
+def _root_name(node: ast.AST) -> str | None:
+    """`a` for `a`, `a.b`, `a.b.c` — the Name an attribute chain hangs off."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _ca_module_names(tree: ast.AST) -> set[str]:
+    """Every local name bound to Commercial Agreements or one of its
+    submodules: `import dotmac_commercial_agreements[.x] [as n]` and
+    `from dotmac_commercial_agreements import service [as n]`."""
+    names = {"dotmac_commercial_agreements"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_ca_module(alias.name):
+                    names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and _is_ca_module(node.module):
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name not in _CA_EVIDENCE_COMMANDS and alias.name != "*"
+            )
+    return names
+
+
 def _guarded_references(tree: ast.AST) -> list[tuple[ast.AST, str]]:
     """Every node that names a guarded entry point, however it is spelled."""
     found: list[tuple[ast.AST, str]] = []
+    ca_modules = _ca_module_names(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in GUARDED_CALL_NAMES:
             found.append((node, node.attr))
@@ -160,13 +207,36 @@ def _guarded_references(tree: ast.AST) -> list[tuple[ast.AST, str]]:
                 for alias in node.names
                 if alias.name in GUARDED_CALL_NAMES
             )
+            # Commercial Agreements' evidence-consuming commands are guarded by
+            # their bound aliases (`module_approve` ...). Importing one under
+            # any OTHER name — or unaliased — would slip past that bound-name
+            # match, so the import itself is the reference.
+            if _is_ca_module(node.module):
+                found.extend(
+                    (node, alias.name)
+                    for alias in node.names
+                    if alias.name == "*"
+                    or (
+                        alias.name in _CA_EVIDENCE_COMMANDS
+                        and (alias.asname or alias.name) not in GUARDED_CALL_NAMES
+                    )
+                )
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr in _CA_EVIDENCE_COMMANDS
+            and _root_name(node.value) in ca_modules
+        ):
+            found.append((node, node.attr))
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "getattr"
             and len(node.args) >= 2
             and isinstance(node.args[1], ast.Constant)
-            and node.args[1].value in GUARDED_CALL_NAMES
+            and (
+                node.args[1].value in GUARDED_CALL_NAMES
+                or node.args[1].value in _CA_EVIDENCE_COMMANDS
+            )
         ):
             found.append((node, str(node.args[1].value)))
     return found
@@ -215,6 +285,7 @@ def test_the_owned_source_files_exist() -> None:
         PROTECTED_REHEARSAL_ISSUER,
         HOST_ADMISSION_ADAPTER,
         DEPLOYMENT_ADAPTER,
+        CONTRACTS_ADAPTER,
     ):
         assert path.exists(), path
 
@@ -378,6 +449,21 @@ def test_a_same_named_function_outside_the_barrier_scope_is_not_exempt() -> None
     assert "request_rollout" in violations[0]
 
 
+def test_the_detector_flags_a_planted_bare_agreement_module_approve_call() -> None:
+    """SENSITIVITY (positive, S4-A). A bare `module_approve(...)` outside any
+    `held_transition` callback must be flagged, the same as Control's own
+    `approve_plan` above -- this is the agreement-side call site the barrier
+    now also covers."""
+    planted = (
+        "def approve_without_a_barrier(db, command):\n"
+        "    return module_approve(db, command)\n"
+    )
+    violations = find_unguarded_calls(planted, filename="contracts/adapter.py")
+    assert len(violations) == 1
+    assert "module_approve" in violations[0]
+    assert "approve_without_a_barrier" in violations[0]
+
+
 def test_the_allowlist_exempts_one_name_not_the_whole_function() -> None:
     """An allowlisted (file, function, finalize) entry must not exempt a new
     guarded call added to the same function."""
@@ -392,3 +478,46 @@ def test_the_allowlist_exempts_one_name_not_the_whole_function() -> None:
     )
     assert len(violations) == 1
     assert "approve_plan" in violations[0]
+
+
+def test_the_detector_flags_an_unaliased_commercial_agreements_command() -> None:
+    """SENSITIVITY (spelling). The guard matches CA's evidence commands by their
+    bound aliases; an unaliased import, a different alias, or an attribute call
+    on the module must each still be flagged."""
+    shapes = {
+        "unaliased": "from dotmac_commercial_agreements import activate\n",
+        "other alias": "from dotmac_commercial_agreements import approve as ok\n",
+        "attribute": (
+            "import dotmac_commercial_agreements\n"
+            "def f(db, c):\n"
+            "    return dotmac_commercial_agreements.reinstate(db, c)\n"
+        ),
+        "module alias": (
+            "import dotmac_commercial_agreements as ca\n"
+            "def f(db, c):\n"
+            "    return ca.approve(db, c)\n"
+        ),
+        "submodule attribute": (
+            "import dotmac_commercial_agreements.service\n"
+            "def f(db, c):\n"
+            "    return dotmac_commercial_agreements.service.activate(db, c)\n"
+        ),
+        "from-imported submodule": (
+            "from dotmac_commercial_agreements import service as svc\n"
+            "def f(db, c):\n"
+            "    return svc.reinstate(db, c)\n"
+        ),
+        "getattr": (
+            "import dotmac_commercial_agreements as ca\n"
+            "def f(db, c):\n"
+            "    return getattr(ca, 'activate')(db, c)\n"
+        ),
+        "star import": "from dotmac_commercial_agreements import *\n",
+    }
+    for label, source in shapes.items():
+        assert find_unguarded_calls(source, filename="planted.py"), label
+    # The sanctioned aliased import itself is not a violation.
+    assert not find_unguarded_calls(
+        "from dotmac_commercial_agreements import approve as module_approve\n",
+        filename="planted.py",
+    )

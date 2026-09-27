@@ -65,7 +65,8 @@ from dotmac_deployment_control import (
     register_target,
     set_desired_state,
 )
-from sqlalchemy import create_engine, event, text
+from dotmac_deployment_control.models import RehearsalIssuerAuthorizationRecord
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -924,6 +925,149 @@ def test_i1_the_hold_and_the_issuance_run_in_the_same_transaction(
         "pairs -- they did not run in the same transaction on the same "
         "connection"
     )
+
+
+# ── I2 (issuance) ────────────────────────────────────────────────────────
+
+
+def test_i2_no_intermediate_commit_at_issuance_and_exactly_one_after(
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    engine: Engine,
+    issuer_security: tuple[object, object],
+) -> None:
+    """T2's proof, at `issue_authorization` instead of `approve_issuer_plan`:
+    zero real COMMITs happen between the hold and the caller's own return, and
+    exactly one fires after the caller's own commit. A dedicated engine for
+    session A keeps session B's probes out of the count, same as T2."""
+    plan_id, request_id = seeded
+    _approve_and_commit(engine, plan_id, request_id)
+
+    _, harness = issuer_security
+    target_ref = _target_ref_for(engine, plan_id)
+    _, evidence = _harness_evidence(harness, target_ref)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(f"issue-{uuid.uuid4()}", plan_id, "operator-rehearsal"),
+        evidence,
+    )
+
+    commits: list[int] = []
+    mutated = threading.Event()
+    release = threading.Event()
+    issue_result: list[object] = []
+    issue_error: list[BaseException] = []
+    real_issue = control.issue_rehearsal_issuer_authorization_for_plan
+
+    def paused_issue(
+        db: Session, request: object, *, harness_evidence_document: object
+    ) -> object:
+        assert not commits, "a commit happened before the issuance transition ran"
+        result = real_issue(
+            db, request, harness_evidence_document=harness_evidence_document
+        )
+        mutated.set()
+        release.wait(timeout=_LOCK_WAIT)
+        return result
+
+    engine_a = create_engine(engine.url, future=True)
+    event.listen(engine_a, "commit", lambda _conn: commits.append(1))
+
+    def run_a() -> None:
+        try:
+            with (
+                Session(engine_a) as db_a,
+                mock.patch.object(
+                    control,
+                    "issue_rehearsal_issuer_authorization_for_plan",
+                    paused_issue,
+                ),
+            ):
+                result = issue_authorization(db_a, invocation)
+                assert (
+                    not commits
+                ), "issue_authorization committed before returning to its caller"
+                db_a.commit()
+            issue_result.append(result)
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            issue_error.append(exc)
+
+    thread_a = threading.Thread(target=run_a)
+    thread_a.start()
+    try:
+        assert mutated.wait(
+            timeout=_LOCK_WAIT
+        ), "session A never reached its pause point"
+    finally:
+        release.set()
+        thread_a.join(timeout=_LOCK_WAIT)
+
+    assert not issue_error, f"session A failed: {issue_error!r}"
+    assert issue_result
+    engine_a.dispose()
+    assert (
+        len(commits) == 1
+    ), f"expected exactly one commit after the caller's own commit, got {len(commits)}"
+
+
+# ── I4 (issuance) ────────────────────────────────────────────────────────
+
+
+def test_i4_a_withdrawal_that_commits_first_makes_issuance_refuse(
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    engine: Engine,
+    issuer_security: tuple[object, object],
+) -> None:
+    """T4's proof, at issuance: a withdrawal that commits before
+    `issue_authorization` starts must make the hold refuse `withdrawn`,
+    Control's issuance entry point must never be called, and Control's issuer
+    ledger must gain no new row for this plan."""
+    plan_id, request_id = seeded
+    _approve_and_commit(engine, plan_id, request_id)
+
+    _, harness = issuer_security
+    target_ref = _target_ref_for(engine, plan_id)
+    _, evidence = _harness_evidence(harness, target_ref)
+    invocation = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(f"issue-{uuid.uuid4()}", plan_id, "operator-rehearsal"),
+        evidence,
+    )
+
+    with Session(engine) as db_b:
+        outcome = _withdraw(
+            db_b, request_id=request_id, external_ref=f"withdraw-{uuid.uuid4()}"
+        )
+        db_b.commit()
+    assert outcome.state is ApprovalState.WITHDRAWN
+
+    issue_calls: list[object] = []
+    real_issue = control.issue_rehearsal_issuer_authorization_for_plan
+
+    def counting_issue(
+        db: Session, request: object, *, harness_evidence_document: object
+    ) -> object:
+        issue_calls.append(request)
+        return real_issue(
+            db, request, harness_evidence_document=harness_evidence_document
+        )
+
+    with (
+        Session(engine) as db_a,
+        mock.patch.object(
+            control, "issue_rehearsal_issuer_authorization_for_plan", counting_issue
+        ),
+    ):
+        with pytest.raises(dotmac_approvals.ApprovalNotHeld) as refused:
+            issue_authorization(db_a, invocation)
+        db_a.rollback()
+    assert refused.value.code is dotmac_approvals.ApprovalHoldRefusal.WITHDRAWN
+    assert issue_calls == [], "Control was asked to issue on a withdrawn decision"
+
+    with Session(engine) as db_c:
+        count = db_c.scalar(
+            select(func.count())
+            .select_from(RehearsalIssuerAuthorizationRecord)
+            .where(RehearsalIssuerAuthorizationRecord.plan_id == plan_id)
+        )
+    assert count == 0, "issuance created a ledger row despite the withdrawal"
 
 
 # ── A1 ────────────────────────────────────────────────────────────────────

@@ -6,8 +6,9 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 
+import dotmac_approvals
 import pytest
-from dotmac_approvals import SelfApprovalRefused
+from dotmac_approvals import Actor, SelfApprovalRefused
 from dotmac_commercial_agreements import (
     AGREEMENT_ACTIVATED_V1,
     AGREEMENT_APPROVED_V1,
@@ -16,15 +17,21 @@ from dotmac_commercial_agreements import (
     AgreementStatus,
     UndeclaredCapabilityError,
 )
-from dotmac_kernel import ConflictError, NotFoundError
+from dotmac_kernel import ConflictError, NotFoundError, PlatformAdmin
+from dotmac_kernel.db import get_platform_db
 from dotmac_kernel.entitlements import TenantEntitlementGrant
+from dotmac_kernel.errors import register_error_handlers
 from dotmac_kernel.messaging import PlatformOutboxEvent
+from dotmac_kernel.platform_auth import require_platform_admin
 from dotmac_kernel.testing import create_test_engine, isolated_session
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import adapter as approvals
 from vendor_cp.contracts import adapter as agreements
+from vendor_cp.contracts.router import router as contracts_router
 from vendor_cp.contracts.terms import (
     TermEndNotRepresentable,
     end_exclusive_from_inclusive,
@@ -33,6 +40,14 @@ from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.models import OfferVersion
 
 PRODUCT = "dotmac-sub"
+
+# `approve`/`activate`/`reinstate` now run through
+# `approval_barrier.held_transition`. Its runtime checks are dialect-aware
+# (`_require_the_hold_is_still_open` skips on a non-PostgreSQL bind, and
+# `_require_transactional` only refuses a driver's real `autocommit is True`,
+# never SQLite's `-1`/`False`), so this in-memory SQLite suite needs no
+# bypass — the FOR SHARE lock and both runtime checks are proved for real
+# against PostgreSQL in `tests/migration/test_agreement_approval_barrier.py`.
 
 
 @pytest.fixture
@@ -261,7 +276,7 @@ def test_a_requester_cannot_approve_their_own_agreement(db: Session) -> None:
         _decide(db, proposed, requester)
 
     assert proposed.approval_request_id is not None
-    with pytest.raises(ConflictError, match="not approved"):
+    with pytest.raises(ConflictError, match="not held: not_approved"):
         agreements.approve(
             db,
             agreements.ApprovalCommand(
@@ -387,3 +402,73 @@ def test_reject_clears_the_frozen_snapshot(db: Session) -> None:
     )
     assert rejected.status == AgreementStatus.DRAFT.value
     assert rejected.content_hash is None
+
+
+# ── router: a refused hold is a 409, never a 500 ────────────────────────────
+#
+# `adapter.approve`/`activate` map `dotmac_approvals.ApprovalNotHeld` to
+# `dotmac_kernel.ConflictError`, but the router only ever catches
+# `adapter.AgreementError` explicitly (see `contracts/router.py`). Without
+# `register_error_handlers` wiring `ConflictError` to a 409 response, an
+# uncaught `ConflictError` would propagate as an unhandled exception and
+# FastAPI would turn it into a 500 — which is exactly the regression this
+# route-level (not adapter-level) proof exists to catch.
+
+
+@pytest.fixture
+def client(db: Session) -> Iterator[TestClient]:
+    app = FastAPI()
+    register_error_handlers(app)
+    app.include_router(contracts_router)
+    admin = PlatformAdmin(id=uuid.uuid4(), email="ops@dotmac.io", password_hash="x")
+    app.dependency_overrides[get_platform_db] = lambda: db
+    app.dependency_overrides[require_platform_admin] = lambda: admin
+    with TestClient(app) as c:
+        yield c
+
+
+def test_approve_route_returns_409_not_500_for_an_unapproved_request(
+    client: TestClient, db: Session
+) -> None:
+    _offer(db)
+    proposed = _propose(db, _draft(db).id)
+    assert proposed.approval_request_id is not None
+
+    response = client.post(
+        f"/platform/vendor/contracts/{proposed.id}/approve",
+        json={
+            "command_id": "approve-route-409",
+            "approval_request_id": str(proposed.approval_request_id),
+        },
+    )
+    assert response.status_code == 409
+    assert "not held: not_approved" in response.json()["message"]
+
+
+def test_activate_route_returns_409_not_500_for_a_withdrawn_decision(
+    client: TestClient, db: Session
+) -> None:
+    _offer(db)
+    approved = _approve(db, _propose(db, _draft(db).id))
+    assert approved.approval_request_id is not None
+    dotmac_approvals.withdraw_platform_approval(
+        db,
+        request_id=approved.approval_request_id,
+        actor=Actor(actor_id=uuid.uuid4()),
+        authority_ref="ops-ticket-route-409",
+        reason="router 409 proof",
+        external_ref=f"withdraw-{uuid.uuid4()}",
+    )
+
+    response = client.post(
+        f"/platform/vendor/contracts/{approved.id}/activate",
+        json={
+            "command_id": "activate-route-409",
+            "approval_request_id": str(approved.approval_request_id),
+            "activation_rule": "countersigned",
+            "activation_reference": "countersignature-1",
+            "activation_satisfied_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    assert response.status_code == 409
+    assert "not held: withdrawn" in response.json()["message"]
