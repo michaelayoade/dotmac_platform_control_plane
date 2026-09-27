@@ -773,6 +773,133 @@ def test_control_replay_across_plans_under_a_reused_command_id_fails_closed(
     assert plan_b_view.approval_decision_ref is None
 
 
+# ── issuance: a cross-plan command-id reuse is refused before Control ───────
+
+
+def test_issuance_cross_plan_command_id_reuse_is_refused_before_control_by_the_receipt(
+    seeded: tuple[uuid.UUID, uuid.UUID],
+    engine: Engine,
+    issuer_security: tuple[object, object],
+) -> None:
+    plan_a, request_a = seeded
+    _approve_and_commit(engine, plan_a, request_a)
+    _, harness = issuer_security
+    target_ref_a = _target_ref_for(engine, plan_a)
+    command_id = f"issue-{uuid.uuid4()}"
+    _, evidence_a = _harness_evidence(harness, target_ref_a)
+    invocation_a = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(command_id, plan_a, "operator-rehearsal"), evidence_a
+    )
+    with Session(engine) as db:
+        issue_authorization(db, invocation_a)
+        db.commit()
+
+    with Session(engine) as db:
+        assert find_receipt(db, command_id) is not None
+
+    plan_b, request_b = _seed(engine)
+    _approve_and_commit(engine, plan_b, request_b)
+    target_ref_b = _target_ref_for(engine, plan_b)
+    _, evidence_b = _harness_evidence(harness, target_ref_b)
+    invocation_b = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(command_id, plan_b, "operator-rehearsal"), evidence_b
+    )
+
+    issue_calls: list[object] = []
+    real_issue = control.issue_rehearsal_issuer_authorization_for_plan
+
+    def counting_issue(
+        db: Session, request: object, *, harness_evidence_document: object
+    ) -> object:
+        issue_calls.append(request)
+        return real_issue(
+            db, request, harness_evidence_document=harness_evidence_document
+        )
+
+    with (
+        Session(engine) as db,
+        mock.patch.object(
+            control, "issue_rehearsal_issuer_authorization_for_plan", counting_issue
+        ),
+    ):
+        with pytest.raises(IssuerCommandReused):
+            issue_authorization(db, invocation_b)
+        db.rollback()
+    assert issue_calls == [], "Control was called for a reused command id"
+
+    with Session(engine) as db:
+        record = db.scalar(
+            select(RehearsalIssuerAuthorizationRecord).where(
+                RehearsalIssuerAuthorizationRecord.plan_id == plan_b
+            )
+        )
+    assert record is None
+
+
+def test_issuance_control_replay_across_plans_under_a_reused_command_id_fails_closed(
+    engine: Engine, issuer_security: tuple[object, object]
+) -> None:
+    """Control a16's own replay bug for issuance (`rehearsal_issuer_issuance.py`
+    lines 583-601): a same-`command_id` retry against a DIFFERENT plan bypasses
+    the handler via `process_once_platform`'s idempotency replay, and Control's
+    `record.plan_id != plan_id` check catches it and raises
+    `RehearsalIssuerIssuanceRefusedError` itself -- CP never gets the chance to
+    write a receipt disagreement, because with receipt-writing monkeypatched
+    off for the first call, CP's own pre-hold check sees no receipt at all and
+    lets the request reach Control.
+    """
+
+    def _noop_record_receipt(db: Session, **kwargs: object) -> None:
+        return None
+
+    plan_a, request_a = _seed(engine)
+    _approve_and_commit(engine, plan_a, request_a)
+    _, harness = issuer_security
+    target_ref_a = _target_ref_for(engine, plan_a)
+    command_id = f"issue-{uuid.uuid4()}"
+    _, evidence_a = _harness_evidence(harness, target_ref_a)
+    invocation_a = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(command_id, plan_a, "operator-rehearsal"), evidence_a
+    )
+    with (
+        Session(engine) as db,
+        mock.patch.object(
+            issuer_receipts_module, "record_receipt", _noop_record_receipt
+        ),
+    ):
+        issue_authorization(db, invocation_a)
+        db.commit()
+
+    with Session(engine) as db:
+        assert find_receipt(db, command_id) is None
+
+    plan_b, request_b = _seed(engine)
+    _approve_and_commit(engine, plan_b, request_b)
+    target_ref_b = _target_ref_for(engine, plan_b)
+    _, evidence_b = _harness_evidence(harness, target_ref_b)
+    invocation_b = RehearsalIssuerInvocation(
+        RehearsalIssuerCommand(command_id, plan_b, "operator-rehearsal"), evidence_b
+    )
+
+    with Session(engine) as db:
+        with pytest.raises(control.RehearsalIssuerIssuanceRefusedError) as refused:
+            issue_authorization(db, invocation_b)
+        db.rollback()
+    assert (
+        "issuance replay no longer resolves to an issued authorization for this "
+        "plan" in str(refused.value)
+    )
+
+    with Session(engine) as db:
+        assert find_receipt(db, command_id) is None
+        record = db.scalar(
+            select(RehearsalIssuerAuthorizationRecord).where(
+                RehearsalIssuerAuthorizationRecord.plan_id == plan_b
+            )
+        )
+    assert record is None
+
+
 # ── seam-level concurrency: same command id, different actor_ref ───────────
 
 
