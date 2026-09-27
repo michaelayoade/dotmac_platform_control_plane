@@ -40,6 +40,7 @@ import dotmac_approvals
 import pytest
 from alembic import command
 from dotmac_approvals import Actor, ApprovalState
+from dotmac_kernel import ConflictError
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
@@ -269,7 +270,7 @@ def test_a_withdrawal_committed_first_makes_approve_refuse(
         Session(engine) as db_a,
         mock.patch.object(agreements, "module_approve", counting_module_approve),
     ):
-        with pytest.raises(dotmac_approvals.ApprovalNotHeld) as refused:
+        with pytest.raises(ConflictError, match="not held: withdrawn"):
             agreements.approve(
                 db_a,
                 agreements.ApprovalCommand(
@@ -279,7 +280,6 @@ def test_a_withdrawal_committed_first_makes_approve_refuse(
                 ),
             )
         db_a.rollback()
-    assert refused.value.code is dotmac_approvals.ApprovalHoldRefusal.WITHDRAWN
     assert approve_calls == [], "the module was asked to approve a withdrawn decision"
     assert _status(engine, agreement_id) == "proposed"
 
@@ -403,7 +403,7 @@ def test_activate_withdraw_first_is_refused_and_the_agreement_stays_approved(
         Session(engine) as db_a,
         mock.patch.object(agreements, "module_activate", counting_module_activate),
     ):
-        with pytest.raises(dotmac_approvals.ApprovalNotHeld) as refused:
+        with pytest.raises(ConflictError, match="not held: withdrawn"):
             agreements.activate(
                 db_a,
                 agreements.ActivateCommand(
@@ -416,7 +416,6 @@ def test_activate_withdraw_first_is_refused_and_the_agreement_stays_approved(
                 ),
             )
         db_a.rollback()
-    assert refused.value.code is dotmac_approvals.ApprovalHoldRefusal.WITHDRAWN
     assert (
         activate_calls == []
     ), "the module was asked to activate on a withdrawn decision"
@@ -453,7 +452,7 @@ def test_reinstate_withdraw_first_is_refused_and_the_agreement_stays_suspended(
         Session(engine) as db_a,
         mock.patch.object(agreements, "module_reinstate", counting_module_reinstate),
     ):
-        with pytest.raises(dotmac_approvals.ApprovalNotHeld) as refused:
+        with pytest.raises(ConflictError, match="not held: withdrawn"):
             agreements.reinstate(
                 db_a,
                 agreements.TransitionCommand(
@@ -462,7 +461,6 @@ def test_reinstate_withdraw_first_is_refused_and_the_agreement_stays_suspended(
                 ),
             )
         db_a.rollback()
-    assert refused.value.code is dotmac_approvals.ApprovalHoldRefusal.WITHDRAWN
     assert (
         reinstate_calls == []
     ), "the module was asked to reinstate on a withdrawn decision"
