@@ -60,6 +60,12 @@ class FakeApprovalNotHeld(Exception):
         self.code = code
 
 
+#: A JSON-native harness evidence document, the shape the real harness emits
+#: (`rehearsal_issuer_harness/security.py::document()` returns a plain dict);
+#: the issuance fingerprint refuses anything it cannot digest canonically.
+_EVIDENCE: dict[str, object] = {"schema": "test-harness-evidence", "lease": "L-1"}
+
+
 @pytest.fixture(autouse=True)
 def _no_receipt_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """These seam tests pass a bare stand-in session; the receipt store (its
@@ -285,7 +291,7 @@ def test_mutated_approval_subject_is_refused(
 
 
 def test_issuance_carries_only_existing_seam_fields(ports: SimpleNamespace) -> None:
-    evidence = object()
+    evidence = dict(_EVIDENCE)
     invocation = RehearsalIssuerInvocation(
         RehearsalIssuerCommand("issue-1", PLAN_ID), evidence
     )
@@ -312,7 +318,7 @@ def test_issuance_derives_request_id_only_from_the_frozen_plan(
     other_request_id = UUID("80000000-0000-0000-0000-000000000008")
     ports.plan.approval_decision_ref = str(other_request_id)
     invocation = RehearsalIssuerInvocation(
-        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+        RehearsalIssuerCommand("issue-1", PLAN_ID), dict(_EVIDENCE)
     )
     issuer.issue_authorization(object(), invocation)
     held = ports.calls[0]
@@ -325,7 +331,7 @@ def test_issuance_refuses_without_a_recorded_approval_decision(
 ) -> None:
     ports.plan.approval_decision_ref = None
     invocation = RehearsalIssuerInvocation(
-        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+        RehearsalIssuerCommand("issue-1", PLAN_ID), dict(_EVIDENCE)
     )
     with pytest.raises(ValueError, match="no recorded approval decision"):
         issuer.issue_authorization(object(), invocation)
@@ -337,7 +343,7 @@ def test_issuance_refuses_a_malformed_approval_decision_ref(
 ) -> None:
     ports.plan.approval_decision_ref = "not-a-uuid"
     invocation = RehearsalIssuerInvocation(
-        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+        RehearsalIssuerCommand("issue-1", PLAN_ID), dict(_EVIDENCE)
     )
     with pytest.raises(ValueError, match="is not a UUID"):
         issuer.issue_authorization(object(), invocation)
@@ -360,7 +366,7 @@ def test_issuance_reread_mismatch_after_a_concurrent_change_raises(
 
     ports.control.issue_rehearsal_issuer_authorization_for_plan = issue_and_mutate
     invocation = RehearsalIssuerInvocation(
-        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+        RehearsalIssuerCommand("issue-1", PLAN_ID), dict(_EVIDENCE)
     )
     with pytest.raises(ValueError, match="approval standing changed"):
         issuer.issue_authorization(object(), invocation)
@@ -387,7 +393,7 @@ def test_approval_not_held_refusal_means_control_never_sees_issuance(
     ports.hold_refusal["code"] = "withdrawn"
     ports.hold_refusal["message"] = "withdrawn"
     invocation = RehearsalIssuerInvocation(
-        RehearsalIssuerCommand("issue-1", PLAN_ID), object()
+        RehearsalIssuerCommand("issue-1", PLAN_ID), dict(_EVIDENCE)
     )
     with pytest.raises(FakeApprovalNotHeld):
         issuer.issue_authorization(object(), invocation)
