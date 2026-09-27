@@ -223,7 +223,7 @@ def test_a_member_with_its_own_connect_grant_is_fenced_and_restored_exactly(
                     pass
 
             with _connect(admin_url, autocommit=True) as conn:
-                restore_writers(conn, proof)
+                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
                 assert fence_module._current_grants(conn, db) == before
 
             with _connect(url_for(postgres_url, db, user=member)) as conn:
@@ -340,7 +340,7 @@ def test_fence_then_restore_on_a_null_datacl_database_reproduces_the_default(
                 ).scalar_one()
                 assert probe_while_fenced is False
 
-                restore_writers(conn, proof)
+                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
 
                 probe_after_restore = conn.execute(
                     text("SELECT has_database_privilege(:r, :d, 'CONNECT')"),
@@ -374,13 +374,17 @@ def test_restore_returns_the_exact_prior_acl_and_a_second_restore_changes_nothin
             assert proof.prior_acl == prior_before
             assert proof.prior_grants == prior_grants_before
 
-            first = restore_writers(conn, proof)
+            first = restore_writers(
+                conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS
+            )
             assert fence_module._current_grants(conn, db) == prior_grants_before
 
             # The ACL already matches prior_grants, so a second restore has
             # nothing left to grant — idempotent means "changes nothing",
             # not "re-grants the same roles again".
-            second = restore_writers(conn, proof)
+            second = restore_writers(
+                conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS
+            )
             assert second.roles_restored == ()
             assert first.roles_restored != ()
             assert fence_module._current_grants(conn, db) == prior_grants_before
@@ -410,7 +414,9 @@ def test_refencing_with_prior_keeps_the_original_prior_acl(
             assert second_proof.prior_acl == first_proof.prior_acl
             assert second_proof.prior_grants == first_proof.prior_grants
 
-            restore_writers(conn, second_proof)
+            restore_writers(
+                conn, second_proof, session_wait_seconds=SESSION_WAIT_SECONDS
+            )
             assert fence_module._current_grants(conn, db) == first_proof.prior_grants
 
 
@@ -888,7 +894,7 @@ def test_a_quoted_grantee_fences_and_restores_exactly(admin_url: str, db: str) -
             ).scalar_one()
             assert fenced_can_connect is False
 
-            restore_writers(conn, proof)
+            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
             assert fence_module._current_grants(conn, db) == before
     finally:
         with _connect(admin_url, autocommit=True) as conn:
@@ -919,7 +925,7 @@ def test_a_writer_with_grant_option_restores_with_the_grant_option(
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
-            restore_writers(conn, proof)
+            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
 
             after = fence_module._current_grants(conn, db)
             assert after == before
@@ -947,13 +953,13 @@ def test_restore_refuses_an_unexpected_extra_grant_and_stays_fenced(
             conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {intruder}'))
 
             with pytest.raises(FenceRefused) as refused:
-                restore_writers(conn, proof)
+                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
             assert refused.value.code == FenceRefusalCode.ACL_NOT_RESTORED
             # Still fenced: PUBLIC was never re-granted by the refused restore.
             assert not _has_connect(fence_module._current_grants(conn, db), "")
 
             conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {intruder}'))
-            restore_writers(conn, proof)
+            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
 
 
 def test_restore_refuses_a_disallowed_grantee_before_regranting_public(
@@ -976,7 +982,7 @@ def test_restore_refuses_a_disallowed_grantee_before_regranting_public(
             conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {bystander}'))
 
             with pytest.raises(FenceRefused) as refused:
-                restore_writers(conn, proof)
+                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
             assert refused.value.code == FenceRefusalCode.ACL_NOT_RESTORED
             # Still fenced: PUBLIC was never re-granted, and neither was w.
             grants = fence_module._current_grants(conn, db)
@@ -984,7 +990,7 @@ def test_restore_refuses_a_disallowed_grantee_before_regranting_public(
             assert not _has_connect(grants, w)
 
             conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {bystander}'))
-            restore_writers(conn, proof)
+            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
             conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {bystander}'))
 
 
@@ -1039,3 +1045,94 @@ def test_a_drain_that_never_reaches_zero_survives_and_is_compensated(
             assert refused.value.code == FenceRefusalCode.WRITER_SESSIONS_SURVIVED
             assert refused.value.before_acl is not None
             assert fence_module._current_grants(conn, db) == before
+
+
+# ── (r) a restore that reopens, a writer reconnects, then it mismatches ────
+
+
+class _SkipOneGrantReconnectTheOther:
+    """Drops the GRANT for `skip_role` (so the final restore verification
+    genuinely mismatches proof.prior_grants), and — right after the REAL
+    GRANT for `reconnect_role` lands — opens a second connection as
+    `reconnect_role`, simulating a writer that reconnects during the window
+    the ACL was genuinely reopened, before the final mismatch is caught."""
+
+    def __init__(
+        self,
+        real: Connection,
+        *,
+        skip_role: str,
+        reconnect_role: str,
+        reconnect_url: str,
+        reconnected: list[Connection],
+    ) -> None:
+        self._real = real
+        self._skip_role = skip_role
+        self._reconnect_role = reconnect_role
+        self._reconnect_url = reconnect_url
+        self._reconnected = reconnected
+
+    def execute(self, statement: object, *args: object, **kwargs: object) -> object:
+        sql = str(statement)
+        if sql.startswith("GRANT CONNECT") and self._skip_role in sql:
+            return None
+        result = self._real.execute(statement, *args, **kwargs)  # type: ignore[arg-type]
+        if sql.startswith("GRANT CONNECT") and self._reconnect_role in sql:
+            engine = create_engine(self._reconnect_url)
+            self._reconnected.append(engine.connect())
+        return result
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def test_a_restore_that_reopens_and_then_mismatches_redrains_before_reporting(
+    admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """COMPENSATION for restore itself. The final verification mismatches
+    (w2's GRANT was dropped), but w1's GRANT landed for real and a second
+    connection reconnects as w1 during that reopen window. `restore_writers`
+    must not report `ACL_NOT_RESTORED` without re-proving the database holds
+    no open writer sessions: the re-drain terminates w1's reconnected session,
+    and only then is the mismatch reported."""
+    with _writer_role(admin_url) as w1, _writer_role(admin_url) as w2:
+        with _connect(admin_url, autocommit=True) as conn:
+            proof = fence_writers(
+                conn,
+                database=db,
+                writer_roles=(w1, w2),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+
+            reconnected: list[Connection] = []
+            proxy = _SkipOneGrantReconnectTheOther(
+                conn,
+                skip_role=w2,
+                reconnect_role=w1,
+                reconnect_url=url_for(postgres_url, db, user=w1),
+                reconnected=reconnected,
+            )
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(
+                    proxy,  # type: ignore[arg-type]
+                    proof,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.ACL_NOT_RESTORED
+            assert len(reconnected) == 1
+
+            # The writer that reconnected during the reopen window was
+            # terminated by the re-drain...
+            with pytest.raises(OperationalError):
+                reconnected[0].execute(text("SELECT 1"))
+            reconnected[0].close()
+
+            # ...and cannot reconnect: the re-fence revoked it again.
+            with pytest.raises(OperationalError, match="permission denied"):
+                with _connect(url_for(postgres_url, db, user=w1)):
+                    pass
+
+            # The database is still fully fenced (both w1 and w2, plus
+            # PUBLIC) — restore it for real so fixture teardown can drop the
+            # roles.
+            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)

@@ -643,7 +643,9 @@ def fence_writers(
             fenced_at=datetime.now(UTC),
         )
         try:
-            restore_writers(conn, compensating)
+            restore_writers(
+                conn, compensating, session_wait_seconds=session_wait_seconds
+            )
         except BaseException as restore_exc:
             failure = FenceRefused(
                 FenceRefusalCode.COMPENSATION_FAILED,
@@ -804,7 +806,52 @@ def _refence(conn: Connection, quoted_db: str, restored: list[str]) -> None:
         )
 
 
-def restore_writers(conn: Connection, proof: FenceProof) -> UnfenceProof:
+def _refence_and_redrain(
+    conn: Connection,
+    quoted_db: str,
+    database: str,
+    effective: tuple[str, ...],
+    restored: list[str],
+    session_wait_seconds: float,
+    *,
+    original: BaseException,
+    detail: str,
+    before_acl: str,
+) -> None:
+    """Re-revoke what a failed restore just granted, then re-drain the
+    effective set before the caller reports its own failure.
+
+    A restore that briefly re-opened the ACL and then failed must not claim
+    the database is fenced without re-proving it: a writer could have
+    reconnected during the re-opened window. Returning normally here means
+    the re-fence and re-drain both succeeded, and the caller raises its own
+    `ACL_NOT_RESTORED`. Raising here (this function never returns in that
+    case) supersedes that with a sharper diagnosis: `COMPENSATION_FAILED` if
+    the re-revoke itself failed, or `WRITER_SESSIONS_SURVIVED` if the drain
+    never converged — both chained from `original`, the failure this restore
+    was reacting to."""
+    try:
+        _refence(conn, quoted_db, restored)
+    except BaseException as refence_exc:
+        raise FenceRefused(
+            FenceRefusalCode.COMPENSATION_FAILED,
+            f"re-fencing {database!r} after a failed restore itself failed: "
+            f"{refence_exc!r}; the database may not be fenced — restore to "
+            "prior_acl by hand",
+            before_acl=before_acl,
+        ) from original
+    try:
+        _terminate_and_drain(conn, database, effective, session_wait_seconds)
+    except FenceRefused as drain_exc:
+        raise FenceRefused(
+            FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
+            f"{detail}; re-fenced, but the drain did not converge: {drain_exc!r}",
+        ) from original
+
+
+def restore_writers(
+    conn: Connection, proof: FenceProof, *, session_wait_seconds: float
+) -> UnfenceProof:
     """Put the ACL back to exactly `proof.prior_grants`. Idempotent.
 
     Only re-grants CONNECT to a grantee the prior ACL actually held it for —
@@ -816,6 +863,14 @@ def restore_writers(conn: Connection, proof: FenceProof) -> UnfenceProof:
     fenced — and, if the restored ACL still does not match afterwards,
     re-revokes everything it just granted (plus PUBLIC) so the database stays
     fenced rather than silently half-open.
+
+    On either re-fence path (a partial GRANT failure, or a final mismatch)
+    this also TERMINATES AND DRAINS the effective set again with
+    `session_wait_seconds` before reporting the failure — reopening the ACL
+    briefly is not itself a hazard a caller can act on, but a writer that
+    reconnected during that window and is still open when this function
+    returns would be, so this never claims the database is fenced without
+    re-proving it holds no open writer sessions.
     """
     _require_autocommit(conn)
 
@@ -867,7 +922,18 @@ def restore_writers(conn: Connection, proof: FenceProof) -> UnfenceProof:
             restored.append("PUBLIC" if grantee == "" else grantee)
         final = _current_grants(conn, proof.database)
     except BaseException as exc:
-        _refence(conn, quoted_db, restored)
+        _refence_and_redrain(
+            conn,
+            quoted_db,
+            proof.database,
+            effective,
+            restored,
+            session_wait_seconds,
+            original=exc,
+            detail=f"restoring the ACL for {proof.database!r} failed part-way "
+            f"({exc!r}); re-revoked what was granted to stay fenced",
+            before_acl=proof.prior_acl,
+        )
         raise FenceRefused(
             FenceRefusalCode.ACL_NOT_RESTORED,
             f"restoring the ACL for {proof.database!r} failed part-way "
@@ -877,12 +943,23 @@ def restore_writers(conn: Connection, proof: FenceProof) -> UnfenceProof:
     if final != proof.prior_grants:
         # Stay fenced: re-revoke PUBLIC and every role just granted, rather
         # than returning a proof claiming the restore worked.
-        _refence(conn, quoted_db, restored)
-        raise FenceRefused(
+        mismatch = FenceRefused(
             FenceRefusalCode.ACL_NOT_RESTORED,
             f"restored ACL for {proof.database!r} does not equal the prior "
             "ACL recorded in the fence proof; re-revoked to stay fenced",
         )
+        _refence_and_redrain(
+            conn,
+            quoted_db,
+            proof.database,
+            effective,
+            restored,
+            session_wait_seconds,
+            original=mismatch,
+            detail=str(mismatch),
+            before_acl=proof.prior_acl,
+        )
+        raise mismatch
 
     restored_at = conn.execute(text("SELECT now()")).scalar_one()
     return UnfenceProof(
