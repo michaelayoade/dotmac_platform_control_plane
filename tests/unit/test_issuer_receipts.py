@@ -32,6 +32,7 @@ from vendor_cp.deployment.issuer_receipts import (
     IssuerCommandReceipt,
     IssuerCommandReused,
     IssuerReceiptMismatch,
+    _normalize,
     find_receipt,
     record_receipt,
     request_fingerprint,
@@ -91,6 +92,30 @@ def test_the_fingerprint_normalizes_uuids_and_datetimes_to_plain_strings() -> No
         APPROVE_PLAN, {"plan_id": str(identifier), "decided_at": stamp.isoformat()}
     )
     assert digest == same
+
+
+def test_normalize_raises_on_a_type_it_does_not_recognize() -> None:
+    class Unrecognised:
+        pass
+
+    with pytest.raises(TypeError):
+        _normalize(Unrecognised())
+
+
+def test_the_fingerprint_raises_rather_than_silently_stringify_an_unknown_type() -> (
+    None
+):
+    """SENSITIVITY (near-miss): a JSON-native value (str) must still work,
+    proving the raise above is reached only for the type it targets."""
+
+    class Unrecognised:
+        pass
+
+    with pytest.raises(TypeError):
+        request_fingerprint(APPROVE_PLAN, {"weird": Unrecognised()})
+    # A near-miss: an ordinary string is JSON-native and never reaches
+    # `_normalize` at all.
+    request_fingerprint(APPROVE_PLAN, {"fine": "a plain string"})
 
 
 # ── exceptions carry no envelope field ───────────────────────────────────────
