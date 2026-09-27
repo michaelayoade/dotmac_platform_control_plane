@@ -8,6 +8,7 @@ port, and the Approvals authority is converted into content-bound evidence.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Final
@@ -24,9 +25,11 @@ from dotmac_commercial_agreements import (
     AgreementStatus,
     AgreementView,
     ApprovalEvidence,
+    ApprovalWithdrawalOutcome,
     CommercialTerms,
     EvidenceRefusedError,
     ExpectedStateError,
+    RecordApprovalWithdrawalCommand,
     TransitionRefusedError,
     UndeclaredCapabilityError,
     UnknownProductError,
@@ -77,6 +80,9 @@ from dotmac_commercial_agreements import (
     propose as module_propose,
 )
 from dotmac_commercial_agreements import (
+    record_approval_withdrawal as module_record_approval_withdrawal,
+)
+from dotmac_commercial_agreements import (
     reinstate as module_reinstate,
 )
 from dotmac_commercial_agreements import (
@@ -95,10 +101,11 @@ from dotmac_entitlement_allocation import (
     UnknownProductError as AllocationUnknownProductError,
 )
 from dotmac_kernel import BadRequestError, ConflictError, DomainError, NotFoundError
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from vendor_cp.approvals import adapter as approvals
-from vendor_cp.approvals_authority import translate_digest
+from vendor_cp.approvals_authority import bare_content_hash, translate_digest
 from vendor_cp.contracts.terms import (
     TermEndNotRepresentable,
     end_exclusive_from_inclusive,
@@ -106,6 +113,11 @@ from vendor_cp.contracts.terms import (
 from vendor_cp.contracts_authority import APPROVAL_SUBJECT_TYPE
 from vendor_cp.offers.catalog import ProductCapabilityCatalogues
 from vendor_cp.offers.service import get_offer_version
+from vendor_cp.relay.approval_router import (
+    ApprovalWithdrawalResult,
+    RetryableWithdrawal,
+)
+from vendor_cp.relay.withdrawal_outcomes import WithdrawalDisposition
 
 if TYPE_CHECKING:
     from vendor_cp.approvals.adapter import HeldPlatformApproval
@@ -800,6 +812,109 @@ def active_snapshot(
     )
 
 
+_WITHDRAWAL_OUTCOME_MAP: Final[
+    dict[ApprovalWithdrawalOutcome, tuple[WithdrawalDisposition, str]]
+] = {
+    ApprovalWithdrawalOutcome.RECORDED: (WithdrawalDisposition.APPLIED, "recorded"),
+    ApprovalWithdrawalOutcome.ALREADY_RECORDED: (
+        WithdrawalDisposition.ALREADY_APPLIED,
+        "already_recorded",
+    ),
+    ApprovalWithdrawalOutcome.DECISION_NOT_CARRIED: (
+        WithdrawalDisposition.NOT_CARRIED,
+        "decision_not_carried",
+    ),
+    ApprovalWithdrawalOutcome.CONTENT_NOT_BOUND: (
+        WithdrawalDisposition.NOT_CARRIED,
+        "content_not_bound",
+    ),
+    ApprovalWithdrawalOutcome.EVIDENCE_CONFLICT: (
+        WithdrawalDisposition.SECURITY_CONFLICT,
+        "evidence_conflict",
+    ),
+}
+
+
+def record_agreement_approval_withdrawal(
+    db: Session, *, event_id: UUID, payload: Mapping[str, object]
+) -> ApprovalWithdrawalResult:
+    """Classify one `approval.withdrawn` event against a Commercial Agreement.
+
+    The ONLY CP module allowed to call Commercial Agreements for a withdrawal
+    (ADR seam boundary) — there is no CP table mutation of agreements. Builds
+    CA's `RecordApprovalWithdrawalCommand` and maps its closed outcome
+    vocabulary onto CP's six terminal dispositions.
+    """
+    try:
+        agreement_id = UUID(str(payload["subject_id"]))
+        request_id = UUID(str(payload["request_id"]))
+        withdrawal_id = UUID(str(payload["withdrawal_id"]))
+        policy_code = str(payload["policy_code"])
+        policy_version = int(payload["policy_version"])  # type: ignore[arg-type]
+        content_digest = str(payload["content_digest"])
+        reason = payload.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("withdrawal has no reason")
+        withdrawn_at = datetime.fromisoformat(str(payload["effective_at"]))
+    except (KeyError, ValueError, TypeError) as exc:
+        return ApprovalWithdrawalResult(
+            disposition=WithdrawalDisposition.SECURITY_CONFLICT,
+            reason_code="malformed_withdrawal_payload",
+            coordinates={},
+            evidence={"error": repr(exc)},
+        )
+
+    withdrawal_ref = str(withdrawal_id)
+    coordinates: dict[str, object] = {
+        "agreement_id": agreement_id,
+        "approval_request_id": request_id,
+        "withdrawal_ref": withdrawal_ref,
+    }
+
+    try:
+        bound_content_hash = bare_content_hash(content_digest)
+        command = RecordApprovalWithdrawalCommand(
+            command_id=f"approval-withdrawal:{event_id}",
+            agreement_id=agreement_id,
+            approval_request_ref=str(request_id),
+            approval_decision_ref=str(request_id),
+            policy_code=policy_code,
+            policy_version=policy_version,
+            subject_ref=str(agreement_id),
+            content_hash=bound_content_hash,
+            withdrawal_ref=withdrawal_ref,
+            reason=reason,
+            withdrawn_at=withdrawn_at,
+        )
+        result = module_record_approval_withdrawal(db, command)
+    except AgreementError as exc:
+        reason_code = (
+            "agreement_not_found" if "not found" in str(exc) else "agreement_error"
+        )
+        return ApprovalWithdrawalResult(
+            disposition=WithdrawalDisposition.SECURITY_CONFLICT,
+            reason_code=reason_code,
+            coordinates=coordinates,
+            evidence={"error": repr(exc)},
+        )
+    except OperationalError as exc:
+        raise RetryableWithdrawal("database_unavailable") from exc
+
+    disposition, reason_code = _WITHDRAWAL_OUTCOME_MAP[result.outcome]
+    return ApprovalWithdrawalResult(
+        disposition=disposition,
+        reason_code=reason_code,
+        coordinates=coordinates,
+        evidence={
+            "status": result.status,
+            "approval_carried": result.approval_carried,
+            "withdrawal_id": (
+                str(result.withdrawal_id) if result.withdrawal_id else None
+            ),
+        },
+    )
+
+
 __all__ = [
     "ACTIVATED_EVENT_TYPE",
     "AgreementError",
@@ -823,6 +938,7 @@ __all__ = [
     "get",
     "list_agreements",
     "propose",
+    "record_agreement_approval_withdrawal",
     "reinstate",
     "reject",
     "suspend",
