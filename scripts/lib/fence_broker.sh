@@ -40,20 +40,53 @@
 #
 # ── Bounded, checked, and silent-by-default on success ─────────────────────
 #
-# The `compose exec` that runs `psql` is wrapped in `timeout
-# FENCE_BROKER_TIMEOUT_SECONDS`: a termination attempt that never returns
-# must not hang this broker (and, transitively, the maintenance window)
-# forever. `psql` itself runs `-q -t -A` and its stdout is discarded
-# (`> /dev/null`) — NEVER left attached to fd 1, which here is the ops
-# process's stdin: a `psql` NOTICE, a column header, or a query result row
-# reaching fd 1 would be fed into that process's next `readline()` as if it
-# were this protocol's reply, corrupting the channel. `$?` is captured and
-# checked explicitly, right after the command, rather than relied on via
-# `set -e` — this function can be invoked from an `a || b` construct, where
-# errexit is off for the duration of `a`, so an inherited `set -e` cannot be
-# assumed to catch a failure here. A non-zero status (an ordinary `psql`
-# failure, or a `timeout`-induced 124) means NO reply is ever sent, and the
-# function returns 1 without touching the ops process's stdin at all.
+# `compose` is a bash FUNCTION — in production (`scripts/deploy_production.sh`)
+# and in `tests/migration/test_fence_broker_script.py`'s own shim alike —
+# and GNU `timeout` execs a named program; it cannot run a shell function
+# (`timeout N compose ...` exits 127 on every call, having invoked nothing at
+# all — this file shipped exactly that defect once and it terminated
+# nothing). The bound instead comes from a WATCHDOG this function runs
+# itself: the `compose exec` pipeline is backgrounded, a second background
+# job sleeps `FENCE_BROKER_TIMEOUT_SECONDS` and then signals the first if it
+# is still running, and `wait` on the first job's PID is what this function
+# actually blocks on. `wait`, used as an `if` condition, never triggers an
+# inherited `set -e`: errexit ignores the exit status of any command that is
+# part of an `if`/`while`/`&&`/`||` construct, so a caller running this
+# function under `set -euo pipefail` (`scripts/deploy_production.sh` does)
+# cannot have it silently abort mid-check before `status` is ever read — no
+# bare, potentially-failing command appears before that read anywhere in this
+# function.
+#
+# As DEFENCE IN DEPTH, the termination attempt is ALSO bounded INSIDE the
+# container: `compose exec -T --user postgres db timeout
+# FENCE_BROKER_TIMEOUT_SECONDS psql ...` — `timeout` there execs a real
+# program (`psql`), so it works, and it means a `psql` that hangs is killed
+# at its own source even if the watchdog's outer `kill -TERM` on the `compose
+# exec` job somehow failed to reach it (a `docker compose exec` process
+# stopping does not guarantee the process INSIDE the container stops with
+# it). `docker-compose.production.yml` and `docker-compose.test.yml` both
+# pin `postgres:16`, the official Debian-based image, which ships coreutils
+# `timeout` by default — confirmed from this repository's own compose files,
+# not assumed.
+#
+# `psql` itself runs `-q -t -A` and its stdout is discarded (`> /dev/null`)
+# — NEVER left attached to fd 1, which here is the ops process's stdin: a
+# `psql` NOTICE, a column header, or a query result row reaching fd 1 would
+# be fed into that process's next `readline()` as if it were this protocol's
+# reply, corrupting the channel. A non-zero status (an ordinary `psql`
+# failure, the in-container `timeout`, or the watchdog's `kill -TERM`) means
+# NO reply is ever sent, and the function returns 1 without touching the ops
+# process's stdin at all.
+#
+# **Entry gate for PR 4 (not yet covered by any test in this repository):**
+# a `close`/`restore` round trip run through the actual `dotmac-platform`
+# CLI, over a real coproc wired to this broker, has never been exercised —
+# every test today either calls `fence_commands` directly (no subprocess) or
+# runs `fence_broker_serve` directly (no `dotmac-platform` process on the
+# other end). `restore`'s proof, read as the first stdin line, followed by
+# the broker's own protocol lines on the SAME stdin, is the shape most at
+# risk of a framing bug neither existing suite can see. PR 4 must add this
+# before wiring the maintenance window to either.
 #
 # ── Everything else passes through fd 3, never fd 1 ──────────────────────────
 #
@@ -109,7 +142,7 @@ _fence_broker_sql_path() {
 fence_broker_serve() {
     local database="$1"
     local fence_id="$2"
-    local line request_fence_id sql_path status
+    local line request_fence_id sql_path status job watchdog
 
     if [[ -z "$database" || -z "$fence_id" ]]; then
         echo "fence_broker_serve: both <database> and <fence_id> are required" >&2
@@ -144,13 +177,23 @@ fence_broker_serve() {
                     "'$fence_id'" >&2
                 return 1
             fi
-            timeout "$FENCE_BROKER_TIMEOUT_SECONDS" \
-                compose exec -T --user postgres db \
+            compose exec -T --user postgres db \
+                timeout "$FENCE_BROKER_TIMEOUT_SECONDS" \
                 psql -X -v ON_ERROR_STOP=1 --username postgres -q -t -A \
                 -v "db=$database" \
                 < "$sql_path" \
-                > /dev/null
-            status=$?
+                > /dev/null &
+            job=$!
+            ( sleep "$FENCE_BROKER_TIMEOUT_SECONDS"; kill -TERM "$job" 2>/dev/null ) &
+            watchdog=$!
+            status=0
+            if wait "$job"; then
+                status=0
+            else
+                status=$?
+            fi
+            kill "$watchdog" 2>/dev/null || true
+            wait "$watchdog" 2>/dev/null || true
             if [[ $status -ne 0 ]]; then
                 echo "fence_broker_serve: termination command for fence_id" \
                     "'$fence_id' failed or timed out (exit $status); not" \

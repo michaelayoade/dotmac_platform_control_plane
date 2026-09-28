@@ -105,6 +105,25 @@ def test_the_sql_has_a_server_side_statement_timeout() -> None:
     assert "SET statement_timeout = '20s';" in text
 
 
+def test_the_sql_is_exactly_two_statements() -> None:
+    """`psql` runs every statement in the file in sequence; a SQLAlchemy
+    caller driving the checked-in text through a single parameterised
+    `execute` cannot (`psycopg.errors.SyntaxError: cannot insert multiple
+    commands into a prepared statement`), so both
+    `tests/migration/test_fence_commands.py`'s `_InProcessHostBroker` and its
+    standalone SQL test split the file into statements and run each
+    separately. That split assumes exactly two: the `SET statement_timeout`,
+    then the terminate query — asserted here, independently, so the helper's
+    assumption cannot drift from the checked-in file silently."""
+    without_comments = "\n".join(
+        line for line in _sql_text().splitlines() if not line.strip().startswith("--")
+    )
+    statements = [s.strip() for s in without_comments.split(";") if s.strip()]
+    assert len(statements) == 2, statements
+    assert statements[0].startswith("SET statement_timeout")
+    assert statements[1].startswith("WITH RECURSIVE")
+
+
 def test_the_sql_names_no_psql_variable_other_than_db() -> None:
     """A psql bind is `:name` or `:'name'`. `::` type casts are not a bind and
     must not be mistaken for one — this SQL has none, so the check stays
@@ -188,17 +207,60 @@ def test_the_broker_checks_the_exit_status_before_replying() -> None:
     assert "return 1" in failure_branch
 
 
-def test_the_broker_bounds_the_termination_call_with_timeout() -> None:
+def test_the_broker_never_runs_timeout_directly_against_compose() -> None:
+    """`timeout` execs a named program; `compose` is a bash FUNCTION in both
+    production and the test shim, so `timeout N compose ...` exits 127 on
+    every call without terminating anything — this file shipped exactly that
+    defect once. `compose` must always be the FIRST word of the pipeline."""
     body = _broker_function_body()
-    timeout_index = body.index("timeout ")
+    broken_form = re.search(
+        r'timeout\s+"\$FENCE_BROKER_TIMEOUT_SECONDS"\s+compose', body
+    )
+    assert broken_form is None
+    assert re.search(r"^\s*compose exec", body, re.MULTILINE) is not None
+
+
+def test_the_broker_bounds_psql_inside_the_container_as_defence_in_depth() -> None:
+    """`compose exec ... timeout N psql ...` — `timeout` there execs a real
+    program (`psql`), which DOES work, unlike wrapping the outer `compose`
+    call. This runs INSIDE the watchdog-backgrounded job, not instead of it."""
+    body = _broker_function_body()
+    compose_index = body.index("compose exec")
+    timeout_index = body.index('timeout "$FENCE_BROKER_TIMEOUT_SECONDS"')
     psql_index = body.index("psql -X")
-    assert timeout_index < psql_index < timeout_index + 200
+    assert compose_index < timeout_index < psql_index < compose_index + 300
+
+
+def test_the_broker_runs_the_termination_command_under_a_watchdog() -> None:
+    """A backgrounded job, a backgrounded sleep-then-`kill -TERM` watchdog,
+    and `wait` used as an `if` CONDITION — which never triggers an inherited
+    `set -e`, unlike a bare `wait` whose own non-zero status would."""
+    body = _broker_function_body()
     assert "FENCE_BROKER_TIMEOUT_SECONDS" in _broker_text()
     # A fixed constant, not an environment-overridable default (no `:-`/`:=`
     # against it).
     assert re.search(
         r"^FENCE_BROKER_TIMEOUT_SECONDS=\d+\s*$", _broker_text(), re.MULTILINE
     )
+    job_index = body.index("job=$!")
+    watchdog_spawn_index = body.index("kill -TERM")
+    watchdog_pid_index = body.index("watchdog=$!")
+    wait_if_index = body.index('if wait "$job"')
+    status_check_index = body.index("$status -ne 0")
+    assert (
+        job_index
+        < watchdog_spawn_index
+        < watchdog_pid_index
+        < wait_if_index
+        < status_check_index
+    )
+    # The status check follows the `if wait ...` block closely — no second
+    # command invocation (another `compose`/`psql` call) sits between the
+    # `wait` and the check that could itself fail and abort under `set -e`
+    # before `status` is ever read.
+    between = body[wait_if_index:status_check_index]
+    assert "compose exec" not in between
+    assert "psql -X" not in between
 
 
 def test_the_broker_checks_the_fence_id_pattern_before_serving() -> None:
