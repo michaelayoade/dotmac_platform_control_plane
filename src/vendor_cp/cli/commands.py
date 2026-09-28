@@ -234,6 +234,14 @@ def transition_fence_close(args: argparse.Namespace) -> Result:
     `--prior-expected-digest` and `--expected-prior-fence-id` must be given
     together; when they are, the prior proof document is read as the FIRST
     stdin line, before the broker protocol lines that follow it.
+
+    The `fence_id` this returns — both `data["fence_id"]` and
+    `references["fence_id"]` — is read back from `data["proof"]["fence_id"]`
+    (`close_fence` sources both from the PROOF, never from `--fence-id`
+    echoed). The HOST must check THAT value against the `fence_id` it itself
+    generated, per this module's own "digest/fence_id channel" ruling — a
+    value this command merely echoed back would not catch a defect that
+    silently dropped the argument on its way into the fence.
     """
     import sys
 
@@ -259,23 +267,33 @@ def transition_fence_close(args: argparse.Namespace) -> Result:
         expected_prior_fence_id=args.expected_prior_fence_id,
     )
     return Result(
-        command="admin transition-fence close",
+        command="admin transition-fence-close",
         data=result,
         references={"fence_id": result["fence_id"], "digest": result["digest"]},
     )
 
 
 def transition_fence_holding(args: argparse.Namespace) -> Result:
-    """Read-only: does a previously closed fence still hold, right now?"""
+    """Read-only: does a previously closed fence still hold, right now?
+
+    `--database` and `--expected-fence-id` bind the proof document to the
+    HOST's own coordinates for which fence is being asked about — a document
+    that decodes and digest-checks but names a different database or a
+    superseded run is `holding: false`, not evidence about the fence this
+    invocation means.
+    """
     import sys
 
     from vendor_cp.deployment.fence_commands import fence_holding
 
     proof_document = _read_stdin_json_line(sys.stdin, what="fence proof document")
     result = fence_holding(
-        proof_document=proof_document, expected_digest=args.expected_digest
+        database=args.database,
+        proof_document=proof_document,
+        expected_digest=args.expected_digest,
+        expected_fence_id=args.expected_fence_id,
     )
-    return Result(command="admin transition-fence holding", data=result)
+    return Result(command="admin transition-fence-holding", data=result)
 
 
 def transition_fence_restore(args: argparse.Namespace) -> Result:
@@ -294,7 +312,7 @@ def transition_fence_restore(args: argparse.Namespace) -> Result:
         stdin=sys.stdin,
         stdout=sys.stdout,
     )
-    return Result(command="admin transition-fence restore", data=result)
+    return Result(command="admin transition-fence-restore", data=result)
 
 
 # ── release ─────────────────────────────────────────────────────────────────

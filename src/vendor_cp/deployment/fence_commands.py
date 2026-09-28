@@ -52,14 +52,34 @@ document to the run the host actually asked about.
 
 Every function here refuses, before `owner_runtime()` is ever called and so
 before any connection is opened, if a required host-supplied value —
-`database`, `fence_id`, `expected_digest`, `expected_fence_id` — is missing
-or empty. `FenceCommandConfigError` is this module's own vocabulary for that
-refusal, distinct from `transition_fence.FenceRefused`, because it is a
-configuration fault this module caught, not a verdict the fence itself made.
+`database`, `fence_id`, `expected_digest`, `expected_fence_id` — is missing,
+empty, or (for a fence_id) does not match `_FENCE_ID_PATTERN`, or (for
+`session_wait_seconds`) is not a finite number greater than zero.
+`FenceCommandConfigError` is this module's own vocabulary for that refusal,
+distinct from `transition_fence.FenceRefused`, because it is a configuration
+fault this module caught, not a verdict the fence itself made.
+
+## `fence_holding` binds its document to the HOST's own coordinates
+
+`fence_holding` takes `database` and `expected_fence_id` as REQUIRED
+arguments, in addition to `expected_digest` — not because `transition_fence`
+needs them (`fence_is_holding` only ever needs a `FenceProof`), but because a
+document that decodes and digest-checks cleanly could still be a PROOF FOR A
+DIFFERENT FENCE than the one the caller means to ask about (a different
+database, or a superseded run against the same one — the identical replay
+`restore_writers`'s own `database`/`expected_fence_id` bindings exist to
+close, per `transition_fence`'s "Two required bindings" section).
+`fence_holding` refuses that silently rather than loudly: a document whose
+`proof.database`/`proof.fence_id` disagree with the caller's own arguments is
+`holding: False`, checked BEFORE any connection is opened, the same
+fail-closed shape every other exception during the check already collapses
+to.
 """
 
 from __future__ import annotations
 
+import math
+import re
 from typing import TextIO
 
 from dotmac_kernel.session_runtime import DatabaseRuntime
@@ -72,6 +92,17 @@ from vendor_cp.deployment.transition_fence import (
     fence_writers,
     restore_writers,
 )
+
+#: The shape a `fence_id` (or `expected_fence_id`/`expected_prior_fence_id`)
+#: must have — identical to `scripts/lib/fence_broker.sh`'s own
+#: `_fence_broker_valid_fence_id`, which checks the SAME pattern on the
+#: broker side before ever running the termination SQL. Deliberately close to
+#: (but not identical to) `transition_fence._reject_invalid_fence_id`'s own
+#: 128-character, no-NUL, no-surrogate, no-whitespace-padding discipline —
+#: this pattern is stricter (an allowlist, not a denylist), because a
+#: fence_id here also has to survive an unescaped `[[ "$line" == ... ]]` bash
+#: comparison and a literal position on a single protocol line.
+_FENCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 #: The protocol's two line shapes, exactly. `StdioBrokerTerminator` writes the
 #: first and requires the second, verbatim, as its only proof that the host's
@@ -136,6 +167,25 @@ def _require(value: str | None, name: str) -> str:
     return value
 
 
+def _require_fence_id(value: str | None, name: str) -> str:
+    """`_require`, plus the shape `scripts/lib/fence_broker.sh` also checks."""
+    value = _require(value, name)
+    if not _FENCE_ID_PATTERN.match(value):
+        raise FenceCommandConfigError(
+            f"{name} {value!r} must match {_FENCE_ID_PATTERN.pattern}"
+        )
+    return value
+
+
+def _require_session_wait_seconds(value: float) -> float:
+    if not math.isfinite(value) or value <= 0:
+        raise FenceCommandConfigError(
+            "session_wait_seconds must be a finite number greater than 0, "
+            f"got {value!r}"
+        )
+    return value
+
+
 class StdioBrokerTerminator:
     """A `Terminator` that asks a host-side broker to terminate writers, over
     the direct stdout/stdin of the process the host spawned.
@@ -190,14 +240,23 @@ def close_fence(
     boundary" section for why that matters). `prior_expected_digest` is
     required whenever `prior_document` is given, and is never read out of
     the document itself.
+
+    The returned `fence_id` is read back from the PROOF `fence_writers`
+    actually returned (`proof.fence_id`), never echoed from the `fence_id`
+    argument — the host's own generated-vs-returned comparison (see this
+    module's docstring, "The digest/`fence_id` channel") must compare against
+    what the fence itself recorded, not against its own request, or a defect
+    that silently dropped the argument on the way in could never be caught by
+    that comparison.
     """
     database = _require(database, "database")
-    fence_id = _require(fence_id, "fence_id")
+    fence_id = _require_fence_id(fence_id, "fence_id")
+    session_wait_seconds = _require_session_wait_seconds(session_wait_seconds)
 
     prior: FenceProof | None = None
     if prior_document is not None:
         prior_expected_digest = _require(prior_expected_digest, "prior_expected_digest")
-        expected_prior_fence_id = _require(
+        expected_prior_fence_id = _require_fence_id(
             expected_prior_fence_id, "expected_prior_fence_id"
         )
         prior = FenceProof.from_document(
@@ -224,26 +283,40 @@ def close_fence(
     return {
         "proof": proof.to_document(),
         "digest": proof.digest(),
-        "fence_id": fence_id,
+        "fence_id": proof.fence_id,
     }
 
 
 def fence_holding(
-    *, proof_document: dict[str, object], expected_digest: str
+    *,
+    database: str,
+    proof_document: dict[str, object],
+    expected_digest: str,
+    expected_fence_id: str,
 ) -> dict[str, object]:
     """Read-only: does the fence this document describes still hold?
 
-    `expected_digest` is required and checked before anything else. Once
-    that holds, any exception raised while checking — an invalid document, an
-    unreachable database, a driver error — is reported as `holding: false`
-    rather than propagated, because "cannot tell" and "does not hold" both
-    mean the caller must not proceed as though the fence were up.
+    `database` and `expected_fence_id` — the host's own coordinates for WHICH
+    fence it means to ask about — are required, exactly like `expected_
+    digest`, and checked before anything else. Once a document decodes and
+    digest-checks, it must ALSO name the same `database` and `fence_id` the
+    caller supplied, or this reports `holding: False` before any connection
+    is opened — a proof for a different database, or a superseded run
+    against the same one, is not evidence about the fence the caller
+    actually means (see this module's docstring). Any OTHER exception while
+    checking — an invalid document, an unreachable database, a driver error —
+    is reported as `holding: false` too, because "cannot tell" and "does not
+    hold" both mean the caller must not proceed as though the fence were up.
     """
+    database = _require(database, "database")
     expected_digest = _require(expected_digest, "expected_digest")
+    expected_fence_id = _require_fence_id(expected_fence_id, "expected_fence_id")
     try:
         proof = FenceProof.from_document(
             proof_document, expected_digest=expected_digest
         )
+        if proof.database != database or proof.fence_id != expected_fence_id:
+            return {"holding": False}
         runtime = owner_runtime()
         with _autocommit_connection(runtime) as conn:
             holding = fence_is_holding(conn, proof)
@@ -272,7 +345,8 @@ def restore_fence(
     """
     database = _require(database, "database")
     expected_digest = _require(expected_digest, "expected_digest")
-    expected_fence_id = _require(expected_fence_id, "expected_fence_id")
+    expected_fence_id = _require_fence_id(expected_fence_id, "expected_fence_id")
+    session_wait_seconds = _require_session_wait_seconds(session_wait_seconds)
 
     proof = FenceProof.from_document(proof_document, expected_digest=expected_digest)
     runtime = owner_runtime()

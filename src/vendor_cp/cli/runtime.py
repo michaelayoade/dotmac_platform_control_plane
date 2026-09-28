@@ -149,6 +149,12 @@ _BY_NAME: Final[tuple[tuple[str, str], ...]] = (
     ("ReleaseEvidenceError", "usage.bad_request"),
     ("ProductionSecretError", "config.invalid"),
     ("PacketRefused", "owner.readiness_refused"),
+    # `fence_commands.FenceCommandConfigError`: a required host-supplied
+    # value was missing, empty, or malformed, caught before any connection.
+    ("FenceCommandConfigError", "usage.fence_command_invalid"),
+    # `fence_commands.BrokerProtocolError`: the host's broker did not reply
+    # as the protocol requires. Nobody refused; the channel broke.
+    ("BrokerProtocolError", "evidence.fence_broker_unavailable"),
 )
 
 
@@ -158,9 +164,26 @@ def translate(error: Exception) -> Refusal:
     Walks the MRO rather than checking `type(error).__name__`, so a module that
     introduces `PlanSupersededError(PlanRefusedError)` next release is refused
     as a plan refusal instead of silently becoming an execution failure.
+
+    `transition_fence.FenceRefused` gets its OWN branch, ahead of the
+    generic name walk: it already carries a closed, machine-readable `code`
+    (`FenceRefusalCode`) and, on some refusals, `before_acl` — the exact ACL
+    an operator would need for manual recovery (see that module's docstring,
+    "`prior_acl` is informational"). Folding it through the generic
+    `str(error) or name` path would keep the `FenceRefusalCode` (it is
+    already embedded in `FenceRefused.__str__`) but silently drop
+    `before_acl` whenever it was set, which is exactly the evidence a stuck
+    fence's operator needs most.
     """
     if isinstance(error, Refusal):
         return error
+    from vendor_cp.deployment.transition_fence import FenceRefused
+
+    if isinstance(error, FenceRefused):
+        detail = str(error)
+        if error.before_acl is not None:
+            detail = f"{detail} (before_acl={error.before_acl!r})"
+        return refuse("owner.fence_refused", detail)
     names = {klass.__name__ for klass in type(error).__mro__}
     for name, code in _BY_NAME:
         if name in names:
