@@ -37,6 +37,12 @@ from vendor_cp.deployment.transition_fence import (
 #: A few seconds — bounded, never open-ended.
 SESSION_WAIT_SECONDS = 3.0
 
+#: The run identifier this file's `fence_writers`/`restore_writers` calls
+#: bind, and rebind, throughout — no test in this file exercises more than
+#: one run at a time, so one constant is enough; the `fence_id` mismatch
+#: itself is proven by the dedicated replay test below.
+FENCE_ID = "test-fence"
+
 
 @contextmanager
 def _connect(url: str, *, autocommit: bool = False) -> Iterator[Connection]:
@@ -131,6 +137,7 @@ def test_a_new_connection_as_a_fenced_writer_is_refused_app_admin_still_connects
             fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w1, w2),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -169,6 +176,7 @@ def test_a_member_of_a_fenced_writer_with_an_open_session_is_terminated(
                     proof = fence_writers(
                         conn,
                         database=db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
@@ -215,6 +223,7 @@ def test_a_member_with_its_own_connect_grant_is_fenced_and_restored_exactly(
                 proof = fence_writers(
                     conn,
                     database=db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
@@ -225,7 +234,13 @@ def test_a_member_with_its_own_connect_grant_is_fenced_and_restored_exactly(
                     pass
 
             with _connect(admin_url, autocommit=True) as conn:
-                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+                restore_writers(
+                    conn,
+                    proof,
+                    database=db,
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
                 assert fence_module._current_grants(conn, db) == before
 
             with _connect(url_for(postgres_url, db, user=member)) as conn:
@@ -260,6 +275,7 @@ def test_a_member_of_a_fenced_writer_sharing_identity_with_app_admin_is_refused(
                     fence_writers(
                         conn,
                         database=db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
@@ -306,6 +322,7 @@ def test_a_member_inheriting_connect_through_an_unrelated_grantee_is_refused_fir
                         fence_writers(
                             conn,
                             database=db,
+                            fence_id=FENCE_ID,
                             writer_roles=(w,),
                             session_wait_seconds=SESSION_WAIT_SECONDS,
                         )
@@ -357,6 +374,7 @@ def test_a_three_level_membership_chain_through_a_nologin_intermediate_is_fenced
                     proof = fence_writers(
                         conn,
                         database=db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
@@ -423,6 +441,7 @@ def test_a_member_session_using_set_role_to_write_is_terminated_by_the_fence(
                     proof = fence_writers(
                         conn,
                         database=db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
@@ -462,6 +481,7 @@ def test_an_open_writer_session_is_terminated_and_counted(
                 proof = fence_writers(
                     conn,
                     database=db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
@@ -500,6 +520,7 @@ def test_fence_then_restore_on_a_null_datacl_database_reproduces_the_default(
                 proof = fence_writers(
                     conn,
                     database=bare_db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
@@ -513,7 +534,13 @@ def test_fence_then_restore_on_a_null_datacl_database_reproduces_the_default(
                 ).scalar_one()
                 assert probe_while_fenced is False
 
-                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+                restore_writers(
+                    conn,
+                    proof,
+                    database=db,
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
 
                 probe_after_restore = conn.execute(
                     text("SELECT has_database_privilege(:r, :d, 'CONNECT')"),
@@ -541,6 +568,7 @@ def test_restore_returns_the_exact_prior_acl_and_a_second_restore_changes_nothin
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -548,7 +576,11 @@ def test_restore_returns_the_exact_prior_acl_and_a_second_restore_changes_nothin
             assert proof.prior_grants == prior_grants_before
 
             first = restore_writers(
-                conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
             )
             assert fence_module._current_grants(conn, db) == prior_grants_before
 
@@ -556,7 +588,11 @@ def test_restore_returns_the_exact_prior_acl_and_a_second_restore_changes_nothin
             # nothing left to grant — idempotent means "changes nothing",
             # not "re-grants the same roles again".
             second = restore_writers(
-                conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
             )
             assert second.roles_restored == ()
             assert first.roles_restored != ()
@@ -574,12 +610,14 @@ def test_refencing_with_prior_keeps_the_original_prior_acl(
             first_proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
             second_proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 prior=first_proof,
@@ -588,7 +626,11 @@ def test_refencing_with_prior_keeps_the_original_prior_acl(
             assert second_proof.prior_grants == first_proof.prior_grants
 
             restore_writers(
-                conn, second_proof, session_wait_seconds=SESSION_WAIT_SECONDS
+                conn,
+                second_proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
             )
             assert fence_module._current_grants(conn, db) == first_proof.prior_grants
 
@@ -618,6 +660,7 @@ def test_connect_inherited_through_an_intermediate_roles_own_grant_is_refused_fi
                         fence_writers(
                             conn,
                             database=db,
+                            fence_id=FENCE_ID,
                             writer_roles=(w,),
                             session_wait_seconds=SESSION_WAIT_SECONDS,
                         )
@@ -670,6 +713,7 @@ def test_a_refusal_after_the_first_revoke_restores_the_starting_acl(
                 fence_writers(
                     _SkipWriterRevoke(conn, w),  # type: ignore[arg-type]
                     database=db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
@@ -694,6 +738,7 @@ def test_a_superuser_writer_is_refused_first(
                 fence_writers(
                     conn,
                     database=db,
+                    fence_id=FENCE_ID,
                     writer_roles=(role,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
@@ -726,6 +771,7 @@ def test_a_writer_that_is_a_member_of_the_database_owner_is_refused_before_any_c
                     fence_writers(
                         conn,
                         database=db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
@@ -753,6 +799,7 @@ def test_a_writer_that_app_admin_is_a_member_of_is_refused_as_shared(
                     fence_writers(
                         conn,
                         database=db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
@@ -777,6 +824,7 @@ def test_a_writer_that_is_a_member_of_app_admin_is_refused_as_shared(
                     fence_writers(
                         conn,
                         database=db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
@@ -824,6 +872,7 @@ def test_skipping_the_public_revoke_is_caught_by_writer_still_has_connect(
                 fence_writers(
                     proxy,  # type: ignore[arg-type]
                     database=db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
@@ -855,6 +904,7 @@ def test_a_migrator_whose_connect_rests_only_on_public_is_refused_first(
                 fence_writers(
                     conn,
                     database=name,
+                    fence_id=FENCE_ID,
                     writer_roles=("app_user",),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
@@ -901,6 +951,7 @@ def test_a_db_error_mid_fence_is_compensated_as_fence_interrupted(
                 fence_writers(
                     _RaiseOnWriterRevoke(conn, w),  # type: ignore[arg-type]
                     database=db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
@@ -948,6 +999,7 @@ def test_a_restore_that_itself_fails_raises_compensation_failed(
                     fence_writers(
                         _SkipWriterRevokeAndFailGrant(conn, w),  # type: ignore[arg-type]
                         database=db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
@@ -977,6 +1029,7 @@ def test_a_non_autocommit_connection_is_refused_before_any_change(
             fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=("app_user",),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -992,6 +1045,7 @@ def test_a_prior_naming_a_different_database_is_refused_as_prior_mismatch(
 ) -> None:
     stale = FenceProof(
         database=f"not_{db}",
+        fence_id=FENCE_ID,
         prior_acl="",
         prior_grants=frozenset(),
         fenced_roles=("app_user",),
@@ -1006,6 +1060,7 @@ def test_a_prior_naming_a_different_database_is_refused_as_prior_mismatch(
             fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=("app_user",),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 prior=stale,
@@ -1020,6 +1075,7 @@ def test_a_prior_naming_a_different_writer_set_is_refused_as_prior_mismatch(
     with _writer_role(admin_url) as w1, _writer_role(admin_url) as w2:
         stale = FenceProof(
             database=db,
+            fence_id=FENCE_ID,
             prior_acl="",
             prior_grants=frozenset(),
             fenced_roles=(w2,),
@@ -1034,6 +1090,7 @@ def test_a_prior_naming_a_different_writer_set_is_refused_as_prior_mismatch(
                 fence_writers(
                     conn,
                     database=db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w1,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                     prior=stale,
@@ -1058,6 +1115,7 @@ def test_a_quoted_grantee_fences_and_restores_exactly(admin_url: str, db: str) -
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(role,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -1067,7 +1125,13 @@ def test_a_quoted_grantee_fences_and_restores_exactly(admin_url: str, db: str) -
             ).scalar_one()
             assert fenced_can_connect is False
 
-            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+            restore_writers(
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
             assert fence_module._current_grants(conn, db) == before
     finally:
         with _connect(admin_url, autocommit=True) as conn:
@@ -1095,10 +1159,17 @@ def test_a_writer_with_grant_option_restores_with_the_grant_option(
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
-            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+            restore_writers(
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
 
             after = fence_module._current_grants(conn, db)
             assert after == before
@@ -1119,6 +1190,7 @@ def test_restore_refuses_an_unexpected_extra_grant_and_stays_fenced(
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -1126,28 +1198,47 @@ def test_restore_refuses_an_unexpected_extra_grant_and_stays_fenced(
             conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {intruder}'))
 
             with pytest.raises(FenceRefused) as refused:
-                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+                restore_writers(
+                    conn,
+                    proof,
+                    database=db,
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
             assert refused.value.code == FenceRefusalCode.ACL_NOT_RESTORED
             # Still fenced: PUBLIC was never re-granted by the refused restore.
             assert not _has_connect(fence_module._current_grants(conn, db), "")
 
             conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {intruder}'))
-            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+            restore_writers(
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
 
 
 def test_restore_refuses_a_disallowed_grantee_before_regranting_public(
     admin_url: str, db: str
 ) -> None:
-    """A role the fence never revoked held CONNECT in the prior ACL and lost it
-    while fenced. Restore must refuse BEFORE any GRANT: `missing` sorts PUBLIC
-    first, so a refusal found mid-loop would already have reopened the
-    database to every writer."""
+    """`bystander` was never a named writer or a member of one, so it is not
+    in the effective set. It held CONNECT in the prior ACL and lost it while
+    fenced (an operator revoked it by hand). The entry `restore_writers`
+    would need to GRANT to put it back is therefore not a CONNECT grant to
+    `{"", *effective}` — the `to_add` bound (computed, and checked, BEFORE
+    `missing` or the GRANT loop even exist) refuses `PROOF_MISMATCH` before
+    any GRANT is attempted at all. This is a strictly stronger guarantee than
+    an older shape of this test once expected (`ACL_NOT_RESTORED` after
+    PUBLIC was already re-granted and the loop failed on `bystander`
+    mid-way): PUBLIC is never even reopened here."""
     with _writer_role(admin_url) as w, _writer_role(admin_url) as bystander:
         with _connect(admin_url, autocommit=True) as conn:
             conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {bystander}'))
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -1155,15 +1246,27 @@ def test_restore_refuses_a_disallowed_grantee_before_regranting_public(
             conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {bystander}'))
 
             with pytest.raises(FenceRefused) as refused:
-                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
-            assert refused.value.code == FenceRefusalCode.ACL_NOT_RESTORED
+                restore_writers(
+                    conn,
+                    proof,
+                    database=db,
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
             # Still fenced: PUBLIC was never re-granted, and neither was w.
             grants = fence_module._current_grants(conn, db)
             assert not _has_connect(grants, "")
             assert not _has_connect(grants, w)
 
             conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {bystander}'))
-            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+            restore_writers(
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
             conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {bystander}'))
 
 
@@ -1212,6 +1315,7 @@ def test_a_drain_that_never_reaches_zero_survives_and_is_compensated(
                 fence_writers(
                     _AlwaysWriterPresent(conn),  # type: ignore[arg-type]
                     database=db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w,),
                     session_wait_seconds=0.3,
                 )
@@ -1279,6 +1383,7 @@ def test_a_restore_that_reopens_and_then_mismatches_redrains_before_reporting(
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w1, w2),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -1295,6 +1400,8 @@ def test_a_restore_that_reopens_and_then_mismatches_redrains_before_reporting(
                 restore_writers(
                     proxy,  # type: ignore[arg-type]
                     proof,
+                    database=db,
+                    expected_fence_id=FENCE_ID,
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
             assert refused.value.code == FenceRefusalCode.ACL_NOT_RESTORED
@@ -1314,7 +1421,13 @@ def test_a_restore_that_reopens_and_then_mismatches_redrains_before_reporting(
             # The database is still fully fenced (both w1 and w2, plus
             # PUBLIC) — restore it for real so fixture teardown can drop the
             # roles.
-            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+            restore_writers(
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
 
 
 # ── (r2) the re-fence after a failed restore is ground truth, not `restored`
@@ -1358,6 +1471,7 @@ def test_a_keyboardinterrupt_mid_restore_propagates_and_the_writer_stays_fenced(
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -1367,6 +1481,8 @@ def test_a_keyboardinterrupt_mid_restore_propagates_and_the_writer_stays_fenced(
                 restore_writers(
                     proxy,  # type: ignore[arg-type]
                     proof,
+                    database=db,
+                    expected_fence_id=FENCE_ID,
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
 
@@ -1393,6 +1509,7 @@ def test_an_operationalerror_mid_restore_stays_fenced_via_the_ground_truth_refen
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -1408,6 +1525,8 @@ def test_an_operationalerror_mid_restore_stays_fenced_via_the_ground_truth_refen
                 restore_writers(
                     proxy,  # type: ignore[arg-type]
                     proof,
+                    database=db,
+                    expected_fence_id=FENCE_ID,
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
             assert refused.value.code in (
@@ -1461,6 +1580,7 @@ def test_a_grant_with_a_distinct_grantor_is_refused_before_any_change(
                     fence_writers(
                         conn,
                         database=db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
@@ -1502,10 +1622,17 @@ def test_a_superuser_grant_is_recorded_with_the_owner_as_grantor(
             proof = fence_writers(
                 conn,
                 database=bare_db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
-            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+            restore_writers(
+                conn,
+                proof,
+                database=bare_db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
 
             after = fence_module._current_grants(conn, bare_db)
             assert after == prior_grants
@@ -1529,12 +1656,19 @@ def test_an_ungranted_superuser_is_not_a_member_of_every_writer(
                 proof = fence_writers(
                     conn,
                     database=db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
                 assert superuser not in proof.member_roles
                 assert "postgres" not in proof.member_roles
-                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+                restore_writers(
+                    conn,
+                    proof,
+                    database=db,
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
     finally:
         with _connect(postgres_url, autocommit=True) as conn:
             conn.execute(text(f"DROP ROLE IF EXISTS {superuser}"))
@@ -1551,11 +1685,18 @@ def test_fence_is_holding_returns_true_after_a_normal_fence(
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
             assert fence_is_holding(conn, proof) is True
-            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+            restore_writers(
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
 
 
 def test_fence_is_holding_returns_false_when_a_member_is_regranted_connect(
@@ -1579,6 +1720,7 @@ def test_fence_is_holding_returns_false_when_a_member_is_regranted_connect(
                 proof = fence_writers(
                     conn,
                     database=db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
@@ -1590,7 +1732,13 @@ def test_fence_is_holding_returns_false_when_a_member_is_regranted_connect(
 
                 conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {member}'))
                 assert fence_is_holding(conn, proof) is True
-                restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+                restore_writers(
+                    conn,
+                    proof,
+                    database=db,
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
         finally:
             with _connect(admin_url, autocommit=True) as conn:
                 conn.execute(text(f'REVOKE CONNECT ON DATABASE "{db}" FROM {member}'))
@@ -1611,6 +1759,7 @@ def test_fence_is_holding_returns_false_when_a_new_member_is_granted_mid_fence(
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -1629,7 +1778,13 @@ def test_fence_is_holding_returns_false_when_a_new_member_is_granted_mid_fence(
                 conn.execute(text(f"DROP ROLE IF EXISTS {new_member}"))
 
             assert fence_is_holding(conn, proof) is True
-            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+            restore_writers(
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
 
 
 def test_fence_is_holding_returns_false_when_a_writer_backend_is_open(
@@ -1642,6 +1797,7 @@ def test_fence_is_holding_returns_false_when_a_writer_backend_is_open(
             proof = fence_writers(
                 conn,
                 database=db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
@@ -1660,7 +1816,13 @@ def test_fence_is_holding_returns_false_when_a_writer_backend_is_open(
                 writer_engine.dispose()
 
             assert fence_is_holding(conn, proof) is True
-            restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+            restore_writers(
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
 
 
 # ── (v) NON-SUPERUSER OWNER: the ACL work needs no superuser privilege ──────
@@ -1795,6 +1957,7 @@ def test_owner_only_fence_with_a_superuser_terminator_holds_and_restores_exactly
                 proof = fence_writers(
                     owner_conn,
                     database=owner_db,
+                    fence_id=FENCE_ID,
                     writer_roles=(w,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                     terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
@@ -1811,7 +1974,11 @@ def test_owner_only_fence_with_a_superuser_terminator_holds_and_restores_exactly
 
             with _connect(owner_url, autocommit=True) as owner_conn:
                 restore_writers(
-                    owner_conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS
+                    owner_conn,
+                    proof,
+                    database=owner_db,
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
                 after = fence_module._current_grants(owner_conn, owner_db)
                 # Grantor-exact: the full 4-tuple, including the OWNER as
@@ -1851,6 +2018,7 @@ def test_owner_only_fence_without_a_terminator_cannot_signal_and_compensates(
                     fence_writers(
                         owner_conn,
                         database=owner_db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
@@ -1889,6 +2057,7 @@ def test_owner_only_fence_with_a_raising_terminator_compensates(
                     fence_writers(
                         owner_conn,
                         database=owner_db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                         terminator=_broken_terminator,
@@ -1930,6 +2099,7 @@ def test_restore_refuses_a_proof_whose_member_roles_no_longer_matches_live_membe
             proof = fence_writers(
                 owner_conn,
                 database=owner_db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
@@ -1950,6 +2120,8 @@ def test_restore_refuses_a_proof_whose_member_roles_no_longer_matches_live_membe
                     restore_writers(
                         owner_conn,
                         proof,
+                        database=owner_db,
+                        expected_fence_id=FENCE_ID,
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
                 assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
@@ -1967,6 +2139,8 @@ def test_restore_refuses_a_proof_whose_member_roles_no_longer_matches_live_membe
                 restore_writers(
                     owner_conn,
                     proof,
+                    database=owner_db,
+                    expected_fence_id=FENCE_ID,
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                     terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
                 )
@@ -1984,6 +2158,7 @@ def test_restore_refuses_a_proof_whose_prior_grants_grantor_is_not_the_current_o
             proof = fence_writers(
                 owner_conn,
                 database=owner_db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
@@ -1998,6 +2173,8 @@ def test_restore_refuses_a_proof_whose_prior_grants_grantor_is_not_the_current_o
                 restore_writers(
                     owner_conn,
                     forged_proof,
+                    database=owner_db,
+                    expected_fence_id=FENCE_ID,
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
             assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
@@ -2016,6 +2193,8 @@ def test_restore_refuses_a_proof_whose_prior_grants_grantor_is_not_the_current_o
             restore_writers(
                 owner_conn,
                 proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
             )
@@ -2043,6 +2222,7 @@ def test_restore_grants_a_legally_shaped_forged_entry_the_digest_is_what_would_c
             proof = fence_writers(
                 owner_conn,
                 database=owner_db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
@@ -2057,6 +2237,8 @@ def test_restore_grants_a_legally_shaped_forged_entry_the_digest_is_what_would_c
             restored = restore_writers(
                 owner_conn,
                 forged_proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
                 session_wait_seconds=SESSION_WAIT_SECONDS,
             )
             assert "PUBLIC" in restored.roles_restored
@@ -2089,6 +2271,7 @@ def test_owner_only_fence_with_a_no_op_terminator_survives_and_compensates(
                     fence_writers(
                         owner_conn,
                         database=owner_db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                         terminator=_no_op,
@@ -2121,6 +2304,7 @@ def test_a_terminator_is_never_called_when_the_poll_finds_zero_backends(
             proof = fence_writers(
                 owner_conn,
                 database=owner_db,
+                fence_id=FENCE_ID,
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 terminator=_counting_terminator,
@@ -2128,7 +2312,11 @@ def test_a_terminator_is_never_called_when_the_poll_finds_zero_backends(
             assert calls == 0
             assert proof.terminated_count == 0
             restore_writers(
-                owner_conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS
+                owner_conn,
+                proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
             )
         assert calls == 0
 
@@ -2155,6 +2343,7 @@ def test_owner_only_restore_reopen_mismatch_redrains_via_the_terminator(
             proof = fence_writers(
                 owner_conn,
                 database=owner_db,
+                fence_id=FENCE_ID,
                 writer_roles=(w1, w2),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 terminator=_superuser_terminator(postgres_url, owner_db, (w1, w2)),
@@ -2172,6 +2361,8 @@ def test_owner_only_restore_reopen_mismatch_redrains_via_the_terminator(
                 restore_writers(
                     proxy,  # type: ignore[arg-type]
                     proof,
+                    database=owner_db,
+                    expected_fence_id=FENCE_ID,
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                     terminator=_superuser_terminator(postgres_url, owner_db, (w1, w2)),
                 )
@@ -2191,6 +2382,8 @@ def test_owner_only_restore_reopen_mismatch_redrains_via_the_terminator(
             restore_writers(
                 owner_conn,
                 proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 terminator=_superuser_terminator(postgres_url, owner_db, (w1, w2)),
             )
@@ -2211,6 +2404,7 @@ def test_owner_only_restore_reopen_mismatch_without_a_terminator_fails_closed(
             proof = fence_writers(
                 owner_conn,
                 database=owner_db,
+                fence_id=FENCE_ID,
                 writer_roles=(w1, w2),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 terminator=_superuser_terminator(postgres_url, owner_db, (w1, w2)),
@@ -2228,6 +2422,8 @@ def test_owner_only_restore_reopen_mismatch_without_a_terminator_fails_closed(
                 restore_writers(
                     proxy,  # type: ignore[arg-type]
                     proof,
+                    database=owner_db,
+                    expected_fence_id=FENCE_ID,
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                     # No terminator: the owner cannot signal w1's
                     # reconnected backend directly.
@@ -2241,6 +2437,8 @@ def test_owner_only_restore_reopen_mismatch_without_a_terminator_fails_closed(
             restore_writers(
                 owner_conn,
                 proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 terminator=_superuser_terminator(postgres_url, owner_db, (w1, w2)),
             )
@@ -2274,6 +2472,7 @@ def test_a_terminator_raising_fencerefused_cannot_spoof_the_refusal_code(
                     fence_writers(
                         conn,
                         database=db,
+                        fence_id=FENCE_ID,
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                         terminator=_spoofing_terminator,
