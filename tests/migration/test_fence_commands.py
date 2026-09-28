@@ -220,6 +220,11 @@ def test_the_checked_in_sql_kills_only_the_effective_writer_set(
     (distinct) owner, and a SUPERUSER login role granted `app_user`, all
     survive. An unrelated bystander (its own `CONNECT` grant, never a writer
     member at all) survives too.
+
+    The superuser case is spared by more than one clause: `pg_has_role` is
+    true for a superuser against any role, so the app_admin and owner clauses
+    also exclude it. The `NOT rolsuper` clause is therefore not tested in
+    isolation here; the other two exclusions are.
     """
     statements = _sql_statements(SQL_PATH.read_text(encoding="utf-8"))
     assert len(statements) == 2, statements

@@ -226,7 +226,7 @@ def test_the_broker_bounds_psql_inside_the_container_as_defence_in_depth() -> No
     call. This runs INSIDE the watchdog-backgrounded job, not instead of it."""
     body = _broker_function_body()
     compose_index = body.index("compose exec")
-    timeout_index = body.index('timeout "$FENCE_BROKER_TIMEOUT_SECONDS"')
+    timeout_index = body.index('timeout "$FENCE_BROKER_PSQL_TIMEOUT_SECONDS"')
     psql_index = body.index("psql -X")
     assert compose_index < timeout_index < psql_index < compose_index + 300
 
@@ -320,3 +320,29 @@ def test_the_three_fence_commands_are_registered_with_owners() -> None:
     assert holding.mutates is False
     assert restore.symbol == "restore_fence"
     assert restore.mutates is True
+
+
+def test_the_watchdog_holds_none_of_the_callers_descriptors() -> None:
+    """A surviving watchdog `sleep` must not keep the reply pipe (fd 1), stderr
+    or the envelope descriptor (fd 3) open after the broker has answered, or
+    anything waiting for end-of-file on them stalls. Sensitivity: dropping the
+    subshell's redirections fails this test."""
+    body = _broker_function_body()
+    assert ") </dev/null >/dev/null 2>/dev/null 3>&- &" in body
+
+
+def test_the_in_container_timeout_is_shorter_than_the_watchdog() -> None:
+    """The in-container bound fires first; the watchdog is only a backstop.
+    Sensitivity: equal or inverted constants fail this test."""
+    text = _broker_text()
+    outer = int(
+        re.search(r"^FENCE_BROKER_TIMEOUT_SECONDS=(\d+)\s*$", text, re.MULTILINE).group(
+            1
+        )
+    )
+    inner = int(
+        re.search(
+            r"^FENCE_BROKER_PSQL_TIMEOUT_SECONDS=(\d+)\s*$", text, re.MULTILINE
+        ).group(1)
+    )
+    assert inner < outer

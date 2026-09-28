@@ -294,3 +294,6 @@ fence_broker_serve "{db!s}" "{FENCE_ID!s}"
     assert proc.returncode != 0
     assert proc.stdout == ""
     assert "failed to run command" not in proc.stderr
+    # The shim's own refusal (exit 99) would also satisfy every assertion
+    # above; rule it out so only a genuine psql failure passes.
+    assert "compose shim" not in proc.stderr

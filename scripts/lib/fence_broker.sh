@@ -107,6 +107,9 @@ fi
 # A fixed constant, not an environment override: the whole point of bounding
 # a single termination attempt is that nothing at runtime can widen it.
 FENCE_BROKER_TIMEOUT_SECONDS=30
+# The in-container bound is shorter than the watchdog's, so psql's own clean
+# timeout normally fires first and the watchdog is only a backstop.
+FENCE_BROKER_PSQL_TIMEOUT_SECONDS=25
 
 #: `^[A-Za-z0-9._-]{1,128}$` — identical to
 #: `vendor_cp.deployment.fence_commands._FENCE_ID_PATTERN` on the Python
@@ -178,13 +181,22 @@ fence_broker_serve() {
                 return 1
             fi
             compose exec -T --user postgres db \
-                timeout "$FENCE_BROKER_TIMEOUT_SECONDS" \
+                timeout "$FENCE_BROKER_PSQL_TIMEOUT_SECONDS" \
                 psql -X -v ON_ERROR_STOP=1 --username postgres -q -t -A \
                 -v "db=$database" \
                 < "$sql_path" \
                 > /dev/null &
             job=$!
-            ( sleep "$FENCE_BROKER_TIMEOUT_SECONDS"; kill -TERM "$job" 2>/dev/null ) &
+            # The watchdog holds none of the caller's descriptors: a surviving
+            # `sleep` must never keep the reply pipe or fd 3 open after the
+            # broker has answered. Its own sleep is killed when it is.
+            (
+                sleep "$FENCE_BROKER_TIMEOUT_SECONDS" &
+                sleeper=$!
+                trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+                wait "$sleeper"
+                kill -TERM "$job" 2>/dev/null
+            ) </dev/null >/dev/null 2>/dev/null 3>&- &
             watchdog=$!
             status=0
             if wait "$job"; then
