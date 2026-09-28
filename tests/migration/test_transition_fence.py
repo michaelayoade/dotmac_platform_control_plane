@@ -2296,19 +2296,72 @@ def test_restore_grants_a_legally_shaped_forged_entry_the_digest_is_what_would_c
     owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
 ) -> None:
     """A forged `prior_grants` entry that is STRUCTURALLY indistinguishable
-    from a real one — a PUBLIC CONNECT grant made by the current owner, the
-    exact shape a real prior ACL has — passes the `to_add` bound
-    `restore_writers` applies (that bound cannot tell "the real prior ACL"
-    from "an in-memory `FenceProof` a caller mutated after `fence_writers`
-    returned it": both are owner-granted CONNECT to an allowed grantee).
-    `restore_writers` takes a `FenceProof` directly, in-process, and
-    performs NO digest check — that defence belongs to
-    `FenceProof.from_document`, for a proof that crosses a process boundary
-    as untrusted JSON (PR 2). This test proves that boundary explicitly:
-    restore proceeds and actually GRANTs the forged entry, which is exactly
-    why an orchestrator must never hand-construct a `FenceProof` from
-    something it read out of band — it must go through
-    `from_document(doc, expected_digest=...)`."""
+    from a real one — a CONNECT grant to an effective writer role, made by
+    the current owner, non-grantable, the exact shape a real prior ACL has —
+    passes the `to_add` bound `restore_writers` applies (that bound cannot
+    tell "the real prior ACL" from "an in-memory `FenceProof` a caller
+    mutated after `fence_writers` returned it": both are owner-granted
+    CONNECT to an allowed grantee). `restore_writers` takes a `FenceProof`
+    directly, in-process, and performs NO digest check — that defence
+    belongs to `FenceProof.from_document`, for a proof that crosses a
+    process boundary as untrusted JSON (PR 2). This test proves that
+    boundary explicitly: restore proceeds and actually GRANTs the forged
+    entry, which is exactly why an orchestrator must never hand-construct a
+    `FenceProof` from something it read out of band — it must go through
+    `from_document(doc, expected_digest=...)`.
+
+    Deviation from a PUBLIC-shaped forgery: PostgreSQL's own default database
+    ACL already grants PUBLIC a non-grantable CONNECT (owner-granted) the
+    moment `datacl` stops being NULL — `owner_db`'s own fixture docstring
+    says so — so `("", "CONNECT", False, owner)` is already a member of the
+    REAL `proof.prior_grants` here, not absent from it, and forging it would
+    be a silent no-op (a frozenset union with an element already present),
+    proving nothing. `w` itself never receives an individual ACL entry
+    (its only path to CONNECT is PUBLIC's default grant), so a forged
+    `(w, "CONNECT", False, owner)` entry genuinely is absent from the real
+    prior ACL, keeps the identical legal shape (CONNECT, an allowed grantee,
+    owner-granted, non-grantable — so it does not trip the new
+    grant-option-to-PUBLIC refusal either), and is what this test now
+    forges."""
+    with _writer_role(postgres_url) as w:
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                fence_id=FENCE_ID,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            owner = fence_module._database_owner(owner_conn, owner_db)
+            forged_entry = (w, "CONNECT", False, owner)
+            assert forged_entry not in proof.prior_grants
+            forged_proof = dataclasses.replace(
+                proof, prior_grants=frozenset({*proof.prior_grants, forged_entry})
+            )
+
+            restored = restore_writers(
+                owner_conn,
+                forged_proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            assert "PUBLIC" in restored.roles_restored
+            assert w in restored.roles_restored
+            assert forged_entry in fence_module._current_grants(owner_conn, owner_db)
+
+
+def test_restore_refuses_a_grant_option_to_public_before_any_grant(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """PostgreSQL never allows a grant option to PUBLIC — no real
+    `aclexplode` read can ever produce `("", <priv>, True, ...)`. A
+    `prior_grants` entry claiming one is therefore refused by the `to_add`
+    bound as `PROOF_MISMATCH`, before any GRANT — never merely left to fail
+    as a raw SQL error mid-GRANT-loop (which would misreport this as
+    `ACL_NOT_RESTORED`/`COMPENSATION_FAILED` instead of the precise
+    proof-shape refusal it actually is)."""
     with _writer_role(postgres_url) as w:
         with _connect(owner_url, autocommit=True) as owner_conn:
             proof = fence_writers(
@@ -2326,15 +2379,35 @@ def test_restore_grants_a_legally_shaped_forged_entry_the_digest_is_what_would_c
                 proof, prior_grants=frozenset({*proof.prior_grants, forged_entry})
             )
 
-            restored = restore_writers(
+            before = fence_module._current_grants(owner_conn, owner_db)
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(
+                    owner_conn,
+                    forged_proof,
+                    database=owner_db,
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
+            # Nothing was granted: still fully fenced, byte-identical to the
+            # ACL right after the fence closed.
+            assert fence_module._current_grants(owner_conn, owner_db) == before
+            public_can_connect = owner_conn.execute(
+                text("SELECT has_database_privilege('public', :db, 'CONNECT')"),
+                {"db": owner_db},
+            ).scalar_one()
+            assert public_can_connect is False
+
+            # Restore for real with the genuine (unforged) proof so fixture
+            # teardown can drop the role.
+            restore_writers(
                 owner_conn,
-                forged_proof,
+                proof,
                 database=owner_db,
                 expected_fence_id=FENCE_ID,
                 session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
             )
-            assert "PUBLIC" in restored.roles_restored
-            assert forged_entry in fence_module._current_grants(owner_conn, owner_db)
 
 
 # ── (x) no-op terminator: survives and compensates ──────────────────────────

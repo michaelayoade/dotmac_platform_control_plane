@@ -439,6 +439,20 @@ def test_an_empty_prior_grants_grantor_is_refused() -> None:
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
+def test_a_grantable_public_grant_in_prior_grants_is_refused() -> None:
+    """PostgreSQL never allows a grant option to PUBLIC — `is_grantable=True`
+    on a PUBLIC (empty-grantee) entry cannot have come from a real
+    `aclexplode` read, so it is refused as `PROOF_INVALID` rather than
+    treated as merely another shape the digest alone would catch. The near
+    miss is `test_an_empty_prior_grants_grantee_is_the_near_miss_accepted_as_public`
+    just above: the identical PUBLIC grantee with `is_grantable=False` is
+    accepted."""
+    doc = _mutate(prior_grants=[["", "CONNECT", True, "app_admin"]])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
 def test_fenced_roles_not_a_subset_of_allowed_writer_roles_is_refused() -> None:
     doc = _mutate(fenced_roles=["not_a_writer_role"])
     with pytest.raises(FenceRefused) as refused:

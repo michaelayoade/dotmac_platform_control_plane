@@ -775,6 +775,16 @@ class FenceProof:
                     f"{privilege!r}, which is not one of "
                     f"{sorted(_KNOWN_DATABASE_PRIVILEGES)}",
                 )
+            if grantee == "" and is_grantable:
+                # PostgreSQL never allows a grant option to PUBLIC — no real
+                # `aclexplode` read can ever produce this entry, so its
+                # presence here is evidence the document did not originate
+                # from a real fence.
+                raise FenceRefused(
+                    FenceRefusalCode.PROOF_INVALID,
+                    "fence proof document's prior_grants names a grant "
+                    "option to PUBLIC, which PostgreSQL never allows",
+                )
             prior_grants_list.append((grantee, privilege, is_grantable, grantor))
         if len(prior_grants_list) != len(set(prior_grants_list)):
             raise FenceRefused(
@@ -1425,12 +1435,25 @@ def fence_writers(
                 if entry[1] != "CONNECT"
                 or entry[0] not in allowed_for_prior
                 or entry[3] != owner_for_prior
+                # PostgreSQL never allows a grant option to PUBLIC — an
+                # entry claiming one cannot have come from a real
+                # `aclexplode` read of any ACL this module could have
+                # fenced.
+                or (entry[0] == "" and entry[2])
             ),
             None,
         )
         if bad_prior_entry is not None:
-            grantee, privilege, _is_grantable, grantor = bad_prior_entry
+            grantee, privilege, is_grantable, grantor = bad_prior_entry
             display_grantee = "PUBLIC" if grantee == "" else grantee
+            if grantee == "" and is_grantable:
+                raise FenceRefused(
+                    FenceRefusalCode.PRIOR_MISMATCH,
+                    f"the given prior proof for {database!r} claims a "
+                    f"{privilege!r} grant WITH GRANT OPTION to PUBLIC beyond "
+                    "the live ACL, which PostgreSQL never allows; refusing "
+                    "before any change",
+                )
             raise FenceRefused(
                 FenceRefusalCode.PRIOR_MISMATCH,
                 f"the given prior proof for {database!r} claims a "
@@ -1946,12 +1969,23 @@ def restore_writers(
             if entry[1] != "CONNECT"
             or entry[0] not in allowed_grantees
             or entry[3] != owner
+            # PostgreSQL never allows a grant option to PUBLIC — an entry
+            # claiming one cannot have come from a real `aclexplode` read of
+            # any ACL this module could have fenced.
+            or (entry[0] == "" and entry[2])
         ),
         None,
     )
     if bad_entry is not None:
-        grantee, privilege, _is_grantable, grantor = bad_entry
+        grantee, privilege, is_grantable, grantor = bad_entry
         display_grantee = "PUBLIC" if grantee == "" else grantee
+        if grantee == "" and is_grantable:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_MISMATCH,
+                f"restoring {proof.database!r} would need to grant "
+                f"{privilege!r} WITH GRANT OPTION to PUBLIC, which "
+                "PostgreSQL never allows; refusing before any change",
+            )
         raise FenceRefused(
             FenceRefusalCode.PROOF_MISMATCH,
             f"restoring {proof.database!r} would need to grant {privilege!r} "
