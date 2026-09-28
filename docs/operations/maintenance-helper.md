@@ -267,11 +267,11 @@ fails its proof, and reverts (proving the revert too) bounds at:
 here — the 90s drain bound only actually elapses on a drain that is TIMING
 OUT, in which case the run exits 67 directly, without a revert or a proof,
 so this is a conservative combined bound, not a claim that every failure
-takes the full 364s.) The already-in-target-state short-circuit path (no
-switch or revert, just the drain-wait plus one proof) bounds separately at
-`90 + 182 = 272` seconds unless the drain-wait itself doesn't apply on the
-`routing-restore` side (only `maintenance-on`'s short circuit waits for
-drain) — worst case there is the `92`s proof.
+takes the full 364s.) The `maintenance-on` already-in-maintenance short-circuit
+path (no switch or revert: the drain-wait, then one proof) bounds separately
+at `DRAIN_BOUND_SECONDS + 92 = 90 + 92 = 182` seconds (≈3 minutes).
+`routing-restore`'s already-live short circuit has no drain-wait of its own
+(see the exit-code contract), so it bounds at the `92`s proof alone.
 
 **PR 4 must give the helper at least this much headroom — recommend
 7 minutes (420s) — and must NOT wrap `dotmac-vendor-maintenance` in a
