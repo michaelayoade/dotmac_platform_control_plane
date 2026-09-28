@@ -2379,6 +2379,103 @@ def test_restore_refuses_a_proof_whose_prior_grants_grantor_is_not_the_current_o
             )
 
 
+def test_restore_refuses_a_grantor_only_mismatch_isolated_from_every_other_bound(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """Every OTHER condition of the `to_add` bound is satisfied — CONNECT,
+    granted to `w`, an actual effective (allowed) grantee, non-grantable —
+    and ONLY the grantor is wrong. This isolates the grantor clause from the
+    privilege and grantee clauses the other forgery tests exercise together
+    with it, proving the grantor check alone still refuses when every other
+    check would pass."""
+    with _writer_role(postgres_url) as w:
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                fence_id=FENCE_ID,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            forged_entry = (w, "CONNECT", False, "not_the_owner")
+            assert forged_entry not in proof.prior_grants
+            forged_proof = dataclasses.replace(
+                proof, prior_grants=frozenset({*proof.prior_grants, forged_entry})
+            )
+
+            before = fence_module._current_grants(owner_conn, owner_db)
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(
+                    owner_conn,
+                    forged_proof,
+                    database=owner_db,
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
+            assert fence_module._current_grants(owner_conn, owner_db) == before
+
+            restore_writers(
+                owner_conn,
+                proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+
+
+def test_fence_refuses_a_prior_grantor_only_mismatch_isolated(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """The identical isolation as
+    `test_restore_refuses_a_grantor_only_mismatch_isolated_from_every_other_bound`,
+    against `fence_writers`'s `prior=` content bound instead: CONNECT,
+    granted to `w`, non-grantable — every clause but the grantor is
+    satisfied."""
+    with _writer_role(postgres_url) as w:
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                fence_id=FENCE_ID,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            restore_writers(
+                owner_conn,
+                proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            forged_entry = (w, "CONNECT", False, "not_the_owner")
+            assert forged_entry not in proof.prior_grants
+            laundered_prior = dataclasses.replace(
+                proof,
+                fence_id="laundered-grantor-prior",
+                prior_grants=frozenset({*proof.prior_grants, forged_entry}),
+            )
+
+            before = fence_module._current_grants(owner_conn, owner_db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    owner_conn,
+                    database=owner_db,
+                    fence_id=FENCE_ID,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    prior=laundered_prior,
+                    expected_prior_fence_id=laundered_prior.fence_id,
+                    terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+                )
+            assert refused.value.code == FenceRefusalCode.PRIOR_MISMATCH
+            assert fence_module._current_grants(owner_conn, owner_db) == before
+
+
 def test_restore_grants_a_legally_shaped_forged_entry_the_digest_is_what_would_catch(
     owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
 ) -> None:
@@ -2921,6 +3018,166 @@ def test_fence_refuses_a_prior_claiming_a_public_grant_option_absent_from_live_a
             assert fence_module._current_grants(owner_conn, owner_db) == before
 
 
+def test_fence_refuses_a_prior_that_does_not_account_for_a_live_grant(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """The SUBSET layer, isolated: `before_grants <= prior.prior_grants`
+    must hold, or `fence_writers` refuses `PRIOR_MISMATCH` before any
+    change. A `bystander` role is granted CONNECT live, on the already
+    fenced (and restored) database, and the `prior=` proof handed back is
+    the ORIGINAL proof — silent about `bystander` entirely — so the live
+    ACL is no longer a subset of what `prior` claims."""
+    with (
+        _writer_role(postgres_url) as w,
+        _writer_role(postgres_url) as bystander,
+    ):
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                fence_id=FENCE_ID,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            restore_writers(
+                owner_conn,
+                proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            # Something grants CONNECT to an unrelated role that `proof`
+            # (about to be reused as `prior=`) never accounted for.
+            owner_conn.execute(
+                text(f'GRANT CONNECT ON DATABASE "{owner_db}" TO {bystander}')
+            )
+
+            before = fence_module._current_grants(owner_conn, owner_db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    owner_conn,
+                    database=owner_db,
+                    fence_id=FENCE_ID,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    prior=proof,
+                    expected_prior_fence_id=proof.fence_id,
+                    terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+                )
+            assert refused.value.code == FenceRefusalCode.PRIOR_MISMATCH
+            assert fence_module._current_grants(owner_conn, owner_db) == before
+
+            owner_conn.execute(
+                text(f'REVOKE CONNECT ON DATABASE "{owner_db}" FROM {bystander}')
+            )
+
+
+def test_fence_refuses_a_prior_claiming_an_extra_non_connect_privilege(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """The privilege clause, isolated: the forged entry beyond the live
+    subset is grantee `w` (an actual effective role), grantor the CURRENT
+    owner — every clause but the privilege is satisfied — and only its
+    privilege, `TEMPORARY`, is not `CONNECT`."""
+    with _writer_role(postgres_url) as w:
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                fence_id=FENCE_ID,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            restore_writers(
+                owner_conn,
+                proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            owner = fence_module._database_owner(owner_conn, owner_db)
+            forged_entry = (w, "TEMPORARY", False, owner)
+            assert forged_entry not in proof.prior_grants
+            laundered_prior = dataclasses.replace(
+                proof,
+                fence_id="laundered-privilege-prior",
+                prior_grants=frozenset({*proof.prior_grants, forged_entry}),
+            )
+
+            before = fence_module._current_grants(owner_conn, owner_db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    owner_conn,
+                    database=owner_db,
+                    fence_id=FENCE_ID,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    prior=laundered_prior,
+                    expected_prior_fence_id=laundered_prior.fence_id,
+                    terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+                )
+            assert refused.value.code == FenceRefusalCode.PRIOR_MISMATCH
+            assert fence_module._current_grants(owner_conn, owner_db) == before
+
+
+def test_fence_refuses_a_prior_claiming_a_grantee_outside_the_effective_set(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """The grantee clause, isolated: the forged entry beyond the live subset
+    is CONNECT, owner-granted, non-grantable — every clause but the grantee
+    is satisfied — and only its grantee, `bystander`, is neither PUBLIC nor
+    an effective role of THIS fence (`bystander` is a plain login role, never
+    named in `writer_roles`, never a member of `w`)."""
+    with (
+        _writer_role(postgres_url) as w,
+        _writer_role(postgres_url) as bystander,
+    ):
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                fence_id=FENCE_ID,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            restore_writers(
+                owner_conn,
+                proof,
+                database=owner_db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            owner = fence_module._database_owner(owner_conn, owner_db)
+            forged_entry = (bystander, "CONNECT", False, owner)
+            assert forged_entry not in proof.prior_grants
+            laundered_prior = dataclasses.replace(
+                proof,
+                fence_id="laundered-grantee-prior",
+                prior_grants=frozenset({*proof.prior_grants, forged_entry}),
+            )
+
+            before = fence_module._current_grants(owner_conn, owner_db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    owner_conn,
+                    database=owner_db,
+                    fence_id=FENCE_ID,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    prior=laundered_prior,
+                    expected_prior_fence_id=laundered_prior.fence_id,
+                    terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+                )
+            assert refused.value.code == FenceRefusalCode.PRIOR_MISMATCH
+            assert fence_module._current_grants(owner_conn, owner_db) == before
+
+
 # ── (cc) a terminator slower than the deadline never gets the benefit of the
 # doubt ───────────────────────────────────────────────────────────────────
 
@@ -2934,10 +3191,21 @@ def test_a_terminator_slower_than_the_deadline_survives_and_compensates(
     interrupt a blocking callable, so this is the only place that can ever
     notice — measured on return, and refused as `WRITER_SESSIONS_SURVIVED`
     regardless of what the terminator claims. A short, dedicated
-    `session_wait_seconds` keeps this test itself bounded."""
+    `session_wait_seconds` keeps this test itself bounded.
+
+    Non-vacuous: `calls == 1` and the message says "exceeding" prove the
+    SLOW-CALL branch in `_request_termination` is what refused — a plain
+    `WRITER_SESSIONS_SURVIVED` code alone would also be produced by the
+    unrelated deadline-based poll loop in `_terminate_and_drain` (e.g. if
+    this terminator were simply a no-op that returned instantly and the
+    writer just never got terminated), which would NOT prove the slow-call
+    branch itself still refuses when it should."""
     short_wait = 0.5
+    calls = 0
 
     def _slow_no_op() -> None:
+        nonlocal calls
+        calls += 1
         time.sleep(short_wait * 3)
 
     with _writer_role(postgres_url) as w:
@@ -2958,6 +3226,8 @@ def test_a_terminator_slower_than_the_deadline_survives_and_compensates(
                         terminator=_slow_no_op,
                     )
                 assert refused.value.code == FenceRefusalCode.WRITER_SESSIONS_SURVIVED
+                assert "exceeding" in str(refused.value)
+                assert calls == 1
                 after = fence_module._current_grants(owner_conn, owner_db)
                 assert after == before
 
