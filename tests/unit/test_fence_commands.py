@@ -13,11 +13,18 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import UTC, datetime
 
 import pytest
 
 from vendor_cp.cli import main
+from vendor_cp.cli.runtime import translate
 from vendor_cp.deployment import fence_commands
+from vendor_cp.deployment.transition_fence import (
+    FenceProof,
+    FenceRefusalCode,
+    FenceRefused,
+)
 
 # ── StdioBrokerTerminator ────────────────────────────────────────────────────
 
@@ -130,12 +137,85 @@ def test_close_fence_refuses_a_prior_document_without_a_prior_digest(
         )
 
 
+def test_fence_holding_refuses_an_empty_database_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fence_commands, "owner_runtime", _explode)
+    with pytest.raises(fence_commands.FenceCommandConfigError):
+        fence_commands.fence_holding(
+            database="",
+            proof_document={},
+            expected_digest="sha256:" + "0" * 64,
+            expected_fence_id="fence-1",
+        )
+
+
 def test_fence_holding_refuses_an_empty_expected_digest_before_connecting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(fence_commands, "owner_runtime", _explode)
     with pytest.raises(fence_commands.FenceCommandConfigError):
-        fence_commands.fence_holding(proof_document={}, expected_digest="")
+        fence_commands.fence_holding(
+            database="db1",
+            proof_document={},
+            expected_digest="",
+            expected_fence_id="fence-1",
+        )
+
+
+def test_fence_holding_refuses_an_empty_expected_fence_id_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fence_commands, "owner_runtime", _explode)
+    with pytest.raises(fence_commands.FenceCommandConfigError):
+        fence_commands.fence_holding(
+            database="db1",
+            proof_document={},
+            expected_digest="sha256:" + "0" * 64,
+            expected_fence_id="",
+        )
+
+
+def test_fence_holding_refuses_a_malformed_fence_id_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fence_commands, "owner_runtime", _explode)
+    with pytest.raises(fence_commands.FenceCommandConfigError):
+        fence_commands.fence_holding(
+            database="db1",
+            proof_document={},
+            expected_digest="sha256:" + "0" * 64,
+            expected_fence_id="not a valid fence id!",
+        )
+
+
+@pytest.mark.parametrize("bad_seconds", [0.0, -1.0, float("nan"), float("inf")])
+def test_close_fence_refuses_a_non_positive_or_non_finite_session_wait(
+    monkeypatch: pytest.MonkeyPatch, bad_seconds: float
+) -> None:
+    monkeypatch.setattr(fence_commands, "owner_runtime", _explode)
+    with pytest.raises(fence_commands.FenceCommandConfigError):
+        fence_commands.close_fence(
+            database="db1",
+            fence_id="fence-1",
+            session_wait_seconds=bad_seconds,
+            stdin=io.StringIO(),
+            stdout=io.StringIO(),
+        )
+
+
+def test_close_fence_refuses_a_malformed_fence_id_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fence_commands, "owner_runtime", _explode)
+    with pytest.raises(fence_commands.FenceCommandConfigError):
+        fence_commands.close_fence(
+            database="db1",
+            fence_id="has a space",
+            session_wait_seconds=1.0,
+            stdin=io.StringIO(),
+            stdout=io.StringIO(),
+        )
 
 
 def test_restore_fence_refuses_an_empty_database_before_connecting(
@@ -186,6 +266,141 @@ def test_restore_fence_refuses_an_empty_expected_fence_id_before_connecting(
         )
 
 
+def test_restore_fence_refuses_a_malformed_expected_fence_id_before_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fence_commands, "owner_runtime", _explode)
+    with pytest.raises(fence_commands.FenceCommandConfigError):
+        fence_commands.restore_fence(
+            database="db1",
+            proof_document={},
+            expected_digest="sha256:" + "0" * 64,
+            expected_fence_id="not valid!",
+            session_wait_seconds=1.0,
+            stdin=io.StringIO(),
+            stdout=io.StringIO(),
+        )
+
+
+@pytest.mark.parametrize("bad_seconds", [0.0, -1.0, float("nan"), float("inf")])
+def test_restore_fence_refuses_a_non_positive_or_non_finite_session_wait(
+    monkeypatch: pytest.MonkeyPatch, bad_seconds: float
+) -> None:
+    monkeypatch.setattr(fence_commands, "owner_runtime", _explode)
+    with pytest.raises(fence_commands.FenceCommandConfigError):
+        fence_commands.restore_fence(
+            database="db1",
+            proof_document={},
+            expected_digest="sha256:" + "0" * 64,
+            expected_fence_id="fence-1",
+            session_wait_seconds=bad_seconds,
+            stdin=io.StringIO(),
+            stdout=io.StringIO(),
+        )
+
+
+# ── fence_holding binds the document to the caller's own coordinates ───────
+
+
+def test_fence_holding_reports_false_before_connecting_on_a_database_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A structurally valid, digest-matching document naming a DIFFERENT
+    database is `holding: False` — never evidence about the database the
+    caller actually asked about — and this is caught before `owner_runtime()`
+    is ever called."""
+    monkeypatch.setattr(fence_commands, "owner_runtime", _explode)
+
+    proof = FenceProof(
+        database="other-db",
+        fence_id="fence-1",
+        prior_acl="",
+        prior_grants=frozenset(),
+        fenced_roles=(),
+        member_roles=(),
+        absent_roles=(),
+        terminated_count=0,
+        fenced_at=datetime.now(UTC),
+    )
+    document = proof.to_document()
+
+    result = fence_commands.fence_holding(
+        database="db1",
+        proof_document=document,
+        expected_digest=proof.digest(),
+        expected_fence_id="fence-1",
+    )
+    assert result == {"holding": False}
+
+
+def test_fence_holding_reports_false_before_connecting_on_a_fence_id_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fence_commands, "owner_runtime", _explode)
+
+    proof = FenceProof(
+        database="db1",
+        fence_id="fence-1",
+        prior_acl="",
+        prior_grants=frozenset(),
+        fenced_roles=(),
+        member_roles=(),
+        absent_roles=(),
+        terminated_count=0,
+        fenced_at=datetime.now(UTC),
+    )
+    document = proof.to_document()
+
+    result = fence_commands.fence_holding(
+        database="db1",
+        proof_document=document,
+        expected_digest=proof.digest(),
+        expected_fence_id="a-different-run",
+    )
+    assert result == {"holding": False}
+
+
+# ── translate() gives FenceRefused/FenceCommandConfigError/BrokerProtocolError
+#    their own identity, rather than collapsing to execution.failed ─────────
+
+
+def test_translate_carries_fence_refused_as_its_own_code_and_before_acl() -> None:
+    error = FenceRefused(
+        FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
+        "2 writer backend(s) survived",
+        before_acl="GRANT CONNECT ON DATABASE foo TO bar",
+    )
+
+    refusal = translate(error)
+
+    assert refusal.code == "owner.fence_refused"
+    assert "writer_sessions_survived" in refusal.message
+    assert "GRANT CONNECT ON DATABASE foo TO bar" in refusal.message
+
+
+def test_translate_carries_fence_refused_without_before_acl() -> None:
+    error = FenceRefused(FenceRefusalCode.UNKNOWN_DATABASE, "no such database")
+
+    refusal = translate(error)
+
+    assert refusal.code == "owner.fence_refused"
+    assert "before_acl" not in refusal.message
+
+
+def test_translate_carries_fence_command_config_error_as_usage() -> None:
+    refusal = translate(
+        fence_commands.FenceCommandConfigError("database must be given")
+    )
+
+    assert refusal.code == "usage.fence_command_invalid"
+
+
+def test_translate_carries_broker_protocol_error_as_unavailable_evidence() -> None:
+    refusal = translate(fence_commands.BrokerProtocolError("wrong reply"))
+
+    assert refusal.code == "evidence.fence_broker_unavailable"
+
+
 # ── stdout discipline ─────────────────────────────────────────────────────
 
 
@@ -210,6 +425,11 @@ class _FakeRuntime:
 
 
 class _FakeProof:
+    #: `close_fence` reads its result's `fence_id` back from `proof.fence_id`
+    #: — never from the `fence_id` argument it was called with — so this fake
+    #: carries its own value, matched against below.
+    fence_id = "fence-xyz"
+
     def to_document(self) -> dict[str, object]:
         return {"schema": "TransitionFenceProof.v1", "fake": True}
 
@@ -247,8 +467,7 @@ def test_a_close_run_writes_only_protocol_lines_and_the_final_envelope(
             "--format",
             "json",
             "admin",
-            "transition-fence",
-            "close",
+            "transition-fence-close",
             "--database",
             "db1",
             "--fence-id",
@@ -268,5 +487,10 @@ def test_a_close_run_writes_only_protocol_lines_and_the_final_envelope(
     assert lines[0] == "DOTMAC-FENCE-TERMINATE v1 fence-xyz"
     assert all(not line.startswith("DOTMAC-FENCE-") for line in lines[1:])
     envelope = json.loads("\n".join(lines[1:]))
-    assert envelope["command"] == "admin transition-fence close"
+    assert envelope["command"] == "admin transition-fence-close"
     assert envelope["status"] == "ok"
+    # The fence_id in both the data and the references comes back from the
+    # PROOF (`_FakeProof.fence_id`), never echoed from `--fence-id` alone —
+    # they happen to be equal here, but the READ PATH is what this proves.
+    assert envelope["data"]["fence_id"] == "fence-xyz"
+    assert envelope["references"]["fence_id"] == "fence-xyz"
