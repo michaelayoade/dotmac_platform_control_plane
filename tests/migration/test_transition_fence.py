@@ -1186,6 +1186,31 @@ def test_a_mismatched_expected_prior_fence_id_is_refused_before_any_change(
             )
 
 
+def test_expected_prior_fence_id_without_prior_is_refused_before_any_change(
+    admin_url: str, db: str
+) -> None:
+    """A caller that states it is re-fencing (`expected_prior_fence_id`) but
+    drops `prior=` would otherwise record the current ACL as "prior". It is
+    refused `PROOF_MISMATCH` before any change: the ACL is untouched and
+    PUBLIC keeps CONNECT. Removing the guard would let the fence proceed and
+    revoke PUBLIC, failing both assertions."""
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            before = fence_module._current_grants(conn, db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    conn,
+                    database=db,
+                    fence_id=FENCE_ID,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    expected_prior_fence_id="a-prior-run",
+                )
+            assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
+            assert "without prior=" in str(refused.value)
+            assert fence_module._current_grants(conn, db) == before
+
+
 # ── (m2) restore's two required bindings: database and fence_id ────────────
 
 
@@ -2951,15 +2976,14 @@ def test_a_third_party_grant_chain_survives_fence_restore_and_compensation(
                     writer_conn.close()
                     writer_engine.dispose()
         finally:
-            # Revoke the chain as the owner (authorized to revoke any grant
-            # on its own database regardless of grantor) so the roles can be
-            # dropped: Y's grant (recording X as grantor) before X's own.
+            # An owner's REVOKE only removes grants the owner recorded, so a
+            # plain REVOKE FROM y removes nothing (y's grant records x as
+            # grantor), and a plain REVOKE FROM x fails with "dependent
+            # privileges exist". CASCADE on x's grant option removes x's
+            # grant and y's dependent one together, so the roles can drop.
             with _connect(owner_url, autocommit=True) as cleanup_conn:
                 cleanup_conn.execute(
-                    text(f'REVOKE CONNECT ON DATABASE "{owner_db}" FROM {y}')
-                )
-                cleanup_conn.execute(
-                    text(f'REVOKE CONNECT ON DATABASE "{owner_db}" FROM {x}')
+                    text(f'REVOKE CONNECT ON DATABASE "{owner_db}" FROM {x} CASCADE')
                 )
 
 

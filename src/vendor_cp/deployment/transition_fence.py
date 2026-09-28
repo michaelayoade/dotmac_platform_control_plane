@@ -146,10 +146,14 @@ The mechanism (owned by the host orchestrator, PR 2, not this module):
 1. The host generates a unique `fence_id` itself and passes it into
    `fence_writers` as the `fence_id=` argument — this module never
    generates one.
-2. On receiving the resulting document (however it crossed the process
-   boundary — stdout, a file, a queue), the host checks that
+2. On receiving the resulting document, the host checks that
    `doc["fence_id"]` equals the id it itself generated in step 1 — BEFORE
-   it ever records `expected_digest`.
+   it ever records `expected_digest`. The hop from the fencing process to
+   the host must itself be trusted — for example the direct stdout of a
+   process the host spawned. The digest protects only storage and
+   transport AFTER the host records it: a document altered on a writable
+   file or queue before capture keeps its `fence_id` and would pass this
+   check.
 3. Only once that check passes does the host record BOTH the digest and the
    `fence_id` in HOST-ONLY state (its own memory, its own store) — never
    re-derived by re-reading anything from the document's own channel.
@@ -387,13 +391,15 @@ timestamp.
   single `terminator()` call consume far more than `session_wait_seconds`
   before this library ever gets a chance to notice (see
   `_request_termination`'s docstring).
-- **The real drain wall-clock bound is roughly THREE TIMES
-  `session_wait_seconds`, not one** — see `_terminate_and_drain`'s
-  docstring for the exact mechanics (an unbounded first termination
-  request, and a compensating restore's independent second drain attempt).
-  PR 2's maintenance-window budget must account for this multiple, plus
-  ordinary `_POLL_INTERVAL_SECONDS` polling overhead, not the single
-  `session_wait_seconds` value a caller passes in.
+- **The real drain wall-clock bound is not `session_wait_seconds`.** One
+  drain is bounded by roughly THREE TIMES it (a first termination request
+  before the deadline starts, the deadline window, and a last call started
+  just before the deadline), provided every `terminator()` call returns
+  within `session_wait_seconds`. A second drain happens only when a
+  compensating or failed restore goes through `_refence_and_redrain`, so
+  the composed worst case is roughly SIX TIMES `session_wait_seconds`, plus
+  `_POLL_INTERVAL_SECONDS` polling overhead. See `_terminate_and_drain`'s
+  docstring. PR 2's maintenance-window budget must use these figures.
 - **The fail-closed recovery boundaries PR 2 must operate against.**
   Membership drift between fence and restore (a role granted membership in
   a writer after the fence closed) gives `PROOF_MISMATCH`, with the
@@ -591,8 +597,13 @@ class FenceRefusalCode(StrEnum):
     #: Fail closed: never construct a `FenceProof` from a document that does
     #: not strictly conform.
     PROOF_INVALID = "proof_invalid"
-    #: `restore_writers` refused a structurally-valid `FenceProof` because it
-    #: does not match LIVE state: re-deriving `_member_roles` from
+    #: A structurally-valid `FenceProof` does not match what the caller bound
+    #: it to, or does not match LIVE state. Raised by `restore_writers` when
+    #: `database` or `expected_fence_id` differs from the proof; by
+    #: `fence_writers` when `prior=` is given without, or with a different,
+    #: `expected_prior_fence_id` (and when `expected_prior_fence_id` is given
+    #: without `prior=`); and by `restore_writers` against LIVE state:
+    #: re-deriving `_member_roles` from
     #: `proof.fenced_roles` right now disagrees with `proof.member_roles`, or
     #: an entry this restore would actually need to GRANT (`prior_grants`
     #: minus the current ACL) is not a CONNECT grant to an effective role or
@@ -1559,6 +1570,15 @@ def fence_writers(
     before_acl = _current_acl_text(conn, database)
     before_grants = _current_grants(conn, database)
 
+    if expected_prior_fence_id is not None and prior is None:
+        # A caller that states it is re-fencing but drops `prior` would
+        # record the already-revoked ACL as "prior" — the hazard `prior=`
+        # exists to prevent. Refuse rather than ignore the stated intent.
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_MISMATCH,
+            "expected_prior_fence_id was given without prior=; a re-fence "
+            "must pass the prior proof it names",
+        )
     if prior is not None:
         # The provenance binding, checked first and before any other prior
         # check — the identical discipline `restore_writers` applies to
@@ -1844,15 +1864,19 @@ def _terminate_and_drain(
     is not subject to the deadline check at all, so a single slow
     `terminator()` call there can already consume close to
     `session_wait_seconds` before the deadline clock starts, pushing one
-    call's real bound toward roughly TWICE `session_wait_seconds` plus
-    `_POLL_INTERVAL_SECONDS` polling overhead. A caller that composes a
-    fence with its own compensation (`fence_writers` on
-    `WRITER_SESSIONS_SURVIVED`, or `restore_writers` on a GRANT-loop failure
-    or final mismatch, both via `_refence_and_redrain`) can invoke a SECOND,
-    independent `_terminate_and_drain` on top of the first. PR 2's real
-    end-to-end drain budget should assume roughly THREE TIMES
-    `session_wait_seconds`, not one, plus polling overhead — see the module
-    docstring's "carried into PR 2" section."""
+    call's real bound toward roughly TWICE `session_wait_seconds`; and a
+    LAST call started just before the deadline (the deadline is checked
+    before each call, not after) can add up to about one more. So ONE drain
+    is bounded by roughly THREE TIMES `session_wait_seconds` plus
+    `_POLL_INTERVAL_SECONDS` polling overhead, provided every
+    `terminator()` call returns within `session_wait_seconds`; a call that
+    never returns is unbounded. A SECOND, independent drain happens only
+    when a compensating or failed restore goes through
+    `_refence_and_redrain` (a GRANT-loop failure or a final mismatch) — a
+    compensating restore that succeeds does not drain at all. PR 2's
+    composed worst case is therefore roughly SIX TIMES
+    `session_wait_seconds` plus overhead — see the module docstring's
+    "carried into PR 2" section."""
     if not roles:
         return 0
     backends = _writer_pids(conn, database, roles)
