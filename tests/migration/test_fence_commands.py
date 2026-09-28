@@ -46,6 +46,28 @@ SESSION_WAIT_SECONDS = 3.0
 FENCE_ID = "test-fence-commands"
 
 
+def _sql_statements(sql_text: str) -> list[str]:
+    """The checked-in file's own statements, split on a `;` that terminates
+    one — never one inside a `--` comment. `psycopg` refuses to run more
+    than one statement through a single parameterised `execute` ("cannot
+    insert multiple commands into a prepared statement"), which `psql`
+    itself never does (it just runs the file's statements in sequence), so
+    every SQLAlchemy-driven caller here that wants the file's REAL
+    behaviour must split it exactly the way `psql` would and execute each
+    piece separately, in the SAME session.
+
+    `tests/architecture/test_fence_broker_sql.py::
+    test_the_sql_is_exactly_two_statements` asserts the file always yields
+    exactly two — the `SET statement_timeout` and the terminate query — so
+    this function's own two-statement assumption cannot drift from the
+    checked-in file silently.
+    """
+    without_comments = "\n".join(
+        line for line in sql_text.splitlines() if not line.strip().startswith("--")
+    )
+    return [s.strip() for s in without_comments.split(";") if s.strip()]
+
+
 @contextmanager
 def _connect(url: str, *, autocommit: bool = False) -> Iterator[Connection]:
     engine = create_engine(url, isolation_level="AUTOCOMMIT" if autocommit else None)
@@ -146,9 +168,17 @@ class _InProcessHostBroker:
         # `:'db'` is psql's quoted-literal substitution syntax, not a
         # SQLAlchemy bind parameter — rebound here to `:dbname` so the exact
         # checked-in file's text can run over a plain SQLAlchemy connection.
-        sql = SQL_PATH.read_text(encoding="utf-8").replace(":'db'", ":dbname")
+        # The file holds TWO statements (`SET statement_timeout`, then the
+        # terminate query); psycopg refuses both in one parameterised
+        # execute, so each runs separately, in the SAME session, exactly as
+        # `psql` running the whole file would.
+        statements = _sql_statements(SQL_PATH.read_text(encoding="utf-8"))
+        assert len(statements) == 2, statements
+        set_statement, query_statement = statements
+        query_statement = query_statement.replace(":'db'", ":dbname")
         with _connect(self._admin_url, autocommit=True) as conn:
-            conn.execute(text(sql), {"dbname": self._database})
+            conn.execute(text(set_statement))
+            conn.execute(text(query_statement), {"dbname": self._database})
         self.served += 1
         self._reply = f"DOTMAC-FENCE-TERMINATED v1 {self._fence_id}\n"
         return len(data)
@@ -178,7 +208,10 @@ def test_the_checked_in_sql_kills_only_the_effective_writer_set(
     the database's OWNER, `app_admin`'s own session, and an unrelated
     bystander holding its own `CONNECT` grant.
     """
-    sql = SQL_PATH.read_text(encoding="utf-8").replace(":'db'", ":dbname")
+    statements = _sql_statements(SQL_PATH.read_text(encoding="utf-8"))
+    assert len(statements) == 2, statements
+    set_statement, query_statement = statements
+    query_statement = query_statement.replace(":'db'", ":dbname")
 
     with _connect(admin_url, autocommit=True) as conn:
         owner_name = conn.execute(
@@ -225,7 +258,8 @@ def test_the_checked_in_sql_kills_only_the_effective_writer_set(
                     assert admin_conn.execute(text("SELECT 1")).scalar_one() == 1
 
                     with _connect(admin_url, autocommit=True) as super_conn:
-                        super_conn.execute(text(sql), {"dbname": db})
+                        super_conn.execute(text(set_statement))
+                        super_conn.execute(text(query_statement), {"dbname": db})
                         # The calling session's own backend is excluded by
                         # `pg_backend_pid()` — proven by continuing to use
                         # the SAME connection right after running the
