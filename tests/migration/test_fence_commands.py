@@ -200,13 +200,26 @@ def test_the_checked_in_sql_kills_only_the_effective_writer_set(
 ) -> None:
     """Run the file's own text as superuser, with `:'db'` rebound to a
     SQLAlchemy bind parameter (stated here, not hidden — psql's `:'db'`
-    quoted-literal substitution has no SQLAlchemy equivalent).
+    quoted-literal substitution has no SQLAlchemy equivalent). This test only
+    ever runs the SQL directly — it never calls `fence_commands`.
 
-    A LOGIN member of `app_user` (an actual `WRITER_ROLES` path) dies. Every
-    one of the SQL's own stated exclusions survives: a superuser session
-    (the calling connection itself), a member of `app_admin`, a member of
-    the database's OWNER, `app_admin`'s own session, and an unrelated
-    bystander holding its own `CONNECT` grant.
+    Every SPARED role here is ALSO a member of `app_user` (a real
+    `WRITER_ROLES` path, via `GRANT app_user TO <role>`), so it lands in the
+    base recursive walk exactly like the writer that dies — the ONLY thing
+    that can save it is its own exclusion clause. A test where a spared role
+    was never a writer member in the first place would pass even if that
+    clause were deleted, since the role was never in the kill set to begin
+    with; that is exactly the gap this shape closes.
+
+    The scratch database's owner is changed to a role DISTINCT from
+    `app_admin`, so the owner-exclusion clause is exercised on its own,
+    never coinciding with the app_admin-exclusion clause.
+
+    A plain writer member (no exclusion applies) dies. A member of BOTH
+    `app_user` and `app_admin`, a member of BOTH `app_user` and the
+    (distinct) owner, and a SUPERUSER login role granted `app_user`, all
+    survive. An unrelated bystander (its own `CONNECT` grant, never a writer
+    member at all) survives too.
     """
     statements = _sql_statements(SQL_PATH.read_text(encoding="utf-8"))
     assert len(statements) == 2, statements
@@ -214,24 +227,34 @@ def test_the_checked_in_sql_kills_only_the_effective_writer_set(
     query_statement = query_statement.replace(":'db'", ":dbname")
 
     with _connect(admin_url, autocommit=True) as conn:
-        owner_name = conn.execute(
+        original_owner = conn.execute(
             text("SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = :db"),
             {"db": db},
         ).scalar_one()
 
+    dedicated_owner = f"fence_owner_{uuid.uuid4().hex[:10]}"
+    with _connect(admin_url, autocommit=True) as conn:
+        conn.execute(text(f"CREATE ROLE {dedicated_owner} NOLOGIN"))
+        conn.execute(text(f'ALTER DATABASE "{db}" OWNER TO {dedicated_owner}'))
+
     with _writer_member_role(admin_url) as writer_member:
         app_admin_member = f"fence_admin_member_{uuid.uuid4().hex[:10]}"
         owner_member = f"fence_owner_member_{uuid.uuid4().hex[:10]}"
+        superuser_writer = f"fence_superuser_writer_{uuid.uuid4().hex[:10]}"
         bystander = f"fence_bystander_{uuid.uuid4().hex[:10]}"
         with _connect(admin_url, autocommit=True) as conn:
             conn.execute(
                 text(f"CREATE ROLE {app_admin_member} LOGIN NOSUPERUSER NOBYPASSRLS")
             )
+            conn.execute(text(f"GRANT app_user TO {app_admin_member}"))
             conn.execute(text(f"GRANT {MIGRATION_ROLE} TO {app_admin_member}"))
             conn.execute(
                 text(f"CREATE ROLE {owner_member} LOGIN NOSUPERUSER NOBYPASSRLS")
             )
-            conn.execute(text(f'GRANT "{owner_name}" TO {owner_member}'))
+            conn.execute(text(f"GRANT app_user TO {owner_member}"))
+            conn.execute(text(f"GRANT {dedicated_owner} TO {owner_member}"))
+            conn.execute(text(f"CREATE ROLE {superuser_writer} LOGIN SUPERUSER"))
+            conn.execute(text(f"GRANT app_user TO {superuser_writer}"))
             conn.execute(text(f"CREATE ROLE {bystander} LOGIN NOSUPERUSER NOBYPASSRLS"))
             conn.execute(text(f'GRANT CONNECT ON DATABASE "{db}" TO {bystander}'))
         try:
@@ -244,6 +267,9 @@ def test_the_checked_in_sql_kills_only_the_effective_writer_set(
                 ),
                 "owner_member": create_engine(
                     url_for(postgres_url, db, user=owner_member)
+                ),
+                "superuser_writer": create_engine(
+                    url_for(postgres_url, db, user=superuser_writer)
                 ),
                 "bystander": create_engine(url_for(postgres_url, db, user=bystander)),
             }
@@ -271,7 +297,12 @@ def test_the_checked_in_sql_kills_only_the_effective_writer_set(
 
                 with pytest.raises(OperationalError):
                     conns["writer_member"].execute(text("SELECT 1"))
-                for name in ("app_admin_member", "owner_member", "bystander"):
+                for name in (
+                    "app_admin_member",
+                    "owner_member",
+                    "superuser_writer",
+                    "bystander",
+                ):
                     assert conns[name].execute(text("SELECT 1")).scalar_one() == 1, name
             finally:
                 for name, conn in conns.items():
@@ -284,12 +315,24 @@ def test_the_checked_in_sql_kills_only_the_effective_writer_set(
                 )
                 conn.execute(text(f"DROP OWNED BY {bystander}"))
                 conn.execute(text(f"DROP ROLE IF EXISTS {bystander}"))
-                conn.execute(text(f'REVOKE "{owner_name}" FROM {owner_member}'))
+                conn.execute(text(f"REVOKE app_user FROM {superuser_writer}"))
+                conn.execute(text(f"DROP OWNED BY {superuser_writer}"))
+                conn.execute(text(f"DROP ROLE IF EXISTS {superuser_writer}"))
+                conn.execute(text(f"REVOKE {dedicated_owner} FROM {owner_member}"))
+                conn.execute(text(f"REVOKE app_user FROM {owner_member}"))
                 conn.execute(text(f"DROP OWNED BY {owner_member}"))
                 conn.execute(text(f"DROP ROLE IF EXISTS {owner_member}"))
                 conn.execute(text(f"REVOKE {MIGRATION_ROLE} FROM {app_admin_member}"))
+                conn.execute(text(f"REVOKE app_user FROM {app_admin_member}"))
                 conn.execute(text(f"DROP OWNED BY {app_admin_member}"))
                 conn.execute(text(f"DROP ROLE IF EXISTS {app_admin_member}"))
+
+    # Revert ownership before dropping the dedicated owner role — a role
+    # that still owns the database cannot be dropped.
+    with _connect(admin_url, autocommit=True) as conn:
+        conn.execute(text(f'ALTER DATABASE "{db}" OWNER TO "{original_owner}"'))
+        conn.execute(text(f"DROP OWNED BY {dedicated_owner}"))
+        conn.execute(text(f"DROP ROLE IF EXISTS {dedicated_owner}"))
 
 
 # ── (b) close_fence, then restore_fence, end to end, with a real session ────

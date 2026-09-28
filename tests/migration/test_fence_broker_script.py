@@ -5,11 +5,20 @@ proves `fence_commands` and the checked-in SQL; this file is the only place
 exercised end to end.
 
 `compose` is shimmed to turn the broker's own `compose exec -T --user
-postgres db psql ...` into a real `psql` against the CI test cluster —
-connection parameters come from the standard `PG*` libpq environment
-variables, derived from the same `postgres_url` every other Postgres suite
-in this repository uses, so this file adds no new cluster-configuration
-surface.
+postgres db timeout N psql ...` into a real `timeout N psql ...` run
+directly on the CI host against the CI test cluster — connection parameters
+come from the standard `PG*` libpq environment variables, derived from the
+same `postgres_url` every other Postgres suite in this repository uses, so
+this file adds no new cluster-configuration surface.
+
+The shim matches the FIVE leading tokens `exec -T --user postgres db`
+exactly, and exits 99 with a message on stderr if they ever differ — a
+blind `shift` here previously left `N psql ...` behind after `db`'s
+position changed underneath it (the in-container `timeout` this broker
+gained is between `db` and `psql`), which silently broke the happy-path
+test without failing loudly. Matching the exact shape, rather than a fixed
+token COUNT, is what makes a future shape change fail loudly here again
+instead of quietly forwarding the wrong argv.
 
 Skips (never fails) when `psql` is not on `PATH` locally; under
 `REQUIRE_POSTGRES_TESTS=1` (the CI job's own setting) a missing `psql` is a
@@ -115,18 +124,23 @@ def _run_broker(
     *, postgres_url: str, database: str, fence_id: str, stdin_text: str
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Run `fence_broker_serve <database> <fence_id>` as a real bash
-    subprocess, with `compose` shimmed to a direct `psql` against the CI
-    cluster, fd 3 wired to a temp file, and stdin/stdout carrying the exact
-    protocol bytes. Returns the completed process and the fd-3 envelope
-    file's contents."""
+    subprocess, with `compose` shimmed to a direct `timeout N psql` against
+    the CI cluster, fd 3 wired to a temp file, and stdin/stdout carrying the
+    exact protocol bytes. Returns the completed process and the fd-3
+    envelope file's contents."""
     with tempfile.TemporaryDirectory() as tmp:
         envelope_path = Path(tmp) / "envelope.txt"
         script = f"""
 set -euo pipefail
 source "{BROKER_PATH!s}"
 compose() {{
-    shift 6
-    psql -d "$database" "$@"
+    if [[ "$1" != "exec" || "$2" != "-T" || "$3" != "--user" || "$4" != "postgres" \\
+          || "$5" != "db" ]]; then
+        echo "compose shim: unexpected leading arguments: $*" >&2
+        exit 99
+    fi
+    shift 5
+    PGDATABASE="$database" "$@"
 }}
 exec 3>"{envelope_path!s}"
 fence_broker_serve "{database!s}" "{fence_id!s}"
@@ -242,9 +256,14 @@ def test_the_real_broker_refuses_a_mismatched_fence_id_without_running_any_sql(
 def test_the_real_broker_reports_a_psql_failure_without_replying(
     admin_url: str, db: str
 ) -> None:
-    """Point the `compose` shim at a bad DSN (a nonexistent port) so the real
-    `psql` invocation fails — the broker must not reply, and must exit
-    non-zero, exactly as it does for a mismatched fence_id."""
+    """Point the connection at a bad port (nothing listens on it) so the
+    real `psql` invocation itself fails to connect — the broker must not
+    reply, and must exit non-zero. `"failed to run command"` is `timeout`'s
+    own message when it cannot EXEC `psql` at all (a 127-style meta
+    failure, the exact shape of the defect this suite exists to catch) —
+    asserting its absence is what proves this failure genuinely came from
+    `psql`'s own connection attempt, not from the shim or `timeout` being
+    broken again."""
     bad_env = _libpq_env(admin_url)
     bad_env["PGPORT"] = "1"  # a port nothing listens on
 
@@ -252,8 +271,13 @@ def test_the_real_broker_reports_a_psql_failure_without_replying(
 set -euo pipefail
 source "{BROKER_PATH!s}"
 compose() {{
-    shift 6
-    psql -d "$database" "$@"
+    if [[ "$1" != "exec" || "$2" != "-T" || "$3" != "--user" || "$4" != "postgres" \\
+          || "$5" != "db" ]]; then
+        echo "compose shim: unexpected leading arguments: $*" >&2
+        exit 99
+    fi
+    shift 5
+    PGDATABASE="$database" "$@"
 }}
 exec 3>/dev/null
 fence_broker_serve "{db!s}" "{FENCE_ID!s}"
@@ -269,3 +293,4 @@ fence_broker_serve "{db!s}" "{FENCE_ID!s}"
 
     assert proc.returncode != 0
     assert proc.stdout == ""
+    assert "failed to run command" not in proc.stderr
