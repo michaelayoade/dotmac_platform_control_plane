@@ -30,6 +30,56 @@ anything unless the DRIVER connection's own `autocommit` flag is True
 (`Connection.get_isolation_level()` is not used: it reports the server's
 isolation level, which still reads "read committed" under autocommit).
 
+## D1: the owner topology
+
+`conn` is the database owner or a superuser, on both `fence_writers` and
+`restore_writers`: the ACL work — REVOKE/GRANT CONNECT, `aclexplode`,
+`pg_auth_members`, `has_database_privilege`, `pg_stat_activity` reads — needs
+no privilege beyond that (`_require_owner_member_or_superuser`, checked
+before any change on both entry points). Terminating another role's open
+backends is a SEPARATE privilege ownership does not grant, so it never rides
+`conn`: it goes through the `Terminator` seam instead (`None` for the default
+`pg_terminate_backend` adapter over `conn` itself, or a caller-supplied
+no-argument callable — see `Terminator`'s own docstring for that seam's lower
+and upper bounds). This is the "D1 topology" the `Terminator` docstring and
+the grantor-preservation comments elsewhere in this module refer to: one
+owner-privileged connection for every ACL read/write, one separately
+privileged (and separately untrusted) channel for termination.
+
+## Two required bindings a restore must present: `database` and `fence_id`
+
+`restore_writers` never trusts a `FenceProof` on its own claimed content
+alone. It requires the caller to also state, out of band, which database the
+proof should apply to (`database`) and which run this restore is completing
+(`expected_fence_id`), and refuses `PROOF_MISMATCH` — checked first, before
+`_require_owner_member_or_superuser` and before every other query that
+depends on the proof, and so before any GRANT — unless `database ==
+proof.database` and `expected_fence_id == proof.fence_id`. A caller holding a
+stale or misdirected proof (one for a different database, or one from a
+superseded fencing run against the same database — a replay) is refused
+rather than silently restoring the wrong ACL under the wrong run's authority.
+
+Every `FenceProof` therefore also carries `fence_id`: a non-empty,
+caller-supplied run identifier `fence_writers` requires and records,
+refusing `PROOF_INVALID` if it is empty or unsafe. A re-fence with `prior=`
+records the NEW caller's `fence_id` on the resulting proof, never the prior
+proof's (whose own `fence_id` must itself be non-empty, or `fence_writers`
+refuses `PROOF_INVALID`). The wire form (`to_document`/`from_document`)
+treats `fence_id` as a required key that must be non-empty, free of NUL bytes
+and lone surrogates, free of leading or trailing whitespace, and at most 128
+characters — the identical discipline every other identifier on this proof
+already gets, and, like `digest()`, only a defence when `expected_fence_id`
+itself crossed a trust boundary the proof's own channel does not control.
+
+`restore_writers`'s remaining pre-checks, run in order after both bindings
+above have been proven, are unchanged by this: re-deriving live membership
+against `proof.member_roles` (`PROOF_MISMATCH` on drift), then bounding
+`to_add` (the entries this call would actually GRANT) to a CONNECT grant made
+by the database's CURRENT owner to an effective role or PUBLIC — never
+checked against the whole of `prior_grants`, only the entries this call would
+act on (see "The prior ACL is the thing being protected" below for why a
+restore must never refuse an ACL `fence_writers` itself already accepted).
+
 ## The prior ACL is the thing being protected, not the fence's own state
 
 `restore_writers` puts the database back to EXACTLY the ACL that was there
@@ -475,6 +525,39 @@ def _reject_unsafe_identifier(
         )
 
 
+def _reject_invalid_fence_id(fence_id: str) -> None:
+    """`PROOF_INVALID`: `fence_id` must be a non-empty run identifier — not
+    unsafe (a NUL byte or a lone surrogate, the same discipline as every
+    other identifier this module carries), not padded with leading or
+    trailing whitespace, and no longer than 128 characters. Applied
+    identically whether the value came from a caller's
+    `fence_writers`/`restore_writers` argument or from a wire document
+    `from_document` is parsing."""
+    if fence_id == "":
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_INVALID, "fence_id is an empty string"
+        )
+    if "\x00" in fence_id:
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_INVALID, "fence_id contains a NUL character"
+        )
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in fence_id):
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_INVALID, "fence_id contains a lone surrogate"
+        )
+    if fence_id != fence_id.strip():
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_INVALID,
+            "fence_id has leading or trailing whitespace",
+        )
+    if len(fence_id) > 128:
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_INVALID,
+            f"fence_id is {len(fence_id)} characters, exceeding the 128 "
+            "character limit",
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class FenceProof:
     """What the fence did, verified rather than assumed.
@@ -486,9 +569,16 @@ class FenceProof:
     privilege_type, is_grantable, grantor)` tuples via `aclexplode`) is what
     `restore_writers` actually compares against; see the module docstring for
     why text comparison is refused and why the grantor is part of the
-    comparison."""
+    comparison.
+
+    `fence_id` is the caller-supplied identifier of the run that produced
+    this proof — required, non-empty, and bound by `restore_writers` against
+    the caller's `expected_fence_id` before any GRANT, so a proof from a
+    superseded run cannot be replayed against a live fence of the same
+    database (see the module docstring's "Two required bindings" section)."""
 
     database: str
+    fence_id: str
     prior_acl: str
     prior_grants: _Grants
     fenced_roles: tuple[str, ...]
@@ -517,6 +607,7 @@ class FenceProof:
         return {
             "schema": FENCE_PROOF_SCHEMA,
             "database": self.database,
+            "fence_id": self.fence_id,
             "prior_acl": self.prior_acl,
             "prior_grants": sorted(
                 [grantee, privilege, is_grantable, grantor]
@@ -637,6 +728,14 @@ class FenceProof:
                 "fence proof document's database must be a string",
             )
         _reject_unsafe_identifier(database, "database")
+
+        fence_id = doc["fence_id"]
+        if not isinstance(fence_id, str):
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "fence proof document's fence_id must be a string",
+            )
+        _reject_invalid_fence_id(fence_id)
 
         prior_acl = doc["prior_acl"]
         if not isinstance(prior_acl, str):
@@ -783,6 +882,7 @@ class FenceProof:
 
         proof = cls(
             database=database,
+            fence_id=fence_id,
             prior_acl=prior_acl,
             prior_grants=prior_grants,
             fenced_roles=fenced_roles,
@@ -807,6 +907,7 @@ _FENCE_PROOF_DOCUMENT_KEYS: Final = frozenset(
     {
         "schema",
         "database",
+        "fence_id",
         "prior_acl",
         "prior_grants",
         "fenced_roles",
@@ -1212,6 +1313,7 @@ def fence_writers(
     conn: Connection,
     *,
     database: str,
+    fence_id: str,
     writer_roles: tuple[str, ...] = WRITER_ROLES,
     session_wait_seconds: float,
     prior: FenceProof | None = None,
@@ -1234,8 +1336,16 @@ def fence_writers(
     drain times out and the fence is compensated, so it fails safe. The
     library never trusts a terminator's claim; its own poll of
     `pg_stat_activity` is the only proof it acts on.
+
+    `fence_id` is a required, caller-supplied identifier of THIS run,
+    recorded on the returned `FenceProof` and bound by `restore_writers`
+    against its own `expected_fence_id` before any GRANT (see the module
+    docstring's "Two required bindings" section) — refused `PROOF_INVALID`
+    if empty or unsafe. A re-fence (`prior=`) records THIS call's `fence_id`
+    on the new proof, never the prior proof's own.
     """
     _require_autocommit(conn)
+    _reject_invalid_fence_id(fence_id)
 
     if not _database_exists(conn, database):
         raise FenceRefused(
@@ -1267,6 +1377,13 @@ def fence_writers(
     before_grants = _current_grants(conn, database)
 
     if prior is not None:
+        if not prior.fence_id:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "prior proof's fence_id is empty; a valid prior always "
+                "carries the non-empty run identifier its own fence "
+                "recorded",
+            )
         if (
             prior.database != database
             or set(prior.fenced_roles) != set(fenced)
@@ -1337,6 +1454,7 @@ def fence_writers(
         return _apply_fence(
             conn,
             database=database,
+            fence_id=fence_id,
             fenced=fenced,
             member_roles=member_roles,
             effective=effective,
@@ -1354,6 +1472,7 @@ def fence_writers(
         # still-holding fence, not the original prior ACL.
         compensating = FenceProof(
             database=database,
+            fence_id=fence_id,
             prior_acl=before_acl,
             prior_grants=before_grants,
             member_roles=member_roles,
@@ -1369,6 +1488,8 @@ def fence_writers(
             restore_writers(
                 conn,
                 compensating,
+                database=database,
+                expected_fence_id=fence_id,
                 session_wait_seconds=session_wait_seconds,
                 terminator=terminator,
             )
@@ -1521,6 +1642,7 @@ def _apply_fence(
     conn: Connection,
     *,
     database: str,
+    fence_id: str,
     fenced: tuple[str, ...],
     member_roles: tuple[str, ...],
     effective: tuple[str, ...],
@@ -1580,6 +1702,7 @@ def _apply_fence(
     fenced_at = datetime.now(UTC)
     return FenceProof(
         database=database,
+        fence_id=fence_id,
         prior_acl=prior_acl,
         prior_grants=prior_grants,
         fenced_roles=fenced,
@@ -1700,10 +1823,20 @@ def restore_writers(
     conn: Connection,
     proof: FenceProof,
     *,
+    database: str,
+    expected_fence_id: str,
     session_wait_seconds: float,
     terminator: Terminator | None = None,
 ) -> UnfenceProof:
     """Put the ACL back to exactly `proof.prior_grants`. Idempotent.
+
+    `database` and `expected_fence_id` are both REQUIRED bindings, checked
+    first — before `_require_owner_member_or_superuser` and every other query
+    that depends on `proof` — and refused with `PROOF_MISMATCH` unless
+    `database == proof.database` and `expected_fence_id == proof.fence_id`
+    (see the module docstring's "Two required bindings" section). Without
+    them a caller could restore a proof meant for a different database, or
+    replay a proof from a superseded fencing run against the same database.
 
     Only re-grants CONNECT to a grantee the prior ACL actually held it for —
     never PUBLIC, never a fenced role, unless `prior_grants` says so — and
@@ -1745,6 +1878,27 @@ def restore_writers(
     privilege, or grantee cannot.
     """
     _require_autocommit(conn)
+
+    # Checked first, before any query that depends on `proof`: a caller's
+    # `database` and `expected_fence_id` must both name what this proof
+    # actually claims, or a stale/misdirected/replayed proof could restore
+    # the wrong ACL under the wrong run's authority (see the module
+    # docstring's "Two required bindings" section).
+    if database != proof.database:
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_MISMATCH,
+            f"restore was called with database {database!r}, but the proof "
+            f"names {proof.database!r}; refusing before any query that "
+            "depends on the proof",
+        )
+    if expected_fence_id != proof.fence_id:
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_MISMATCH,
+            f"restore was called with expected_fence_id {expected_fence_id!r}, "
+            f"but the proof names fence_id {proof.fence_id!r}; refusing "
+            "before any GRANT",
+        )
+
     _require_owner_member_or_superuser(conn, proof.database)
 
     live_member_roles = _member_roles(conn, proof.fenced_roles)
