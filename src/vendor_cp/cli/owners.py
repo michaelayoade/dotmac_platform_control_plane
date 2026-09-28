@@ -91,6 +91,27 @@ OWNERS: Final[tuple[Owner, ...]] = (
         True,
         "create one vendor account",
     ),
+    Owner(
+        "admin transition-fence close",
+        "vendor_cp.deployment.fence_commands",
+        "close_fence",
+        True,
+        "revoke writer CONNECT, drain open writer sessions, hold the fence",
+    ),
+    Owner(
+        "admin transition-fence holding",
+        "vendor_cp.deployment.fence_commands",
+        "fence_holding",
+        False,
+        "read-only: does a previously closed fence still hold",
+    ),
+    Owner(
+        "admin transition-fence restore",
+        "vendor_cp.deployment.fence_commands",
+        "restore_fence",
+        True,
+        "restore the fenced ACL to exactly what the proof recorded",
+    ),
     # ── release ────────────────────────────────────────────────────────────
     Owner(
         "release record",

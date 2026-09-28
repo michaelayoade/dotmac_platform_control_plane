@@ -160,6 +160,55 @@ def build_parser() -> _Parser:
     account_create.add_argument("--display-name", required=True)
     account_create.set_defaults(handler=commands.admin_account_create)
 
+    # `admin transition-fence <close|holding|restore>` is the one three-level
+    # command: a nested `_Parser` group under `admin`, rather than the flat
+    # `_command(admin_sub, ...)` shape every other admin command uses, because
+    # the operator vocabulary genuinely has three words. `tf_sub`'s own dest
+    # (`tf_name`) is deliberately not `name` — that dest already belongs to
+    # `admin_sub` (holding `"transition-fence"` itself) — dispatch in `main()`
+    # reads `args.command`, which each leaf below sets directly, not `name`.
+    transition_fence = admin_sub.add_parser(
+        "transition-fence",
+        help="the D16 writer fence: revoke, hold, restore (host-brokered)",
+    )
+    tf_sub = transition_fence.add_subparsers(dest="tf_name", parser_class=_Parser)
+
+    tf_close = tf_sub.add_parser(
+        "close", help="revoke writer CONNECT and drain open writer sessions"
+    )
+    tf_close.set_defaults(command="admin transition-fence close")
+    tf_close.add_argument("--database", required=True)
+    tf_close.add_argument("--fence-id", required=True)
+    tf_close.add_argument("--session-wait-seconds", type=float, required=True)
+    tf_close.add_argument(
+        "--prior-expected-digest",
+        help="the prior run's host-recorded digest; requires "
+        "--expected-prior-fence-id, and reads the prior proof document as "
+        "the first stdin line",
+    )
+    tf_close.add_argument(
+        "--expected-prior-fence-id",
+        help="the prior run's fence_id; requires --prior-expected-digest",
+    )
+    tf_close.set_defaults(handler=commands.transition_fence_close)
+
+    tf_holding = tf_sub.add_parser(
+        "holding", help="read-only: does a previously closed fence still hold"
+    )
+    tf_holding.set_defaults(command="admin transition-fence holding")
+    tf_holding.add_argument("--expected-digest", required=True)
+    tf_holding.set_defaults(handler=commands.transition_fence_holding)
+
+    tf_restore = tf_sub.add_parser(
+        "restore", help="restore the fenced ACL to exactly what the proof recorded"
+    )
+    tf_restore.set_defaults(command="admin transition-fence restore")
+    tf_restore.add_argument("--database", required=True)
+    tf_restore.add_argument("--expected-digest", required=True)
+    tf_restore.add_argument("--expected-fence-id", required=True)
+    tf_restore.add_argument("--session-wait-seconds", type=float, required=True)
+    tf_restore.set_defaults(handler=commands.transition_fence_restore)
+
     # ── release ────────────────────────────────────────────────────────────
     release = groups.add_parser("release", help="product release evidence and pins")
     release_sub = release.add_subparsers(dest="name", parser_class=_Parser)
@@ -544,7 +593,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help(sys.stderr)
         return int(ExitCode.USAGE)
 
-    command = args.command
+    # `admin transition-fence` alone (its own leaf, `close`/`holding`/`restore`,
+    # not chosen) sets `name` but no `command` — a nested group one level below
+    # every other command's flat `<group> <name>` shape. `getattr` rather than
+    # `args.command` so that incomplete invocation is a USAGE error too, not an
+    # `AttributeError`.
+    command = getattr(args, "command", None)
+    if command is None:
+        parser.print_help(sys.stderr)
+        return int(ExitCode.USAGE)
     if command == "deployment foundation":
         # The one passthrough. The delegate's own status is returned unchanged:
         # remapping it would invent a verdict this process did not compute.

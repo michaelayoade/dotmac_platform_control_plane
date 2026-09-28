@@ -26,6 +26,7 @@ import argparse
 import json
 import tomllib
 from dataclasses import asdict, is_dataclass
+from typing import TextIO
 from uuid import UUID
 
 from vendor_cp.cli.exits import ExitCode, refuse
@@ -204,6 +205,96 @@ def admin_account_create(args: argparse.Namespace) -> Result:
             },
             references={"account_id": str(outcome.account.id)},
         )
+
+
+def _read_stdin_json_line(stream: TextIO, *, what: str) -> dict[str, object]:
+    """The proof/prior document: one JSON object, the FIRST line of `stream`.
+
+    Never a file path — the document is stdin-piped precisely because it must
+    never be re-read from something a document itself could name."""
+    raw = stream.readline()
+    if raw == "":
+        raise refuse("usage.missing_input", f"{what}: stdin closed with no line")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise refuse(
+            "usage.invalid_argument", f"{what}: the stdin line is not valid JSON"
+        ) from error
+    if not isinstance(value, dict):
+        raise refuse(
+            "usage.invalid_argument", f"{what}: the stdin line must be a JSON object"
+        )
+    return value
+
+
+def transition_fence_close(args: argparse.Namespace) -> Result:
+    """Fence every writer role, brokering termination over stdin/stdout.
+
+    `--prior-expected-digest` and `--expected-prior-fence-id` must be given
+    together; when they are, the prior proof document is read as the FIRST
+    stdin line, before the broker protocol lines that follow it.
+    """
+    import sys
+
+    from vendor_cp.deployment.fence_commands import close_fence
+
+    if bool(args.prior_expected_digest) != bool(args.expected_prior_fence_id):
+        raise refuse(
+            "usage.invalid_argument",
+            "--prior-expected-digest and --expected-prior-fence-id must be "
+            "given together",
+        )
+    prior_document = None
+    if args.prior_expected_digest:
+        prior_document = _read_stdin_json_line(sys.stdin, what="prior proof document")
+    result = close_fence(
+        database=args.database,
+        fence_id=args.fence_id,
+        session_wait_seconds=args.session_wait_seconds,
+        stdin=sys.stdin,
+        stdout=sys.stdout,
+        prior_document=prior_document,
+        prior_expected_digest=args.prior_expected_digest,
+        expected_prior_fence_id=args.expected_prior_fence_id,
+    )
+    return Result(
+        command="admin transition-fence close",
+        data=result,
+        references={"fence_id": result["fence_id"], "digest": result["digest"]},
+    )
+
+
+def transition_fence_holding(args: argparse.Namespace) -> Result:
+    """Read-only: does a previously closed fence still hold, right now?"""
+    import sys
+
+    from vendor_cp.deployment.fence_commands import fence_holding
+
+    proof_document = _read_stdin_json_line(sys.stdin, what="fence proof document")
+    result = fence_holding(
+        proof_document=proof_document, expected_digest=args.expected_digest
+    )
+    return Result(command="admin transition-fence holding", data=result)
+
+
+def transition_fence_restore(args: argparse.Namespace) -> Result:
+    """Restore the fenced ACL to exactly what the proof document recorded."""
+    import sys
+
+    from vendor_cp.deployment.fence_commands import restore_fence
+
+    proof_document = _read_stdin_json_line(sys.stdin, what="fence proof document")
+    result = restore_fence(
+        database=args.database,
+        proof_document=proof_document,
+        expected_digest=args.expected_digest,
+        expected_fence_id=args.expected_fence_id,
+        session_wait_seconds=args.session_wait_seconds,
+        stdin=sys.stdin,
+        stdout=sys.stdout,
+    )
+    return Result(command="admin transition-fence restore", data=result)
 
 
 # ── release ─────────────────────────────────────────────────────────────────
