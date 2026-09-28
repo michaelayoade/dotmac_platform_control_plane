@@ -987,7 +987,7 @@ def test_the_drain_checks_fail_closed_without_a_live_nginx_master() -> None:
     `no_worker_is_shutting_down`, or dropping `require_nginx_master` from the
     top-level preconditions, fails this test.
     """
-    script = HELPER.read_text(encoding="utf-8")
+    script = _text(HELPER)
     body = script[script.index("no_worker_is_shutting_down() {") :]
     body = body[: body.index("\n}\n")]
     assert 'nginx_master_is_live "$master_pid" || return 1' in body

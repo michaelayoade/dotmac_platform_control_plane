@@ -144,7 +144,7 @@ case "$VERB" in
 esac
 
 # --- root-owned lock on the managed directory itself (never the
-# world-writable /run/lock). Contention is its own exit code, 75. ----------
+# world-writable system lock directory). Contention is its own exit code, 75. ----------
 exec 9<"$MANAGED_DIR"
 if ! flock -n 9; then
     FAIL_CODE=75
@@ -418,7 +418,7 @@ reload_and_prove_drain() {
 }
 
 # A single fresh-connection probe. `-q` must be curl's first argument so a
-# stray ~/.curlrc is ignored. Header parsing is portable (no %header{}, so
+# stray ~/.curlrc is ignored. Header parsing is portable (no curl header write-out expression, so
 # no curl-version floor beyond what --dump-header has always supported):
 # headers are dumped to a temp file and grepped case-insensitively. Prints
 # "<status>\x1f<marker-value-or-empty>". A curl-level failure (timeout,
