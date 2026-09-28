@@ -2,8 +2,9 @@
 
 > **Status — Amended: § 10 rulings approved 2026-09-28 (item 5 pending the
 > execution repository); the execution topology is ruled subject to
-> verification of account controls and a live negative test; provisioning is
-> blocked until those are met.** This is not a new ADR; it implements
+> verification of account controls and a live negative test;
+> credential-bearing provisioning stays blocked until those are met.** This
+> is not a new ADR; it implements
 > ADR-0013 § A7 Work Packet D. **Provisioning: none performed.** No GitHub
 > Environment, OpenBao role, OpenBao SSH CA, or signing key exists yet as a
 > result of this document. Every value below marked `<placeholder>` is
@@ -40,8 +41,8 @@ authorization.
 ## Runner placement blocker
 
 **This blocks §§ 2, 3, 6, 7 and 8 as originally written. The topology below
-is Ruled by Michael 2026-09-28, subject to two conditions; provisioning
-stays blocked until both are met.**
+is Ruled by Michael 2026-09-28, subject to two conditions; credential-bearing
+provisioning stays blocked until both are met.**
 
 Facts, as found by a live check on 2026-09-27:
 
@@ -77,28 +78,52 @@ This ruling is subject to two conditions:
 1. verifying the account's actually available controls (organization plan
    and runner-group features);
 2. a live negative test — non-vacuous, per § 7's
-   `test_only_the_protected_workflow_can_select_the_runner` row: an idle,
-   registered runner in the group; a positive control (the protected
-   workflow IS picked up by that runner); a negative case (a second
-   workflow targeting the group itself and its labels stays queued for a
-   stated bound and is then cancelled); both run IDs recorded as evidence;
-   and the test workflow removed or kept on a non-default branch afterward.
-   Run for real, in the organization, against the provisioned group, not a
-   mock.
+   `test_only_the_protected_workflow_can_select_the_runner` row. There is
+   ONE ephemeral runner: if the positive control ran first, it would consume
+   that runner, and the negative case would then stay queued for lack of a
+   runner, not because of the restriction — so the order matters and is
+   fixed:
+   1. With the runner shown idle and registered in the group's listing,
+      queue the negative-case workflow (a second workflow targeting the
+      group itself and its labels).
+   2. The runner stays shown idle for the whole stated bound
+      `<placeholder: N minutes>` while the negative job never starts on it.
+   3. Only then dispatch the positive control (the protected workflow), and
+      show the SAME runner picks it up, while the negative job is still not
+      started.
+   The negative job's final status is recorded — it never starts on the
+   runner, whether that ends as "queued past the bound, then cancelled" or
+   "rejected outright"; state which. Both run IDs are recorded as evidence.
+   The test workflow is removed afterward, evidenced by a commit SHA, or
+   kept on a non-default branch — state which — so the repository still
+   holds only the protected workflow on its default branch. Run for real, in
+   the organization, against the provisioned group, not a mock.
+
+**The condition-2 fixture workflow is a STUB.** At the ref-pinned coordinate
+(§ 6), it declares no `environment:` key and requests no `id-token: write`
+permission. Referencing an Environment that does not yet exist can
+auto-create it unprotected — the stub avoids that by not referencing one at
+all. § 7's non-default-ref row
+(`test_non_default_ref_run_of_the_protected_workflow_file_cannot_select_the_runner`)
+also runs in this fixture phase, before any Environment exists, so its
+refusal can only come from the runner group's ref-pinned selected-workflow
+restriction, never from Environment branch policy — it keeps the same idle,
+negative-first, then positive-control order as condition 2 above. The § 2
+Environment's own `main`-only branch-policy refusal
+(`test_non_main_run_cannot_reach_the_protected_job`) is a separate, later
+test, run only once the Environment actually exists.
 
 **#217 is design-only: nothing in this spec authorizes provisioning.**
-Provisioning waits for the confirmed organization plan (condition 1) and a
-passing live negative test (condition 2). Everything credential-bearing —
-the § 2 Environment's secrets/approvals binding, the OpenBao JWT role, the
-signers, the trust state, the SSH CA — stays blocked until both conditions
-are met. The only thing Michael may provision ahead of that, as his own
-step in order to run condition 2, is a credential-free topology fixture:
-the organization, the execution repository, the runner group, and an
-ephemeral runner with no OpenBao binding and no secrets. This spec does not
-authorize that fixture either — it names what condition 2 requires to exist
-before it can be run; Michael provisions it, or not, at his own discretion.
-
-Provisioning stays blocked until both are met.
+Credential-bearing provisioning stays blocked until the confirmed
+organization plan (condition 1) and a passing live negative test
+(condition 2) are both met — the § 2 Environment's secrets/approvals
+binding, the OpenBao JWT role, the signers, the trust state, the SSH CA.
+The only thing Michael may provision ahead of that, as his own step in
+order to run condition 2, is a credential-free topology fixture: the
+organization, the execution repository, the runner group, and an ephemeral
+runner with no OpenBao binding and no secrets. This spec does not authorize
+that fixture either — it names what condition 2 requires to exist before it
+can be run; Michael provisions it, or not, at his own discretion.
 
 Until both conditions are met, §§ 2, 3, 6, 7 and 8 below describe the ruled
 shape only, not a provisionable configuration.
@@ -264,18 +289,22 @@ The rehearsal-issuer signer is Ed25519, held at the already-declared path
     into CP's process memory the way this section already describes.
 
     **Ruled by Michael 2026-09-28 (§ 10 item 3):** the Ed25519 keypair is
-    generated in a short-lived, offline process under Michael's control
-    (e.g. on Michael's own machine or a dedicated bootstrap step), the
-    private key is written to the KV v2 path above as version 1, and every
+    generated by a controlled, short-lived provisioning process and sealed
+    into KV v2. Not exportable Transit merely to satisfy the load-at-start
+    contract: exportability cannot later be disabled
+    (https://openbao.org/docs/next/api/secret/transit/).
+
+    **Carried-over mechanics (not part of the ruling) — the specific
+    procedure the spec originally proposed, retained as the working
+    assumption unless Michael specifies otherwise:** the process runs
+    offline (e.g. on Michael's own machine or a dedicated bootstrap step);
+    the private key is written to the KV v2 path above as version 1; every
     transient copy (memory, disk, shell history) is wiped immediately after
-    the write — mirroring § 5's per-run key destruction discipline. Not
-    exportable Transit merely to satisfy the load-at-start contract:
-    exportability cannot later be disabled
-    (https://openbao.org/docs/next/api/secret/transit/). Any transient copy
-    of the private key material outside its final custody location is
-    wiped, and the private key is never copied into a GitHub secret,
-    workflow artifact, log line, or this document (unchanged from the rule
-    already stated above). Michael performs this (§ 8).
+    the write — mirroring § 5's per-run key destruction discipline. Any
+    transient copy of the private key material outside its final custody
+    location is wiped, and the private key is never copied into a GitHub
+    secret, workflow artifact, log line, or this document (unchanged from
+    the rule already stated above). Michael performs this (§ 8).
   - *Rotation:* a new key VERSION is written to the same path, followed by
     the explicit reload the kernel's secret-source rules require — this is
     `refresh_secrets()`/an equivalent explicit re-install call, never a TTL
@@ -404,12 +433,13 @@ protected run — never a persistent, reused runner key.
   reuse of the same fingerprint on a *different* or *concurrent* lease** —
   or (b) a separate index, keyed by fingerprint across all prior runs and
   leases, that the rehearsal issuer or harness-evidence verifier consults
-  before Control's consumption check ever runs — **adopted, in substance,
-  per the § 10 item 2 ruling: Control's durable lease/consumption authority
-  enforces cross-run fingerprint uniqueness transactionally, across
-  leases, not merely within one.** Either way, a fingerprint already bound
-  to an earlier run or lease is refused as a stale/reused controller
-  identity, never treated as evidence of the current run.
+  before Control's consumption check ever runs — **neither option as
+  written. Ruled (§ 10 item 2): fingerprint uniqueness lives in Control's
+  durable lease/consumption authority, enforced transactionally across
+  leases, not as a pre-check by the issuer or the verifier.** Either way, a
+  fingerprint already bound to an earlier run or lease is refused as a
+  stale/reused controller identity, never treated as evidence of the
+  current run.
 
   **Ruled by Michael 2026-09-28 (§ 10 item 2):**
   cross-run fingerprint uniqueness lives in Control's durable
@@ -525,11 +555,11 @@ claims), not a mock or a hand-constructed stand-in role.
 | Wrong or missing `aud` | OpenBao JWT role `bound_audiences` | OpenBao login denied | `test_oidc_login_refuses_wrong_audience` |
 | Expired OIDC or OpenBao token | Token TTL enforcement, both layers | Login/token-use denied | `test_expired_token_is_refused` |
 | **Follows from the 2026-09-28 topology ruling, subject to the two conditions in the Runner placement section:** A job from any OTHER repository reaches the protected job's runner | Runner isolation via the runner group's repository access (§ 6), independent of the § 2 Environment gate | Job cannot use the runner group | `test_other_repository_job_cannot_reach_the_protected_runner` |
-| **Follows from the 2026-09-28 topology ruling, subject to the two conditions in the Runner placement section. This row IS the live negative test (condition 2) and must be non-vacuous:** A workflow in the execution repository other than the exact protected one selects the runner | Runner isolation via the runner group's selected-workflow restriction (§ 6). **Precondition:** an idle, registered runner in the group, shown in the runner/group listing at test time. **Positive control:** in the same window, the protected workflow (its ref-pinned coordinate) IS picked up by that runner; its run ID is recorded. **Negative case:** a second workflow targets the group itself (`runs-on: group: <placeholder>`) AND its labels; it stays queued for a stated bound `<placeholder: N minutes>` and is then cancelled; its run ID is recorded. **Evidence:** both run IDs recorded. **Clean-up:** the test workflow lives on a non-default branch, or is removed afterward with the removal evidenced by a commit SHA — state which — so the repository still holds only the protected workflow on its default branch. Run for real, in the organization, against the provisioned group, not a mock. | Runner is not selected; the negative-case run stays queued past the stated bound and is then cancelled, never starting | `test_only_the_protected_workflow_can_select_the_runner` |
+| **Follows from the 2026-09-28 topology ruling, subject to the two conditions in the Runner placement section. This row IS the live negative test (condition 2) and must be non-vacuous — order matters because there is only ONE ephemeral runner:** A workflow in the execution repository other than the exact protected one selects the runner | Runner isolation via the runner group's selected-workflow restriction (§ 6), against the STUB fixture workflow (no `environment:` key, no `id-token: write`). **Fixed order, negative case first:** (1) with the runner shown idle and registered in the group's listing, queue the negative-case workflow — a second workflow targeting the group itself (`runs-on: group: <placeholder>`) AND its labels; (2) the runner stays shown idle for the whole stated bound `<placeholder: N minutes>` while the negative job never starts on it; (3) only then dispatch the positive control — the protected workflow at its ref-pinned coordinate — and show the SAME runner picks it up while the negative job is still not started. Running the positive control first would consume the one runner and make the negative case queue for lack of a runner, not because of the restriction, so this order is required, not optional. **Evidence:** both run IDs recorded, plus the negative job's final status. **Clean-up:** the test workflow lives on a non-default branch, or is removed afterward with the removal evidenced by a commit SHA — state which — so the repository still holds only the protected workflow on its default branch. Run for real, in the organization, against the provisioned group, not a mock. | The negative job never starts on the runner (queued past the bound `<placeholder: N minutes>`, or rejected — status recorded); the positive control's run then starts on the SAME runner while the negative job is still not started | `test_only_the_protected_workflow_can_select_the_runner` |
 | **Follows from the 2026-09-28 topology ruling, subject to the two conditions in the Runner placement section:** The runner retains state between runs | Ephemeral-runner recreation (§ 6) — hygiene, not the selection control | No state carries across runs; runner holds no state between runs | `test_the_runner_is_ephemeral_and_holds_no_state_between_runs` |
-| **Follows from the 2026-09-28 topology ruling.** Applying item 1's precondition/positive-control discipline: the protected workflow FILE, run from a non-default ref | Runner isolation via the runner group's ref-pinned selected-workflow entry (§ 6): `<org>/<repo>/.github/workflows/<file>.yml@refs/heads/<default branch>` does not match a run from any other ref. **Precondition:** an idle, registered runner in the group. **Positive control:** the same file run from the default-branch ref IS picked up (run ID recorded). **Negative case:** the identical file, run from a non-default ref, stays queued past a stated bound and is then cancelled (run ID recorded). | Runner is not selected for the non-default-ref run | `test_non_default_ref_run_of_the_protected_workflow_file_cannot_select_the_runner` |
+| **Follows from the 2026-09-28 topology ruling. Runs in the condition-2 fixture phase, before any Environment exists,** so its refusal can only come from runner selection, never from Environment branch policy (see below): the protected workflow FILE (the same STUB), run from a non-default ref | Runner isolation via the runner group's ref-pinned selected-workflow entry (§ 6): `<org>/<repo>/.github/workflows/<file>.yml@refs/heads/<default branch>` does not match a run from any other ref. Same fixed order as the live negative test above, negative case first: (1) with the runner shown idle, queue the non-default-ref run; (2) it never starts on the runner for the stated bound; (3) only then dispatch the same file from the default-branch ref and show the SAME runner picks it up. | The non-default-ref run never starts on the runner (queued past the bound, or rejected — status recorded); the default-branch run then starts on the same runner | `test_non_default_ref_run_of_the_protected_workflow_file_cannot_select_the_runner` |
 | A `pull_request`/`pull_request_target`-triggered workflow selects the protected job's runner | Runner isolation via the runner group's ref-pinned selected-workflow entry (§ 6): a `pull_request`/`pull_request_target`-triggered run does not match the pinned `<org>/<repo>/.github/workflows/<file>.yml@refs/heads/<default branch>` coordinate, and the protected workflow itself declares no such trigger, independent of the § 2 Environment gate | Job never dispatches to the protected job's runner | `test_pull_request_triggered_workflow_cannot_select_the_protected_runner` |
-| A non-`main` run reaches the protected job | § 2's Environment branch policy (`main`-only) AND § 3's `bound_claims.ref` (defense in depth — see § 3's own note that `ref` is independently pinned at the OpenBao layer) | Environment protection blocks the run before the job starts; OpenBao would independently refuse the token exchange even if it did | `test_non_main_run_cannot_reach_the_protected_job` |
+| **A separate, later test, run only once the § 2 Environment actually exists** (distinct from the fixture-phase non-default-ref row above): a non-`main` run reaches the protected job | § 2's Environment branch policy (`main`-only) AND § 3's `bound_claims.ref` (defense in depth — see § 3's own note that `ref` is independently pinned at the OpenBao layer) | Environment protection blocks the run before the job starts; OpenBao would independently refuse the token exchange even if it did | `test_non_main_run_cannot_reach_the_protected_job` |
 | Runner attempts a signer read | OpenBao policy attached to the runner's scoped token (§ 4) excludes the signer path | OpenBao permission denied | `test_runner_token_cannot_read_signer_path` |
 | A per-request OpenBao read occurs on the consumption path | `install_rehearsal_issuer_security`'s load-once-at-start pattern (§ 4); no per-request call is wired | No OpenBao call observed during consumption (structural/static check, not a live-OpenBao assertion) | `test_no_per_request_openbao_read_on_the_consumption_path` |
 | Missing human approval | `dotmac-approvals`' `approve_plan` / rehearsal issuer's `_standing_plan_terms` (fact 2, § 1) | No standing plan; issuance refused | `test_issuance_refuses_without_approval_evidence` |
@@ -572,7 +602,8 @@ Provisioning — Michael only; no agent performs any of these:
 | **Condition 1:** Confirm the plan supports selected-workflow runner groups | Michael |
 | **Credential-free fixture, follows from the 2026-09-28 topology ruling:** Create or choose the organization and its private execution repository | Michael |
 | **Credential-free fixture, follows from the 2026-09-28 topology ruling:** Create the runner group restricted to the exact protected workflow (the ref-pinned coordinate, § 6), and register the ephemeral runner in it — no OpenBao binding, no secrets | Michael |
-| **Condition 2, the live negative test:** Run it per § 7's `test_only_the_protected_workflow_can_select_the_runner` row's precondition/positive-control/negative-case/evidence/clean-up requirements | Michael |
+| **Condition 2, the live negative test:** Run it per § 7's `test_only_the_protected_workflow_can_select_the_runner` row's fixed negative-first, then positive-control order and its evidence/clean-up requirements | Michael |
+| **Credential-free fixture, same phase as condition 2, run right after it:** Run § 7's non-default-ref row (`test_non_default_ref_run_of_the_protected_workflow_file_cannot_select_the_runner`) against the same STUB fixture workflow, before any Environment exists | Michael |
 | **Blocked until both conditions are met:** Create the § 2 GitHub Environment and configure the required reviewer + `main`-only branch policy | Michael |
 | **Blocked until both conditions are met:** Create the OpenBao JWT auth role and its policies (§ 3, § 4) | Michael |
 | **Blocked until both conditions are met:** Generate and store the Ed25519 rehearsal-issuer signer at `secret/dotmac/platform-cp/rehearsal-issuer/signing-key` (§ 4) | Michael |
@@ -677,9 +708,11 @@ none is missed before provisioning:
    trust-state version is pinned in independently controlled, IMMUTABLE CP
    deployment configuration, not beside the mutable trust-state record.
 5. Every `<placeholder: ...>` value throughout §§ 2–8 (audience, trust-state
-   path, SSH CA role/`valid_principals`/extensions/key ID, and the rotation
-   overlap window in item 6 below) is Michael's to choose at provisioning
-   time, not a decision this spec makes. Plain names that do not depend on
+   path, SSH CA role/`valid_principals`/extensions/key ID, the runner-group
+   name, the live-negative-test bound `<placeholder: N minutes>` (§ 7), and
+   the rotation overlap window in item 6 below) is Michael's to choose at
+   provisioning time, not a decision this spec makes. Plain names that do
+   not depend on
    the execution repository are settled now, not deferred to provisioning:
    **Ruled by Michael 2026-09-28:** the Environment name and the OpenBao JWT
    role name are both fixed as `rehearsal-issuer-protected` (§§ 2, 3 — no
