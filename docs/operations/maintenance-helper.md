@@ -44,9 +44,25 @@ The helper captures whichever config the enabled link is ACTUALLY pointing
 at when it starts (`readlink -f`, refusing if it isn't a symlink to exactly
 `live.conf` or `maintenance.conf`) and reverts to that captured state on any
 failure — never to a hard-coded "other" file. If routing is already in the
-requested state, the helper does not switch at all; it only proves. A
-`maintenance-on` proof failure while already in maintenance stays in
-maintenance and exits 67 — it never reverts to live.
+requested state, the helper does not switch at all; it only proves. Before
+that idempotent `maintenance-on` proof, it also waits (bounded, 90s) for any
+worker still mid-shutdown from an EARLIER, possibly timed-out, drain to
+actually finish — an old worker can otherwise keep serving live traffic even
+though the enabled link already points at `maintenance.conf`. A
+`maintenance-on` proof (or drain-wait) failure while already in maintenance
+stays in maintenance and exits 67 — it never reverts to live.
+
+The helper's own drain proof combines two independent signals after every
+reload: the pre-reload worker PIDs must all be gone, a new worker must exist,
+AND no surviving worker may still carry nginx's own "worker process is
+shutting down" process title. The PID comparison alone can be fooled by PID
+reuse or a master restart between checks; the title check is re-read fresh
+from the CURRENT master's actual children on every poll for exactly that
+reason.
+
+`trap '' HUP INT TERM` means none of those three signals can interrupt an
+in-flight mutation — a cancelled or disconnected caller cannot leave the
+enabled-site symlink half-switched.
 
 See `deploy/host/dotmac-vendor-maintenance`'s header comment for the full
 exit-code contract; it is summarized below.
@@ -56,9 +72,21 @@ exit-code contract; it is summarized below.
 | Path | Content | Owner | Mode |
 | --- | --- | --- | --- |
 | `/usr/local/sbin/dotmac-vendor-maintenance` | `deploy/host/dotmac-vendor-maintenance` | `root:root` | `0755` |
+| `/etc/nginx/dotmac/vendor/` (the directory itself) | — | `root:root` | `0750` (or `0700`) |
 | `/etc/nginx/dotmac/vendor/live.conf` | `deploy/nginx/vendor.dotmac.io.conf` | `root:root` | `0644` |
 | `/etc/nginx/dotmac/vendor/maintenance.conf` | `deploy/nginx/vendor.dotmac.io.maintenance.conf` | `root:root` | `0644` |
 | `/etc/sudoers.d/dotmac-vendor-maintenance` | `deploy/host/sudoers.d/dotmac-vendor-maintenance`, with `<DEPLOY_USER>` substituted | `root:root` | `0440` |
+
+**The managed directory's own mode matters, not just its files':** the lock
+is an `flock` on an fd opened against `/etc/nginx/dotmac/vendor/` itself, so
+anyone able to `open()` that directory can contend for (and, on a
+world-readable directory, potentially interfere with) the lock. The helper
+refuses to run (exit 65) unless that directory is exactly `0700` or `0750`
+— a more permissive mode (e.g. the `0755` used before this fix round) is
+rejected. The helper also refuses (exit 65) unless
+`/etc/nginx/sites-enabled/` is root-owned, not group/other-writable, AND on
+the SAME filesystem as `/etc/nginx/dotmac/vendor/` (`stat -c %d`) — `mv -T`
+is only atomic within one filesystem.
 
 The enabled site remains `/etc/nginx/sites-enabled/vendor.dotmac.io`; the
 helper only ever repoints that one symlink between the two files above. The
@@ -98,7 +126,7 @@ This is a one-time, Michael-only host conversion, done once before the
 first `maintenance-on` rehearsal:
 
 ```console
-$ sudo install -d -m 0755 /etc/nginx/dotmac/vendor
+$ sudo install -d -m 0750 -o root -g root /etc/nginx/dotmac/vendor
 $ sudo install -m 0644 /etc/nginx/sites-available/vendor.dotmac.io \
     /etc/nginx/dotmac/vendor/live.conf
 $ sudo install -m 0644 deploy/nginx/vendor.dotmac.io.maintenance.conf \
@@ -124,6 +152,7 @@ cleanup, not as a live fallback.
 ## Installing the sudoers fragment
 
 ```console
+$ : "${VENDOR_PRODUCTION_USER:?VENDOR_PRODUCTION_USER must be set before installing the sudoers fragment}"
 $ sudo install -d -m 0755 /etc/sudoers.d
 $ sed 's/<DEPLOY_USER>/'"$VENDOR_PRODUCTION_USER"'/' \
     deploy/host/sudoers.d/dotmac-vendor-maintenance \
@@ -155,6 +184,23 @@ If anything else appears — a wildcard, a third command, or a password
 requirement — stop and fix the sudoers fragment before rehearsing.
 
 ## One-time rehearsal
+
+**Michael-only preconditions, before the first rehearsal:**
+
+- The host's nginx `worker_shutdown_timeout` (in `nginx.conf`'s `http {}`
+  block, or per-`server`) must be set BELOW the helper's `DRAIN_BOUND_SECONDS`
+  (90s) — for example `worker_shutdown_timeout 75s;`. If it isn't, a
+  legitimately long-lived connection (a slow client streaming a response)
+  can make nginx take longer than 90s to actually finish shutting an old
+  worker down, and the helper will report a false `67` (state unknown) for
+  a drain that was, in fact, still healthily in progress. Confirm this
+  before the first rehearsal, and after any nginx config change that
+  touches it.
+- Confirm the host's actual nginx pid file path matches the helper's
+  `NGINX_PID_FILE` constant (`/run/nginx.pid`) — `nginx -T | grep pid` or
+  the distro's nginx.conf `pid` directive. A mismatch here makes every
+  drain/title check silently see "no master pid" and skip straight to
+  "not shutting down", masking a real stuck drain.
 
 Run once, as the deploy user, before D16 PR 4 is allowed to call this helper
 in production:
@@ -189,7 +235,7 @@ undocumented status.
 | --- | --- | --- |
 | `0` | ok | none — the switch (or, if already in the target state, the proof) is proven |
 | `64` | usage error: unknown verb, missing verb, or extra arguments | nothing was touched; fix the invocation |
-| `65` | refused, or failed, BEFORE any mutation — state is unchanged (a stat/ownership precondition, an unmanaged or unresolved enabled-link target, or the `routing-restore` app-health precondition) | nothing was switched; read the `logger` output, fix the precondition, retry |
+| `65` | refused, or failed, BEFORE any mutation — state is unchanged (a stat/ownership/mode precondition on the managed directory or `sites-enabled/`, a cross-filesystem mismatch between them, an unmanaged or unresolved enabled-link target, or the `routing-restore` app-health precondition) | nothing was switched; read the `logger` output, fix the precondition, retry |
 | `66` | the public proof failed after a successful switch and reload | the helper reverted to the CAPTURED PRIOR config, reloaded, and PROVED the revert; read the logs to understand why the public proof failed (app not actually ready, DNS/TLS drift, a CDN/WAF/LB in front — see above) before retrying |
 | `67` | state is **UNKNOWN**: a revert could not be proved, a drain timed out (an ambiguous old/new worker mix), or an unexpected error occurred after a mutation | page a human immediately; do not retry automatically; check `nginx -T`, the enabled-site symlink target, `systemctl status nginx`, and the public endpoint by hand before touching anything else |
 | `75` | another run (the helper or a concurrent `bootstrap_production_host.sh`) holds the lock | nothing was touched; wait for the other run to finish, or investigate why it is stuck, before retrying |
@@ -200,12 +246,56 @@ This helper is checked in only. `deploy_production.sh` (D16 PR 4) is the
 intended caller: it runs `maintenance-on` before a migration, and only calls
 `routing-restore` after it has independently proven compatible heads,
 application health, and ACL restoration — this helper does not make that
-judgment call. **PR 4 must treat any exit code other than `0` as: for
-`maintenance-on`, stay in maintenance and do not fence (do not proceed to
-migrate); for `routing-restore`, stay in maintenance** — a nonzero exit from
-either verb is never a signal to proceed as if routing were in the
-requested state. Until PR 4 lands and wires the sudoers-gated call, this
+judgment call. Until PR 4 lands and wires the sudoers-gated call, this
 helper is unused in production.
+
+### Worst-case runtime — a PR 4 constraint
+
+Computed from the helper's own constants, a single invocation that switches,
+fails its proof, and reverts (proving the revert too) bounds at:
+
+```
+2 × ( DRAIN_BOUND_SECONDS
+      + PROOF_SETTLE_RETRIES × (PROOF_ATTEMPTS × curl --max-time)
+      + (PROOF_SETTLE_RETRIES − 1) × PROOF_SETTLE_SLEEP_SECONDS )
+= 2 × ( 90 + 3 × (3 × 10) + 2 × 1 )
+= 2 × 182
+= 364 seconds (≈ 6.1 minutes)
+```
+
+(The forward switch's own reload+drain and `nginx -t` are assumed near-instant
+here — the 90s drain bound only actually elapses on a drain that is TIMING
+OUT, in which case the run exits 67 directly, without a revert or a proof,
+so this is a conservative combined bound, not a claim that every failure
+takes the full 364s.) The already-in-target-state short-circuit path (no
+switch or revert, just the drain-wait plus one proof) bounds separately at
+`90 + 182 = 272` seconds unless the drain-wait itself doesn't apply on the
+`routing-restore` side (only `maintenance-on`'s short circuit waits for
+drain) — worst case there is the `92`s proof.
+
+**PR 4 must give the helper at least this much headroom — recommend
+7 minutes (420s) — and must NOT wrap `dotmac-vendor-maintenance` in a
+shorter `timeout`.** A caller-imposed timeout shorter than the helper's own
+worst case can kill the process mid-mutation despite the trap-blocked
+signals above (`SIGKILL` cannot be trapped), defeating the entire
+state-truthful exit-code contract this helper exists to provide.
+
+### Per-exit-code state, by verb
+
+Replaces any blanket "stay in maintenance and do not fence" — PR 4 must
+consult this per-code table instead:
+
+| Code | `maintenance-on` leaves the host... | `routing-restore` leaves the host... | PR 4 action |
+| --- | --- | --- | --- |
+| `0` | in maintenance, proven | live, proven | proceed (fence/migrate for `maintenance-on`; resume traffic for `routing-restore`) |
+| `64` | untouched, in its prior state (usually live) | untouched, in its prior state (usually maintenance) | do not fence or migrate; fix the invocation and retry |
+| `65` | untouched, in its prior state (usually live) | untouched, in its prior state (usually maintenance) | do not fence or migrate; fix the failed precondition and retry |
+| `66` | reverted to the CAPTURED PRIOR state, proven (usually back to live) | reverted to the CAPTURED PRIOR state, proven (usually back to maintenance) | do not fence or migrate; read the logs before retrying |
+| `67` | **unknown** | **unknown** | page a human immediately; do not fence or migrate; do not retry automatically |
+| `75` | untouched, in its prior state (usually live) | untouched, in its prior state (usually maintenance) | do not fence or migrate; wait for the lock holder or investigate, then retry |
+
+A nonzero exit from either verb is never a signal to proceed as if routing
+were in the requested state.
 
 ## Known limitation: no behavioural rehearsal in CI
 

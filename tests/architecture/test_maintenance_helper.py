@@ -43,11 +43,16 @@ HELPER_FUNCTIONS = (
     "handle_exit",
     "usage",
     "require_root_owned_and_not_group_or_other_writable",
+    "require_managed_dir_mode",
+    "require_same_filesystem",
     "capture_and_validate_prior_state",
     "status_for_conf",
     "marker_for_conf",
     "switch_enabled_site",
     "validate_config",
+    "worker_title_is_shutting_down",
+    "no_worker_is_shutting_down",
+    "wait_for_no_shutting_down_workers",
     "reload_and_prove_drain",
     "probe_public",
     "prove_public",
@@ -220,10 +225,11 @@ def test_no_fail_code_65_is_reachable_after_the_first_mutation() -> None:
     dispatch structure directly:
 
     1. Every function body is checked in isolation (via `_function_body`);
-       a FAIL_CODE=65 assignment is only allowed inside the two PRECONDITION
+       a FAIL_CODE=65 assignment is only allowed inside the four PRECONDITION
        functions (`require_root_owned_and_not_group_or_other_writable`,
-       `capture_and_validate_prior_state`), both of which run unconditionally
-       at top level BEFORE the verb-dispatch case even starts, and neither of
+       `require_managed_dir_mode`, `require_same_filesystem`,
+       `capture_and_validate_prior_state`), all of which run unconditionally
+       at top level BEFORE the verb-dispatch case even starts, and none of
        which calls `switch_enabled_site`.
     2. The verb-dispatch case's `routing-restore` arm has one more
        FAIL_CODE=65 (the app-health precondition) that is NOT inside a
@@ -240,6 +246,8 @@ def test_no_fail_code_65_is_reachable_after_the_first_mutation() -> None:
 
     allowed_functions = {
         "require_root_owned_and_not_group_or_other_writable",
+        "require_managed_dir_mode",
+        "require_same_filesystem",
         "capture_and_validate_prior_state",
     }
     for fn_name in HELPER_FUNCTIONS:
@@ -305,6 +313,23 @@ def test_an_exit_trap_is_installed_and_maps_undocumented_codes_by_mutated() -> N
     assert "rc=67" in handle_exit_body
     assert "rc=65" in handle_exit_body
 
+    # The remap DIRECTION matters, not just that both codes appear somewhere
+    # in the function: MUTATED=1 must map to 67, MUTATED=0 must map to 65 —
+    # reversed, an unmutated failure would be misreported as "state unknown"
+    # (needlessly paging a human) and a post-mutation failure would be
+    # misreported as "nothing happened" (actively dangerous: an operator or
+    # PR 4 could retry or proceed believing the host is untouched). Split the
+    # body on its `if`/`else`/`fi` and check each branch independently.
+    then_start = handle_exit_body.index('if [ "$MUTATED" -eq 1 ]; then') + len(
+        'if [ "$MUTATED" -eq 1 ]; then'
+    )
+    else_idx = handle_exit_body.index("else", then_start)
+    fi_idx = handle_exit_body.index("fi", else_idx)
+    then_branch = handle_exit_body[then_start:else_idx]
+    else_branch = handle_exit_body[else_idx + len("else") : fi_idx]
+    assert "rc=67" in then_branch and "rc=65" not in then_branch, then_branch
+    assert "rc=65" in else_branch and "rc=67" not in else_branch, else_branch
+
     # The trap must be installed (`trap handle_exit EXIT`) AFTER `MUTATED=0`
     # is declared, so the trap's very first possible firing already has a
     # defined $MUTATED to branch on.
@@ -315,12 +340,13 @@ def test_an_exit_trap_is_installed_and_maps_undocumented_codes_by_mutated() -> N
     # undocumented exit code straight to the caller — the first assertion
     # catches that. Changing the case arm to omit one of the six documented
     # codes (e.g. dropping `75`) would make a legitimate lock-contention exit
-    # get needlessly remapped — caught by the exact-list assertion. Reversing
-    # the two remap directions (rc=65 when MUTATED=1) is a defect the
-    # `-eq 1` / `rc=67` / `rc=65` triple of substring checks does not
-    # directly order-check, but IS caught by the "no FAIL_CODE=65 after
-    # mutation" test above, which relies on the surrounding contract this
-    # test declares present.
+    # get needlessly remapped — caught by the exact-list assertion. Swapping
+    # the two remap directions (`rc=65` under `MUTATED -eq 1`, `rc=67` under
+    # the `else`) is caught directly by the then/else branch split above —
+    # this is the fix for a previously FALSE sensitivity claim in this same
+    # test, which asserted this defect was "caught" by the no-FAIL_CODE=65-
+    # after-mutation test elsewhere; that test does not exercise handle_exit
+    # at all, so it could not have caught a reversed remap.
 
 
 # ---------------------------------------------------------------------------
@@ -419,22 +445,23 @@ def test_every_curl_invocation_carries_q_and_both_timeouts() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. `#!/bin/bash` and `trap '' HUP` are present.
+# 10. `#!/bin/bash` and `trap '' HUP INT TERM` are present.
 # ---------------------------------------------------------------------------
 
 
-def test_shebang_and_hup_trap_are_present() -> None:
+def test_shebang_and_signal_trap_are_present() -> None:
     script = _text(HELPER)
     lines = script.splitlines()
     assert lines[0] == "#!/bin/bash"
-    assert "trap '' HUP" in script
+    assert "trap '' HUP INT TERM" in script
 
     # Sensitivity: `#!/usr/bin/env bash` (PATH-dependent) instead of the
     # pinned `#!/bin/bash` would still satisfy a bare `"bash" in lines[0]`
-    # check but fails this exact-match one. Dropping `trap '' HUP` would let
-    # a deploy-triggered SIGHUP (e.g. the calling shell's session ending)
-    # interrupt an in-flight switch mid-mutation — the substring check
-    # catches its removal directly.
+    # check but fails this exact-match one. Trapping only `HUP` (the
+    # previous, narrower version) would leave the helper interruptible by
+    # Ctrl-C (INT) or a deploy orchestrator's cancellation signal (TERM)
+    # mid-mutation — this exact-string check on all three signals together
+    # catches a regression back to the narrower trap.
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +470,15 @@ def test_shebang_and_hup_trap_are_present() -> None:
 
 
 def test_the_lock_is_root_owned_and_contention_exits_75() -> None:
+    """The lock target is root-owned and not under the world-writable /run/lock.
+
+    NOTE — this test's scope is deliberately narrower than "the lock cannot
+    be taken by anyone": ownership alone does not stop a local user who can
+    still merely OPEN the directory (root ownership does not require a
+    restrictive mode) from contending for the flock. That gap is what
+    `test_the_managed_directory_mode_is_restrictive` below closes — the two
+    tests are complementary, not redundant.
+    """
     script = _text(HELPER)
 
     assert "/run/lock" not in script
@@ -456,6 +492,33 @@ def test_the_lock_is_root_owned_and_contention_exits_75() -> None:
     # local user create contention or, worse, a symlink race) would keep
     # `flock -n 9` intact but fail the `/run/lock` absence check and the
     # `exec 9<"$MANAGED_DIR"` exact-match check.
+
+
+# ---------------------------------------------------------------------------
+# 11b. The managed directory's mode is 0700 or 0750, not merely root-owned.
+# ---------------------------------------------------------------------------
+
+
+def test_the_managed_directory_mode_is_restrictive() -> None:
+    script = _text(HELPER)
+
+    mode_body = _function_body(script, "require_managed_dir_mode")
+    assert "700 | 750) ;;" in mode_body
+
+    # The check must actually be CALLED, against MANAGED_DIR, before the
+    # verb-dispatch case begins (i.e. unconditionally, for both verbs).
+    call_idx = script.index('require_managed_dir_mode "$MANAGED_DIR"')
+    dispatch_start = script.rindex('case "$VERB" in')
+    assert call_idx < dispatch_start
+
+    # Sensitivity: a version that only checked group/other-WRITE bits (the
+    # pre-existing `require_root_owned_and_not_group_or_other_writable`,
+    # which accepts e.g. 0755) would let any local user OPEN the directory
+    # and contend for the lock even though they could never WRITE into it —
+    # the exact `700 | 750` case-arm match catches a rewrite that widened
+    # this to also accept, say, `755`. Removing the call entirely (or moving
+    # it inside a dispatch arm, so only one verb gets checked) is caught by
+    # the call-site-before-dispatch ordering assertion.
 
 
 # ---------------------------------------------------------------------------
@@ -622,34 +685,85 @@ def test_bootstrap_managed_branch_never_relinks_and_shares_the_helpers_lock_dir(
     )
 
     assert 'exec 8<"$MANAGED_NGINX_DIR"' in bootstrap
-    assert "flock 8" in bootstrap
+    assert "flock -w 60 8" in bootstrap, (
+        "the lock wait must be BOUNDED, so a stuck concurrent run fails "
+        "this bootstrap loudly rather than hanging it indefinitely"
+    )
 
-    # Isolate the managed branch: `if is_nginx_site_managed; then ... else`.
+    # Isolate the PRE-certificate managed branch: `if is_nginx_site_managed;
+    # then ... else`. Since D16 PR 3's second fix round, this branch does
+    # NOTHING but set a flag — no lock, no conf install — because the lock
+    # and the conf installs both moved to AFTER certificate issuance (see
+    # the next test).
     branch_match = re.search(
         r"if is_nginx_site_managed; then\n(.*?)\n    else\n",
         bootstrap,
         re.DOTALL,
     )
     assert branch_match, "expected an is_nginx_site_managed branch"
-    managed_branch = branch_match.group(1)
-    assert "ln -sfn" not in managed_branch
-    assert "install_managed_conf_atomically" in managed_branch
+    pre_cert_branch = branch_match.group(1)
+    assert "ln -sfn" not in pre_cert_branch
+    assert "install_managed_conf_atomically" not in pre_cert_branch
+    assert "flock" not in pre_cert_branch
+    assert "exec 8" not in pre_cert_branch
+
+    # The lock-and-install block (AFTER certificate issuance) must contain
+    # both installs.
+    post_cert_match = re.search(
+        r'if \[\[ "\$site_is_managed" -eq 1 \]\]; then\n(.*?)\n    else\n',
+        bootstrap,
+        re.DOTALL,
+    )
+    assert post_cert_match, "expected a site_is_managed post-certificate branch"
+    post_cert_branch = post_cert_match.group(1)
+    assert "install_managed_conf_atomically" in post_cert_branch
+    assert post_cert_branch.count("install_managed_conf_atomically") == 2
+    assert "ln -sfn" not in post_cert_branch
 
     # The bare `ln -sfn` in the whole file must be exactly the one
-    # pre-conversion (unmanaged) call, not a second one hiding in managed
-    # mode's post-certificate reload branch either.
+    # pre-conversion (unmanaged) call, not a second one hiding anywhere in
+    # managed mode.
     code = _code_only(bootstrap)
     assert code.count("ln -sfn") == 1
     assert 'ln -sfn "$NGINX_AVAILABLE" "$NGINX_ENABLED"' in code
 
-    # Sensitivity: a bootstrap re-run that called `ln -sfn` inside the
-    # managed branch (e.g. "just to be safe") would fight the helper for
-    # ownership of the enabled-site symlink and could switch a host that a
-    # deploy had deliberately left in maintenance back to live — the
-    # `managed_branch` substring check and the whole-file count both catch
-    # that. A lock-directory typo (a literal path differing from the
-    # helper's) would let bootstrap and the helper mutate concurrently
-    # without contention — caught by the literal-equality assertion.
+    # Sensitivity: a bootstrap re-run that called `ln -sfn` inside either
+    # managed-mode branch (e.g. "just to be safe") would fight the helper
+    # for ownership of the enabled-site symlink and could switch a host that
+    # a deploy had deliberately left in maintenance back to live — the two
+    # branch-scoped substring checks and the whole-file count all
+    # independently catch that. A lock-directory typo (a literal path
+    # differing from the helper's) would let bootstrap and the helper
+    # mutate concurrently without contention — caught by the
+    # literal-equality assertion. Restoring the old unbounded `flock 8`
+    # (rather than `flock -w 60 8`) is caught by the exact-string bound
+    # check.
+
+
+# ---------------------------------------------------------------------------
+# 16b. Bootstrap never holds the lock across certificate issuance.
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_never_holds_the_lock_across_certificate_issuance() -> None:
+    bootstrap = _text(BOOTSTRAP)
+
+    # The bare top-level CALL (inside main(), not the function definition
+    # `issue_production_certificate() {`) is the only place the certificate
+    # is actually issued.
+    call_idx = bootstrap.index("\n    issue_production_certificate\n")
+    lock_idx = bootstrap.index("flock -w 60 8")
+    assert call_idx < lock_idx, (
+        "the lock must be acquired AFTER certificate issuance, never held "
+        "across it — ACME network I/O can block far longer than any "
+        "concurrent maintenance-helper run should ever have to wait"
+    )
+
+    # Sensitivity: moving `issue_production_certificate` back inside (or
+    # after) the lock-held block — the exact defect this fix round
+    # corrects — flips this ordering assertion. A near-miss that keeps the
+    # call before the lock but renames one of the two anchor strings is
+    # caught by `.index()` raising `ValueError` instead of silently passing.
 
 
 # ---------------------------------------------------------------------------
@@ -702,3 +816,165 @@ def test_no_eval_and_no_top_level_positional_args_beyond_verb_parsing() -> None:
     # `require_root_owned_and_not_group_or_other_writable`, `status_for_conf`
     # and `marker_for_conf`, all of which use `$1` purely as their own
     # function argument.
+
+
+# ---------------------------------------------------------------------------
+# 18. MUTATED=1 precedes ln -s in switch_enabled_site.
+# ---------------------------------------------------------------------------
+
+
+def test_mutated_is_set_before_the_temporary_link_is_created() -> None:
+    script = _text(HELPER)
+    switch_body = _function_body(script, "switch_enabled_site")
+
+    mutated_idx = switch_body.index("MUTATED=1")
+    ln_idx = switch_body.index('ln -s "$target" "$tmp_link"')
+    assert mutated_idx < ln_idx, (
+        "MUTATED must flip before the FIRST filesystem call this function "
+        "makes (the temporary ln -s), not just before the mv -T that "
+        "repoints ENABLED_LINK — deliberately conservative, so a failed "
+        "ln -s is treated as state-unknown (67), never nothing-happened (65)"
+    )
+
+    # Sensitivity: moving `MUTATED=1` to just before the `mv -T` line (a
+    # seemingly-more-precise placement, since `mv -T` is the step that
+    # actually repoints ENABLED_LINK) would flip this ordering assertion —
+    # exactly the near-miss this test exists to catch, since a failed `ln -s`
+    # under that placement would incorrectly report 65 ("nothing happened")
+    # despite having just written a stray temporary link under MANAGED_DIR.
+
+
+# ---------------------------------------------------------------------------
+# 19. capture_and_validate_prior_state runs before the first possible switch.
+# ---------------------------------------------------------------------------
+
+
+def test_capture_and_validate_prior_state_runs_before_the_verb_dispatch() -> None:
+    script = _text(HELPER)
+
+    # The bare top-level call (not the function definition
+    # "capture_and_validate_prior_state() {") is the only place this
+    # function is actually invoked.
+    call_idx = script.index("capture_and_validate_prior_state\n")
+    dispatch_start = script.rindex('case "$VERB" in')
+    assert call_idx < dispatch_start, (
+        "CAPTURED_PRIOR must be set before the verb-dispatch case — the "
+        "only place that can reach switch_enabled_site — begins; both "
+        "verb arms unconditionally reference $CAPTURED_PRIOR"
+    )
+
+    # Sensitivity: moving the call inside one dispatch arm (e.g. "only
+    # capture it for routing-restore, since maintenance-on rarely needs it")
+    # would leave $CAPTURED_PRIOR unset for the other arm's do_revert /
+    # attempt_switch_and_prove_or_revert calls, which unconditionally
+    # reference it — this ordering assertion is what keeps that invariant
+    # checkable from the text alone.
+
+
+# ---------------------------------------------------------------------------
+# 20. A drain timeout (reload_rc == 2) goes straight to 67, with no revert.
+# ---------------------------------------------------------------------------
+
+
+def test_a_drain_timeout_skips_the_revert_and_goes_straight_to_67() -> None:
+    script = _text(HELPER)
+    body = _function_body(script, "attempt_switch_and_prove_or_revert")
+
+    start = body.index('if [ "$reload_rc" -eq 2 ]; then')
+    fi_idx = body.index("\n    fi\n", start)
+    block = body[start:fi_idx]
+
+    assert "FAIL_CODE=67" in block
+    assert "do_revert" not in block, (
+        "a drain timeout is an AMBIGUOUS worker mix — attempting a revert "
+        "on top of an already-ambiguous state could make things worse, so "
+        "this path must go straight to 67 without one"
+    )
+
+    # Sensitivity: adding a `do_revert "$CAPTURED_PRIOR"` call inside this
+    # specific block (the fix described in the packet's own exit-code
+    # contract: "a drain timeout after the reload is 67, and it is never
+    # `|| true`") would flip the `not in` assertion. A near-miss that added
+    # the call just AFTER this `fi` (i.e. in the general reload_rc != 0
+    # path) would not trip this test, but IS a different, already-existing
+    # code path (the `reload_rc -ne 0` block below) that legitimately does
+    # revert for a non-drain-timeout reload failure.
+
+
+# ---------------------------------------------------------------------------
+# 21. The maintenance-on short-circuit calls the drain check before proving.
+# ---------------------------------------------------------------------------
+
+
+def test_maintenance_on_short_circuit_waits_for_drain_before_proving() -> None:
+    script = _text(HELPER)
+
+    maintenance_on_start = script.rindex("maintenance-on)")
+    routing_restore_start = script.rindex("routing-restore)")
+    arm = script[maintenance_on_start:routing_restore_start]
+
+    short_circuit_start = arm.index(
+        'if [ "$CAPTURED_PRIOR" = "$MAINTENANCE_CONF" ]; then'
+    )
+    switch_call_idx = arm.index("attempt_switch_and_prove_or_revert")
+    short_circuit_block = arm[short_circuit_start:switch_call_idx]
+
+    assert "wait_for_no_shutting_down_workers" in short_circuit_block
+    wait_idx = short_circuit_block.index("wait_for_no_shutting_down_workers")
+    prove_idx = short_circuit_block.index("PROVE_WANT_STATUS=503")
+    assert wait_idx < prove_idx, (
+        "the drain-wait must run BEFORE the proof — a worker still mid-"
+        "shutdown from an earlier timed-out drain could otherwise still be "
+        "serving live traffic even though the 503 proof passes"
+    )
+    # On timeout, this path must exit 67 immediately (never fall through to
+    # the proof, let alone to attempt_switch_and_prove_or_revert, which
+    # could switch back toward live) — the FIRST FAIL_CODE=67 in this block
+    # is the wait's own failure handler, and it must sit strictly between
+    # the wait call and the proof assignment.
+    first_fail_idx = short_circuit_block.index("FAIL_CODE=67")
+    assert wait_idx < first_fail_idx < prove_idx
+
+    # Sensitivity: dropping the `wait_for_no_shutting_down_workers` call
+    # entirely (reverting to the pre-fix-round short circuit) empties
+    # `short_circuit_block` of that substring, failing the first assertion.
+    # Moving it to AFTER `PROVE_WANT_STATUS=503` (proving before checking
+    # drain) flips the ordering assertion — exactly the HIGH-severity defect
+    # named in this fix round's packet.
+
+
+# ---------------------------------------------------------------------------
+# 22. The live conf hides the marker header from the upstream app.
+# ---------------------------------------------------------------------------
+
+
+def test_live_conf_hides_the_marker_header_from_the_upstream() -> None:
+    live = _text(LIVE_CONF)
+
+    assert f"proxy_hide_header {MARKER_HEADER};" in live
+
+    # Must sit inside the 443 `location /` block, before `proxy_pass` (order
+    # doesn't strictly matter to nginx here, but the header must be hidden
+    # on THIS block, not the port-80 redirect block, which has no proxy_pass
+    # at all).
+    second_location = live.index(
+        "\n    location / {\n", live.index("\n    location / {\n") + 1
+    )
+    proxy_pass_idx = live.index("proxy_pass", second_location)
+    hide_idx = live.index(f"proxy_hide_header {MARKER_HEADER};", second_location)
+    assert second_location < hide_idx < proxy_pass_idx
+
+    # Sensitivity: without `proxy_hide_header`, a compromised or
+    # misconfigured upstream could forge `X-Dotmac-Maintenance` on its own
+    # 503/200 responses — routing-restore's proof requires the marker be
+    # ABSENT, so a forged marker would make a genuinely-restored live proof
+    # falsely fail (or, worse, a forged marker on a live response could mask
+    # a real problem). Removing the directive drops the first assertion;
+    # moving it to the port-80 block (which never proxies) would not appear
+    # inside this function's `second_location`-scoped search, catching that
+    # misplacement too.
+
+    # This addition is entirely inside the 443 `location /` block, which
+    # `test_maintenance_conf_equals_live_conf_except_for_the_443_location_
+    # block` above deliberately excludes from its prefix/suffix comparison
+    # — confirmed by re-reading that test: it still holds unchanged.
