@@ -1660,3 +1660,244 @@ def test_fence_is_holding_returns_false_when_a_writer_backend_is_open(
 
             assert fence_is_holding(conn, proof) is True
             restore_writers(conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS)
+
+
+# ── (v) NON-SUPERUSER OWNER: the ACL work needs no superuser privilege ──────
+#
+# D1 fence topology (decided 2026-09-28): the ACL work — REVOKE/GRANT
+# CONNECT, aclexplode, pg_auth_members, has_database_privilege,
+# pg_stat_activity reads — runs as the database OWNER, needing no new
+# privilege. Only backend termination needs superuser, and that goes through
+# a `terminator` seam a production broker implements over its own socket.
+# These tests fence and restore over an OWNER connection that is itself
+# NOSUPERUSER, proving the library never actually needs more than ownership
+# for anything except signalling a backend.
+
+
+@pytest.fixture
+def owner_role(postgres_url: str) -> Iterator[str]:
+    """A NON-SUPERUSER, NOCREATEROLE login role: the shape `app_admin` has in
+    production under D1 — ownership, not superuser, is what the ACL work
+    needs."""
+    role = f"fence_owner_{uuid.uuid4().hex[:10]}"
+    with _connect(postgres_url, autocommit=True) as conn:
+        conn.execute(text(f"CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEROLE"))
+    try:
+        yield role
+    finally:
+        with _connect(postgres_url, autocommit=True) as conn:
+            conn.execute(text(f"DROP OWNED BY {role}"))
+            conn.execute(text(f"DROP ROLE IF EXISTS {role}"))
+
+
+@pytest.fixture
+def owner_db(
+    postgres_url: str, owner_role: str, url_for: Callable[..., str]
+) -> Iterator[str]:
+    """A scratch database OWNED BY `owner_role`, NULL datacl (so its ACL is
+    the materialised default, `acldefault('d', owner_role)`, recorded with
+    `owner_role` as grantor — the same "grantor is the owner" shape
+    `_reject_grants_not_owner_granted` requires), with `MIGRATION_ROLE`
+    explicitly GRANTed CONNECT by the owner itself (so
+    `_require_migration_connect_without_public` passes: `MIGRATION_ROLE` is
+    trivially a member of itself), and dropped at teardown."""
+    name = f"vcp_fence_nonsuper_{uuid.uuid4().hex[:12]}"
+    with _connect(postgres_url, autocommit=True) as conn:
+        conn.execute(text(f'CREATE DATABASE "{name}" OWNER {owner_role}'))
+    owner_url_for_grant = url_for(postgres_url, name, user=owner_role)
+    with _connect(owner_url_for_grant, autocommit=True) as conn:
+        conn.execute(text(f'GRANT CONNECT ON DATABASE "{name}" TO {MIGRATION_ROLE}'))
+    try:
+        yield name
+    finally:
+        with _connect(postgres_url, autocommit=True) as conn:
+            conn.execute(
+                text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = :n AND pid <> pg_backend_pid()"
+                ),
+                {"n": name},
+            )
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}"'))
+
+
+@pytest.fixture
+def owner_url(
+    postgres_url: str, owner_db: str, owner_role: str, url_for: Callable[..., str]
+) -> str:
+    """The OWNER's own connection URL against `owner_db` — the identity
+    `fence_writers`/`restore_writers` are called with in every test below;
+    never the cluster superuser."""
+    return url_for(postgres_url, owner_db, user=owner_role)
+
+
+def _superuser_terminator(
+    postgres_url: str, database: str, writers: tuple[str, ...]
+) -> Callable[[], None]:
+    """A test `Terminator` backed by a SEPARATE superuser connection,
+    simulating the production broker: it re-derives the writer set itself
+    (via the SAME `_writer_pids` query the library uses) and terminates it —
+    the fence never passes it a pid or a role name; this closure captures
+    `database`/`writers` only because the TEST built it that way, standing in
+    for the broker's own server-side derivation."""
+
+    def _terminate() -> None:
+        with _connect(postgres_url, autocommit=True) as super_conn:
+            for pid in fence_module._writer_pids(super_conn, database, writers):
+                super_conn.execute(
+                    text("SELECT pg_terminate_backend(:pid)"), {"pid": pid}
+                )
+
+    return _terminate
+
+
+def test_pg_stat_activity_exposes_a_writers_backend_to_the_non_superuser_owner(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """The whole D1 topology depends on PG exposing `usename`/`datname` in
+    `pg_stat_activity` to a non-superuser reader — if it does not, the owner
+    can never even SEE a writer backend to know a drain has or hasn't
+    converged, and the fence design in this module is unsound. This is
+    measured directly, not assumed."""
+    with _writer_role(postgres_url) as w:
+        writer_engine = create_engine(url_for(postgres_url, owner_db, user=w))
+        writer_conn = writer_engine.connect()
+        try:
+            assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+            with _connect(owner_url, autocommit=True) as owner_conn:
+                visible = fence_module._writer_pids(owner_conn, owner_db, (w,))
+            assert visible != [], (
+                "PG did not expose the writer's backend to the non-superuser "
+                "owner via pg_stat_activity — the D1 fence topology requires "
+                "this and the design does not hold without it"
+            )
+        finally:
+            writer_conn.close()
+            writer_engine.dispose()
+
+
+def test_owner_only_fence_with_a_superuser_terminator_holds_and_restores_exactly(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    with _writer_role(postgres_url) as w:
+        writer_engine = create_engine(url_for(postgres_url, owner_db, user=w))
+        writer_conn = writer_engine.connect()
+        try:
+            assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+
+            with _connect(owner_url, autocommit=True) as owner_conn:
+                before = fence_module._current_grants(owner_conn, owner_db)
+                proof = fence_writers(
+                    owner_conn,
+                    database=owner_db,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+                )
+                assert proof.terminated_count >= 1
+                assert fence_is_holding(owner_conn, proof) is True
+
+            with pytest.raises(OperationalError):
+                writer_conn.execute(text("SELECT 1"))
+
+            with pytest.raises(OperationalError, match="permission denied"):
+                with _connect(url_for(postgres_url, owner_db, user=w)):
+                    pass
+
+            with _connect(owner_url, autocommit=True) as owner_conn:
+                restore_writers(
+                    owner_conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS
+                )
+                after = fence_module._current_grants(owner_conn, owner_db)
+                # Grantor-exact: the full 4-tuple, including the OWNER as
+                # grantor, is reproduced exactly.
+                assert after == before
+        finally:
+            writer_conn.close()
+            writer_engine.dispose()
+
+
+def test_owner_only_fence_without_a_terminator_cannot_signal_and_compensates(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """No `terminator` is given, so the default adapter tries
+    `pg_terminate_backend` over the OWNER connection itself — a privilege the
+    owner does not have over another role's backend. `fence_writers` must
+    still fail SAFE: a `FenceRefused` is raised and the ACL is restored to
+    exactly its prior state; the writer's already-open session, never
+    actually terminated, keeps working, exactly as the module docstring's
+    "a backend already connected ... is a separate hazard REVOKE CONNECT
+    does not touch" describes for a fence that fails to drain.
+
+    NOTE: whether PostgreSQL raises `WRITER_SESSIONS_SURVIVED` (a silent,
+    ineffective termination that only the deadline catches) or
+    `FENCE_INTERRUPTED` (an immediate permission-denied error from
+    `pg_terminate_backend` itself, compensated as a driver error) is a real
+    server behaviour this file does not control; either is accepted here
+    because either preserves the actual safety property under test."""
+    with _writer_role(postgres_url) as w:
+        writer_engine = create_engine(url_for(postgres_url, owner_db, user=w))
+        writer_conn = writer_engine.connect()
+        try:
+            assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+
+            with _connect(owner_url, autocommit=True) as owner_conn:
+                before = fence_module._current_grants(owner_conn, owner_db)
+                with pytest.raises(FenceRefused) as refused:
+                    fence_writers(
+                        owner_conn,
+                        database=owner_db,
+                        writer_roles=(w,),
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                    )
+                assert refused.value.code in (
+                    FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
+                    FenceRefusalCode.FENCE_INTERRUPTED,
+                )
+                after = fence_module._current_grants(owner_conn, owner_db)
+                assert after == before
+
+            # The writer's session was never actually terminated (the owner
+            # could not signal it), so it still works.
+            assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+        finally:
+            writer_conn.close()
+            writer_engine.dispose()
+
+
+def test_owner_only_fence_with_a_raising_terminator_compensates(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """A `terminator` that raises is treated exactly like a failed drain: the
+    existing compensation path runs and the original error propagates,
+    chained, as `FENCE_INTERRUPTED` — the ACL ends up equal to its prior
+    state either way."""
+
+    def _broken_terminator() -> None:
+        raise RuntimeError("broker unreachable")
+
+    with _writer_role(postgres_url) as w:
+        writer_engine = create_engine(url_for(postgres_url, owner_db, user=w))
+        writer_conn = writer_engine.connect()
+        try:
+            assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+
+            with _connect(owner_url, autocommit=True) as owner_conn:
+                before = fence_module._current_grants(owner_conn, owner_db)
+                with pytest.raises(FenceRefused) as refused:
+                    fence_writers(
+                        owner_conn,
+                        database=owner_db,
+                        writer_roles=(w,),
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                        terminator=_broken_terminator,
+                    )
+                assert refused.value.code == FenceRefusalCode.FENCE_INTERRUPTED
+                assert isinstance(refused.value.__cause__, RuntimeError)
+                after = fence_module._current_grants(owner_conn, owner_db)
+                assert after == before
+
+            assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+        finally:
+            writer_conn.close()
+            writer_engine.dispose()
