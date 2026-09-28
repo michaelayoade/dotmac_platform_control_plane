@@ -10,10 +10,41 @@ readonly KEY_FILE="/run/secrets/dotmac/vendor-control-plane/licence-signing/prim
 readonly KEY_DIR="${KEY_FILE%/*}"
 readonly NGINX_AVAILABLE="/etc/nginx/sites-available/vendor.dotmac.io"
 readonly NGINX_ENABLED="/etc/nginx/sites-enabled/vendor.dotmac.io"
+# Set up once, by hand, per docs/operations/maintenance-helper.md's one-time
+# conversion: after that, $NGINX_ENABLED is a symlink into this directory,
+# owned and switched exclusively by deploy/host/dotmac-vendor-maintenance.
+# This script never runs `ln -sfn` on an already-converted host, and never
+# reloads unless the link is currently pointing at live.conf.
+readonly MANAGED_NGINX_DIR="/etc/nginx/dotmac/vendor"
+readonly MANAGED_LIVE_CONF="${MANAGED_NGINX_DIR}/live.conf"
+readonly MANAGED_MAINTENANCE_CONF="${MANAGED_NGINX_DIR}/maintenance.conf"
 
 die() {
     printf '%s\n' "$*" >&2
     exit 1
+}
+
+# True once the one-time sites-enabled conversion in
+# docs/operations/maintenance-helper.md has happened on this host: the
+# enabled link is a symlink resolving somewhere inside $MANAGED_NGINX_DIR.
+# False on a fresh host, or on a host bootstrapped before that conversion —
+# on which pre-conversion behaviour below is unchanged.
+is_nginx_site_managed() {
+    [[ -L "$NGINX_ENABLED" ]] || return 1
+    local resolved
+    resolved="$(readlink -f "$NGINX_ENABLED")" || return 1
+    [[ "$resolved" == "$MANAGED_NGINX_DIR"/* ]]
+}
+
+# Installs $1 to $2 (inside $MANAGED_NGINX_DIR) atomically: write to a
+# temporary file in the same directory, then `mv -T` it into place, so
+# nginx (or a concurrent dotmac-vendor-maintenance run) never observes a
+# partially-written config.
+install_managed_conf_atomically() {
+    local src="$1" dest="$2" tmp
+    tmp="$(mktemp "${dest}.XXXXXX")"
+    install -m 0644 -o root -g root "$src" "$tmp"
+    mv -T "$tmp" "$dest"
 }
 
 CERTBOT_ACCOUNT_MODE=""
@@ -106,10 +137,26 @@ main() {
     chmod 0600 "$KEY_FILE"
 
     install -d -m 0755 /var/www/certbot
-    install -m 0644 deploy/nginx/vendor.dotmac.io.bootstrap.conf "$NGINX_AVAILABLE"
-    ln -sfn "$NGINX_AVAILABLE" "$NGINX_ENABLED"
-    nginx -t
-    systemctl reload nginx
+
+    local managed_lock_held=0
+    if is_nginx_site_managed; then
+        # Both managed confs already pass the ACME challenge through on
+        # port 80 (see deploy/nginx/vendor.dotmac.io{,.maintenance}.conf),
+        # so there is nothing to switch here — the enabled link may
+        # legitimately be mid-maintenance, and this script must not touch
+        # it. Hold the same lock the helper uses for the rest of the
+        # managed-mode nginx handling below.
+        exec 8<"$MANAGED_NGINX_DIR"
+        flock 8
+        managed_lock_held=1
+        install_managed_conf_atomically deploy/nginx/vendor.dotmac.io.conf "$MANAGED_LIVE_CONF"
+        install_managed_conf_atomically deploy/nginx/vendor.dotmac.io.maintenance.conf "$MANAGED_MAINTENANCE_CONF"
+    else
+        install -m 0644 deploy/nginx/vendor.dotmac.io.bootstrap.conf "$NGINX_AVAILABLE"
+        ln -sfn "$NGINX_AVAILABLE" "$NGINX_ENABLED"
+        nginx -t
+        systemctl reload nginx
+    fi
 
     issue_production_certificate
 
@@ -122,9 +169,21 @@ main() {
     openssl x509 -checkend 2592000 -noout -in "$CERTIFICATE" >/dev/null \
         || die "production certificate expires within 30 days"
 
-    install -m 0644 deploy/nginx/vendor.dotmac.io.conf "$NGINX_AVAILABLE"
-    nginx -t
-    systemctl reload nginx
+    if [[ "$managed_lock_held" -eq 1 ]]; then
+        # The managed confs are already installed above. Reload only if the
+        # enabled link is CURRENTLY pointing at live.conf — a host caught
+        # mid-maintenance during a bootstrap re-run keeps its enabled
+        # config untouched by this script.
+        if [[ "$(readlink -f "$NGINX_ENABLED")" == "$MANAGED_LIVE_CONF" ]]; then
+            nginx -t
+            systemctl reload nginx
+        fi
+        exec 8<&-
+    else
+        install -m 0644 deploy/nginx/vendor.dotmac.io.conf "$NGINX_AVAILABLE"
+        nginx -t
+        systemctl reload nginx
+    fi
 
     if [[ ! -f "$DEPLOY_DIR/.env" ]]; then
         install -m 0600 .env.production.example "$DEPLOY_DIR/.env"

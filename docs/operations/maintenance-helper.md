@@ -16,17 +16,37 @@ maintenance switch with exactly two verbs:
   the switch before returning.
 
 It validates the candidate config with `nginx -t`, switches atomically
-(never `ln -sfn`), reloads, and proves its own switch against the public
-endpoint over three fresh connections before it will report success. It
-does **not** decide when it is safe to restore public routing — that
-precondition (compatible heads, health and ACL restoration already proven)
-is the deploy's job, in D16 PR 4. This helper only proves the mechanical
-switch it just performed.
+(never `ln -sfn`), reloads (waiting, bounded, for old workers to actually
+drain and a new worker to appear), and proves its own switch against the
+public endpoint over three consecutive fresh connections, with a short
+settle-and-retry allowance, before it will report success. It does **not**
+decide when it is safe to restore public routing — that precondition
+(compatible heads, health and ACL restoration already proven) is the
+deploy's job, in D16 PR 4. This helper only proves the mechanical switch it
+just performed, against **this host's own nginx**.
 
-A failed post-migration deploy stays in maintenance: `routing-restore`
-refuses to run at all unless the app's own loopback health check is already
-200, and if the proof after switching fails, it reverts to maintenance
-(not to live) and proves the marker is back.
+**This is not a public-path proof if anything sits in front of
+`vendor.dotmac.io`.** If a CDN, WAF, or load balancer terminates TLS or
+caches responses in front of this host, a 503 proved against this host's
+loopback-resolved nginx does not mean the public internet sees maintenance,
+and a 200 proved here does not mean the public internet sees live traffic.
+**Michael-only precondition, before the first rehearsal:** confirm nothing
+sits in front of `vendor.dotmac.io` (DNS resolves directly to this host, no
+CDN/WAF/LB in the path), or extend the proof to go through that layer
+instead of `--resolve`-ing straight to `127.0.0.1`.
+
+The helper's lock is a `flock` on a read-only file descriptor opened against
+`/etc/nginx/dotmac/vendor/` itself (root-owned, not the world-writable
+`/run/lock`); `bootstrap_production_host.sh` takes the same lock in managed
+mode. Contention exits `75` immediately, distinct from every other failure.
+
+The helper captures whichever config the enabled link is ACTUALLY pointing
+at when it starts (`readlink -f`, refusing if it isn't a symlink to exactly
+`live.conf` or `maintenance.conf`) and reverts to that captured state on any
+failure — never to a hard-coded "other" file. If routing is already in the
+requested state, the helper does not switch at all; it only proves. A
+`maintenance-on` proof failure while already in maintenance stays in
+maintenance and exits 67 — it never reverts to live.
 
 See `deploy/host/dotmac-vendor-maintenance`'s header comment for the full
 exit-code contract; it is summarized below.
@@ -41,22 +61,41 @@ exit-code contract; it is summarized below.
 | `/etc/sudoers.d/dotmac-vendor-maintenance` | `deploy/host/sudoers.d/dotmac-vendor-maintenance`, with `<DEPLOY_USER>` substituted | `root:root` | `0440` |
 
 The enabled site remains `/etc/nginx/sites-enabled/vendor.dotmac.io`; the
-helper only ever repoints that one symlink between the two files above.
+helper only ever repoints that one symlink between the two files above. The
+helper's temporary link is created INSIDE `/etc/nginx/dotmac/vendor/` (not
+under `sites-enabled/`) and `mv -T`'d into place — this relies on
+`/etc/nginx/dotmac/vendor/` and `/etc/nginx/sites-enabled/` being the same
+filesystem, which they are on a standard single-disk `/etc` (both under the
+host's root filesystem); if a deployment ever mounts `/etc/nginx` split
+across filesystems, `mv -T` would silently fall back to a non-atomic
+copy-and-unlink and this assumption must be re-verified before relying on
+the helper. Any stray temporary link left by a crashed run is cleaned up,
+under the lock, the next time the helper runs.
+
+**Bootstrap owns the managed `live.conf`/`maintenance.conf` content — the
+helper only owns which one is enabled.** After the one-time conversion
+below, `scripts/bootstrap_production_host.sh` re-installs both managed
+files (atomically: write to a temp file in the same directory, then
+`mv -T`) on every run, and takes the same lock the helper does while doing
+it. It never runs `ln -sfn` on the enabled link once it is managed, and it
+reloads only if the link currently resolves to `live.conf` — a bootstrap
+re-run that happens to land while a deploy has the host in maintenance
+does not touch the enabled link or force an unexpected reload.
 
 ## The one-time `sites-enabled` conversion
 
-`scripts/bootstrap_production_host.sh` today installs the live config as a
-**plain file** at `/etc/nginx/sites-available/vendor.dotmac.io`
+Before this conversion, `scripts/bootstrap_production_host.sh` installs the
+live config as a **plain file** at `/etc/nginx/sites-available/vendor.dotmac.io`
 (`install -m 0644 ...`) and points `/etc/nginx/sites-enabled/vendor.dotmac.io`
 at it with `ln -sfn` (see that script's `NGINX_AVAILABLE`/`NGINX_ENABLED`
 constants and its cert-issuance step, which reinstalls the same file's
 *content* in place rather than switching a symlink). That shape does not
 give the helper anything to atomically switch between: there is only one
-managed file, not two named targets.
+managed file, not two named targets. Pre-conversion, bootstrap's behaviour
+is completely unchanged from before this helper existed.
 
 This is a one-time, Michael-only host conversion, done once before the
-first `maintenance-on` rehearsal, and it does not change
-`bootstrap_production_host.sh`:
+first `maintenance-on` rehearsal:
 
 ```console
 $ sudo install -d -m 0755 /etc/nginx/dotmac/vendor
@@ -71,10 +110,16 @@ $ sudo nginx -t && sudo systemctl reload nginx
 ```
 
 After this, `/etc/nginx/sites-enabled/vendor.dotmac.io` is a symlink to
-`/etc/nginx/dotmac/vendor/live.conf`, which the helper will repoint between
-`live.conf` and `maintenance.conf`. `/etc/nginx/sites-available/vendor.dotmac.io`
-is left in place, unreferenced; a future bootstrap re-run reinstalling it is
-harmless because nothing in `sites-enabled` points at it anymore.
+`/etc/nginx/dotmac/vendor/live.conf`. From this point on, `bootstrap_production_host.sh`
+detects the conversion (the enabled link resolves inside
+`/etc/nginx/dotmac/vendor/`) and switches into managed mode: it re-installs
+both managed files on every run as described above, and never writes to or
+re-links `/etc/nginx/sites-available/vendor.dotmac.io` or the enabled link
+again. **`/etc/nginx/sites-available/vendor.dotmac.io` is NOT harmless to
+leave in place indefinitely** — it is simply unreferenced once the enabled
+link points elsewhere; a future bootstrap re-run does not read or write it
+anymore, and it should be treated as dead weight to remove during a later
+cleanup, not as a live fallback.
 
 ## Installing the sudoers fragment
 
@@ -133,13 +178,21 @@ $ curl -sS -D - -o /dev/null https://vendor.dotmac.io/health/ready
 
 ## Exit codes and what an operator does
 
+Every code below describes the state AFTER any mutation, not just the
+immediate failure. Once the enabled-site symlink has been switched even
+once in a given run, `65` is never reachable again — an EXIT trap inside
+the helper remaps any exit code outside `{0,64,65,66,67,75}` to `65` before
+a mutation and `67` after one, so an operator never sees a raw or
+undocumented status.
+
 | Code | Meaning | Operator action |
 | --- | --- | --- |
-| `0` | ok | none — the switch is proven |
+| `0` | ok | none — the switch (or, if already in the target state, the proof) is proven |
 | `64` | usage error: unknown verb, missing verb, or extra arguments | nothing was touched; fix the invocation |
-| `65` | validation failed: a precondition was not met, or `nginx -t` rejected the candidate config | nothing was switched that was not switched back, and nothing was reloaded; read the `logger` output, fix the config or the precondition, retry |
-| `66` | proof failed after a successful switch and reload | the helper reverted and PROVED the revert; read the logs to understand why the public proof failed (app not actually ready, DNS/TLS drift, etc.) before retrying |
-| `67` | revert failed | state is **UNKNOWN** — page a human immediately; do not retry automatically; check `nginx -T`, the enabled-site symlink target, and the public endpoint by hand before touching anything else |
+| `65` | refused, or failed, BEFORE any mutation — state is unchanged (a stat/ownership precondition, an unmanaged or unresolved enabled-link target, or the `routing-restore` app-health precondition) | nothing was switched; read the `logger` output, fix the precondition, retry |
+| `66` | the public proof failed after a successful switch and reload | the helper reverted to the CAPTURED PRIOR config, reloaded, and PROVED the revert; read the logs to understand why the public proof failed (app not actually ready, DNS/TLS drift, a CDN/WAF/LB in front — see above) before retrying |
+| `67` | state is **UNKNOWN**: a revert could not be proved, a drain timed out (an ambiguous old/new worker mix), or an unexpected error occurred after a mutation | page a human immediately; do not retry automatically; check `nginx -T`, the enabled-site symlink target, `systemctl status nginx`, and the public endpoint by hand before touching anything else |
+| `75` | another run (the helper or a concurrent `bootstrap_production_host.sh`) holds the lock | nothing was touched; wait for the other run to finish, or investigate why it is stuck, before retrying |
 
 ## Relationship to the deploy (D16 PR 4)
 
@@ -147,5 +200,20 @@ This helper is checked in only. `deploy_production.sh` (D16 PR 4) is the
 intended caller: it runs `maintenance-on` before a migration, and only calls
 `routing-restore` after it has independently proven compatible heads,
 application health, and ACL restoration — this helper does not make that
-judgment call. Until PR 4 lands and wires the sudoers-gated call, this
+judgment call. **PR 4 must treat any exit code other than `0` as: for
+`maintenance-on`, stay in maintenance and do not fence (do not proceed to
+migrate); for `routing-restore`, stay in maintenance** — a nonzero exit from
+either verb is never a signal to proceed as if routing were in the
+requested state. Until PR 4 lands and wires the sudoers-gated call, this
 helper is unused in production.
+
+## Known limitation: no behavioural rehearsal in CI
+
+The architecture tests in `tests/architecture/test_maintenance_helper.py`
+are static text/parse checks only — there is no stubbed `nginx`,
+`systemctl`, or `curl` harness exercising the helper's actual control flow
+(the switch/validate/reload/drain/proof/revert state machine, the EXIT
+trap's remapping, or the idempotent-verb short-circuits). That behavioural
+coverage remains a follow-up; until it exists, the one-time rehearsal above
+is the only exercise of the real code paths, and it must be repeated after
+any change to the helper.
