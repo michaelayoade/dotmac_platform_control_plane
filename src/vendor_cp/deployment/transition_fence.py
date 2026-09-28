@@ -91,20 +91,81 @@ already-fenced database (`fence_writers(..., prior=proof)`) keeps that same
 original ACL rather than recording the already-revoked one as "prior",
 because the second call's own view of `pg_database.datacl` is the fence's own
 handiwork, not evidence about what the database looked like before anyone
-fenced it. A `prior=` a caller passes is bound, and the binding has two
-layers. First, identity: `prior` must name the same database and the same
-fenced-role set this call resolved, or `fence_writers` refuses
-(`prior_mismatch`) before any change — a mismatched `prior` would let one
-database's proof restore a different one's ACL. Second, content: the live
-ACL this call is about to re-fence must be a SUBSET of `prior.prior_grants`
-(nothing currently granted may be silently missing from what `prior` claims
-the original ACL was), and every entry `prior` claims BEYOND that live
-subset must be a CONNECT grant to an effective role or PUBLIC made by the
-database's CURRENT owner — the identical bound `restore_writers` applies to
-what it is about to GRANT. A `prior=` that fails either layer is refused
-(`prior_mismatch`) before any change; a caller cannot smuggle an arbitrary
-grant back into circulation by wrapping it in a `prior=` a later restore
-would otherwise trust.
+fenced it. A `prior=` a caller passes is bound to a REQUIRED
+`expected_prior_fence_id` (refused `PROOF_MISMATCH` before any change if
+omitted or mismatched — the identical out-of-band binding `restore_writers`
+requires for `expected_fence_id`), and then to two further layers. First,
+identity: `prior` must name the same database and the same fenced-role set
+this call resolved, or `fence_writers` refuses (`prior_mismatch`) before any
+change — a mismatched `prior` would let one database's proof restore a
+different one's ACL. Second, content: the live ACL this call is about to
+re-fence must be a SUBSET of `prior.prior_grants` (nothing currently granted
+may be silently missing from what `prior` claims the original ACL was), and
+every entry `prior` claims BEYOND that live subset must be a CONNECT grant to
+an effective role or PUBLIC made by the database's CURRENT owner, never a
+grant option to PUBLIC — the identical bound `restore_writers` applies to
+what it is about to GRANT. A `prior=` that fails any of these layers is
+refused (`prior_mismatch`/`proof_mismatch`) before any change.
+
+## The trust boundary: an in-process `FenceProof` is fully trusted
+
+`fence_writers(prior=)` and `restore_writers` both take a `FenceProof`
+directly, in-process, and perform NO digest check on it — every bound
+above (identity, subset, the CONNECT/grantee/grantor/no-grant-option-to-
+PUBLIC shape) is a SHAPE check, not a provenance check, and a legally shaped
+residue survives it BY DESIGN: an owner-granted, non-grantable PUBLIC
+CONNECT, or an owner-granted CONNECT to an effective role (with or without
+its own grant option), are both indistinguishable from the real prior ACL
+using shape alone, because a real prior ACL can legitimately contain either.
+A caller that can construct or mutate an in-process `FenceProof` — a
+compromised or buggy component running in the SAME process as the fencer —
+can therefore launder such an entry through either function; nothing in this
+module's shape bounds stops it. Only `FenceProof.from_document`'s digest
+check, combined with a `fence_id` the RECEIVING host itself generated and
+compared before ever trusting the digest (see "The threat model" below),
+defends against that: the digest proves the document is byte-identical to
+what a specific fence recorded, and the host-checked `fence_id` proves it is
+the run the host actually asked to restore. A caller that skips
+`from_document` and hands either function a hand-built or mutated
+`FenceProof` gets none of that — this is a documented boundary of what these
+two functions verify, not a gap either one is expected to close itself.
+
+## The threat model
+
+The fencer (whatever process calls `fence_writers`) already holds owner
+credentials on the database it fences — it could always GRANT CONNECT back
+to anyone directly, with or without this module. `FenceProof.digest()` is
+therefore not, and cannot be, a defence against the fencer itself; its job
+is INTEGRITY between the moment a fence is captured and the moment a restore
+consumes it, against anyone who can write to or alter the STORED or
+TRANSPORTED document without holding those owner credentials (a compromised
+log store, a tampered message queue, a modified file on disk).
+
+The mechanism (owned by the host orchestrator, PR 2, not this module):
+
+1. The host generates a unique `fence_id` itself and passes it into
+   `fence_writers` as the `fence_id=` argument — this module never
+   generates one.
+2. On receiving the resulting document (however it crossed the process
+   boundary — stdout, a file, a queue), the host checks that
+   `doc["fence_id"]` equals the id it itself generated in step 1 — BEFORE
+   it ever records `expected_digest`.
+3. Only once that check passes does the host record BOTH the digest and the
+   `fence_id` in HOST-ONLY state (its own memory, its own store) — never
+   re-derived by re-reading anything from the document's own channel.
+4. The eventual restore takes `expected_digest` (for `from_document`) and
+   `expected_fence_id` (for `restore_writers`) FROM THAT HOST-ONLY STATE,
+   never from the document being restored.
+
+A document whose `fence_id` does not match what the host generated fails at
+step 2, before any digest is ever trusted — this is what stops a document
+from asserting its own provenance. A document whose CONTENT was altered
+after step 3 fails `from_document`'s digest comparison. Together these close
+the gap "The trust boundary" section above describes for a document that
+crossed a process boundary; they do nothing for a `FenceProof` a caller
+constructs or mutates purely in-process, which is a different, narrower
+trust boundary this module documents rather than defends against (see that
+section).
 
 ## The ACL is compared as decomposed grants, GRANTOR INCLUDED, never as text
 
@@ -201,8 +262,10 @@ another `FenceRefused`, a driver error, a timeout, `KeyboardInterrupt` — is
 caught, the ACL is restored to what this call started from, and only then is
 the failure reported. If the compensating restore itself fails, the caller
 gets `FenceRefused(COMPENSATION_FAILED)` chained from the original exception,
-with `before_acl` set on it, so an operator always holds the exact ACL to
-restore by hand rather than a stack trace alone.
+with `before_acl` set on it, so an operator always holds a record of the ACL
+to restore by hand rather than a stack trace alone — `before_acl`/`prior_acl`
+is the human-readable text; see "`prior_acl` is informational" below for what
+manual recovery actually restores.
 
 ## A restore that reopens and then fails re-drains before reporting
 
@@ -233,8 +296,26 @@ rather than escaping raw. `KeyboardInterrupt`/`SystemExit` caught while
 restoring are re-raised as themselves once the re-fence-and-redrain attempt
 has run, mirroring `fence_writers`. If the re-fence itself raises,
 `COMPENSATION_FAILED` is raised, chained from the original failure, carrying
-`prior_acl` as the ACL to restore by hand — never a claim that zero writers
-remain when that was never re-proven.
+`before_acl` — never a claim that zero writers remain when that was never
+re-proven. Manual recovery here restores `prior_grants`, not `before_acl`'s
+text; see "`prior_acl` is informational" below.
+
+## `prior_acl` is informational
+
+`FenceProof.prior_acl` (and `FenceRefused.before_acl`, which carries the
+identical text on a refusal) is `pg_database.datacl::text` (or the
+materialised default) kept for the HUMAN record only — an operator reading a
+log line, never a value this module or a manual recovery re-parses. Manual
+recovery restores `prior_grants`, the decomposed `(grantee, privilege_type,
+is_grantable, grantor)` tuples every comparison in this module actually
+uses (see "The ACL is compared as decomposed grants" above): re-issue the
+`GRANT`/`REVOKE` statements that reproduce exactly that set, grantor
+included. `prior_acl` crosses a process boundary as JSON like every other
+field, but it is bound only by `from_document`'s digest check, the same as
+`prior_grants` — it carries no independent verification of its own, so a
+document whose `prior_acl` was hand-edited to read anything at all still
+fails the digest the instant `prior_grants` (or anything else) no longer
+matches what was recorded.
 
 ## No query after the ACL is restored
 
@@ -273,6 +354,61 @@ timestamp.
   the roles it is told about; nothing here derives or verifies that
   `WRITER_ROLES` actually names every role in the cluster capable of writing
   to the database.
+- **The digest/`fence_id` channel is PR 2's to build.** See "The threat
+  model" above for the exact mechanism: PR 2 generates the unique
+  `fence_id`, checks the returned document's `fence_id` against it BEFORE
+  ever recording `expected_digest`, and keeps both in host-only state the
+  fenced process's own document channel cannot write to or re-derive from.
+- **`prior=` must be reconstructed via `from_document`, not carried
+  in-process.** A re-fence across a process boundary (the shape PR 2 needs
+  for a retried maintenance window) must build its `prior=` argument by
+  calling `FenceProof.from_document` with the PRIOR run's own
+  host-captured `expected_digest`, and must pass that prior run's `fence_id`
+  as `expected_prior_fence_id` — never by holding onto and replaying an
+  in-process `FenceProof` object across that boundary, which gets none of
+  `from_document`'s provenance check (see "The trust boundary" above).
+- **`database` and `allowed_writer_roles` come from HOST CONFIGURATION,
+  never from the document.** Nothing in `FenceProof.from_document` binds
+  `database`, and `allowed_writer_roles` only bounds `fenced_roles` to
+  WHATEVER SET the caller passes — a caller that read either value out of
+  the untrusted document itself would let the document assert its own
+  scope. PR 2 must supply both from its own configuration, the same way
+  `restore_writers`'s `database`/`expected_fence_id` arguments are supplied
+  out of band today.
+- **The broker needs tests against BOTH of `Terminator`'s bounds**, not just
+  the lower one — see that Protocol's own docstring for the exact lower
+  bound (every effective role, scoped to the right database) and upper
+  bound (never `MIGRATION_ROLE`, never the fence's own backend) a real
+  broker statement must satisfy, and for why a broker scoped too narrow is
+  silently indistinguishable from "did nothing", while one scoped too wide
+  can terminate the migration this module exists to protect.
+- **The broker must bound its OWN call time** — Python cannot interrupt a
+  blocking callable, so a broker that does not bound itself can make a
+  single `terminator()` call consume far more than `session_wait_seconds`
+  before this library ever gets a chance to notice (see
+  `_request_termination`'s docstring).
+- **The real drain wall-clock bound is roughly THREE TIMES
+  `session_wait_seconds`, not one** — see `_terminate_and_drain`'s
+  docstring for the exact mechanics (an unbounded first termination
+  request, and a compensating restore's independent second drain attempt).
+  PR 2's maintenance-window budget must account for this multiple, plus
+  ordinary `_POLL_INTERVAL_SECONDS` polling overhead, not the single
+  `session_wait_seconds` value a caller passes in.
+- **The fail-closed recovery boundaries PR 2 must operate against.**
+  Membership drift between fence and restore (a role granted membership in
+  a writer after the fence closed) gives `PROOF_MISMATCH`, with the
+  database LEFT FENCED — `restore_writers` refuses before any GRANT. An
+  owner change (or any drift `_reject_grants_not_owner_granted`-style
+  checks would catch, re-run implicitly via `restore_writers`'s `to_add`
+  bound) during a fence gives `PROOF_MISMATCH` for the same reason. A
+  restore that reopens the ACL and then fails to re-verify it (a partial
+  GRANT failure, a final mismatch, or a terminator failure during the
+  re-drain) gives `COMPENSATION_FAILED` or `WRITER_SESSIONS_SURVIVED`,
+  again with the database intended to stay fenced (verified where the
+  re-fence itself succeeded; unverified, with `before_acl`/`prior_acl` as
+  the human-readable record, where it did not). PR 2 must treat every one
+  of these outcomes as "still fenced, needs operator attention" — never as
+  "probably restored".
 """
 
 from __future__ import annotations
@@ -434,8 +570,10 @@ class FenceRefusalCode(StrEnum):
     #: first ACL change; the ACL was successfully restored.
     FENCE_INTERRUPTED = "fence_interrupted"
     #: The compensating restore after an interrupted fence itself failed. The
-    #: database may still be fenced; `before_acl` is the ACL to restore by
-    #: hand.
+    #: database may still be fenced; `before_acl` is the human-readable
+    #: record of the ACL, but manual recovery restores `prior_grants` (see
+    #: the module docstring's "`prior_acl` is informational" section) —
+    #: `before_acl` is not itself re-parsed by anything.
     COMPENSATION_FAILED = "compensation_failed"
     #: An effective role or PUBLIC holds a CONNECT grant whose recorded
     #: grantor is not the database owner. An owner/superuser REVOKE cannot
@@ -564,12 +702,13 @@ class FenceProof:
 
     `prior_acl` is the database's ACL exactly as `pg_database.datacl::text`
     read it (or the materialised `acldefault('d', datdba)` when that was
-    NULL) before this fence's first REVOKE — kept for the human record, but
+    NULL) before this fence's first REVOKE — kept for the human record ONLY
+    (see the module docstring's "`prior_acl` is informational" section):
     `prior_grants` (the identical ACL decomposed into `(grantee,
     privilege_type, is_grantable, grantor)` tuples via `aclexplode`) is what
-    `restore_writers` actually compares against; see the module docstring for
-    why text comparison is refused and why the grantor is part of the
-    comparison.
+    `restore_writers` actually compares against AND what manual recovery
+    restores; see the module docstring for why text comparison is refused
+    and why the grantor is part of the comparison.
 
     `fence_id` is the caller-supplied identifier of the run that produced
     this proof — required, non-empty, and bound by `restore_writers` against
@@ -656,19 +795,22 @@ class FenceProof:
         below has already passed (so a digest mismatch is never confused
         with a shape problem the caller could otherwise fix by re-encoding).
 
-        **`digest()` is a plain, UNKEYED sha256.** It protects a document
-        ONLY when the host orchestrator (PR 2) captures `expected_digest`
-        itself, per run, at the moment `fence_writers` returns, on a
-        channel the fenced process's own document CANNOT ALSO WRITE — and
-        then never re-derives that expected value by re-reading anything
-        from the container/process whose output it is validating. An
-        orchestrator that captured both the document AND its "expected"
-        digest from the SAME untrusted channel (e.g. both read back from a
-        container's stdout) would be comparing a value to itself; the
-        digest is only a defence when it crossed a trust boundary the
-        document's own channel does not control. PR 2 owns building and
-        proving that channel — this method only ever compares two byte
-        strings.
+        **`digest()` is a plain, UNKEYED sha256 — see the module docstring's
+        "The threat model" section for the full statement.** In short: the
+        fencer already holds owner credentials and could GRANT directly, so
+        this digest is not a defence against the fencer itself — its job is
+        INTEGRITY between capture and restore, against anyone who can write
+        or alter the stored or transported document WITHOUT owner
+        credentials. The host orchestrator (PR 2) generates a unique
+        `fence_id`, passes it into `fence_writers`, and on receiving the
+        resulting document checks that `doc["fence_id"]` equals the id it
+        itself generated BEFORE ever recording `expected_digest` — then
+        keeps both the digest and the `fence_id` in HOST-ONLY state,
+        never re-derived by re-reading anything from the document's own
+        channel. `restore_writers`'s `expected_fence_id` (and this method's
+        `expected_digest`) come from that host-only state, never from the
+        document. This method only ever compares two byte strings; PR 2 owns
+        generating, capturing and storing the values being compared.
 
         Every other check here is defence in depth against a document that
         is simply malformed (not necessarily maliciously tampered — nothing
@@ -693,11 +835,20 @@ class FenceProof:
         ACL always includes an owner-granted entry for the owner — see
         `_current_grants`), and the owner's name is not carried on this
         document at all. This method therefore does not attempt to restrict
-        `prior_grants` grantees to a closed role set; `restore_writers`
-        bounds that instead, from LIVE state: it only ever GRANTs to `{"",
-        *effective}` (never the owner), and separately refuses a proof whose
-        `prior_grants` records any grantor other than the database's CURRENT
-        owner.
+        `prior_grants` grantees, privileges, grant options or grantors to a
+        closed set beyond the structural checks above — it cannot, since it
+        has no live database to check them against. `restore_writers` bounds
+        the remainder instead, from LIVE state, but ONLY over the entries a
+        restore would actually need to GRANT (`to_add = prior_grants -
+        current`, never the whole of `prior_grants` — see that function's
+        own docstring for why): each such entry must be a CONNECT grant, to
+        an effective role or PUBLIC (never the owner, never a grant option
+        to PUBLIC), made by the database's CURRENT owner. An entry `prior_
+        grants` carries that this restore will never need to GRANT (because
+        the live ACL already holds it) is not checked against the owner or
+        any other bound by anything in this module — see the module
+        docstring's "The trust boundary" and "The threat model" sections for
+        what this leaves undefended and why that is by design.
         """
         if not isinstance(doc, dict):
             raise FenceRefused(
@@ -1068,11 +1219,21 @@ def _require_owner_member_or_superuser(conn: Connection, database: str) -> None:
     database owner, a member of the owner, or a superuser, any GRANT it
     issued would record a grantor `restore_writers` could never bind against
     the CURRENT owner — so this is refused up front, before either function
-    does anything else."""
+    does anything else.
+
+    `pg_has_role(..., 'USAGE')`, never `'MEMBER'`: `'MEMBER'` answers true
+    for a NOINHERIT member of the owner too, even though such a member's
+    privileges are NOT automatically available to it — issuing a GRANT as
+    that `current_user` (without an explicit `SET ROLE` this module never
+    performs) would fail with a raw permission-denied error rather than
+    being refused up front with this module's own closed vocabulary.
+    `'USAGE'` answers exactly the question this check needs: are the
+    owner's privileges usable by `current_user` RIGHT NOW, without a role
+    switch."""
     try:
         is_authorized = conn.execute(
             text(
-                "SELECT r.rolsuper OR pg_has_role(r.rolname, d.datdba, 'MEMBER') "
+                "SELECT r.rolsuper OR pg_has_role(r.rolname, d.datdba, 'USAGE') "
                 "FROM pg_roles r, pg_database d "
                 "WHERE r.rolname = current_user AND d.datname = :db"
             ),
@@ -1327,6 +1488,7 @@ def fence_writers(
     writer_roles: tuple[str, ...] = WRITER_ROLES,
     session_wait_seconds: float,
     prior: FenceProof | None = None,
+    expected_prior_fence_id: str | None = None,
     terminator: Terminator | None = None,
 ) -> FenceProof:
     """Revoke CONNECT from every existing writer role, verify it, then drain.
@@ -1353,6 +1515,17 @@ def fence_writers(
     docstring's "Two required bindings" section) — refused `PROOF_INVALID`
     if empty or unsafe. A re-fence (`prior=`) records THIS call's `fence_id`
     on the new proof, never the prior proof's own.
+
+    `expected_prior_fence_id` is REQUIRED whenever `prior` is given (refused
+    `PROOF_MISMATCH` before any change if it is `None` or does not equal
+    `prior.fence_id`) — the identical out-of-band binding
+    `restore_writers` requires for `expected_fence_id`, applied here to the
+    OTHER place this module accepts an in-process `FenceProof` from a
+    caller. Without it, a caller could pass any `FenceProof` it happens to
+    hold as `prior=` — a stale one from a superseded run against this same
+    database, say — without ever having stated which run it believed it was
+    re-fencing, and have that proof's `prior_grants` become this call's own
+    idea of "the ACL to restore to".
     """
     _require_autocommit(conn)
     _reject_invalid_fence_id(fence_id)
@@ -1387,6 +1560,30 @@ def fence_writers(
     before_grants = _current_grants(conn, database)
 
     if prior is not None:
+        # The provenance binding, checked first and before any other prior
+        # check — the identical discipline `restore_writers` applies to
+        # `database`/`expected_fence_id` against the proof it is about to
+        # act on. Without it a caller could pass ANY in-process `FenceProof`
+        # as `prior=` (a stale one from a different run against this same
+        # database, say) and have its `prior_grants` become the new proof's
+        # idea of "the ACL to restore to" without ever having stated which
+        # run it believed it was re-fencing.
+        if expected_prior_fence_id is None:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_MISMATCH,
+                "prior= was given without expected_prior_fence_id; a "
+                "caller re-fencing an already-fenced database must state "
+                "which run's proof it expects before any change, the same "
+                "binding restore_writers requires for expected_fence_id",
+            )
+        if expected_prior_fence_id != prior.fence_id:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_MISMATCH,
+                f"fence_writers was called with expected_prior_fence_id "
+                f"{expected_prior_fence_id!r}, but the given prior proof "
+                f"names fence_id {prior.fence_id!r}; refusing before any "
+                "change",
+            )
         if not prior.fence_id:
             raise FenceRefused(
                 FenceRefusalCode.PROOF_INVALID,
@@ -1415,9 +1612,14 @@ def fence_writers(
         # that `prior` does not also claim would be silently dropped on
         # restore. And every entry `prior` adds beyond that live subset is
         # bounded exactly as `restore_writers` bounds a restore's own GRANTs:
-        # a CONNECT grant to `{"", *effective}` made by the CURRENT owner —
-        # never a wider claim a caller could use to smuggle an arbitrary
-        # grant back in under a later restore.
+        # a CONNECT grant to `{"", *effective}` made by the CURRENT owner,
+        # never a grant option to PUBLIC. This is a SHAPE bound, not a
+        # provenance one — see the module docstring's "The trust boundary"
+        # section for the legally shaped residue it does not and cannot
+        # catch (an owner-granted, non-grantable PUBLIC CONNECT, or an
+        # owner-granted CONNECT to an effective role with or without its own
+        # grant option), and "The threat model" for what actually defends
+        # against it.
         if not before_grants <= prior.prior_grants:
             raise FenceRefused(
                 FenceRefusalCode.PRIOR_MISMATCH,
@@ -1634,7 +1836,23 @@ def _terminate_and_drain(
 
     `terminator`, when given, replaces the default `pg_terminate_backend`
     adapter (see `_request_termination`); the poll loop and its proof are
-    identical either way."""
+    identical either way.
+
+    **`session_wait_seconds` is a per-attempt budget, not this module's real
+    wall-clock bound.** THIS function alone can already exceed it: the FIRST
+    termination request (issued above, before `deadline` is even computed)
+    is not subject to the deadline check at all, so a single slow
+    `terminator()` call there can already consume close to
+    `session_wait_seconds` before the deadline clock starts, pushing one
+    call's real bound toward roughly TWICE `session_wait_seconds` plus
+    `_POLL_INTERVAL_SECONDS` polling overhead. A caller that composes a
+    fence with its own compensation (`fence_writers` on
+    `WRITER_SESSIONS_SURVIVED`, or `restore_writers` on a GRANT-loop failure
+    or final mismatch, both via `_refence_and_redrain`) can invoke a SECOND,
+    independent `_terminate_and_drain` on top of the first. PR 2's real
+    end-to-end drain budget should assume roughly THREE TIMES
+    `session_wait_seconds`, not one, plus polling overhead — see the module
+    docstring's "carried into PR 2" section."""
     if not roles:
         return 0
     backends = _writer_pids(conn, database, roles)
@@ -1810,8 +2028,9 @@ def _refence_and_redrain(
         raise FenceRefused(
             FenceRefusalCode.COMPENSATION_FAILED,
             f"re-fencing {database!r} after a failed restore itself failed: "
-            f"{refence_exc!r}; the database may not be fenced — restore to "
-            "prior_acl by hand",
+            f"{refence_exc!r}; the database may not be fenced — manual "
+            "recovery restores prior_grants (the decomposed tuples this "
+            "proof carries); before_acl is the human-readable record",
             before_acl=before_acl,
         ) from original
     if not holds:
@@ -1819,8 +2038,9 @@ def _refence_and_redrain(
             FenceRefusalCode.COMPENSATION_FAILED,
             f"re-fencing {database!r} after a failed restore could not be "
             "verified: an effective role or PUBLIC still holds CONNECT after "
-            "the re-revoke; the database may not be fenced — restore to "
-            "prior_acl by hand",
+            "the re-revoke; the database may not be fenced — manual "
+            "recovery restores prior_grants (the decomposed tuples this "
+            "proof carries); before_acl is the human-readable record",
             before_acl=before_acl,
         ) from original
     try:
@@ -1837,7 +2057,9 @@ def _refence_and_redrain(
             FenceRefusalCode.COMPENSATION_FAILED,
             f"re-draining {database!r} after a failed restore raised "
             f"{drain_exc!r}; the ACL re-fence was verified but the drain "
-            "state is unproven — restore to prior_acl by hand",
+            "state is unproven — manual recovery restores prior_grants "
+            "(the decomposed tuples this proof carries); before_acl is the "
+            "human-readable record",
             before_acl=before_acl,
         ) from original
 
@@ -1898,7 +2120,18 @@ def restore_writers(
     what bounds a `prior_grants` grantee `FenceProof.from_document` could
     not (see that method's docstring): a legitimate owner-granted CONNECT
     entry always satisfies it, and a laundered one naming any other grantor,
-    privilege, or grantee cannot.
+    privilege, or grantee cannot — EXCEPT for the entries this bound never
+    even looks at, because the live ACL already holds them (`current`, not
+    `to_add`); see the module docstring's "The trust boundary" section for
+    exactly what that leaves undefended.
+
+    **This function takes `proof` directly, in-process, and performs NO
+    digest check on it** — see the module docstring's "The trust boundary"
+    and "The threat model" sections. Only `FenceProof.from_document` (for a
+    proof that crossed a process boundary) plus a `fence_id` the RECEIVING
+    host itself generated and verified defends against a proof whose content
+    was altered after capture; a `FenceProof` handed to this function
+    straight from Python is fully trusted as given.
     """
     _require_autocommit(conn)
 
