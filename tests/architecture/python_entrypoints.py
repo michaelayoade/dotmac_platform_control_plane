@@ -88,6 +88,10 @@ NON_PYTHON_TRACKED_SOURCE: dict[str, str] = {
     "scripts/deploy_production.sh": "sh, on the production host",
     "scripts/deploy_production_with_registry_token.sh": "sh, on the production host",
     "scripts/install_deployment_tool.sh": "sh, on the operator's machine",
+    "scripts/lib/fence_broker.sh": (
+        "bash, sourced by scripts/deploy_production.sh (PR 4) on the "
+        "production host — never executed on its own"
+    ),
     "src/vendor_cp/recovery/capture_catalog.sql": "PostgreSQL",
     "src/vendor_cp/rotation_database_auth_oracle.shprogram": (
         "sh, inside the label-selected PostgreSQL container"
