@@ -538,7 +538,7 @@ def test_fence_then_restore_on_a_null_datacl_database_reproduces_the_default(
                 restore_writers(
                     conn,
                     proof,
-                    database=db,
+                    database=bare_db,
                     expected_fence_id=FENCE_ID,
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
@@ -2673,84 +2673,111 @@ def test_a_third_party_grant_chain_survives_fence_restore_and_compensation(
         _writer_role(postgres_url) as x,
         _writer_role(postgres_url) as y,
     ):
-        with _connect(owner_url, autocommit=True) as owner_conn:
-            owner_conn.execute(
-                text(
-                    f'GRANT CONNECT ON DATABASE "{owner_db}" TO {x} '
-                    "WITH GRANT OPTION"
-                )
-            )
-        with _connect(
-            url_for(postgres_url, owner_db, user=x), autocommit=True
-        ) as x_conn:
-            x_conn.execute(text(f'GRANT CONNECT ON DATABASE "{owner_db}" TO {y}'))
-
-        with _connect(owner_url, autocommit=True) as owner_conn:
-            before = fence_module._current_grants(owner_conn, owner_db)
-            assert (
-                x,
-                "CONNECT",
-                True,
-                fence_module._database_owner(owner_conn, owner_db),
-            ) in before
-            assert (y, "CONNECT", False, x) in before
-
-            proof = fence_writers(
-                owner_conn,
-                database=owner_db,
-                fence_id=FENCE_ID,
-                writer_roles=(writer,),
-                session_wait_seconds=SESSION_WAIT_SECONDS,
-                terminator=_superuser_terminator(postgres_url, owner_db, (writer,)),
-            )
-            # The chain survived the fence itself (never touched by a REVOKE
-            # scoped to PUBLIC and the effective writer set).
-            fenced_grants = fence_module._current_grants(owner_conn, owner_db)
-            assert (
-                x,
-                "CONNECT",
-                True,
-                fence_module._database_owner(owner_conn, owner_db),
-            ) in fenced_grants
-            assert (y, "CONNECT", False, x) in fenced_grants
-
-            restore_writers(
-                owner_conn,
-                proof,
-                database=owner_db,
-                expected_fence_id=FENCE_ID,
-                session_wait_seconds=SESSION_WAIT_SECONDS,
-            )
-            after_restore = fence_module._current_grants(owner_conn, owner_db)
-            assert after_restore == before
-
-            # Force a SECOND fence to fail to drain (a no-op terminator never
-            # even attempts a signal, so the deadline alone catches it) with
-            # the writer connected, so it is compensated — the chain must be
-            # unchanged by the compensating restore too.
-            writer_engine = create_engine(url_for(postgres_url, owner_db, user=writer))
-            writer_conn = writer_engine.connect()
-            try:
-                assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
-
-                def _no_op() -> None:
-                    return None
-
-                with pytest.raises(FenceRefused) as refused:
-                    fence_writers(
-                        owner_conn,
-                        database=owner_db,
-                        fence_id=FENCE_ID,
-                        writer_roles=(writer,),
-                        session_wait_seconds=SESSION_WAIT_SECONDS,
-                        terminator=_no_op,
+        # `_writer_role`'s own teardown runs `DROP OWNED BY` against
+        # `postgres_url`'s database — NOT `owner_db`, a separate, per-test
+        # database `DROP OWNED` never reaches (it only affects "the current
+        # database"). X's and Y's grants live on `owner_db`, so this test
+        # must revoke that chain itself, as the OWNER (who can revoke any
+        # grant on its own database regardless of who the recorded grantor
+        # was), before the roles are dropped — Y's grant first, since it is
+        # the one recording X as grantor.
+        try:
+            with _connect(owner_url, autocommit=True) as owner_conn:
+                owner_conn.execute(
+                    text(
+                        f'GRANT CONNECT ON DATABASE "{owner_db}" TO {x} '
+                        "WITH GRANT OPTION"
                     )
-                assert refused.value.code == FenceRefusalCode.WRITER_SESSIONS_SURVIVED
-                after_compensation = fence_module._current_grants(owner_conn, owner_db)
-                assert after_compensation == before
-            finally:
-                writer_conn.close()
-                writer_engine.dispose()
+                )
+            with _connect(
+                url_for(postgres_url, owner_db, user=x), autocommit=True
+            ) as x_conn:
+                x_conn.execute(text(f'GRANT CONNECT ON DATABASE "{owner_db}" TO {y}'))
+
+            with _connect(owner_url, autocommit=True) as owner_conn:
+                before = fence_module._current_grants(owner_conn, owner_db)
+                assert (
+                    x,
+                    "CONNECT",
+                    True,
+                    fence_module._database_owner(owner_conn, owner_db),
+                ) in before
+                assert (y, "CONNECT", False, x) in before
+
+                proof = fence_writers(
+                    owner_conn,
+                    database=owner_db,
+                    fence_id=FENCE_ID,
+                    writer_roles=(writer,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    terminator=_superuser_terminator(postgres_url, owner_db, (writer,)),
+                )
+                # The chain survived the fence itself (never touched by a
+                # REVOKE scoped to PUBLIC and the effective writer set).
+                fenced_grants = fence_module._current_grants(owner_conn, owner_db)
+                assert (
+                    x,
+                    "CONNECT",
+                    True,
+                    fence_module._database_owner(owner_conn, owner_db),
+                ) in fenced_grants
+                assert (y, "CONNECT", False, x) in fenced_grants
+
+                restore_writers(
+                    owner_conn,
+                    proof,
+                    database=owner_db,
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+                after_restore = fence_module._current_grants(owner_conn, owner_db)
+                assert after_restore == before
+
+                # Force a SECOND fence to fail to drain (a no-op terminator
+                # never even attempts a signal, so the deadline alone
+                # catches it) with the writer connected, so it is
+                # compensated — the chain must be unchanged by the
+                # compensating restore too.
+                writer_engine = create_engine(
+                    url_for(postgres_url, owner_db, user=writer)
+                )
+                writer_conn = writer_engine.connect()
+                try:
+                    assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+
+                    def _no_op() -> None:
+                        return None
+
+                    with pytest.raises(FenceRefused) as refused:
+                        fence_writers(
+                            owner_conn,
+                            database=owner_db,
+                            fence_id=FENCE_ID,
+                            writer_roles=(writer,),
+                            session_wait_seconds=SESSION_WAIT_SECONDS,
+                            terminator=_no_op,
+                        )
+                    assert (
+                        refused.value.code == FenceRefusalCode.WRITER_SESSIONS_SURVIVED
+                    )
+                    after_compensation = fence_module._current_grants(
+                        owner_conn, owner_db
+                    )
+                    assert after_compensation == before
+                finally:
+                    writer_conn.close()
+                    writer_engine.dispose()
+        finally:
+            # Revoke the chain as the owner (authorized to revoke any grant
+            # on its own database regardless of grantor) so the roles can be
+            # dropped: Y's grant (recording X as grantor) before X's own.
+            with _connect(owner_url, autocommit=True) as cleanup_conn:
+                cleanup_conn.execute(
+                    text(f'REVOKE CONNECT ON DATABASE "{owner_db}" FROM {y}')
+                )
+                cleanup_conn.execute(
+                    text(f'REVOKE CONNECT ON DATABASE "{owner_db}" FROM {x}')
+                )
 
 
 # ── (bb) a prior= claim cannot launder a grant option to PUBLIC ────────────
