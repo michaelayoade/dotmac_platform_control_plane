@@ -1829,12 +1829,11 @@ def test_owner_only_fence_without_a_terminator_cannot_signal_and_compensates(
     "a backend already connected ... is a separate hazard REVOKE CONNECT
     does not touch" describes for a fence that fails to drain.
 
-    NOTE: whether PostgreSQL raises `WRITER_SESSIONS_SURVIVED` (a silent,
-    ineffective termination that only the deadline catches) or
-    `FENCE_INTERRUPTED` (an immediate permission-denied error from
-    `pg_terminate_backend` itself, compensated as a driver error) is a real
-    server behaviour this file does not control; either is accepted here
-    because either preserves the actual safety property under test."""
+    Pinned to `FENCE_INTERRUPTED`: PostgreSQL does not silently ignore an
+    unauthorised `pg_terminate_backend` — it raises insufficient-privilege
+    on the first call, which the fence compensates as a driver error. A
+    `WRITER_SESSIONS_SURVIVED` here would mean the server returned without
+    signalling, which is a different failure mode this test must notice."""
     with _writer_role(postgres_url) as w:
         writer_engine = create_engine(url_for(postgres_url, owner_db, user=w))
         writer_conn = writer_engine.connect()
@@ -1850,10 +1849,7 @@ def test_owner_only_fence_without_a_terminator_cannot_signal_and_compensates(
                         writer_roles=(w,),
                         session_wait_seconds=SESSION_WAIT_SECONDS,
                     )
-                assert refused.value.code in (
-                    FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
-                    FenceRefusalCode.FENCE_INTERRUPTED,
-                )
+                assert refused.value.code is FenceRefusalCode.FENCE_INTERRUPTED
                 after = fence_module._current_grants(owner_conn, owner_db)
                 assert after == before
 
