@@ -603,7 +603,7 @@ Provisioning — Michael only; no agent performs any of these:
 | **Credential-free fixture, follows from the 2026-09-28 topology ruling:** Create or choose the organization and its private execution repository | Michael |
 | **Credential-free fixture, follows from the 2026-09-28 topology ruling:** Create the runner group restricted to the exact protected workflow (the ref-pinned coordinate, § 6), and register the ephemeral runner in it — no OpenBao binding, no secrets | Michael |
 | **Condition 2, the live negative test:** Run it per § 7's `test_only_the_protected_workflow_can_select_the_runner` row's fixed negative-first, then positive-control order and its evidence/clean-up requirements | Michael |
-| **Credential-free fixture, same phase as condition 2, run right after it:** Run § 7's non-default-ref row (`test_non_default_ref_run_of_the_protected_workflow_file_cannot_select_the_runner`) against the same STUB fixture workflow, before any Environment exists | Michael |
+| **Credential-free fixture, same phase as condition 2, run right after it:** Run § 7's non-default-ref row (`test_non_default_ref_run_of_the_protected_workflow_file_cannot_select_the_runner`) against the same STUB fixture workflow, before any Environment exists. First cancel any still-queued job from condition 2, then register a FRESH ephemeral runner in the group (the condition-2 positive control consumed the previous one) and show it idle; "the SAME runner" means the same runner within this test | Michael |
 | **Blocked until both conditions are met:** Create the § 2 GitHub Environment and configure the required reviewer + `main`-only branch policy | Michael |
 | **Blocked until both conditions are met:** Create the OpenBao JWT auth role and its policies (§ 3, § 4) | Michael |
 | **Blocked until both conditions are met:** Generate and store the Ed25519 rehearsal-issuer signer at `secret/dotmac/platform-cp/rehearsal-issuer/signing-key` (§ 4) | Michael |
@@ -719,8 +719,9 @@ none is missed before provisioning:
    longer placeholders).
    **Ruled in principle; cannot be finalized until the execution repository
    is chosen:** the repository, `workflow_ref`, runner-group and runner
-   identity, SSH principals and fingerprints remain `<derived from the
-   approved execution repository>`. The 5-minute non-renewable token
+   identity (its ID and registration, as distinct from the group NAME,
+   which is Michael's to choose above), SSH principals and fingerprints
+   remain `<derived from the approved execution repository>`. The 5-minute non-renewable token
    proposal stays. The certificate TTL is still to be measured.
 
 Design choices already made in this spec, confirmed by Michael's 2026-09-28
