@@ -41,10 +41,20 @@ already-fenced database (`fence_writers(..., prior=proof)`) keeps that same
 original ACL rather than recording the already-revoked one as "prior",
 because the second call's own view of `pg_database.datacl` is the fence's own
 handiwork, not evidence about what the database looked like before anyone
-fenced it. A `prior=` a caller passes is bound: it must name the same
-database and the same fenced-role set this call resolved, or `fence_writers`
-refuses (`prior_mismatch`) before any change — a mismatched `prior` would let
-one database's proof restore a different one's ACL.
+fenced it. A `prior=` a caller passes is bound, and the binding has two
+layers. First, identity: `prior` must name the same database and the same
+fenced-role set this call resolved, or `fence_writers` refuses
+(`prior_mismatch`) before any change — a mismatched `prior` would let one
+database's proof restore a different one's ACL. Second, content: the live
+ACL this call is about to re-fence must be a SUBSET of `prior.prior_grants`
+(nothing currently granted may be silently missing from what `prior` claims
+the original ACL was), and every entry `prior` claims BEYOND that live
+subset must be a CONNECT grant to an effective role or PUBLIC made by the
+database's CURRENT owner — the identical bound `restore_writers` applies to
+what it is about to GRANT. A `prior=` that fails either layer is refused
+(`prior_mismatch`) before any change; a caller cannot smuggle an arbitrary
+grant back into circulation by wrapping it in a `prior=` a later restore
+would otherwise trust.
 
 ## The ACL is compared as decomposed grants, GRANTOR INCLUDED, never as text
 
@@ -227,6 +237,7 @@ from typing import Final, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import NoResultFound
 
 __all__ = [
     "FENCE_PROOF_SCHEMA",
@@ -254,22 +265,39 @@ class Terminator(Protocol):
     terminator's claim that termination happened; its own poll of
     `pg_stat_activity` is the only proof it acts on.
 
-    **The broker's contract.** The production broker's fixed, checked-in
-    statement (no arguments — see the module docstring's D1 topology note)
-    must terminate a SUPERSET of every EFFECTIVE set this library may ever
-    drain: every named writer role AND every role transitively holding
-    membership in one (`_member_roles`), scoped to the SAME database this
-    call is fencing. A broker statement scoped to fewer roles, or to a
-    different database, is not a partial defence — it is silently
-    indistinguishable from "the broker did nothing this poll", and the drain
-    simply fails safe with `WRITER_SESSIONS_SURVIVED` once the deadline
-    passes, exactly as if no terminator had been supplied at all. PR 2 must
-    test the broker's actual statement against this superset requirement.
+    **The broker's contract has a LOWER bound and an UPPER bound.** The
+    production broker's fixed, checked-in statement (no arguments — see the
+    module docstring's D1 topology note) must terminate a SUPERSET of every
+    EFFECTIVE set this library may ever drain: every named writer role AND
+    every role transitively holding membership in one (`_member_roles`),
+    scoped to the SAME database this call is fencing — that is the LOWER
+    bound, and a broker statement scoped to fewer roles, or to a different
+    database, is not a partial defence: it is silently indistinguishable
+    from "the broker did nothing this poll", and the drain simply fails safe
+    with `WRITER_SESSIONS_SURVIVED` once the deadline passes, exactly as if
+    no terminator had been supplied at all.
+
+    The UPPER bound is exactly as strict: the broker's statement must
+    terminate ONLY writer and member login roles on the CONFIGURED database
+    — NEVER `MIGRATION_ROLE`, and never the fence's own backend (the
+    connection `fence_writers`/`restore_writers` themselves are running
+    over). A broker statement scoped too WIDE is not merely imprecise — it
+    can terminate the very migration the fence exists to protect, or the
+    library's own connection mid-drain. PR 2 must test the broker's actual
+    statement against BOTH bounds, not only the lower one.
 
     A `terminator` that raises is never trusted at face value either —
     including a `FenceRefused` it raises itself, which this module re-wraps
     (see `_TerminatorFailed`) so it can never be mistaken for a refusal this
     library produced.
+
+    **The broker must bound its OWN call time.** Python cannot interrupt a
+    blocking callable: if `terminator()` itself blocks longer than
+    `session_wait_seconds`, this library only notices AFTER the call
+    finally returns (see `_request_termination`), by which point the
+    deadline it was supposed to respect has already passed. The broker's
+    own statement — not this library — is the only thing that can actually
+    bound how long a single termination attempt takes.
     """
 
     def __call__(self) -> None: ...
@@ -344,6 +372,11 @@ class FenceRefusalCode(StrEnum):
     SHARED_WRITER_ROLE = "shared_writer_role"
     #: `conn` is not AUTOCOMMIT. Checked before any change.
     CONNECTION_NOT_AUTOCOMMIT = "connection_not_autocommit"
+    #: `conn`'s `current_user` is not the database owner, a member of the
+    #: owner, or a superuser. Checked before any change: any GRANT such a
+    #: connection issued would record a grantor `restore_writers` could
+    #: never bind against the current owner.
+    CONNECTION_NOT_OWNER = "connection_not_owner"
     #: A `prior=` proof named a different database, or a different fenced-role
     #: set, than this call resolved. Checked before any change.
     PRIOR_MISMATCH = "prior_mismatch"
@@ -373,8 +406,12 @@ class FenceRefusalCode(StrEnum):
     #: `restore_writers` refused a structurally-valid `FenceProof` because it
     #: does not match LIVE state: re-deriving `_member_roles` from
     #: `proof.fenced_roles` right now disagrees with `proof.member_roles`, or
-    #: some grantor recorded in `proof.prior_grants` is not the database's
-    #: CURRENT owner. Checked before any GRANT.
+    #: an entry this restore would actually need to GRANT (`prior_grants`
+    #: minus the current ACL) is not a CONNECT grant to an effective role or
+    #: PUBLIC made by the database's CURRENT owner. Checked before any GRANT
+    #: — never against the whole of `prior_grants`, only the entries this
+    #: call would act on, so a restore never refuses an ACL `fence_writers`
+    #: itself already accepted.
     PROOF_MISMATCH = "proof_mismatch"
 
 
@@ -522,13 +559,25 @@ class FenceProof:
         a document that is structurally well-formed but semantically
         laundered — a flipped `is_grantable`, an added PUBLIC grant, an
         escalated privilege — none of which live database state can reveal
-        once the ACL has been revoked and later restored. The caller (PR 2's
-        orchestrator) records `digest()` out of band, from the SAME process
-        that called `fence_writers`, at the moment the fence closed; this
-        method recomputes the digest of what it parsed and refuses unless it
+        once the ACL has been revoked and later restored. This method
+        recomputes the digest of what it parsed and refuses unless it
         matches EXACTLY, as the LAST check, after every structural check
         below has already passed (so a digest mismatch is never confused
         with a shape problem the caller could otherwise fix by re-encoding).
+
+        **`digest()` is a plain, UNKEYED sha256.** It protects a document
+        ONLY when the host orchestrator (PR 2) captures `expected_digest`
+        itself, per run, at the moment `fence_writers` returns, on a
+        channel the fenced process's own document CANNOT ALSO WRITE — and
+        then never re-derives that expected value by re-reading anything
+        from the container/process whose output it is validating. An
+        orchestrator that captured both the document AND its "expected"
+        digest from the SAME untrusted channel (e.g. both read back from a
+        container's stdout) would be comparing a value to itself; the
+        digest is only a defence when it crossed a trust boundary the
+        document's own channel does not control. PR 2 owns building and
+        proving that channel — this method only ever compares two byte
+        strings.
 
         Every other check here is defence in depth against a document that
         is simply malformed (not necessarily maliciously tampered — nothing
@@ -880,13 +929,57 @@ def _member_roles(conn: Connection, fenced: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _database_owner(conn: Connection, database: str) -> str:
-    """The database owner's role name, resolved from `pg_database.datdba`."""
-    return str(
-        conn.execute(
+    """The database owner's role name, resolved from `pg_database.datdba`.
+
+    `UNKNOWN_DATABASE`, never a raw `NoResultFound`, if the database no
+    longer exists — a caller deep inside `restore_writers` or a `prior=`
+    bind should see this module's own closed refusal vocabulary, not a
+    driver-level exception it never wrapped."""
+    try:
+        row = conn.execute(
             text("SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = :db"),
             {"db": database},
         ).scalar_one()
-    )
+    except NoResultFound as exc:
+        raise FenceRefused(
+            FenceRefusalCode.UNKNOWN_DATABASE,
+            f"no database named {database!r} exists in this cluster",
+        ) from exc
+    return str(row)
+
+
+def _require_owner_member_or_superuser(conn: Connection, database: str) -> None:
+    """`CONNECTION_NOT_OWNER`, checked before any change.
+
+    Every GRANT this module ever issues (the restore path's re-grant) or
+    relies on having been issued by (the fence path's pre-check) records the
+    EXECUTING identity as grantor. If `conn`'s `current_user` is not the
+    database owner, a member of the owner, or a superuser, any GRANT it
+    issued would record a grantor `restore_writers` could never bind against
+    the CURRENT owner — so this is refused up front, before either function
+    does anything else."""
+    try:
+        is_authorized = conn.execute(
+            text(
+                "SELECT r.rolsuper OR pg_has_role(r.rolname, d.datdba, 'MEMBER') "
+                "FROM pg_roles r, pg_database d "
+                "WHERE r.rolname = current_user AND d.datname = :db"
+            ),
+            {"db": database},
+        ).scalar_one()
+    except NoResultFound as exc:
+        raise FenceRefused(
+            FenceRefusalCode.UNKNOWN_DATABASE,
+            f"no database named {database!r} exists in this cluster",
+        ) from exc
+    if not is_authorized:
+        raise FenceRefused(
+            FenceRefusalCode.CONNECTION_NOT_OWNER,
+            f"this connection's current_user is not database {database!r}'s "
+            "owner, a member of the owner, or a superuser; a GRANT it issued "
+            "would record a grantor restore_writers could never bind against "
+            "the current owner",
+        )
 
 
 def _is_member_of(conn: Connection, member: str, role: str) -> bool:
@@ -1149,6 +1242,7 @@ def fence_writers(
             FenceRefusalCode.UNKNOWN_DATABASE,
             f"no database named {database!r} exists in this cluster",
         )
+    _require_owner_member_or_superuser(conn, database)
 
     existing = _existing_roles(conn, writer_roles)
     absent = tuple(role for role in writer_roles if role not in existing)
@@ -1162,20 +1256,6 @@ def fence_writers(
     member_roles = _member_roles(conn, fenced)
     effective = tuple(dict.fromkeys((*fenced, *member_roles)))
 
-    if prior is not None and (
-        prior.database != database
-        or set(prior.fenced_roles) != set(fenced)
-        or set(prior.member_roles) != set(member_roles)
-    ):
-        raise FenceRefused(
-            FenceRefusalCode.PRIOR_MISMATCH,
-            f"prior proof names database {prior.database!r}, fenced roles "
-            f"{sorted(prior.fenced_roles)} and member roles "
-            f"{sorted(prior.member_roles)}, but this call resolved "
-            f"{database!r}, {sorted(fenced)} and {sorted(member_roles)} — a "
-            "mismatched prior would restore the wrong ACL",
-        )
-
     # Every check below runs before any ACL change, and over the EFFECTIVE
     # role set. None of these hazards can be repaired by revoking — a role
     # that inherits CONNECT through ownership or membership keeps it
@@ -1185,6 +1265,65 @@ def fence_writers(
     # move.
     before_acl = _current_acl_text(conn, database)
     before_grants = _current_grants(conn, database)
+
+    if prior is not None:
+        if (
+            prior.database != database
+            or set(prior.fenced_roles) != set(fenced)
+            or set(prior.member_roles) != set(member_roles)
+        ):
+            raise FenceRefused(
+                FenceRefusalCode.PRIOR_MISMATCH,
+                f"prior proof names database {prior.database!r}, fenced roles "
+                f"{sorted(prior.fenced_roles)} and member roles "
+                f"{sorted(prior.member_roles)}, but this call resolved "
+                f"{database!r}, {sorted(fenced)} and {sorted(member_roles)} — "
+                "a mismatched prior would restore the wrong ACL",
+            )
+        # `prior.prior_grants` is about to become this call's own idea of
+        # "the ACL to restore to" — bound it against LIVE state before
+        # trusting it. `before_grants` (what the database's ACL holds RIGHT
+        # NOW, already fenced by an earlier call) must be a SUBSET of what
+        # `prior` claims the original ACL was — anything currently granted
+        # that `prior` does not also claim would be silently dropped on
+        # restore. And every entry `prior` adds beyond that live subset is
+        # bounded exactly as `restore_writers` bounds a restore's own GRANTs:
+        # a CONNECT grant to `{"", *effective}` made by the CURRENT owner —
+        # never a wider claim a caller could use to smuggle an arbitrary
+        # grant back in under a later restore.
+        if not before_grants <= prior.prior_grants:
+            raise FenceRefused(
+                FenceRefusalCode.PRIOR_MISMATCH,
+                f"the live ACL for {database!r} holds grant(s) "
+                f"{sorted(before_grants - prior.prior_grants)} that the "
+                "given prior proof does not account for; a mismatched prior "
+                "would restore the wrong ACL",
+            )
+        owner_for_prior = _database_owner(conn, database)
+        allowed_for_prior = {"", *effective}
+        bad_prior_entry = next(
+            (
+                entry
+                for entry in (prior.prior_grants - before_grants)
+                if entry[1] != "CONNECT"
+                or entry[0] not in allowed_for_prior
+                or entry[3] != owner_for_prior
+            ),
+            None,
+        )
+        if bad_prior_entry is not None:
+            grantee, privilege, _is_grantable, grantor = bad_prior_entry
+            display_grantee = "PUBLIC" if grantee == "" else grantee
+            raise FenceRefused(
+                FenceRefusalCode.PRIOR_MISMATCH,
+                f"the given prior proof for {database!r} claims a "
+                f"{privilege!r} grant to {display_grantee!r} (recorded "
+                f"grantor {grantor!r}) beyond the live ACL, which is not a "
+                "CONNECT grant to an effective role or PUBLIC made by the "
+                f"database's current owner {owner_for_prior!r}; refusing "
+                "before any change",
+            )
+
     _reject_superuser_writers(conn, effective)
     _require_migration_connect_without_public(conn, database, before_grants)
     _reject_shared_writer_roles(conn, effective, writer_roles)
@@ -1285,6 +1424,7 @@ def _request_termination(
     database: str,
     roles: tuple[str, ...],
     terminator: Terminator | None,
+    session_wait_seconds: float,
 ) -> None:
     """Route one termination request through `terminator`, or the default
     adapter when `terminator` is `None`. Never passes a pid or a role name to
@@ -1298,12 +1438,31 @@ def _request_termination(
     this module produced (see `_TerminatorFailed`'s docstring).
     `KeyboardInterrupt`/`SystemExit` are not wrapped — they propagate as
     themselves, the same convention `fence_writers`/`restore_writers` use
-    everywhere else."""
+    everywhere else.
+
+    Python cannot interrupt a blocking callable: if `terminator()` itself
+    takes longer than `session_wait_seconds` to return, THIS is the only
+    place that can ever notice, since a single call can consume the entire
+    deadline before the poll loop gets another chance to check it. Measured
+    on return (success or a wrapped failure does not matter — a terminator
+    that blocks past the deadline gets no benefit of the doubt either way),
+    and raised as `WRITER_SESSIONS_SURVIVED` — a writer this call could not
+    time-bound waiting for is exactly what that code means."""
     if terminator is not None:
+        started = time.monotonic()
         try:
             terminator()
         except Exception as exc:
             raise _TerminatorFailed(f"terminator raised {exc!r}") from exc
+        elapsed = time.monotonic() - started
+        if elapsed > session_wait_seconds:
+            raise FenceRefused(
+                FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
+                f"a terminator call for {database!r} took {elapsed:.3f}s, "
+                f"exceeding the {session_wait_seconds}s deadline; "
+                "PostgreSQL cannot interrupt a blocking callable, so this "
+                "is the only place that can notice",
+            )
     else:
         _default_terminate(conn, database, roles)
 
@@ -1320,10 +1479,14 @@ def _terminate_and_drain(
     remaining — a termination request merely asks for termination, and a
     single zero reading can race a backend that is mid-termination and about
     to be replaced by a reconnect. Raises `WRITER_SESSIONS_SURVIVED` if the
-    drain does not converge within `session_wait_seconds` (the deadline
-    bounds the whole drain, not the two-poll confirmation). Returns the
-    number of backends found on entry — read via `_writer_pids`, never taken
-    on `terminator`'s word.
+    drain does not converge within `session_wait_seconds` — the poll loop's
+    own deadline bounds the whole drain across repeated calls, AND (see
+    `_request_termination`) a SINGLE `terminator()` call that itself blocks
+    past `session_wait_seconds` is caught immediately when it returns,
+    since Python cannot interrupt a blocking callable mid-call and the poll
+    loop's deadline check would otherwise never get a chance to run.
+    Returns the number of backends found on entry — read via `_writer_pids`,
+    never taken on `terminator`'s word.
 
     `terminator`, when given, replaces the default `pg_terminate_backend`
     adapter (see `_request_termination`); the poll loop and its proof are
@@ -1333,7 +1496,7 @@ def _terminate_and_drain(
     backends = _writer_pids(conn, database, roles)
     terminated_count = len(backends)
     if backends:
-        _request_termination(conn, database, roles, terminator)
+        _request_termination(conn, database, roles, terminator, session_wait_seconds)
 
     deadline = time.monotonic() + session_wait_seconds
     while True:
@@ -1350,7 +1513,7 @@ def _terminate_and_drain(
                 f"{len(remaining)} writer backend(s) on {database!r} "
                 f"survived {session_wait_seconds}s of draining",
             )
-        _request_termination(conn, database, roles, terminator)
+        _request_termination(conn, database, roles, terminator, session_wait_seconds)
         time.sleep(_POLL_INTERVAL_SECONDS)
 
 
@@ -1565,14 +1728,24 @@ def restore_writers(
     `proof.fenced_roles` against LIVE state and refuses
     (`PROOF_MISMATCH`) unless it equals `proof.member_roles` exactly — the
     same discipline `fence_is_holding` already applies to a proof it is only
-    reading, applied here to one this function is about to ACT on — and
-    refuses (`PROOF_MISMATCH`) unless every grantor recorded in
-    `proof.prior_grants` is the database's CURRENT owner: this is what
-    bounds a `prior_grants` grantee `FenceProof.from_document` could not
-    (see that method's docstring), since a legitimate owner-granted entry
-    always satisfies it and a laundered one naming any other grantor cannot.
+    reading, applied here to one this function is about to ACT on. It then
+    computes `to_add = proof.prior_grants - current` (the entries this
+    restore would actually need to GRANT) and refuses (`PROOF_MISMATCH`)
+    unless EVERY entry in `to_add` is a CONNECT grant to `{"", *effective}`
+    made by the database's CURRENT owner — never checking every entry in the
+    whole `prior_grants` set, only the ones this call would act on: a grant
+    the fence never touched and this restore is not going to re-issue is not
+    this function's business, and a restore must not refuse an ACL the fence
+    itself already accepted at fence time (see the module docstring's
+    "Grantor-exact restore" section for why `fence_writers` is the one place
+    that checks the FULL ACL, once, before ever touching it). This is also
+    what bounds a `prior_grants` grantee `FenceProof.from_document` could
+    not (see that method's docstring): a legitimate owner-granted CONNECT
+    entry always satisfies it, and a laundered one naming any other grantor,
+    privilege, or grantee cannot.
     """
     _require_autocommit(conn)
+    _require_owner_member_or_superuser(conn, proof.database)
 
     live_member_roles = _member_roles(conn, proof.fenced_roles)
     if set(live_member_roles) != set(proof.member_roles):
@@ -1583,24 +1756,6 @@ def restore_writers(
             f"{sorted(proof.member_roles)} this proof recorded; membership "
             "drifted since the fence closed, so this proof's effective set "
             "can no longer be trusted",
-        )
-
-    owner = _database_owner(conn, proof.database)
-    bad_grantor = next(
-        (
-            grantor
-            for _grantee, _priv, _og, grantor in proof.prior_grants
-            if grantor != owner
-        ),
-        None,
-    )
-    if bad_grantor is not None:
-        raise FenceRefused(
-            FenceRefusalCode.PROOF_MISMATCH,
-            f"this proof's prior_grants records a grant made by "
-            f"{bad_grantor!r}, not database {proof.database!r}'s current "
-            f"owner {owner!r} — a proof whose grants were not all "
-            "owner-granted cannot be restored faithfully",
         )
 
     quoted_db = _quote_ident(conn, proof.database)
@@ -1621,24 +1776,38 @@ def restore_writers(
     # have revoked, and so the only ones `restore_writers` may re-grant.
     effective = tuple(dict.fromkeys((*proof.fenced_roles, *proof.member_roles)))
     allowed_grantees = {"", *effective}
-    missing = sorted(
-        grant for grant in (proof.prior_grants - current) if grant[1] == "CONNECT"
+
+    # Every entry this restore would actually need to GRANT, bounded before
+    # the first GRANT — never against the WHOLE of `prior_grants` (a grant
+    # the fence never revoked and this restore will never re-issue is not
+    # this function's business, and refusing on it would be a restore that
+    # rejects an ACL `fence_writers` itself already accepted: the HIGH
+    # regression this replaced).
+    owner = _database_owner(conn, proof.database)
+    to_add = proof.prior_grants - current
+    bad_entry = next(
+        (
+            entry
+            for entry in to_add
+            if entry[1] != "CONNECT"
+            or entry[0] not in allowed_grantees
+            or entry[3] != owner
+        ),
+        None,
     )
-    # Every grantee is validated BEFORE the first GRANT. `missing` sorts
-    # PUBLIC first, so a refusal found mid-loop would already have reopened
-    # the database to every writer.
-    disallowed = [
-        grantee
-        for grantee, _p, _g, _grantor in missing
-        if grantee not in allowed_grantees
-    ]
-    if disallowed:
+    if bad_entry is not None:
+        grantee, privilege, _is_grantable, grantor = bad_entry
+        display_grantee = "PUBLIC" if grantee == "" else grantee
         raise FenceRefused(
-            FenceRefusalCode.ACL_NOT_RESTORED,
-            f"the prior ACL for {proof.database!r} granted CONNECT to "
-            f"{sorted(disallowed)}, which this fence never revoked and will not "
-            "re-grant; nothing was granted, so the database stays fenced",
+            FenceRefusalCode.PROOF_MISMATCH,
+            f"restoring {proof.database!r} would need to grant {privilege!r} "
+            f"to {display_grantee!r} (recorded grantor {grantor!r}), which is "
+            "not a CONNECT grant to an effective role or PUBLIC made by the "
+            f"database's current owner {owner!r}; refusing before any change",
         )
+    # `missing` sorts PUBLIC first, so a partial failure below reopens the
+    # least first.
+    missing = sorted(to_add)
 
     restored: list[str] = []
     try:
