@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+#
+# dotmac-vendor-maintenance — root-owned nginx maintenance switch for
+# vendor.dotmac.io.
+#
+# Installed as /usr/local/sbin/dotmac-vendor-maintenance, root:root, 0755.
+# See docs/operations/maintenance-helper.md for install, sudoers wiring and
+# the required one-time rehearsal. This is PR 3 of the D16 series: it is
+# checked in only. Nothing here is installed by this repository or CI. The
+# production deploy (D16 PR 4) is the only intended caller, via the sudoers
+# fragment in deploy/host/sudoers.d/dotmac-vendor-maintenance.
+#
+# Exit codes:
+#   0  ok
+#   64 usage error (unknown verb, missing verb, or extra arguments) —
+#      nothing was touched.
+#   65 validation failed (a precondition was not met, or nginx -t rejected
+#      the candidate config) — nothing was switched that was not switched
+#      back, and nothing was reloaded.
+#   66 proof failed after a successful switch and reload — the helper
+#      reverted to the prior config, reloaded, and proved the revert.
+#   67 revert failed — the proof after reverting did not pass either. State
+#      is UNKNOWN: page a human, do not retry automatically.
+#
+# Verbs (exactly two; anything else, or any further argument, is a usage
+# error):
+#   maintenance-on      switch public routing to the 503 maintenance config
+#                        and prove it before returning.
+#   routing-restore      switch public routing back to the live proxy config
+#                        and prove it before returning.
+#
+# This script only proves ITS OWN switch. Restoring public routing after a
+# deploy additionally requires compatible heads, health and ACL restoration
+# to already be proven — that precondition is the deploy's job (D16 PR 4),
+# checked before routing-restore is ever invoked.
+set -euo pipefail
+umask 022
+
+# --- constants (hostnames, paths and ports are hard-coded on purpose) ------
+readonly LIVE_CONF="/etc/nginx/dotmac/vendor/live.conf"
+readonly MAINTENANCE_CONF="/etc/nginx/dotmac/vendor/maintenance.conf"
+readonly ENABLED_LINK="/etc/nginx/sites-enabled/vendor.dotmac.io"
+readonly LOCK_FILE="/run/lock/dotmac-vendor-maintenance.lock"
+readonly NGINX_BIN="/usr/sbin/nginx"
+readonly RELOAD_CMD="/usr/bin/systemctl reload nginx"
+readonly CURL_BIN="/usr/bin/curl"
+readonly LOGGER_TAG="dotmac-vendor-maintenance"
+readonly PUBLIC_HOST="vendor.dotmac.io"
+readonly PUBLIC_RESOLVE="vendor.dotmac.io:443:127.0.0.1"
+readonly HEALTH_PATH="/health/ready"
+readonly APP_HEALTH_URL="http://127.0.0.1:8100/health/ready"
+readonly MARKER_HEADER="X-Dotmac-Maintenance"
+readonly MARKER_VALUE="vendor-cp"
+readonly PROOF_ATTEMPTS=3
+# proxy_read_timeout in the nginx configs is 60s; this bound must stay above it.
+readonly WORKER_DRAIN_BOUND_SECONDS=90
+
+log() {
+    logger -t "$LOGGER_TAG" -- "$*" || true
+    printf '%s\n' "$*" >&2
+}
+
+# Reads FAIL_CODE (global) instead of a positional argument, so this
+# script never reads $1/$2 outside verb parsing below.
+FAIL_CODE=1
+fail() {
+    log "FAIL(${FAIL_CODE}): $*"
+    exit "$FAIL_CODE"
+}
+
+usage() {
+    printf 'usage: %s {maintenance-on|routing-restore}\n' "$(basename "$0")" >&2
+    exit 64
+}
+
+# --- verb parsing: the ONLY place this script reads $1 ---------------------
+if [ "$#" -ne 1 ]; then
+    usage
+fi
+VERB="$1"
+case "$VERB" in
+    maintenance-on) ;;
+    routing-restore) ;;
+    *) usage ;;
+esac
+
+# --- root-owned lock, held for the whole run --------------------------------
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    FAIL_CODE=65
+    fail "another dotmac-vendor-maintenance run holds the lock"
+fi
+
+# --- atomic symlink switch (never ln -sfn) ----------------------------------
+# Reads SWITCH_TO (global, set by the caller) instead of a positional
+# argument, so this script never reads $1/$2 outside verb parsing above.
+SWITCH_TO=""
+switch_enabled_site() {
+    local tmp_link="${ENABLED_LINK}.tmp.$$"
+    ln -s "$SWITCH_TO" "$tmp_link"
+    mv -T "$tmp_link" "$ENABLED_LINK"
+}
+
+validate_config() {
+    "$NGINX_BIN" -t
+}
+
+reload_and_wait_for_drain() {
+    $RELOAD_CMD
+    local waited=0
+    while pgrep -f 'nginx: worker process is shutting down' >/dev/null 2>&1; do
+        if [ "$waited" -ge "$WORKER_DRAIN_BOUND_SECONDS" ]; then
+            FAIL_CODE=65
+            fail "old nginx workers did not drain within ${WORKER_DRAIN_BOUND_SECONDS}s"
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+
+# Switches to SWITCH_VALIDATE_TARGET; on nginx -t failure, switches back to
+# SWITCH_VALIDATE_FALLBACK, re-validates, and exits 65. On success, reloads
+# and waits for old workers to drain. Uses globals for the same reason as
+# switch_enabled_site above.
+SWITCH_VALIDATE_TARGET=""
+SWITCH_VALIDATE_FALLBACK=""
+switch_validate_or_bail() {
+    SWITCH_TO="$SWITCH_VALIDATE_TARGET"
+    switch_enabled_site
+    if ! validate_config; then
+        SWITCH_TO="$SWITCH_VALIDATE_FALLBACK"
+        switch_enabled_site
+        validate_config || true
+        FAIL_CODE=65
+        fail "nginx -t rejected ${SWITCH_VALIDATE_TARGET}; reverted symlink to ${SWITCH_VALIDATE_FALLBACK}; nothing was reloaded"
+    fi
+    reload_and_wait_for_drain
+}
+
+# A single fresh-connection probe of the public health endpoint. Prints
+# "<status> <marker-value-or-empty>".
+probe_public() {
+    "$CURL_BIN" --silent --show-error --output /dev/null \
+        --resolve "$PUBLIC_RESOLVE" \
+        --header 'Connection: close' \
+        --write-out "%{http_code} %header{${MARKER_HEADER}}" \
+        "https://${PUBLIC_HOST}${HEALTH_PATH}"
+}
+
+# Proves PROOF_ATTEMPTS consecutive fresh connections match
+# PROVE_WANT_STATUS and PROVE_WANT_MARKER ("present" or "absent"). A bare
+# status match is not proof by itself: routing-restore must NOT see the
+# marker, and maintenance-on must see it, because the app's own
+# /health/ready also returns 503 when the database is fenced.
+PROVE_WANT_STATUS=""
+PROVE_WANT_MARKER=""
+prove_public() {
+    local attempt=1
+    local out status marker
+    while [ "$attempt" -le "$PROOF_ATTEMPTS" ]; do
+        out=$(probe_public)
+        status="${out%% *}"
+        marker="${out#* }"
+        if [ "$status" != "$PROVE_WANT_STATUS" ]; then
+            return 1
+        fi
+        if [ "$PROVE_WANT_MARKER" = "present" ] && [ "$marker" != "$MARKER_VALUE" ]; then
+            return 1
+        fi
+        if [ "$PROVE_WANT_MARKER" = "absent" ] && [ -n "$marker" ]; then
+            return 1
+        fi
+        attempt=$((attempt + 1))
+    done
+    return 0
+}
+
+app_health_is_ready() {
+    local status
+    status=$("$CURL_BIN" --silent --show-error --output /dev/null \
+        --write-out '%{http_code}' "$APP_HEALTH_URL")
+    [ "$status" = "200" ]
+}
+
+case "$VERB" in
+    maintenance-on)
+        SWITCH_VALIDATE_TARGET="$MAINTENANCE_CONF"
+        SWITCH_VALIDATE_FALLBACK="$LIVE_CONF"
+        switch_validate_or_bail
+
+        PROVE_WANT_STATUS=503
+        PROVE_WANT_MARKER="present"
+        if prove_public; then
+            log "maintenance-on: proved 503 + marker on ${PROOF_ATTEMPTS} fresh connections"
+            exit 0
+        fi
+
+        log "maintenance-on: proof failed; reverting to live"
+        SWITCH_VALIDATE_TARGET="$LIVE_CONF"
+        SWITCH_VALIDATE_FALLBACK="$MAINTENANCE_CONF"
+        switch_validate_or_bail
+
+        PROVE_WANT_STATUS=200
+        PROVE_WANT_MARKER="absent"
+        if prove_public; then
+            FAIL_CODE=66
+            fail "maintenance-on proof failed; reverted to live and proved the revert"
+        fi
+        FAIL_CODE=67
+        fail "maintenance-on proof failed and the revert to live could not be proved; state is UNKNOWN"
+        ;;
+    routing-restore)
+        if ! app_health_is_ready; then
+            FAIL_CODE=65
+            fail "app health precondition (${APP_HEALTH_URL}) is not 200; refusing to switch"
+        fi
+
+        SWITCH_VALIDATE_TARGET="$LIVE_CONF"
+        SWITCH_VALIDATE_FALLBACK="$MAINTENANCE_CONF"
+        switch_validate_or_bail
+
+        PROVE_WANT_STATUS=200
+        PROVE_WANT_MARKER="absent"
+        if prove_public; then
+            log "routing-restore: proved 200 without marker on ${PROOF_ATTEMPTS} fresh connections"
+            exit 0
+        fi
+
+        log "routing-restore: proof failed; reverting to maintenance"
+        SWITCH_VALIDATE_TARGET="$MAINTENANCE_CONF"
+        SWITCH_VALIDATE_FALLBACK="$LIVE_CONF"
+        switch_validate_or_bail
+
+        PROVE_WANT_STATUS=503
+        PROVE_WANT_MARKER="present"
+        if prove_public; then
+            FAIL_CODE=66
+            fail "routing-restore proof failed; reverted to maintenance and proved the revert"
+        fi
+        FAIL_CODE=67
+        fail "routing-restore proof failed and the revert to maintenance could not be proved; state is UNKNOWN"
+        ;;
+esac
