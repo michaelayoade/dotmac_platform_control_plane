@@ -37,6 +37,7 @@ from vendor_cp.deployment.transition_fence import (
 #: running the code under test.
 _GOLDEN_CANONICAL_BYTES = (
     b'{"absent_roles":["outbox_dispatcher"],"database":"db1",'
+    b'"fence_id":"fence-1",'
     b'"fenced_at":"2026-01-02T03:04:05.678901Z","fenced_roles":["app_user"],'
     b'"member_roles":["app_user_member"],'
     b'"prior_acl":"app_admin=CTc/app_admin",'
@@ -45,9 +46,14 @@ _GOLDEN_CANONICAL_BYTES = (
     b'"schema":"TransitionFenceProof.v1","terminated_count":2}'
 )
 #: `shasum -a 256` over exactly `_GOLDEN_CANONICAL_BYTES`, computed by hand —
-#: not by calling `digest()` and trusting it.
+#: not by calling `digest()` and trusting it. Derivation: `fence_id` sorts
+#: between `database` and `fenced_at` (`json.dumps(sort_keys=True)` compares
+#: byte-for-byte, and `"fence_id"[5]` is `_` (0x5F) vs `"fenced_at"[5]` `d`
+#: (0x64), so `fence_id` < `fenced_at`), and the literal above was hand-typed
+#: with it inserted exactly there before hashing:
+#: `printf '%s' '<the literal above, minified>' | shasum -a 256`.
 _GOLDEN_DIGEST = (
-    "sha256:31356a43177ea8f8202780c309feeed138e821f92fba546b8179f1fcb206d839"
+    "sha256:e428fb6f5a872f3e5f19d4b0d277da4b16938ca6e3b074dcd152dffc841df394"
 )
 
 #: A digest that matches nothing, used as the `expected_digest` for every
@@ -58,6 +64,7 @@ _UNUSED_DIGEST = "sha256:" + "0" * 64
 def _golden_proof() -> FenceProof:
     return FenceProof(
         database="db1",
+        fence_id="fence-1",
         prior_acl="app_admin=CTc/app_admin",
         prior_grants=frozenset(
             {
@@ -84,6 +91,7 @@ def _proof_matching_document(doc: dict[str, Any]) -> FenceProof:
     itself, which is what every test in this file is exercising."""
     return FenceProof(
         database=doc["database"],
+        fence_id=doc["fence_id"],
         prior_acl=doc["prior_acl"],
         prior_grants=frozenset(tuple(g) for g in doc["prior_grants"]),
         fenced_roles=tuple(doc["fenced_roles"]),
@@ -123,6 +131,7 @@ def test_round_trip_through_a_document_reproduces_the_identical_proof() -> None:
 def test_round_trip_preserves_a_zero_terminated_count_and_empty_role_tuples() -> None:
     proof = FenceProof(
         database="db2",
+        fence_id="fence-2",
         prior_acl="",
         prior_grants=frozenset(),
         fenced_roles=(),
@@ -282,6 +291,73 @@ def test_a_database_name_with_a_lone_surrogate_is_refused() -> None:
 
 def test_a_non_empty_database_name_is_the_near_miss_accepted() -> None:
     doc = _mutate(database="db1")
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
+
+
+# ── fence_id: the run binding, refused with the same discipline as database
+
+
+def test_a_missing_fence_id_key_is_refused() -> None:
+    doc = _mutate()
+    del doc["fence_id"]
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_non_string_fence_id_is_refused() -> None:
+    doc = _mutate(fence_id=123)
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_an_empty_fence_id_is_refused() -> None:
+    doc = _mutate(fence_id="")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_fence_id_with_a_nul_byte_is_refused() -> None:
+    doc = _mutate(fence_id="fence\x001")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_fence_id_with_a_lone_surrogate_is_refused() -> None:
+    doc = _mutate(fence_id="fence\ud800")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_fence_id_with_leading_whitespace_is_refused() -> None:
+    doc = _mutate(fence_id=" fence-1")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_fence_id_with_trailing_whitespace_is_refused() -> None:
+    doc = _mutate(fence_id="fence-1 ")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_an_overlong_fence_id_is_refused() -> None:
+    doc = _mutate(fence_id="f" * 129)
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_128_character_fence_id_is_the_near_miss_accepted() -> None:
+    """128 characters exactly is the boundary this module accepts; 129 (the
+    test above) is refused."""
+    doc = _mutate(fence_id="f" * 128)
     FenceProof.from_document(doc, expected_digest=_digest_for(doc))
 
 
