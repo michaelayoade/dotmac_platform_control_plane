@@ -622,6 +622,7 @@ def test_refencing_with_prior_keeps_the_original_prior_acl(
                 writer_roles=(w,),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 prior=first_proof,
+                expected_prior_fence_id=first_proof.fence_id,
             )
             assert second_proof.prior_acl == first_proof.prior_acl
             assert second_proof.prior_grants == first_proof.prior_grants
@@ -1065,6 +1066,7 @@ def test_a_prior_naming_a_different_database_is_refused_as_prior_mismatch(
                 writer_roles=("app_user",),
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 prior=stale,
+                expected_prior_fence_id=stale.fence_id,
             )
         assert refused.value.code == FenceRefusalCode.PRIOR_MISMATCH
         assert fence_module._current_grants(conn, db) == before
@@ -1095,9 +1097,93 @@ def test_a_prior_naming_a_different_writer_set_is_refused_as_prior_mismatch(
                     writer_roles=(w1,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                     prior=stale,
+                    expected_prior_fence_id=stale.fence_id,
                 )
             assert refused.value.code == FenceRefusalCode.PRIOR_MISMATCH
             assert fence_module._current_grants(conn, db) == before
+
+
+# ── (m1) fence_writers' own required binding: expected_prior_fence_id ──────
+
+
+def test_prior_without_expected_prior_fence_id_is_refused_before_any_change(
+    admin_url: str, db: str
+) -> None:
+    """`prior=` without `expected_prior_fence_id` is refused before any
+    other prior check runs — the identical out-of-band binding
+    `restore_writers` requires for `expected_fence_id`, applied to the
+    OTHER place this module accepts an in-process `FenceProof`."""
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            first_proof = fence_writers(
+                conn,
+                database=db,
+                fence_id=FENCE_ID,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            before = fence_module._current_grants(conn, db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    conn,
+                    database=db,
+                    fence_id=FENCE_ID,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    prior=first_proof,
+                    # expected_prior_fence_id omitted (defaults to None).
+                )
+            assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
+            assert fence_module._current_grants(conn, db) == before
+
+            restore_writers(
+                conn,
+                first_proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+
+
+def test_a_mismatched_expected_prior_fence_id_is_refused_before_any_change(
+    admin_url: str, db: str
+) -> None:
+    """A caller that names the WRONG run — `expected_prior_fence_id` does
+    not equal the given `prior.fence_id` — is refused `PROOF_MISMATCH`
+    before any change, exactly as `restore_writers` refuses a mismatched
+    `expected_fence_id`. This is the replay this binding exists to stop: a
+    stale or misdirected `prior` proof passed to a re-fence the caller
+    thinks is for a different run."""
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            first_proof = fence_writers(
+                conn,
+                database=db,
+                fence_id=FENCE_ID,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            before = fence_module._current_grants(conn, db)
+            with pytest.raises(FenceRefused) as refused:
+                fence_writers(
+                    conn,
+                    database=db,
+                    fence_id=FENCE_ID,
+                    writer_roles=(w,),
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    prior=first_proof,
+                    expected_prior_fence_id="a-different-run-entirely",
+                )
+            assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
+            assert fence_module._current_grants(conn, db) == before
+
+            restore_writers(
+                conn,
+                first_proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
 
 
 # ── (m2) restore's two required bindings: database and fence_id ────────────
@@ -2828,6 +2914,7 @@ def test_fence_refuses_a_prior_claiming_a_public_grant_option_absent_from_live_a
                     writer_roles=(w,),
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                     prior=laundered_prior,
+                    expected_prior_fence_id=laundered_prior.fence_id,
                     terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
                 )
             assert refused.value.code == FenceRefusalCode.PRIOR_MISMATCH
