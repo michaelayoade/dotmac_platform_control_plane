@@ -59,7 +59,7 @@
 #
 # As DEFENCE IN DEPTH, the termination attempt is ALSO bounded INSIDE the
 # container: `compose exec -T --user postgres db timeout
-# FENCE_BROKER_TIMEOUT_SECONDS psql ...` — `timeout` there execs a real
+# FENCE_BROKER_PSQL_TIMEOUT_SECONDS psql ...` — `timeout` there execs a real
 # program (`psql`), so it works, and it means a `psql` that hangs is killed
 # at its own source even if the watchdog's outer `kill -TERM` on the `compose
 # exec` job somehow failed to reach it (a `docker compose exec` process
@@ -185,7 +185,7 @@ fence_broker_serve() {
                 psql -X -v ON_ERROR_STOP=1 --username postgres -q -t -A \
                 -v "db=$database" \
                 < "$sql_path" \
-                > /dev/null &
+                > /dev/null 3>&- &
             job=$!
             # The watchdog holds none of the caller's descriptors: a surviving
             # `sleep` must never keep the reply pipe or fd 3 open after the
