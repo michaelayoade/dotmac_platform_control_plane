@@ -8,7 +8,11 @@ golden canonical-bytes literal and its digest reproducible byte-for-byte.
 file's real weight is the refusal matrix: each documented invalid shape
 raises `FenceRefused(FenceRefusalCode.PROOF_INVALID)`, proven against a near
 miss of the same document that is accepted, so a refusal is never mistaken
-for "this whole shape is unsupported".
+for "this whole shape is unsupported". `expected_digest` is the sharpest
+edge of that matrix: a document that is structurally perfect but
+semantically laundered (an added grant, an escalated `is_grantable`) passes
+every OTHER check here and is caught only by the digest comparison — that is
+the property this file's digest-laundering tests exist to prove.
 """
 
 from __future__ import annotations
@@ -21,14 +25,15 @@ import pytest
 
 from vendor_cp.deployment.transition_fence import (
     FENCE_PROOF_SCHEMA,
+    MIGRATION_ROLE,
     WRITER_ROLES,
     FenceProof,
     FenceRefusalCode,
     FenceRefused,
 )
 
-#: The exact literal this file's golden digest was derived from — see the
-#: module docstring: `printf '<the literal below>' | shasum -a 256`, never by
+#: The exact literal this FILE's golden digest was derived from — see this
+#: docstring above: `printf '<the literal below>' | shasum -a 256`, never by
 #: running the code under test.
 _GOLDEN_CANONICAL_BYTES = (
     b'{"absent_roles":["outbox_dispatcher"],"database":"db1",'
@@ -44,6 +49,10 @@ _GOLDEN_CANONICAL_BYTES = (
 _GOLDEN_DIGEST = (
     "sha256:31356a43177ea8f8202780c309feeed138e821f92fba546b8179f1fcb206d839"
 )
+
+#: A digest that matches nothing, used as the `expected_digest` for every
+#: refusal test whose refusal fires long before the digest check runs.
+_UNUSED_DIGEST = "sha256:" + "0" * 64
 
 
 def _golden_proof() -> FenceProof:
@@ -68,6 +77,27 @@ def _golden_document() -> dict[str, Any]:
     return _golden_proof().to_document()
 
 
+def _proof_matching_document(doc: dict[str, Any]) -> FenceProof:
+    """Reconstruct the `FenceProof` a (well-formed) document represents,
+    purely to compute that document's `expected_digest` for a near-miss test
+    — via the already golden-tested `digest()`, never via `from_document`
+    itself, which is what every test in this file is exercising."""
+    return FenceProof(
+        database=doc["database"],
+        prior_acl=doc["prior_acl"],
+        prior_grants=frozenset(tuple(g) for g in doc["prior_grants"]),
+        fenced_roles=tuple(doc["fenced_roles"]),
+        member_roles=tuple(doc["member_roles"]),
+        absent_roles=tuple(doc["absent_roles"]),
+        terminated_count=doc["terminated_count"],
+        fenced_at=datetime.fromisoformat(doc["fenced_at"].replace("Z", "+00:00")),
+    )
+
+
+def _digest_for(doc: dict[str, Any]) -> str:
+    return _proof_matching_document(doc).digest()
+
+
 # ── the golden literal, derived by hand, not by running the code ───────────
 
 
@@ -84,7 +114,10 @@ def test_digest_matches_the_hand_derived_golden_digest() -> None:
 
 def test_round_trip_through_a_document_reproduces_the_identical_proof() -> None:
     proof = _golden_proof()
-    assert FenceProof.from_document(proof.to_document()) == proof
+    assert (
+        FenceProof.from_document(proof.to_document(), expected_digest=proof.digest())
+        == proof
+    )
 
 
 def test_round_trip_preserves_a_zero_terminated_count_and_empty_role_tuples() -> None:
@@ -98,7 +131,10 @@ def test_round_trip_preserves_a_zero_terminated_count_and_empty_role_tuples() ->
         terminated_count=0,
         fenced_at=datetime(2000, 1, 1, tzinfo=UTC),
     )
-    assert FenceProof.from_document(proof.to_document()) == proof
+    assert (
+        FenceProof.from_document(proof.to_document(), expected_digest=proof.digest())
+        == proof
+    )
 
 
 # ── digest stability across key order ───────────────────────────────────
@@ -111,12 +147,64 @@ def test_digest_is_stable_across_document_key_insertion_order() -> None:
     forward = _golden_document()
     reversed_doc = dict(reversed(list(forward.items())))
     assert list(reversed_doc.keys()) != list(forward.keys())
-    assert FenceProof.from_document(reversed_doc).digest() == _golden_proof().digest()
+    assert (
+        FenceProof.from_document(
+            reversed_doc, expected_digest=_golden_proof().digest()
+        ).digest()
+        == _golden_proof().digest()
+    )
 
 
 def test_digest_is_stable_across_repeated_calls() -> None:
     proof = _golden_proof()
     assert proof.digest() == proof.digest()
+
+
+# ── expected_digest: the actual defence against a laundered grant ──────────
+
+
+def test_a_wrong_expected_digest_is_refused() -> None:
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(_golden_document(), expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_the_correct_expected_digest_is_the_near_miss_accepted() -> None:
+    FenceProof.from_document(
+        _golden_document(), expected_digest=_golden_proof().digest()
+    )
+
+
+def test_an_added_public_grant_passes_every_structural_check_but_fails_the_digest() -> (
+    None
+):
+    """The whole point of `expected_digest`: this document is well-typed,
+    every privilege is known, there is no duplicate, no unsafe identifier —
+    every OTHER check in `from_document` passes it. Only the digest, computed
+    against the digest of the proof BEFORE this grant was added, catches
+    it."""
+    doc = _golden_document()
+    doc["prior_grants"] = sorted(
+        [*doc["prior_grants"], ["", "TEMPORARY", False, "app_admin"]]
+    )
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_golden_proof().digest())
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_an_escalated_is_grantable_passes_structural_checks_but_fails_the_digest() -> (
+    None
+):
+    doc = _golden_document()
+    doc["prior_grants"] = sorted(
+        [
+            ["", "CONNECT", True, "app_admin"],  # was False in the golden proof
+            ["app_user", "CONNECT", True, "app_admin"],
+        ]
+    )
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_golden_proof().digest())
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 # ── from_document refusal matrix: each refusal, with a near miss ───────────
@@ -131,24 +219,28 @@ def _mutate(**overrides: Any) -> dict[str, Any]:
 def test_the_golden_document_itself_round_trips_without_refusal() -> None:
     """The near miss shared by every refusal test below: the exact valid
     baseline every mutation in this file starts from."""
-    FenceProof.from_document(_golden_document())
+    FenceProof.from_document(
+        _golden_document(), expected_digest=_golden_proof().digest()
+    )
 
 
 def test_wrong_schema_is_refused() -> None:
+    doc = _mutate(schema="TransitionFenceProof.v2")
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(schema="TransitionFenceProof.v2"))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_the_correct_schema_is_the_near_miss_accepted() -> None:
-    FenceProof.from_document(_mutate(schema=FENCE_PROOF_SCHEMA))
+    doc = _mutate(schema=FENCE_PROOF_SCHEMA)
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
 
 
 def test_an_unknown_key_is_refused() -> None:
     doc = _mutate()
     doc["unexpected"] = "value"
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(doc)
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
@@ -156,145 +248,318 @@ def test_a_missing_key_is_refused() -> None:
     doc = _mutate()
     del doc["absent_roles"]
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(doc)
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_a_non_string_database_is_refused() -> None:
+    doc = _mutate(database=123)
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(database=123))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_an_empty_database_name_is_refused() -> None:
+    doc = _mutate(database="")
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(database=""))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_database_name_with_a_nul_byte_is_refused() -> None:
+    doc = _mutate(database="db\x001")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_database_name_with_a_lone_surrogate_is_refused() -> None:
+    doc = _mutate(database="db\ud800")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_a_non_empty_database_name_is_the_near_miss_accepted() -> None:
-    FenceProof.from_document(_mutate(database="db1"))
+    doc = _mutate(database="db1")
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
 
 
 def test_prior_grants_not_a_list_is_refused() -> None:
+    doc = _mutate(prior_grants={"not": "a list"})
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(prior_grants={"not": "a list"}))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_a_malformed_prior_grants_entry_is_refused() -> None:
     """A 3-element entry — missing the grantor — is the near miss of the
     valid 4-element form."""
+    doc = _mutate(prior_grants=[["", "CONNECT", False]])
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(prior_grants=[["", "CONNECT", False]]))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_a_non_bool_is_grantable_value_is_refused() -> None:
     """`is_grantable` (position 2) must itself be a bool; a string there is
     refused as the near miss of the correct bool."""
+    doc = _mutate(prior_grants=[["", "CONNECT", "false", "app_admin"]])
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(
-            _mutate(prior_grants=[["", "CONNECT", "false", "app_admin"]])
-        )
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_a_duplicate_grant_is_refused() -> None:
+    doc = _mutate(
+        prior_grants=[
+            ["", "CONNECT", False, "app_admin"],
+            ["", "CONNECT", False, "app_admin"],
+        ]
+    )
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(
-            _mutate(
-                prior_grants=[
-                    ["", "CONNECT", False, "app_admin"],
-                    ["", "CONNECT", False, "app_admin"],
-                ]
-            )
-        )
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_distinct_grants_are_the_near_miss_accepted() -> None:
-    FenceProof.from_document(
-        _mutate(
-            prior_grants=[
-                ["", "CONNECT", False, "app_admin"],
-                ["app_user", "CONNECT", True, "app_admin"],
-            ]
-        )
+    doc = _mutate(
+        prior_grants=[
+            ["", "CONNECT", False, "app_admin"],
+            ["app_user", "CONNECT", True, "app_admin"],
+        ]
     )
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
+
+
+def test_an_unknown_privilege_in_prior_grants_is_refused() -> None:
+    doc = _mutate(prior_grants=[["", "DROP", False, "app_admin"]])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_known_privilege_in_prior_grants_is_the_near_miss_accepted() -> None:
+    doc = _mutate(prior_grants=[["", "CREATE", False, "app_admin"]])
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
+
+
+def test_a_prior_grants_grantee_with_a_nul_byte_is_refused() -> None:
+    doc = _mutate(prior_grants=[["ro\x00le", "CONNECT", False, "app_admin"]])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_an_empty_prior_grants_grantee_is_the_near_miss_accepted_as_public() -> None:
+    doc = _mutate(prior_grants=[["", "CONNECT", False, "app_admin"]])
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
+
+
+def test_an_empty_prior_grants_grantor_is_refused() -> None:
+    doc = _mutate(prior_grants=[["", "CONNECT", False, ""]])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_fenced_roles_not_a_subset_of_allowed_writer_roles_is_refused() -> None:
+    doc = _mutate(fenced_roles=["not_a_writer_role"])
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(fenced_roles=["not_a_writer_role"]))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_fenced_roles_within_allowed_writer_roles_is_the_near_miss_accepted() -> None:
+    doc = _mutate(fenced_roles=["app_user"])
     FenceProof.from_document(
-        _mutate(fenced_roles=["app_user"]), allowed_writer_roles=WRITER_ROLES
+        doc, expected_digest=_digest_for(doc), allowed_writer_roles=WRITER_ROLES
     )
 
 
 def test_fenced_roles_not_a_list_of_strings_is_refused() -> None:
+    doc = _mutate(fenced_roles=["app_user", 1])
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(fenced_roles=["app_user", 1]))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_duplicate_within_fenced_roles_is_refused() -> None:
+    doc = _mutate(fenced_roles=["app_user", "app_user"])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_duplicate_within_member_roles_is_refused() -> None:
+    doc = _mutate(member_roles=["app_user_member", "app_user_member"])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_duplicate_within_absent_roles_is_refused() -> None:
+    doc = _mutate(absent_roles=["outbox_dispatcher", "outbox_dispatcher"])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_distinct_absent_roles_are_the_near_miss_accepted() -> None:
+    doc = _mutate(absent_roles=["outbox_dispatcher", "platform_outbox_dispatcher"])
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
+
+
+def test_a_role_name_with_a_lone_surrogate_is_refused() -> None:
+    doc = _mutate(fenced_roles=["app_us\ud800er"])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_role_name_with_a_nul_byte_is_refused() -> None:
+    doc = _mutate(member_roles=["app_user\x00member"])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_an_empty_role_name_is_refused() -> None:
+    doc = _mutate(absent_roles=["outbox_dispatcher", ""])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_member_roles_overlapping_fenced_roles_is_refused() -> None:
+    doc = _mutate(fenced_roles=["app_user"], member_roles=["app_user"])
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(
-            _mutate(fenced_roles=["app_user"], member_roles=["app_user"])
-        )
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_member_roles_disjoint_from_fenced_roles_is_the_near_miss_accepted() -> None:
-    FenceProof.from_document(
-        _mutate(fenced_roles=["app_user"], member_roles=["some_other_member"])
-    )
+    doc = _mutate(fenced_roles=["app_user"], member_roles=["some_other_member"])
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
+
+
+def test_member_roles_naming_the_migration_role_is_refused() -> None:
+    """An "unconstrained" `member_roles` entry: `MIGRATION_ROLE` can never
+    legitimately be a member of a fenced writer (it would already have been
+    refused as `SHARED_WRITER_ROLE` at fence time), so a document naming it
+    there did not come from a real fence."""
+    doc = _mutate(member_roles=[MIGRATION_ROLE])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_absent_roles_overlapping_fenced_roles_is_refused() -> None:
+    doc = _mutate(fenced_roles=["app_user"], absent_roles=["app_user"])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_absent_roles_overlapping_member_roles_is_refused() -> None:
+    doc = _mutate(member_roles=["app_user_member"], absent_roles=["app_user_member"])
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_absent_roles_disjoint_from_fenced_and_member_is_the_near_miss_accepted() -> (
+    None
+):
+    doc = _mutate(absent_roles=["platform_outbox_dispatcher"])
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
 
 
 def test_terminated_count_as_bool_is_refused() -> None:
+    doc = _mutate(terminated_count=True)
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(terminated_count=True))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_terminated_count_as_a_plain_int_is_the_near_miss_accepted() -> None:
-    FenceProof.from_document(_mutate(terminated_count=1))
+    doc = _mutate(terminated_count=1)
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
 
 
 def test_terminated_count_as_a_string_is_refused() -> None:
+    doc = _mutate(terminated_count="2")
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(terminated_count="2"))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
-def test_a_naive_fenced_at_timestamp_is_refused() -> None:
+def test_a_negative_terminated_count_is_refused() -> None:
+    doc = _mutate(terminated_count=-1)
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(fenced_at="2026-01-02T03:04:05.678901"))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_zero_terminated_count_is_the_near_miss_accepted() -> None:
+    doc = _mutate(terminated_count=0)
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
+
+
+# ── fenced_at: exact canonical round trip, not merely "parses to UTC" ──────
+
+
+def test_the_canonical_z_suffixed_fenced_at_is_the_near_miss_accepted() -> None:
+    doc = _mutate(fenced_at="2026-01-02T03:04:05.678901Z")
+    FenceProof.from_document(doc, expected_digest=_digest_for(doc))
+
+
+def test_a_naive_fenced_at_timestamp_is_refused() -> None:
+    doc = _mutate(fenced_at="2026-01-02T03:04:05.678901")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_a_non_utc_fenced_at_timestamp_is_refused() -> None:
+    doc = _mutate(fenced_at="2026-01-02T03:04:05.678901+02:00")
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(fenced_at="2026-01-02T03:04:05.678901+02:00"))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
-def test_a_z_suffixed_utc_fenced_at_timestamp_is_the_near_miss_accepted() -> None:
-    FenceProof.from_document(_mutate(fenced_at="2026-01-02T03:04:05.678901Z"))
+def test_a_plus_zero_offset_fenced_at_timestamp_is_refused() -> None:
+    """Same UTC instant as the canonical form, spelled `+00:00` instead of
+    `Z` — parses fine, but is not the exact byte form `to_document()` ever
+    writes, so the canonical round trip refuses it."""
+    doc = _mutate(fenced_at="2026-01-02T03:04:05.678901+00:00")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_minus_zero_offset_fenced_at_timestamp_is_refused() -> None:
+    doc = _mutate(fenced_at="2026-01-02T03:04:05.678901-00:00")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
+
+
+def test_a_fenced_at_missing_microseconds_is_refused() -> None:
+    doc = _mutate(fenced_at="2026-01-02T03:04:05Z")
+    with pytest.raises(FenceRefused) as refused:
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
+    assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_an_unparseable_fenced_at_timestamp_is_refused() -> None:
+    doc = _mutate(fenced_at="not-a-timestamp")
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(_mutate(fenced_at="not-a-timestamp"))
+        FenceProof.from_document(doc, expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID
 
 
 def test_a_non_dict_document_is_refused() -> None:
     with pytest.raises(FenceRefused) as refused:
-        FenceProof.from_document(["not", "a", "dict"])
+        FenceProof.from_document(["not", "a", "dict"], expected_digest=_UNUSED_DIGEST)
     assert refused.value.code == FenceRefusalCode.PROOF_INVALID

@@ -13,6 +13,7 @@ rather than hanging CI.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -1694,13 +1695,17 @@ def owner_role(postgres_url: str) -> Iterator[str]:
 def owner_db(
     postgres_url: str, owner_role: str, url_for: Callable[..., str]
 ) -> Iterator[str]:
-    """A scratch database OWNED BY `owner_role`, NULL datacl (so its ACL is
-    the materialised default, `acldefault('d', owner_role)`, recorded with
-    `owner_role` as grantor — the same "grantor is the owner" shape
-    `_reject_grants_not_owner_granted` requires), with `MIGRATION_ROLE`
-    explicitly GRANTed CONNECT by the owner itself (so
-    `_require_migration_connect_without_public` passes: `MIGRATION_ROLE` is
-    trivially a member of itself), and dropped at teardown."""
+    """A scratch database OWNED BY `owner_role`. `datacl` starts NULL at
+    creation (so its ACL is the materialised default,
+    `acldefault('d', owner_role)`, which — per PostgreSQL's own `acldefault`
+    — already includes an explicit owner-granted entry for `owner_role`
+    itself alongside PUBLIC's CONNECT/TEMPORARY), then becomes non-NULL the
+    moment this fixture GRANTs `MIGRATION_ROLE` its own explicit CONNECT
+    (executed BY the owner, so recorded with `owner_role` as grantor — the
+    same "grantor is the owner" shape `_reject_grants_not_owner_granted`
+    requires, and the reason `_require_migration_connect_without_public`
+    passes: `MIGRATION_ROLE` is trivially a member of itself). The database
+    is dropped at teardown."""
     name = f"vcp_fence_nonsuper_{uuid.uuid4().hex[:12]}"
     with _connect(postgres_url, autocommit=True) as conn:
         conn.execute(text(f'CREATE DATABASE "{name}" OWNER {owner_role}'))
@@ -1894,6 +1899,327 @@ def test_owner_only_fence_with_a_raising_terminator_compensates(
                 assert after == before
 
             assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+        finally:
+            writer_conn.close()
+            writer_engine.dispose()
+
+
+# ── (w) a proof cannot launder a grant: restore_writers bounds live state ──
+
+
+def test_restore_refuses_a_proof_whose_member_roles_no_longer_matches_live_membership(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """A proof's `member_roles` is a claim about membership AT FENCE TIME.
+    If it no longer matches what `_member_roles` derives from
+    `proof.fenced_roles` RIGHT NOW, `restore_writers` must refuse before any
+    GRANT — the same "proof vs. live state" discipline `fence_is_holding`
+    already applies to a proof it only reads, applied here to one this
+    function is about to act on."""
+    with _writer_role(postgres_url) as w:
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            # A role granted membership in the fenced writer AFTER the fence
+            # closed: live membership now disagrees with what `proof`
+            # recorded.
+            new_member = f"fence_new_member_{uuid.uuid4().hex[:10]}"
+            owner_conn.execute(
+                text(f"CREATE ROLE {new_member} LOGIN NOSUPERUSER NOBYPASSRLS")
+            )
+            owner_conn.execute(text(f"GRANT {w} TO {new_member}"))
+            try:
+                with pytest.raises(FenceRefused) as refused:
+                    restore_writers(
+                        owner_conn,
+                        proof,
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                    )
+                assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
+                # Nothing was granted: PUBLIC is still fenced.
+                public_can_connect = owner_conn.execute(
+                    text("SELECT has_database_privilege('public', :db, 'CONNECT')"),
+                    {"db": owner_db},
+                ).scalar_one()
+                assert public_can_connect is False
+            finally:
+                owner_conn.execute(text(f"REVOKE {w} FROM {new_member}"))
+                owner_conn.execute(text(f"DROP OWNED BY {new_member}"))
+                owner_conn.execute(text(f"DROP ROLE IF EXISTS {new_member}"))
+                restore_writers(
+                    owner_conn,
+                    proof,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+                )
+
+
+def test_restore_refuses_a_proof_whose_prior_grants_grantor_is_not_the_current_owner(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """`FenceProof.from_document` cannot bound a `prior_grants` grantee
+    against the owner (its name is not on the document) — this is the live
+    backstop `restore_writers` applies instead: a proof recording a grantor
+    other than the CURRENT owner is refused before any GRANT."""
+    with _writer_role(postgres_url) as w:
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            forged_grants = frozenset(
+                {*proof.prior_grants, ("", "TEMPORARY", False, "not_the_owner")}
+            )
+            forged_proof = dataclasses.replace(proof, prior_grants=forged_grants)
+
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(
+                    owner_conn,
+                    forged_proof,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
+            assert not fence_module._current_grants(owner_conn, owner_db) & {
+                ("", "CONNECT", False, w)
+            }
+
+            # Restore for real with the genuine (unforged) proof so fixture
+            # teardown can drop the role.
+            restore_writers(
+                owner_conn,
+                proof,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+
+
+# ── (x) no-op terminator: survives and compensates ──────────────────────────
+
+
+def test_owner_only_fence_with_a_no_op_terminator_survives_and_compensates(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """A `terminator` that returns normally without terminating anything
+    (unlike the default adapter, it never even ATTEMPTS a signal, so it
+    never raises either) drains to nothing and the deadline alone catches
+    it: `WRITER_SESSIONS_SURVIVED`, never `FENCE_INTERRUPTED`."""
+
+    def _no_op() -> None:
+        return None
+
+    with _writer_role(postgres_url) as w:
+        writer_engine = create_engine(url_for(postgres_url, owner_db, user=w))
+        writer_conn = writer_engine.connect()
+        try:
+            assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+
+            with _connect(owner_url, autocommit=True) as owner_conn:
+                before = fence_module._current_grants(owner_conn, owner_db)
+                with pytest.raises(FenceRefused) as refused:
+                    fence_writers(
+                        owner_conn,
+                        database=owner_db,
+                        writer_roles=(w,),
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                        terminator=_no_op,
+                    )
+                assert refused.value.code == FenceRefusalCode.WRITER_SESSIONS_SURVIVED
+                after = fence_module._current_grants(owner_conn, owner_db)
+                assert after == before
+
+            # The writer's session was never actually terminated.
+            assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+        finally:
+            writer_conn.close()
+            writer_engine.dispose()
+
+
+def test_a_terminator_is_never_called_when_the_poll_finds_zero_backends(
+    owner_url: str, owner_db: str, postgres_url: str
+) -> None:
+    """No writer is ever connected, so the poll sees zero backends on entry
+    and the drain returns immediately — `terminator` must never be invoked
+    for a database that was never holding an open writer session."""
+    calls = 0
+
+    def _counting_terminator() -> None:
+        nonlocal calls
+        calls += 1
+
+    with _writer_role(postgres_url) as w:
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_counting_terminator,
+            )
+            assert calls == 0
+            assert proof.terminated_count == 0
+            restore_writers(
+                owner_conn, proof, session_wait_seconds=SESSION_WAIT_SECONDS
+            )
+        assert calls == 0
+
+
+# ── (y) restore over the terminator seam: a mismatch re-drains via it ──────
+
+
+def test_owner_only_restore_reopen_mismatch_redrains_via_the_terminator(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """Mirrors the superuser suite's
+    `test_a_restore_that_reopens_and_then_mismatches_redrains_before_reporting`
+    but over the OWNER connection, with a superuser-backed `terminator` for
+    the re-drain: w2's GRANT is dropped so the final comparison genuinely
+    mismatches, w1's real GRANT lands and a second connection reconnects as
+    w1 during that reopened window — the re-drain (going through the
+    terminator, since the owner alone cannot signal it) must terminate that
+    reconnected session before `ACL_NOT_RESTORED` is reported, never
+    `COMPENSATION_FAILED`."""
+    with _writer_role(postgres_url) as w1, _writer_role(postgres_url) as w2:
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            owner_conn.execute(text(f'GRANT CONNECT ON DATABASE "{owner_db}" TO {w1}'))
+            owner_conn.execute(text(f'GRANT CONNECT ON DATABASE "{owner_db}" TO {w2}'))
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                writer_roles=(w1, w2),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w1, w2)),
+            )
+
+            reconnected: list[Connection] = []
+            proxy = _SkipOneGrantReconnectTheOther(
+                owner_conn,
+                skip_role=w2,
+                reconnect_role=w1,
+                reconnect_url=url_for(postgres_url, owner_db, user=w1),
+                reconnected=reconnected,
+            )
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(
+                    proxy,  # type: ignore[arg-type]
+                    proof,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    terminator=_superuser_terminator(postgres_url, owner_db, (w1, w2)),
+                )
+            assert refused.value.code == FenceRefusalCode.ACL_NOT_RESTORED
+            assert len(reconnected) == 1
+
+            with pytest.raises(OperationalError):
+                reconnected[0].execute(text("SELECT 1"))
+            reconnected[0].close()
+
+            with pytest.raises(OperationalError, match="permission denied"):
+                with _connect(url_for(postgres_url, owner_db, user=w1)):
+                    pass
+
+            # Still fully fenced — restore for real so teardown can drop the
+            # roles.
+            restore_writers(
+                owner_conn,
+                proof,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w1, w2)),
+            )
+
+
+def test_owner_only_restore_reopen_mismatch_without_a_terminator_fails_closed(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """The same shape as the test above, but with NO `terminator` on the
+    restore call: the owner cannot signal w1's reconnected backend, so the
+    re-drain's default adapter cannot converge and the failure is reported
+    as `COMPENSATION_FAILED`, not `ACL_NOT_RESTORED` — the re-fence's own
+    drain could not be proven to hold."""
+    with _writer_role(postgres_url) as w1, _writer_role(postgres_url) as w2:
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            owner_conn.execute(text(f'GRANT CONNECT ON DATABASE "{owner_db}" TO {w1}'))
+            owner_conn.execute(text(f'GRANT CONNECT ON DATABASE "{owner_db}" TO {w2}'))
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                writer_roles=(w1, w2),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w1, w2)),
+            )
+
+            reconnected: list[Connection] = []
+            proxy = _SkipOneGrantReconnectTheOther(
+                owner_conn,
+                skip_role=w2,
+                reconnect_role=w1,
+                reconnect_url=url_for(postgres_url, owner_db, user=w1),
+                reconnected=reconnected,
+            )
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(
+                    proxy,  # type: ignore[arg-type]
+                    proof,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                    # No terminator: the owner cannot signal w1's
+                    # reconnected backend directly.
+                )
+            assert refused.value.code == FenceRefusalCode.COMPENSATION_FAILED
+            assert len(reconnected) == 1
+            reconnected[0].close()
+
+            # Clean up for real with a working terminator so teardown can
+            # drop the roles.
+            restore_writers(
+                owner_conn,
+                proof,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w1, w2)),
+            )
+
+
+# ── (z) a terminator's own FenceRefused cannot spoof this module's code ────
+
+
+def test_a_terminator_raising_fencerefused_cannot_spoof_the_refusal_code(
+    admin_url: str, db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """A terminator is untrusted code: if it raises
+    `FenceRefused(UNKNOWN_DATABASE)`, the fence must not report
+    `UNKNOWN_DATABASE` — that code was never actually determined by this
+    module. `_TerminatorFailed` wraps it first, so the existing compensation
+    path classifies the real failure (a terminator that could not do its
+    job) as `FENCE_INTERRUPTED`."""
+
+    def _spoofing_terminator() -> None:
+        raise FenceRefused(FenceRefusalCode.UNKNOWN_DATABASE, "spoofed refusal")
+
+    with _writer_role(admin_url) as w:
+        writer_engine = create_engine(url_for(postgres_url, db, user=w))
+        writer_conn = writer_engine.connect()
+        try:
+            assert writer_conn.execute(text("SELECT 1")).scalar_one() == 1
+
+            with _connect(admin_url, autocommit=True) as conn:
+                before = fence_module._current_grants(conn, db)
+                with pytest.raises(FenceRefused) as refused:
+                    fence_writers(
+                        conn,
+                        database=db,
+                        writer_roles=(w,),
+                        session_wait_seconds=SESSION_WAIT_SECONDS,
+                        terminator=_spoofing_terminator,
+                    )
+                assert refused.value.code == FenceRefusalCode.FENCE_INTERRUPTED
+                assert refused.value.code != FenceRefusalCode.UNKNOWN_DATABASE
+                after = fence_module._current_grants(conn, db)
+                assert after == before
         finally:
             writer_conn.close()
             writer_engine.dispose()
