@@ -7,17 +7,20 @@ verdict that never fires on a repaired input is a verdict nothing tests.
 
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 
 import pytest
 
 from vendor_cp.deployment.image_heads import (
+    COMPARE_MISMATCH_EXIT_CODE,
     IMAGE_HEADS_SCHEMA,
     UNREADABLE_DOCUMENT,
     HeadsVerdict,
     compare_heads,
     composed_effective_heads,
+    main,
     read_image_document,
     render_image_document,
 )
@@ -448,6 +451,290 @@ def test_emit_succeeds_and_writes_the_document_on_a_valid_revision(
 ) -> None:
     from vendor_cp.deployment.image_heads import main
 
+    output = tmp_path / "migration_heads.json"
+    exit_code = main(
+        [
+            "--emit",
+            "--source-revision",
+            _VALID_REVISION,
+            "--output",
+            str(output),
+            "--offline-dsn",
+            OFFLINE_DSN,
+        ]
+    )
+    assert exit_code == 0
+    document = read_image_document(output)
+    assert document is not None and document is not UNREADABLE_DOCUMENT
+    assert document["source_revision"] == _VALID_REVISION
+
+
+# ── `--compare` ──────────────────────────────────────────────────────────────
+
+
+def _write_document(path: Path, **overrides: object) -> Path:
+    document = _doc(**overrides)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def test_compare_exits_zero_and_prints_matched_when_everything_agrees(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc_path = _write_document(tmp_path / "migration_heads.json", heads=["h1", "h2"])
+
+    exit_code = main(
+        [
+            "--compare",
+            "--image-document",
+            str(doc_path),
+            "--descriptor-heads",
+            "h2",
+            "h1",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == HeadsVerdict.MATCHED.value
+
+
+def test_compare_matched_also_checks_database_heads_when_given(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc_path = _write_document(tmp_path / "migration_heads.json", heads=["h1", "h2"])
+
+    exit_code = main(
+        [
+            "--compare",
+            "--image-document",
+            str(doc_path),
+            "--descriptor-heads",
+            "h1",
+            "h2",
+            "--database-heads",
+            "h2",
+            "h1",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == HeadsVerdict.MATCHED.value
+    assert payload["detail"]["database_heads"] == ["h1", "h2"]
+
+
+def test_compare_exits_nonzero_with_the_fixed_code_on_a_missing_document(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "does-not-exist.json"
+
+    exit_code = main(
+        [
+            "--compare",
+            "--image-document",
+            str(missing),
+            "--descriptor-heads",
+            "h1",
+        ]
+    )
+
+    assert exit_code == COMPARE_MISMATCH_EXIT_CODE
+    assert exit_code != 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == HeadsVerdict.DOCUMENT_ABSENT.value
+
+
+def test_compare_exits_nonzero_on_an_unreadable_document(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc_path = tmp_path / "migration_heads.json"
+    doc_path.write_text("not valid json {{{", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "--compare",
+            "--image-document",
+            str(doc_path),
+            "--descriptor-heads",
+            "h1",
+        ]
+    )
+
+    assert exit_code == COMPARE_MISMATCH_EXIT_CODE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == HeadsVerdict.DOCUMENT_UNREADABLE.value
+
+
+def test_compare_exits_nonzero_on_image_descriptor_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc_path = _write_document(tmp_path / "migration_heads.json", heads=["h1", "h2"])
+
+    exit_code = main(
+        [
+            "--compare",
+            "--image-document",
+            str(doc_path),
+            "--descriptor-heads",
+            "h1",
+            "h3",
+        ]
+    )
+
+    assert exit_code == COMPARE_MISMATCH_EXIT_CODE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == HeadsVerdict.IMAGE_DESCRIPTOR_MISMATCHED.value
+
+
+def test_compare_exits_nonzero_on_image_database_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc_path = _write_document(tmp_path / "migration_heads.json", heads=["h1", "h2"])
+
+    exit_code = main(
+        [
+            "--compare",
+            "--image-document",
+            str(doc_path),
+            "--descriptor-heads",
+            "h1",
+            "h2",
+            "--database-heads",
+            "h1",
+            "h3",
+        ]
+    )
+
+    assert exit_code == COMPARE_MISMATCH_EXIT_CODE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == HeadsVerdict.IMAGE_DATABASE_MISMATCHED.value
+
+
+def test_compare_exits_nonzero_on_source_revision_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc_path = _write_document(tmp_path / "migration_heads.json", heads=["h1", "h2"])
+
+    exit_code = main(
+        [
+            "--compare",
+            "--image-document",
+            str(doc_path),
+            "--descriptor-heads",
+            "h1",
+            "h2",
+            "--expected-source-revision",
+            "b" * 40,
+        ]
+    )
+
+    assert exit_code == COMPARE_MISMATCH_EXIT_CODE
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == HeadsVerdict.SOURCE_REVISION_MISMATCH.value
+
+
+def test_compare_matched_when_expected_source_revision_agrees(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc_path = _write_document(tmp_path / "migration_heads.json", heads=["h1", "h2"])
+
+    exit_code = main(
+        [
+            "--compare",
+            "--image-document",
+            str(doc_path),
+            "--descriptor-heads",
+            "h1",
+            "h2",
+            "--expected-source-revision",
+            _VALID_REVISION,
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == HeadsVerdict.MATCHED.value
+
+
+def test_compare_refuses_an_empty_descriptor_heads_argument(tmp_path: Path) -> None:
+    """`nargs="+"` refuses zero values for `--descriptor-heads` at the
+    argparse level — a usage error (exit 2), not a verdict."""
+    doc_path = _write_document(tmp_path / "migration_heads.json", heads=["h1"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "--compare",
+                "--image-document",
+                str(doc_path),
+                "--descriptor-heads",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_compare_refuses_an_empty_database_heads_argument(tmp_path: Path) -> None:
+    doc_path = _write_document(tmp_path / "migration_heads.json", heads=["h1"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "--compare",
+                "--image-document",
+                str(doc_path),
+                "--descriptor-heads",
+                "h1",
+                "--database-heads",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_compare_refuses_missing_descriptor_heads_entirely(tmp_path: Path) -> None:
+    doc_path = _write_document(tmp_path / "migration_heads.json", heads=["h1"])
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--compare", "--image-document", str(doc_path)])
+
+    assert excinfo.value.code == 2
+
+
+def test_compare_refuses_a_missing_image_document_argument() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--compare", "--descriptor-heads", "h1"])
+
+    assert excinfo.value.code == 2
+
+
+def test_emit_and_compare_together_are_refused(tmp_path: Path) -> None:
+    doc_path = tmp_path / "migration_heads.json"
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "--emit",
+                "--compare",
+                "--source-revision",
+                _VALID_REVISION,
+                "--output",
+                str(tmp_path / "out.json"),
+                "--image-document",
+                str(doc_path),
+                "--descriptor-heads",
+                "h1",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_emit_still_works_byte_identically_alongside_compare(tmp_path: Path) -> None:
+    """The non-vacuity control for the `--emit`/`--compare` split: the exact
+    same invocation that worked before `--compare` existed still produces the
+    identical document."""
     output = tmp_path / "migration_heads.json"
     exit_code = main(
         [
