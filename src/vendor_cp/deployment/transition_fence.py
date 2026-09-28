@@ -221,7 +221,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final, Protocol
 
@@ -253,9 +253,43 @@ class Terminator(Protocol):
     superuser channel must not accept. The library never trusts a
     terminator's claim that termination happened; its own poll of
     `pg_stat_activity` is the only proof it acts on.
+
+    **The broker's contract.** The production broker's fixed, checked-in
+    statement (no arguments — see the module docstring's D1 topology note)
+    must terminate a SUPERSET of every EFFECTIVE set this library may ever
+    drain: every named writer role AND every role transitively holding
+    membership in one (`_member_roles`), scoped to the SAME database this
+    call is fencing. A broker statement scoped to fewer roles, or to a
+    different database, is not a partial defence — it is silently
+    indistinguishable from "the broker did nothing this poll", and the drain
+    simply fails safe with `WRITER_SESSIONS_SURVIVED` once the deadline
+    passes, exactly as if no terminator had been supplied at all. PR 2 must
+    test the broker's actual statement against this superset requirement.
+
+    A `terminator` that raises is never trusted at face value either —
+    including a `FenceRefused` it raises itself, which this module re-wraps
+    (see `_TerminatorFailed`) so it can never be mistaken for a refusal this
+    library produced.
     """
 
     def __call__(self) -> None: ...
+
+
+class _TerminatorFailed(RuntimeError):
+    """Wraps ANY exception a caller-supplied `Terminator` raises, `FenceRefused`
+    included, before it ever reaches `fence_writers`'/`restore_writers`'
+    exception handling.
+
+    A terminator is untrusted code running on the library's behalf: if it
+    raised `FenceRefused(FenceRefusalCode.UNKNOWN_DATABASE)` and that
+    exception were allowed to propagate as-is, the outer `except
+    BaseException` in `fence_writers` would see a genuine-looking
+    `FenceRefused` and could report `UNKNOWN_DATABASE` — a code this module
+    never actually determined, spoofed by the terminator. Wrapping in a
+    private, non-`FenceRefused` type forces the existing compensation path to
+    classify the failure itself (as `FENCE_INTERRUPTED` or
+    `COMPENSATION_FAILED`), the same treatment any other terminator failure
+    gets."""
 
 
 #: The portable wire schema `FenceProof.to_document()`/`from_document()`
@@ -282,6 +316,12 @@ MIGRATION_ROLE: Final = "app_admin"
 #: How often to re-poll `pg_stat_activity` while waiting for terminated writer
 #: backends to actually disappear.
 _POLL_INTERVAL_SECONDS: Final = 0.05
+
+#: The only database privilege types this module's ACL ever holds an
+#: opinion about. A `prior_grants` entry naming anything else did not come
+#: from a real `aclexplode(pg_database.datacl)` read and is refused by
+#: `FenceProof.from_document`.
+_KNOWN_DATABASE_PRIVILEGES: Final = frozenset({"CONNECT", "CREATE", "TEMPORARY"})
 
 
 class FenceRefusalCode(StrEnum):
@@ -320,13 +360,22 @@ class FenceRefusalCode(StrEnum):
     #: original grantor. Checked before any change.
     GRANT_NOT_OWNER_GRANTED = "grant_not_owner_granted"
     #: `FenceProof.from_document` refused a document: the wrong schema,
-    #: unknown or missing keys, a wrong type (including bool-as-int for
-    #: `terminated_count`), a naive or non-UTC `fenced_at`, a duplicate
-    #: grant, `fenced_roles` not a subset of the allowed writer roles,
-    #: `member_roles` overlapping `fenced_roles`, or an empty database name.
+    #: unknown or missing keys, a wrong type anywhere (including bool-as-int
+    #: for `terminated_count`), a negative `terminated_count`, a `fenced_at`
+    #: that is not the exact canonical UTC form, a duplicate grant or role, an
+    #: unknown privilege, an unsafe (empty/NUL/lone-surrogate) identifier,
+    #: `fenced_roles` not a subset of the allowed writer roles, `member_roles`
+    #: naming `MIGRATION_ROLE` or overlapping `fenced_roles`, `absent_roles`
+    #: overlapping either, or a digest that does not match `expected_digest`.
     #: Fail closed: never construct a `FenceProof` from a document that does
     #: not strictly conform.
     PROOF_INVALID = "proof_invalid"
+    #: `restore_writers` refused a structurally-valid `FenceProof` because it
+    #: does not match LIVE state: re-deriving `_member_roles` from
+    #: `proof.fenced_roles` right now disagrees with `proof.member_roles`, or
+    #: some grantor recorded in `proof.prior_grants` is not the database's
+    #: CURRENT owner. Checked before any GRANT.
+    PROOF_MISMATCH = "proof_mismatch"
 
 
 class FenceRefused(Exception):
@@ -355,6 +404,38 @@ class FenceRefused(Exception):
 #: PUBLIC's grantee is `""`. The grantor IS part of this comparison — see the
 #: module docstring's "Grantor-exact restore" section.
 _Grants = frozenset[tuple[str, str, bool, str]]
+
+
+def _reject_unsafe_identifier(
+    value: str, field: str, *, allow_empty: bool = False
+) -> None:
+    """`PROOF_INVALID`, checked on every role/database/grantee/grantor name a
+    `FenceProof` document carries.
+
+    An empty string is refused everywhere except a `prior_grants` grantee
+    (where it is the PUBLIC sentinel, `allow_empty=True`). A NUL byte or a
+    lone (unpaired) UTF-16 surrogate codepoint can never come from a real
+    `pg_roles.rolname`/`pg_database.datname` read — PostgreSQL identifiers
+    cannot contain a NUL, and a real database string is always valid
+    Unicode — so either is refused as evidence the document did not
+    originate from a real fence."""
+    if value == "":
+        if allow_empty:
+            return
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_INVALID,
+            f"fence proof document's {field} is an empty string",
+        )
+    if "\x00" in value:
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_INVALID,
+            f"fence proof document's {field} contains a NUL character",
+        )
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in value):
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_INVALID,
+            f"fence proof document's {field} contains a lone surrogate",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,17 +512,53 @@ class FenceProof:
         cls,
         doc: dict[str, object],
         *,
+        expected_digest: str,
         allowed_writer_roles: tuple[str, ...] = WRITER_ROLES,
     ) -> FenceProof:
         """The strict inverse of `to_document()`. Fails closed with
-        `FenceRefused(FenceRefusalCode.PROOF_INVALID)` on the wrong schema,
-        unknown or missing keys, a wrong type (bool is not accepted as
-        `terminated_count`'s int), a naive or non-UTC `fenced_at`, a
-        duplicate grant, `fenced_roles` not a subset of
-        `allowed_writer_roles`, `member_roles` overlapping `fenced_roles`,
-        or an empty database name — never construct a `FenceProof` from a
-        document that does not strictly conform, since this proof crosses a
-        process boundary as untrusted JSON (PR 2)."""
+        `FenceRefused(FenceRefusalCode.PROOF_INVALID)`.
+
+        `expected_digest` is REQUIRED and is the only actual defence against
+        a document that is structurally well-formed but semantically
+        laundered — a flipped `is_grantable`, an added PUBLIC grant, an
+        escalated privilege — none of which live database state can reveal
+        once the ACL has been revoked and later restored. The caller (PR 2's
+        orchestrator) records `digest()` out of band, from the SAME process
+        that called `fence_writers`, at the moment the fence closed; this
+        method recomputes the digest of what it parsed and refuses unless it
+        matches EXACTLY, as the LAST check, after every structural check
+        below has already passed (so a digest mismatch is never confused
+        with a shape problem the caller could otherwise fix by re-encoding).
+
+        Every other check here is defence in depth against a document that
+        is simply malformed (not necessarily maliciously tampered — nothing
+        can compute `digest()` on invalid input in the first place): the
+        wrong schema; unknown or missing keys; a wrong type anywhere,
+        including bool-as-int for `terminated_count`; a negative
+        `terminated_count`; a `fenced_at` that is not the EXACT canonical
+        `_iso_utc` form (naive, non-UTC, a non-`Z` UTC offset like `+00:00`
+        or `-00:00`, or missing/extra precision are all refused, since none
+        of them is what `to_document()` ever writes); a duplicate entry
+        within `prior_grants`, or within `fenced_roles`, `member_roles`, or
+        `absent_roles`; any role name, grantor, or non-PUBLIC grantee that is
+        empty, contains a NUL byte, or contains a lone surrogate; a
+        `prior_grants` privilege outside `CONNECT`/`CREATE`/`TEMPORARY`;
+        `fenced_roles` not a subset of `allowed_writer_roles` — the SAME
+        `writer_roles` tuple the fence that produced this proof was called
+        with; `member_roles` containing `MIGRATION_ROLE` or overlapping
+        `fenced_roles`; or `absent_roles` overlapping either.
+
+        **What this method cannot bound.** A `prior_grants` grantee may
+        legitimately be the database OWNER itself (PostgreSQL's own default
+        ACL always includes an owner-granted entry for the owner — see
+        `_current_grants`), and the owner's name is not carried on this
+        document at all. This method therefore does not attempt to restrict
+        `prior_grants` grantees to a closed role set; `restore_writers`
+        bounds that instead, from LIVE state: it only ever GRANTs to `{"",
+        *effective}` (never the owner), and separately refuses a proof whose
+        `prior_grants` records any grantor other than the database's CURRENT
+        owner.
+        """
         if not isinstance(doc, dict):
             raise FenceRefused(
                 FenceRefusalCode.PROOF_INVALID,
@@ -465,11 +582,12 @@ class FenceProof:
             )
 
         database = doc["database"]
-        if not isinstance(database, str) or database == "":
+        if not isinstance(database, str):
             raise FenceRefused(
                 FenceRefusalCode.PROOF_INVALID,
-                "fence proof document names an empty or non-string database",
+                "fence proof document's database must be a string",
             )
+        _reject_unsafe_identifier(database, "database")
 
         prior_acl = doc["prior_acl"]
         if not isinstance(prior_acl, str):
@@ -499,11 +617,21 @@ class FenceProof:
                     "fence proof document has a malformed prior_grants "
                     f"entry: {entry!r}",
                 )
-            prior_grants_list.append((entry[0], entry[1], entry[2], entry[3]))
+            grantee, privilege, is_grantable, grantor = entry
+            _reject_unsafe_identifier(grantee, "prior_grants grantee", allow_empty=True)
+            _reject_unsafe_identifier(grantor, "prior_grants grantor")
+            if privilege not in _KNOWN_DATABASE_PRIVILEGES:
+                raise FenceRefused(
+                    FenceRefusalCode.PROOF_INVALID,
+                    f"fence proof document's prior_grants names privilege "
+                    f"{privilege!r}, which is not one of "
+                    f"{sorted(_KNOWN_DATABASE_PRIVILEGES)}",
+                )
+            prior_grants_list.append((grantee, privilege, is_grantable, grantor))
         if len(prior_grants_list) != len(set(prior_grants_list)):
             raise FenceRefused(
                 FenceRefusalCode.PROOF_INVALID,
-                "fence proof document's prior_grants contains a duplicate " "grant",
+                "fence proof document's prior_grants contains a duplicate grant",
             )
         prior_grants: _Grants = frozenset(prior_grants_list)
 
@@ -515,6 +643,13 @@ class FenceProof:
                 raise FenceRefused(
                     FenceRefusalCode.PROOF_INVALID,
                     f"fence proof document's {key} must be a list of strings",
+                )
+            for item in value:
+                _reject_unsafe_identifier(item, f"{key} entry")
+            if len(value) != len(set(value)):
+                raise FenceRefused(
+                    FenceRefusalCode.PROOF_INVALID,
+                    f"fence proof document's {key} contains a duplicate role",
                 )
             return tuple(value)
 
@@ -529,6 +664,13 @@ class FenceProof:
                 "is not a subset of the allowed writer roles "
                 f"{sorted(allowed_writer_roles)}",
             )
+        if MIGRATION_ROLE in member_roles:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                f"fence proof document's member_roles names the migration "
+                f"role {MIGRATION_ROLE!r}, which can never be a member of a "
+                "fenced writer without also being refused as shared",
+            )
         role_overlap = set(member_roles) & set(fenced_roles)
         if role_overlap:
             raise FenceRefused(
@@ -536,12 +678,24 @@ class FenceProof:
                 "fence proof document's member_roles overlaps its "
                 f"fenced_roles: {sorted(role_overlap)}",
             )
+        absent_overlap = set(absent_roles) & (set(fenced_roles) | set(member_roles))
+        if absent_overlap:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "fence proof document's absent_roles overlaps its "
+                f"fenced_roles/member_roles: {sorted(absent_overlap)}",
+            )
 
         terminated_count = doc["terminated_count"]
         if not isinstance(terminated_count, int) or isinstance(terminated_count, bool):
             raise FenceRefused(
                 FenceRefusalCode.PROOF_INVALID,
-                "fence proof document's terminated_count must be an int, " "not a bool",
+                "fence proof document's terminated_count must be an int, not a bool",
+            )
+        if terminated_count < 0:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "fence proof document's terminated_count must not be negative",
             )
 
         fenced_at_raw = doc["fenced_at"]
@@ -558,15 +712,27 @@ class FenceProof:
                 f"fence proof document's fenced_at {fenced_at_raw!r} is not "
                 "a valid ISO-8601 timestamp",
             ) from exc
-        if fenced_at.tzinfo is None or fenced_at.utcoffset() != timedelta(0):
+        if fenced_at.tzinfo is None:
             raise FenceRefused(
                 FenceRefusalCode.PROOF_INVALID,
-                f"fence proof document's fenced_at {fenced_at_raw!r} must "
-                "be a naive-free, UTC timestamp",
+                f"fence proof document's fenced_at {fenced_at_raw!r} is "
+                "naive; it must be UTC and offset-aware",
             )
         fenced_at = fenced_at.astimezone(UTC)
+        # The exact round trip, not just "parses to a UTC instant": a naive
+        # timestamp, a non-UTC offset, or a UTC offset spelled any way other
+        # than `to_document()`'s own `Z` suffix (`+00:00`, `-00:00`, missing
+        # or extra fractional digits) all parse successfully above but are
+        # not what this module ever writes, and are refused here.
+        if _iso_utc(fenced_at) != fenced_at_raw:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                f"fence proof document's fenced_at {fenced_at_raw!r} is not "
+                f"the canonical UTC form this module writes "
+                f"({_iso_utc(fenced_at)!r} would be)",
+            )
 
-        return cls(
+        proof = cls(
             database=database,
             prior_acl=prior_acl,
             prior_grants=prior_grants,
@@ -576,6 +742,16 @@ class FenceProof:
             terminated_count=terminated_count,
             fenced_at=fenced_at,
         )
+        actual_digest = proof.digest()
+        if actual_digest != expected_digest:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                f"fence proof document's digest {actual_digest!r} does not "
+                f"match the expected digest {expected_digest!r}; the "
+                "document does not match what the fence recorded when it "
+                "closed",
+            )
+        return proof
 
 
 _FENCE_PROOF_DOCUMENT_KEYS: Final = frozenset(
@@ -595,7 +771,11 @@ _FENCE_PROOF_DOCUMENT_KEYS: Final = frozenset(
 
 def _iso_utc(dt: datetime) -> str:
     """ISO-8601 UTC with a `Z` suffix — the only timestamp form
-    `FenceProof.to_document()` writes and `from_document` accepts."""
+    `FenceProof.to_document()` writes. `from_document` treats this as the
+    CANONICAL form of `fenced_at`: it refuses any document string for which
+    `_iso_utc(parsed) != raw`, which is what actually rejects a naive
+    timestamp, a non-UTC offset, or a UTC offset spelled as anything other
+    than this exact `Z`-suffixed, microsecond-precision form."""
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
@@ -1109,9 +1289,21 @@ def _request_termination(
     """Route one termination request through `terminator`, or the default
     adapter when `terminator` is `None`. Never passes a pid or a role name to
     `terminator` — it takes no arguments and re-derives the writer set
-    itself."""
+    itself.
+
+    Any exception `terminator()` raises — including a `FenceRefused` it
+    raises itself — is caught here and re-raised as `_TerminatorFailed`,
+    chained from the original: a terminator is untrusted code, and a
+    `FenceRefused` it happens to raise must never be mistaken for a refusal
+    this module produced (see `_TerminatorFailed`'s docstring).
+    `KeyboardInterrupt`/`SystemExit` are not wrapped — they propagate as
+    themselves, the same convention `fence_writers`/`restore_writers` use
+    everywhere else."""
     if terminator is not None:
-        terminator()
+        try:
+            terminator()
+        except Exception as exc:
+            raise _TerminatorFailed(f"terminator raised {exc!r}") from exc
     else:
         _default_terminate(conn, database, roles)
 
@@ -1368,8 +1560,48 @@ def restore_writers(
     returns would be, so this never claims the database is fenced without
     re-proving it holds no open writer sessions. `terminator`, passed through
     to that re-drain, has the same meaning as on `fence_writers`.
+
+    Before touching anything, this also re-derives `_member_roles` from
+    `proof.fenced_roles` against LIVE state and refuses
+    (`PROOF_MISMATCH`) unless it equals `proof.member_roles` exactly — the
+    same discipline `fence_is_holding` already applies to a proof it is only
+    reading, applied here to one this function is about to ACT on — and
+    refuses (`PROOF_MISMATCH`) unless every grantor recorded in
+    `proof.prior_grants` is the database's CURRENT owner: this is what
+    bounds a `prior_grants` grantee `FenceProof.from_document` could not
+    (see that method's docstring), since a legitimate owner-granted entry
+    always satisfies it and a laundered one naming any other grantor cannot.
     """
     _require_autocommit(conn)
+
+    live_member_roles = _member_roles(conn, proof.fenced_roles)
+    if set(live_member_roles) != set(proof.member_roles):
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_MISMATCH,
+            f"re-deriving membership for {sorted(proof.fenced_roles)} right "
+            f"now gives {sorted(live_member_roles)}, not the "
+            f"{sorted(proof.member_roles)} this proof recorded; membership "
+            "drifted since the fence closed, so this proof's effective set "
+            "can no longer be trusted",
+        )
+
+    owner = _database_owner(conn, proof.database)
+    bad_grantor = next(
+        (
+            grantor
+            for _grantee, _priv, _og, grantor in proof.prior_grants
+            if grantor != owner
+        ),
+        None,
+    )
+    if bad_grantor is not None:
+        raise FenceRefused(
+            FenceRefusalCode.PROOF_MISMATCH,
+            f"this proof's prior_grants records a grant made by "
+            f"{bad_grantor!r}, not database {proof.database!r}'s current "
+            f"owner {owner!r} — a proof whose grants were not all "
+            "owner-granted cannot be restored faithfully",
+        )
 
     quoted_db = _quote_ident(conn, proof.database)
     current = _current_grants(conn, proof.database)
@@ -1412,13 +1644,15 @@ def restore_writers(
     try:
         for grantee, _priv, is_grantable, _grantor in missing:
             # The GRANT below does not (and cannot, for an object privilege)
-            # specify a grantor: it always records the EXECUTING identity —
-            # the database owner, when that identity is a superuser (see the
-            # module docstring's "Grantor-exact restore" section). The
-            # pre-fence check already refused any grant whose recorded
-            # grantor was not the owner, so this reproduces it exactly; the
-            # post-loop comparison against `proof.prior_grants` (grantor
-            # included) is what actually proves it.
+            # specify a grantor: it always records the EXECUTING identity as
+            # grantor — the database owner itself, whether `conn` IS the
+            # owner directly (D1: no superuser needed for the ACL work) or
+            # is a superuser granting on the owner's behalf (see the module
+            # docstring's "Grantor-exact restore" section). The pre-fence
+            # check already refused any grant whose recorded grantor was not
+            # the owner, so this reproduces it exactly; the post-loop
+            # comparison against `proof.prior_grants` (grantor included) is
+            # what actually proves it.
             option_sql = " WITH GRANT OPTION" if is_grantable else ""
             conn.execute(
                 text(
