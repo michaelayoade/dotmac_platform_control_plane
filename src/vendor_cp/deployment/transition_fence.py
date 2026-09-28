@@ -217,26 +217,52 @@ timestamp.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Final
+from typing import Final, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 __all__ = [
+    "FENCE_PROOF_SCHEMA",
     "MIGRATION_ROLE",
     "WRITER_ROLES",
     "FenceProof",
     "FenceRefusalCode",
     "FenceRefused",
+    "Terminator",
     "UnfenceProof",
     "fence_is_holding",
     "fence_writers",
     "restore_writers",
 ]
+
+
+class Terminator(Protocol):
+    """A callable that requests termination of every writer backend on the
+    fenced database, taking no arguments and returning nothing.
+
+    The production broker re-derives the writer set itself, server-side, over
+    its own superuser channel — this module never passes a pid or a role name
+    across the seam, because a caller-supplied list is exactly what a
+    superuser channel must not accept. The library never trusts a
+    terminator's claim that termination happened; its own poll of
+    `pg_stat_activity` is the only proof it acts on.
+    """
+
+    def __call__(self) -> None: ...
+
+
+#: The portable wire schema `FenceProof.to_document()`/`from_document()`
+#: read and write. The proof crosses processes as JSON on stdout (PR 2), so
+#: this is its only wire form; a document naming any other schema is refused
+#: (`FenceRefusalCode.PROOF_INVALID`).
+FENCE_PROOF_SCHEMA: Final = "TransitionFenceProof.v1"
 
 #: The long-running application, relay and dispatcher identities (see
 #: `docker-compose.production.yml` and the deploy script's role list). Every
@@ -293,6 +319,14 @@ class FenceRefusalCode(StrEnum):
     #: remove such a grant, and a restore could not recreate it with its
     #: original grantor. Checked before any change.
     GRANT_NOT_OWNER_GRANTED = "grant_not_owner_granted"
+    #: `FenceProof.from_document` refused a document: the wrong schema,
+    #: unknown or missing keys, a wrong type (including bool-as-int for
+    #: `terminated_count`), a naive or non-UTC `fenced_at`, a duplicate
+    #: grant, `fenced_roles` not a subset of the allowed writer roles,
+    #: `member_roles` overlapping `fenced_roles`, or an empty database name.
+    #: Fail closed: never construct a `FenceProof` from a document that does
+    #: not strictly conform.
+    PROOF_INVALID = "proof_invalid"
 
 
 class FenceRefused(Exception):
@@ -353,6 +387,216 @@ class FenceProof:
     absent_roles: tuple[str, ...]
     terminated_count: int
     fenced_at: datetime
+
+    def to_document(self) -> dict[str, object]:
+        """`TransitionFenceProof.v1`: the portable wire form of this proof.
+
+        `prior_grants` becomes a sorted list of 4-element
+        `[grantee, privilege, is_grantable, grantor]` lists (JSON has no
+        tuple or set — a list is both), and `fenced_at` becomes an ISO-8601
+        UTC string with a `Z` suffix. `from_document` is this method's exact
+        inverse: `FenceProof.from_document(proof.to_document()) == proof`."""
+        return {
+            "schema": FENCE_PROOF_SCHEMA,
+            "database": self.database,
+            "prior_acl": self.prior_acl,
+            "prior_grants": sorted(
+                [grantee, privilege, is_grantable, grantor]
+                for grantee, privilege, is_grantable, grantor in self.prior_grants
+            ),
+            "fenced_roles": list(self.fenced_roles),
+            "member_roles": list(self.member_roles),
+            "absent_roles": list(self.absent_roles),
+            "terminated_count": self.terminated_count,
+            "fenced_at": _iso_utc(self.fenced_at),
+        }
+
+    def canonical_bytes(self) -> bytes:
+        """`to_document()`, serialised with sorted keys, `(",", ":")`
+        separators, `ensure_ascii=True`, encoded as UTF-8 — the exact bytes
+        `digest()` hashes, and the only byte-stable form this proof has."""
+        return json.dumps(
+            self.to_document(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+
+    def digest(self) -> str:
+        """`"sha256:" + hex` over `canonical_bytes()`."""
+        return "sha256:" + hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+    @classmethod
+    def from_document(
+        cls,
+        doc: dict[str, object],
+        *,
+        allowed_writer_roles: tuple[str, ...] = WRITER_ROLES,
+    ) -> FenceProof:
+        """The strict inverse of `to_document()`. Fails closed with
+        `FenceRefused(FenceRefusalCode.PROOF_INVALID)` on the wrong schema,
+        unknown or missing keys, a wrong type (bool is not accepted as
+        `terminated_count`'s int), a naive or non-UTC `fenced_at`, a
+        duplicate grant, `fenced_roles` not a subset of
+        `allowed_writer_roles`, `member_roles` overlapping `fenced_roles`,
+        or an empty database name — never construct a `FenceProof` from a
+        document that does not strictly conform, since this proof crosses a
+        process boundary as untrusted JSON (PR 2)."""
+        if not isinstance(doc, dict):
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                f"a fence proof document must be a JSON object, got "
+                f"{type(doc).__name__}",
+            )
+        keys = set(doc.keys())
+        if keys != _FENCE_PROOF_DOCUMENT_KEYS:
+            missing = sorted(_FENCE_PROOF_DOCUMENT_KEYS - keys)
+            unknown = sorted(keys - _FENCE_PROOF_DOCUMENT_KEYS)
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                f"fence proof document has missing keys {missing} and "
+                f"unknown keys {unknown}",
+            )
+        if doc["schema"] != FENCE_PROOF_SCHEMA:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                f"fence proof document has schema {doc['schema']!r}, "
+                f"expected {FENCE_PROOF_SCHEMA!r}",
+            )
+
+        database = doc["database"]
+        if not isinstance(database, str) or database == "":
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "fence proof document names an empty or non-string database",
+            )
+
+        prior_acl = doc["prior_acl"]
+        if not isinstance(prior_acl, str):
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "fence proof document's prior_acl must be a string",
+            )
+
+        prior_grants_doc = doc["prior_grants"]
+        if not isinstance(prior_grants_doc, list):
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "fence proof document's prior_grants must be a list",
+            )
+        prior_grants_list: list[tuple[str, str, bool, str]] = []
+        for entry in prior_grants_doc:
+            if (
+                not isinstance(entry, list)
+                or len(entry) != 4
+                or not isinstance(entry[0], str)
+                or not isinstance(entry[1], str)
+                or not isinstance(entry[2], bool)
+                or not isinstance(entry[3], str)
+            ):
+                raise FenceRefused(
+                    FenceRefusalCode.PROOF_INVALID,
+                    "fence proof document has a malformed prior_grants "
+                    f"entry: {entry!r}",
+                )
+            prior_grants_list.append((entry[0], entry[1], entry[2], entry[3]))
+        if len(prior_grants_list) != len(set(prior_grants_list)):
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "fence proof document's prior_grants contains a duplicate " "grant",
+            )
+        prior_grants: _Grants = frozenset(prior_grants_list)
+
+        def _role_list(key: str) -> tuple[str, ...]:
+            value = doc[key]
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) for item in value
+            ):
+                raise FenceRefused(
+                    FenceRefusalCode.PROOF_INVALID,
+                    f"fence proof document's {key} must be a list of strings",
+                )
+            return tuple(value)
+
+        fenced_roles = _role_list("fenced_roles")
+        member_roles = _role_list("member_roles")
+        absent_roles = _role_list("absent_roles")
+
+        if not set(fenced_roles) <= set(allowed_writer_roles):
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                f"fence proof document's fenced_roles {sorted(fenced_roles)} "
+                "is not a subset of the allowed writer roles "
+                f"{sorted(allowed_writer_roles)}",
+            )
+        role_overlap = set(member_roles) & set(fenced_roles)
+        if role_overlap:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "fence proof document's member_roles overlaps its "
+                f"fenced_roles: {sorted(role_overlap)}",
+            )
+
+        terminated_count = doc["terminated_count"]
+        if not isinstance(terminated_count, int) or isinstance(terminated_count, bool):
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "fence proof document's terminated_count must be an int, " "not a bool",
+            )
+
+        fenced_at_raw = doc["fenced_at"]
+        if not isinstance(fenced_at_raw, str):
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                "fence proof document's fenced_at must be a string",
+            )
+        try:
+            fenced_at = datetime.fromisoformat(fenced_at_raw.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                f"fence proof document's fenced_at {fenced_at_raw!r} is not "
+                "a valid ISO-8601 timestamp",
+            ) from exc
+        if fenced_at.tzinfo is None or fenced_at.utcoffset() != timedelta(0):
+            raise FenceRefused(
+                FenceRefusalCode.PROOF_INVALID,
+                f"fence proof document's fenced_at {fenced_at_raw!r} must "
+                "be a naive-free, UTC timestamp",
+            )
+        fenced_at = fenced_at.astimezone(UTC)
+
+        return cls(
+            database=database,
+            prior_acl=prior_acl,
+            prior_grants=prior_grants,
+            fenced_roles=fenced_roles,
+            member_roles=member_roles,
+            absent_roles=absent_roles,
+            terminated_count=terminated_count,
+            fenced_at=fenced_at,
+        )
+
+
+_FENCE_PROOF_DOCUMENT_KEYS: Final = frozenset(
+    {
+        "schema",
+        "database",
+        "prior_acl",
+        "prior_grants",
+        "fenced_roles",
+        "member_roles",
+        "absent_roles",
+        "terminated_count",
+        "fenced_at",
+    }
+)
+
+
+def _iso_utc(dt: datetime) -> str:
+    """ISO-8601 UTC with a `Z` suffix — the only timestamp form
+    `FenceProof.to_document()` writes and `from_document` accepts."""
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
 @dataclass(frozen=True, slots=True)
@@ -698,15 +942,25 @@ def fence_writers(
     writer_roles: tuple[str, ...] = WRITER_ROLES,
     session_wait_seconds: float,
     prior: FenceProof | None = None,
+    terminator: Terminator | None = None,
 ) -> FenceProof:
     """Revoke CONNECT from every existing writer role, verify it, then drain.
 
-    `conn` must be held by a superuser (or a role with `pg_signal_backend`):
-    terminating another role's backends needs that, and database ownership
-    alone does not grant it. Without it the drain times out and the fence is
-    compensated, so it fails safe. Production holds this over the cluster
-    superuser's socket connection, the same identity `pg_dumpall` already
-    uses.
+    `conn` is the database owner (production) or a superuser: the ACL work —
+    REVOKE/GRANT CONNECT, `aclexplode`, `pg_auth_members`,
+    `has_database_privilege`, `pg_stat_activity` reads — needs no more than
+    that. Terminating another role's open backends is a separate privilege
+    database ownership does not grant, so it goes through `terminator`
+    instead of `conn`: `None` uses the default adapter (`pg_terminate_backend`
+    over `conn` itself, today's behaviour, for a caller that does hold
+    signalling rights), and a caller-supplied `terminator` is a no-argument
+    callable requesting termination of every writer backend, invoked without
+    ever being told which pids or roles to terminate — the production broker
+    re-derives that set itself, server-side, over its own superuser channel.
+    Without the right to signal (an absent or ineffective `terminator`), the
+    drain times out and the fence is compensated, so it fails safe. The
+    library never trusts a terminator's claim; its own poll of
+    `pg_stat_activity` is the only proof it acts on.
     """
     _require_autocommit(conn)
 
@@ -771,6 +1025,7 @@ def fence_writers(
             prior_acl=prior_acl,
             prior_grants=prior_grants,
             session_wait_seconds=session_wait_seconds,
+            terminator=terminator,
         )
     except BaseException as exc:
         # Any exception at all after the first REVOKE — another refusal, a
@@ -793,7 +1048,10 @@ def fence_writers(
         )
         try:
             restore_writers(
-                conn, compensating, session_wait_seconds=session_wait_seconds
+                conn,
+                compensating,
+                session_wait_seconds=session_wait_seconds,
+                terminator=terminator,
             )
         except BaseException as restore_exc:
             failure = FenceRefused(
@@ -833,26 +1091,57 @@ def _writer_pids(
     )
 
 
+def _default_terminate(conn: Connection, database: str, roles: tuple[str, ...]) -> None:
+    """The default `Terminator` adapter: `pg_terminate_backend` issued over
+    `conn` itself for every pid `_writer_pids` currently finds — today's
+    behaviour, unchanged, for a caller that holds signalling rights on
+    `conn`."""
+    for pid in _writer_pids(conn, database, roles):
+        conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+
+
+def _request_termination(
+    conn: Connection,
+    database: str,
+    roles: tuple[str, ...],
+    terminator: Terminator | None,
+) -> None:
+    """Route one termination request through `terminator`, or the default
+    adapter when `terminator` is `None`. Never passes a pid or a role name to
+    `terminator` — it takes no arguments and re-derives the writer set
+    itself."""
+    if terminator is not None:
+        terminator()
+    else:
+        _default_terminate(conn, database, roles)
+
+
 def _terminate_and_drain(
     conn: Connection,
     database: str,
     roles: tuple[str, ...],
     session_wait_seconds: float,
+    terminator: Terminator | None = None,
 ) -> int:
     """Terminate every open backend for `roles` and block until TWO
     CONSECUTIVE polls, a full `_POLL_INTERVAL_SECONDS` apart, both find zero
-    remaining — `pg_terminate_backend` merely requests termination, and a
+    remaining — a termination request merely asks for termination, and a
     single zero reading can race a backend that is mid-termination and about
     to be replaced by a reconnect. Raises `WRITER_SESSIONS_SURVIVED` if the
     drain does not converge within `session_wait_seconds` (the deadline
     bounds the whole drain, not the two-poll confirmation). Returns the
-    number of backends terminated on entry."""
+    number of backends found on entry — read via `_writer_pids`, never taken
+    on `terminator`'s word.
+
+    `terminator`, when given, replaces the default `pg_terminate_backend`
+    adapter (see `_request_termination`); the poll loop and its proof are
+    identical either way."""
     if not roles:
         return 0
     backends = _writer_pids(conn, database, roles)
     terminated_count = len(backends)
-    for pid in backends:
-        conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+    if backends:
+        _request_termination(conn, database, roles, terminator)
 
     deadline = time.monotonic() + session_wait_seconds
     while True:
@@ -869,8 +1158,7 @@ def _terminate_and_drain(
                 f"{len(remaining)} writer backend(s) on {database!r} "
                 f"survived {session_wait_seconds}s of draining",
             )
-        for pid in remaining:
-            conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+        _request_termination(conn, database, roles, terminator)
         time.sleep(_POLL_INTERVAL_SECONDS)
 
 
@@ -885,6 +1173,7 @@ def _apply_fence(
     prior_acl: str,
     prior_grants: _Grants,
     session_wait_seconds: float,
+    terminator: Terminator | None = None,
 ) -> FenceProof:
     """The mutating half of `fence_writers`; its caller compensates a refusal.
 
@@ -925,7 +1214,7 @@ def _apply_fence(
         )
 
     terminated_count = _terminate_and_drain(
-        conn, database, effective, session_wait_seconds
+        conn, database, effective, session_wait_seconds, terminator
     )
 
     # A local timestamp, never a query: every ACL mutation and the drain that
@@ -993,6 +1282,7 @@ def _refence_and_redrain(
     original: BaseException,
     detail: str,
     before_acl: str,
+    terminator: Terminator | None = None,
 ) -> None:
     """Re-revoke the effective set as ground truth, VERIFY the re-fence
     actually holds, then re-drain it before the caller reports its own
@@ -1033,7 +1323,9 @@ def _refence_and_redrain(
             before_acl=before_acl,
         ) from original
     try:
-        _terminate_and_drain(conn, database, effective, session_wait_seconds)
+        _terminate_and_drain(
+            conn, database, effective, session_wait_seconds, terminator
+        )
     except FenceRefused as drain_exc:
         raise FenceRefused(
             FenceRefusalCode.WRITER_SESSIONS_SURVIVED,
@@ -1050,7 +1342,11 @@ def _refence_and_redrain(
 
 
 def restore_writers(
-    conn: Connection, proof: FenceProof, *, session_wait_seconds: float
+    conn: Connection,
+    proof: FenceProof,
+    *,
+    session_wait_seconds: float,
+    terminator: Terminator | None = None,
 ) -> UnfenceProof:
     """Put the ACL back to exactly `proof.prior_grants`. Idempotent.
 
@@ -1070,7 +1366,8 @@ def restore_writers(
     briefly is not itself a hazard a caller can act on, but a writer that
     reconnected during that window and is still open when this function
     returns would be, so this never claims the database is fenced without
-    re-proving it holds no open writer sessions.
+    re-proving it holds no open writer sessions. `terminator`, passed through
+    to that re-drain, has the same meaning as on `fence_writers`.
     """
     _require_autocommit(conn)
 
@@ -1142,6 +1439,7 @@ def restore_writers(
             detail=f"restoring the ACL for {proof.database!r} failed part-way "
             f"({exc!r}); re-revoked what was granted to stay fenced",
             before_acl=proof.prior_acl,
+            terminator=terminator,
         )
         # Mirrors `fence_writers`: an interrupt is reported AS ITSELF, never
         # wrapped, once the re-fence and re-drain attempt has run.
@@ -1170,6 +1468,7 @@ def restore_writers(
             original=mismatch,
             detail=str(mismatch),
             before_acl=proof.prior_acl,
+            terminator=terminator,
         )
         raise mismatch
 
