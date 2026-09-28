@@ -206,9 +206,9 @@ requirement — stop and fix the sudoers fragment before rehearsing.
   draining workers; report it before relying on the helper.
 - Confirm the host's actual nginx pid file path matches the helper's
   `NGINX_PID_FILE` constant (`/run/nginx.pid`) — `nginx -T | grep pid` or
-  the distro's nginx.conf `pid` directive. A mismatch here makes every
-  drain/title check silently see "no master pid" and skip straight to
-  "not shutting down", masking a real stuck drain.
+  the distro's nginx.conf `pid` directive. A mismatch makes the helper
+  refuse every run with `65`, because it will not prove a drain without a
+  live nginx master.
 
 Run once, as the deploy user, before D16 PR 4 is allowed to call this helper
 in production:
@@ -243,7 +243,7 @@ undocumented status.
 | --- | --- | --- |
 | `0` | ok | none — the switch (or, if already in the target state, the proof) is proven |
 | `64` | usage error: unknown verb, missing verb, or extra arguments | nothing was touched; fix the invocation |
-| `65` | refused, or failed, BEFORE any mutation — state is unchanged (a stat/ownership/mode precondition on the managed directory or `sites-enabled/`, a cross-filesystem mismatch between them, an unmanaged or unresolved enabled-link target, or the `routing-restore` app-health precondition) | nothing was switched; read the `logger` output, fix the precondition, retry |
+| `65` | refused, or failed, BEFORE any mutation — state is unchanged (a stat/ownership/mode precondition on the managed directory or `sites-enabled/`, a cross-filesystem mismatch between them, no live nginx master at the pid file, an unmanaged or unresolved enabled-link target, or the `routing-restore` app-health precondition) | nothing was switched; read the `logger` output, fix the precondition, retry |
 | `66` | the public proof failed after a successful switch and reload | the helper reverted to the CAPTURED PRIOR config, reloaded, and PROVED the revert; read the logs to understand why the public proof failed (app not actually ready, DNS/TLS drift, a CDN/WAF/LB in front — see above) before retrying |
 | `67` | state is **UNKNOWN**: a revert could not be proved, a drain timed out (an ambiguous old/new worker mix), or an unexpected error occurred after a mutation | page a human immediately; do not retry automatically; check `nginx -T`, the enabled-site symlink target, `systemctl status nginx`, and the public endpoint by hand before touching anything else |
 | `75` | another run (the helper or a concurrent `bootstrap_production_host.sh`) holds the lock | nothing was touched; wait for the other run to finish, or investigate why it is stuck, before retrying |

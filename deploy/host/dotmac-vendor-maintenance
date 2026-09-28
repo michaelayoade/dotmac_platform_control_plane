@@ -188,11 +188,6 @@ require_managed_dir_mode() {
     esac
 }
 
-# `mv -T` is only atomic within a single filesystem; if MANAGED_DIR and the
-# sites-enabled directory were ever split across mounts, the switch would
-# silently fall back to a non-atomic copy-and-unlink (see the runbook's
-# note on this same assumption). Comparing `stat -c %d` (the containing
-# device number) catches that before any switch is attempted.
 # True only when $1 is a live process whose command name is nginx. Used so a
 # missing, stale or foreign pid file can never make a drain check pass.
 nginx_master_is_live() {
@@ -213,6 +208,11 @@ require_nginx_master() {
     fi
 }
 
+# `mv -T` is only atomic within a single filesystem; if MANAGED_DIR and the
+# sites-enabled directory were ever split across mounts, the switch would
+# silently fall back to a non-atomic copy-and-unlink (see the runbook's
+# note on this same assumption). Comparing `stat -c %d` (the containing
+# device number) catches that before any switch is attempted.
 require_same_filesystem() {
     local a="$1" b="$2" dev_a dev_b
     dev_a="$(stat -c '%d' "$a")" || { FAIL_CODE=65; fail "cannot stat ${a}"; }

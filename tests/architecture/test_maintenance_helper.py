@@ -44,6 +44,8 @@ HELPER_FUNCTIONS = (
     "usage",
     "require_root_owned_and_not_group_or_other_writable",
     "require_managed_dir_mode",
+    "nginx_master_is_live",
+    "require_nginx_master",
     "require_same_filesystem",
     "capture_and_validate_prior_state",
     "status_for_conf",
@@ -247,6 +249,7 @@ def test_no_fail_code_65_is_reachable_after_the_first_mutation() -> None:
     allowed_functions = {
         "require_root_owned_and_not_group_or_other_writable",
         "require_managed_dir_mode",
+        "require_nginx_master",
         "require_same_filesystem",
         "capture_and_validate_prior_state",
     }
@@ -994,3 +997,16 @@ def test_the_drain_checks_fail_closed_without_a_live_nginx_master() -> None:
     assert "|| return 0" not in body
     assert "\nrequire_nginx_master\n" in script
     assert '[ "$comm" = "nginx" ]' in script
+
+
+def test_the_function_registry_matches_the_helper() -> None:
+    """HELPER_FUNCTIONS must list every function the helper defines, in file
+    order, so no new function escapes the guards that scope by function body.
+
+    Sensitivity: adding a function to the helper without listing it here (or
+    listing one that no longer exists, or reordering) fails this test.
+    """
+    defined = tuple(
+        re.findall(r"^([a-z_][a-z0-9_]*)\(\) \{", _text(HELPER), flags=re.MULTILINE)
+    )
+    assert defined == HELPER_FUNCTIONS
