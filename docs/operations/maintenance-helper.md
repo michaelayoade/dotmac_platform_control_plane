@@ -60,9 +60,12 @@ reuse or a master restart between checks; the title check is re-read fresh
 from the CURRENT master's actual children on every poll for exactly that
 reason.
 
-`trap '' HUP INT TERM` means none of those three signals can interrupt an
-in-flight mutation — a cancelled or disconnected caller cannot leave the
-enabled-site symlink half-switched.
+`trap '' HUP INT TERM PIPE` means none of those signals can interrupt an
+in-flight mutation. PIPE matters for a caller on a non-pty SSH pipe: when it
+disconnects, the helper's next write to stderr fails with EPIPE (absorbed by
+`log`) instead of killing the process. `SIGKILL` cannot be ignored, so a
+caller-imposed kill can still interrupt a mutation (see the runtime bound
+below).
 
 See `deploy/host/dotmac-vendor-maintenance`'s header comment for the full
 exit-code contract; it is summarized below.
@@ -196,6 +199,11 @@ requirement — stop and fix the sudoers fragment before rehearsing.
   a drain that was, in fact, still healthily in progress. Confirm this
   before the first rehearsal, and after any nginx config change that
   touches it.
+- During the rehearsal, while a `maintenance-on` or `routing-restore` is
+  draining, run `ps -o pid,args -C nginx` and confirm an old worker shows the
+  literal title `nginx: worker process is shutting down`. If the host's nginx
+  never shows that title, the helper's process-title drain check cannot see
+  draining workers; report it before relying on the helper.
 - Confirm the host's actual nginx pid file path matches the helper's
   `NGINX_PID_FILE` constant (`/run/nginx.pid`) — `nginx -T | grep pid` or
   the distro's nginx.conf `pid` directive. A mismatch here makes every
@@ -263,15 +271,16 @@ fails its proof, and reverts (proving the revert too) bounds at:
 = 364 seconds (≈ 6.1 minutes)
 ```
 
-(The forward switch's own reload+drain and `nginx -t` are assumed near-instant
-here — the 90s drain bound only actually elapses on a drain that is TIMING
-OUT, in which case the run exits 67 directly, without a revert or a proof,
-so this is a conservative combined bound, not a claim that every failure
-takes the full 364s.) The `maintenance-on` already-in-maintenance short-circuit
-path (no switch or revert: the drain-wait, then one proof) bounds separately
-at `DRAIN_BOUND_SECONDS + 92 = 90 + 92 = 182` seconds (≈3 minutes).
-`routing-restore`'s already-live short circuit has no drain-wait of its own
-(see the exit-code contract), so it bounds at the `92`s proof alone.
+This counts a forward drain that succeeds just inside its bound, a failed
+forward proof, a revert drain and a revert proof. `routing-restore` adds its
+app-health probe (at most 10s) before any switch: **374s nominal**. The
+`maintenance-on` already-in-maintenance short-circuit (drain-wait, then one
+proof) bounds at `90 + 92 = 182`s; `routing-restore`'s already-live
+short-circuit (health probe, then one proof, no drain-wait) at `10 + 92 = 102`s.
+
+Not counted, because the helper does not bound them itself: `nginx -t` time,
+`systemctl reload` time, and the per-poll overhead of the drain loops (a
+`cat`, a `pgrep` and a `ps` per child, about once a second).
 
 **PR 4 must give the helper at least this much headroom — recommend
 7 minutes (420s) — and must NOT wrap `dotmac-vendor-maintenance` in a
@@ -292,7 +301,7 @@ consult this per-code table instead:
 | `65` | untouched, in its prior state (usually live) | untouched, in its prior state (usually maintenance) | do not fence or migrate; fix the failed precondition and retry |
 | `66` | reverted to the CAPTURED PRIOR state, proven (usually back to live) | reverted to the CAPTURED PRIOR state, proven (usually back to maintenance) | do not fence or migrate; read the logs before retrying |
 | `67` | **unknown** | **unknown** | page a human immediately; do not fence or migrate; do not retry automatically |
-| `75` | untouched, in its prior state (usually live) | untouched, in its prior state (usually maintenance) | do not fence or migrate; wait for the lock holder or investigate, then retry |
+| `75` | not touched by THIS run; the state is whatever the lock holder is doing, possibly mid-switch | not touched by THIS run; the state is whatever the lock holder is doing, possibly mid-switch | do not fence or migrate; wait for the lock holder or investigate, then retry |
 
 A nonzero exit from either verb is never a signal to proceed as if routing
 were in the requested state.

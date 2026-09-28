@@ -56,8 +56,11 @@ umask 022
 # ending, or an operator hitting Ctrl-C) must never interrupt a switch
 # between the temporary link being created and the revert/proof completing
 # — an interrupted mutation is exactly the "state UNKNOWN" case the exit-code
-# contract exists to avoid ever silently leaving behind.
-trap '' HUP INT TERM
+# contract exists to avoid ever silently leaving behind. PIPE is ignored for
+# the same reason: a caller on a non-pty SSH pipe that disconnects would
+# otherwise kill this process with SIGPIPE on its next write to stderr,
+# mid-mutation; ignored, the write fails with EPIPE, which `log` absorbs.
+trap '' HUP INT TERM PIPE
 
 # --- constants (hostnames, paths and ports are hard-coded on purpose) ------
 readonly MANAGED_DIR="/etc/nginx/dotmac/vendor"
@@ -190,6 +193,26 @@ require_managed_dir_mode() {
 # silently fall back to a non-atomic copy-and-unlink (see the runbook's
 # note on this same assumption). Comparing `stat -c %d` (the containing
 # device number) catches that before any switch is attempted.
+# True only when $1 is a live process whose command name is nginx. Used so a
+# missing, stale or foreign pid file can never make a drain check pass.
+nginx_master_is_live() {
+    local pid="$1" comm
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null || true)"
+    [ "$comm" = "nginx" ]
+}
+
+require_nginx_master() {
+    local pid=""
+    if [ -r "$NGINX_PID_FILE" ]; then
+        pid="$(cat "$NGINX_PID_FILE" 2>/dev/null || true)"
+    fi
+    if ! nginx_master_is_live "$pid"; then
+        FAIL_CODE=65
+        fail "${NGINX_PID_FILE} does not name a live nginx master; refusing (the drain proof depends on it)"
+    fi
+}
+
 require_same_filesystem() {
     local a="$1" b="$2" dev_a dev_b
     dev_a="$(stat -c '%d' "$a")" || { FAIL_CODE=65; fail "cannot stat ${a}"; }
@@ -247,6 +270,7 @@ require_root_owned_and_not_group_or_other_writable "$LIVE_CONF"
 require_root_owned_and_not_group_or_other_writable "$MAINTENANCE_CONF"
 require_root_owned_and_not_group_or_other_writable "$SITES_ENABLED_DIR"
 require_same_filesystem "$MANAGED_DIR" "$SITES_ENABLED_DIR"
+require_nginx_master
 
 # A prior crashed run may have left a stray temporary link behind; clean it
 # up under the lock, before doing anything else. This never touches
@@ -307,7 +331,9 @@ no_worker_is_shutting_down() {
     if [ -r "$NGINX_PID_FILE" ]; then
         master_pid="$(cat "$NGINX_PID_FILE" 2>/dev/null || true)"
     fi
-    [ -n "$master_pid" ] || return 0
+    # Fail closed: without a live nginx master this check can prove nothing,
+    # and on the maintenance-on short-circuit it is the ONLY drain proof.
+    nginx_master_is_live "$master_pid" || return 1
     for pid in $(pgrep -P "$master_pid" 2>/dev/null || true); do
         if worker_title_is_shutting_down "$pid"; then
             return 1
@@ -561,6 +587,10 @@ case "$VERB" in
         exit 0
         ;;
     routing-restore)
+        # Deliberately NO drain-wait on this verb's already-live short-circuit:
+        # a straggling old MAINTENANCE worker can only answer 503, which is
+        # fail-safe and self-correcting, whereas a straggling old LIVE worker
+        # during maintenance-on would leak real traffic past a declared window.
         if ! app_health_is_ready; then
             FAIL_CODE=65
             fail "app health precondition (${APP_HEALTH_URL}) is not 200; refusing to switch"

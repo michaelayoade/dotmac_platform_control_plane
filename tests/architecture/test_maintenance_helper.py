@@ -445,7 +445,7 @@ def test_every_curl_invocation_carries_q_and_both_timeouts() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. `#!/bin/bash` and `trap '' HUP INT TERM` are present.
+# 10. `#!/bin/bash` and `trap '' HUP INT TERM PIPE` are present.
 # ---------------------------------------------------------------------------
 
 
@@ -453,7 +453,7 @@ def test_shebang_and_signal_trap_are_present() -> None:
     script = _text(HELPER)
     lines = script.splitlines()
     assert lines[0] == "#!/bin/bash"
-    assert "trap '' HUP INT TERM" in script
+    assert "trap '' HUP INT TERM PIPE" in script
 
     # Sensitivity: `#!/usr/bin/env bash` (PATH-dependent) instead of the
     # pinned `#!/bin/bash` would still satisfy a bare `"bash" in lines[0]`
@@ -978,3 +978,19 @@ def test_live_conf_hides_the_marker_header_from_the_upstream() -> None:
     # `test_maintenance_conf_equals_live_conf_except_for_the_443_location_
     # block` above deliberately excludes from its prefix/suffix comparison
     # — confirmed by re-reading that test: it still holds unchanged.
+
+
+def test_the_drain_checks_fail_closed_without_a_live_nginx_master() -> None:
+    """A missing, stale or foreign pid file must never let a drain check pass.
+
+    Sensitivity: restoring `[ -n "$master_pid" ] || return 0` in
+    `no_worker_is_shutting_down`, or dropping `require_nginx_master` from the
+    top-level preconditions, fails this test.
+    """
+    script = HELPER.read_text(encoding="utf-8")
+    body = script[script.index("no_worker_is_shutting_down() {") :]
+    body = body[: body.index("\n}\n")]
+    assert 'nginx_master_is_live "$master_pid" || return 1' in body
+    assert "|| return 0" not in body
+    assert "\nrequire_nginx_master\n" in script
+    assert '[ "$comm" = "nginx" ]' in script
