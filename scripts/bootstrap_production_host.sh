@@ -138,19 +138,15 @@ main() {
 
     install -d -m 0755 /var/www/certbot
 
-    local managed_lock_held=0
+    local site_is_managed=0
     if is_nginx_site_managed; then
-        # Both managed confs already pass the ACME challenge through on
-        # port 80 (see deploy/nginx/vendor.dotmac.io{,.maintenance}.conf),
-        # so there is nothing to switch here — the enabled link may
-        # legitimately be mid-maintenance, and this script must not touch
-        # it. Hold the same lock the helper uses for the rest of the
-        # managed-mode nginx handling below.
-        exec 8<"$MANAGED_NGINX_DIR"
-        flock 8
-        managed_lock_held=1
-        install_managed_conf_atomically deploy/nginx/vendor.dotmac.io.conf "$MANAGED_LIVE_CONF"
-        install_managed_conf_atomically deploy/nginx/vendor.dotmac.io.maintenance.conf "$MANAGED_MAINTENANCE_CONF"
+        site_is_managed=1
+        # Nothing runs here in managed mode: both managed confs already pass
+        # the ACME challenge through on port 80 (see
+        # deploy/nginx/vendor.dotmac.io{,.maintenance}.conf) via whichever
+        # one is currently enabled, and the enabled link may legitimately be
+        # mid-maintenance right now — this script must not touch it, or take
+        # its lock, before the certificate is issued below.
     else
         install -m 0644 deploy/nginx/vendor.dotmac.io.bootstrap.conf "$NGINX_AVAILABLE"
         ln -sfn "$NGINX_AVAILABLE" "$NGINX_ENABLED"
@@ -169,11 +165,27 @@ main() {
     openssl x509 -checkend 2592000 -noout -in "$CERTIFICATE" >/dev/null \
         || die "production certificate expires within 30 days"
 
-    if [[ "$managed_lock_held" -eq 1 ]]; then
-        # The managed confs are already installed above. Reload only if the
-        # enabled link is CURRENTLY pointing at live.conf — a host caught
-        # mid-maintenance during a bootstrap re-run keeps its enabled
-        # config untouched by this script.
+    if [[ "$site_is_managed" -eq 1 ]]; then
+        # The lock is held ONLY around this install-validate-reload block —
+        # never across issue_production_certificate above, which can block
+        # on ACME network I/O far longer than any maintenance-helper run
+        # should ever have to wait for a concurrent lock holder. The wait is
+        # bounded (60s): a stuck concurrent run fails this bootstrap loudly
+        # instead of hanging it indefinitely.
+        exec 8<"$MANAGED_NGINX_DIR"
+        flock -w 60 8 \
+            || die "could not acquire the managed nginx lock (${MANAGED_NGINX_DIR}) within 60s"
+        install_managed_conf_atomically deploy/nginx/vendor.dotmac.io.conf "$MANAGED_LIVE_CONF"
+        install_managed_conf_atomically deploy/nginx/vendor.dotmac.io.maintenance.conf "$MANAGED_MAINTENANCE_CONF"
+        # Reload only if the enabled link is CURRENTLY pointing at
+        # live.conf — a host caught mid-maintenance during a bootstrap
+        # re-run keeps its enabled config untouched by this script. If the
+        # link points at maintenance.conf instead, the live.conf just
+        # installed above is left UNVALIDATED here on purpose: the next
+        # `dotmac-vendor-maintenance routing-restore` run validates it with
+        # its own `nginx -t` before ever switching to it, and reverts
+        # (proven, exit 66) if that fails — this script does not duplicate
+        # that check.
         if [[ "$(readlink -f "$NGINX_ENABLED")" == "$MANAGED_LIVE_CONF" ]]; then
             nginx -t
             systemctl reload nginx

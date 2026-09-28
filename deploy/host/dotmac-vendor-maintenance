@@ -52,13 +52,19 @@
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 set -euo pipefail
 umask 022
-trap '' HUP
+# A HUP, INT or TERM delivered mid-mutation (e.g. the calling shell/session
+# ending, or an operator hitting Ctrl-C) must never interrupt a switch
+# between the temporary link being created and the revert/proof completing
+# — an interrupted mutation is exactly the "state UNKNOWN" case the exit-code
+# contract exists to avoid ever silently leaving behind.
+trap '' HUP INT TERM
 
 # --- constants (hostnames, paths and ports are hard-coded on purpose) ------
 readonly MANAGED_DIR="/etc/nginx/dotmac/vendor"
 readonly LIVE_CONF="${MANAGED_DIR}/live.conf"
 readonly MAINTENANCE_CONF="${MANAGED_DIR}/maintenance.conf"
 readonly ENABLED_LINK="/etc/nginx/sites-enabled/vendor.dotmac.io"
+readonly SITES_ENABLED_DIR="/etc/nginx/sites-enabled"
 readonly NGINX_BIN="/usr/sbin/nginx"
 readonly RELOAD_CMD="/usr/bin/systemctl reload nginx"
 readonly NGINX_PID_FILE="/run/nginx.pid"
@@ -78,7 +84,10 @@ readonly DRAIN_BOUND_SECONDS=90
 
 log() {
     logger -t "$LOGGER_TAG" -- "$*" || true
-    printf '%s\n' "$*" >&2
+    # `|| true`: a broken stderr pipe (e.g. the invoking sudo session's
+    # terminal going away) must never itself become this script's exit
+    # code — only the documented FAIL_CODE/0 contract may.
+    printf '%s\n' "$*" >&2 || true
 }
 
 # MUTATED flips to 1 the instant the enabled-site symlink is first switched
@@ -158,6 +167,39 @@ require_root_owned_and_not_group_or_other_writable() {
     fi
 }
 
+# The lock is an flock on an fd opened against MANAGED_DIR itself: anyone
+# who can open that directory can contend for (or, with a malicious flock
+# implementation, spoof) the lock. Being merely "not group/other-writable"
+# is not enough — the directory must not be group/other-READABLE either, or
+# any local user can open it and take the lock. 0750 (root + its group) is
+# the least restrictive mode still allowed; 0700 is the tighter default.
+require_managed_dir_mode() {
+    local path="$1" mode
+    mode="$(stat -c '%a' "$path")" || { FAIL_CODE=65; fail "cannot stat ${path}"; }
+    case "$mode" in
+        700 | 750) ;;
+        *)
+            FAIL_CODE=65
+            fail "${path} must be mode 0700 or 0750 (found ${mode}); a more permissive mode lets any local user open it and take the maintenance lock"
+            ;;
+    esac
+}
+
+# `mv -T` is only atomic within a single filesystem; if MANAGED_DIR and the
+# sites-enabled directory were ever split across mounts, the switch would
+# silently fall back to a non-atomic copy-and-unlink (see the runbook's
+# note on this same assumption). Comparing `stat -c %d` (the containing
+# device number) catches that before any switch is attempted.
+require_same_filesystem() {
+    local a="$1" b="$2" dev_a dev_b
+    dev_a="$(stat -c '%d' "$a")" || { FAIL_CODE=65; fail "cannot stat ${a}"; }
+    dev_b="$(stat -c '%d' "$b")" || { FAIL_CODE=65; fail "cannot stat ${b}"; }
+    if [ "$dev_a" != "$dev_b" ]; then
+        FAIL_CODE=65
+        fail "${a} and ${b} are on different filesystems; mv -T would not be atomic"
+    fi
+}
+
 # Reads (never writes) the enabled-site symlink and records which managed
 # config it currently targets, so every later revert goes back to the
 # state that was ACTUALLY running when this invocation started — never a
@@ -198,9 +240,13 @@ marker_for_conf() {
 }
 
 capture_and_validate_prior_state
+log "captured prior state: ${CAPTURED_PRIOR}"
 require_root_owned_and_not_group_or_other_writable "$MANAGED_DIR"
+require_managed_dir_mode "$MANAGED_DIR"
 require_root_owned_and_not_group_or_other_writable "$LIVE_CONF"
 require_root_owned_and_not_group_or_other_writable "$MAINTENANCE_CONF"
+require_root_owned_and_not_group_or_other_writable "$SITES_ENABLED_DIR"
+require_same_filesystem "$MANAGED_DIR" "$SITES_ENABLED_DIR"
 
 # A prior crashed run may have left a stray temporary link behind; clean it
 # up under the lock, before doing anything else. This never touches
@@ -217,6 +263,13 @@ done
 # never a temporary link left sitting under sites-enabled/*. -----------------
 switch_enabled_site() {
     local target="$1"
+    # Deliberately conservative: MUTATED is set before the FIRST filesystem
+    # call this function makes (the temporary `ln -s`), not just before the
+    # `mv -T` that actually repoints ENABLED_LINK. A failed `ln -s` (e.g. a
+    # stray leftover from a previous crash that `rm -f` above didn't reach)
+    # is therefore treated as "state unknown" (67), not "nothing happened"
+    # (65) — this function makes no promise about what it left behind once
+    # it starts touching MANAGED_DIR at all.
     MUTATED=1
     local tmp_link
     tmp_link="${MANAGED_DIR}/$(basename "$ENABLED_LINK").tmp.$$"
@@ -228,11 +281,67 @@ validate_config() {
     "$NGINX_BIN" -t
 }
 
+# True (1, "is shutting down") if $1's process title contains nginx's own
+# "worker process is shutting down" string. `ps -o args=` reads the
+# kernel's copy of the process's argv/title (what nginx's setproctitle-style
+# renaming actually changes), so this does not depend on any particular ps
+# flavor beyond POSIX `-o args=`.
+worker_title_is_shutting_down() {
+    local pid="$1" title
+    title="$(ps -o args= -p "$pid" 2>/dev/null || true)"
+    case "$title" in
+        *"worker process is shutting down"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Snapshot-INDEPENDENT: true (0, "none shutting down") only when NO child of
+# the CURRENT nginx master — the master pid is re-read fresh on every call,
+# never cached — carries the shutting-down title. This is deliberately a
+# second, unrelated signal from the old-pid/new-worker-count comparison in
+# reload_and_prove_drain below: a master restart or PID reuse between calls
+# could fool a stale pid snapshot, but cannot fool a title re-read fresh
+# from the currently-running master's actual children.
+no_worker_is_shutting_down() {
+    local master_pid="" pid
+    if [ -r "$NGINX_PID_FILE" ]; then
+        master_pid="$(cat "$NGINX_PID_FILE" 2>/dev/null || true)"
+    fi
+    [ -n "$master_pid" ] || return 0
+    for pid in $(pgrep -P "$master_pid" 2>/dev/null || true); do
+        if worker_title_is_shutting_down "$pid"; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Bounded (DRAIN_BOUND_SECONDS) wait for no_worker_is_shutting_down to hold.
+# Used by reload_and_prove_drain below (as a second check alongside the
+# old-pid comparison) AND by the maintenance-on short-circuit (which never
+# calls reload_and_prove_drain at all, but must still confirm an EARLIER
+# run's timed-out drain has actually finished before declaring "already in
+# maintenance, proven").
+wait_for_no_shutting_down_workers() {
+    local waited=0
+    while :; do
+        if no_worker_is_shutting_down; then
+            return 0
+        fi
+        if [ "$waited" -ge "$DRAIN_BOUND_SECONDS" ]; then
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+}
+
 # Returns 0 on a proven-drained reload, 1 if the reload command itself
 # failed (a clean, revertable failure), 2 if old workers never fully
-# drained (or no new worker ever appeared) within the bound — an AMBIGUOUS
-# worker-mix state that callers must treat as an immediate 67, never a
-# declared-successful revert.
+# drained (or no new worker ever appeared, or a worker is still mid-
+# shutdown by process title) within the bound — an AMBIGUOUS worker-mix
+# state that callers must treat as an immediate 67, never a declared-
+# successful revert.
 reload_and_prove_drain() {
     local master_pid="" old_workers=""
     if [ -r "$NGINX_PID_FILE" ]; then
@@ -243,8 +352,10 @@ reload_and_prove_drain() {
     fi
 
     if ! $RELOAD_CMD; then
+        log "reload command failed"
         return 1
     fi
+    log "reload command succeeded; waiting up to ${DRAIN_BOUND_SECONDS}s for drain"
 
     local waited=0
     while :; do
@@ -260,10 +371,19 @@ reload_and_prove_drain() {
         if [ -n "$current_master" ]; then
             new_worker_count="$(pgrep -P "$current_master" 2>/dev/null | wc -l)"
         fi
-        if [ "$any_old_alive" -eq 0 ] && [ "$new_worker_count" -ge 1 ]; then
+        # The old-pid/new-worker-count comparison AND the snapshot-
+        # independent title check must BOTH hold before a drain counts as
+        # proven — either alone can be fooled (a stale pid snapshot by PID
+        # reuse; the title check alone by a master that hasn't reloaded at
+        # all yet, which a fresh master with zero children would trivially
+        # satisfy).
+        if [ "$any_old_alive" -eq 0 ] && [ "$new_worker_count" -ge 1 ] \
+            && no_worker_is_shutting_down; then
+            log "drain complete: old workers gone, new worker present, none shutting down"
             return 0
         fi
         if [ "$waited" -ge "$DRAIN_BOUND_SECONDS" ]; then
+            log "drain timed out after ${DRAIN_BOUND_SECONDS}s"
             return 2
         fi
         sleep 1
@@ -356,6 +476,7 @@ app_health_is_ready() {
 # the mutation boundary and a failed revert cannot be declared safe.
 do_revert() {
     local prior="$1"
+    log "reverting to captured prior: ${prior}"
     switch_enabled_site "$prior"
     if ! validate_config; then
         FAIL_CODE=67
@@ -382,6 +503,7 @@ do_revert() {
 # mix) skips the revert-then-declare-66 story and goes straight to 67.
 attempt_switch_and_prove_or_revert() {
     local target="$1" want_status="$2" want_marker="$3"
+    log "switching to ${target} (captured prior: ${CAPTURED_PRIOR})"
     switch_enabled_site "$target"
 
     if ! validate_config; then
@@ -416,11 +538,19 @@ case "$VERB" in
         if [ "$CAPTURED_PRIOR" = "$MAINTENANCE_CONF" ]; then
             # Already in maintenance: never switch, only prove. A proof
             # failure here stays in maintenance — it must NEVER revert to
-            # live, because live is not known to be safe right now.
+            # live, because live is not known to be safe right now. Before
+            # proving, confirm an EARLIER run's timed-out drain has actually
+            # finished — old workers left mid-shutdown from a prior
+            # maintenance-on may still be serving live traffic even though
+            # the enabled link already points at maintenance.conf.
+            if ! wait_for_no_shutting_down_workers; then
+                FAIL_CODE=67
+                fail "already in maintenance but old workers have not finished draining within ${DRAIN_BOUND_SECONDS}s; staying in maintenance; state needs investigation"
+            fi
             PROVE_WANT_STATUS=503
             PROVE_WANT_MARKER="present"
             if prove_public_with_settle; then
-                log "maintenance-on: already in maintenance; proved 503 + marker"
+                log "maintenance-on: already in maintenance; proved drain + 503 + marker"
                 exit 0
             fi
             FAIL_CODE=67
