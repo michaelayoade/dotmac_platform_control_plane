@@ -268,6 +268,17 @@ def _emit(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     and fail closed on a bad `--source-revision` or an empty head set."""
     from vendor_cp.migrations import make_alembic_config
 
+    if args.image_document is not None:
+        parser.error("--emit does not take --image-document (that is --compare's)")
+    if args.descriptor_heads:
+        parser.error("--emit does not take --descriptor-heads (that is --compare's)")
+    if args.database_heads:
+        parser.error("--emit does not take --database-heads (that is --compare's)")
+    if args.expected_source_revision is not None:
+        parser.error(
+            "--emit does not take --expected-source-revision (that is --compare's)"
+        )
+
     if not args.source_revision:
         parser.error("--emit requires --source-revision")
     if args.output is None:
@@ -309,6 +320,11 @@ def _compare(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     verdict exits `COMPARE_MISMATCH_EXIT_CODE`, a fixed code distinct from
     both argparse's own usage-error code (2) and `--emit`'s failure code (1).
     """
+    if args.source_revision is not None:
+        parser.error("--compare does not take --source-revision (that is --emit's)")
+    if args.output is not None:
+        parser.error("--compare does not take --output (that is --emit's)")
+
     if args.image_document is None:
         parser.error("--compare requires --image-document")
     if not args.descriptor_heads:
@@ -365,10 +381,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     # `--compare`-only arguments. `nargs="+"` refuses an empty
     # `--descriptor-heads`/`--database-heads` (argparse itself exits 2 with
     # "expected at least one argument"); required-when-given is checked in
-    # `_compare`.
+    # `_compare`. `action="extend"` so a REPEATED flag accumulates every head
+    # named across all occurrences (`--descriptor-heads h1 --descriptor-heads
+    # h2` yields `["h1", "h2"]`) rather than argparse's plain `nargs="+"`
+    # default of silently keeping only the last occurrence's list.
     parser.add_argument("--image-document", type=Path)
-    parser.add_argument("--descriptor-heads", nargs="+")
-    parser.add_argument("--database-heads", nargs="+")
+    parser.add_argument("--descriptor-heads", nargs="+", action="extend")
+    parser.add_argument("--database-heads", nargs="+", action="extend")
     parser.add_argument("--expected-source-revision")
 
     args = parser.parse_args(argv)
