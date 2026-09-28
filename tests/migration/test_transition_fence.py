@@ -1099,6 +1099,98 @@ def test_a_prior_naming_a_different_writer_set_is_refused_as_prior_mismatch(
             assert fence_module._current_grants(conn, db) == before
 
 
+# ── (m2) restore's two required bindings: database and fence_id ────────────
+
+
+class _NoQueryAllowed:
+    """A connection proxy that fails any `execute()` call — proves a refusal
+    happens before ANY query, not merely before a specific one. `conn` is
+    forwarded for attribute access (`_require_autocommit` only reads
+    `conn.connection.dbapi_connection.autocommit`, never queries it) so a
+    real fenced database can back this proof without this proxy ever letting
+    a query reach the server."""
+
+    def __init__(self, real: Connection) -> None:
+        self._real = real
+        self.connection = real.connection
+
+    def execute(self, *args: object, **kwargs: object) -> object:
+        raise AssertionError(
+            "no query should run before the database/fence_id binding check"
+        )
+
+
+def test_restore_refuses_a_database_mismatch_before_any_query(
+    admin_url: str, db: str
+) -> None:
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            proof = fence_writers(
+                conn,
+                database=db,
+                fence_id=FENCE_ID,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            proxy = _NoQueryAllowed(conn)
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(
+                    proxy,  # type: ignore[arg-type]
+                    proof,
+                    database=f"not_{db}",
+                    expected_fence_id=FENCE_ID,
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
+
+            # The real fence is untouched: no query ever reached it.
+            restore_writers(
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+
+
+def test_restore_refuses_a_replayed_proof_whose_fence_id_differs(
+    admin_url: str, db: str
+) -> None:
+    """A proof from a superseded fencing run against the SAME database must
+    not be accepted by a restore completing a DIFFERENT run — the replay this
+    binding exists to catch."""
+    with _writer_role(admin_url) as w:
+        with _connect(admin_url, autocommit=True) as conn:
+            proof = fence_writers(
+                conn,
+                database=db,
+                fence_id=FENCE_ID,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            with pytest.raises(FenceRefused) as refused:
+                restore_writers(
+                    conn,
+                    proof,
+                    database=db,
+                    expected_fence_id="a-different-run",
+                    session_wait_seconds=SESSION_WAIT_SECONDS,
+                )
+            assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
+            # Nothing was granted: still fully fenced.
+            grants = fence_module._current_grants(conn, db)
+            assert not _has_connect(grants, "")
+            assert not _has_connect(grants, w)
+
+            restore_writers(
+                conn,
+                proof,
+                database=db,
+                expected_fence_id=FENCE_ID,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+
+
 # ── (n) a quoted grantee fences and restores exactly ────────────────────────
 
 
