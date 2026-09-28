@@ -1894,7 +1894,16 @@ def test_owner_only_fence_with_a_raising_terminator_compensates(
                         terminator=_broken_terminator,
                     )
                 assert refused.value.code == FenceRefusalCode.FENCE_INTERRUPTED
-                assert isinstance(refused.value.__cause__, RuntimeError)
+                # __cause__ is the private _TerminatorFailed wrapper (itself
+                # a RuntimeError, which is why a plain isinstance check
+                # against RuntimeError alone would pass without actually
+                # proving the ORIGINAL exception survived) — its OWN
+                # __cause__ must be the exact RuntimeError the terminator
+                # raised, chained through, not swallowed.
+                wrapper = refused.value.__cause__
+                assert type(wrapper).__name__ == "_TerminatorFailed"
+                assert isinstance(wrapper.__cause__, RuntimeError)
+                assert str(wrapper.__cause__) == "broker unreachable"
                 after = fence_module._current_grants(owner_conn, owner_db)
                 assert after == before
 
@@ -1927,13 +1936,16 @@ def test_restore_refuses_a_proof_whose_member_roles_no_longer_matches_live_membe
             )
             # A role granted membership in the fenced writer AFTER the fence
             # closed: live membership now disagrees with what `proof`
-            # recorded.
+            # recorded. The OWNER connection is NOCREATEROLE (see
+            # `owner_role`), so this — and its cleanup — runs over a
+            # SEPARATE superuser connection.
             new_member = f"fence_new_member_{uuid.uuid4().hex[:10]}"
-            owner_conn.execute(
-                text(f"CREATE ROLE {new_member} LOGIN NOSUPERUSER NOBYPASSRLS")
-            )
-            owner_conn.execute(text(f"GRANT {w} TO {new_member}"))
             try:
+                with _connect(postgres_url, autocommit=True) as super_conn:
+                    super_conn.execute(
+                        text(f"CREATE ROLE {new_member} LOGIN NOSUPERUSER NOBYPASSRLS")
+                    )
+                    super_conn.execute(text(f"GRANT {w} TO {new_member}"))
                 with pytest.raises(FenceRefused) as refused:
                     restore_writers(
                         owner_conn,
@@ -1948,9 +1960,10 @@ def test_restore_refuses_a_proof_whose_member_roles_no_longer_matches_live_membe
                 ).scalar_one()
                 assert public_can_connect is False
             finally:
-                owner_conn.execute(text(f"REVOKE {w} FROM {new_member}"))
-                owner_conn.execute(text(f"DROP OWNED BY {new_member}"))
-                owner_conn.execute(text(f"DROP ROLE IF EXISTS {new_member}"))
+                with _connect(postgres_url, autocommit=True) as super_conn:
+                    super_conn.execute(text(f"REVOKE {w} FROM {new_member}"))
+                    super_conn.execute(text(f"DROP OWNED BY {new_member}"))
+                    super_conn.execute(text(f"DROP ROLE IF EXISTS {new_member}"))
                 restore_writers(
                     owner_conn,
                     proof,
@@ -1980,6 +1993,7 @@ def test_restore_refuses_a_proof_whose_prior_grants_grantor_is_not_the_current_o
             )
             forged_proof = dataclasses.replace(proof, prior_grants=forged_grants)
 
+            before = fence_module._current_grants(owner_conn, owner_db)
             with pytest.raises(FenceRefused) as refused:
                 restore_writers(
                     owner_conn,
@@ -1987,9 +2001,15 @@ def test_restore_refuses_a_proof_whose_prior_grants_grantor_is_not_the_current_o
                     session_wait_seconds=SESSION_WAIT_SECONDS,
                 )
             assert refused.value.code == FenceRefusalCode.PROOF_MISMATCH
-            assert not fence_module._current_grants(owner_conn, owner_db) & {
-                ("", "CONNECT", False, w)
-            }
+            # Nothing was granted: the live ACL is byte-identical to what it
+            # was before the refused call, and PUBLIC specifically still
+            # lacks CONNECT.
+            assert fence_module._current_grants(owner_conn, owner_db) == before
+            public_can_connect = owner_conn.execute(
+                text("SELECT has_database_privilege('public', :db, 'CONNECT')"),
+                {"db": owner_db},
+            ).scalar_one()
+            assert public_can_connect is False
 
             # Restore for real with the genuine (unforged) proof so fixture
             # teardown can drop the role.
@@ -1999,6 +2019,48 @@ def test_restore_refuses_a_proof_whose_prior_grants_grantor_is_not_the_current_o
                 session_wait_seconds=SESSION_WAIT_SECONDS,
                 terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
             )
+
+
+def test_restore_grants_a_legally_shaped_forged_entry_the_digest_is_what_would_catch(
+    owner_url: str, owner_db: str, postgres_url: str, url_for: Callable[..., str]
+) -> None:
+    """A forged `prior_grants` entry that is STRUCTURALLY indistinguishable
+    from a real one — a PUBLIC CONNECT grant made by the current owner, the
+    exact shape a real prior ACL has — passes the `to_add` bound
+    `restore_writers` applies (that bound cannot tell "the real prior ACL"
+    from "an in-memory `FenceProof` a caller mutated after `fence_writers`
+    returned it": both are owner-granted CONNECT to an allowed grantee).
+    `restore_writers` takes a `FenceProof` directly, in-process, and
+    performs NO digest check — that defence belongs to
+    `FenceProof.from_document`, for a proof that crosses a process boundary
+    as untrusted JSON (PR 2). This test proves that boundary explicitly:
+    restore proceeds and actually GRANTs the forged entry, which is exactly
+    why an orchestrator must never hand-construct a `FenceProof` from
+    something it read out of band — it must go through
+    `from_document(doc, expected_digest=...)`."""
+    with _writer_role(postgres_url) as w:
+        with _connect(owner_url, autocommit=True) as owner_conn:
+            proof = fence_writers(
+                owner_conn,
+                database=owner_db,
+                writer_roles=(w,),
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+                terminator=_superuser_terminator(postgres_url, owner_db, (w,)),
+            )
+            owner = fence_module._database_owner(owner_conn, owner_db)
+            forged_entry = ("", "CONNECT", True, owner)
+            assert forged_entry not in proof.prior_grants
+            forged_proof = dataclasses.replace(
+                proof, prior_grants=frozenset({*proof.prior_grants, forged_entry})
+            )
+
+            restored = restore_writers(
+                owner_conn,
+                forged_proof,
+                session_wait_seconds=SESSION_WAIT_SECONDS,
+            )
+            assert "PUBLIC" in restored.roles_restored
+            assert forged_entry in fence_module._current_grants(owner_conn, owner_db)
 
 
 # ── (x) no-op terminator: survives and compensates ──────────────────────────
