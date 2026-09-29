@@ -96,6 +96,12 @@ REFUSAL_CODES: Final[dict[str, ExitCode]] = {
     "config.missing": ExitCode.USAGE,
     "config.invalid": ExitCode.USAGE,
     "config.migration_root_unset": ExitCode.USAGE,
+    "usage.missing_input": ExitCode.USAGE,
+    # `fence_commands.FenceCommandConfigError`: a required host-supplied
+    # value (database, fence_id, expected_digest, expected_fence_id,
+    # session_wait_seconds) was missing, empty, or malformed — caught before
+    # any connection, so this is a configuration fault, not a fence verdict.
+    "usage.fence_command_invalid": ExitCode.USAGE,
     # ── owner refusals (3) ─────────────────────────────────────────────────
     "owner.transition_refused": ExitCode.REFUSED,
     "owner.expected_state": ExitCode.REFUSED,
@@ -105,10 +111,20 @@ REFUSAL_CODES: Final[dict[str, ExitCode]] = {
     "owner.forbidden": ExitCode.REFUSED,
     "owner.migration_target_refused": ExitCode.REFUSED,
     "owner.provider_not_permitted": ExitCode.REFUSED,
+    # `transition_fence.FenceRefused`: the fence itself decided no — carries
+    # that module's own closed `FenceRefusalCode` (and `before_acl`, when
+    # set) in the message; see `translate`'s dedicated branch.
+    "owner.fence_refused": ExitCode.REFUSED,
     # ── absent or unreachable evidence (4) ─────────────────────────────────
     "evidence.not_found": ExitCode.UNAVAILABLE,
     "evidence.tool_absent": ExitCode.UNAVAILABLE,
     "evidence.capability_absent": ExitCode.UNAVAILABLE,
+    # `fence_commands.BrokerProtocolError`: the host's broker did not reply
+    # as the protocol requires (wrong fence_id, a trailing token, end of
+    # input). Nobody refused — the channel broke — so this is an absence, not
+    # a decision, the same distinction `RelayNotConfiguredError` draws
+    # elsewhere in this vocabulary.
+    "evidence.fence_broker_unavailable": ExitCode.UNAVAILABLE,
     # ADR-0013 A6.4: the Foundation-execution inputs a plan or rollout needs
     # do not exist before Gate 3 — no owner refused, so this is an absence.
     "evidence.plan_input_derivation_unavailable": ExitCode.UNAVAILABLE,
