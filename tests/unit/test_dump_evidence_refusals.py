@@ -30,6 +30,7 @@ import pytest
 from vendor_cp.recovery.dump_evidence import (
     DumpEvidence,
     FoundationUnavailable,
+    PgRestoreCheckFailed,
     PgRestoreUnavailable,
     capture_dump_evidence,
     to_backup_record,
@@ -91,6 +92,118 @@ def test_pg_restore_unavailable_is_a_distinct_refusal_from_a_failed_check(
         capture_dump_evidence(present)
 
 
+def test_capture_dump_evidence_invokes_a_full_decompression_not_a_toc_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sensitivity proof for the fix: `--list` only reads the archive header
+    and table of contents, never the data blocks, so it cannot back
+    `Assurance.VERIFIED`'s "reads every byte" claim. The real check must be
+    `--file /dev/null` (a full decompression, discarded), with `--` guarding
+    the path from being parsed as an option, and no `-d`/`--dbname` (no live
+    database connection)."""
+    present = tmp_path / "present.dump"
+    present.write_bytes(b"not a real dump, but non-empty")
+    monkeypatch.setattr(
+        "vendor_cp.recovery.dump_evidence.shutil.which",
+        lambda _name: "/usr/bin/pg_restore",
+    )
+
+    captured_argv: list[object] = []
+
+    def _spy_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured_argv.extend(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _spy_run)
+
+    capture_dump_evidence(present)
+
+    assert captured_argv[0] == "/usr/bin/pg_restore"
+    assert (
+        "--list" not in captured_argv
+    ), "a TOC-only listing does not prove full decompression"
+    assert "--file" in captured_argv
+    assert captured_argv[captured_argv.index("--file") + 1] == "/dev/null"
+    assert "--" in captured_argv, (
+        "the dump path must be guarded by `--` so a path beginning with "
+        "`-` cannot be parsed as an option"
+    )
+    assert captured_argv.index("--") < captured_argv.index(
+        str(present)
+    ), "`--` must come before the path it guards"
+    assert (
+        "-d" not in captured_argv and "--dbname" not in captured_argv
+    ), "this check must never open a live database connection"
+
+
+def test_a_pg_restore_timeout_is_a_check_failure_not_a_pass_or_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timeout answers neither "the archive is fine" nor "the archive is
+    bad" — it must not be silently folded into either `decompression_proved`
+    outcome, nor confused with `PgRestoreUnavailable` (the tool WAS found and
+    started)."""
+    present = tmp_path / "present.dump"
+    present.write_bytes(b"not a real dump, but non-empty")
+    monkeypatch.setattr(
+        "vendor_cp.recovery.dump_evidence.shutil.which",
+        lambda _name: "/usr/bin/pg_restore",
+    )
+
+    def _timeout(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd="pg_restore", timeout=30)
+
+    monkeypatch.setattr(subprocess, "run", _timeout)
+
+    with pytest.raises(PgRestoreCheckFailed):
+        capture_dump_evidence(present)
+
+
+def test_a_pg_restore_os_error_is_a_check_failure_not_a_pass_or_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    present = tmp_path / "present.dump"
+    present.write_bytes(b"not a real dump, but non-empty")
+    monkeypatch.setattr(
+        "vendor_cp.recovery.dump_evidence.shutil.which",
+        lambda _name: "/usr/bin/pg_restore",
+    )
+
+    def _os_error(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(subprocess, "run", _os_error)
+
+    with pytest.raises(PgRestoreCheckFailed):
+        capture_dump_evidence(present)
+
+
+def test_an_unrecognised_checksum_algorithm_raises_value_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(subprocess, "run", _refuse_any_subprocess_call)
+    present = tmp_path / "present.dump"
+    present.write_bytes(b"not a real dump, but non-empty")
+
+    with pytest.raises(ValueError, match="not a hashlib algorithm"):
+        capture_dump_evidence(present, checksum_algorithm="not-a-real-algorithm")
+
+
+def test_a_variable_length_digest_algorithm_raises_value_error_before_streaming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`shake_128` is a real `hashlib` algorithm whose `.hexdigest()` needs an
+    explicit length argument — calling it bare fails cryptically, and only
+    after a whole file has already been streamed through it if the probe
+    were placed after the read loop instead of before."""
+    monkeypatch.setattr(subprocess, "run", _refuse_any_subprocess_call)
+    present = tmp_path / "present.dump"
+    present.write_bytes(b"not a real dump, but non-empty")
+
+    with pytest.raises(ValueError, match="variable-length digest"):
+        capture_dump_evidence(present, checksum_algorithm="shake_128")
+
+
 def _force_foundation_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force the exact `ModuleNotFoundError` `to_backup_record` catches.
 
@@ -109,6 +222,51 @@ def test_to_backup_record_refuses_cleanly_when_foundation_is_absent(
     _force_foundation_absent(monkeypatch)
 
     with pytest.raises(FoundationUnavailable, match="not installed"):
+        to_backup_record(
+            _SAMPLE,
+            dataset="primary",
+            artefact_class="data_export",
+            evidence_origin="local_artefact",
+        )
+
+
+def test_to_backup_record_refuses_cleanly_when_foundation_is_present_but_incompatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sensitivity proof for the broadened `except` clause: a Foundation
+    checkout that IMPORTS but is missing a name this module needs (an older
+    API surface with no `BackupEvidenceOrigin`, say) raises a plain
+    `ImportError`, not the narrower `ModuleNotFoundError` — before the fix,
+    `except ModuleNotFoundError` alone would have let this escape untyped."""
+
+    class Assurance(str, Enum):
+        COMPLETED = "completed"
+
+    class ArtefactClass(str, Enum):
+        DATA_EXPORT = "data_export"
+
+    @dataclass(frozen=True, slots=True)
+    class BackupRecord:
+        dataset: str
+        path: str
+        size_bytes: int
+        checksum: str
+        checksum_algorithm: str
+        completed_at_epoch: int
+
+    # Deliberately no `BackupEvidenceOrigin` — an older Foundation surface.
+    incomplete_backup = types.ModuleType("dotmac_deployment_foundation.backup")
+    incomplete_backup.Assurance = Assurance  # type: ignore[attr-defined]
+    incomplete_backup.ArtefactClass = ArtefactClass  # type: ignore[attr-defined]
+    incomplete_backup.BackupRecord = BackupRecord  # type: ignore[attr-defined]
+
+    fake_package = types.ModuleType("dotmac_deployment_foundation")
+    monkeypatch.setitem(sys.modules, "dotmac_deployment_foundation", fake_package)
+    monkeypatch.setitem(
+        sys.modules, "dotmac_deployment_foundation.backup", incomplete_backup
+    )
+
+    with pytest.raises(FoundationUnavailable):
         to_backup_record(
             _SAMPLE,
             dataset="primary",
