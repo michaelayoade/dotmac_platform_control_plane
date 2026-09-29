@@ -112,6 +112,12 @@ it. It never runs `ln -sfn` on the enabled link once it is managed, and it
 reloads only if the link currently resolves to `live.conf` — a bootstrap
 re-run that happens to land while a deploy has the host in maintenance
 does not touch the enabled link or force an unexpected reload.
+Bootstrap accepts only an absent enabled site, its exact legacy symlink,
+or a symlink directly to the existing regular `live.conf` or
+`maintenance.conf`. A dangling link, an unknown target (even inside the
+managed directory), or an existing non-symlink is refused before nginx is
+changed. It checks the link again after certificate issuance, under the
+managed lock when applicable.
 
 ## The one-time `sites-enabled` conversion
 
@@ -122,8 +128,9 @@ at it with `ln -sfn` (see that script's `NGINX_AVAILABLE`/`NGINX_ENABLED`
 constants and its cert-issuance step, which reinstalls the same file's
 *content* in place rather than switching a symlink). That shape does not
 give the helper anything to atomically switch between: there is only one
-managed file, not two named targets. Pre-conversion, bootstrap's behaviour
-is completely unchanged from before this helper existed.
+managed file, not two named targets. Pre-conversion, bootstrap still installs
+the legacy config when the enabled link is absent or points exactly to the
+existing legacy config. Other pre-existing states now fail closed.
 
 This is a one-time, Michael-only host conversion, done once before the
 first `maintenance-on` rehearsal:
@@ -142,8 +149,8 @@ $ sudo nginx -t && sudo systemctl reload nginx
 
 After this, `/etc/nginx/sites-enabled/vendor.dotmac.io` is a symlink to
 `/etc/nginx/dotmac/vendor/live.conf`. From this point on, `bootstrap_production_host.sh`
-detects the conversion (the enabled link resolves inside
-`/etc/nginx/dotmac/vendor/`) and switches into managed mode: it re-installs
+detects the conversion (the enabled link directly targets an existing
+regular `live.conf` or `maintenance.conf`) and switches into managed mode: it re-installs
 both managed files on every run as described above, and never writes to or
 re-links `/etc/nginx/sites-available/vendor.dotmac.io` or the enabled link
 again. **`/etc/nginx/sites-available/vendor.dotmac.io` is NOT harmless to
@@ -151,6 +158,45 @@ leave in place indefinitely** — it is simply unreferenced once the enabled
 link points elsewhere; a future bootstrap re-run does not read or write it
 anymore, and it should be treated as dead weight to remove during a later
 cleanup, not as a live fallback.
+
+## Installing the helper from the reviewed Git blob (Michael only)
+
+From a trusted checkout that contains the reviewed D16 PR 3 source revision,
+Michael installs the exact helper blob below on the explicitly named host.
+The source revision `87dca788a70a745db228451de116f07a378946f7` has
+Git blob `422d77d5b34c90adff177ddae9ba4c62ed3b8937` at the helper path;
+its independent SHA-256 is
+`5b70fc92db5d0ca492d02128ab6c3931e884ce2c5be3d69973006e461562995b`.
+If that revision is unavailable or either identity differs, stop; do not
+substitute the working-tree file or a branch name. This is a manual
+installation procedure, never a CI or deploy side effect.
+
+```console
+$ set -euo pipefail
+$ REVIEWED_HELPER_REV=87dca788a70a745db228451de116f07a378946f7
+$ REVIEWED_HELPER_BLOB=422d77d5b34c90adff177ddae9ba4c62ed3b8937
+$ REVIEWED_HELPER_SHA256=5b70fc92db5d0ca492d02128ab6c3931e884ce2c5be3d69973006e461562995b
+$ HELPER_PATH=deploy/host/dotmac-vendor-maintenance
+$ test "$(git rev-parse --verify "${REVIEWED_HELPER_REV}^{commit}")" = "$REVIEWED_HELPER_REV"
+$ test "$(git rev-parse "${REVIEWED_HELPER_REV}:${HELPER_PATH}")" = "$REVIEWED_HELPER_BLOB"
+$ test "$(git show "${REVIEWED_HELPER_REV}:${HELPER_PATH}" | sha256sum | cut -d ' ' -f 1)" = "$REVIEWED_HELPER_SHA256"
+$ staged_helper="$(sudo mktemp /usr/local/sbin/.dotmac-vendor-maintenance.XXXXXX)"
+$ git show "${REVIEWED_HELPER_REV}:${HELPER_PATH}" | sudo tee "$staged_helper" >/dev/null
+$ sudo chown root:root "$staged_helper"
+$ sudo chmod 0755 "$staged_helper"
+$ printf '%s  %s\n' "$REVIEWED_HELPER_SHA256" "$staged_helper" | sudo sha256sum -c -
+$ test "$(sudo stat -c '%U:%G:%a' "$staged_helper")" = root:root:755
+$ sudo mv -T "$staged_helper" /usr/local/sbin/dotmac-vendor-maintenance
+```
+
+Run this independent installed-file verification immediately after the
+install, again **before installing the sudoers fragment**, and again **before
+the first rehearsal**. A mismatch blocks sudoers use and rehearsal:
+
+```console
+$ printf '%s  %s\n' '5b70fc92db5d0ca492d02128ab6c3931e884ce2c5be3d69973006e461562995b' '/usr/local/sbin/dotmac-vendor-maintenance' | sudo sha256sum -c -
+$ test "$(sudo stat -c '%U:%G:%a' /usr/local/sbin/dotmac-vendor-maintenance)" = root:root:755
+```
 
 ## Installing the sudoers fragment
 

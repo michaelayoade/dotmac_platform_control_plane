@@ -24,16 +24,34 @@ die() {
     exit 1
 }
 
-# True once the one-time sites-enabled conversion in
-# docs/operations/maintenance-helper.md has happened on this host: the
-# enabled link is a symlink resolving somewhere inside $MANAGED_NGINX_DIR.
-# False on a fresh host, or on a host bootstrapped before that conversion —
-# on which pre-conversion behaviour below is unchanged.
-is_nginx_site_managed() {
-    [[ -L "$NGINX_ENABLED" ]] || return 1
-    local resolved
-    resolved="$(readlink -f "$NGINX_ENABLED")" || return 1
-    [[ "$resolved" == "$MANAGED_NGINX_DIR"/* ]]
+# Classify the enabled site by its literal link target. A resolved path inside
+# the managed directory is insufficient: it could be an unknown or dangling
+# target, and treating either as legacy would relink the site to live routing.
+# Explicit paths make the classifier executable against isolated test files.
+classify_nginx_site() {
+    local enabled="$1" available="$2" live="$3" maintenance="$4"
+    local target state
+
+    if [[ ! -e "$enabled" && ! -L "$enabled" ]]; then
+        printf '%s\n' fresh
+        return
+    fi
+    [[ -L "$enabled" ]] || die "enabled nginx site is not a symlink"
+    target="$(readlink -- "$enabled")" \
+        || die "could not read enabled nginx site link"
+    case "$target" in
+        "$available") state=legacy ;;
+        "$live") state=managed-live ;;
+        "$maintenance") state=managed-maintenance ;;
+        *) die "enabled nginx site has an unexpected target" ;;
+    esac
+    if [[ "$state" == managed-live || "$state" == managed-maintenance ]]; then
+        [[ -d "${live%/*}" && ! -L "${live%/*}" ]] \
+            || die "managed nginx directory is missing or a symlink"
+    fi
+    [[ -f "$target" && ! -L "$target" ]] \
+        || die "enabled nginx site target is not an existing regular file"
+    printf '%s\n' "$state"
 }
 
 # Installs $1 to $2 (inside $MANAGED_NGINX_DIR) atomically: write to a
@@ -138,8 +156,10 @@ main() {
 
     install -d -m 0755 /var/www/certbot
 
-    local site_is_managed=0
-    if is_nginx_site_managed; then
+    local site_is_managed=0 site_state
+    site_state="$(classify_nginx_site "$NGINX_ENABLED" "$NGINX_AVAILABLE" \
+        "$MANAGED_LIVE_CONF" "$MANAGED_MAINTENANCE_CONF")"
+    if [[ "$site_state" == managed-live || "$site_state" == managed-maintenance ]]; then
         site_is_managed=1
         # Nothing runs here in managed mode: both managed confs already pass
         # the ACME challenge through on port 80 (see
@@ -148,6 +168,8 @@ main() {
         # mid-maintenance right now — this script must not touch it, or take
         # its lock, before the certificate is issued below.
     else
+        [[ "$site_state" == fresh || "$site_state" == legacy ]] \
+            || die "enabled nginx site has an unexpected classification"
         install -m 0644 deploy/nginx/vendor.dotmac.io.bootstrap.conf "$NGINX_AVAILABLE"
         ln -sfn "$NGINX_AVAILABLE" "$NGINX_ENABLED"
         nginx -t
@@ -175,6 +197,10 @@ main() {
         exec 8<"$MANAGED_NGINX_DIR"
         flock -w 60 8 \
             || die "could not acquire the managed nginx lock (${MANAGED_NGINX_DIR}) within 60s"
+        site_state="$(classify_nginx_site "$NGINX_ENABLED" "$NGINX_AVAILABLE" \
+            "$MANAGED_LIVE_CONF" "$MANAGED_MAINTENANCE_CONF")"
+        [[ "$site_state" == managed-live || "$site_state" == managed-maintenance ]] \
+            || die "enabled nginx site left managed mode during certificate issuance"
         install_managed_conf_atomically deploy/nginx/vendor.dotmac.io.conf "$MANAGED_LIVE_CONF"
         install_managed_conf_atomically deploy/nginx/vendor.dotmac.io.maintenance.conf "$MANAGED_MAINTENANCE_CONF"
         # Reload only if the enabled link is CURRENTLY pointing at
@@ -186,12 +212,16 @@ main() {
         # its own `nginx -t` before ever switching to it, and reverts
         # (proven, exit 66) if that fails — this script does not duplicate
         # that check.
-        if [[ "$(readlink -f "$NGINX_ENABLED")" == "$MANAGED_LIVE_CONF" ]]; then
+        if [[ "$site_state" == managed-live ]]; then
             nginx -t
             systemctl reload nginx
         fi
         exec 8<&-
     else
+        site_state="$(classify_nginx_site "$NGINX_ENABLED" "$NGINX_AVAILABLE" \
+            "$MANAGED_LIVE_CONF" "$MANAGED_MAINTENANCE_CONF")"
+        [[ "$site_state" == legacy ]] \
+            || die "enabled nginx site left legacy mode during certificate issuance"
         install -m 0644 deploy/nginx/vendor.dotmac.io.conf "$NGINX_AVAILABLE"
         nginx -t
         systemctl reload nginx

@@ -18,7 +18,10 @@ convention in `test_production_deployment.py`.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,6 +31,7 @@ BOOTSTRAP = "scripts/bootstrap_production_host.sh"
 LIVE_CONF = "deploy/nginx/vendor.dotmac.io.conf"
 MAINTENANCE_CONF = "deploy/nginx/vendor.dotmac.io.maintenance.conf"
 SUDOERS = "deploy/host/sudoers.d/dotmac-vendor-maintenance"
+RUNBOOK = "docs/operations/maintenance-helper.md"
 
 MARKER_HEADER = "X-Dotmac-Maintenance"
 
@@ -67,6 +71,79 @@ HELPER_FUNCTIONS = (
 
 def _text(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def _classify_bootstrap_site(
+    enabled: Path, available: Path, live: Path, maintenance: Path
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 -- fixed bash executes the checked-in classifier
+        [
+            "/bin/bash",
+            "-c",
+            'source "$1"; shift; classify_nginx_site "$@"',
+            "bash",
+            str(ROOT / BOOTSTRAP),
+            str(enabled),
+            str(available),
+            str(live),
+            str(maintenance),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_runbook_pins_and_verifies_the_installed_helper() -> None:
+    runbook = _text(RUNBOOK)
+    install_section = runbook.split(
+        "## Installing the helper from the reviewed Git blob (Michael only)", 1
+    )[1].split("## Installing the sudoers fragment", 1)[0]
+    match = re.search(
+        r"The source revision `([0-9a-f]{40})` has\nGit blob `([0-9a-f]{40})`",
+        install_section,
+    )
+    digest_match = re.search(
+        r"its independent SHA-256 is\n`([0-9a-f]{64})`", install_section
+    )
+    assert match and digest_match
+    revision, blob = match.groups()
+    digest = digest_match.group(1)
+
+    source = (ROOT / HELPER).read_bytes()
+    assert hashlib.sha256(source).hexdigest() == digest
+    git_bin = shutil.which("git")
+    assert git_bin is not None
+    assert (
+        blob
+        == subprocess.run(  # noqa: S603 -- fixed git verifies object identity
+            [git_bin, "hash-object", HELPER],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    assert f"REVIEWED_HELPER_REV={revision}" in install_section
+
+    assert (
+        'git show "${REVIEWED_HELPER_REV}:${HELPER_PATH}" | sudo tee "$staged_helper"'
+        in install_section
+    )
+    assert 'sudo chmod 0755 "$staged_helper"' in install_section
+    assert 'sudo chown root:root "$staged_helper"' in install_section
+    assert (
+        'sudo mv -T "$staged_helper" /usr/local/sbin/dotmac-vendor-maintenance'
+        in install_section
+    )
+    assert install_section.count("sudo sha256sum -c -") == 2
+    assert install_section.count("sudo stat -c '%U:%G:%a'") == 2
+    assert "before installing the sudoers fragment" in install_section
+    assert "the first rehearsal" in install_section
+
+    # Sensitivity: deleting either independent installed-file check, the
+    # source pin, or the root-owned staged install fails this guard. A helper
+    # byte change requires reviewing and updating the pinned identities.
 
 
 def _code_only(script: str) -> str:
@@ -666,8 +743,142 @@ def test_maintenance_conf_equals_live_conf_except_for_the_443_location_block() -
 
 
 # ---------------------------------------------------------------------------
-# 16. Bootstrap: inside the managed branch, no `ln -sfn` on the enabled
-#     link, and it takes the same lock directory as the helper.
+# 16. Bootstrap classifies the actual enabled-site link before touching nginx.
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_classifier_accepts_only_fresh_and_exact_known_targets(
+    tmp_path: Path,
+) -> None:
+    enabled = tmp_path / "enabled"
+    available = tmp_path / "available.conf"
+    managed = tmp_path / "managed"
+    live = managed / "live.conf"
+    maintenance = managed / "maintenance.conf"
+
+    result = _classify_bootstrap_site(enabled, available, live, maintenance)
+    assert (result.returncode, result.stdout) == (0, "fresh\n")
+
+    available.write_text("legacy", encoding="utf-8")
+    enabled.symlink_to(available)
+    result = _classify_bootstrap_site(enabled, available, live, maintenance)
+    assert (result.returncode, result.stdout) == (0, "legacy\n")
+
+    managed.mkdir()
+    live.write_text("live", encoding="utf-8")
+    maintenance.write_text("maintenance", encoding="utf-8")
+    for target, state in ((live, "managed-live"), (maintenance, "managed-maintenance")):
+        enabled.unlink()
+        enabled.symlink_to(target)
+        result = _classify_bootstrap_site(enabled, available, live, maintenance)
+        assert (result.returncode, result.stdout) == (0, f"{state}\n")
+
+    # Sensitivity: removing either exact-target arm makes that valid state
+    # fail; broadening the managed arm to a directory-prefix check is caught
+    # by the unknown-target case below.
+
+
+def test_bootstrap_classifier_refuses_unknown_and_dangling_states(
+    tmp_path: Path,
+) -> None:
+    enabled = tmp_path / "enabled"
+    available = tmp_path / "available.conf"
+    managed = tmp_path / "managed"
+    live = managed / "live.conf"
+    maintenance = managed / "maintenance.conf"
+
+    enabled.write_text("not a link", encoding="utf-8")
+    result = _classify_bootstrap_site(enabled, available, live, maintenance)
+    assert result.returncode != 0 and result.stdout == ""
+    enabled.unlink()
+
+    managed.mkdir()
+    unknown = managed / "other.conf"
+    unknown.write_text("unexpected", encoding="utf-8")
+    enabled.symlink_to(unknown)
+    result = _classify_bootstrap_site(enabled, available, live, maintenance)
+    assert result.returncode != 0 and result.stdout == ""
+    enabled.unlink()
+
+    # A missing final component is the original regression: `readlink -f`
+    # can resolve it, then the old boolean classifier fell into legacy mode.
+    enabled.symlink_to(live)
+    result = _classify_bootstrap_site(enabled, available, live, maintenance)
+    assert result.returncode != 0 and result.stdout == ""
+    enabled.unlink()
+
+    unknown.unlink()
+    managed.rmdir()
+    enabled.symlink_to(live)
+    result = _classify_bootstrap_site(enabled, available, live, maintenance)
+    assert result.returncode != 0 and result.stdout == ""
+    enabled.unlink()
+
+    enabled.symlink_to(available)
+    result = _classify_bootstrap_site(enabled, available, live, maintenance)
+    assert result.returncode != 0 and result.stdout == ""
+    enabled.unlink()
+
+    managed.mkdir()
+    actual = managed / "actual.conf"
+    actual.write_text("actual", encoding="utf-8")
+    live.symlink_to(actual)
+    enabled.symlink_to(live)
+    result = _classify_bootstrap_site(enabled, available, live, maintenance)
+    assert result.returncode != 0 and result.stdout == ""
+    enabled.unlink()
+    live.unlink()
+    actual.unlink()
+    managed.rmdir()
+
+    real_managed = tmp_path / "real-managed"
+    real_managed.mkdir()
+    (real_managed / "live.conf").write_text("live", encoding="utf-8")
+    managed.symlink_to(real_managed, target_is_directory=True)
+    enabled.symlink_to(live)
+    result = _classify_bootstrap_site(enabled, available, live, maintenance)
+    assert result.returncode != 0 and result.stdout == ""
+
+    # Sensitivity: accepting any managed-directory child, or checking only
+    # `readlink -f` without a regular-file check, fails one of these real
+    # classifier invocations. A dangling legacy link must not become a
+    # fresh-site pass either.
+
+
+def test_bootstrap_classifies_before_each_nginx_mutation() -> None:
+    bootstrap = _text(BOOTSTRAP)
+    main = bootstrap.split("main() {\n", 1)[1].split("\n}\n\nif [[", 1)[0]
+    classifier_call = 'site_state="$(classify_nginx_site "$NGINX_ENABLED"'
+    assert main.count(classifier_call) == 3
+
+    initial = main.index(classifier_call)
+    legacy_bootstrap = main.index(
+        "install -m 0644 deploy/nginx/vendor.dotmac.io.bootstrap.conf"
+    )
+    assert initial < legacy_bootstrap < main.index('ln -sfn "$NGINX_AVAILABLE"')
+    assert (
+        '[[ "$site_state" == fresh || "$site_state" == legacy ]]'
+        in main[initial:legacy_bootstrap]
+    )
+
+    managed_recheck = main.index(classifier_call, legacy_bootstrap)
+    managed_install = main.index(
+        "install_managed_conf_atomically deploy/nginx/vendor.dotmac.io.conf"
+    )
+    assert managed_recheck < managed_install
+
+    legacy_recheck = main.index(classifier_call, managed_install)
+    legacy_install = main.index("install -m 0644 deploy/nginx/vendor.dotmac.io.conf")
+    assert legacy_recheck < legacy_install
+
+    # Sensitivity: dropping the initial call lets an unknown or dangling
+    # link reach `ln -sfn`; dropping either post-certificate call lets a
+    # changed link reach the corresponding config install.
+
+
+# ---------------------------------------------------------------------------
+# 16b. Bootstrap: inside the managed branch, no `ln -sfn` on the enabled
+#      link, and it takes the same lock directory as the helper.
 # ---------------------------------------------------------------------------
 
 
@@ -693,17 +904,19 @@ def test_bootstrap_managed_branch_never_relinks_and_shares_the_helpers_lock_dir(
         "this bootstrap loudly rather than hanging it indefinitely"
     )
 
-    # Isolate the PRE-certificate managed branch: `if is_nginx_site_managed;
-    # then ... else`. Since D16 PR 3's second fix round, this branch does
+    # Isolate the PRE-certificate managed branch. Since D16 PR 3's second
+    # fix round, this branch does
     # NOTHING but set a flag — no lock, no conf install — because the lock
     # and the conf installs both moved to AFTER certificate issuance (see
     # the next test).
     branch_match = re.search(
-        r"if is_nginx_site_managed; then\n(.*?)\n    else\n",
+        r'if \[\[ "\$site_state" == managed-live \|\| '
+        r'"\$site_state" == managed-maintenance \]\]; then\n'
+        r"(.*?)\n    else\n",
         bootstrap,
         re.DOTALL,
     )
-    assert branch_match, "expected an is_nginx_site_managed branch"
+    assert branch_match, "expected an explicitly classified managed branch"
     pre_cert_branch = branch_match.group(1)
     assert "ln -sfn" not in pre_cert_branch
     assert "install_managed_conf_atomically" not in pre_cert_branch
