@@ -16,18 +16,27 @@ Requires the test Postgres cluster from `make test-db-up`, AND a real
 `REQUIRE_POSTGRES_TESTS=1`) when `TEST_DATABASE_URL` is unset — see
 `tests/migration/conftest.py`.
 
-Foundation itself is brought in through `pytest.importorskip`, not a
-module-level `from dotmac_deployment_foundation... import ...`. A bare
-module-level import that fails breaks COLLECTION for this entire file —
-worse than a clean skip, since depending on the `postgres` CI job's
-configuration that can error the whole test session rather than report
-these specific tests as not-yet-provable. `importorskip` turns the same
-absence into a normal, visible SKIP with a stated reason. This repository's
-own `pyproject.toml` mypy override and `poetry.lock` both confirm
-`dotmac-deployment-foundation` is not a declared dependency anywhere in
-this assembly, including the `postgres` CI job (`poetry install` only) —
-so today this file is EXPECTED to skip, not silently pass or break
-collection, until that dependency decision is made.
+Foundation itself is brought in through a `try/except ImportError` around
+the actual import, converted to `pytest.skip(..., allow_module_level=True)`
+on catch — not a bare module-level `from dotmac_deployment_foundation...
+import ...`, and not `pytest.importorskip` on the package name alone
+either: `importorskip("dotmac_deployment_foundation")` only proves the TOP
+package imports, not that the specific names this file needs
+(`REQUIRED_COMPONENTS`, `load_manifest`) exist in whatever version is
+installed — a present-but-older Foundation checkout missing one of them
+raises a plain `ImportError` at the real `from ...recovery import (...)`
+line, which `importorskip` on the package alone would not have caught. A
+bare module-level import that fails (of either kind) breaks COLLECTION for
+this entire file — worse than a clean skip, since depending on the
+`postgres` CI job's configuration that can error the whole test session
+rather than report these specific tests as not-yet-provable. This
+repository's own `pyproject.toml` mypy override and `poetry.lock` both
+confirm `dotmac-deployment-foundation` is not a declared dependency
+anywhere in this assembly, including the `postgres` CI job (`poetry
+install` only) — so today this file is EXPECTED to skip, not silently pass
+or break collection, until that dependency decision is made. This file is
+DORMANT PROOF, not currently-executed coverage: nothing here runs to
+completion in CI until Foundation is actually installed.
 """
 
 from __future__ import annotations
@@ -56,18 +65,19 @@ from vendor_cp.migrations import (
 from vendor_cp.recovery.bundle import build_bundle
 from vendor_cp.recovery.capture import capture_sql
 
-pytest.importorskip(
-    "dotmac_deployment_foundation",
-    reason=(
+try:
+    from dotmac_deployment_foundation.recovery import (  # noqa: E402
+        REQUIRED_COMPONENTS,
+        load_manifest,
+    )
+except ImportError as _foundation_error:
+    pytest.skip(
         "dotmac-deployment-foundation is not yet a declared CP dependency "
-        "(an open decision) — this file proves nothing about build_bundle() "
-        "until it is installed"
-    ),
-)
-from dotmac_deployment_foundation.recovery import (  # noqa: E402
-    REQUIRED_COMPONENTS,
-    load_manifest,
-)
+        "(an open decision), or the installed checkout is missing a name "
+        f"this file needs — this file proves nothing about build_bundle() "
+        f"until it is installed and compatible: {_foundation_error}",
+        allow_module_level=True,
+    )
 
 _PRODUCT_TOML = Path(__file__).resolve().parents[2] / "deploy" / "product.toml"
 _OFFLINE_DSN = "postgresql+psycopg://image-heads@127.0.0.1:5432/none"

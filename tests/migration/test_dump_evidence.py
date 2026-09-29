@@ -2,27 +2,31 @@
 
 `deploy_production.sh` already proves decompression today with
 ``pg_restore --list < database.dump`` after an ``[[ -s ... ]]`` emptiness
-check (see that script, around its step 2/3, and `dump_evidence.py`'s own
-module docstring). This file reproduces the same proof in typed Python
-against a REAL custom-format dump of a real (if empty) scratch database —
-not a hand-built fixture — because the property under test is "does
-`pg_restore` actually accept the bytes `pg_dump` wrote", which a synthetic
-file cannot answer.
+check (see that script, around its step 2/3). `dump_evidence.py` deliberately
+checks MORE than that: `--list` only reads the archive header and table of
+contents, never the data blocks, so this file's REAL assertions exercise
+`capture_dump_evidence`'s `pg_restore --file /dev/null -- <path>` check — a
+full decompression of every data block, converted to a SQL script and
+discarded — against a REAL custom-format dump of a real (if empty) scratch
+database, not a hand-built fixture, because the property under test is "does
+`pg_restore` actually accept and fully decompress the bytes `pg_dump`
+wrote", which a synthetic file cannot answer and a header-only check cannot
+prove.
 
 Requires the test Postgres cluster from `make test-db-up`; skips (or fails
 under `REQUIRE_POSTGRES_TESTS=1`) when `TEST_DATABASE_URL` is unset — see
 `tests/migration/conftest.py`.
 
 The `capture_dump_evidence` assertions (checksum, size, decompression
-proved/unproved) need only Postgres and run regardless of Foundation. The
-`to_backup_record` assertions in each test are gated behind their own
-`pytest.importorskip("dotmac_deployment_foundation", ...)` immediately
-before the call: `to_backup_record` raises `FoundationUnavailable` (a plain
-`RuntimeError`) when Foundation is absent, and an uncaught `RuntimeError`
-inside a test function is a FAIL, not a SKIP — so without this guard, the
-Postgres-only evidence this file proves would be reported as a failure
-alongside the genuinely separate, currently-open question of whether
-Foundation is installed at all.
+proved/unproved) need only Postgres and run regardless of Foundation. Each
+`to_backup_record` call is wrapped in `try/except FoundationUnavailable`,
+converted to `pytest.skip` on catch: `to_backup_record` raises
+`FoundationUnavailable` (a plain `RuntimeError`) when Foundation is absent
+or incompatible, and an uncaught `RuntimeError` inside a test function is a
+FAIL, not a SKIP — so without this guard, the Postgres-only evidence this
+file proves would be reported as a failure alongside the genuinely
+separate, currently-open question of whether Foundation is installed at
+all.
 """
 
 from __future__ import annotations
@@ -34,7 +38,11 @@ from pathlib import Path
 
 import pytest
 
-from vendor_cp.recovery.dump_evidence import capture_dump_evidence, to_backup_record
+from vendor_cp.recovery.dump_evidence import (
+    FoundationUnavailable,
+    capture_dump_evidence,
+    to_backup_record,
+)
 
 
 def _libpq_url(sqlalchemy_url: str) -> str:
@@ -84,20 +92,20 @@ def test_capture_dump_evidence_proves_a_real_custom_format_dump(
     independent = hashlib.sha256(dump_path.read_bytes()).hexdigest()
     assert evidence.checksum == independent
 
-    pytest.importorskip(
-        "dotmac_deployment_foundation",
-        reason=(
+    try:
+        good_record = to_backup_record(
+            evidence,
+            dataset="primary",
+            artefact_class="data_export",
+            evidence_origin="local_artefact",
+        )
+    except FoundationUnavailable as error:
+        pytest.skip(
             "dotmac-deployment-foundation is not yet a declared CP dependency "
-            "(an open decision) — the capture_dump_evidence proof above holds "
-            "regardless; only the to_backup_record mapping needs Foundation"
-        ),
-    )
-    good_record = to_backup_record(
-        evidence,
-        dataset="primary",
-        artefact_class="data_export",
-        evidence_origin="local_artefact",
-    )
+            f"(an open decision) — the capture_dump_evidence proof above holds "
+            f"regardless; only the to_backup_record mapping needs Foundation: "
+            f"{error}"
+        )
     assert good_record.assurance.value == "verified"
 
 
@@ -106,7 +114,13 @@ def test_capture_dump_evidence_reports_a_corrupt_dump_as_unproved_not_a_refusal(
 ) -> None:
     """A present-but-corrupt dump is a FAILED check, not a missing tool: it
     must surface as `decompression_proved=False` on an ordinarily-returned
-    `DumpEvidence`, never `PgRestoreUnavailable`."""
+    `DumpEvidence`, never `PgRestoreUnavailable`.
+
+    A 100-byte prefix of a real archive fails `pg_restore --file /dev/null`
+    at least as certainly as it failed the old `--list` check: `--file`
+    reads everything `--list` reads (the header and TOC) and then goes on to
+    read the data blocks, so a file too short to even carry a valid header
+    is rejected before decompression would begin."""
     pg_dump = shutil.which("pg_dump")
     assert pg_dump is not None
 
@@ -131,18 +145,18 @@ def test_capture_dump_evidence_reports_a_corrupt_dump_as_unproved_not_a_refusal(
     assert evidence.decompression_proved is False
     assert evidence.size_bytes == 100
 
-    pytest.importorskip(
-        "dotmac_deployment_foundation",
-        reason=(
+    try:
+        bad_record = to_backup_record(
+            evidence,
+            dataset="primary",
+            artefact_class="data_export",
+            evidence_origin="local_artefact",
+        )
+    except FoundationUnavailable as error:
+        pytest.skip(
             "dotmac-deployment-foundation is not yet a declared CP dependency "
-            "(an open decision) — the capture_dump_evidence proof above holds "
-            "regardless; only the to_backup_record mapping needs Foundation"
-        ),
-    )
-    bad_record = to_backup_record(
-        evidence,
-        dataset="primary",
-        artefact_class="data_export",
-        evidence_origin="local_artefact",
-    )
+            f"(an open decision) — the capture_dump_evidence proof above holds "
+            f"regardless; only the to_backup_record mapping needs Foundation: "
+            f"{error}"
+        )
     assert bad_record.assurance.value == "completed"
