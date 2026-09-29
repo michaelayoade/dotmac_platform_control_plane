@@ -14,14 +14,20 @@ from what `capture_sql()` really emits.
 Requires the test Postgres cluster from `make test-db-up`, AND a real
 `dotmac-deployment-foundation` install; skips (or fails under
 `REQUIRE_POSTGRES_TESTS=1`) when `TEST_DATABASE_URL` is unset — see
-`tests/migration/conftest.py`. The Foundation import below is intentionally
-NOT wrapped in a try/except: this repository's own `pyproject.toml` mypy
-override and `poetry.lock` both confirm `dotmac-deployment-foundation` is
-not a declared dependency anywhere in this assembly, including the
-`postgres` CI job (`poetry install` only) — so this import failing at
-collection time IS the correct signal that the environment running this
-suite does not yet carry what this test needs, rather than something to
-paper over here.
+`tests/migration/conftest.py`.
+
+Foundation itself is brought in through `pytest.importorskip`, not a
+module-level `from dotmac_deployment_foundation... import ...`. A bare
+module-level import that fails breaks COLLECTION for this entire file —
+worse than a clean skip, since depending on the `postgres` CI job's
+configuration that can error the whole test session rather than report
+these specific tests as not-yet-provable. `importorskip` turns the same
+absence into a normal, visible SKIP with a stated reason. This repository's
+own `pyproject.toml` mypy override and `poetry.lock` both confirm
+`dotmac-deployment-foundation` is not a declared dependency anywhere in
+this assembly, including the `postgres` CI job (`poetry install` only) —
+so today this file is EXPECTED to skip, not silently pass or break
+collection, until that dependency decision is made.
 """
 
 from __future__ import annotations
@@ -38,10 +44,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from dotmac_deployment_foundation.recovery import (
-    REQUIRED_COMPONENTS,
-    load_manifest,
-)
 from sqlalchemy import create_engine, text
 
 from vendor_cp.cli.commands import recovery_bundle
@@ -53,6 +55,19 @@ from vendor_cp.migrations import (
 )
 from vendor_cp.recovery.bundle import build_bundle
 from vendor_cp.recovery.capture import capture_sql
+
+pytest.importorskip(
+    "dotmac_deployment_foundation",
+    reason=(
+        "dotmac-deployment-foundation is not yet a declared CP dependency "
+        "(an open decision) — this file proves nothing about build_bundle() "
+        "until it is installed"
+    ),
+)
+from dotmac_deployment_foundation.recovery import (  # noqa: E402
+    REQUIRED_COMPONENTS,
+    load_manifest,
+)
 
 _PRODUCT_TOML = Path(__file__).resolve().parents[2] / "deploy" / "product.toml"
 _OFFLINE_DSN = "postgresql+psycopg://image-heads@127.0.0.1:5432/none"

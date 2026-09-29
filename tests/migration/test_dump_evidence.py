@@ -12,6 +12,17 @@ file cannot answer.
 Requires the test Postgres cluster from `make test-db-up`; skips (or fails
 under `REQUIRE_POSTGRES_TESTS=1`) when `TEST_DATABASE_URL` is unset — see
 `tests/migration/conftest.py`.
+
+The `capture_dump_evidence` assertions (checksum, size, decompression
+proved/unproved) need only Postgres and run regardless of Foundation. The
+`to_backup_record` assertions in each test are gated behind their own
+`pytest.importorskip("dotmac_deployment_foundation", ...)` immediately
+before the call: `to_backup_record` raises `FoundationUnavailable` (a plain
+`RuntimeError`) when Foundation is absent, and an uncaught `RuntimeError`
+inside a test function is a FAIL, not a SKIP — so without this guard, the
+Postgres-only evidence this file proves would be reported as a failure
+alongside the genuinely separate, currently-open question of whether
+Foundation is installed at all.
 """
 
 from __future__ import annotations
@@ -20,6 +31,8 @@ import hashlib
 import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from vendor_cp.recovery.dump_evidence import capture_dump_evidence, to_backup_record
 
@@ -71,6 +84,14 @@ def test_capture_dump_evidence_proves_a_real_custom_format_dump(
     independent = hashlib.sha256(dump_path.read_bytes()).hexdigest()
     assert evidence.checksum == independent
 
+    pytest.importorskip(
+        "dotmac_deployment_foundation",
+        reason=(
+            "dotmac-deployment-foundation is not yet a declared CP dependency "
+            "(an open decision) — the capture_dump_evidence proof above holds "
+            "regardless; only the to_backup_record mapping needs Foundation"
+        ),
+    )
     good_record = to_backup_record(
         evidence,
         dataset="primary",
@@ -110,6 +131,14 @@ def test_capture_dump_evidence_reports_a_corrupt_dump_as_unproved_not_a_refusal(
     assert evidence.decompression_proved is False
     assert evidence.size_bytes == 100
 
+    pytest.importorskip(
+        "dotmac_deployment_foundation",
+        reason=(
+            "dotmac-deployment-foundation is not yet a declared CP dependency "
+            "(an open decision) — the capture_dump_evidence proof above holds "
+            "regardless; only the to_backup_record mapping needs Foundation"
+        ),
+    )
     bad_record = to_backup_record(
         evidence,
         dataset="primary",
