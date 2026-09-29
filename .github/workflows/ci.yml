@@ -45,6 +45,20 @@ jobs:
         run: poetry run mypy
       - name: Tests (boot + provisioning contract + D1–D5 deny cases)
         run: poetry run pytest -q
+      # Gate the temporary, read-only D16 tool against the actual immutable
+      # Foundation verifier source. Starter is public; no cross-repo credential
+      # or mutable branch is needed. This stays in the required check job.
+      - name: Fetch exact Foundation transition verifier source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_starter_mt
+          ref: d74bf8dd8c399dd92047174365403b861f82ddd0
+          path: .d16-foundation-source
+          persist-credentials: false
+      - name: D16 source-verifier conformance
+        env:
+          D16_FOUNDATION_CHECKOUT: ${{ github.workspace }}/.d16-foundation-source
+        run: poetry run pytest -q conformance/test_d16_source_verifier_real_foundation.py
       # Postgres-backed suites. These were previously never run in CI: the
       # migration rehearsals and the replay-concurrency proof both SKIP without
       # TEST_DATABASE_URL, so a green pipeline said nothing about migration
