@@ -1,4 +1,11 @@
-# Host-admission conformance suite
+# Conformance suites
+
+The host-admission suite below is database-backed. The separate D16
+source-verifier test is read-only and database-free; its requirements and
+command are at the end of this file. An explicit whole-directory run still
+requires the host-admission database precondition.
+
+## Host-admission suite
 
 Proves CP's `admit_and_launch_host_source` orchestration
 (`src/vendor_cp/deployment/host_admission_adapter.py`, a leaf module -- see
@@ -17,8 +24,9 @@ This directory is deliberately OUTSIDE `tests/` (this repo's `pyproject.toml`
 pins `testpaths = ["tests"]`), so a normal `pytest` invocation in this
 repository never collects it and never tries to import
 `dotmac_deployment_control`'s or `dotmac_deployment_foundation`'s real, not-
-yet-installable APIs. Nothing here is run as part of this repository's normal
-CI. It exists so the suite is ready to execute the moment both real
+yet-installable APIs. The host-admission file is not run as part of this
+repository's normal CI; the D16 file is invoked explicitly by the required
+`check` job. The host-admission suite exists so it is ready once both real
 dependencies are installable, without anyone having to reconstruct the real
 fixture-building patterns from scratch under time pressure.
 
@@ -147,12 +155,13 @@ one-liner is exact).
     CONFORMANCE_DATABASE_URL=postgresql://<test-server-dsn> \
       /tmp/host-admission-conformance-venv/bin/pytest conformance/ -v
 
-There is NO skip anywhere in this suite. If `CONFORMANCE_DATABASE_URL` is
-unset, `conformance/conftest.py`'s `pytest_configure` raises a hard
+There is NO skip anywhere in this suite. For a host-admission or whole-directory
+invocation, if `CONFORMANCE_DATABASE_URL` is unset,
+`conformance/conftest.py`'s `pytest_configure` raises a hard
 `pytest.UsageError` before collection even starts -- a loud, non-zero-exit
 usage error, never a quiet "0 passed, N skipped" that could be mistaken for
-a pass. `conformance/` is already excluded from `testpaths` and from normal
-CI, so an explicit `pytest conformance/` invocation is always a deliberate
+a pass. `conformance/` is excluded from default `testpaths`, so an explicit
+`pytest conformance/` invocation is always a deliberate
 act, and this suite treats "not configured" the same as any other real
 defect (a missing wheel, a stale API, a broken leaf import): fail loudly,
 never skip. A genuine run with `CONFORMANCE_DATABASE_URL` set must report
@@ -178,24 +187,41 @@ For marking PR #192 ready for review, record:
 Do NOT run this suite against this repository's own `.venv`, commit its
 disposable venv or wheel artifacts, or edit `pyproject.toml`/`poetry.lock` to
 make it installable in this repository's own environment -- that would
-silently move CP's own pin off `dotmac-deployment-control==0.1.0a6`, which is
+silently change CP's exact `dotmac-deployment-control` pin, which is
 its own, separate, deliberate decision (see
 `host_admission_adapter.py`'s own module docstring and this repository's
 `pyproject.toml` comments above the `dotmac-deployment-control` pin).
 
-## Mandatory re-run gate: the moment either real pin moves
+## Mandatory re-run gate for future host-admission pin changes
 
-CI can never catch a Control/Foundation signature drift against this leaf
-module: `dotmac-deployment-control` stays pinned at `0.1.0a6` (pre-dates all
-of this), `dotmac-deployment-foundation` is not a dependency at all, and
-`pyproject.toml`'s `[tool.mypy] files = ["src/vendor_cp"]` never type-checks
-`conformance/` against the real functions. The Protocols in
+As of this change, `dotmac-deployment-control` is pinned at `0.1.0a16`;
+`dotmac-deployment-foundation` is still not a CP dependency. Ordinary mypy
+does not type-check `conformance/` against the real functions. The Protocols in
 `host_admission_adapter.py` are proven to match the real functions ONLY by
 this suite's runtime execution, at the exact commits recorded above.
 
-So: the FIRST PR that bumps `dotmac-deployment-control` off `0.1.0a6`, or
-adds `dotmac-deployment-foundation` as a real dependency, MUST re-run this
+Any future PR that changes the Control pin, or adds/changes
+`dotmac-deployment-foundation` as a real dependency, MUST re-run this
 suite against wheels built from the new pinned commits and record fresh
 evidence in that PR, before merge -- not as a follow-up. A signature change
 on either real function with no test anywhere in CI to catch it is exactly
 the gap this gate closes.
+
+## D16 source-only transition-verifier conformance
+
+`test_d16_source_verifier_real_foundation.py` has a different precondition:
+the public Starter repository checked out cleanly at exact commit
+`d74bf8dd8c399dd92047174365403b861f82ddd0`. It needs no database and
+never executes migrations, workload launch or routing. CP's required `check`
+job fetches those exact bytes into `.d16-foundation-source` and invokes this
+file explicitly. To run it manually in an isolated environment:
+
+    D16_FOUNDATION_CHECKOUT=/absolute/path/to/clean/starter-at-d74bf8dd \
+      pytest -q conformance/test_d16_source_verifier_real_foundation.py
+
+The test hard-errors if the source checkout is absent or wrong; it does not
+skip. A whole-directory or mixed conformance invocation still requires
+`CONFORMANCE_DATABASE_URL` for the host-admission tests. This is source-tool
+conformance only: it does not authenticate the future CP host producer's
+write-time checksum, full-decompression proof, catalogue capture, image or
+observed migration heads, and it is not production deployment evidence.
