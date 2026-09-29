@@ -27,7 +27,9 @@ called `fence_is_holding`.
    must exclude these ephemeral identities; the bundle owner independently
    proves that ordering and catalog claim.
 3. Only then create two run-scoped `NOLOGIN` PostgreSQL roles using a
-   privileged local socket operation, not `app_admin` (`NOCREATEROLE`).
+   privileged superuser connection, not `app_admin` (`NOCREATEROLE`). The
+   host adapter must constrain that connection to the approved local socket;
+   this source check verifies superuser and autocommit, not connection origin.
    Each has exactly one `INHERIT TRUE, SET FALSE, ADMIN FALSE` membership:
 
    | Candidate role | Sole parent | Later URL |
@@ -35,9 +37,12 @@ called `fence_is_holding`.
    | app | `app_user` | `DATABASE_URL` |
    | platform | `platform_api` | `PLATFORM_DATABASE_URL` |
 
-   Neither role may inherit `app_admin`, the database owner, or the other
-   candidate's parent. The identities are specific to one run and never
-   reused. The original `FenceProof`, digest and fence id remain immutable;
+   Neither role may inherit `app_admin`, the database owner, the other
+   candidate's parent, or a dispatcher, including through its allowed
+   parent's transitive memberships. The source refuses an existing candidate
+   role name; the host adapter must issue a fresh run ID and prevent reuse
+   across completed runs. The original `FenceProof`, digest and fence id
+   remain immutable;
    no refence or replacement proof may absorb temporary membership. That
    expected membership delta makes original `fence_is_holding` false.
 4. After a separate credential installer has placed a password verifier on

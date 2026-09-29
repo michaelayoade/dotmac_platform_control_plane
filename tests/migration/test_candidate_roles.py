@@ -528,3 +528,83 @@ def test_extra_acl_membership_and_partial_cleanup_are_refused_or_recoverable(
         _cleanup(owner, roles, proof)
         assert fence_is_holding(owner, proof)
         _restore(owner, roles, proof)
+
+
+def test_inherited_other_parent_privilege_refuses_staged_verification(
+    scratch_db: str,
+    postgres_url: str,
+    url_for: Callable[..., str],
+    target_only_connect: tuple[str, ...],
+) -> None:
+    db = scratch_db.rpartition("/")[2]
+    roles = _roles(db)
+    with _connect(url_for(postgres_url, db)) as owner:
+        owner.execute(
+            text("CREATE TABLE public.d16_platform_inheritance_probe (n int)")
+        )
+        owner.execute(
+            text("REVOKE ALL ON public.d16_platform_inheritance_probe FROM PUBLIC")
+        )
+        owner.execute(
+            text(
+                "GRANT SELECT ON public.d16_platform_inheritance_probe "
+                "TO platform_api"
+            )
+        )
+        proof = _fence(owner, db, roles)
+        _create(owner, roles, proof)
+        _activate(owner, roles, proof)
+        assert verify_staged_database(
+            owner,
+            roles,
+            proof,
+            expected_digest=proof.digest(),
+            expected_fence_id=proof.fence_id,
+        )
+        assert not owner.execute(
+            text(
+                "SELECT has_table_privilege("
+                ":role, 'public.d16_platform_inheritance_probe', 'SELECT')"
+            ),
+            {"role": roles.app},
+        ).scalar_one()
+        existing_grant = owner.execute(
+            text(
+                "SELECT 1 FROM pg_auth_members am "
+                "JOIN pg_roles parent ON parent.oid = am.roleid "
+                "JOIN pg_roles member ON member.oid = am.member "
+                "WHERE parent.rolname = 'platform_api' "
+                "AND member.rolname = 'app_user'"
+            )
+        ).scalar_one_or_none()
+        assert existing_grant is None
+        try:
+            owner.execute(text("GRANT platform_api TO app_user"))
+            assert owner.execute(
+                text(
+                    "SELECT has_table_privilege("
+                    ":role, 'public.d16_platform_inheritance_probe', 'SELECT')"
+                ),
+                {"role": roles.app},
+            ).scalar_one()
+            assert not verify_staged_database(
+                owner,
+                roles,
+                proof,
+                expected_digest=proof.digest(),
+                expected_fence_id=proof.fence_id,
+            )
+            with pytest.raises(CandidateRoleRefused, match="forbidden role"):
+                _deactivate(owner, roles, proof)
+        finally:
+            owner.execute(text("REVOKE platform_api FROM app_user"))
+        assert verify_staged_database(
+            owner,
+            roles,
+            proof,
+            expected_digest=proof.digest(),
+            expected_fence_id=proof.fence_id,
+        )
+        _deactivate(owner, roles, proof)
+        _cleanup(owner, roles, proof)
+        _restore(owner, roles, proof)

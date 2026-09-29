@@ -140,6 +140,46 @@ def _require_memberships(
         raise CandidateRoleRefused("candidate role membership or options drifted")
 
 
+def _require_parent_ancestry(
+    conn: Connection, roles: CandidateRoles, proof: fence.FenceProof
+) -> None:
+    """Reject forbidden ancestors reached through either sole candidate parent.
+
+    Walk actual membership rows rather than ``pg_has_role``: a superuser
+    connection must not make every role appear to be a candidate ancestor.
+    Direct candidate grants are checked separately by ``_require_memberships``.
+    """
+    forbidden = {
+        *fence.WRITER_ROLES,
+        *proof.fenced_roles,
+        *proof.member_roles,
+        fence.MIGRATION_ROLE,
+        fence._database_owner(conn, roles.database),
+    }
+    rows = conn.execute(
+        text(
+            "WITH RECURSIVE ancestors(root_oid, ancestor_oid) AS ("
+            "SELECT oid, oid FROM pg_roles "
+            "WHERE rolname = ANY(CAST(:parents AS text[])) "
+            "UNION "
+            "SELECT ancestors.root_oid, memberships.roleid "
+            "FROM ancestors JOIN pg_auth_members memberships "
+            "ON memberships.member = ancestors.ancestor_oid"
+            ") "
+            "SELECT root.rolname, parent.rolname FROM ancestors "
+            "JOIN pg_roles root ON root.oid = ancestors.root_oid "
+            "JOIN pg_roles parent ON parent.oid = ancestors.ancestor_oid "
+            "WHERE ancestors.ancestor_oid <> ancestors.root_oid"
+        ),
+        {"parents": list(_PARENTS)},
+    )
+    for parent, ancestor in rows:
+        if str(ancestor) in forbidden - {str(parent)}:
+            raise CandidateRoleRefused(
+                "a candidate parent inherits a forbidden role through membership"
+            )
+
+
 def _require_role_shape(
     conn: Connection, roles: CandidateRoles, *, login: bool
 ) -> None:
@@ -175,6 +215,7 @@ def _require_membership_delta(
     if live != set(proof.member_roles) | present:
         raise CandidateRoleRefused("the staged writer membership delta drifted")
     _require_memberships(conn, roles, present=present)
+    _require_parent_ancestry(conn, roles, proof)
 
 
 def create_roles(
@@ -205,6 +246,7 @@ def create_roles(
         raise CandidateRoleRefused("a run-scoped candidate role already exists")
     if _existing(conn, _PARENTS) != set(_PARENTS):
         raise CandidateRoleRefused("a required writer parent role is absent")
+    _require_parent_ancestry(conn, roles, proof)
     statements: list[str] = []
     for name, parent in roles.bindings():
         quoted = _identifier(conn, name)
