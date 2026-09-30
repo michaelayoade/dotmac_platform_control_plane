@@ -225,3 +225,22 @@ skip. A whole-directory or mixed conformance invocation still requires
 conformance only: it does not authenticate the future CP host producer's
 write-time checksum, full-decompression proof, catalogue capture, image or
 observed migration heads, and it is not production deployment evidence.
+
+## D16 bundle-producer and dump-evidence conformance
+
+The required `postgres` CI job also runs the two bundle-producer and two
+dump-evidence migration tests against a disposable Postgres database. It
+checks out Starter at the exact same `d74bf8dd8c399dd92047174365403b861f82ddd0`
+commit and puts only its Foundation package source on `PYTHONPATH` for that
+step. CI verifies the checkout commit and Python import origin before running
+the tests; `scripts/check_d16_bundle_junit.py` requires all four named cases
+to pass with no skips. The normal migration test invocation may still skip
+the optional Foundation import, but that green result is not the D16 gate.
+
+This is CI-only source conformance, not an installed CP dependency or a
+production bundle/receipt producer. It proves that a live CP catalogue maps
+to a Foundation-accepted manifest, and that a nonempty `pg_dump` archive has
+write-time checksum, size and full-decompression evidence mapped into
+Foundation's backup record types. It does not prove restore rehearsal,
+transition receipt construction, deploy wiring, or permission to restore
+routing. Those remain separate D16 gates.

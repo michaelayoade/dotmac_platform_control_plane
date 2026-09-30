@@ -7,18 +7,21 @@ checks MORE than that: `--list` only reads the archive header and table of
 contents, never the data blocks, so this file's REAL assertions exercise
 `capture_dump_evidence`'s `pg_restore --file /dev/null -- <path>` check — a
 full decompression of every data block, converted to a SQL script and
-discarded — against a REAL custom-format dump of a real (if empty) scratch
+discarded — against a REAL custom-format dump of a nonempty scratch
 database, not a hand-built fixture, because the property under test is "does
 `pg_restore` actually accept and fully decompress the bytes `pg_dump`
 wrote", which a synthetic file cannot answer and a header-only check cannot
-prove.
+prove. The positive scratch database contains a real table row, so the
+archive includes table data rather than only a schema.
 
 Requires the test Postgres cluster from `make test-db-up`; skips (or fails
 under `REQUIRE_POSTGRES_TESTS=1`) when `TEST_DATABASE_URL` is unset — see
 `tests/migration/conftest.py`.
 
 The `capture_dump_evidence` assertions (checksum, size, decompression
-proved/unproved) need only Postgres and run regardless of Foundation. Each
+proved/unproved) need only Postgres and run regardless of Foundation. The
+required CI D16 conformance step supplies exact Foundation source and refuses
+skipped or missing tests; a local run without it may still skip. Each
 `to_backup_record` call is wrapped in `try/except FoundationUnavailable`,
 converted to `pytest.skip` on catch: `to_backup_record` raises
 `FoundationUnavailable` (a plain `RuntimeError`) when Foundation is absent
@@ -37,6 +40,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, text
 
 from vendor_cp.recovery.dump_evidence import (
     FoundationUnavailable,
@@ -64,6 +68,20 @@ def test_capture_dump_evidence_proves_a_real_custom_format_dump(
         "with the PostgreSQL client tools installed, the same as the "
         "`deploy_production.sh` host this test's flags mirror"
     )
+
+    engine = create_engine(scratch_db)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text("CREATE TABLE public.d16_archive_probe (value text NOT NULL)")
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO public.d16_archive_probe (value) VALUES ('data-block')"
+                )
+            )
+    finally:
+        engine.dispose()
 
     dump_path = tmp_path / "database.dump"
     # Same two flags `deploy_production.sh` uses for the database dump

@@ -14,7 +14,9 @@ from what `capture_sql()` really emits.
 Requires the test Postgres cluster from `make test-db-up`, AND a real
 `dotmac-deployment-foundation` install; skips (or fails under
 `REQUIRE_POSTGRES_TESTS=1`) when `TEST_DATABASE_URL` is unset — see
-`tests/migration/conftest.py`.
+`tests/migration/conftest.py`. The required CI postgres job runs these cases a
+second time against the exact Foundation source commit, then refuses skips or
+missing cases. A local run without Foundation may still skip deliberately.
 
 Foundation itself is brought in through a `try/except ImportError` around
 the actual import, converted to `pytest.skip(..., allow_module_level=True)`
@@ -33,10 +35,10 @@ rather than report these specific tests as not-yet-provable. This
 repository's own `pyproject.toml` mypy override and `poetry.lock` both
 confirm `dotmac-deployment-foundation` is not a declared dependency
 anywhere in this assembly, including the `postgres` CI job (`poetry
-install` only) — so today this file is EXPECTED to skip, not silently pass
-or break collection, until that dependency decision is made. This file is
-DORMANT PROOF, not currently-executed coverage: nothing here runs to
-completion in CI until Foundation is actually installed.
+install` only) — so the ordinary migration invocation may still skip, but
+the separate D16 conformance step executes the same cases from exact source
+and refuses skips. That source-only CI tool is not a CP production dependency
+or deploy wiring.
 """
 
 from __future__ import annotations
