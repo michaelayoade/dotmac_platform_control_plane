@@ -163,7 +163,7 @@ cleanup, not as a live fallback.
 
 From a trusted checkout that contains the reviewed D16 PR 3 source revision,
 Michael installs the exact helper blob below on the explicitly named host.
-The source revision `87dca788a70a745db228451de116f07a378946f7` has
+The source revision `7448c4404c470fba74a57d3f96fcbb363a001bc0` has
 Git blob `422d77d5b34c90adff177ddae9ba4c62ed3b8937` at the helper path;
 its independent SHA-256 is
 `5b70fc92db5d0ca492d02128ab6c3931e884ce2c5be3d69973006e461562995b`.
@@ -173,7 +173,7 @@ installation procedure, never a CI or deploy side effect.
 
 ```console
 $ set -euo pipefail
-$ REVIEWED_HELPER_REV=87dca788a70a745db228451de116f07a378946f7
+$ REVIEWED_HELPER_REV=7448c4404c470fba74a57d3f96fcbb363a001bc0
 $ REVIEWED_HELPER_BLOB=422d77d5b34c90adff177ddae9ba4c62ed3b8937
 $ REVIEWED_HELPER_SHA256=5b70fc92db5d0ca492d02128ab6c3931e884ce2c5be3d69973006e461562995b
 $ HELPER_PATH=deploy/host/dotmac-vendor-maintenance
