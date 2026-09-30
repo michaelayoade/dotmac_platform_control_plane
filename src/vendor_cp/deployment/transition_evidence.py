@@ -53,6 +53,7 @@ the working tree.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess  # noqa: S404 - argv list, shell=False throughout
 import time
@@ -146,29 +147,64 @@ class TargetState:
     captured_at_epoch: int
 
 
-def raw_bytes_digest(text_: str) -> str:
-    """`"sha256:" + hex` over the UTF-8 bytes of `text_`, exactly as given —
-    no stripping, no normalization. Kept separate from
+def raw_bytes_digest(data: bytes) -> str:
+    """`"sha256:" + hex` over `data`, exactly as given — no decoding, no
+    newline normalization, no re-encoding. Kept separate from
     `read_descriptor_at_revision` so "what got hashed" always has one,
     inspectable answer in tests.
+
+    Takes `bytes`, not `str`, deliberately: `subprocess.run(text=True)` and
+    `Path.read_text()` both perform universal-newline translation
+    (`\\r\\n`/`\\r` -> `\\n`) and locale/encoding-dependent decoding before a
+    caller ever sees a `str` — hashing a decoded-then-re-encoded string would
+    silently diverge from `sha256sum`'s (and `scripts/promote_descriptor.py`'s
+    `raw_digest`'s) raw-bytes convention for any descriptor containing a
+    `\\r` or content decoded under an unexpected locale.
     """
-    return "sha256:" + hashlib.sha256(text_.encode("utf-8")).hexdigest()
+    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def read_descriptor_at_revision(repo_root: Path, source_revision: str) -> str:
-    """`deploy/product.toml`'s text AT `source_revision` — from git history,
-    never the working tree.
+def _git_isolated_env() -> dict[str, str]:
+    """An environment for a git subprocess call that cannot be redirected by
+    ambient `GIT_*` variables, matching `d16_source_verifier.py`'s own `_git`
+    helper (the established pattern in this codebase for exactly this
+    class of risk): every existing `GIT_*` variable is stripped (so
+    `GIT_DIR`/`GIT_WORK_TREE` cannot repoint `-C <repo_root>` at a different
+    repository), and a fixed set is then applied on top.
+    """
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    environment.update(
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_OPTIONAL_LOCKS="0",
+        GIT_NO_REPLACE_OBJECTS="1",
+        GIT_TERMINAL_PROMPT="0",
+    )
+    return environment
 
-    Validates `source_revision` against `SOURCE_REVISION_PATTERN.fullmatch`
-    first (a 40-hex string embedded in a longer string does not pass) and
-    raises `InvalidSourceRevision` before any subprocess call. Runs `git -C
-    <repo_root> show <source_revision>:deploy/product.toml`
-    (`shell=False`, a bounded timeout); a non-zero exit raises
+
+def read_descriptor_at_revision(repo_root: Path, source_revision: str) -> bytes:
+    """`deploy/product.toml`'s RAW BYTES AT `source_revision` — from git
+    history, never the working tree.
+
+    Validates `source_revision` is a `str` matching
+    `SOURCE_REVISION_PATTERN.fullmatch` first (a 40-hex string embedded in a
+    longer string does not pass; a non-`str` value is refused the same way,
+    never left to raise a bare `TypeError`) and raises
+    `InvalidSourceRevision` before any subprocess call. Runs `git
+    --no-replace-objects -C <repo_root> show
+    <source_revision>:deploy/product.toml` (`shell=False`, binary mode, a
+    bounded timeout, replacement objects and ambient `GIT_*` overrides
+    disabled — see `_git_isolated_env`); a non-zero exit raises
     `SourceRevisionUnavailable` with the command's stderr included. Returns
-    `stdout` exactly as returned — the raw bytes a caller then hashes with
-    `raw_bytes_digest`.
+    `stdout` exactly as returned, in bytes — no decode, no newline
+    translation — the raw bytes a caller then hashes with `raw_bytes_digest`.
     """
-    if not SOURCE_REVISION_PATTERN.fullmatch(source_revision):
+    if not isinstance(source_revision, str) or not SOURCE_REVISION_PATTERN.fullmatch(
+        source_revision
+    ):
         raise InvalidSourceRevision(
             f"{source_revision!r} is not 40 lowercase hex characters; "
             "refusing to construct a git command from a value that does "
@@ -187,15 +223,17 @@ def read_descriptor_at_revision(repo_root: Path, source_revision: str) -> str:
         result = subprocess.run(  # noqa: S603 - argv list, resolved executable
             [
                 git_executable,
+                "--no-replace-objects",
                 "-C",
                 str(repo_root),
                 "show",
                 f"{source_revision}:deploy/product.toml",
             ],
             capture_output=True,
-            text=True,
+            text=False,
             timeout=_GIT_SHOW_TIMEOUT_SECONDS,
             check=False,
+            env=_git_isolated_env(),
         )
     except (subprocess.TimeoutExpired, OSError) as error:
         raise SourceRevisionUnavailable(
@@ -204,32 +242,51 @@ def read_descriptor_at_revision(repo_root: Path, source_revision: str) -> str:
         ) from error
 
     if result.returncode != 0:
+        # `stderr` is bytes here (binary mode) — decoded ONLY for this human
+        # error message, with `errors="replace"`; never for hashed content.
+        stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
         raise SourceRevisionUnavailable(
             f"git show {source_revision}:deploy/product.toml failed against "
-            f"{repo_root} (exit {result.returncode}): {result.stderr.strip()}"
+            f"{repo_root} (exit {result.returncode}): {stderr_text}"
         )
 
     return result.stdout
 
 
-def read_descriptor_from_working_tree(descriptor_path: Path) -> str:
-    """`descriptor_path`'s text, read directly from the working tree.
+def read_descriptor_from_working_tree(descriptor_path: Path) -> bytes:
+    """`descriptor_path`'s RAW BYTES, read directly from the working tree —
+    no decode, no newline translation.
 
     Mirrors `deploy_production.sh`'s own `[[ -f "$DESCRIPTOR_FILE" ]] || die
     ...` framing: an absent file is a real, existing Python fact
     (`FileNotFoundError`) and is left to surface as such rather than being
     wrapped in a new exception type.
     """
-    return descriptor_path.read_text(encoding="utf-8")
+    return descriptor_path.read_bytes()
 
 
 def read_current_migration_heads(conn: Connection) -> tuple[str, ...]:
     """`alembic_version`'s current rows, sorted — the exact query
     `deploy_production.sh` already uses (`SELECT version_num FROM
-    alembic_version ORDER BY version_num`, around line 337).
+    alembic_version ORDER BY version_num`, around line 337), schema-qualified
+    (`public.alembic_version`) since an unqualified read depends on
+    `search_path`.
+
+    A genuinely never-migrated database (a fresh `scratch_db`, before its
+    first `dotmac-platform admin migrate` run) has no `alembic_version`
+    table at all — `to_regclass` is checked FIRST, and `()` is returned when
+    it is `NULL`, the same `to_regclass('public.alembic_version') IS NOT
+    NULL` guard `tests/migration/test_vendor_migration_rehearsals.py`
+    already uses. This is a real, meaningful fact about a brand-new
+    database, not an error to raise.
     """
+    table_exists = conn.execute(
+        text("SELECT to_regclass('public.alembic_version') IS NOT NULL")
+    ).scalar_one()
+    if not table_exists:
+        return ()
     rows = conn.execute(
-        text("SELECT version_num FROM alembic_version ORDER BY version_num")
+        text("SELECT version_num FROM public.alembic_version ORDER BY version_num")
     )
     return tuple(sorted(row[0] for row in rows))
 
@@ -251,10 +308,10 @@ def capture_genesis_baseline(
     expected/override value for any field: the signature itself is the
     proof of non-circularity.
     """
-    descriptor_text = read_descriptor_at_revision(
+    descriptor_bytes = read_descriptor_at_revision(
         repo_root=repo_root, source_revision=source_revision
     )
-    digest = raw_bytes_digest(descriptor_text)
+    digest = raw_bytes_digest(descriptor_bytes)
     heads = read_current_migration_heads(conn)
     return GenesisBaseline(
         source_revision=source_revision,
@@ -277,8 +334,8 @@ def capture_target_state(
     No parameter lets a caller supply an expected/override value for any
     field: the signature itself is the proof of non-circularity.
     """
-    descriptor_text = read_descriptor_from_working_tree(descriptor_path)
-    digest = raw_bytes_digest(descriptor_text)
+    descriptor_bytes = read_descriptor_from_working_tree(descriptor_path)
+    digest = raw_bytes_digest(descriptor_bytes)
     heads = read_current_migration_heads(conn)
     return TargetState(
         raw_bytes_descriptor_digest=digest,

@@ -129,8 +129,8 @@ def test_the_genesis_descriptor_comes_from_git_history_not_the_working_tree(
 
     _git(tmp_path, "init", "--quiet")
 
-    old_text = 'product = "old-value"\n'
-    descriptor_path.write_text(old_text, encoding="utf-8")
+    old_bytes = b'product = "old-value"\n'
+    descriptor_path.write_bytes(old_bytes)
     _git(tmp_path, "add", "deploy/product.toml")
     _git(tmp_path, "commit", "--quiet", "-m", "genesis descriptor")
     old_revision = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
@@ -142,31 +142,31 @@ def test_the_genesis_descriptor_comes_from_git_history_not_the_working_tree(
     # independent descriptor-promotion commit, exactly the scenario
     # deploy_production.sh's own working-tree read cannot distinguish from
     # "this is still the descriptor that was deployed".
-    new_text = 'product = "new-value"\n'
-    descriptor_path.write_text(new_text, encoding="utf-8")
+    new_bytes = b'product = "new-value"\n'
+    descriptor_path.write_bytes(new_bytes)
     _git(tmp_path, "add", "deploy/product.toml")
     _git(tmp_path, "commit", "--quiet", "-m", "promote descriptor")
 
     # Sanity: the working tree really does hold the NEW content right now.
-    assert descriptor_path.read_text(encoding="utf-8") == new_text
+    assert descriptor_path.read_bytes() == new_bytes
 
-    returned_text = read_descriptor_at_revision(
+    returned_bytes = read_descriptor_at_revision(
         repo_root=tmp_path, source_revision=old_revision
     )
 
-    assert returned_text == old_text, (
+    assert returned_bytes == old_bytes, (
         "read_descriptor_at_revision must return the descriptor's bytes AS "
         "THEY WERE at old_revision, not the working tree's current content"
     )
-    assert returned_text != new_text
+    assert returned_bytes != new_bytes
 
-    # Non-vacuity control: the two texts are genuinely different values, so
-    # the digest comparison below is not accidentally comparing identical
-    # bytes to itself.
-    assert raw_bytes_digest(old_text) != raw_bytes_digest(new_text)
-    assert raw_bytes_digest(returned_text) == raw_bytes_digest(old_text)
-    assert raw_bytes_digest(returned_text) != raw_bytes_digest(
-        descriptor_path.read_text(encoding="utf-8")
+    # Non-vacuity control: the two byte strings are genuinely different
+    # values, so the digest comparison below is not accidentally comparing
+    # identical bytes to itself.
+    assert raw_bytes_digest(old_bytes) != raw_bytes_digest(new_bytes)
+    assert raw_bytes_digest(returned_bytes) == raw_bytes_digest(old_bytes)
+    assert raw_bytes_digest(returned_bytes) != raw_bytes_digest(
+        descriptor_path.read_bytes()
     )
 
 
@@ -245,6 +245,29 @@ def test_genesis_baseline_and_target_state_around_a_real_fenced_migration(
     assert genesis.raw_bytes_descriptor_digest.startswith("sha256:")
     hex_part = genesis.raw_bytes_descriptor_digest.removeprefix("sha256:")
     assert len(hex_part) == 64
+
+    # The composition-level proof, not just a format check: independently
+    # read the exact same blob's bytes via `git cat-file`, hashed the same
+    # way, and confirm capture_genesis_baseline actually hashed THOSE bytes
+    # — never routed through read_descriptor_at_revision's own machinery.
+    cat_file = subprocess.run(  # noqa: S603 - argv list, resolved executable
+        [
+            _git_executable(),
+            "-C",
+            str(repo_root),
+            "cat-file",
+            "-p",
+            f"{current_revision}:deploy/product.toml",
+        ],
+        capture_output=True,
+        text=False,
+        check=True,
+    )
+    independently_expected_digest = raw_bytes_digest(cat_file.stdout)
+    assert genesis.raw_bytes_descriptor_digest == independently_expected_digest, (
+        "capture_genesis_baseline's digest must equal an independently "
+        "computed sha256 over the exact blob bytes at current_revision"
+    )
 
     dotmac_platform = shutil.which("dotmac-platform")
     assert dotmac_platform is not None, (
