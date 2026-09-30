@@ -16,7 +16,7 @@ at exact Starter commit `d74bf8dd8c399dd92047174365403b861f82ddd0` (the same
 commit #224/#226's CI conformance step pins). Field and code names below are
 taken directly from that file, not paraphrased.
 
-## Corrected finding, prerequisite to decision 3
+## Corrected finding, and the digest-convention ruling (not one of the four numbered decisions below)
 
 Earlier session notes described `deploy/descriptor-promotions.json`'s
 2026-09-01 entry as "an unresolved ordering conflict." Re-read directly
@@ -26,27 +26,36 @@ are clean, internally consistent, and correctly chained via `supersedes`; the
 `primary` dataset's verification set (three checks → seven) after a real,
 already-closed incident (a 2026-08-30 restore rehearsal that passed its then-
 declared checks while missing 114 roles). There is no open ordering conflict
-to reconcile. The only genuinely open thing decision 3 needed was the digest-
-form split the ledger's own header documents:
+to reconcile. The only genuinely open thing here was the digest-form split
+the ledger's own header documents:
 
 > "Digests here are RAW-BYTES sha256 of the file, the same convention the
 > bootstrap receipt's `product_descriptor_sha256` uses — NOT the
 > canonical-bytes convention `assembly.manifest_digest` uses."
 
 Ruling: **keep both conventions, named explicitly, never substituted for one
-another.** `deploy/descriptor-promotions.json` keeps its raw-bytes sha256 of
+another — and they serve different consumers, not two fields of one
+receipt.** `deploy/descriptor-promotions.json` keeps its raw-bytes sha256 of
 `deploy/product.toml` as promotion evidence — that is what
 `test_descriptor_promotion.py` byte-compares and what the ledger's own
 history is written against; changing it would invalidate the existing chain.
+That raw-bytes digest has no field in Foundation's `TransitionReceiptV1`
+schema at all — it is not a receipt input, and must be kept in a separate
+CP-owned provenance record, not forced into the receipt.
+
 The D16 transition receipt's `TransitionSide.descriptor_sha256` /
-`TargetSide.descriptor_sha256` fields use Foundation's canonical-bytes digest
-of the descriptor instead — computed the same way `assembly.manifest_digest`
-already is elsewhere in this codebase. A future receipt-producing record
-(and the eventual producer code) must carry BOTH digests under their own
-distinct, explicit field names when both are relevant (e.g. "the promotion
-ledger's evidence digest was X; the receipt's canonical descriptor digest is
-Y") — never present one as a stand-in for the other, and never collapse them
-into a single ambiguous "descriptor digest" field anywhere in new code.
+`TargetSide.descriptor_sha256` fields instead carry
+`ProductDeploymentSpec.to_canonical_document().sha256_digest()` — the digest
+of the `DeploymentDescriptorDocumentV1` that method returns (`spec.py`,
+Foundation, same pinned commit). This is NOT the same calculation as
+`assembly.manifest_digest`: that field hashes a different document entirely
+(the product/assembly manifest — `deploy/product-manifest.json` — a separate
+artefact from the descriptor), and citing it as though it were the same
+computation was a mistake in an earlier draft of this record. Only the
+canonical descriptor digest goes into the receipt; the ledger's raw-bytes
+digest and the receipt's canonical digest are two separate values, computed
+over two separate documents, for two separate consumers, and neither
+substitutes for the other anywhere in new code.
 
 ## Decision 1 — does the receipt gate restoring public routing?
 
@@ -80,15 +89,22 @@ single CI step) remains a legitimate, approved TEMPORARY exception for CI
 conformance proof only — it does not authorize shipping or using unreleased
 Foundation source as the actual production bundle/receipt producer. This
 rule "exposes a release gate rather than hiding a runtime dependency": the
-real blocker on building the production receipt producer is that Foundation
-has not yet cut a release CP can pin, not a design question CP owns.
+real blocker on building the production receipt producer is that there is no
+eligible published Foundation release carrying this contract, not a design
+question CP owns.
 
-**Not yet implemented / not yet true:** Foundation has not published a
-release; `pyproject.toml`/`poetry.lock` are unchanged and must stay that way
-until one exists. The production bundle/receipt producer cannot be built as
-production code until this gate clears — a release-readiness question for
+**Not yet implemented / not yet true:** no eligible published Foundation
+release carries the bundle/receipt contract cited in this record;
+`pyproject.toml`/`poetry.lock` are unchanged and must stay that way until one
+exists. The production bundle/receipt producer cannot be built as production
+code until this gate clears — a release-readiness question for
 Foundation/Starter release management, tracked as a precondition here, not
-solved here.
+solved here. Separately: CP already has a LEGACY production deploy path
+(`scripts/deploy_production.sh`; see `dotmac-debt-register` D5, currently
+disabled) — this record does not claim CP has no deploy workflow at all. What
+is pending is the SUCCESSOR protected deploy workflow (Gate-0 D's topology
+work), which decision 3 below depends on for `run_id`; that is a distinct gap
+from the Foundation-release gate this decision names.
 
 ## Decision 3 — source of `run_id`
 
@@ -125,9 +141,11 @@ protected deploy workflow to derive `run_id` from.
 derived from the receipt being checked, never assumed from the ledger's
 penultimate promotion.** While the D16 database fence holds, and BEFORE
 migration runs, independently measure and retain: the actual source
-descriptor's canonical digest (decision 3's canonical-bytes convention, see
-above) and the actual source migration heads read directly off the fenced
-database — bound to the named host, product and environment. That retained
+descriptor's canonical digest (the digest-convention ruling above —
+`ProductDeploymentSpec.to_canonical_document().sha256_digest()`, not the
+ledger's raw-bytes digest) and the actual source migration heads read
+directly off the fenced database — bound to the named host, product and
+environment. That retained
 record is supplied to the verifier as Foundation's `genesis_source`
 argument; later receipts chain to their immediately preceding VERIFIED
 receipt via `previous_receipt_digest`, never back to this genesis baseline
