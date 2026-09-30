@@ -634,3 +634,41 @@ GitHub plan and runner-group references: [protected branches](https://docs.githu
 [runner groups](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access),
 [runner-group API](https://docs.github.com/en/rest/actions/self-hosted-runner-groups), and
 [self-hosted runner security](https://docs.github.com/en/actions/reference/security/secure-use).
+
+### Provisioning record — 2026-09-30 (partial; no Gate-0 admission)
+
+The amendment's proposed coordinates now exist. CP #229 merged as
+`6f5efe2176e25477816f24e6762d5ce9e9fb34ed`. The public execution
+repository `dotmac-tech/gate0-issuer-execution` has repository ID
+`1397614140` under organization ID `335992433`. Its refusal-only source
+PR #1 merged as `f218660b6ff7c3a01b877e6ab080efcd31672805`. The
+protected workflow exits unsuccessfully by design and has no issuer,
+OpenBao, SSH, or target action.
+
+GitHub API read-back showed the following configured controls:
+
+- Main ruleset `24240825`: pull request required with zero approving
+  reviews, `source_policy` required, no configured bypass actors, deletion
+  and non-fast-forward refused.
+- Environment `rehearsal-issuer-protected` (`23103080174`): Michael is
+  the required reviewer, admin bypass disabled, and only `main` admitted.
+- Organization runner group `gate0-issuer-protected` (`3`): public
+  repositories allowed, selected repository ID `1397614140` only, selected
+  workflow
+  `dotmac-tech/gate0-issuer-execution/.github/workflows/gate0-issuer.yml@refs/heads/main`
+  only. The group contained **zero runners** at last read-back.
+
+`source_policy` runs from the same repository as the workflow it checks.
+It catches accidental drift but can be changed alongside that workflow;
+its green status is **not independent admission evidence**. A disposable,
+separately isolated canary VM was created on a named authorized testing
+host, and its guest had no default route. From within it, an explicitly
+forwarded, host-owned proxy reached GitHub's API and refused the test host,
+production host, unrelated public site, and arbitrary Azure Blob account.
+The official runner archive was verified against its GitHub-published
+SHA-256 and extracted, but unattended registration timed out before the
+runner appeared in GitHub. No live scheduling refusal or OIDC/OpenBao
+negative test has run. The VM was powered off and its temporary proxy
+stopped after the failed attempt; its disk is retained for diagnosis. The
+canary is not the privileged runner. This partial setup neither closes D
+nor permits Foundation successor allocation.
