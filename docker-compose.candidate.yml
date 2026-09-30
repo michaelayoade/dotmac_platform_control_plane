@@ -1,0 +1,58 @@
+# D16 candidate app readiness only. Invoke this file ALONE, never as an
+# override of docker-compose.production.yml: merging would import the normal
+# app/relay env_file (.env) and their old-role database URLs.
+# The host adapter must validate the run id, immutable image digest, per-run
+# file ownership/mode/content, and selected port before invoking Compose.
+# app.env uses raw parsing so secret material containing '$' is not expanded
+# by Compose. It must contain only candidate app/platform URLs and required
+# runtime material; it must contain VENDOR_RELAY_EXPECTED=false. Compose also
+# forces that non-secret flag below. It cannot allowlist arbitrary env_file
+# keys, so the host adapter must reject owner/dispatcher credentials there.
+# Relay readiness is proved after exact ACL restore and normal relay startup.
+name: dotmac_vendor_control_plane_candidate
+
+services:
+  candidate-app:
+    image: ${VENDOR_CANDIDATE_APP_IMAGE:?Set the selected immutable digest image}
+    env_file:
+      - path: /opt/dotmac/vendor-control-plane/candidate-runs/${VENDOR_CANDIDATE_RUN_ID:?Set the run id}/app.env
+        required: true
+        format: raw
+    environment:
+      VENDOR_RELAY_EXPECTED: "false"
+    ports:
+      - "127.0.0.1:${VENDOR_CANDIDATE_APP_PORT:?Set a distinct loopback readiness port}:8000"
+    volumes:
+      - vendor_product_manifests:/run/dotmac/product-manifests:ro
+      - ${VENDOR_LICENCE_SIGNING_KEY_HOST_FILE:?Set the held licence key path}:/run/secrets/dotmac/vendor-control-plane/licence-signing/primary.key:ro
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 768m
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health/ready', headers={'Host': 'vendor.dotmac.io'}); urllib.request.urlopen(r, timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [vendor_backend]
+
+volumes:
+  vendor_product_manifests:
+    external: true
+    name: dotmac_vendor_control_plane_vendor_product_manifests
+
+networks:
+  vendor_backend:
+    external: true
+    name: dotmac_vendor_control_plane_vendor_backend
