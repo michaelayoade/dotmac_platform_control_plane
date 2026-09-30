@@ -236,7 +236,10 @@ BASELINE: Final[dict[tuple[str, str], tuple[str, ...]]] = {
         "checkout_relative_production_command",
         "docs/operations/production-deployment.md",
     ): ("cd /opt/dotmac/vendor-control-plane",),
-    ("python_scripts", ".github/workflows/ci.yml"): ("python scripts/kernel_floor.py",),
+    ("python_scripts", ".github/workflows/ci.yml"): (
+        "python scripts/check_d16_bundle_junit.py",
+        "python scripts/kernel_floor.py",
+    ),
     ("python_scripts", ".github/workflows/kernel-lock.yml"): (
         "python scripts/kernel_lock.py",
     ),
@@ -285,6 +288,11 @@ BASELINE: Final[dict[tuple[str, str], tuple[str, ...]]] = {
 #: cannot say what would remove it is an exemption nobody will remove.
 BASELINE_REASONS: Final[dict[str, str]] = {
     ".github/workflows/ci.yml": (
+        "The D16 bundle gate checks pytest's JUnit result from this same hosted "
+        "checkout so an optional Foundation import cannot turn four required "
+        "cases into a green skip. Its script-path invocation retires when that "
+        "gate moves into installed CI tooling or the source-only Foundation "
+        "period ends. "
         "The `kernel-pin` lane's SUBJECT is this checkout's own declaration — "
         "which kernel `pyproject.toml` pins, which submodules the composed "
         "source imports — compared against the private index and against a "
