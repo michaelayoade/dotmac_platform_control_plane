@@ -160,6 +160,58 @@ def build_parser() -> _Parser:
     account_create.add_argument("--display-name", required=True)
     account_create.set_defaults(handler=commands.admin_account_create)
 
+    # `admin transition-fence-<close|holding|restore>` stays a flat
+    # `<group> <name>` command like every other admin command — a genuine
+    # three-level `admin transition-fence close` nesting broke
+    # `test_every_command_help_renders`, which splits a command name on a
+    # single space and feeds it straight to argparse as argv, and breaks the
+    # image job's clean-install acceptance the same way. The hyphenated
+    # `-close`/`-holding`/`-restore` suffixes keep the three verbs visually
+    # grouped without a second level of subparsers.
+    tf_close = _command(
+        admin_sub,
+        "admin",
+        "transition-fence-close",
+        "revoke writer CONNECT and drain open writer sessions",
+    )
+    tf_close.add_argument("--database", required=True)
+    tf_close.add_argument("--fence-id", required=True)
+    tf_close.add_argument("--session-wait-seconds", type=float, required=True)
+    tf_close.add_argument(
+        "--prior-expected-digest",
+        help="the prior run's host-recorded digest; requires "
+        "--expected-prior-fence-id, and reads the prior proof document as "
+        "the first stdin line",
+    )
+    tf_close.add_argument(
+        "--expected-prior-fence-id",
+        help="the prior run's fence_id; requires --prior-expected-digest",
+    )
+    tf_close.set_defaults(handler=commands.transition_fence_close)
+
+    tf_holding = _command(
+        admin_sub,
+        "admin",
+        "transition-fence-holding",
+        "read-only: does a previously closed fence still hold",
+    )
+    tf_holding.add_argument("--database", required=True)
+    tf_holding.add_argument("--expected-digest", required=True)
+    tf_holding.add_argument("--expected-fence-id", required=True)
+    tf_holding.set_defaults(handler=commands.transition_fence_holding)
+
+    tf_restore = _command(
+        admin_sub,
+        "admin",
+        "transition-fence-restore",
+        "restore the fenced ACL to exactly what the proof recorded",
+    )
+    tf_restore.add_argument("--database", required=True)
+    tf_restore.add_argument("--expected-digest", required=True)
+    tf_restore.add_argument("--expected-fence-id", required=True)
+    tf_restore.add_argument("--session-wait-seconds", type=float, required=True)
+    tf_restore.set_defaults(handler=commands.transition_fence_restore)
+
     # ── release ────────────────────────────────────────────────────────────
     release = groups.add_parser("release", help="product release evidence and pins")
     release_sub = release.add_subparsers(dest="name", parser_class=_Parser)

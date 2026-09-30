@@ -1,0 +1,18 @@
+# dotmac-vendor-maintenance sudoers fragment.
+#
+# Installed by Michael to /etc/sudoers.d/dotmac-vendor-maintenance, owner
+# root:root, mode 0440, and checked with `visudo -cf` before use. See
+# docs/operations/maintenance-helper.md for the install and verification
+# steps.
+#
+# Michael substitutes the literal placeholder <DEPLOY_USER> below with the
+# value of the GitHub Actions repository variable VENDOR_PRODUCTION_USER
+# (`.github/workflows/production-deploy.yml`, `vars.VENDOR_PRODUCTION_USER`)
+# at install time. The runbook's install step verifies no placeholder
+# remains before running `visudo -cf`.
+#
+# No wildcards, no NOPASSWD beyond these two exact commands, and the
+# system-wide `env_reset` default is left untouched by this fragment.
+Cmnd_Alias VENDOR_MAINT = /usr/local/sbin/dotmac-vendor-maintenance maintenance-on, /usr/local/sbin/dotmac-vendor-maintenance routing-restore
+
+<DEPLOY_USER> ALL=(root) NOPASSWD: VENDOR_MAINT
