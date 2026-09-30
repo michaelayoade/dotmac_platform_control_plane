@@ -246,6 +246,30 @@ def _function_name(node: ast.AST) -> str:
     return getattr(node, "name", "<lambda>")
 
 
+def _own_body_descendants(node: ast.AST) -> list[ast.AST]:
+    """Every descendant of `node`, WITHOUT descending into a nested
+    function/lambda definition -- so a call inside a helper defined inside
+    the callback does not count as the callback's own, direct call."""
+    found: list[ast.AST] = []
+    stack = list(ast.iter_child_nodes(node))
+    while stack:
+        current = stack.pop()
+        found.append(current)
+        if isinstance(current, _FUNCTION_NODES):
+            continue
+        stack.extend(ast.iter_child_nodes(current))
+    return found
+
+
+def _calls_directly(function: ast.AST, name: str) -> bool:
+    """`True` if `function`'s OWN body calls `name(...)` -- not from inside a
+    nested function/lambda defined within it."""
+    return any(
+        isinstance(node, ast.Call) and _call_name(node) == name
+        for node in _own_body_descendants(function)
+    )
+
+
 def find_unguarded_calls(source: str, *, filename: str) -> list[str]:
     """Return a description of every guarded-name reference that is neither
     inside a `held_transition` callback nor an allowlisted (file, function,
@@ -521,3 +545,94 @@ def test_the_detector_flags_an_unaliased_commercial_agreements_command() -> None
         "from dotmac_commercial_agreements import approve as module_approve\n",
         filename="planted.py",
     )
+
+
+# ── fix 5: the receipt index's completeness is a structural property ────────
+
+
+def test_every_issuance_callback_also_records_a_receipt() -> None:
+    """D18-C's receipt index (`issuer_receipts.issued_authorization_refs`) is
+    only complete if every `held_transition` callback that issues an
+    authorization also records its receipt -- in the SAME callback. This is
+    a structural property (two calls living in one function), not something a
+    single unit test replaying one path can prove, so it is an AST check
+    here, mirroring the rest of this module."""
+    violations: list[str] = []
+    for path in _iter_source_files():
+        source = path.read_text()
+        tree = ast.parse(source)
+        parents = _parents(tree)
+        for callback in _held_transition_callbacks(tree, parents):
+            if not _calls_directly(
+                callback, "issue_rehearsal_issuer_authorization_for_plan"
+            ):
+                continue
+            if not _calls_directly(callback, "record_receipt"):
+                violations.append(
+                    f"{path.relative_to(SRC).as_posix()}:{_function_name(callback)} "
+                    "issues a rehearsal-issuer authorization without recording "
+                    "a receipt in the same held_transition callback"
+                )
+    assert violations == [], "\n".join(violations)
+
+
+def test_the_receipt_completeness_guard_flags_a_planted_violation() -> None:
+    """SENSITIVITY (positive). An issuance callback that never calls
+    `record_receipt` must be flagged."""
+    planted = (
+        "def issue_without_a_receipt(db, control):\n"
+        "    def transition(held):\n"
+        "        return control.issue_rehearsal_issuer_authorization_for_plan(db)\n"
+        "    return held_transition(db, request_id=None, subject_type='x',\n"
+        "        subject_id='y', content_digest='sha256:aa', transition=transition)\n"
+    )
+    tree = ast.parse(planted)
+    parents = _parents(tree)
+    (callback,) = _held_transition_callbacks(tree, parents)
+    assert _calls_directly(callback, "issue_rehearsal_issuer_authorization_for_plan")
+    assert not _calls_directly(callback, "record_receipt")
+
+
+def test_the_receipt_completeness_guard_does_not_flag_a_callback_with_both_calls() -> (
+    None
+):
+    """SENSITIVITY (near-miss). The identical shape, this time with
+    `record_receipt` also called directly in the callback, must NOT be
+    flagged -- otherwise the guard cannot tell the two shapes apart."""
+    clean = (
+        "def issue_with_a_receipt(db, control):\n"
+        "    def transition(held):\n"
+        "        result = control.issue_rehearsal_issuer_authorization_for_plan(db)\n"
+        "        record_receipt(db)\n"
+        "        return result\n"
+        "    return held_transition(db, request_id=None, subject_type='x',\n"
+        "        subject_id='y', content_digest='sha256:aa', transition=transition)\n"
+    )
+    tree = ast.parse(clean)
+    parents = _parents(tree)
+    (callback,) = _held_transition_callbacks(tree, parents)
+    assert _calls_directly(callback, "issue_rehearsal_issuer_authorization_for_plan")
+    assert _calls_directly(callback, "record_receipt")
+
+
+def test_the_receipt_completeness_guard_ignores_a_nested_record_receipt() -> None:
+    """SENSITIVITY (near-miss, nesting). `record_receipt` called from inside a
+    helper function DEFINED INSIDE the callback is not a direct call of the
+    callback itself -- the packet requires "directly within the same callback
+    function", not merely reachable from it."""
+    nested = (
+        "def issue_with_a_nested_receipt(db, control):\n"
+        "    def transition(held):\n"
+        "        def _record():\n"
+        "            record_receipt(db)\n"
+        "        result = control.issue_rehearsal_issuer_authorization_for_plan(db)\n"
+        "        _record()\n"
+        "        return result\n"
+        "    return held_transition(db, request_id=None, subject_type='x',\n"
+        "        subject_id='y', content_digest='sha256:aa', transition=transition)\n"
+    )
+    tree = ast.parse(nested)
+    parents = _parents(tree)
+    (callback,) = _held_transition_callbacks(tree, parents)
+    assert _calls_directly(callback, "issue_rehearsal_issuer_authorization_for_plan")
+    assert not _calls_directly(callback, "record_receipt")
