@@ -1,0 +1,172 @@
+# D16 transition-receipt decisions (2026-09-30)
+
+> **Decision record, not an implementation.** Michael ruled all five items
+> below on 2026-09-30. This file fixes what the D16 transition receipt must
+> do before `TransitionReceiptV1` construction is built; it authorizes no
+> deploy wiring, no production Foundation dependency, and no host action.
+
+#224/#226 (source verifier, bundle-producer test coverage, write-time dump
+evidence) and #225 (nginx-helper runbook provenance) are separate,
+already-merged or in-flight slices; none of them depend on these rulings,
+and none of them are changed by this record.
+
+Contract cited throughout:
+`packages/dotmac-deployment-foundation/src/dotmac_deployment_foundation/transition_receipt.py`
+at exact Starter commit `d74bf8dd8c399dd92047174365403b861f82ddd0` (the same
+commit #224/#226's CI conformance step pins). Field and code names below are
+taken directly from that file, not paraphrased.
+
+## Corrected finding, prerequisite to decision 3
+
+Earlier session notes described `deploy/descriptor-promotions.json`'s
+2026-09-01 entry as "an unresolved ordering conflict." Re-read directly
+against `origin/main` on 2026-09-30: this is wrong. All eight ledger entries
+are clean, internally consistent, and correctly chained via `supersedes`; the
+2026-09-01 entry is a fully resolved, well-documented widening of the
+`primary` dataset's verification set (three checks → seven) after a real,
+already-closed incident (a 2026-08-30 restore rehearsal that passed its then-
+declared checks while missing 114 roles). There is no open ordering conflict
+to reconcile. The only genuinely open thing decision 3 needed was the digest-
+form split the ledger's own header documents:
+
+> "Digests here are RAW-BYTES sha256 of the file, the same convention the
+> bootstrap receipt's `product_descriptor_sha256` uses — NOT the
+> canonical-bytes convention `assembly.manifest_digest` uses."
+
+Ruling: **keep both conventions, named explicitly, never substituted for one
+another.** `deploy/descriptor-promotions.json` keeps its raw-bytes sha256 of
+`deploy/product.toml` as promotion evidence — that is what
+`test_descriptor_promotion.py` byte-compares and what the ledger's own
+history is written against; changing it would invalidate the existing chain.
+The D16 transition receipt's `TransitionSide.descriptor_sha256` /
+`TargetSide.descriptor_sha256` fields use Foundation's canonical-bytes digest
+of the descriptor instead — computed the same way `assembly.manifest_digest`
+already is elsewhere in this codebase. A future receipt-producing record
+(and the eventual producer code) must carry BOTH digests under their own
+distinct, explicit field names when both are relevant (e.g. "the promotion
+ledger's evidence digest was X; the receipt's canonical descriptor digest is
+Y") — never present one as a stand-in for the other, and never collapse them
+into a single ambiguous "descriptor digest" field anywhere in new code.
+
+## Decision 1 — does the receipt gate restoring public routing?
+
+**Ruled: yes, necessary but not sufficient.** A verified transition receipt
+is REQUIRED before public routing is restored after a deploy. It is not, by
+itself, SUFFICIENT: target migration heads, candidate readiness (the D16
+candidate-role preflight — CP #222/#223), and routing checks must also pass
+before routing restores. This is an AND of independent gates, not a single
+receipt-only condition. On any failure among these, the deploy retains
+nginx maintenance and follows the already-ruled re-fence compensation path
+(PR2 rulings, 2026-09-28: failed post-migration deploy stays in maintenance;
+restore routing only after compatible heads, health and ACL restoration are
+proved).
+
+**Not yet implemented:** the actual gate — the code path that checks all of
+receipt-verified AND heads-compatible AND candidate-ready AND routing-checks-
+passed before calling whatever restores nginx to serving traffic — does not
+exist yet. This is deploy-rewire work, explicitly out of scope for the
+bundle-producer/dump-evidence slice (#226) by Michael's own earlier
+constraint, and remains out of scope here too.
+
+## Decision 2 — is Foundation an explicit CP dependency?
+
+**Ruled: yes for the final production path, not as an unreleased pin now.**
+CP must explicitly pin an ELIGIBLE PUBLISHED Foundation release
+(`pyproject.toml` + `poetry.lock`) before any PRODUCTION code path imports
+Foundation's bundle/receipt implementation. The exact-commit-pinned,
+read-only source verifier pattern #224/#226 established (checking out
+`d74bf8dd8c399dd92047174365403b861f82ddd0`'s source onto `PYTHONPATH` for a
+single CI step) remains a legitimate, approved TEMPORARY exception for CI
+conformance proof only — it does not authorize shipping or using unreleased
+Foundation source as the actual production bundle/receipt producer. This
+rule "exposes a release gate rather than hiding a runtime dependency": the
+real blocker on building the production receipt producer is that Foundation
+has not yet cut a release CP can pin, not a design question CP owns.
+
+**Not yet implemented / not yet true:** Foundation has not published a
+release; `pyproject.toml`/`poetry.lock` are unchanged and must stay that way
+until one exists. The production bundle/receipt producer cannot be built as
+production code until this gate clears — a release-readiness question for
+Foundation/Starter release management, tracked as a precondition here, not
+solved here.
+
+## Decision 3 — source of `run_id`
+
+**Ruled: derive from the protected deploy workflow's own run ID and attempt
+number, passed to the host as workflow-derived evidence — never a
+`workflow_dispatch` input, never an operator-entered label.** Concretely:
+`run_id` must identify the specific GitHub Actions run of the PROTECTED
+DEPLOY workflow (not the CI/build workflow that produced the image — these
+are distinct runs with distinct IDs, and conflating them is explicitly
+refused). A rerun/retry of a deploy must carry a distinct transition
+identity from its predecessor.
+
+This maps directly onto the contract's own refusal codes:
+`TransitionReceiptV1.run_id` is "who is claiming to have done the work," and
+`verify_transition_receipt`'s `RUN_ID_REUSED` finding exists specifically to
+catch "a receipt that reuses its predecessor's `run_id`... claiming two
+distinct hops happened under one run." A workflow-derived
+`${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}` (of the deploy workflow, evaluated
+at the point the deploy actually launches) satisfies this: GitHub increments
+`run_attempt` on every retry of the same run, and a wholly new deploy gets a
+new `run_id`, so no legitimate rerun can accidentally collide with its
+predecessor's identity, and no operator can hand-type a stale or reused
+value.
+
+**Not yet implemented:** the deploy workflow itself is not yet running under
+this identity scheme; this depends on Gate-0 D's still-unresolved runner/
+execution-topology work (see `dotmac-debt-register` D1's "D runner blocker"
+and `gate0-d-execution-topology-ruling-2026-09-28`) landing an actual
+protected deploy workflow to derive `run_id` from.
+
+## Decision 4 — genesis/chain anchor for the first receipt
+
+**Ruled: a separately retained, pre-migration genesis baseline — never
+derived from the receipt being checked, never assumed from the ledger's
+penultimate promotion.** While the D16 database fence holds, and BEFORE
+migration runs, independently measure and retain: the actual source
+descriptor's canonical digest (decision 3's canonical-bytes convention, see
+above) and the actual source migration heads read directly off the fenced
+database — bound to the named host, product and environment. That retained
+record is supplied to the verifier as Foundation's `genesis_source`
+argument; later receipts chain to their immediately preceding VERIFIED
+receipt via `previous_receipt_digest`, never back to this genesis baseline
+directly.
+
+This maps directly onto the contract: `verify_transition_receipt` requires
+exactly one of `previous_receipt` or `genesis_source` for any receipt
+(`CHAIN_ANCHOR_AMBIGUOUS` if both or neither are given); a first receipt has
+no `previous_receipt` to check against, so "the descriptor and heads the
+chain actually left from" (`genesis_source`, a `TransitionSide` value) must
+be "established independently of the receipt" per the module's own
+docstring — exactly the independently-measured-while-fenced baseline ruled
+above, and exactly why it must not be inferred from the receipt or assumed
+from a promotion record that may not reflect what is actually running.
+
+**Not yet implemented:** the genesis-baseline capture step (measure +
+retain, while fenced, before migration) does not exist in CP yet. This
+composes naturally with the P1 work #226 already built (write-time dump
+evidence, `capture_dump_evidence`) and the still-open post-migration
+target-state capture (heads re-read after `admin migrate`,
+`image_heads.py::composed_effective_heads` already available for reuse) —
+the genesis baseline is the SOURCE-side half of that same capture problem,
+captured once per fence rather than once per receipt.
+
+## What this record does not decide
+
+- The actual `TransitionReceiptV1`-constructing code. These four rulings are
+  inputs to that design, not the design itself.
+- The deploy rewire (routing-restore gate, decision 1's AND-condition
+  implementation).
+- Naming or authorizing a production host — still Michael's, still separate,
+  still ungated by anything in this record.
+- Foundation's release timeline — decision 2 exposes it as a precondition;
+  it does not set it.
+
+## Status
+
+All five prior "next-slice decisions" named in the `dotmac-debt-register`
+Knowledge slug's D16 section are now RULED. That register entry, and this
+file, should be read together going forward; update this file (not the
+register) if any ruling here is later revisited, and update the register to
+point at this file rather than restating the rulings inline.
