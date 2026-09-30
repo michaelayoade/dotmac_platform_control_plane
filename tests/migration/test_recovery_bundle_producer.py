@@ -156,25 +156,22 @@ def _postgres_major(admin_url: str) -> int:
 
 
 def _capture_catalogue(admin_url: str) -> dict[str, Any]:
-    engine = create_engine(admin_url)
-    try:
-        with engine.connect() as conn:
-            raw = conn.execute(text(capture_sql())).scalar()
-    finally:
-        engine.dispose()
-    # `capture_sql()`'s final SELECT is `json_build_object(...)` (a `json`
-    # column, not `jsonb`) — assert the type explicitly rather than trusting
-    # whichever shape the driver happens to hand back today.
-    if isinstance(raw, str):
-        parsed = json.loads(raw)
-    elif isinstance(raw, dict):
-        parsed = raw
-    else:
-        raise AssertionError(
-            f"capture_sql() over SQLAlchemy returned {type(raw)!r}, neither "
-            "str nor dict — build_bundle()'s capture: dict[str, Any] "
-            "contract does not accept this shape"
-        )
+    psql = shutil.which("psql")
+    assert psql is not None, "psql is required for the packaged capture script"
+    # capture_sql() is a psql script, not driver SQL: it includes \set and is
+    # explicitly documented to be fed to psql. -X excludes local psqlrc state.
+    libpq_url = admin_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    result = subprocess.run(  # noqa: S603 -- fixed psql argv, no shell
+        [psql, "-X", "-tA", "-v", "ON_ERROR_STOP=1", "--dbname", libpq_url],
+        input=capture_sql(),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (
+        result.returncode == 0
+    ), f"psql catalogue capture failed (exit {result.returncode}): {result.stderr}"
+    parsed = json.loads(result.stdout)
     assert isinstance(parsed, dict)
     return parsed
 
