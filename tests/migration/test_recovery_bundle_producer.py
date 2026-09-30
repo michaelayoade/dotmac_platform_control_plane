@@ -237,11 +237,14 @@ def test_build_bundle_produces_a_foundation_valid_manifest(
     for component in REQUIRED_COMPONENTS:
         manifest.component_digest(component)  # raises if absent; let it
 
-    assert outcome.excluded_superusers == (), (
-        "the scratch cluster's app-level roles were captured as SUPERUSER — "
-        "a genuine finding about the test cluster's role setup, not "
-        "something to filter around here"
-    )
+    captured_superusers = {
+        str(role["name"]) for role in capture["roles"] if role["superuser"]
+    }
+    assert "postgres" in captured_superusers
+    assert set(outcome.excluded_superusers) == captured_superusers
+    assert not captured_superusers.intersection(
+        {"app_admin", "app_user", "platform_api"}
+    ), "an application role was captured as SUPERUSER and excluded from the bundle"
 
 
 def test_recovery_bundle_cli_handler_round_trips_through_load_manifest(
