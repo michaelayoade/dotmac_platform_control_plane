@@ -470,6 +470,7 @@ def _approved_plan(db: Session, target_id: uuid.UUID) -> Any:
             operation="deploy",
             descriptor_digest=_DESCRIPTOR,
             execution_plan_digest=_EXECUTION_PLAN,
+            purpose="foundation_execution",
             requires_approval=True,
             approval_policy_code=_POLICY,
             approval_policy_version=_POLICY_VERSION,
