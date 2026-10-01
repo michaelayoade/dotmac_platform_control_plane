@@ -179,9 +179,9 @@ def test_genesis_baseline_and_target_state_around_a_real_fenced_migration(
     """`capture_genesis_baseline` (empty heads, pre-migration) and
     `capture_target_state` (the real composed heads, post-migration),
     captured around a real `dotmac-platform admin migrate` run, while the
-    scratch database stays fenced the entire time — the invariant Michael
-    named: "retain the independently measured genesis baseline while
-    fenced, then capture target heads after migration".
+    scratch database stays fenced the entire time. This test holds the
+    captured source value in memory and uses the checkout HEAD as a synthetic
+    source revision; it does not verify a running image or durable retention.
     """
     repo_root = Path(__file__).resolve().parents[2]
     rev_parse = subprocess.run(  # noqa: S603 - argv list, resolved executable
