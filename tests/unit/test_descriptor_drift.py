@@ -196,10 +196,10 @@ def test_a_declared_head_that_never_ran_is_reported() -> None:
     upgrade rolled back claims revisions the database does not have."""
     descriptor = accepted()
     capture = conforming_capture(descriptor)
-    capture["migration_heads"].remove("dc_0015_plan_purpose")
+    capture["migration_heads"].remove("dc_0016_controller_key_nonreuse")
     report = compare(descriptor, capture)
     assert directions(report, Subject.MIGRATION_HEAD)[Direction.DECLARED_ABSENT] == {
-        "dc_0015_plan_purpose"
+        "dc_0016_controller_key_nonreuse"
     }
 
 

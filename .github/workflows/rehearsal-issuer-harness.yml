@@ -1,6 +1,6 @@
 name: Rehearsal Issuer Harness
 
-# The disposable Control a15 / Kernel a100 rehearsal-issuer conformance
+# The disposable Control a17 / Kernel a100 rehearsal-issuer conformance
 # harness (`rehearsal_issuer_harness/`) is deliberately outside the
 # application's default `testpaths`, so `ci.yml`'s `check` job never collects
 # it. That made a "13 passed" claim in a pull request description a one-time
@@ -73,7 +73,7 @@ jobs:
             --index-url "https://pypi.org/simple" \
             --extra-index-url "https://registry.dotmac.io/api/packages/dotmac/pypi/simple" \
             --dest /tmp/private-wheels \
-            "dotmac-deployment-control==0.1.0a15" "dotmac-kernel==0.1.0a100"
+            "dotmac-deployment-control==0.1.0a17" "dotmac-kernel==0.1.0a100"
 
           # A CI-level sanity check only -- defense in depth. The harness's
           # own verify_wheels/verify_installed re-checks this again, from
@@ -146,6 +146,74 @@ jobs:
             echo "::error::this suite must never skip"
             exit 1
           fi
+
+      # Test-only Foundation build, never a release/candidate allocation. The
+      # released Control wheel and CP wheel above stay in the isolated venv.
+      - name: Fetch exact Foundation source for host-admission conformance
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_starter_mt
+          ref: d74bf8dd8c399dd92047174365403b861f82ddd0
+          path: .host-admission-foundation
+          persist-credentials: false
+      - name: Build and install the test-only Foundation wheel
+        run: |
+          set -euo pipefail
+          foundation_dir="${GITHUB_WORKSPACE}/.host-admission-foundation"
+          test "$(git -C "$foundation_dir" rev-parse HEAD)" = d74bf8dd8c399dd92047174365403b861f82ddd0
+          test -z "$(git -C "$foundation_dir" status --porcelain=v1 --untracked-files=all)"
+          poetry -C "$foundation_dir/packages/dotmac-deployment-foundation" build \
+            --format wheel --output "$RUNNER_TEMP/host-admission-foundation-wheels"
+          sha256sum "$RUNNER_TEMP"/host-admission-foundation-wheels/*.whl
+          /tmp/rehearsal-issuer-venv/bin/pip install --no-index --no-deps \
+            "$RUNNER_TEMP"/host-admission-foundation-wheels/*.whl
+      - name: Real-wheel host-admission conformance at the adopted Control pin
+        env:
+          REHEARSAL_ISSUER_MIGRATION_DATABASE_URL: "postgresql+psycopg://app_admin@localhost:${{ env.TEST_DB_PORT }}/${{ env.TEST_DB_NAME }}"
+          CONFORMANCE_DATABASE_URL: "postgresql+psycopg://platform_api@localhost:${{ env.TEST_DB_PORT }}/${{ env.TEST_DB_NAME }}"
+        run: |
+          set -euo pipefail
+          /tmp/rehearsal-issuer-venv/bin/python - <<'PY'
+          import os
+          from importlib.metadata import version
+          from pathlib import Path
+          from alembic import command
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
+          from dotmac_deployment_control import versions_dir
+          from dotmac_kernel.migrations import versions_dir as kernel_versions_dir
+          import dotmac_deployment_control as control
+          import dotmac_deployment_foundation as foundation
+          import vendor_cp.deployment.host_admission_adapter as adapter
+          for distribution, expected in (
+              ("dotmac-deployment-control", "0.1.0a17"),
+              ("dotmac-kernel", "0.1.0a100"),
+              ("dotmac-deployment-foundation", "0.4.0a1"),
+          ):
+              assert version(distribution) == expected, distribution
+          installed = Path("/tmp/rehearsal-issuer-venv").resolve()
+          for module in (control, foundation, adapter):
+              origin = Path(module.__file__).resolve()
+              assert origin.is_relative_to(installed), (module.__name__, str(origin))
+              print(module.__name__, origin)
+          cfg = Config("rehearsal_issuer_harness/alembic.ini")
+          cfg.set_main_option("version_locations", os.pathsep.join(map(str, (kernel_versions_dir(), versions_dir()))))
+          assert set(ScriptDirectory.from_config(cfg).get_heads()) == {
+              "0028_machine_attribution", "dc_0016_controller_key_nonreuse"
+          }
+          command.upgrade(cfg, "heads")
+          PY
+          /tmp/rehearsal-issuer-venv/bin/python -m pytest -q -rs \
+            conformance/test_host_admission_conformance.py \
+            --junitxml="$RUNNER_TEMP/host-admission-conformance.xml"
+          /tmp/rehearsal-issuer-venv/bin/python - "$RUNNER_TEMP/host-admission-conformance.xml" <<'PY'
+          import sys
+          from xml.etree import ElementTree
+          cases = ElementTree.parse(sys.argv[1]).getroot().findall(".//testcase")
+          assert len(cases) == 11, f"expected eleven host-admission cases, collected {len(cases)}"
+          assert all(not any(case.find(outcome) is not None for outcome in ("skipped", "failure", "error")) for case in cases)
+          print("host-admission conformance: ten component cases and one CP V3 refusal passed, zero skipped")
+          PY
 
       - name: Stop Postgres
         if: always()

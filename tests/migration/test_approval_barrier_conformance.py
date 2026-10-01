@@ -10,7 +10,7 @@ That claim is only provable with a real lock manager, two real sessions and a
 real blocking wait — the in-memory SQLite unit suite cannot take a row lock at
 all, so this lives here rather than under `tests/unit`. Everything below runs
 against a migrated scratch PostgreSQL database, through the real installed
-Control 0.1.0a16 and Approvals 0.1.0a8, seeded only through Vendor CP's own
+Control 0.1.0a17 and Approvals 0.1.0a8, seeded only through Vendor CP's own
 public seams (`propose_issuer_plan`, `open_issuer_approval`,
 `vendor_cp.approvals.adapter`) — no hand-inserted rows.
 

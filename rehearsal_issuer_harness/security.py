@@ -114,10 +114,16 @@ class AuthorizationSecurity:
 class HarnessSecurity:
     def __init__(self) -> None:
         self._key = _Key.fresh(REHEARSAL_HARNESS_EVIDENCE_PURPOSE)
+        # The attester is stable for this disposable process; each controller
+        # lease has its own actual ephemeral key, retained only in memory.
+        self._controllers: dict[str, _Key] = {}
 
-    @property
-    def controller_fingerprint(self) -> str:
-        return self._key.fingerprint
+    def controller_fingerprint_for(self, lease_id: str) -> str:
+        controller = self._controllers.get(lease_id)
+        if controller is None:
+            controller = _Key.fresh("disposable-controller")
+            self._controllers[lease_id] = controller
+        return controller.fingerprint
 
     def verify_rehearsal_harness_evidence(
         self,
@@ -151,7 +157,7 @@ class HarnessSecurity:
             "version": REHEARSAL_HARNESS_EVIDENCE_VERSION,
             "lease_id": lease_id,
             "controller_fingerprint": controller_fingerprint
-            or self.controller_fingerprint,
+            or self.controller_fingerprint_for(lease_id),
             "target_ref": target_ref,
             "environment": REHEARSAL_ONLY_ENVIRONMENT,
             "issued_at": now.isoformat().replace("+00:00", "Z"),

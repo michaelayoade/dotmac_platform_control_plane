@@ -154,7 +154,7 @@ it owns and — just as importantly — what it must never become.
   product capability catalogue, converts the authoritative Approvals request
   into content-bound evidence, and exposes the owner's bounded UUID-keyset
   agreement reader for complete commercial-cohort enumeration.
-- `dotmac-deployment-control==0.1.0a16` is the owner of deployment identity,
+- `dotmac-deployment-control==0.1.0a17` is the owner of deployment identity,
   desired state, immutable plans, rollouts and authenticated observations under
   ADR-0011. Platform-only and atomic — one supported plane set, so no
   `ModulePlaneSelection` is possible and `ASSEMBLY_MODULE_PLANES` gains nothing.
@@ -586,7 +586,7 @@ The deployment path never creates or repairs the marker itself.
 
 The Foundation V3 successor composition is kept in the import-light
 `vendor_cp.deployment.host_admission_adapter` leaf. CP pins Control
-0.1.0a16, which exports these V3 symbols, but does not install Foundation, so
+0.1.0a17, which exports these V3 symbols, but does not install Foundation, so
 the factory is not wired at startup until a published Foundation release is
 pinned and conformance-tested against its real types. Its single startup
 factory binds Control's public resolve/finalize/lookup contracts, Foundation's

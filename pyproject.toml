@@ -30,7 +30,7 @@ python = ">=3.12,<3.14"
 # requires to sign and to round-trip its envelopes through `verify_licence`.
 # No copied kernel modules, no import-path shims.
 #
-# a100 is the truthful COMPOSED FLOOR (`scripts/kernel_floor.py`): Control a16
+# a100 is the truthful COMPOSED FLOOR (`scripts/kernel_floor.py`): Control a17
 # and Approvals a8 each declare `dotmac-kernel >=0.1.0a100`, and the pin equals
 # the highest floor anything composed declares. It is NOT the final kernel
 # state and is NOT independently adoptable: a98, a99 and a100 all reach a
@@ -154,20 +154,21 @@ dotmac-approvals = { version = "0.1.0a8", source = "forgejo" }
 # a16 locks `cancel_plan` target-then-plan, the same order as every other plan
 # transition; no migration, kernel floor unchanged.
 #
-# Oracles (AGENTS.md rule 17). Pinnable — `peeled_tag`
-# `dotmac-deployment-control-v0.1.0a16`, peeled commit
-# `712647025dc312403ad48edd5d58ea60c6f70d6f`, tag object
-# `884346bf9830842cfcf7b1b6be0f72db17a6a789`. Published and installable —
-# `release_run` 36233791667 uploaded (its own read-back timed out, so that run
-# concluded failure), and INDEPENDENT verify run 36234317683 returned VERIFIED
-# (fifteen installed-artifact canaries), recorded by Control PR #71. The
-# resolved artifacts equal that evidence: wheel `da254a50…383a20`, sdist
-# `2a3171d9…52f727`, resolved by protected `kernel-lock.yml` run 36240115789.
+# a17 permanently refuses controller-key reuse across leases and targets,
+# including revoked/spent history; dc_0016 refuses duplicate history without
+# rewriting it and refuses a populated downgrade. No runtime fallback to a16.
+# Oracles: tag `dotmac-deployment-control-v0.1.0a17`, peeled commit
+# `574418944d35ddf3559d17e59e9184b5f545ebe4`, tag object
+# `2b8458bc7c7c6bc38644b2bcb117d01bf317ef2c`; release run 36876808565,
+# independent VERIFIED run 36877181012 (15 installed-artifact canaries),
+# record PR #74 (`ad95f4e1`). Protected `kernel-lock.yml` run 36880146793
+# resolved the exact wheel `ecd3478a…f39f9` and sdist `52f2d1f0…2196a`.
+# BOTH resolver files were applied byte-identically before these comment edits.
 #
 # This pin is not deployment authorization: the a98 -> a100 kernel move and the
-# dc_0003..dc_0015 and ap_0003 migrations still owe a rehearsal against a
+# dc_0003..dc_0016 and ap_0003 migrations still owe a rehearsal against a
 # RESTORED isolated database before they reach the running deployment.
-dotmac-deployment-control = { version = "0.1.0a16", source = "forgejo" }
+dotmac-deployment-control = { version = "0.1.0a17", source = "forgejo" }
 # The platform-only Commercial Agreements authority. Vendor migration `v015`
 # checks the greenfield premise under lock, drops the empty legacy tables, and
 # leaves this module as the one lifecycle/history/audit/outbox writer. Vendor

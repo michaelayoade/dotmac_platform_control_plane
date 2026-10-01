@@ -3,12 +3,12 @@
     "dotmac-deployment-control": {
       "repository": "michaelayoade/dotmac_deployment_control",
       "record_path": "docs/published-versions.json",
-      "version": "0.1.0a16",
-      "record_commit": "e6c0bb4a284ad6f50666f5f24244eef370764303",
-      "tag": "dotmac-deployment-control-v0.1.0a16",
-      "tag_object": "884346bf9830842cfcf7b1b6be0f72db17a6a789",
-      "source_commit": "712647025dc312403ad48edd5d58ea60c6f70d6f",
-      "sha256": "da254a50b35ee9456df9d4a7857a2fe3c7c3f43ab34e8412a180685b90383a20"
+      "version": "0.1.0a17",
+      "record_commit": "ad95f4e1ef2bc454450ffc1f59a8d6f090b32431",
+      "tag": "dotmac-deployment-control-v0.1.0a17",
+      "tag_object": "2b8458bc7c7c6bc38644b2bcb117d01bf317ef2c",
+      "source_commit": "574418944d35ddf3559d17e59e9184b5f545ebe4",
+      "sha256": "ecd3478a5398ce7c93d1c7195edf76ca4b4630f9c8474527e914d1561a3f39f9"
     },
     "dotmac-approvals": {
       "repository": "michaelayoade/dotmac_starter_mt",

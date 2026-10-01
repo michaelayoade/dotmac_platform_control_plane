@@ -1181,6 +1181,9 @@ class CurrentVersionClaim:
 
 
 CURRENT_VERSION_ASSERTIONS: dict[str, CurrentVersionClaim] = {
+    "conformance/README.md": CurrentVersionClaim(
+        assertions=("Kernel `{pin}`",),
+    ),
     "docs/ARCHITECTURE.md": CurrentVersionClaim(
         assertions=("`dotmac-kernel=={pin}`",),
         other_kernel_versions={

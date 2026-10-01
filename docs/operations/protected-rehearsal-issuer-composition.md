@@ -2,8 +2,8 @@
 
 The sibling module `vendor_cp.deployment.protected_rehearsal_issuer` composes
 Control and Approvals for the issuer's own operation. Both producers have
-published: Control `0.1.0a16` (tag object `884346bf…`, peeled `71264702…`,
-record Control PR #71) and Approvals `0.1.0a8` (tag object `0f307476…`, peeled
+published: Control `0.1.0a17` (tag object `2b8458bc…`, peeled `57441894…`,
+record Control PR #74) and Approvals `0.1.0a8` (tag object `0f307476…`, peeled
 `9e2d69f4…`, record Starter PR #758). CP PR #204 (the Gate-0 composition
 adoption) pinned a15/a7; this repin moves the application to exactly these
 versions, so the isolated lane
@@ -57,8 +57,8 @@ lane's sole successor coordinate source. Each row names the producing GitHub
 repository, its publication-record path and immutable record commit, release
 version, annotated tag object, peeled source commit, and wheel SHA-256. The
 coordinates were filled, in a reviewed commit, from each producer's completed
-publication (Control record commit `6edb376f…`, Starter record commit
-`0bff1b7a…`), and an architecture test holds their versions equal to the
+publication (Control record commit `ad95f4e1…`, Starter record commit
+`d26324f4…`), and an architecture test holds their versions equal to the
 application pins. The workflow fetches each
 producer's pinned record commit and tag, checks the record is on `main`, the
 tag is annotated and peels to the same source, and the producing record binds
@@ -78,3 +78,9 @@ that its versions equal the application pins, and that its wheel hashes equal
 `poetry.lock`; the producer records and tags are re-verified in the manual
 lane. This lane tests the composition boundary; it is not
 a protected run or a Gate-0 receipt.
+
+Control a17's `dc_0016_controller_key_nonreuse` permanently covers every target,
+lease and ledger state. Historical duplicate fingerprints make migration refuse
+without rewriting history. This source adoption is forward-only: a16 remains
+immutable publication history, not a post-cutover fallback. Real OIDC, custody,
+issuer readiness and the D16 transition remain separate operational gates.

@@ -1,4 +1,4 @@
-"""Real installed Control a15, real signatures, real migrated PostgreSQL.
+"""Real installed Control a17, real signatures, real migrated PostgreSQL.
 
 Every issuer/standing/revocation/consumption/target/plan call below --
 including the `_seed` helper -- runs against the `engine` fixture, which is
@@ -204,7 +204,7 @@ def test_leaf_issues_and_fresh_session_standing(
     envelope, lease, evidence = _issue(engine, harness, target_ref, plan_id)
     assert (
         signer.rehearsal_issuer_identity.public_key_fingerprint
-        != harness.controller_fingerprint
+        != envelope.statement.controller_fingerprint
     )
     assert envelope.statement.immutable_reference == str(plan_id)
     assert envelope.statement.target_ref == target_ref
@@ -253,6 +253,50 @@ def test_standing_refuses_the_uncommitted_issuing_session(
         issuing.commit()
     assert (
         _standing(engine, envelope, evidence).standing
+        is RehearsalIssuerAuthorizationStanding.VALID
+    )
+
+
+def test_leaf_refuses_controller_reuse_across_targets_and_allows_a_fresh_key(
+    engine: Engine, security: tuple[AuthorizationSecurity, HarnessSecurity]
+) -> None:
+    """Real leaf -> real a17 owner as platform_api, with signed evidence.
+
+    Changing lease and target must not allow the old controller key back in.
+    A fresh key succeeds on that same target, so this is not blanket refusal.
+    """
+    _, harness = security
+    first_ref, first_plan = _seed(engine)
+    first, _, _ = _issue(engine, harness, first_ref, first_plan)
+    next_ref, next_plan = _seed(engine)
+    lease, reused = _evidence(
+        harness, next_ref, controller=first.statement.controller_fingerprint
+    )
+    with Session(engine) as db:
+        assert db.scalar(text("SELECT current_user")) == "platform_api"
+        with pytest.raises(RehearsalIssuerIssuanceRefusedError) as caught:
+            issue_from_leaf(
+                db,
+                RehearsalIssuerInvocation(
+                    RehearsalIssuerCommand(_id(), next_plan), reused
+                ),
+            )
+        refusals = RehearsalIssuerIssuanceRefusalCode
+        assert caught.value.code is refusals.CONTROLLER_FINGERPRINT_ALREADY_AUTHORIZED
+        db.rollback()
+    _, fresh = _evidence(harness, next_ref, lease=lease)
+    with Session(engine) as db:
+        issued = issue_from_leaf(
+            db,
+            RehearsalIssuerInvocation(RehearsalIssuerCommand(_id(), next_plan), fresh),
+        )
+        db.commit()
+    assert (
+        issued.statement.controller_fingerprint
+        != first.statement.controller_fingerprint
+    )
+    assert (
+        _standing(engine, issued, fresh).standing
         is RehearsalIssuerAuthorizationStanding.VALID
     )
 

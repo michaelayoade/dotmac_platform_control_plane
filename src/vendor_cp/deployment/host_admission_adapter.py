@@ -24,31 +24,25 @@ whatever leaf dependencies it genuinely has) installs with `pip install
 exactly what `conformance/test_host_admission_conformance.py` needs to prove
 the real choreography without pretending the whole assembly is composed there.
 
-## Why this orchestrates THREE unreleased components with zero import coupling
+## Installed contracts are not execution adoption
 
-Control's resolve/admit-and-consume host-admission phases and Foundation's
-attestation-pair verification are none of them installable in an ordinary CP
-environment today -- `pyproject.toml` pins `dotmac-deployment-control` at
-`0.1.0a6`, which pre-dates every name below, and does not depend on
-`dotmac-deployment-foundation` at all. Bumping either is deliberately out of
-scope for this change: it happens only after a real release exists.
-
-Every collaborator below is therefore expressed as a CP-owned `Protocol`
-describing the exact shape this adapter calls, narrow enough that whatever the
-real released functions eventually provide satisfies it structurally, with
-zero import coupling. This is the same pattern `credential_bootstrap.py`'s
-`SecretResolver` and `CredentialAuthenticator` already use, for the identical
-reason: a port lets the orchestration be exercised, and its failure paths
-proven, without either upstream dependency existing yet.
+CP pins released Control, but Foundation is not an application dependency.
+The isolated conformance lane validates the real upstream contracts without
+silently adding Foundation to the runtime composition. A Protocol-shaped unit
+double is not proof that a current released function still satisfies it.
 
 The V3 successor path below is the startup-bound
-`compose_foundation_v3_providers` pair. It uses Control 0.1.0a16's public
+`compose_foundation_v3_providers` pair. It uses released Control's public
 `FoundationDispatchConsumptionV1` and sole
 `admit_and_consume_host_admission` finalizer, plus Foundation b273337d's
 `HostSourceAdmissionTrace`/`ControlConsumptionRequestV3` contract, through
 constructors/functions installed once by the successor composition. The older
 `admit_and_launch_host_source` helper remains a pre-V3 choreography reference;
 the V3 providers never call it and have no alternate consume/launch path.
+That reference lacks the current finalizer's execution input and is not a
+supported adapter for released Control. The real-wheel suite no longer claims
+it is. Positive V3 execution remains gated on the owned approval subject and
+Foundation adoption; current conformance proves CP's required refusal instead.
 """
 
 from __future__ import annotations
@@ -305,7 +299,7 @@ class HostAdmissionObservation:
 class ControlFoundationV3Bindings:
     """Control's exact public functions and DTO constructors, bound at startup.
 
-    CP pins Control 0.1.0a16, which exports these symbols; the successor
+    CP's released Control pin exports these symbols; the successor
     composition passes its public objects in. This leaf never imports a private
     Control API or selects an implementation during an execution request.
     """
