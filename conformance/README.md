@@ -44,6 +44,11 @@ Ed25519. The tests execute real component verification logic and reject
 tampering, but do not prove asymmetric signer custody, OIDC, live controller
 authentication, deployment, or end-to-end execution authority.
 
+The fixture uses Control's test reset hooks, stored-dispatch locator and marker
+scope constant. These private test dependencies are not production imports;
+they can change across releases and must be re-proven by this exact-wheel gate.
+Public committed-consumption lookup independently checks every marker assertion.
+
 ## Preconditions and evidence
 
 A normal `pytest tests/` run does not collect `conformance/`. An explicit

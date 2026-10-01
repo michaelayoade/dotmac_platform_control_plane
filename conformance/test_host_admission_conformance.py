@@ -1,9 +1,9 @@
 """Real-wheel Control/Foundation component conformance and CP V3 refusal.
 
 The ten component cases use a TEST-OWNED resolve/verify/finalize driver with
-Control\'s actual FoundationDispatchConsumptionV1 signed-pair input. They do
-not call CP\'s obsolete pre-V3 helper and do not prove CP execution adoption.
-A separate case drives CP\'s real startup-bound V3 provider through genuine
+Control's actual FoundationDispatchConsumptionV1 signed-pair input. They do
+not call CP's obsolete pre-V3 helper and do not prove CP execution adoption.
+A separate case drives CP's real startup-bound V3 provider through genuine
 Foundation F2 admission and proves its C2-D1 approval-subject refusal happens
 before Control finalization, consumption or launch. Gate 3 remains open.
 
@@ -160,7 +160,7 @@ CONFORMANCE_DATABASE_URL = os.environ.get("CONFORMANCE_DATABASE_URL")
 # (`now < activated_at`) refuses with CREDENTIAL_NOT_ACTIVE the moment real
 # time passes whatever instant this suite hardcoded. A one-hour forward
 # margin comfortably covers this suite's own real Postgres round-trip time
-# (~5 minutes for all 9 tests) without weakening anything the tests check --
+# without weakening anything the tests check --
 # every test still moves ITS OWN clock only forward from this baseline,
 # relative to itself, never compared against another fixed point.
 _NOW = datetime.now(UTC) + timedelta(hours=1)
@@ -507,7 +507,7 @@ def _approved_plan(db: Session, target_id: uuid.UUID) -> Any:
                 policy_version=_POLICY_VERSION,
                 decision_ref=f"apr-{uuid.uuid4().hex[:8]}",
                 content_digest=plan.plan_digest or "",
-                decided_at=_NOW,
+                decided_at=datetime.now(UTC),
                 operation="deploy",
                 execution_plan_digest=_EXECUTION_PLAN,
                 decision_status="granted",
@@ -575,7 +575,7 @@ def _build_admission_coordinate(
     # commands this function calls (register_target, enrol_host_admission_
     # credential, enrol_root, ...) run through `process_once_platform`, which
     # commits internally for at-most-once durability -- the outer `db`
-    # fixture's rollback-on-teardown does NOT undo them. Seven tests in one
+    # fixture's rollback-on-teardown does NOT undo them. Multiple tests in one
     # process therefore each need their own key_id/host_id/custody subject,
     # or the second test to run collides with the first's already-committed
     # rows (real defect found by actually running this against Postgres,
@@ -898,7 +898,7 @@ def _map_foundation_result_to_control_evidence(
 
 
 def _idempotency_marker_count(db: Session, attempt_id: uuid.UUID) -> int:
-    return (
+    rows = (
         db.execute(
             select(PlatformIdempotencyRecord).where(
                 PlatformIdempotencyRecord.scope
@@ -908,8 +908,15 @@ def _idempotency_marker_count(db: Session, attempt_id: uuid.UUID) -> int:
         )
         .scalars()
         .all()
-        .__len__()
     )
+    committed = lookup_foundation_execution_consumption(
+        db, control_consumption_ref=f"control-dispatch:{attempt_id}"
+    )
+    assert (committed is not None) == (len(rows) == 1)
+    if committed is not None:
+        assert committed.attempt_id == attempt_id
+        assert committed.dispatch_id == str(attempt_id)
+    return len(rows)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1018,8 +1025,8 @@ def _build_trust_policy_from_resolved_context(resolved: Any) -> AttestationTrust
     the policy FRESH from Control's real resolved context, exactly the way
     any real production caller must. An independent security review found
     that no test anywhere exercised this actual derivation -- every existing
-    test's `build_trust_policy` ignored `resolved` entirely -- so the 9/9
-    conformance result proved Control's comparison fires, but not that the
+    test's `build_trust_policy` ignored `resolved` entirely -- so the historical
+    component result proved Control's comparison fires, but not that the
     caller-side mapping it depends on is even possible to write correctly
     with the real fields `HostAdmissionVerificationContextV1` exposes.
 
@@ -1476,6 +1483,7 @@ def test_real_cp_v3_refuses_an_approval_requiring_plan_before_finalization(
     engine = create_engine(CONFORMANCE_DATABASE_URL, future=True)
     sessions: list[Session] = []
     finalizations: list[object] = []
+    read_plans: list[object] = []
 
     def _session() -> Session:
         session = Session(bind=engine)
@@ -1491,13 +1499,22 @@ def test_real_cp_v3_refuses_an_approval_requiring_plan_before_finalization(
         finalizations.append(kwargs)
         return admit_and_consume_host_admission(session, **kwargs)
 
+    def _checked_get_plan(session: Session, plan_id: uuid.UUID) -> Any:
+        assert plan_id == uuid.UUID(coordinate.facts.plan_id)
+        plan = get_plan(session, plan_id)
+        assert plan is not None, "the real plan read must succeed"
+        assert plan.requires_approval is True
+        assert plan.target_id == coordinate.target_id
+        read_plans.append(plan)
+        return plan
+
     providers = compose_foundation_v3_providers(
         control=ControlFoundationV3Bindings(
             resolve_context=resolve_host_admission_context,
             finalize=_finalize,
             attest_pair=attest_foundation_execution_pair,
             lookup_committed=lookup_foundation_execution_consumption,
-            get_plan=get_plan,
+            get_plan=_checked_get_plan,
             foreign_root_type=HostAdmissionForeignRootV1,
             foreign_evidence_type=HostAdmissionForeignVerificationEvidenceV1,
             execution_context_type=FoundationExecutionContextV1,
@@ -1537,6 +1554,8 @@ def test_real_cp_v3_refuses_an_approval_requiring_plan_before_finalization(
         with pytest.raises(DispatchApprovalSubjectUnavailable) as refused:
             providers.execution_authority.consume_dispatch(request=request)
         assert refused.value.code == "c2_dispatch_approval_subject_unavailable"
+        assert "requires approval" in str(refused.value)
+        assert len(read_plans) == 1
         assert len(sessions) == 2 and sessions[0] is not sessions[1]
         assert all(not session.in_transaction() for session in sessions)
         assert finalizations == []
@@ -1547,6 +1566,12 @@ def test_real_cp_v3_refuses_an_approval_requiring_plan_before_finalization(
             )
             is None
         )
+        # Sensitivity: a missing-plan lookup must not pass as the same typed
+        # approval-subject refusal. The same checked reader must fail first.
+        with pytest.MonkeyPatch.context() as plant:
+            plant.setitem(globals(), "get_plan", lambda *_: None)
+            with pytest.raises(AssertionError, match="real plan read must succeed"):
+                _checked_get_plan(db, uuid.UUID(coordinate.facts.plan_id))
     finally:
         for session in sessions:
             session.close()
