@@ -9,13 +9,13 @@ The composing verifier must require both a successful cryptographic check and
 
 The caller provides `minimum_version` from a durable authority and a reader
 that returns exactly `version`, `trusted_key_ids` (key ID to public fingerprint)
-and `revoked_key_ids`. Michael's 2026-09-28 ruling, recorded in open
+and `revoked_key_ids`. Michael's 2026-09-28 ruling, recorded in merged
 [CP PR #217](https://github.com/michaelayoade/dotmac_platform_control_plane/pull/217)
-at immutable commit `ff5df1a58d69dcd337f9884e64d2b99b0b4c5e71`, selects
+at immutable commit `d598aa0e092ad4a837d0ed7d4e4632d054de7d0b`, selects
 independently controlled, immutable CP deployment configuration as the floor
-source. This approved but still open decision record awaits reconciliation
-with main's public Free specification; it is not evidence of current runtime
-enforcement. This slice accepts the floor as an injected value; the actual
+source. The decision record now includes main's public Free specification;
+it is not evidence of current runtime enforcement. This slice accepts the
+floor as an injected value; the actual
 value, provisioned record and runtime wiring remain pending. No trust-state
 path or operator command is selected here. `start` reads and validates one
 record. A missing/unreadable/malformed record or a version below
