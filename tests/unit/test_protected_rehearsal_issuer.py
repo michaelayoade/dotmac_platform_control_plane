@@ -66,6 +66,31 @@ class FakeApprovalNotHeld(Exception):
 _EVIDENCE: dict[str, object] = {"schema": "test-harness-evidence", "lease": "L-1"}
 
 
+class FakeRehearsalIssuerIssuanceRefusalCode(StrEnum):
+    """Stand-in for `dotmac_deployment_control.RehearsalIssuerIssuanceRefusalCode`
+    -- only the two members `classify_approval_withdrawal` distinguishes."""
+
+    NOT_REVOCABLE = "rehearsal_issuer_issuance_not_revocable"
+    NOT_RECORDED = "rehearsal_issuer_issuance_not_recorded"
+
+
+class FakeRehearsalIssuerIssuanceRefusedError(Exception):
+    """Stand-in for `dotmac_deployment_control.RehearsalIssuerIssuanceRefusedError`
+    (code + message), the shape `revoke_rehearsal_issuer_authorization` and
+    `stage_rehearsal_issuer_consumption` raise. The message format
+    (`f"{code}: {detail}"`) matches the real error
+    (`rehearsal_issuer_issuance.py:191`) exactly -- an earlier version of this
+    fake used a bare `detail`, which hid that `_revoke_issued_authorizations`'
+    `str(exc)` embeds the code in the recorded `detail` field against the
+    real error too."""
+
+    def __init__(
+        self, code: FakeRehearsalIssuerIssuanceRefusalCode, detail: str
+    ) -> None:
+        super().__init__(f"{code}: {detail}")
+        self.code = code
+
+
 @pytest.fixture(autouse=True)
 def _no_receipt_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """These seam tests pass a bare stand-in session; the receipt store (its
@@ -74,6 +99,9 @@ def _no_receipt_store(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(issuer_receipts, "find_receipt", lambda db, command_id: None)
     monkeypatch.setattr(issuer_receipts, "record_receipt", lambda db, **kwargs: None)
+    monkeypatch.setattr(
+        issuer_receipts, "issued_authorization_refs", lambda db, plan_id: ()
+    )
 
 
 @pytest.fixture
@@ -131,6 +159,76 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         return SimpleNamespace(statement=SimpleNamespace(authorization_id="auth-1"))
 
     control.issue_rehearsal_issuer_authorization_for_plan = issue  # type: ignore[attr-defined]
+    control.RehearsalIssuerIssuanceRefusalCode = (  # type: ignore[attr-defined]
+        FakeRehearsalIssuerIssuanceRefusalCode
+    )
+    control.RehearsalIssuerIssuanceRefusedError = (  # type: ignore[attr-defined]
+        FakeRehearsalIssuerIssuanceRefusedError
+    )
+
+    #: `{authorization_id: (code, detail)}` -- set by a test to make ONE
+    #: authorization's revocation refuse; every other id succeeds.
+    revoke_refusals: dict[str, tuple[FakeRehearsalIssuerIssuanceRefusalCode, str]] = {}
+
+    def revoke_authorization(
+        db: object,
+        *,
+        authorization_id: str,
+        revocation_ref: str,
+        actor_ref: str | None = None,
+    ) -> None:
+        calls.append(
+            (
+                "revoke_authorization",
+                SimpleNamespace(
+                    authorization_id=authorization_id,
+                    revocation_ref=revocation_ref,
+                    actor_ref=actor_ref,
+                ),
+            )
+        )
+        if authorization_id in revoke_refusals:
+            code, detail = revoke_refusals[authorization_id]
+            raise FakeRehearsalIssuerIssuanceRefusedError(code, detail)
+
+    control.revoke_rehearsal_issuer_authorization = revoke_authorization  # type: ignore[attr-defined]
+
+    def stage_consumption(
+        db: object, *, authorization_document: object, harness_evidence_document: object
+    ) -> object:
+        calls.append(("consume", (authorization_document, harness_evidence_document)))
+        return SimpleNamespace(
+            authorization_id="auth-1",
+            single_use_reference="ref-1",
+            lease_id="lease-1",
+        )
+
+    control.stage_rehearsal_issuer_consumption = stage_consumption  # type: ignore[attr-defined]
+
+    def fake_parse_authorization(value: object) -> SimpleNamespace:
+        """Stand-in for `RehearsalIssuerAuthorizationV1.parse`: reads
+        `value["statement"]`, defaulting a missing `immutable_reference` to
+        `None` (an absent field is a mismatch, not an attribute error).
+        `as_mapping()` rebuilds the same `{"statement": ..., "signature": ...}`
+        shape -- deliberately a DIFFERENT dict instance than `value`, so a test
+        asserting Control receives `parsed.as_mapping()` (fix 7) fails if the
+        seam regresses to passing the raw, unparsed `value` through instead."""
+        raw_statement = value.get("statement") if isinstance(value, dict) else None
+        statement = dict(raw_statement) if isinstance(raw_statement, dict) else {}
+        statement.setdefault("immutable_reference", None)
+        signature = (
+            value.get("signature", "fake-signature")
+            if isinstance(value, dict)
+            else "fake-signature"
+        )
+        return SimpleNamespace(
+            statement=SimpleNamespace(**statement),
+            as_mapping=lambda: {"statement": dict(statement), "signature": signature},
+        )
+
+    control.RehearsalIssuerAuthorizationV1 = SimpleNamespace(  # type: ignore[attr-defined]
+        parse=fake_parse_authorization
+    )
     approvals = ModuleType("vendor_cp.approvals.adapter")
     approvals.ApprovalHoldRefusal = FakeApprovalHoldRefusal  # type: ignore[attr-defined]
     approvals.OpenRequestCommand = Command  # type: ignore[attr-defined]
@@ -204,6 +302,7 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         calls=calls,
         control=control,
         hold_refusal=hold_refusal,
+        revoke_refusals=revoke_refusals,
     )
 
 
@@ -597,6 +696,128 @@ def test_evidence_digest_raises_on_an_unrecognised_type() -> None:
         issuer._evidence_digest(12345)
 
 
+# ── D18-D: consume_authorization, the seam under the barrier ────────────────
+
+
+def test_consume_authorization_goes_through_held_transition(
+    ports: SimpleNamespace,
+) -> None:
+    document = {
+        "statement": {
+            "authorization_id": "auth-1",
+            "immutable_reference": str(PLAN_ID),
+        }
+    }
+    evidence = {"lease": "L-2"}
+    result = issuer.consume_authorization(
+        object(),
+        plan_id=PLAN_ID,
+        authorization_document=document,
+        harness_evidence_document=evidence,
+    )
+    # Fix 7 (round 3): Control must receive the PARSED-and-rebuilt document
+    # (`parsed.as_mapping()`), never the caller's raw `document` object.
+    # `parsed_document` is an INDEPENDENTLY parsed reference value, equal in
+    # content to what the seam should have built; the `is not document`
+    # identity check below is what actually proves the seam did not silently
+    # pass the raw object through -- content equality alone would not catch
+    # that regression, since `fake_parse_authorization` copies fields
+    # verbatim and could coincidentally produce an equal-but-not-rebuilt dict.
+    parsed_document = ports.control.RehearsalIssuerAuthorizationV1.parse(
+        document
+    ).as_mapping()
+    assert ports.calls == [
+        (
+            "hold",
+            {
+                "request_id": REQUEST_ID,
+                "subject_type": issuer.SUBJECT_TYPE,
+                "subject_id": issuer._subject(ports.plan),
+                "content_digest": PLAN_DIGEST,
+            },
+        ),
+        ("consume", (parsed_document, evidence)),
+    ]
+    consumed_document, _consumed_evidence = next(
+        call for name, call in ports.calls if name == "consume"
+    )
+    assert consumed_document is not document
+    assert result.authorization_id == "auth-1"
+
+
+def test_consume_authorization_derives_request_id_only_from_the_frozen_plan(
+    ports: SimpleNamespace,
+) -> None:
+    """The documents carry no request id at all -- the hold's `request_id`
+    can only come from `plan.approval_decision_ref`, exactly like issuance."""
+    other_request_id = UUID("80000000-0000-0000-0000-000000000008")
+    ports.plan.approval_decision_ref = str(other_request_id)
+    issuer.consume_authorization(
+        object(),
+        plan_id=PLAN_ID,
+        authorization_document={"statement": {"immutable_reference": str(PLAN_ID)}},
+        harness_evidence_document={},
+    )
+    held = ports.calls[0]
+    assert held[0] == "hold"
+    assert held[1]["request_id"] == other_request_id
+
+
+def test_consume_authorization_refused_by_a_withdrawn_hold_never_reaches_control(
+    ports: SimpleNamespace,
+) -> None:
+    ports.hold_refusal["code"] = "withdrawn"
+    ports.hold_refusal["message"] = "withdrawn"
+    with pytest.raises(FakeApprovalNotHeld):
+        issuer.consume_authorization(
+            object(),
+            plan_id=PLAN_ID,
+            authorization_document={"statement": {"immutable_reference": str(PLAN_ID)}},
+            harness_evidence_document={},
+        )
+    assert [name for name, _ in ports.calls] == ["hold"]
+
+
+# ── fix 1: consumption binds to the DOCUMENT's own plan, not the caller's ──
+
+
+def test_consume_authorization_refuses_a_document_naming_a_different_plan(
+    ports: SimpleNamespace,
+) -> None:
+    """The failure this fix closes: P2's authorization document is presented
+    under `plan_id=P1` (P1's hold, standing or not, must never apply to P2's
+    authority). Neither `held_transition` (no "hold" call) nor Control's
+    consumption call may be reached."""
+    other_plan_id = UUID("70000000-0000-0000-0000-000000000007")
+    document = {"statement": {"immutable_reference": str(other_plan_id)}}
+
+    with pytest.raises(issuer.AuthorizationPlanMismatch) as excinfo:
+        issuer.consume_authorization(
+            object(),
+            plan_id=PLAN_ID,
+            authorization_document=document,
+            harness_evidence_document={},
+        )
+    assert excinfo.value.plan_id == PLAN_ID
+    assert excinfo.value.document_plan_ref == str(other_plan_id)
+    assert ports.calls == []
+
+
+def test_consume_authorization_accepts_a_document_naming_the_same_plan(
+    ports: SimpleNamespace,
+) -> None:
+    """SENSITIVITY (near-miss): the identical shape, with the document's
+    `immutable_reference` matching `plan_id`, must proceed normally."""
+    document = {"statement": {"immutable_reference": str(PLAN_ID)}}
+    issuer.consume_authorization(
+        object(),
+        plan_id=PLAN_ID,
+        authorization_document=document,
+        harness_evidence_document={},
+    )
+    assert [name for name, _ in ports.calls] == ["hold", "consume"]
+
+
 def _withdrawal(ports: SimpleNamespace) -> dict[str, object]:
     return {
         "state": "withdrawn",
@@ -633,6 +854,264 @@ def test_withdrawal_applies_and_revokes_with_a_stable_command_id(
     commands = [command for name, command in ports.calls if name == "revoke"]
     assert len(commands) == 1
     assert commands[0].revocation_ref == f"approval.withdrawn:{WITHDRAWAL_ID}"
+
+
+# ── D18-D: withdrawal invalidates issued, unconsumed authorizations ────────
+
+
+def test_withdrawal_revokes_every_issued_authorization_for_the_plan(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts,
+        "issued_authorization_refs",
+        lambda db, plan_id: ("auth-1", "auth-2"),
+    )
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.APPLIED
+    assert result.evidence == {
+        "authorizations_revoked": ["auth-1", "auth-2"],
+        "authorizations_not_revocable": [],
+    }
+    revocations = [
+        command for name, command in ports.calls if name == "revoke_authorization"
+    ]
+    assert [c.authorization_id for c in revocations] == ["auth-1", "auth-2"]
+    for command in revocations:
+        assert command.revocation_ref == f"approval.withdrawn:{WITHDRAWAL_ID}"
+        assert command.actor_ref is None
+
+
+def test_a_not_revocable_authorization_is_recorded_and_history_preserved(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SENSITIVITY: `auth-1` is already spent/revoked (`NOT_REVOCABLE`) --
+    it must be reported as `not_revocable`, never raised, and `auth-2` (a
+    genuinely revocable near-miss) must still be revoked in the same pass."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts,
+        "issued_authorization_refs",
+        lambda db, plan_id: ("auth-1", "auth-2"),
+    )
+    ports.revoke_refusals["auth-1"] = (
+        FakeRehearsalIssuerIssuanceRefusalCode.NOT_REVOCABLE,
+        "authorization auth-1 is spent, not issued",
+    )
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.APPLIED
+    assert result.evidence == {
+        "authorizations_revoked": ["auth-2"],
+        "authorizations_not_revocable": ["auth-1"],
+    }
+
+
+def test_an_unexpected_authorization_refusal_is_a_security_conflict(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts, "issued_authorization_refs", lambda db, plan_id: ("auth-1",)
+    )
+    ports.revoke_refusals["auth-1"] = (
+        FakeRehearsalIssuerIssuanceRefusalCode.NOT_RECORDED,
+        "no ledger row for auth-1",
+    )
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.SECURITY_CONFLICT
+    assert result.reason_code == "authorization_revocation_refused"
+    assert result.evidence == {
+        "authorizations_revoked": [],
+        "authorizations_not_revocable": [],
+        "authorization_conflicts": [
+            {
+                "authorization_id": "auth-1",
+                "code": str(FakeRehearsalIssuerIssuanceRefusalCode.NOT_RECORDED),
+                "detail": (
+                    f"{FakeRehearsalIssuerIssuanceRefusalCode.NOT_RECORDED}: "
+                    "no ledger row for auth-1"
+                ),
+            }
+        ],
+        # Fix 3: provenance -- the plan's own revocation (THIS event) already
+        # committed even though the authorization side did not.
+        "withdrawal_disposition": "applied",
+        "withdrawal_reason_code": "applied",
+    }
+
+
+def test_a_conflict_does_not_stop_the_revoke_loop_for_later_refs(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix 2: the FIRST unexpected refusal (auth-2) must not stop the loop --
+    auth-1 and auth-3 are still revoked, and the security_conflict evidence
+    names all three lists so repair sees exactly which ref remains."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts,
+        "issued_authorization_refs",
+        lambda db, plan_id: ("auth-1", "auth-2", "auth-3"),
+    )
+    ports.revoke_refusals["auth-2"] = (
+        FakeRehearsalIssuerIssuanceRefusalCode.NOT_RECORDED,
+        "no ledger row for auth-2",
+    )
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.SECURITY_CONFLICT
+    assert result.reason_code == "authorization_revocation_refused"
+    assert result.evidence["authorizations_revoked"] == ["auth-1", "auth-3"]
+    assert result.evidence["authorizations_not_revocable"] == []
+    assert result.evidence["authorization_conflicts"] == [
+        {
+            "authorization_id": "auth-2",
+            "code": str(FakeRehearsalIssuerIssuanceRefusalCode.NOT_RECORDED),
+            "detail": (
+                f"{FakeRehearsalIssuerIssuanceRefusalCode.NOT_RECORDED}: "
+                "no ledger row for auth-2"
+            ),
+        }
+    ]
+    assert result.evidence["withdrawal_disposition"] == "applied"
+    assert result.evidence["withdrawal_reason_code"] == "applied"
+    revocations = [
+        command for name, command in ports.calls if name == "revoke_authorization"
+    ]
+    assert [c.authorization_id for c in revocations] == ["auth-1", "auth-2", "auth-3"]
+
+
+def test_a_replayed_already_applied_withdrawal_still_converges_authorizations(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `already_applied` pre-read path (this event's own ref already won)
+    must still attempt authorization revocation, so a replay converges."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts, "issued_authorization_refs", lambda db, plan_id: ("auth-1",)
+    )
+    ports.plan.approval_decision_status = "revoked"
+    ports.plan.approval_revocation_ref = f"approval.withdrawn:{WITHDRAWAL_ID}"
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.ALREADY_APPLIED
+    assert result.evidence["authorizations_revoked"] == ["auth-1"]
+    assert result.evidence["authorizations_not_revocable"] == []
+    revocations = [
+        command for name, command in ports.calls if name == "revoke_authorization"
+    ]
+    assert len(revocations) == 1
+
+
+def test_superseded_by_revocation_does_attempt_authorization_revocation(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix 3: a DIFFERENT withdrawal ref already revoked the plan's approval
+    -- this event is not the one that converged the PLAN, but the plan's
+    approval no longer stands either way, so it must still attempt to
+    converge any authorization CP issued under it."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts, "issued_authorization_refs", lambda db, plan_id: ("auth-1",)
+    )
+    ports.plan.approval_decision_status = "revoked"
+    ports.plan.approval_revocation_ref = "approval.withdrawn:other-event"
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.SUPERSEDED_BY_REVOCATION
+    assert result.evidence["authorizations_revoked"] == ["auth-1"]
+    revocations = [
+        command for name, command in ports.calls if name == "revoke_authorization"
+    ]
+    assert [c.authorization_id for c in revocations] == ["auth-1"]
+
+
+def test_a_conflict_keeps_the_original_results_own_evidence_fields(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 fix 5: building a conflict must not drop the pre-existing
+    result's own evidence -- `approval_revocation_ref` and `withdrawal_ref`
+    (present on the `superseded_by_revocation` result this conflict is built
+    from) must survive alongside the new authorization-revocation fields,
+    which requires `**result.evidence` to be spread in, not replaced by a
+    fresh dict literal."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts, "issued_authorization_refs", lambda db, plan_id: ("auth-1",)
+    )
+    ports.revoke_refusals["auth-1"] = (
+        FakeRehearsalIssuerIssuanceRefusalCode.NOT_RECORDED,
+        "no ledger row for auth-1",
+    )
+    ports.plan.approval_decision_status = "revoked"
+    ports.plan.approval_revocation_ref = "approval.withdrawn:other-event"
+
+    result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert result.disposition == issuer.WithdrawalDisposition.SECURITY_CONFLICT
+    assert (
+        result.evidence["approval_revocation_ref"] == "approval.withdrawn:other-event"
+    )
+    assert result.evidence["withdrawal_ref"] == f"approval.withdrawn:{WITHDRAWAL_ID}"
+    assert result.evidence["withdrawal_disposition"] == "superseded_by_revocation"
+    assert result.evidence["withdrawal_reason_code"] == "superseded_by_revocation"
+
+
+def test_the_classifier_converges_a_cleared_conflict_when_invoked_again(
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix 4 correction: this is NOT a general claim that a committed
+    `authorization_revocation_refused` conflict self-heals in production. The
+    scope is PER APPROVAL REQUEST: `approval_router.py` settles each event at
+    most once -- a second delivery with an identical payload digest is a
+    no-op that never reaches the classifier again -- and Approvals' own
+    `withdraw_request` refuses to withdraw a request that is no longer a
+    standing completed approval, so a genuinely SECOND, DIFFERENT withdrawal
+    event for the SAME request cannot occur either. (A SIBLING approval
+    request for the same plan CAN exist and reach `superseded_by_revocation`
+    for that plan, which can incidentally converge an earlier conflict under
+    the sibling's own `revocation_ref` as provenance -- see
+    `_with_authorization_revocation`'s docstring in `protected_rehearsal_
+    issuer.py`; that is a different path than this test.) Deliberately
+    repairing a recorded conflict needs a separate event or an explicit
+    out-of-band repair command, neither of which ships in this change
+    (tracked as a follow-up, Knowledge `cp-gate0-d18-d16-slices-2026-09-27`).
+
+    What this DOES prove: `classify_approval_withdrawal` itself is safe to
+    invoke again for the SAME event (e.g. from a future repair path) and
+    converges the still-outstanding authorization once the condition that
+    caused the earlier refusal (`NOT_RECORDED`) has cleared -- landing on
+    `ALREADY_APPLIED`, since the plan's own revocation already carries THIS
+    event's own ref. (The plan's `approval_revocation_ref` is set manually
+    here because the first call already committed that side of the event in
+    reality; this fake does not mutate plan state as a side effect of
+    `revoke_plan_approval`.)"""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts, "issued_authorization_refs", lambda db, plan_id: ("auth-1",)
+    )
+    ports.revoke_refusals["auth-1"] = (
+        FakeRehearsalIssuerIssuanceRefusalCode.NOT_RECORDED,
+        "no ledger row for auth-1",
+    )
+    first = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert first.disposition == issuer.WithdrawalDisposition.SECURITY_CONFLICT
+
+    del ports.revoke_refusals["auth-1"]
+    ports.plan.approval_decision_status = "revoked"
+    ports.plan.approval_revocation_ref = f"approval.withdrawn:{WITHDRAWAL_ID}"
+
+    again = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
+    assert again.disposition == issuer.WithdrawalDisposition.ALREADY_APPLIED
+    assert again.evidence["authorizations_revoked"] == ["auth-1"]
+    revocations = [
+        command for name, command in ports.calls if name == "revoke_authorization"
+    ]
+    assert [c.authorization_id for c in revocations] == ["auth-1", "auth-1"]
 
 
 def test_withdrawal_replay_reuses_one_stable_control_command_id(
@@ -689,8 +1168,16 @@ def test_an_unrecognised_subject_type_is_a_security_conflict_without_loading_con
 
 
 def test_d2_a_superseded_plan_maps_to_not_carried_plan_superseded(
-    ports: SimpleNamespace,
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Fix 3: `plan_superseded` is one of the reason codes that also revokes
+    CP's own issued authorizations for the plan."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts, "issued_authorization_refs", lambda db, plan_id: ("auth-1",)
+    )
+
     def refuse(db: object, command: object) -> object:
         raise ports.control.ExpectedStateError(
             "plan",
@@ -704,11 +1191,24 @@ def test_d2_a_superseded_plan_maps_to_not_carried_plan_superseded(
     result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
     assert result.disposition == issuer.WithdrawalDisposition.NOT_CARRIED
     assert result.reason_code == "plan_superseded"
+    assert result.evidence["authorizations_revoked"] == ["auth-1"]
+    revocations = [
+        command for name, command in ports.calls if name == "revoke_authorization"
+    ]
+    assert [c.authorization_id for c in revocations] == ["auth-1"]
 
 
 def test_d4_a_cancelled_plan_is_a_terminal_cancelled_before_execution(
-    ports: SimpleNamespace,
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Fix 3: `cancelled_before_execution` also revokes CP's own issued
+    authorizations for the plan."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts, "issued_authorization_refs", lambda db, plan_id: ("auth-1",)
+    )
+
     def refuse(db: object, command: object) -> object:
         raise ports.control.ExpectedStateError(
             "plan",
@@ -722,11 +1222,26 @@ def test_d4_a_cancelled_plan_is_a_terminal_cancelled_before_execution(
     result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
     assert result.disposition == issuer.WithdrawalDisposition.CANCELLED_BEFORE_EXECUTION
     assert result.reason_code == "cancelled_before_execution"
+    assert result.evidence["authorizations_revoked"] == ["auth-1"]
+    revocations = [
+        command for name, command in ports.calls if name == "revoke_authorization"
+    ]
+    assert [c.authorization_id for c in revocations] == ["auth-1"]
 
 
 def test_a_proposed_plan_was_never_approved_and_is_not_carried(
-    ports: SimpleNamespace,
+    ports: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """SENSITIVITY (near-miss): `never_approved` is deliberately ABSENT from
+    the set of reason codes that revoke authorizations -- a plan that was
+    never approved could never have had an authorization issued under it, so
+    no revocation attempt is made."""
+    from vendor_cp.deployment import issuer_receipts
+
+    monkeypatch.setattr(
+        issuer_receipts, "issued_authorization_refs", lambda db, plan_id: ("auth-1",)
+    )
+
     def refuse(db: object, command: object) -> object:
         raise ports.control.ExpectedStateError(
             "plan",
@@ -740,6 +1255,8 @@ def test_a_proposed_plan_was_never_approved_and_is_not_carried(
     result = issuer.classify_approval_withdrawal(object(), _claimed(_withdrawal(ports)))
     assert result.disposition == issuer.WithdrawalDisposition.NOT_CARRIED
     assert result.reason_code == "never_approved"
+    assert "authorizations_revoked" not in result.evidence
+    assert [name for name, _ in ports.calls if name == "revoke_authorization"] == []
 
 
 def test_an_unexpected_plan_status_is_a_security_conflict(

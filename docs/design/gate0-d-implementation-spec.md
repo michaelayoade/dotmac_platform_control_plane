@@ -1,18 +1,14 @@
 # Gate-0 Work Packet D — protected rehearsal-issuer identity, custody and runner isolation
 
-> **Status — Amended: § 10 rulings approved 2026-09-28 (item 5 pending the
-> execution repository); the execution topology is ruled subject to
-> verification of account controls and a live negative test;
-> credential-bearing provisioning stays blocked until those are met.** This
-> is not a new ADR; it implements
-> ADR-0013 § A7 Work Packet D. **Provisioning: none performed.** No GitHub
-> Environment, OpenBao role, OpenBao SSH CA, or signing key exists yet as a
-> result of this document. Every value below marked `<placeholder>` is
-> Michael's to choose at provisioning time. See "Runner placement blocker"
-> below: the topology assumed by §§ 2, 3, 6, 7 and 8 as originally written
-> cannot be provisioned as-is — those sections now depend on the ruled
-> execution-repository-and-runner-group topology, subject to the two
-> conditions stated there.
+> **Status — § 10 custody and identity rulings approved 2026-09-28; § 11's
+> public GitHub Free execution topology supersedes the earlier private
+> placement as of 2026-09-30.** This implements ADR-0013 § A7 Work Packet D,
+> not a new ADR. § 11 records partial public-control provisioning as of
+> 2026-09-30, with no Gate-0 admission. The OpenBao role, signer keys, trust
+> records, SSH CA, and private-vantage delivery remain unprovisioned or
+> unproved in this document. Historical placement and fixture instructions
+> below must be read through § 11; a placeholder is not an authorization or
+> evidence of a deployed value.
 
 ## 0. Scope and citations
 
@@ -26,9 +22,10 @@ candidate-independent Gate-0 readiness receipt.
 Read together with this spec: § A7.2 (the three-gate table — D operates
 entirely inside Gate 0 and produces no candidate authorization), § A7.4 (the
 identity/custody table this spec fills in the "Gate 0's protected issuer
-composition" column for the harness-evidence row), § A7.5 (the three absences
-this spec closes: no protected Environment, no OIDC/OpenBao role, no
-observer/jump/vantage repository variables beyond `LANE3_PROBE_HOST`), and
+composition" column for the harness-evidence row), § A7.5 (the three gaps
+observed on 2026-09-24: no protected Environment, no OIDC/OpenBao role, no
+observer/jump/vantage repository variables beyond `LANE3_PROBE_HOST`; § 11
+records partial public controls and keeps private-vantage delivery open), and
 § A7.7 (what Work Packet E consumes from D).
 
 D does not touch: `dotmac-deployment-control`'s issuance/standing/revocation
@@ -40,9 +37,11 @@ authorization.
 
 ## Runner placement blocker
 
-**This blocks §§ 2, 3, 6, 7 and 8 as originally written. The topology below
-is Ruled by Michael 2026-09-28, subject to two conditions; credential-bearing
-provisioning stays blocked until both are met.**
+**Historical placement analysis (2026-09-28):** the private-repository
+topology below was ruled subject to two conditions, then superseded by
+Michael's 2026-09-30 public GitHub Free ruling in § 11. It is retained to
+explain the original isolation blocker, not as current provisioning guidance.
+§ 11's public controls, isolation and negative evidence govern admission.
 
 Facts, as found by a live check on 2026-09-27:
 
@@ -63,7 +62,7 @@ Facts, as found by a live check on 2026-09-27:
 - **Consequence:** the current § 6 isolation cannot be met by the existing
   runner and label. Do not claim it is.
 
-**Topology — Ruled by Michael 2026-09-28, subject to two conditions:**
+**Superseded private topology — ruled 2026-09-28, replaced by § 11:**
 
 - an organization-owned PRIVATE execution repository, holding only the
   protected, directly defined, non-reusable workflow;
@@ -73,7 +72,7 @@ Facts, as found by a live check on 2026-09-27:
 - the runner stays isolated and ephemeral;
 - Starter's runner stays dedicated to Lane 3.
 
-This ruling is subject to two conditions:
+The superseded private-placement ruling had two conditions:
 
 1. verifying the account's actually available controls (organization plan
    and runner-group features);
@@ -113,7 +112,7 @@ Environment's own `main`-only branch-policy refusal
 (`test_non_main_run_cannot_reach_the_protected_job`) is a separate, later
 test, run only once the Environment actually exists.
 
-**#217 is design-only: nothing in this spec authorizes provisioning.**
+**The original #217 packet was design-only: it did not authorize provisioning.**
 Credential-bearing provisioning stays blocked until the confirmed
 organization plan (condition 1) and a passing live negative test
 (condition 2) are both met — the § 2 Environment's secrets/approvals
@@ -125,8 +124,9 @@ runner with no OpenBao binding and no secrets. This spec does not authorize
 that fixture either — it names what condition 2 requires to exist before it
 can be run; Michael provisions it, or not, at his own discretion.
 
-Until both conditions are met, §§ 2, 3, 6, 7 and 8 below describe the ruled
-shape only, not a provisionable configuration.
+The condition sequence above is historical. § 11 records the later public
+topology and its dated partial provision record; no Gate-0 admission follows
+from either sequence without the required evidence.
 
 ## 1. Four separate facts — why OIDC is only one of them
 
@@ -172,14 +172,13 @@ level down at the identity layer.
 
 ## 2. Human approval — the rehearsal-issuer GitHub Environment
 
-**Follows from the 2026-09-28 topology ruling, subject to the two
-conditions in the Runner placement section:** per the "Runner placement
-blocker" above, this Environment is created on the approved execution
-repository, `<derived from the approved execution repository>`, not on CP or
-Starter.
+**Current placement (§ 11):** this Environment belongs to the public
+`dotmac-tech/gate0-issuer-execution` repository, not CP or Starter. The
+2026-09-30 partial read-back in § 11 reports its configuration; that dated
+observation does not establish live Gate-0 admission.
 
 A dedicated GitHub Environment, name `rehearsal-issuer-protected` (fixed per
-§ 10 item 5 — not a placeholder), is created on that repository with:
+§ 10 item 5 — not a placeholder), must have:
 
 - **Required reviewer:** Michael Ayoade, one reviewer required.
 - **Deployment branch policy:** `main` only — no other branch, and no tag
@@ -202,13 +201,11 @@ enforces this before the job starts.
 
 ## 3. Workflow identity — GitHub OIDC to a scoped OpenBao token
 
-**Follows from the 2026-09-28 topology ruling, subject to the two
-conditions in the Runner placement section:** per the "Runner placement
-blocker" above, the `repository`, `environment` and `workflow_ref` claims
-bound below are `<derived from the approved execution repository>`, not from
-CP. `workflow_ref` names the directly defined, non-reusable protected
-workflow held in that repository — see § 10 item 7. This workflow declares
-no `pull_request` or `pull_request_target` trigger (§ 6).
+**Current placement (§ 11):** the `repository` and `workflow_ref` claims bind
+the public `dotmac-tech/gate0-issuer-execution` repository and its directly
+defined, non-reusable protected workflow. § 11 also binds immutable
+`repository_id`, `repository_owner_id` and `event_name` claims. The protected
+workflow declares no `pull_request` or `pull_request_target` trigger (§ 6).
 
 Only the protected job (the one running inside the `rehearsal-issuer-protected`
 Environment from § 2) exchanges its GitHub OIDC token for a short-lived,
@@ -223,10 +220,13 @@ rest. The audience is NOT a `bound_claims` entry: OpenBao checks it through
 
 | Claim | Bound value | Why binding the Environment name alone is not enough |
 | --- | --- | --- |
-| `repository` | `<derived from the approved execution repository>` | Scopes the role to the approved execution repository only. |
+| `repository` | `dotmac-tech/gate0-issuer-execution` (§ 11) | Scopes the role to the approved execution repository only. |
+| `repository_id` | `1397614140` (§ 11's 2026-09-30 provision record; re-read before role provisioning) | Refuses a repository-name replacement. |
+| `repository_owner_id` | `335992433` (§ 11's 2026-09-30 provision record; re-read before role provisioning) | Refuses an owner-name replacement. |
 | `environment` | `rehearsal-issuer-protected` (the § 2 Environment name, fixed) | GitHub's environment-based `sub` claim can omit the branch entirely — an Environment-only bound claim would accept the same job running from a non-`main` ref if the Environment's own branch policy were ever misconfigured or bypassed by a different trigger. |
 | `ref` | `refs/heads/main` | Independently pins the branch at the OpenBao layer, so OpenBao's own policy does not rely solely on GitHub's Environment configuration remaining correct. |
-| `workflow_ref` | `<derived from the approved execution repository>` — ref-pinned as `<org>/<repo>/.github/workflows/<file>.yml@refs/heads/<default branch>` (the directly defined, non-reusable protected workflow's exact file and ref) | Pins the exact workflow file and ref of a normal (non-reusable) workflow, not just "some workflow in this repo." `job_workflow_ref` is bound instead ONLY if D deliberately runs the protected job as a reusable-workflow call; this spec does not (§ 10 item 7). |
+| `workflow_ref` | `dotmac-tech/gate0-issuer-execution/.github/workflows/gate0-issuer.yml@refs/heads/main` (§ 11) | Pins the exact workflow file and ref of the directly defined, non-reusable workflow, not just "some workflow in this repo." `job_workflow_ref` is not substituted (§ 10 item 7). |
+| `event_name` | `workflow_dispatch` (§ 11) | Refuses a different trigger even if workflow guards regress. |
 
 Audience (`bound_audiences`, not `bound_claims`): `<placeholder: e.g. https://openbao.dotmac.internal>`.
 The protected job requests its OIDC token for exactly this audience.
@@ -237,9 +237,10 @@ checked against the ACTUAL claims of the protected job (captured from a real
 run of that job, not assumed from documentation) before the role is accepted.
 
 Token TTL: `<placeholder, short — e.g. 5m>`, no renewal.
-**Ruled in principle (§ 10 item 5); cannot be finalized until the execution
-repository is chosen:** a starting OIDC-derived OpenBao token TTL of five
-minutes, non-renewable. Policy scope: the
+**Ruled in principle (§ 10 item 5); the repository is now identified in
+§ 11, while the token and role remain to be provisioned and tested:** a
+starting OIDC-derived OpenBao token TTL of five minutes, non-renewable.
+Policy scope: the
 resulting OpenBao token's attached policy grants exactly the SSH CA signing
 endpoint named in § 5, for the per-run controller certificate, and nothing
 else. It grants NO read on the issuer signer path in § 4: only CP's service
@@ -454,9 +455,9 @@ protected run — never a persistent, reused runner key.
   key, scoped to the target(s) named by `LANE3_PROBE_HOST` and the vantage
   variables in § 6, with:
   - **TTL:** `<placeholder, short — e.g. matching or shorter than the run's
-    expected duration>`. **Ruled in principle (§ 10 item 5); cannot be
-    finalized until the execution repository is chosen:** measure the SSH
-    certificate lifetime against the real run before fixing this value.
+    expected duration>`. **Ruled in principle (§ 10 item 5); the execution
+    repository is selected in § 11:** measure the certificate lifetime
+    against the provisioned real run and SSH signing role before fixing it.
   - **`valid_principals`:** `<placeholder, restricted to the exact
     controller/service account(s) the target(s) accept for this role — not
     a wildcard>`.
@@ -477,15 +478,12 @@ protected run — never a persistent, reused runner key.
 
 ## 6. Runner isolation
 
-**Follows from the 2026-09-28 topology ruling, subject to the two
-conditions in the Runner placement section:** per the "Runner placement
-blocker" above, isolation comes from the runner group's repository access
-(restricted to the organization-owned execution repository holding only the
-protected workflow) together with the runner group's selected-workflow
-restriction (restricted to the exact protected workflow, entered as the
-ref-pinned coordinate `<org>/<repo>/.github/workflows/<file>.yml@refs/heads/<default branch>`,
-not a bare workflow-file name) — not from a label alone, and not from the
-repository or the runner being private/ephemeral by themselves.
+**Current public topology (§ 11):** isolation comes from the organization
+runner group's selected repository ID and selected, ref-pinned workflow,
+`dotmac-tech/gate0-issuer-execution/.github/workflows/gate0-issuer.yml@refs/heads/main`.
+A label alone does not restrict workflow selection, and a public repository
+requires the additional PR-trigger, review, claim and runner-isolation
+controls stated in § 11. The 2026-09-28 private placement above is historical.
 `control-runner-starter-mt` stays dedicated to Lane 3 and is never used for
 this protected job. The no-`pull_request*` rule below still applies to
 whichever runner group is provisioned.
@@ -512,7 +510,7 @@ Environment gate:
 - A workflow in the execution repository OTHER than the exact protected
   workflow is refused by the runner group's selected-workflow restriction —
   the restriction is entered as the ref-pinned coordinate
-  `<org>/<repo>/.github/workflows/<file>.yml@refs/heads/<default branch>`,
+  `dotmac-tech/gate0-issuer-execution/.github/workflows/gate0-issuer.yml@refs/heads/main`,
   not a bare workflow-file name, so a same-named workflow file run from a
   different ref does not match either (see § 7's non-default-ref row). A
   label alone does not restrict which workflow may use a runner (see
@@ -521,8 +519,8 @@ Environment gate:
 - The runner is ephemeral and holds no state between runs. This is hygiene,
   NOT the selection control — selection is enforced by the runner group's
   repository access and selected-workflow restriction above, not by
-  ephemerality — `<derived from the approved execution repository>`'s
-  actual runner configuration confirms this at provisioning time.
+  ephemerality. Its actual configuration and cleanup must be verified before
+  privileged attachment (§ 11).
 
 Reference: GitHub Actions secure-use guidance —
 https://docs.github.com/en/actions/reference/security/secure-use ; GitHub
@@ -531,13 +529,11 @@ https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/ma
 
 ## 7. Refusal tests
 
-**Follows from the 2026-09-28 topology ruling, subject to the two
-conditions in the Runner placement section:** per the "Runner placement
-blocker" above, the runner-isolation refusal tests below are stated against
-the ruled organization-owned execution-repository-plus-runner-group
-topology, not against `control-runner-starter-mt`'s label. The OIDC rows
-are tested against the provisioned JWT role for the approved execution
-repository's real claims, once that repository exists.
+**Current public topology (§ 11):** the refusal tests apply to the public
+`dotmac-tech/gate0-issuer-execution` repository and its selected-workflow
+runner group, not `control-runner-starter-mt`'s label. The OIDC rows require
+the provisioned JWT role and observed claims; § 11's dated read-backs alone
+do not discharge them.
 
 Each row names the planned test's intent; naming a test here does not create
 it — these are written when D's workflow YAML and harness code exist. Every
@@ -545,6 +541,12 @@ row below whose "Enforced where" cites OpenBao's JWT role runs against the
 PROVISIONED role configuration from § 3/§ 8 (the actual bound claims and
 policy Michael configures, for the approved execution repository's real
 claims), not a mock or a hand-constructed stand-in role.
+
+Rows describing a stub fixture **before an Environment exists** preserve the
+2026-09-28 test design as history. § 11's 2026-09-30 read-back reports that
+the Environment now exists; current admission uses § 11's separately
+isolated canary, complete public-control tuple, and positive and negative
+evidence. No historical row proves a live refusal or authorizes a runner.
 
 | Missing/invalid condition | Enforced where | Expected refusal | Planned test |
 | --- | --- | --- | --- |
@@ -583,46 +585,35 @@ claims), not a mock or a hand-constructed stand-in role.
 
 ## 8. Who does what
 
-**Provisioning proceeds in this order, per the Runner placement section's
-two conditions.** Condition 1 is confirmed first. Then Michael may, at his
-own discretion and as his own step in order to run condition 2, provision a
-credential-free topology fixture — the organization, the execution
-repository, the runner group, and an ephemeral runner with no OpenBao
-binding and no secrets — sufficient to run the live negative test. Only once
-BOTH conditions are met does credential-bearing provisioning begin: the § 2
-Environment's secrets/approvals binding, the OpenBao JWT role, the signers,
-the trust state, and the SSH CA. This spec authorizes none of it; it names
-the order and the boundary between the credential-free fixture and
-credential-bearing provisioning.
+The 2026-09-28 two-condition private-fixture sequence in the Runner placement
+section is historical. § 11 governs the public Free execution repository and
+records partial controls as of 2026-09-30; those read-backs are not Gate-0
+admission. Credential-bearing provisioning remains pending the § 11 positive
+and negative evidence, isolated-runner controls, and exact public coordinate
+read-backs. This design document grants no provisioning authority.
 
-Provisioning — Michael only; no agent performs any of these:
+Provisioning and admission obligations — protected provisioning remains
+Michael's; private-vantage delivery retains its ADR-0013 § A7.6 owner. This
+spec grants no agent authority to perform these actions:
 
 | Action | Owner |
 | --- | --- |
-| **Condition 1:** Confirm the plan supports selected-workflow runner groups | Michael |
-| **Credential-free fixture, follows from the 2026-09-28 topology ruling:** Create or choose the organization and its private execution repository | Michael |
-| **Credential-free fixture, follows from the 2026-09-28 topology ruling:** Create the runner group restricted to the exact protected workflow (the ref-pinned coordinate, § 6), and register the ephemeral runner in it — no OpenBao binding, no secrets | Michael |
-| **Condition 2, the live negative test:** Run it per § 7's `test_only_the_protected_workflow_can_select_the_runner` row's fixed negative-first, then positive-control order and its evidence/clean-up requirements | Michael |
-| **Credential-free fixture, same phase as condition 2, run right after it:** Run § 7's non-default-ref row (`test_non_default_ref_run_of_the_protected_workflow_file_cannot_select_the_runner`) against the same STUB fixture workflow, before any Environment exists. First cancel any still-queued job from condition 2, then register a FRESH ephemeral runner in the group (the condition-2 positive control consumed the previous one) and show it idle; "the SAME runner" means the same runner within this test | Michael |
-| **Blocked until both conditions are met:** Create the § 2 GitHub Environment and configure the required reviewer + `main`-only branch policy | Michael |
-| **Blocked until both conditions are met:** Create the OpenBao JWT auth role and its policies (§ 3, § 4) | Michael |
-| **Blocked until both conditions are met:** Generate and store the Ed25519 rehearsal-issuer signer at `secret/dotmac/platform-cp/rehearsal-issuer/signing-key` (§ 4) | Michael |
-| **Blocked until both conditions are met:** Generate the dedicated harness-evidence attester key (§ 10 item 1) — a distinct attester identity from the rehearsal-issuer signer, at its own custody path, with its own trust-state record | Michael |
-| **Blocked until both conditions are met:** Create the verifier trust-state record (`trusted_key_ids`, `revoked_key_ids`; public identifiers only) at `<placeholder: trust-state path>`, write EVERY update to it (including future revocations), and grant CP's service identity read-only access — never write — on it (§ 4) | Michael, via the provisioning identity only — never CP's runtime identity, and never the runner or its workflow token |
-| **Blocked until both conditions are met:** Pin the minimum trust-state version — the durable floor (§ 10 item 4) — in independently controlled, immutable CP deployment configuration | Michael |
-| **Blocked until both conditions are met:** Configure the OpenBao SSH CA / signing role for controller certificates (§ 5) — CA role, `valid_principals`, extensions and measured TTL, per the § 5 selection | Michael |
-| **Blocked until both conditions are met:** Set the repository variables — the observer user, the jump key reference, and the inside-vantage variable that `docs/inventories/lane3-acceptance-criteria.md` requires, alongside the existing `LANE3_PROBE_HOST` (§ A7.5) — on the execution repository | Michael |
+| **Public fixture (§ 11):** Re-read the existing public repository, Environment, workflow and selected runner-group coordinates before any further admission step; the 2026-09-30 observations are dated | Michael |
+| **Isolated canary (§ 11):** Complete the named, separately isolated canary's public-control and negative scheduling probes, remove it, and read back runner-group membership before privileged attachment | Michael |
+| **Pending § 11 admission:** Provision the OpenBao JWT auth role and its policies (§ 3, § 4) against the exact public repository and workflow claims | Michael |
+| **Pending § 11 admission:** Generate and store the Ed25519 rehearsal-issuer signer at `secret/dotmac/platform-cp/rehearsal-issuer/signing-key` (§ 4) | Michael |
+| **Pending § 11 admission:** Generate the dedicated harness-evidence attester key (§ 10 item 1) — a distinct attester identity from the rehearsal-issuer signer, at its own custody path, with its own trust-state record | Michael |
+| **Pending § 11 admission:** Create the verifier trust-state record (`trusted_key_ids`, `revoked_key_ids`; public identifiers only) at `<placeholder: trust-state path>`, write every update to it (including future revocations), and grant CP's service identity read-only access — never write — on it (§ 4) | Michael, via the provisioning identity only — never CP's runtime identity, and never the runner or its workflow token |
+| **Pending § 11 admission:** Pin the minimum trust-state version — the durable floor (§ 10 item 4) — in independently controlled, immutable CP deployment configuration | Michael |
+| **Pending § 11 admission:** Configure the OpenBao SSH CA / signing role for controller certificates (§ 5) — CA role, `valid_principals`, extensions and measured TTL, per the § 5 selection | Michael |
+| **Unresolved (§ 11):** Design and verify private delivery of observer, jump and inside-vantage configuration through Starter/Foundation infrastructure; put none of it in the public execution repository | Starter/Foundation infrastructure owner (ADR-0013 § A7.6) |
 
-Agent-doable source work, once the above is accepted and provisioned:
+Agent-doable source work after the applicable § 11 admission and provisioning:
 
 - The workflow YAML implementing §§ 2–6 (Environment reference, OIDC step,
   OpenBao token exchange, per-run key generation and destruction, runner
-  isolation) — **follows from the 2026-09-28 topology ruling, subject to
-  the two conditions in the Runner placement section:** in the
-  organization-owned execution repository, using the runner group
-  restricted to the exact protected workflow's ref-pinned coordinate (per
-  "Runner placement blocker" above) — not via a label alone on a shared
-  runner.
+  isolation) in § 11's public execution repository, using its selected
+  repository and ref-pinned workflow restrictions — not a shared-runner label.
 - The controller-fingerprint derivation code (§ 5).
 - The startup signer install call site (`install_rehearsal_issuer_security`,
   § 4) wiring CP's process start to the OpenBao read.
@@ -659,12 +650,14 @@ no provisioning of
 its own and consumes D's evidence as-is; D does not itself produce the
 receipt or decide any pass/refusal outcome — that is E's job per § A7.7.
 
-## 10. Open decisions for Michael
+## 10. Decision record and remaining provisioning values
 
 Neither ADR-0013 nor an earlier instruction from Michael originally settled
-these. Items 1–4, 6, 7 and 8 are now ruled (2026-09-28); item 5 is ruled in
-principle and pending the execution repository. They are collected here so
-none is missed before provisioning:
+these. Michael ruled items 1–4 and 6–8 on 2026-09-28. § 11's later public
+Free ruling selects the execution repository and supersedes the private
+placement premise of item 5; exact credential, trust-record and SSH-CA
+provisioning values remain pending. The original alternatives below remain
+as decision history, not questions to put to Michael again:
 
 1. **Who signs the harness evidence (§ 1, § 5, § 7, § 9).** Same key as the
    § 4 rehearsal-issuer signer, or a dedicated harness-evidence signing key
@@ -707,22 +700,22 @@ none is missed before provisioning:
    **Ruled by Michael 2026-09-28:** the minimum
    trust-state version is pinned in independently controlled, IMMUTABLE CP
    deployment configuration, not beside the mutable trust-state record.
-5. Every `<placeholder: ...>` value throughout §§ 2–8 (audience, trust-state
+5. Originally, `<placeholder: ...>` values throughout §§ 2–8 (audience, trust-state
    path, SSH CA role/`valid_principals`/extensions/key ID, the runner-group
    name, the live-negative-test bound `<placeholder: N minutes>` (§ 7), and
-   the rotation overlap window in item 6 below) is Michael's to choose at
-   provisioning time, not a decision this spec makes. Plain names that do
-   not depend on
-   the execution repository are settled now, not deferred to provisioning:
+   the rotation overlap window in item 6 below) required Michael's choices
+   at provisioning time. Plain names independent of the execution repository
+   were then settled:
    **Ruled by Michael 2026-09-28:** the Environment name and the OpenBao JWT
    role name are both fixed as `rehearsal-issuer-protected` (§§ 2, 3 — no
    longer placeholders).
-   **Ruled in principle; cannot be finalized until the execution repository
-   is chosen:** the repository, `workflow_ref`, runner-group and runner
-   identity (its ID and registration, as distinct from the group NAME,
-   which is Michael's to choose above), SSH principals and fingerprints
-   remain `<derived from the approved execution repository>`. The 5-minute non-renewable token
-   proposal stays. The certificate TTL is still to be measured.
+   **Superseded in part by § 11 (2026-09-30):** the public execution
+   repository, ref-pinned `workflow_ref`, Environment and runner-group names
+   are now specified there, with a dated partial control read-back. The
+   runner identity and registration, OpenBao audience and role admission,
+   SSH principals and fingerprints, trust-state path, floor value, and
+   measured certificate TTL remain pending. The five-minute non-renewable
+   token proposal remains subject to provisioned-role validation.
 
 Design choices already made in this spec, confirmed by Michael's 2026-09-28
 ruling below:
@@ -757,3 +750,183 @@ OpenBao-issued SSH certificate, not a long-lived host-trusted key. What
 remains pending is provisioning detail only — the CA role, `valid_principals`,
 extensions, the certificate key ID binding, and the measured TTL — not the
 choice of mechanism itself.
+
+## 11. Amendment — public GitHub Free execution topology (2026-09-30)
+
+Michael ruled on 2026-09-30 that Gate-0 D uses a **public, `dotmac-tech`-owned
+execution repository on GitHub Free**. This supersedes only the earlier
+private/in-this-repository placement assumed in §§ 2, 3, 6, 8 and 10 item 7.
+The § A7.5 observation that this repository lacked an Environment on
+2026-09-24 remains a historical fact, not the location of the new gate.
+Platform CP retains the operator-workflow and Gate-0 receipt ownership in
+§ A7.6–A7.7; the separate repository is its execution surface, not a new
+approval, issuer, or execution-authority owner. All other identity, custody,
+document-purpose, and Gate-0/2/3 boundaries above remain in force.
+
+**Proposed coordinates, all uncreated as of this amendment:** public repository
+`dotmac-tech/gate0-issuer-execution`; directly defined, non-reusable workflow
+`dotmac-tech/gate0-issuer-execution/.github/workflows/gate0-issuer.yml@refs/heads/main`;
+Environment `rehearsal-issuer-protected`; organization runner group
+`gate0-issuer-protected`. These are proposed names for the implementation,
+not claims that the repository, workflow, Environment, group, or runner exists.
+Provisioning must record the final exact coordinates and update this spec if
+any name changes; every GitHub runner-group restriction and OpenBao claim
+binding must use those same coordinates before a privileged runner is
+registered, moved into the group, or allowed to take a job.
+
+The public execution repository has a protected `main`: require a pull request
+with **zero required approving reviews** (a solo owner cannot independently
+approve their own PR), require non-privileged checks selected for this
+workflow, apply protection to administrators, and refuse direct pushes, force
+pushes, deletion, and configured bypass actors. Read back the effective rule.
+This is a change-record and CI gate, **not** an independently reviewed-code
+claim; the separate Environment review below is the one-person human gate.
+Its sole privileged workflow is defined directly in the named file and dispatches only
+from `refs/heads/main`. It has no `pull_request`, `pull_request_target`, or
+reusable `workflow_call` trigger, and no job from a PR event may select the
+privileged group. The protected job has a job-level condition requiring both
+`workflow_dispatch` and `refs/heads/main`. A manual dispatch from another
+ref must be refused before runner scheduling as well as by the Environment
+branch rule and OpenBao `bound_claims.ref`. The Environment permits `main`
+only and requires Michael as its reviewer before the job starts, with
+administrator bypass explicitly disabled and read back. Because Michael is
+the sole approver, the Environment must allow his own review; it is a
+deliberate human gate, not two-person approval. The workflow's `GITHUB_TOKEN`
+gets the minimum read permissions plus `id-token: write` only for the protected
+job; no untrusted
+checkout, artifact, or third-party action executes on the privileged runner.
+
+The organization runner group must be admitted with **all** of this tuple:
+`allows_public_repositories=true` (GitHub defaults it to `false`),
+`visibility=selected`, `selected_repository_ids=[the exact ID of
+dotmac-tech/gate0-issuer-execution]`, `restricted_to_workflows=true`, and
+`selected_workflows=[dotmac-tech/gate0-issuer-execution/.github/workflows/gate0-issuer.yml@refs/heads/main]`.
+The group must contain no other repository or workflow. Read the group back
+through GitHub's API and compare every field, including the resolved
+repository ID, before attaching a runner. A label alone is not isolation.
+The runner must be dedicated to this group and cleaned or recreated between
+runs per § 6; the chosen mode and its observed effectiveness are admission
+evidence, not an assumption from configuration.
+
+The OpenBao JWT role in § 3 binds `repository` to
+`dotmac-tech/gate0-issuer-execution`, `environment` to
+`rehearsal-issuer-protected`, `ref` to `refs/heads/main`, and `workflow_ref`
+to the exact workflow coordinate above. It also binds `repository_id` and
+`repository_owner_id` to the immutable IDs read from GitHub at repository
+creation and `event_name` to `workflow_dispatch`, with the separately
+configured exact `bound_audiences`. Names alone are insufficient identity:
+the IDs refuse rename/recreation substitution, and the event claim refuses
+a different trigger even if a workflow YAML guard regresses. Since the
+privileged job is directly defined, the role does not substitute
+`job_workflow_ref` or accept a reusable caller. The
+workflow's OIDC-derived token can reach only the short-lived SSH CA signing
+capability in § 5. Its policy explicitly denies read of the § 4 issuer signer
+and of any separate harness-evidence signer. CP's distinct service identity
+alone reads the issuer signer at process start. Test the provisioned role and
+policy, not a stand-in configuration.
+
+Public visibility exposes workflow source, repository history, run metadata,
+and any public logs or artifacts to anyone. It grants no trust to a job, no
+approval of a plan, no safe isolation for a self-hosted runner, and no
+protection for a value once workflow code or logs disclose it. The public
+repository therefore holds **no secrets, credentials, host addresses, jump
+details, inside-vantage topology, or private OpenBao material** in tracked
+files, GitHub secrets/variables, logs, or artifacts. § 8's observer, jump and
+vantage variables remain outside this public repository; no public copy of
+`LANE3_PROBE_HOST` is made. ADR-0013 § A7.6 still assigns the Lane-3 vantage
+configuration to Starter/Foundation infrastructure; this public-repository
+amendment does not move its owner. A file readable by the Actions runner user
+is also readable by workflow steps, so putting private topology on that host
+under the runner's identity is not a confidentiality boundary. The private
+delivery mechanism for § 8's vantage configuration remains **unresolved**;
+no target address, jump detail, or inside-vantage value may be copied to the
+public repository as a shortcut. Its owner must design and prove a delivery
+mechanism separately before D can claim that part of its contract is closed.
+
+Gate-0 D/E proves candidate-independent issuer readiness, not a target
+action. A Control `RehearsalIssuerAuthorizationV1` lease never authorizes a
+connection or command against a target. The protected Gate-0 workflow must
+make no target connection. Any later broker, proxy, or direct Lane-3 transport
+belongs to Gate 3 and must refuse absent or mismatched Foundation
+`ExecutionGrant` binding the exact candidate, target, host, and controller.
+This amendment neither chooses nor provisions that transport. Configuring
+GitHub's public controls alone does not close D or authorize a target action.
+
+Before any privileged runner registration or group attachment, retain
+independent evidence of these **positive and negative** outcomes. Scheduling
+probes use only a disposable canary runner in the same selected group, on a
+**separately named and authorized** isolated host/VM with a privately verified
+absence of target-network routes, private material, and trusted workspace.
+Neither the existing control-runner VM nor the shared Docker/Postgres testing
+server qualifies. At amendment time no such canary was authorized; the dated
+partial record below reports a later isolated VM attempt but no completed
+admission. Remove the canary after the probes and read back
+group membership before attaching the privileged runner. The canary cannot stand in for the
+later per-run key, cleanup, or target-vantage proof; those remain post-attach
+acceptance evidence for D and E, and no target action is authorized by these
+pre-registration probes:
+
+| Admission check | Required evidence |
+| --- | --- |
+| Public-repo controls | Read back public visibility, `dotmac-tech` ownership, protected `main` with PR required/zero approvals, required checks, admin enforcement and no bypass, exact Environment reviewer, admin-bypass refusal and `main` branch policy, and the complete runner-group tuple above. Missing or disabled controls refuse admission. |
+| Authorized scheduling | A main-branch PR/check-gated workflow followed by Michael's Environment-reviewed dispatch reaches only the selected group and protected job; the observed OIDC claims, including immutable repository and owner IDs and `event_name`, match the provisioned role. |
+| PR exclusion | Both same-repository and fork-origin `pull_request` **and** `pull_request_target` probes, including attempts to select the group by label or name, cannot schedule on the privileged runner. A malicious PR workflow edit must not change the selected `@refs/heads/main` workflow. |
+| Ref/workflow failure | A non-`main` manual dispatch, a different workflow file or ref, and a reusable-workflow call cannot schedule on the group or obtain an OpenBao token; a missing reviewer blocks the protected job. |
+| Credential failure | Wrong repository name, immutable `repository_id`, immutable `repository_owner_id`, environment, ref, workflow, `event_name`, audience, or expired token is denied by the live OpenBao role; the runner token cannot read either signer path or the private topology record, even after successful SSH CA access. |
+| No Gate-0 target action | The protected Gate-0 workflow makes no connection or command to a target. A Control issuer lease alone cannot enable any target transport; a later Gate-3 attempt with no matching Foundation `ExecutionGrant` is refused before dialing. § 8's private vantage delivery remains open and no topology value appears in public source, variables, logs, or artifacts. |
+| Isolation and disclosure | The canary's failed/cancelled run leaves no per-run key or certificate; its next run sees no prior workspace state. Published source, variables, logs, and artifacts contain no secret or host-topology value. Repeat the cleanup proof on the privileged runner after attachment and before D acceptance. |
+
+Record the exact repository ID, configuration read-backs, test run IDs,
+refusal outcomes, and source revision for Work Packet E. A positive dispatch
+alone is insufficient: the negative scheduling and failure cases are part of
+the gate. GitHub warns that public-repository fork PRs can compromise
+self-hosted runners; the selected-repository **and** selected-workflow
+restriction, PR-trigger exclusion, review gate, branch policy, OpenBao
+claims, and runner isolation must all be demonstrated together before
+registration. A private repository on GitHub Team does not repair this
+specific gate: GitHub makes required Environment reviewers available only to
+public repositories on Free, Pro, and Team.
+
+GitHub plan and runner-group references: [protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches),
+[Environment protection](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments),
+[runner groups](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access),
+[runner-group API](https://docs.github.com/en/rest/actions/self-hosted-runner-groups), and
+[self-hosted runner security](https://docs.github.com/en/actions/reference/security/secure-use).
+
+### Provisioning record — 2026-09-30 (partial; no Gate-0 admission)
+
+The amendment's proposed coordinates now exist. CP #229 merged as
+`6f5efe2176e25477816f24e6762d5ce9e9fb34ed`. The public execution
+repository `dotmac-tech/gate0-issuer-execution` has repository ID
+`1397614140` under organization ID `335992433`. Its refusal-only source
+PR #1 merged as `f218660b6ff7c3a01b877e6ab080efcd31672805`. The
+protected workflow exits unsuccessfully by design and has no issuer,
+OpenBao, SSH, or target action.
+
+GitHub API read-back showed the following configured controls:
+
+- Main ruleset `24240825`: pull request required with zero approving
+  reviews, `source_policy` required, no configured bypass actors, deletion
+  and non-fast-forward refused.
+- Environment `rehearsal-issuer-protected` (`23103080174`): Michael is
+  the required reviewer, admin bypass disabled, and only `main` admitted.
+- Organization runner group `gate0-issuer-protected` (`3`): public
+  repositories allowed, selected repository ID `1397614140` only, selected
+  workflow
+  `dotmac-tech/gate0-issuer-execution/.github/workflows/gate0-issuer.yml@refs/heads/main`
+  only. The group contained **zero runners** at last read-back.
+
+`source_policy` runs from the same repository as the workflow it checks.
+It catches accidental drift but can be changed alongside that workflow;
+its green status is **not independent admission evidence**. A disposable,
+separately isolated canary VM was created on a named authorized testing
+host, and its guest had no default route. From within it, an explicitly
+forwarded, host-owned proxy reached GitHub's API and refused the test host,
+production host, unrelated public site, and arbitrary Azure Blob account.
+The official runner archive was verified against its GitHub-published
+SHA-256 and extracted, but unattended registration timed out before the
+runner appeared in GitHub. At this 2026-09-30 observation, no live scheduling
+refusal or OIDC/OpenBao negative test had run. The VM was powered off and its
+temporary proxy stopped after the failed attempt; its disk is retained for
+diagnosis. The canary is not the privileged runner. This partial setup
+neither closes D nor permits Foundation successor allocation.

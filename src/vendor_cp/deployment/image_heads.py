@@ -65,6 +65,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 __all__ = [
+    "COMPARE_MISMATCH_EXIT_CODE",
     "IMAGE_HEADS_SCHEMA",
     "SOURCE_REVISION_PATTERN",
     "UNREADABLE_DOCUMENT",
@@ -84,6 +85,12 @@ SOURCE_REVISION_PATTERN: Final = re.compile(r"[0-9a-f]{40}")
 #: Where the document travels inside the image, beside
 #: `application_foundation_profile.json` and `distributions.json`.
 DEFAULT_IMAGE_HEADS_PATH: Final = Path("/app/migration_heads.json")
+
+#: `--compare`'s exit code for any verdict other than `MATCHED` — distinct
+#: from argparse's own usage-error code (2) and from `--emit`'s failure code
+#: (1), so a caller can tell "this document disagrees" apart from "this
+#: invocation was malformed".
+COMPARE_MISMATCH_EXIT_CODE: Final = 3
 
 
 class _UnreadableDocument:
@@ -255,24 +262,27 @@ def compare_heads(
     return HeadsVerdict.MATCHED
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _emit(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """`--emit`'s original behaviour, byte-identical to before `--compare`
+    existed: build the composed offline `Config`, freeze its effective heads,
+    and fail closed on a bad `--source-revision` or an empty head set."""
     from vendor_cp.migrations import make_alembic_config
 
-    parser = argparse.ArgumentParser(
-        prog="python -m vendor_cp.deployment.image_heads",
-        description="Emit this build's composed effective migration heads.",
-    )
-    parser.add_argument("--emit", action="store_true", required=True)
-    parser.add_argument("--source-revision", required=True)
-    parser.add_argument("--output", required=True, type=Path)
-    # No database is dialled: `make_alembic_config` builds an offline `Config`
-    # and constructs no engine, matching `test_descriptor_promotion.py`'s own
-    # `OFFLINE_DSN` use of the same function.
-    parser.add_argument(
-        "--offline-dsn",
-        default="postgresql+psycopg://image-heads@127.0.0.1:5432/none",
-    )
-    args = parser.parse_args(argv)
+    if args.image_document is not None:
+        parser.error("--emit does not take --image-document (that is --compare's)")
+    if args.descriptor_heads:
+        parser.error("--emit does not take --descriptor-heads (that is --compare's)")
+    if args.database_heads:
+        parser.error("--emit does not take --database-heads (that is --compare's)")
+    if args.expected_source_revision is not None:
+        parser.error(
+            "--emit does not take --expected-source-revision (that is --compare's)"
+        )
+
+    if not args.source_revision:
+        parser.error("--emit requires --source-revision")
+    if args.output is None:
+        parser.error("--emit requires --output")
 
     if not SOURCE_REVISION_PATTERN.fullmatch(args.source_revision):
         print(
@@ -299,6 +309,92 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(f"{args.output}: {len(heads)} effective head(s): {', '.join(heads)}")
     return 0
+
+
+def _compare(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """`--compare`: read the frozen image document and judge it against the
+    descriptor's (and optionally the live database's) declared heads.
+
+    Prints exactly one JSON line to stdout — `{"verdict": ..., "detail":
+    ...}` — and exits `0` only for `HeadsVerdict.MATCHED`; every other
+    verdict exits `COMPARE_MISMATCH_EXIT_CODE`, a fixed code distinct from
+    both argparse's own usage-error code (2) and `--emit`'s failure code (1).
+    """
+    if args.source_revision is not None:
+        parser.error("--compare does not take --source-revision (that is --emit's)")
+    if args.output is not None:
+        parser.error("--compare does not take --output (that is --emit's)")
+
+    if args.image_document is None:
+        parser.error("--compare requires --image-document")
+    if not args.descriptor_heads:
+        parser.error("--compare requires --descriptor-heads with at least one head")
+
+    document = read_image_document(args.image_document)
+    verdict = compare_heads(
+        image_document=document,
+        descriptor_heads=args.descriptor_heads,
+        database_heads=args.database_heads,
+        expected_source_revision=args.expected_source_revision,
+    )
+    payload: dict[str, object] = {
+        "verdict": verdict.value,
+        "detail": {
+            "image_document": str(args.image_document),
+            "descriptor_heads": sorted(args.descriptor_heads),
+            "database_heads": (
+                sorted(args.database_heads) if args.database_heads is not None else None
+            ),
+            "expected_source_revision": args.expected_source_revision,
+        },
+    }
+    print(json.dumps(payload, sort_keys=True))
+    return 0 if verdict is HeadsVerdict.MATCHED else COMPARE_MISMATCH_EXIT_CODE
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m vendor_cp.deployment.image_heads",
+        description=(
+            "Emit this build's composed effective migration heads (--emit), "
+            "or compare an already-emitted image document against a "
+            "descriptor and, optionally, a live database (--compare)."
+        ),
+    )
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--emit", action="store_true")
+    mode.add_argument("--compare", action="store_true")
+
+    # `--emit`-only arguments. Required only when `--emit` is given (checked
+    # in `_emit`, not at the parser level), so `--compare` does not have to
+    # supply them.
+    parser.add_argument("--source-revision")
+    parser.add_argument("--output", type=Path)
+    # No database is dialled: `make_alembic_config` builds an offline `Config`
+    # and constructs no engine, matching `test_descriptor_promotion.py`'s own
+    # `OFFLINE_DSN` use of the same function.
+    parser.add_argument(
+        "--offline-dsn",
+        default="postgresql+psycopg://image-heads@127.0.0.1:5432/none",
+    )
+
+    # `--compare`-only arguments. `nargs="+"` refuses an empty
+    # `--descriptor-heads`/`--database-heads` (argparse itself exits 2 with
+    # "expected at least one argument"); required-when-given is checked in
+    # `_compare`. `action="extend"` so a REPEATED flag accumulates every head
+    # named across all occurrences (`--descriptor-heads h1 --descriptor-heads
+    # h2` yields `["h1", "h2"]`) rather than argparse's plain `nargs="+"`
+    # default of silently keeping only the last occurrence's list.
+    parser.add_argument("--image-document", type=Path)
+    parser.add_argument("--descriptor-heads", nargs="+", action="extend")
+    parser.add_argument("--database-heads", nargs="+", action="extend")
+    parser.add_argument("--expected-source-revision")
+
+    args = parser.parse_args(argv)
+
+    if args.emit:
+        return _emit(args, parser)
+    return _compare(args, parser)
 
 
 if __name__ == "__main__":  # pragma: no cover - the module entry point

@@ -45,6 +45,20 @@ jobs:
         run: poetry run mypy
       - name: Tests (boot + provisioning contract + D1–D5 deny cases)
         run: poetry run pytest -q
+      # Gate the temporary, read-only D16 tool against the actual immutable
+      # Foundation verifier source. Starter is public; no cross-repo credential
+      # or mutable branch is needed. This stays in the required check job.
+      - name: Fetch exact Foundation transition verifier source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_starter_mt
+          ref: d74bf8dd8c399dd92047174365403b861f82ddd0
+          path: .d16-foundation-source
+          persist-credentials: false
+      - name: D16 source-verifier conformance
+        env:
+          D16_FOUNDATION_CHECKOUT: ${{ github.workspace }}/.d16-foundation-source
+        run: poetry run pytest -q conformance/test_d16_source_verifier_real_foundation.py
       # Postgres-backed suites. These were previously never run in CI: the
       # migration rehearsals and the replay-concurrency proof both SKIP without
       # TEST_DATABASE_URL, so a green pipeline said nothing about migration
@@ -87,6 +101,33 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test
         run: poetry run pytest tests/migration -q -rs
+      # The ordinary migration suite may skip optional Foundation imports.
+      # This separate required step makes those four tests an executed gate
+      # against one immutable Foundation source without changing CP's runtime
+      # dependency graph or treating a skipped test as proof.
+      - name: Fetch exact Foundation bundle source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_starter_mt
+          ref: d74bf8dd8c399dd92047174365403b861f82ddd0
+          path: .d16-foundation-source
+          persist-credentials: false
+      - name: D16 bundle producer and dump evidence conformance
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test
+          PYTHONPATH: ${{ github.workspace }}/.d16-foundation-source/packages/dotmac-deployment-foundation/src
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          foundation_dir="${GITHUB_WORKSPACE}/.d16-foundation-source"
+          test "$(git -C "$foundation_dir" rev-parse HEAD)" = d74bf8dd8c399dd92047174365403b861f82ddd0
+          test -z "$(git -C "$foundation_dir" status --porcelain=v1 --untracked-files=all)"
+          poetry run python -c 'import dotmac_deployment_foundation as f; from pathlib import Path; import os; expected = Path(os.environ["GITHUB_WORKSPACE"]) / ".d16-foundation-source/packages/dotmac-deployment-foundation/src/dotmac_deployment_foundation/__init__.py"; assert Path(f.__file__).resolve() == expected.resolve(), f.__file__'
+          poetry run pytest -q -rs \
+            tests/migration/test_recovery_bundle_producer.py \
+            tests/migration/test_dump_evidence.py \
+            --junitxml="$RUNNER_TEMP/d16-bundle-conformance.xml"
+          poetry run python scripts/check_d16_bundle_junit.py "$RUNNER_TEMP/d16-bundle-conformance.xml"
       - name: Stop Postgres
         if: always()
         run: docker compose -f docker-compose.test.yml down -v

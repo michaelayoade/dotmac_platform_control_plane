@@ -17,6 +17,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Final, Protocol, cast
 from uuid import UUID
 
+from dotmac_kernel import ConflictError
 from dotmac_kernel.messaging import ClaimedPlatformEvent
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -467,6 +468,106 @@ def issue_authorization(db: Session, invocation: RehearsalIssuerInvocation) -> o
         raise
 
 
+class AuthorizationPlanMismatch(ConflictError):
+    """The presented authorization document names a DIFFERENT plan than the
+    caller's `plan_id` -- carries ids only, never the document itself.
+
+    Control's `stage_rehearsal_issuer_consumption` derives the plan it
+    actually spends against from the PRESENTED DOCUMENT's own
+    `statement.immutable_reference` (`rehearsal_issuer_issuance.py` around
+    lines 704-712) -- never from a caller-supplied `plan_id`. Without this
+    check, `consume_authorization` would take its hold on the caller's
+    `plan_id` while Control silently consumed whatever plan the document
+    itself names: a caller holding P1's still-standing approval could spend
+    P2's authorization document if P2 was withdrawn but not yet drained,
+    because the hold covers P1's decision, not P2's.
+    """
+
+    def __init__(self, plan_id: UUID, document_plan_ref: str) -> None:
+        self.plan_id = plan_id
+        self.document_plan_ref = document_plan_ref
+        super().__init__(
+            f"authorization document names plan {document_plan_ref!r}, not "
+            f"the requested plan {plan_id}"
+        )
+
+
+def consume_authorization(
+    db: Session,
+    *,
+    plan_id: UUID,
+    authorization_document: object,
+    harness_evidence_document: object,
+) -> object:
+    """Consume one issued authorization under the same approval hold as
+    approval and issuance (D18-D's consumption seam).
+
+    Follows `issue_authorization`'s exact shape: the hold's `request_id`
+    comes only from Control's own frozen plan, never from either document,
+    and `held_transition` runs `control.stage_rehearsal_issuer_consumption`
+    while still holding the row -- a withdrawal racing this call either
+    committed first (and the hold refuses `WITHDRAWN` before Control is ever
+    reached) or blocks until this transaction ends. The caller owns the
+    single commit.
+
+    Before any of that: the presented document's OWN plan reference
+    (`statement.immutable_reference`, the field Control itself resolves
+    against) must equal `plan_id`, checked with Control's public parser
+    (`RehearsalIssuerAuthorizationV1.parse`) before the hold is taken or
+    Control is called at all. See `AuthorizationPlanMismatch` for why.
+
+    Control is then handed `parsed.as_mapping()` -- the PARSED-and-rebuilt
+    document -- rather than the raw `authorization_document` the caller
+    passed in. Confirmed against Control a16's own source
+    (`rehearsal_issuer_authorization.py`): `.as_mapping()` is `.parse()`'s
+    exact inverse (it is how the envelope is canonicalised for signing and
+    for the ledger's stored `authorization_envelope` in the first place), so
+    Control's own re-parse of it reproduces an identical statement, and its
+    byte-for-byte ledger comparison is unaffected. Handing Control the
+    document CP itself just verified -- rather than trusting a second,
+    independent read of the caller's raw object -- means Control can never
+    see a different document than the one this function's own
+    `AuthorizationPlanMismatch` check just passed.
+    """
+    control = import_module("dotmac_deployment_control")
+
+    from vendor_cp.deployment.approval_barrier import held_transition
+
+    parsed = control.RehearsalIssuerAuthorizationV1.parse(authorization_document)
+    document_plan_ref = parsed.statement.immutable_reference
+    if document_plan_ref != str(plan_id):
+        raise AuthorizationPlanMismatch(plan_id, document_plan_ref)
+
+    plan = _plan(db, plan_id)
+    if not plan.approval_decision_ref:
+        raise ValueError(f"issuer plan {plan_id} has no recorded approval decision")
+    try:
+        request_id = UUID(plan.approval_decision_ref)
+    except ValueError as exc:
+        raise ValueError(
+            f"issuer plan {plan_id} approval_decision_ref "
+            f"{plan.approval_decision_ref!r} is not a UUID"
+        ) from exc
+    if not plan.plan_digest:
+        raise ValueError(f"issuer plan {plan_id} has no frozen digest")
+
+    def transition(held: HeldPlatformApproval) -> object:
+        return control.stage_rehearsal_issuer_consumption(
+            db,
+            authorization_document=parsed.as_mapping(),
+            harness_evidence_document=harness_evidence_document,
+        )
+
+    return held_transition(
+        db,
+        request_id=request_id,
+        subject_type=SUBJECT_TYPE,
+        subject_id=_subject(plan),
+        content_digest=plan.plan_digest,
+        transition=transition,
+    )
+
+
 def _conflict(
     reason_code: str,
     *,
@@ -478,6 +579,195 @@ def _conflict(
         reason_code=reason_code,
         coordinates=coordinates or {},
         evidence=evidence or {},
+    )
+
+
+#: Every `reason_code` `classify_approval_withdrawal` can return for which the
+#: plan's approval no longer stands AFTER this event, so any authorization CP
+#: itself issued under it must be revoked too (idempotently -- `NOT_REVOCABLE`
+#: counts as done). `decision_not_carried` and `never_approved` are
+#: deliberately ABSENT: the former means a DIFFERENT decision currently
+#: carries the plan's approval (nothing about THIS decision to revoke), and
+#: the latter means the plan was never approved at all (no authorization
+#: could exist to have been issued under it). Every `security_conflict`
+#: reason_code is likewise absent -- a conflict means standing is UNRESOLVED,
+#: not known to no longer stand. Lock order on each path (never authorization
+#: then plan):
+#:   * "applied" -- `control.revoke_plan_approval` already succeeded and its
+#:     row lock is held until the caller's commit: plan, then authorization.
+#:   * "already_applied", "superseded_by_revocation" -- reached via
+#:     `_revoked_pre_read`'s plain read (no lock taken by this module) or,
+#:     on the race branch, after `revoke_plan_approval` itself raised (no
+#:     lock survives the raise): authorization only.
+#:   * "cancelled_before_execution", "plan_superseded" -- reached only after
+#:     `control.revoke_plan_approval` raised `ExpectedStateError` (the
+#:     attempted transition failed; no lock survives): authorization only.
+_APPROVAL_NO_LONGER_STANDS: Final[frozenset[str]] = frozenset(
+    {
+        "applied",
+        "already_applied",
+        "superseded_by_revocation",
+        "cancelled_before_execution",
+        "plan_superseded",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _RevocationAttempt:
+    """Every ref in `issuer_receipts.issued_authorization_refs` was attempted
+    -- `conflicts` names every refusal OTHER than `NOT_REVOCABLE`, so a caller
+    can see exactly which refs still need repair rather than stopping at the
+    first one (item 2)."""
+
+    revoked: tuple[str, ...]
+    not_revocable: tuple[str, ...]
+    conflicts: tuple[dict[str, str], ...]
+
+
+def _revoke_issued_authorizations(
+    db: Session, *, plan_id: UUID, event_id: UUID, actor_ref: str | None
+) -> _RevocationAttempt:
+    """Attempt to revoke EVERY authorization CP itself has issued for this
+    plan -- never stopping at the first unexpected refusal.
+
+    The index is CP's own receipts (`issuer_receipts.issued_authorization_refs`)
+    -- there is no public Control read listing a plan's authorizations, and
+    this module never imports Control's internal models. `NOT_REVOCABLE`
+    (already spent, or already revoked by an earlier pass) is recorded as
+    "not revocable": a completed action stays history, untouched, and a retry
+    of this same loop after a replay or a race is exactly idempotent because a
+    second `NOT_REVOCABLE` is still "done". Any OTHER refusal (`NOT_RECORDED`,
+    ...) is recorded in `conflicts` and the loop CONTINUES to the next ref --
+    a caller stopping at the first refusal would leave every later ref stuck
+    ISSUED even though nothing prevents revoking it.
+    """
+    control = import_module("dotmac_deployment_control")
+    from vendor_cp.deployment.issuer_receipts import issued_authorization_refs
+
+    revoked: list[str] = []
+    not_revocable: list[str] = []
+    conflicts: list[dict[str, str]] = []
+    for ref in issued_authorization_refs(db, plan_id):
+        try:
+            control.revoke_rehearsal_issuer_authorization(
+                db,
+                authorization_id=ref,
+                revocation_ref=f"approval.withdrawn:{event_id}",
+                actor_ref=actor_ref,
+            )
+        except control.RehearsalIssuerIssuanceRefusedError as exc:
+            if exc.code is control.RehearsalIssuerIssuanceRefusalCode.NOT_REVOCABLE:
+                not_revocable.append(ref)
+            else:
+                conflicts.append(
+                    {
+                        "authorization_id": ref,
+                        "code": str(exc.code),
+                        "detail": str(exc),
+                    }
+                )
+        else:
+            revoked.append(ref)
+    return _RevocationAttempt(
+        revoked=tuple(revoked),
+        not_revocable=tuple(not_revocable),
+        conflicts=tuple(conflicts),
+    )
+
+
+def _with_authorization_revocation(
+    db: Session,
+    result: ApprovalWithdrawalResult,
+    *,
+    plan_id: UUID,
+    event_id: UUID,
+) -> ApprovalWithdrawalResult:
+    """Attempt authorization revocation on any result whose `reason_code` is
+    in `_APPROVAL_NO_LONGER_STANDS` (item 3's requirement). Every other result
+    passes through unchanged.
+
+    This makes the classifier itself idempotent -- calling it again for the
+    SAME event, before any outcome has been recorded, safely re-attempts and
+    converges. It is NOT a general claim that a committed
+    `authorization_revocation_refused` conflict self-heals in production; the
+    scope of what does and does not converge is PER APPROVAL REQUEST:
+
+    * One approval request gets at most one withdrawal event (Approvals'
+      `withdraw_request` refuses to withdraw a request that is no longer a
+      standing completed approval), and `approval_router.py` settles each
+      event at most once (a second delivery with an identical payload digest
+      is a no-op that never reaches this function again). So a genuinely
+      SECOND, DIFFERENT withdrawal event for the SAME request cannot occur,
+      and a conflict recorded against that request's own withdrawal cannot be
+      converged through the pipeline by that request's withdrawal again.
+    * That does NOT mean the plan's SUBJECT is single-request: `open_issuer_
+      approval` opens one platform approval request per `command_id`, so a
+      SIBLING approval request can exist for the same plan and subject. That
+      sibling's own later withdrawal reaches `superseded_by_revocation`
+      through `_revoked_pre_read` (the plan is already revoked, but under a
+      DIFFERENT ref) and re-enters this function -- which CAN incidentally
+      converge an earlier conflict left by the first request's withdrawal.
+      This is an accepted side effect, not a repair mechanism: the
+      authorization ends up stamped with the SIBLING's `revocation_ref` as
+      provenance, which names the wrong withdrawal for it. Whether the
+      classifier tries the plan-approval transition before or after checking
+      prior standing is an architecture choice kept out of this change; this
+      docstring only names the incidental effect of the existing order.
+    * Repairing a conflict deliberately (rather than incidentally, via a
+      sibling) needs a separate event or an explicit repair command -- neither
+      ships in this change (tracked as a follow-up, Knowledge
+      `cp-gate0-d18-d16-slices-2026-09-27`).
+
+    Safety stays bounded regardless of which of the above applies: once the
+    plan's approval is revoked, Control refuses
+    `stage_rehearsal_issuer_consumption` on `APPROVAL_NOT_STANDING`
+    permanently, whether or not the authorization row itself was revoked, and
+    whichever event's ref ends up recorded as provenance.
+    """
+    if result.reason_code not in _APPROVAL_NO_LONGER_STANDS:
+        return result
+    # actor_ref=None on both revocations, for consistency. The
+    # `approval.withdrawn` payload DOES carry a top-level `actor_id` and
+    # `authority_ref` (Approvals' `ap_0003_withdrawals.py`), but neither this
+    # authorization revocation nor `classify_approval_withdrawal`'s own
+    # `control.revoke_plan_approval` call above forwards it yet -- forwarding
+    # it on both is a tracked follow-up (Knowledge
+    # `cp-gate0-d18-d16-slices-2026-09-27`), not a gap unique to this call.
+    attempt = _revoke_issued_authorizations(
+        db, plan_id=plan_id, event_id=event_id, actor_ref=None
+    )
+    if attempt.conflicts:
+        return _conflict(
+            "authorization_revocation_refused",
+            coordinates=result.coordinates,
+            # Round-3 correction: `**result.evidence` FIRST, so a field like
+            # `approval_revocation_ref` (present on an `already_applied` or
+            # `superseded_by_revocation` result) survives into the conflict
+            # instead of being dropped by a fresh dict literal.
+            evidence={
+                **result.evidence,
+                "authorizations_revoked": list(attempt.revoked),
+                "authorizations_not_revocable": list(attempt.not_revocable),
+                "authorization_conflicts": list(attempt.conflicts),
+                # Provenance (finding 3): the plan-revocation side of THIS
+                # event still committed even though the authorization side
+                # did not, so an operator reading this conflict sees that
+                # the plan is settled and only the named authorizations need
+                # repair.
+                "withdrawal_disposition": result.disposition.value,
+                "withdrawal_reason_code": result.reason_code,
+            },
+        )
+    return ApprovalWithdrawalResult(
+        disposition=result.disposition,
+        reason_code=result.reason_code,
+        coordinates=result.coordinates,
+        evidence={
+            **result.evidence,
+            "authorizations_revoked": list(attempt.revoked),
+            "authorizations_not_revocable": list(attempt.not_revocable),
+        },
     )
 
 
@@ -608,7 +898,9 @@ def classify_approval_withdrawal(
         plan, plan_id=plan_id, request_id=request_id, event_id=event.id
     )
     if pre_read is not None:
-        return pre_read
+        return _with_authorization_revocation(
+            db, pre_read, plan_id=plan_id, event_id=event.id
+        )
 
     if plan.status == "approved" and plan.approval_decision_ref != str(request_id):
         return ApprovalWithdrawalResult(
@@ -636,7 +928,9 @@ def classify_approval_withdrawal(
             reread, plan_id=plan_id, request_id=request_id, event_id=event.id
         )
         if raced is not None:
-            return raced
+            return _with_authorization_revocation(
+                db, raced, plan_id=plan_id, event_id=event.id
+            )
         return _conflict(
             "unexpected_plan_state",
             coordinates=coordinates,
@@ -645,11 +939,16 @@ def classify_approval_withdrawal(
     except control.ExpectedStateError as exc:
         status = exc.actual_status
         if status == "cancelled":
-            return ApprovalWithdrawalResult(
-                disposition=WithdrawalDisposition.CANCELLED_BEFORE_EXECUTION,
-                reason_code="cancelled_before_execution",
-                coordinates=coordinates,
-                evidence={"status": status},
+            return _with_authorization_revocation(
+                db,
+                ApprovalWithdrawalResult(
+                    disposition=WithdrawalDisposition.CANCELLED_BEFORE_EXECUTION,
+                    reason_code="cancelled_before_execution",
+                    coordinates=coordinates,
+                    evidence={"status": status},
+                ),
+                plan_id=plan_id,
+                event_id=event.id,
             )
         if status == "proposed":
             return ApprovalWithdrawalResult(
@@ -659,11 +958,16 @@ def classify_approval_withdrawal(
                 evidence={"status": status},
             )
         if status == "superseded":
-            return ApprovalWithdrawalResult(
-                disposition=WithdrawalDisposition.NOT_CARRIED,
-                reason_code="plan_superseded",
-                coordinates=coordinates,
-                evidence={"status": status},
+            return _with_authorization_revocation(
+                db,
+                ApprovalWithdrawalResult(
+                    disposition=WithdrawalDisposition.NOT_CARRIED,
+                    reason_code="plan_superseded",
+                    coordinates=coordinates,
+                    evidence={"status": status},
+                ),
+                plan_id=plan_id,
+                event_id=event.id,
             )
         return _conflict(
             "unexpected_plan_state",
@@ -673,9 +977,14 @@ def classify_approval_withdrawal(
     except OperationalError as exc:
         raise RetryableWithdrawal("database_unavailable") from exc
 
-    return ApprovalWithdrawalResult(
-        disposition=WithdrawalDisposition.APPLIED,
-        reason_code="applied",
-        coordinates=coordinates,
-        evidence={},
+    return _with_authorization_revocation(
+        db,
+        ApprovalWithdrawalResult(
+            disposition=WithdrawalDisposition.APPLIED,
+            reason_code="applied",
+            coordinates=coordinates,
+            evidence={},
+        ),
+        plan_id=plan_id,
+        event_id=event.id,
     )
