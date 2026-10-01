@@ -23,12 +23,14 @@ faithful to the real implementations.
 This directory is deliberately OUTSIDE `tests/` (this repo's `pyproject.toml`
 pins `testpaths = ["tests"]`), so a normal `pytest` invocation in this
 repository never collects it and never tries to import
-`dotmac_deployment_control`'s or `dotmac_deployment_foundation`'s real, not-
-yet-installable APIs. The host-admission file is not run as part of this
-repository's normal CI; the D16 file is invoked explicitly by the required
-`check` job. The host-admission suite exists so it is ready once both real
-dependencies are installable, without anyone having to reconstruct the real
-fixture-building patterns from scratch under time pressure.
+the real host-admission APIs. The required `rehearsal-issuer-harness` CI job
+now invokes the host-admission file explicitly against released Control a17,
+this branch's CP wheel, Kernel a100 and a test-only Foundation wheel built
+from exact source `d74bf8dd8c399dd92047174365403b861f82ddd0`. It checks installed
+import origins and requires ten passing cases with no skips. This Foundation
+validation build is not a candidate allocation, publication or runtime
+dependency. The D16 file is still invoked separately by the required `check`
+job. The historical manual build recipe below is not the current CI recipe.
 
 ## Preconditions
 
@@ -194,7 +196,7 @@ its own, separate, deliberate decision (see
 
 ## Mandatory re-run gate for future host-admission pin changes
 
-As of this change, `dotmac-deployment-control` is pinned at `0.1.0a16`;
+As of this change, `dotmac-deployment-control` is pinned at `0.1.0a17`;
 `dotmac-deployment-foundation` is still not a CP dependency. Ordinary mypy
 does not type-check `conformance/` against the real functions. The Protocols in
 `host_admission_adapter.py` are proven to match the real functions ONLY by

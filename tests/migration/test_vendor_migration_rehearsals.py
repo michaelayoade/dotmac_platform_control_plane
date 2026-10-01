@@ -64,7 +64,8 @@ LICENSING_HEAD = "li_0001_licensing"
 # (`dc_0001_deployment_control`), not its tip, so the tip is depended on by
 # nothing and is a version row. Control 0.1.0a15 (Gate-0 adoption) moves the
 # tip from `dc_0002_canonical_plan_digest` to `dc_0015_plan_purpose`.
-DEPLOYMENT_CONTROL_HEAD = "dc_0015_plan_purpose"
+# Control a17 adds the permanent controller-key nonreuse constraint above it.
+DEPLOYMENT_CONTROL_HEAD = "dc_0016_controller_key_nonreuse"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 # C2 S4 adds `v020_withdrawal_outcomes` above `v019_relay_heartbeat`; D18

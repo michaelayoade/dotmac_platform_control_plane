@@ -188,6 +188,26 @@
       "deploy_ordering": "v021 is additive (one new append-only platform table, no change to existing tables); the deploy path still migrates before replacing the serving app, and the D16 transition fence governs any production application. Nothing here is applied to production until Michael names the host.",
       "drift_reading": "Until deployed, descriptor drift against production additionally reports v021_issuer_command_receipts as declared-absent and v020_withdrawal_outcomes as present-undeclared. That is the expected reading of a composition change, not a fault.",
       "authored_by": "Hand-authored, not written by scripts/promote_descriptor.py: a composition change has no deployment receipt. tests/architecture/test_descriptor_promotion.py recomputes the declared heads from the installed lineages and enforces byte equality, changed_sections and the carried-forward values."
+    },
+    {
+      "promoted_at": "2026-10-01",
+      "kind": "composition_change",
+      "candidate": "deploy/candidates/2026-10-01-controller-key-nonreuse.toml",
+      "descriptor_sha256": "sha256:6f5f61bc2ebc1ba3bc018af3b32143fee570914b9bda55567888ebbf02a4f6c0",
+      "supersedes": "sha256:d5f149efcf3201dd0b47727b1585190a988401bdf0976953be61f572a189d5ab",
+      "summary": "Control a16 -> a17 replaces dc_0015_plan_purpose with dc_0016_controller_key_nonreuse, derived from the verified a17 wheel's immutable lineage and checked against the composed effective heads in CI. NON-AUTHORIZING: no deployment, issuer activation, Foundation allocation or retirement is claimed.",
+      "changed_sections": [
+        "migration"
+      ],
+      "carried_forward": {
+        "why": "Source composition declares the next migration heads only. No deployment occurs; accepted image, source revision and assembly manifest remain byte-identical. Prospective composition changes separately and cannot assert live adoption.",
+        "image.reference": "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
+        "image.source_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
+        "assembly.manifest_digest": "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
+      },
+      "deploy_ordering": "D16 fenced transition and an isolated restored-database rehearsal remain required before any deployment. dc_0016 refuses historical duplicate controller fingerprints without rewriting records. After the cutover, fix forward; do not restore a16 as a compatibility fallback.",
+      "drift_reading": "Before deployment, dc_0016 is declared-absent and dc_0015 is present-undeclared. The composition-change record is not a production observation.",
+      "authored_by": "New immutable candidate and append-only composition-change promotion; tests/architecture/test_descriptor_promotion.py re-derives composed heads and checks exact candidate bytes, changed sections, ledger chain and unchanged image/manifest coordinates."
     }
   ]
 }

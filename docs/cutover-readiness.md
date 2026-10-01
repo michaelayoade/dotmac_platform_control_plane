@@ -97,7 +97,7 @@ amendment at the owning source. Six slices, three landed.
 | `dotmac-release-catalog` | `0.1.0a4` | a4 | current |
 | `dotmac-commercial-agreements` | `0.1.0a4` | a4 | current |
 | `dotmac-licensing` | `0.1.0a1` | a1 | current |
-| `dotmac-deployment-control` | `0.1.0a16` | a16 | current — a16 locks `cancel_plan` target-then-plan; a15 was the Gate-0 composition adoption; a14 skipped on purpose (debt D15) |
+| `dotmac-deployment-control` | `0.1.0a17` | a17 | source pin — permanent cross-lease/target controller-key nonreuse; live custody and D16 remain open. a16 is immutable history, not a post-cutover fallback; a14 skipped on purpose (D15) |
 | `dotmac-brand-profiles` | not pinned | a1, tagged | deferred by local decision (ADR-0007 § 6) |
 
 ADR-0007's rule is that a package enters with the coherent slice that consumes

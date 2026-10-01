@@ -6,6 +6,7 @@ import ast
 import json
 import os
 import sys
+import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock
 from zipfile import ZipFile
@@ -162,6 +163,29 @@ def test_lock_and_verifier_are_wired_to_exact_artifacts() -> None:
         'parser.addoption("--public-wheelhouse", type=Path)'
         in (HARNESS / "conftest.py").read_text()
     )
+
+
+def test_harness_proves_the_application_control_and_kernel_artifact_pins() -> None:
+    artifacts = json.loads((HARNESS / "artifacts.json").read_text())["artifacts"]
+    pins = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["poetry"][
+        "dependencies"
+    ]
+    packages = {
+        row["name"]: row
+        for row in tomllib.loads((ROOT / "poetry.lock").read_text())["package"]
+    }
+    for name, evidence in artifacts.items():
+        assert evidence["version"] == pins[name]["version"]
+        package = packages[name]
+        assert package["version"] == evidence["version"]
+        hashes = {item["file"]: item["hash"] for item in package["files"]}
+        assert hashes[evidence["filename"]] == "sha256:" + evidence["sha256"]
+    workflow = (ROOT / ".github/workflows/rehearsal-issuer-harness.yml").read_text()
+    assert "conformance/test_host_admission_conformance.py" in workflow
+    assert "assert len(cases) == 10" in workflow
+    assert '"skipped", "failure", "error"' in workflow
+    assert "d74bf8dd8c399dd92047174365403b861f82ddd0" in workflow
+    assert "assert origin.is_relative_to(installed)" in workflow
 
 
 def test_planted_mutable_locator_and_wrong_bytes_fail_lock(tmp_path: Path) -> None:
@@ -322,4 +346,4 @@ def test_no_private_key_or_checkout_dependency() -> None:
     assert 'os.environ.get("REHEARSAL_ISSUER_DATABASE_URL")' in guard
     assert "pytest.UsageError" in guard
     assert "versions_dir" in guard and 'command.upgrade(cfg, "heads")' in guard
-    assert "dc_0015_plan_purpose" in guard
+    assert "dc_0016_controller_key_nonreuse" in guard

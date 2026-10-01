@@ -6,21 +6,22 @@ wiring (session ordering, commit-before-launch, no fallback) against injected
 fakes. This suite proves those fakes were faithful: it wires the SAME
 `admit_and_launch_host_source` orchestration to the real
 `resolve_host_admission_context`/`admit_and_consume_host_admission`
-(Control) and `verify_attestation_pair` (Foundation), built as real wheels
-from the exact merge commits named in `conformance/README.md`, installed
+(Control) and `verify_attestation_pair` (Foundation), installed as real wheels
+at the exact coordinates named in `conformance/README.md` and the CI workflow,
 only into a disposable environment -- never this repository's own `.venv`,
 never referenced from `pyproject.toml`.
 
 This file lives OUTSIDE `tests/` (this repository's `pyproject.toml` pins
 `testpaths = ["tests"]`) specifically so a normal `pytest tests/` run in this
 repository never collects it and never tries to import either real package,
-neither of which is installable here today. There is NO skip anywhere in
-this suite, graceful or otherwise: `conformance/conftest.py` raises a hard
+while Foundation is not an application dependency. Required CI invokes this
+file explicitly in its isolated real-wheel environment. There is NO skip:
+`conformance/conftest.py` raises a hard
 `pytest.UsageError` before collection even starts if
 `CONFORMANCE_DATABASE_URL` is unset, and an import error, a missing symbol,
 or any other real defect below is likewise never converted into a skip. This
-directory is already excluded from normal test discovery (`testpaths`) and
-from CI, so an explicit `pytest conformance/` run is always a deliberate act,
+directory is excluded from normal test discovery (`testpaths`), so an explicit
+run, including the required CI step, is always a deliberate act,
 and it must FAIL loudly -- never report a misleading "0 passed, N skipped"
 that reads as a pass.
 
