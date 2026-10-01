@@ -1,13 +1,14 @@
-"""Independently measured evidence on each side of a migration transition.
+"""Local descriptor and migration-head observations for a transition.
 
 D16's ruling (`docs/design/d16-transition-receipt-decisions.md`) is that a
 transition receipt must be built from evidence that cannot be supplied by
-the thing it is meant to verify. This module is that evidence, on both
-sides, with **no** dependency on `dotmac-deployment-foundation` at all —
+the thing it is meant to verify. This module measures bytes and database
+heads, but does not verify a running image's identity or a host fence. It
+has **no** dependency on `dotmac-deployment-foundation` at all —
 the receipt itself (`TransitionReceiptV1`, `TransitionSide`, `TargetSide`)
-is a later slice's job, which will late-import Foundation the same way
-`recovery/dump_evidence.py`'s `to_backup_record()` does and map these plain
-dataclasses into Foundation's shape.
+is a later slice's job. These observations retain descriptor bytes so that
+Foundation's canonical descriptor digest can be computed later; their raw
+byte digests are CP provenance and must never be copied into receipt fields.
 
 ## The asymmetry this module exists to prove
 
@@ -21,30 +22,29 @@ commit — see `deploy/descriptor-promotions.json`). That answers "what
 descriptor does this checkout hold right now", never "what descriptor was
 the currently-running application actually deployed with".
 
-So: the SOURCE side of a transition (what was actually running, before a
-migration) can never be read from the live checkout — it has to come from
-something that is independent of the checkout's current state. The one
-thing that fixes a running instance's identity is the OCI revision label
-baked into the image that instance is actually running, at build time
+So: the SOURCE descriptor candidate cannot be read from the live checkout
+— it has to come from the revision independently established for the running
+image. That identity must be verified from the OCI revision label baked into
+the image that instance is actually running, at build time
 (Dockerfile `ARG SOURCE_REVISION` -> `LABEL
 org.opencontainers.image.revision`; `deploy_production.sh` already reads
-this back off the image for the TARGET side, around line 323). From that
-revision, the descriptor as it actually was is `git show
-<revision>:deploy/product.toml` — never the file currently on disk.
+this back off the image for the TARGET side, around line 323). Given that
+verified revision, Git history can supply its descriptor via `git show
+<revision>:deploy/product.toml`. This module only accepts a caller-supplied
+revision and reads that blob; it does not perform the image verification.
 
-The TARGET side has no such hazard: at the point a real deploy calls
-`capture_target_state`, the working tree genuinely IS the target, so
-reading `deploy/product.toml` directly off disk is correct, not a
-shortcut. `TargetState` therefore carries no `target_revision` field —
-see its own docstring for why that absence is deliberate, not an
-oversight to "fix" into false symmetry with `GenesisBaseline`.
+The TARGET capture reads the caller-selected working-tree descriptor. A
+deploy must establish that this checkout is the intended target; this
+module does not do so. `TargetState` carries no `target_revision` field
+because this capture observes bytes and heads, not image identity.
 
 ## Non-circularity is structural
 
-Neither `capture_genesis_baseline` nor `capture_target_state` accepts any
-`expected_*`/override parameter for any field. A caller cannot supply what
-this evidence "should" say — only measure what it actually is. See
-`tests/unit/test_transition_evidence_refusals.py` for the structural proof
+Neither capture accepts an override for the descriptor bytes, raw digest or
+migration heads it reads. The caller still selects the source revision or
+target path and supplies the connection; their authority must be established
+elsewhere. See `tests/unit/test_transition_evidence_refusals.py` for the
+structural proof
 (`inspect.signature`), and `tests/migration/test_transition_evidence.py`
 for the proof that the source side genuinely reads git history rather than
 the working tree.
@@ -110,41 +110,49 @@ class SourceRevisionUnavailable(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class GenesisBaseline:
-    """The SOURCE side of a transition: what was actually running, measured
-    independently of the live checkout.
+    """A proposed SOURCE observation measured independently of the checkout.
 
     CP-local evidence, not a Foundation `TransitionSide` — that mapping is a
-    later slice's job. Carries no `expected_*`/override field anywhere, by
-    design: a caller cannot supply what this evidence "should" say, only
-    measure it. `source_revision` is the 40-hex commit the RUNNING image
-    was built from (read off the image's OCI revision label by the caller,
-    outside this module); `raw_bytes_descriptor_digest` and
-    `migration_heads` are measured from that revision's git history and the
-    live database respectively, never from the working tree.
+    later slice's job. `source_revision` is a caller-supplied 40-hex commit;
+    this module does not verify that the running image was built from it.
+    `descriptor_bytes` preserves the exact blob read from that revision's Git
+    history; `raw_bytes_descriptor_digest` identifies
+    those bytes for CP provenance, not for a Foundation receipt. Migration
+    heads are measured from the live database, never the working tree.
     """
 
     source_revision: str
+    descriptor_bytes: bytes
     raw_bytes_descriptor_digest: str
     migration_heads: tuple[str, ...]
     captured_at_epoch: int
+
+    def __post_init__(self) -> None:
+        _require_matching_raw_descriptor(
+            self.descriptor_bytes, self.raw_bytes_descriptor_digest
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class TargetState:
     """The TARGET side of a transition: the state a migration is moving to.
 
-    Unlike `GenesisBaseline`, this carries no `target_revision` field. At
-    the point a real deploy calls `capture_target_state`, the working tree
-    genuinely IS the target — there is no "wrong file" risk on this side,
-    which is exactly the asymmetry the source side's git-history read
-    exists to correct for. Do not "fix" this into false symmetry with
-    `GenesisBaseline` by adding a revision field here: the two sides answer
-    genuinely different questions, and that difference is the whole point.
+    Unlike `GenesisBaseline`, this carries no `target_revision` field. The
+    caller selects the working-tree path and must establish separately that
+    it is the intended target. This observation does not attest image identity.
+    `descriptor_bytes` preserves the exact working-tree read at capture time;
+    its raw digest is CP provenance, not a Foundation receipt input.
     """
 
+    descriptor_bytes: bytes
     raw_bytes_descriptor_digest: str
     migration_heads: tuple[str, ...]
     captured_at_epoch: int
+
+    def __post_init__(self) -> None:
+        _require_matching_raw_descriptor(
+            self.descriptor_bytes, self.raw_bytes_descriptor_digest
+        )
 
 
 def raw_bytes_digest(data: bytes) -> str:
@@ -162,6 +170,14 @@ def raw_bytes_digest(data: bytes) -> str:
     `\\r` or content decoded under an unexpected locale.
     """
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _require_matching_raw_descriptor(descriptor_bytes: bytes, digest: str) -> None:
+    """Keep a frozen observation's bytes immutable and its raw digest honest."""
+    if type(descriptor_bytes) is not bytes:
+        raise TypeError("descriptor_bytes must be immutable bytes")
+    if raw_bytes_digest(descriptor_bytes) != digest:
+        raise ValueError("raw_bytes_descriptor_digest does not match descriptor_bytes")
 
 
 def _git_isolated_env() -> dict[str, str]:
@@ -298,15 +314,13 @@ def capture_genesis_baseline(
     source_revision: str,
     now_epoch: int | None = None,
 ) -> GenesisBaseline:
-    """Compose the source-side evidence: the descriptor as it actually was
-    at `source_revision` (never the working tree) plus the live database's
-    current migration heads.
+    """Capture the descriptor at the caller-supplied `source_revision`
+    (never the working tree) plus the connection's current migration heads.
 
     Refuses before any database read if `source_revision` is invalid —
     delegated entirely to `read_descriptor_at_revision`'s own validation,
-    not duplicated here. No parameter lets a caller supply an
-    expected/override value for any field: the signature itself is the
-    proof of non-circularity.
+    not duplicated here. The caller must establish the revision's running-image
+    provenance and the connection's host and fence elsewhere.
     """
     descriptor_bytes = read_descriptor_at_revision(
         repo_root=repo_root, source_revision=source_revision
@@ -315,6 +329,7 @@ def capture_genesis_baseline(
     heads = read_current_migration_heads(conn)
     return GenesisBaseline(
         source_revision=source_revision,
+        descriptor_bytes=descriptor_bytes,
         raw_bytes_descriptor_digest=digest,
         migration_heads=heads,
         captured_at_epoch=now_epoch if now_epoch is not None else int(time.time()),
@@ -331,13 +346,14 @@ def capture_target_state(
     sits in the working tree plus the live database's current migration
     heads.
 
-    No parameter lets a caller supply an expected/override value for any
-    field: the signature itself is the proof of non-circularity.
+    The caller must establish that the selected path and connection refer to
+    the intended target elsewhere.
     """
     descriptor_bytes = read_descriptor_from_working_tree(descriptor_path)
     digest = raw_bytes_digest(descriptor_bytes)
     heads = read_current_migration_heads(conn)
     return TargetState(
+        descriptor_bytes=descriptor_bytes,
         raw_bytes_descriptor_digest=digest,
         migration_heads=heads,
         captured_at_epoch=now_epoch if now_epoch is not None else int(time.time()),

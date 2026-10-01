@@ -161,14 +161,19 @@ docstring — exactly the independently-measured-while-fenced baseline ruled
 above, and exactly why it must not be inferred from the receipt or assumed
 from a promotion record that may not reflect what is actually running.
 
-**Not yet implemented:** the genesis-baseline capture step (measure +
-retain, while fenced, before migration) does not exist in CP yet. This
-composes naturally with the P1 work #226 already built (write-time dump
-evidence, `capture_dump_evidence`) and the still-open post-migration
-target-state capture (heads re-read after `admin migrate`,
-`image_heads.py::composed_effective_heads` already available for reuse) —
-the genesis baseline is the SOURCE-side half of that same capture problem,
-captured once per fence rather than once per receipt.
+**Implementation status (2026-10-01):** CP has
+`capture_genesis_baseline` and `capture_target_state` in
+`src/vendor_cp/deployment/transition_evidence.py`. The source capture reads
+the descriptor blob at a caller-supplied Git revision; it does not verify that
+revision against the running image. Both captures preserve the exact descriptor
+bytes alongside their raw-byte digests and measured migration heads. These are
+in-memory CP observations. Neither capture proves that a D16 fence is holding,
+binds a named host/product/environment, computes Foundation's canonical
+descriptor digest, or durably retains a pre-migration genesis record. The
+existing source capture is therefore **not yet a valid `genesis_source` chain
+anchor**. The separately retained, fenced,
+canonical and host-bound baseline ruled above remains to be implemented.
+See `d16-evidence-preservation.md` for this slice's precise boundary.
 
 ## What this record does not decide
 
