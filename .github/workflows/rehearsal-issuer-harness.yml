@@ -210,9 +210,9 @@ jobs:
           import sys
           from xml.etree import ElementTree
           cases = ElementTree.parse(sys.argv[1]).getroot().findall(".//testcase")
-          assert len(cases) == 10, f"expected ten host-admission cases, collected {len(cases)}"
+          assert len(cases) == 11, f"expected eleven host-admission cases, collected {len(cases)}"
           assert all(not any(case.find(outcome) is not None for outcome in ("skipped", "failure", "error")) for case in cases)
-          print("host-admission conformance: ten passed, zero skipped")
+          print("host-admission conformance: ten component cases and one CP V3 refusal passed, zero skipped")
           PY
 
       - name: Stop Postgres

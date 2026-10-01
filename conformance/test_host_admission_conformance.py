@@ -1,49 +1,21 @@
-"""Conformance suite: `admit_and_launch_host_source` against the REAL
-`dotmac_deployment_control` and `dotmac_deployment_foundation` functions.
+"""Real-wheel Control/Foundation component conformance and CP V3 refusal.
 
-SCOPE. `tests/unit/test_host_admission_adapter.py` proves the adapter's own
-wiring (session ordering, commit-before-launch, no fallback) against injected
-fakes. This suite proves those fakes were faithful: it wires the SAME
-`admit_and_launch_host_source` orchestration to the real
-`resolve_host_admission_context`/`admit_and_consume_host_admission`
-(Control) and `verify_attestation_pair` (Foundation), installed as real wheels
-at the exact coordinates named in `conformance/README.md` and the CI workflow,
-only into a disposable environment -- never this repository's own `.venv`,
-never referenced from `pyproject.toml`.
+The ten component cases use a TEST-OWNED resolve/verify/finalize driver with
+Control\'s actual FoundationDispatchConsumptionV1 signed-pair input. They do
+not call CP\'s obsolete pre-V3 helper and do not prove CP execution adoption.
+A separate case drives CP\'s real startup-bound V3 provider through genuine
+Foundation F2 admission and proves its C2-D1 approval-subject refusal happens
+before Control finalization, consumption or launch. Gate 3 remains open.
 
-This file lives OUTSIDE `tests/` (this repository's `pyproject.toml` pins
-`testpaths = ["tests"]`) specifically so a normal `pytest tests/` run in this
-repository never collects it and never tries to import either real package,
-while Foundation is not an application dependency. Required CI invokes this
-file explicitly in its isolated real-wheel environment. There is NO skip:
-`conformance/conftest.py` raises a hard
-`pytest.UsageError` before collection even starts if
-`CONFORMANCE_DATABASE_URL` is unset, and an import error, a missing symbol,
-or any other real defect below is likewise never converted into a skip. This
-directory is excluded from normal test discovery (`testpaths`), so an explicit
-run, including the required CI step, is always a deliberate act,
-and it must FAIL loudly -- never report a misleading "0 passed, N skipped"
-that reads as a pass.
+All packages are installed as exact wheels in disposable CI. The Foundation
+wheel is a test-only build from a pinned source commit, not an allocated or
+published successor. Required CI collects this file explicitly on real
+PostgreSQL as platform_api. Missing configuration/imports fail; no skips.
 
-SIGNING CONVENTION. Every signer/verifier pair below is a deterministic,
-non-asymmetric double -- SHA-256/HMAC over canonical bytes, exactly the same
-convention Control's OWN test suite (`tests/authorization_support.py`,
-`tests/dispatch_support.py`, `tests/execution_observation_support.py`) and
-Foundation's OWN test suite
-(`tests/unit/test_deployment_foundation_trusted_host_source.py`'s
-`Verifier`) already use for this exact purpose. These modules are test-only
-and are not packaged into either wheel, so their exact patterns are
-reproduced here rather than imported. This is a legitimate "real Foundation
-code" / "real Control code" proof in the sense that matters: it exercises the
-REAL `verify_attestation_pair`/`resolve_host_admission_context`/
-`admit_and_consume_host_admission` FUNCTION LOGIC (signature checking via an
-injected verifier, purpose/audience/root/subject/digest matching, locking,
-re-derivation, drift refusal) with a genuine cryptographic check that
-genuinely fails on tampering -- not a stub of those functions themselves.
-Using HMAC rather than asymmetric Ed25519 does not weaken any property this
-suite proves, because the functions under test never inspect the verifier's
-internals; they only call its `.verify(...)`/`.verify_host_admission_presentation(...)`
-method and act on the boolean it returns.
+Signature adapters below deliberately use deterministic SHA-256/HMAC test
+doubles, as the upstream component suites do. They exercise the real package
+verification logic and reject tampering, but are NOT Ed25519, signer-custody,
+OIDC, live host authentication, deployment or end-to-end authorization proof.
 """
 
 from __future__ import annotations
@@ -52,6 +24,7 @@ import base64
 import dataclasses
 import hashlib
 import hmac
+import json
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -77,6 +50,8 @@ from dotmac_deployment_control import (
     DispatchSignature,
     DispatchSignerIdentity,
     EnrolHostAdmissionCredentialCommand,
+    FoundationDispatchConsumptionV1,
+    FoundationExecutionContextV1,
     HostAdmissionForeignRootV1,
     HostAdmissionForeignVerificationEvidenceV1,
     HostAdmissionPresentationStatementV1,
@@ -91,10 +66,14 @@ from dotmac_deployment_control import (
     activate_credential,
     admit_and_consume_host_admission,
     approve_plan,
+    attest_foundation_execution_pair,
     bind_target_host,
     dispatch_attempt,
     enrol_host_admission_credential,
+    get_plan,
+    install_foundation_consumption_security,
     install_host_admission_security,
+    lookup_foundation_execution_consumption,
     propose_plan,
     register_target,
     request_rollout,
@@ -114,18 +93,28 @@ from dotmac_deployment_control.attestation_trust_registry import (
     enrol_root,
 )
 from dotmac_deployment_control.digests import PublicKeyFingerprintV1
-from dotmac_deployment_control.models import AttestationEnrolment, RolloutAttempt
+from dotmac_deployment_control.models import (
+    AttestationEnrolment,
+    Rollout,
+    RolloutAttempt,
+)
 from dotmac_deployment_foundation import (
     AttestationEnvelopeV2,
+    AttestationPairVerificationResultV1,
     AttestationTrustPolicy,
     AttestationTrustRootV2,
     CandidateAttestationSubjectV2,
+    ControlConsumptionRequestV3,
     Digest,
+    ExecutionContextV3,
+    HostSourceAdmissionTrace,
     InstalledHostAttestationSubjectV2,
     PreconditionFailed,
+    admit_host_source,
     attestation_envelope_digest,
     verify_attestation_pair,
 )
+from dotmac_deployment_foundation.host_source import read_installed_artifact
 
 # Also not top-level -- verified against the installed wheel. Foundation's OWN
 # test suite (tests/unit/test_deployment_foundation_trusted_host_source.py)
@@ -141,8 +130,12 @@ from sqlalchemy.orm import Session, sessionmaker
 # approvals/identity/licensing closure and would defeat the whole point of
 # the leaf split.
 from vendor_cp.deployment.host_admission_adapter import (
-    AttestationVerificationInputs,
-    admit_and_launch_host_source,
+    ControlFoundationV3Bindings,
+    DispatchApprovalSubjectUnavailable,
+    FoundationHostV3Bindings,
+    FoundationV3Sources,
+    HostAdmissionObservation,
+    compose_foundation_v3_providers,
 )
 
 # No pytestmark skipif here. `conformance/conftest.py`'s `pytest_configure`
@@ -279,6 +272,31 @@ class _DispatchSigner:
         )
 
 
+class _DispatchVerifier:
+    def __init__(self, signer: _DispatchSigner) -> None:
+        self._signer = signer
+
+    def verify_dispatch(
+        self,
+        *,
+        key_id: str,
+        algorithm: str,
+        purpose: str,
+        public_key_fingerprint: str,
+        canonical_bytes: bytes,
+        signature: str,
+    ) -> bool:
+        identity = self._signer.dispatch_identity
+        expected = self._signer.sign_dispatch(canonical_bytes).signature
+        return (
+            key_id == identity.key_id
+            and algorithm == identity.algorithm
+            and purpose == identity.purpose
+            and public_key_fingerprint == identity.public_key_fingerprint
+            and hmac.compare_digest(signature, expected)
+        )
+
+
 class _HostAdmissionPresentationVerifier:
     """Real, injected verifier for `verify_host_admission_presentation` --
     HMAC over the presentation's own canonical bytes, keyed by a per-key-id
@@ -405,11 +423,14 @@ def admit_db() -> Any:
 
 @pytest.fixture(autouse=True)
 def _clean_security_between_tests() -> Any:
+    import dotmac_deployment_control.foundation_consumption as consumption
     import dotmac_deployment_control.host_admission_coordinator as admission_coordinator
 
     admission_coordinator._reset_host_admission_security_for_tests()
+    consumption._reset_foundation_consumption_security_for_tests()
     yield
     admission_coordinator._reset_host_admission_security_for_tests()
+    consumption._reset_foundation_consumption_security_for_tests()
 
 
 @pytest.fixture(autouse=True)
@@ -528,6 +549,8 @@ class _AdmissionCoordinate:
         foundation_verifier: _FoundationAttestationVerifier,
         trust_policy: AttestationTrustPolicy,
         credential_id: uuid.UUID,
+        execution: FoundationDispatchConsumptionV1,
+        facts: ExecutionContextV3,
     ) -> None:
         self.attempt_id = attempt_id
         self.target_id = target_id
@@ -539,13 +562,14 @@ class _AdmissionCoordinate:
         self.foundation_verifier = foundation_verifier
         self.trust_policy = trust_policy
         self.credential_id = credential_id
+        self.execution = execution
+        self.facts = facts
 
 
 def _build_admission_coordinate(
     db: Session,
     *,
     now: datetime,
-    package: str = "dotmac-sub",
 ) -> _AdmissionCoordinate:
     # Every identity below is suffixed with a fresh per-call token. The
     # commands this function calls (register_target, enrol_host_admission_
@@ -557,6 +581,8 @@ def _build_admission_coordinate(
     # rows (real defect found by actually running this against Postgres,
     # not a hypothetical).
     run = uuid.uuid4().hex[:8]
+    reading = read_installed_artifact()
+    package = reading.distribution
 
     target = _register_target(db)
     _set_desired(db, target.id)
@@ -666,9 +692,9 @@ def _build_admission_coordinate(
 
     candidate_subject = CandidateAttestationSubjectV2(
         package,
-        "0.4.0a2",
-        _sha256_digest(f"conformance-wheel-bytes-{run}".encode()),
-        "b" * 40,
+        reading.version,
+        reading.artifact_digest,
+        "d74bf8dd8c399dd92047174365403b861f82ddd0",
         "dotmac/conformance",
         "111",
         "222",
@@ -770,6 +796,50 @@ def _build_admission_coordinate(
     )
 
     clock = _AdmissionClock(now)
+    install_foundation_consumption_security(
+        authorization_verifier=_AuthorizationVerifier(authorization_signer),
+        dispatch_verifier=_DispatchVerifier(dispatch_signer),
+        clock=clock,
+    )
+    # Expected business facts come from Control's owning rows, not from the
+    # presented signed material. The fixture uses no privileged row edits.
+    rollout_row = db.get(Rollout, rollout.id)
+    attempt_row = db.get(RolloutAttempt, attempt_id)
+    assert rollout_row is not None and attempt_row is not None
+    assert rollout_row.authorization_envelope is not None
+    assert attempt_row.dispatch_envelope is not None
+    expected = FoundationExecutionContextV1(
+        product_code=target.product_code,
+        environment=target.environment,
+        target_id=str(target.id),
+        target_ref=target.target_ref,
+        operation=plan.authorized_operation,
+        release_ref=plan.snapshot["release_ref"],
+        rollout_ref=rollout_row.rollout_ref,
+        plan_id=str(plan.id),
+        approval_decision_ref=plan.approval_decision_ref,
+        control_plan_digest=plan.plan_digest,
+        execution_sequence=rollout_row.execution_sequence,
+        attempt_no=attempt_row.attempt_no,
+    )
+    execution = FoundationDispatchConsumptionV1(
+        authorization_material_json=json.dumps(
+            rollout_row.authorization_envelope, sort_keys=True, separators=(",", ":")
+        ).encode(),
+        dispatch_material_json=json.dumps(
+            attempt_row.dispatch_envelope, sort_keys=True, separators=(",", ":")
+        ).encode(),
+        expected_context=expected,
+        expected_execution_plan_digest=_EXECUTION_PLAN,
+        control_consumption_ref=f"control-dispatch:{attempt_id}",
+    )
+    facts = ExecutionContextV3(
+        **dataclasses.asdict(expected),
+        controller_ssh_fingerprint="conformance-controller-not-custody-evidence",
+        host_id=host_id,
+        host_incarnation=host_fp,
+        host_enrolment_ref=host_trust_root_version,
+    )
 
     return _AdmissionCoordinate(
         attempt_id=attempt_id,
@@ -782,19 +852,11 @@ def _build_admission_coordinate(
         foundation_verifier=foundation_verifier,
         trust_policy=trust_policy,
         credential_id=credential_id,
+        execution=execution,
+        facts=facts,
     )
 
 
-# NOTE: this suite's real-wheel execution is blocked until
-# `dotmac_starter_mt`#743 (Foundation's widened `AttestationPairVerificationResultV1`)
-# and `dotmac_deployment_control`#59 (Control's widened
-# `HostAdmissionForeignVerificationEvidenceV1`) both merge and the two pinned
-# wheels this suite installs are rebuilt from those merge commits -- the
-# fields this mapper reads/writes below do not exist in the wheels currently
-# pinned by `conformance/README.md`. The source changes below are made and
-# verified against the real, unmerged diffs directly (not guessed), so this
-# file is ready the moment new wheels are available; it cannot be run
-# successfully before then.
 def _map_foundation_result_to_control_evidence(
     result: Any,
 ) -> HostAdmissionForeignVerificationEvidenceV1:
@@ -850,7 +912,65 @@ def _idempotency_marker_count(db: Session, attempt_id: uuid.UUID) -> int:
     )
 
 
-# ── The seven required conformance properties ───────────────────────────────
+@dataclasses.dataclass(frozen=True)
+class _VerificationInputs:
+    candidate: AttestationEnvelopeV2
+    installed: AttestationEnvelopeV2
+    foundation_verifier: _FoundationAttestationVerifier
+    now: datetime
+
+
+def _verify_and_finalize_control(
+    *,
+    resolve_session: Session,
+    admit_session: Session,
+    attempt_id: uuid.UUID,
+    presentation: HostAdmissionPresentationV1,
+    execution: FoundationDispatchConsumptionV1,
+    resolve_context: Any,
+    verify_pair: Any,
+    admit_and_consume: Any,
+    launch: Any,
+    build_foreign_evidence: Any,
+    build_trust_policy: Any,
+    verification: _VerificationInputs,
+) -> Any:
+    """Test-owned component driver, NOT CP's production composition.
+
+    The complete signed-pair input is mandatory. No compatibility API or
+    production fallback is introduced. The callback only observes a committed
+    component result; this helper grants no CP execution authority.
+    """
+    assert resolve_session is not admit_session
+    context = resolve_context(
+        resolve_session, attempt_id=attempt_id, presentation=presentation
+    )
+    resolve_session.commit()
+    assert not resolve_session.in_transaction()
+    assert not admit_session.in_transaction()
+    result = verify_pair(
+        candidate=verification.candidate,
+        installed=verification.installed,
+        verifier=verification.foundation_verifier,
+        trust_policy=build_trust_policy(context),
+        expected_host_identity=context.host_id,
+        expected_observation_id=context.dispatch_id,
+        expected_package=context.expected_foundation_package,
+        verification_context_digest=context.context_digest,
+        now=verification.now,
+    )
+    staged = admit_and_consume(
+        admit_session,
+        context=context,
+        foreign_evidence=build_foreign_evidence(result),
+        execution=execution,
+    )
+    admit_session.commit()
+    launch(staged)
+    return staged
+
+
+# ── Component verification properties ───────────────────────────────
 
 
 def test_valid_signed_attestations_complete_the_full_flow(
@@ -862,18 +982,19 @@ def test_valid_signed_attestations_complete_the_full_flow(
     )
     launched: list[Any] = []
 
-    result = admit_and_launch_host_source(
+    result = _verify_and_finalize_control(
         resolve_session=db,
         admit_session=admit_db,
         attempt_id=coordinate.attempt_id,
         presentation=coordinate.presentation,
+        execution=coordinate.execution,
         resolve_context=resolve_host_admission_context,
         verify_pair=verify_attestation_pair,
         admit_and_consume=admit_and_consume_host_admission,
         launch=lambda staged: launched.append(staged),
         build_foreign_evidence=_map_foundation_result_to_control_evidence,
         build_trust_policy=lambda resolved: coordinate.trust_policy,
-        verification=AttestationVerificationInputs(
+        verification=_VerificationInputs(
             candidate=coordinate.candidate_envelope,
             installed=coordinate.installed_envelope,
             foundation_verifier=coordinate.foundation_verifier,
@@ -951,18 +1072,19 @@ def test_a_trust_policy_genuinely_derived_from_resolved_context_completes_the_fu
     )
     launched: list[Any] = []
 
-    result = admit_and_launch_host_source(
+    result = _verify_and_finalize_control(
         resolve_session=db,
         admit_session=admit_db,
         attempt_id=coordinate.attempt_id,
         presentation=coordinate.presentation,
+        execution=coordinate.execution,
         resolve_context=resolve_host_admission_context,
         verify_pair=verify_attestation_pair,
         admit_and_consume=admit_and_consume_host_admission,
         launch=lambda staged: launched.append(staged),
         build_foreign_evidence=_map_foundation_result_to_control_evidence,
         build_trust_policy=_build_trust_policy_from_resolved_context,
-        verification=AttestationVerificationInputs(
+        verification=_VerificationInputs(
             candidate=coordinate.candidate_envelope,
             installed=coordinate.installed_envelope,
             foundation_verifier=coordinate.foundation_verifier,
@@ -993,18 +1115,19 @@ def test_an_invalid_signature_stops_inside_real_foundation_code(
     launched: list[Any] = []
 
     with pytest.raises(PreconditionFailed) as excinfo:
-        admit_and_launch_host_source(
+        _verify_and_finalize_control(
             resolve_session=db,
             admit_session=admit_db,
             attempt_id=coordinate.attempt_id,
             presentation=coordinate.presentation,
+            execution=coordinate.execution,
             resolve_context=resolve_host_admission_context,
             verify_pair=verify_attestation_pair,
             admit_and_consume=admit_and_consume_host_admission,
             launch=lambda staged: launched.append(staged),
             build_foreign_evidence=_map_foundation_result_to_control_evidence,
             build_trust_policy=lambda resolved: coordinate.trust_policy,
-            verification=AttestationVerificationInputs(
+            verification=_VerificationInputs(
                 candidate=tampered_candidate,
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
@@ -1032,18 +1155,19 @@ def test_a_sentinel_foundation_failure_has_no_fallback(
 
     launched: list[Any] = []
     with pytest.raises(_Sentinel):
-        admit_and_launch_host_source(
+        _verify_and_finalize_control(
             resolve_session=db,
             admit_session=admit_db,
             attempt_id=coordinate.attempt_id,
             presentation=coordinate.presentation,
+            execution=coordinate.execution,
             resolve_context=resolve_host_admission_context,
             verify_pair=_raising_verify,
             admit_and_consume=admit_and_consume_host_admission,
             launch=lambda staged: launched.append(staged),
             build_foreign_evidence=_map_foundation_result_to_control_evidence,
             build_trust_policy=lambda resolved: coordinate.trust_policy,
-            verification=AttestationVerificationInputs(
+            verification=_VerificationInputs(
                 candidate=coordinate.candidate_envelope,
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
@@ -1068,18 +1192,19 @@ def test_an_altered_evidence_digest_is_refused(db: Session, admit_db: Session) -
 
     launched: list[Any] = []
     with pytest.raises(HostAdmissionRefusedError) as excinfo:
-        admit_and_launch_host_source(
+        _verify_and_finalize_control(
             resolve_session=db,
             admit_session=admit_db,
             attempt_id=coordinate.attempt_id,
             presentation=coordinate.presentation,
+            execution=coordinate.execution,
             resolve_context=resolve_host_admission_context,
             verify_pair=verify_attestation_pair,
             admit_and_consume=admit_and_consume_host_admission,
             launch=lambda staged: launched.append(staged),
             build_foreign_evidence=_substituting_mapper,
             build_trust_policy=lambda resolved: coordinate.trust_policy,
-            verification=AttestationVerificationInputs(
+            verification=_VerificationInputs(
                 candidate=coordinate.candidate_envelope,
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
@@ -1089,13 +1214,6 @@ def test_an_altered_evidence_digest_is_refused(db: Session, admit_db: Session) -
     assert excinfo.value.code is HostAdmissionRefusalCode.EVIDENCE_CHANGED
     assert len(launched) == 0
     assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
-
-
-# NOTE: like `_map_foundation_result_to_control_evidence` above, the two
-# tests below exercise the widened `FOREIGN_EVIDENCE_SEMANTIC_MISMATCH`
-# refusal added by `dotmac_deployment_control`#59 and cannot actually run
-# until that PR (and `dotmac_starter_mt`#743) merge and this suite's pinned
-# wheels are rebuilt from the new merge commits.
 
 
 def test_a_substituted_verified_host_identity_is_refused(
@@ -1120,18 +1238,19 @@ def test_a_substituted_verified_host_identity_is_refused(
 
     launched: list[Any] = []
     with pytest.raises(HostAdmissionRefusedError) as excinfo:
-        admit_and_launch_host_source(
+        _verify_and_finalize_control(
             resolve_session=db,
             admit_session=admit_db,
             attempt_id=coordinate.attempt_id,
             presentation=coordinate.presentation,
+            execution=coordinate.execution,
             resolve_context=resolve_host_admission_context,
             verify_pair=verify_attestation_pair,
             admit_and_consume=admit_and_consume_host_admission,
             launch=lambda staged: launched.append(staged),
             build_foreign_evidence=_substituting_mapper,
             build_trust_policy=lambda resolved: coordinate.trust_policy,
-            verification=AttestationVerificationInputs(
+            verification=_VerificationInputs(
                 candidate=coordinate.candidate_envelope,
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
@@ -1167,18 +1286,19 @@ def test_a_substituted_verified_candidate_root_field_is_refused(
 
     launched: list[Any] = []
     with pytest.raises(HostAdmissionRefusedError) as excinfo:
-        admit_and_launch_host_source(
+        _verify_and_finalize_control(
             resolve_session=db,
             admit_session=admit_db,
             attempt_id=coordinate.attempt_id,
             presentation=coordinate.presentation,
+            execution=coordinate.execution,
             resolve_context=resolve_host_admission_context,
             verify_pair=verify_attestation_pair,
             admit_and_consume=admit_and_consume_host_admission,
             launch=lambda staged: launched.append(staged),
             build_foreign_evidence=_substituting_mapper,
             build_trust_policy=lambda resolved: coordinate.trust_policy,
-            verification=AttestationVerificationInputs(
+            verification=_VerificationInputs(
                 candidate=coordinate.candidate_envelope,
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
@@ -1223,14 +1343,19 @@ def test_a_state_change_between_resolve_and_admission_consumes_nothing(
         trust_policy=coordinate.trust_policy,
         expected_host_identity=coordinate.trust_policy.installed_audience,
         expected_observation_id=str(coordinate.attempt_id),
-        expected_package="dotmac-sub",
+        expected_package=read_installed_artifact().distribution,
         verification_context_digest=context.context_digest,
         now=coordinate.clock.now(),
     )
     evidence = _map_foundation_result_to_control_evidence(result)
 
     with pytest.raises(HostAdmissionRefusedError) as excinfo:
-        admit_and_consume_host_admission(db, context=context, foreign_evidence=evidence)
+        admit_and_consume_host_admission(
+            db,
+            context=context,
+            foreign_evidence=evidence,
+            execution=coordinate.execution,
+        )
     assert excinfo.value.code is HostAdmissionRefusalCode.PREPARED_STATE_CHANGED
     assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
 
@@ -1255,7 +1380,7 @@ def test_expiry_between_foundation_verification_and_final_admission_is_refused(
         trust_policy=coordinate.trust_policy,
         expected_host_identity=coordinate.trust_policy.installed_audience,
         expected_observation_id=str(coordinate.attempt_id),
-        expected_package="dotmac-sub",
+        expected_package=read_installed_artifact().distribution,
         verification_context_digest=context.context_digest,
         now=coordinate.clock.now(),
     )
@@ -1267,12 +1392,17 @@ def test_expiry_between_foundation_verification_and_final_admission_is_refused(
     coordinate.clock.advance(timedelta(minutes=6))
 
     with pytest.raises(HostAdmissionRefusedError) as excinfo:
-        admit_and_consume_host_admission(db, context=context, foreign_evidence=evidence)
+        admit_and_consume_host_admission(
+            db,
+            context=context,
+            foreign_evidence=evidence,
+            execution=coordinate.execution,
+        )
     assert excinfo.value.code is HostAdmissionRefusalCode.CONTEXT_EXPIRED
     assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
 
 
-def test_launch_cannot_occur_before_the_admission_transaction_commits(
+def test_component_observer_runs_only_after_the_admission_transaction_commits(
     db: Session, admit_db: Session
 ) -> None:
     coordinate = _build_admission_coordinate(db, now=_NOW)
@@ -1298,18 +1428,19 @@ def test_launch_cannot_occur_before_the_admission_transaction_commits(
     db.commit = _recording_resolve_commit  # type: ignore[method-assign]
     admit_db.commit = _recording_admit_commit  # type: ignore[method-assign]
     try:
-        admit_and_launch_host_source(
+        _verify_and_finalize_control(
             resolve_session=db,
             admit_session=admit_db,
             attempt_id=coordinate.attempt_id,
             presentation=coordinate.presentation,
+            execution=coordinate.execution,
             resolve_context=resolve_host_admission_context,
             verify_pair=verify_attestation_pair,
             admit_and_consume=admit_and_consume_host_admission,
             launch=_recording_launch,
             build_foreign_evidence=_map_foundation_result_to_control_evidence,
             build_trust_policy=lambda resolved: coordinate.trust_policy,
-            verification=AttestationVerificationInputs(
+            verification=_VerificationInputs(
                 candidate=coordinate.candidate_envelope,
                 installed=coordinate.installed_envelope,
                 foundation_verifier=coordinate.foundation_verifier,
@@ -1325,6 +1456,101 @@ def test_launch_cannot_occur_before_the_admission_transaction_commits(
     # then launch -- never launch before either commit, and never admit's
     # commit before resolve's.
     assert events == ["resolve_commit", "admit_commit", "launch"]
+
+
+def test_real_cp_v3_refuses_an_approval_requiring_plan_before_finalization(
+    db: Session,
+) -> None:
+    """Current CP composition is fail-closed, not positively adopted at Gate 0.
+
+    Real Foundation F2 first verifies both envelopes against Control-derived
+    roots and reads the actual installed wheel. The real CP V3 provider then
+    reads the real plan and refuses the still-unowned Approvals subject.
+    No get_plan fake, row edits, compatibility consumer or alternate launch.
+    """
+    coordinate = _build_admission_coordinate(db, now=_NOW)
+    install_host_admission_security(
+        verifier=coordinate.presentation_verifier, clock=coordinate.clock
+    )
+    db.commit()
+    engine = create_engine(CONFORMANCE_DATABASE_URL, future=True)
+    sessions: list[Session] = []
+    finalizations: list[object] = []
+
+    def _session() -> Session:
+        session = Session(bind=engine)
+        sessions.append(session)
+        return session
+
+    def _real_f2(**kwargs: Any) -> Any:
+        assert len(sessions) == 1 and not sessions[0].in_transaction()
+        assert not db.in_transaction()
+        return admit_host_source(**kwargs)
+
+    def _finalize(session: Session, **kwargs: Any) -> Any:
+        finalizations.append(kwargs)
+        return admit_and_consume_host_admission(session, **kwargs)
+
+    providers = compose_foundation_v3_providers(
+        control=ControlFoundationV3Bindings(
+            resolve_context=resolve_host_admission_context,
+            finalize=_finalize,
+            attest_pair=attest_foundation_execution_pair,
+            lookup_committed=lookup_foundation_execution_consumption,
+            get_plan=get_plan,
+            foreign_root_type=HostAdmissionForeignRootV1,
+            foreign_evidence_type=HostAdmissionForeignVerificationEvidenceV1,
+            execution_context_type=FoundationExecutionContextV1,
+            consumption_request_type=FoundationDispatchConsumptionV1,
+        ),
+        foundation=FoundationHostV3Bindings(
+            admit_host_source=_real_f2,
+            trust_policy_from_context=_build_trust_policy_from_resolved_context,
+            verifier=coordinate.foundation_verifier,
+            trace_type=HostSourceAdmissionTrace,
+            pair_result_type=AttestationPairVerificationResultV1,
+            consumption_request_type=ControlConsumptionRequestV3,
+            execution_context_type=ExecutionContextV3,
+        ),
+        sources=FoundationV3Sources(
+            sessions=_session,
+            host_admission=lambda: HostAdmissionObservation(
+                coordinate.attempt_id,
+                coordinate.presentation,
+                coordinate.candidate_envelope,
+                coordinate.installed_envelope,
+            ),
+            execution_context=lambda: coordinate.facts,
+            clock=coordinate.clock.now,
+        ),
+    )
+    try:
+        source, trace = providers.host_source.admit_host_source()
+        assert source.artifact_digest == read_installed_artifact().artifact_digest
+        request = ControlConsumptionRequestV3(
+            authorization_material_json=coordinate.execution.authorization_material_json,
+            dispatch_material_json=coordinate.execution.dispatch_material_json,
+            host_source_trace=trace,
+            expected_execution_plan_digest=_EXECUTION_PLAN,
+            control_consumption_ref=coordinate.execution.control_consumption_ref,
+        )
+        with pytest.raises(DispatchApprovalSubjectUnavailable) as refused:
+            providers.execution_authority.consume_dispatch(request=request)
+        assert refused.value.code == "c2_dispatch_approval_subject_unavailable"
+        assert len(sessions) == 2 and sessions[0] is not sessions[1]
+        assert all(not session.in_transaction() for session in sessions)
+        assert finalizations == []
+        assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
+        assert (
+            lookup_foundation_execution_consumption(
+                db, control_consumption_ref=coordinate.execution.control_consumption_ref
+            )
+            is None
+        )
+    finally:
+        for session in sessions:
+            session.close()
+        engine.dispose()
 
 
 # ── small helpers used above ────────────────────────────────────────────────

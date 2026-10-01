@@ -182,7 +182,7 @@ def test_harness_proves_the_application_control_and_kernel_artifact_pins() -> No
         assert hashes[evidence["filename"]] == "sha256:" + evidence["sha256"]
     workflow = (ROOT / ".github/workflows/rehearsal-issuer-harness.yml").read_text()
     assert "conformance/test_host_admission_conformance.py" in workflow
-    assert "assert len(cases) == 10" in workflow
+    assert "assert len(cases) == 11" in workflow
     assert '"skipped", "failure", "error"' in workflow
     assert "d74bf8dd8c399dd92047174365403b861f82ddd0" in workflow
     assert "assert origin.is_relative_to(installed)" in workflow
