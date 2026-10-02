@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import unittest
@@ -9,35 +10,47 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from openbao_policy_conformance.proof import (
-    CASE_NAMES,
-    IMAGE_RE,
-    PRINCIPAL,
-    ROLE,
-    SOURCE_ADDRESS,
-    TRUST_PATH,
-    ApiStatus,
-    Bao,
-    ProofFailure,
-    api_opener,
-    command,
-    container_address,
-    issuer_policy,
-    main,
-    policy,
-    refused,
-    run,
-    safe_report,
-    start_container,
-    stop_container,
-    verify_certificate,
+PROOF_PATH = (
+    Path(__file__).resolve().parents[2] / "openbao_policy_conformance" / "proof.py"
 )
+_spec = importlib.util.spec_from_file_location(
+    "_gate0_openbao_policy_proof", PROOF_PATH
+)
+if _spec is None or _spec.loader is None:
+    raise ImportError(f"cannot load OpenBao proof from {PROOF_PATH}")
+proof = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(proof)
+
+CASE_NAMES = proof.CASE_NAMES
+IMAGE_RE = proof.IMAGE_RE
+PRINCIPAL = proof.PRINCIPAL
+ROLE = proof.ROLE
+SOURCE_ADDRESS = proof.SOURCE_ADDRESS
+TRUST_PATH = proof.TRUST_PATH
+ApiStatus = proof.ApiStatus
+Bao = proof.Bao
+ProofFailure = proof.ProofFailure
+api_opener = proof.api_opener
+command = proof.command
+container_address = proof.container_address
+issuer_policy = proof.issuer_policy
+main = proof.main
+policy = proof.policy
+refused = proof.refused
+run = proof.run
+safe_report = proof.safe_report
+start_container = proof.start_container
+stop_container = proof.stop_container
+verify_certificate = proof.verify_certificate
 
 IMAGE = "openbao/openbao@sha256:" + "a" * 64
 IMAGE_ID = "sha256:" + "b" * 64
 
 
 class PolicyConformanceUnitTests(unittest.TestCase):
+    def test_proof_origin_is_exact_repo_file(self) -> None:
+        self.assertEqual(Path(proof.__file__).resolve(), PROOF_PATH)
+
     def test_strict_policy_names_one_sign_path_and_closed_parameters(self) -> None:
         strict = policy(permit_critical_override=False, key_id="fixture-run")
         weak = policy(permit_critical_override=True, key_id="fixture-run")
@@ -112,9 +125,7 @@ class PolicyConformanceUnitTests(unittest.TestCase):
                 return owner["network"]
             self.fail(f"unexpected fixture stage: {stage}")
 
-        with patch(
-            "openbao_policy_conformance.proof.command", side_effect=fake_command
-        ):
+        with patch.object(proof, "command", side_effect=fake_command):
             with self.assertRaisesRegex(ProofFailure, "timed out: docker-run"):
                 start_container(IMAGE)
         self.assertEqual(
@@ -157,9 +168,7 @@ class PolicyConformanceUnitTests(unittest.TestCase):
                 return ""
             self.fail(f"unexpected fixture stage: {stage}")
 
-        with patch(
-            "openbao_policy_conformance.proof.command", side_effect=fake_command
-        ):
+        with patch.object(proof, "command", side_effect=fake_command):
             with self.assertRaisesRegex(ProofFailure, "failed: docker-run"):
                 start_container(IMAGE)
         self.assertNotIn("docker-stop", stages)
@@ -171,9 +180,7 @@ class PolicyConformanceUnitTests(unittest.TestCase):
             return fake_command(argv, stage=stage)
 
         stages.clear()
-        with patch(
-            "openbao_policy_conformance.proof.command", side_effect=inspection_fails
-        ):
+        with patch.object(proof, "command", side_effect=inspection_fails):
             with self.assertRaisesRegex(
                 ProofFailure,
                 "failed: docker-run; fixture cleanup failed: "
@@ -195,9 +202,7 @@ class PolicyConformanceUnitTests(unittest.TestCase):
                 return "foreign-instance"
             self.fail(f"unexpected fixture stage: {stage}")
 
-        with patch(
-            "openbao_policy_conformance.proof.command", side_effect=fake_command
-        ):
+        with patch.object(proof, "command", side_effect=fake_command):
             with self.assertRaisesRegex(ProofFailure, "without its instance label"):
                 stop_container(name)
         self.assertNotIn("docker-stop", stages)
@@ -218,19 +223,14 @@ class PolicyConformanceUnitTests(unittest.TestCase):
             raise ProofFailure("required command failed: docker-network-rm")
 
         with (
-            patch(
-                "openbao_policy_conformance.proof.start_container",
+            patch.object(
+                proof,
+                "start_container",
                 return_value=(name, network, "172.18.0.2", IMAGE_ID),
             ),
-            patch("openbao_policy_conformance.proof.initialize", side_effect=original),
-            patch(
-                "openbao_policy_conformance.proof.stop_container",
-                side_effect=stop_owned_container,
-            ),
-            patch(
-                "openbao_policy_conformance.proof.stop_network",
-                side_effect=stop_owned_network,
-            ),
+            patch.object(proof, "initialize", side_effect=original),
+            patch.object(proof, "stop_container", side_effect=stop_owned_container),
+            patch.object(proof, "stop_network", side_effect=stop_owned_network),
         ):
             with self.assertRaises(OSError) as caught:
                 run(IMAGE)
@@ -244,20 +244,20 @@ class PolicyConformanceUnitTests(unittest.TestCase):
         network = name + "-net"
         checked: list[str] = []
         with (
-            patch(
-                "openbao_policy_conformance.proof.start_container",
+            patch.object(
+                proof,
+                "start_container",
                 return_value=(name, network, "172.18.0.3", IMAGE_ID),
             ),
-            patch(
-                "openbao_policy_conformance.proof.initialize",
-                side_effect=KeyboardInterrupt(),
-            ),
-            patch(
-                "openbao_policy_conformance.proof.stop_container",
+            patch.object(proof, "initialize", side_effect=KeyboardInterrupt()),
+            patch.object(
+                proof,
+                "stop_container",
                 side_effect=lambda owned_name: checked.append(owned_name),
             ),
-            patch(
-                "openbao_policy_conformance.proof.stop_network",
+            patch.object(
+                proof,
+                "stop_network",
                 side_effect=lambda owned_network: checked.append(owned_network),
             ),
         ):
@@ -268,8 +268,9 @@ class PolicyConformanceUnitTests(unittest.TestCase):
     def test_cli_redacts_unexpected_exception(self) -> None:
         output = io.StringIO()
         with (
-            patch(
-                "openbao_policy_conformance.proof.run",
+            patch.object(
+                proof,
+                "run",
                 side_effect=ValueError("private-value-must-not-be-rendered"),
             ),
             patch("sys.stderr", output),
@@ -327,10 +328,7 @@ class PolicyConformanceUnitTests(unittest.TestCase):
                 ]
             )
 
-        with patch(
-            "openbao_policy_conformance.proof.command",
-            return_value=document("172.18.0.2"),
-        ):
+        with patch.object(proof, "command", return_value=document("172.18.0.2")):
             self.assertEqual(container_address(name, network), "172.18.0.2")
         self.assertEqual(Bao("172.18.0.2").origin, "http://172.18.0.2:8200/v1/")
         for address in (
@@ -343,22 +341,19 @@ class PolicyConformanceUnitTests(unittest.TestCase):
             "not-an-ip",
         ):
             with self.subTest(address=address):
-                with patch(
-                    "openbao_policy_conformance.proof.command",
-                    return_value=document(address),
-                ):
+                with patch.object(proof, "command", return_value=document(address)):
                     with self.assertRaises(ProofFailure):
                         container_address(name, network)
                 with self.assertRaises(ProofFailure):
                     Bao(address)
-        with patch(
-            "openbao_policy_conformance.proof.command",
-            return_value=document("172.18.0.2", label="foreign"),
+        with patch.object(
+            proof, "command", return_value=document("172.18.0.2", label="foreign")
         ):
             with self.assertRaisesRegex(ProofFailure, "instance label"):
                 container_address(name, network)
-        with patch(
-            "openbao_policy_conformance.proof.command",
+        with patch.object(
+            proof,
+            "command",
             return_value=document(
                 "172.18.0.2",
                 networks={
