@@ -959,3 +959,167 @@ attachment remain **not authorized**. Step A1's human-run metadata inventory
 The fixed names in §§ 2, 3 and 11 (repository, workflow, Environment, runner
 group, JWT role `rehearsal-issuer-protected`) are unchanged.
 
+
+## 13. Proposed amendment — Lane 3 N3 structural exclusion (2026-10-06)
+
+**Status: PROPOSED, NOT ADOPTED.** Michael requested a draft proposing
+structural coverage on 2026-10-06. That request authorizes preparation, not
+acceptance of this substitution. Until the contract owners accept matching
+Starter and CP amendments through reviewed, fully green protected merges,
+the existing live PR-target requirement applies. `admission_evidence` remains
+null. This is a documentation proposal, not an implemented admission check.
+
+### Scope and precise proposed substitution
+
+For Lane 3 repository `dotmac-tech/lane3-exposure-execution` only (repository
+ID 1406738001, owner ID 335992433), permit N3 to be recorded as
+`structural exclusion; live probe not executed` for a reviewed exact source
+revision whose entire workflow set declares no `pull_request_target` trigger.
+Replace only the otherwise required same-repository and fork-origin N3 live
+probe with the complete source/control evidence below. Same-repository and
+fork `pull_request` negatives, non-main/different-file/reusable-call negatives,
+and the protected positive scheduling proof remain live requirements.
+
+This proposal does not apply to `dotmac-tech/gate0-issuer-execution`, does not
+replace any OIDC/credential/audit/disclosure/oracle check, and does not certify
+that a runner group rejects every PR-target event. No Foundation allocation,
+publication, privileged attachment or provisioning authority follows from it.
+
+### Required structural evidence before accepting N3
+
+1. Independently retrieve the live repository ID/owner, default branch `main`,
+   exact full source SHA, and Git tree. Enumerate every workflow file from that
+   tree, archive its content digest and parse its complete trigger/job selection
+   structure. Fail closed on unreadable files, unsupported YAML, aliases or
+   indirection. Every workflow must lack `pull_request_target`, not only the
+   selected launcher. Record the policy implementation/test SHAs too.
+2. Verify the selected launcher has only `workflow_dispatch`; its privileged
+   job checks both event and `refs/heads/main`, uses the exact group and protected
+   Environment, and cannot derive its runner selection or workflow code from
+   PR input. Record the workflow blob digest. No PR-target opt-in or source
+   policy exception is permitted under this substitution.
+3. Live API read-backs must bind the group to that immutable repository ID and
+   exact selected workflow at `@refs/heads/main`, with no alternate repository
+   or workflow entry. Read back the main ruleset's required PR/source-policy
+   check, enforcement and absence of bypass actors; Environment reviewer,
+   main-only branch rule and disabled admin bypass. Show the latest required
+   source-policy checks passed for the exact head/base. A label is insufficient.
+4. Link the live N1/N2/N4b/N5/N6 and P1 evidence, including the contemporaneous
+   queued observation bound with an online idle canary, positive approval and
+   assignment, and teardown. Terminal `runner_id: 0` alone does not reconstruct
+   the historical waiting interval. Identify which evidence is API-verified,
+   contemporaneously observed, or reported; do not promote one into another.
+5. Before accepting the residual, record the independently enforced control
+   chosen below, its owner and live enforcement evidence, or Michael's explicit
+   decision to retain source-only governance. Today main requires zero approvals
+   and the same PR can change trigger, dispatch-only job guard and source policy.
+   Adding a trigger alone still meets the existing dispatch-only guard; the
+   combined change is the escape. Source-policy green is not independent
+   acceptance. Re-read the exact source and controls before privileged attachment
+   and subsequent credential-bearing runs; absent revalidation must refuse.
+
+### What the reasoning establishes
+
+GitHub documents that PR-target workflow code is taken from the base
+repository's default branch. A same-repository or fork PR workflow edit does
+not create a PR-target entry point in an independently inspected default-branch
+workflow tree containing no such trigger. This is the narrow proposed
+exclusion argument. See [GitHub's PR-target security documentation](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target)
+and the [default-branch semantics change](https://github.blog/changelog/2025-11-07-actions-pull_request_target-and-environment-branch-protections-changes/).
+
+**Do not infer event isolation from `@refs/heads/main`.** PR-target can itself
+resolve to the default branch; a selected ref does not, by itself, distinguish
+that event from an admitted main dispatch. The proposal relies on absence of
+an entry point in the full protected source and the dispatch-only job shape.
+It does not prove how GitHub would schedule a newly added malicious default-
+branch PR-target workflow.
+
+### Reduce the source-governance residual before acceptance
+
+**Current read-back (2026-10-06):** `dotmac-tech` plan is `free`.
+Repository ruleset 24557642 is active, with no bypass actors, zero required
+approvals and a required `source-policy` context without an App-source binding.
+This is discovery evidence; settings must be re-read before any enforcement
+claim. [Checker implementation draft](https://github.com/dotmac-tech/lane3-source-isolation/pull/1)
+provides an outbound App worker, exact-workflow policy, sensitivity tests and a
+sandboxed service unit. It is not deployed: no App installation, host custody,
+expected-source binding or live enforcement proof exists yet. Its policy is
+stricter than a trigger parser: every workflow change refuses until an external
+reviewed policy repin. No App or external required workflow was installed by
+this proposal.
+
+A protected main pin does not prove PR-target exclusion or its opposite. The
+unexecuted event-level result remains unknown. The structural proof relies on
+source entry-point absence and the dispatch-only guard, not on the pin alone.
+
+Proposed control options, to be selected and proven before residual acceptance:
+
+- **External App check (candidate for the current public Free topology):**
+  deploy a separately governed checker and bind required context
+  `lane3-source-isolation` to that App's immutable ID through the ruleset's
+  expected-source setting (`integration_id`). An ordinary context name or a
+  reusable workflow called by an editable in-repository workflow is insufficient.
+  The actual App/installation IDs and account-level enforcement availability
+  must be measured, not invented. Keep the existing required source-policy check.
+- **Organization required workflow:** source it from a separately protected
+  policy repository and select an immutable reviewed policy revision where
+  supported. GitHub's required-workflow announcement specifies Enterprise Cloud;
+  ordinary ruleset availability on Free does not establish this feature's
+  availability. Verify the account's actual feature entitlement before choosing
+  or purchasing a plan. The public execution repository needs a compatible
+  public source workflow. The required workflow runs on GitHub-hosted runners,
+  not the protected Lane 3 group.
+- **Independent human review:** require at least one approval by another eligible
+  person, dismiss stale approvals and require approval of the latest push with
+  no bypass. Record who can change the ruleset and policy. This reduces unilateral
+  source changes but remains human governance rather than an external detector.
+
+For either automated option, use independently protected policy code,
+configuration and credentials. The candidate PR cannot change the evaluator or
+its policy revision. Evaluate the complete candidate workflow tree as data;
+never execute/check out PR code for execution, import its parser/policy, run its
+scripts/actions, or expose the App credential to it. Pin trusted parser/runtime
+versions, bound input size and resource use, and fail closed on unsupported YAML,
+unreadable source, symlinks, aliases or indirection. An App needs repository
+contents/metadata/PR read access and checks write access, not target/OpenBao,
+repository administration or workflow write permission. Verify webhook signatures
+and re-fetch immutable source rather than trusting webhook-supplied file contents.
+
+Reject every non-dispatch privileged/group-using workflow and any PR-target
+trigger anywhere in the repository; preserve the exact launcher guard, group,
+Environment and permissions. Bind the result to repository ID, exact candidate
+head/base/merge tree and trusted policy revision; invalidate/rerun on head or base
+change. Only an explicit successful evaluation may report success. A skipped,
+neutral, missing or errored evaluation is not acceptance evidence. The checker
+must not grant a bypass or edit the ruleset that requires it.
+
+Before claiming the control works, demonstrate planted trigger-only and combined
+trigger/guard/policy edits, a same-name status from another App, missing/failed
+checker, stale head/base result and unsupported workflow syntax are blocked from
+merge. Also prove an unchanged safe candidate can pass. Record canonical check
+and ruleset read-backs. These are required future hosted/live checks, not tests
+performed by this documentation change. Administrators who can change the App,
+policy service or ruleset remain an explicitly named trust boundary; separate
+repositories alone do not remove common administration.
+
+Sources: [required status checks and expected App source](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets),
+[required workflow announcement](https://github.blog/enterprise-software/ci-cd/enforcing-code-reliability-by-requiring-workflows-with-github-repository-rules/),
+and [required workflow configuration](https://docs.github.com/en/enterprise-cloud%40latest/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets).
+
+### Invalidation, labels and acceptance
+
+Any change to the default-branch workflow tree, policy implementation/tests,
+repository/default-branch identity, group tuple, ruleset or Environment
+invalidates the structural evidence. Before further credential-bearing runs,
+re-establish every structural condition against the new exact source/control
+snapshot, or perform the live N3 probes under a separately authorized reviewed
+probe procedure. If a PR-target trigger appears anywhere, this substitution
+is unavailable. Missing evidence remains indeterminate and refuses admission.
+
+The accepted record must retain `live N3 not executed`; never label it a live
+pass. Adoption requires CP and Starter contract-owner review plus Michael's
+explicit acceptance of the residual above and corresponding checked-in
+amendments. Source-policy green alone is not that acceptance. The October6
+scheduling record is evidence input, not a completed structural dossier; no
+full workflow-tree digest/revalidation mechanism is supplied by this change.
+All other programme gates remain unchanged.
