@@ -228,7 +228,7 @@ rest. The audience is NOT a `bound_claims` entry: OpenBao checks it through
 | `workflow_ref` | `dotmac-tech/gate0-issuer-execution/.github/workflows/gate0-issuer.yml@refs/heads/main` (§ 11) | Pins the exact workflow file and ref of the directly defined, non-reusable workflow, not just "some workflow in this repo." `job_workflow_ref` is not substituted (§ 10 item 7). |
 | `event_name` | `workflow_dispatch` (§ 11) | Refuses a different trigger even if workflow guards regress. |
 
-Audience (`bound_audiences`, not `bound_claims`): `<placeholder: e.g. https://openbao.dotmac.internal>`.
+Audience (`bound_audiences`, not `bound_claims`): `urn:dotmac:gate0:rehearsal-issuer` (adopted 2026-10-06, § 12).
 The protected job requests its OIDC token for exactly this audience.
 
 `ref` is bound to `refs/heads/main` as its own claim, separately from
@@ -271,8 +271,11 @@ The rehearsal-issuer signer is Ed25519, held at the already-declared path
   `authorization_v3`'s "no OpenBao call on the controller path" discipline
   from ADR-0013 § 5). No per-request OpenBao read.
 - **What is recorded (here and at provisioning time):** key ID, fingerprint,
-  and version only — never the private key material. `<placeholder: key ID>`,
-  `<placeholder: fingerprint>`, `<placeholder: version, e.g. v1>`. The
+  and version only — never the private key material. Key ID
+  `gate0-rehearsal-issuer-v1` (adopted 2026-10-06, § 12); the fingerprint is
+  measured from the public half at provisioning and is not a chosen value;
+  the KV version is read back after the write, with the path asserted absent
+  before it. The
   private key is never copied into a GitHub secret, workflow artifact, log
   line, or this document.
 - **Lifecycle:**
@@ -337,7 +340,9 @@ The rehearsal-issuer signer is Ed25519, held at the already-declared path
          `trusted_key_ids` (key ID plus fingerprint per trusted version) and
          `revoked_key_ids`. It holds public key material and identifiers only,
          never the private key. It is sourced from a non-secret, access-
-         controlled record, `<placeholder: trust-state path>`, and installed at
+         controlled record, `secret/dotmac/platform-cp/rehearsal-issuer/trust-state`
+         (the attester's is `secret/dotmac/platform-cp/rehearsal-attester/trust-state`;
+         adopted 2026-10-06, § 12), and installed at
          process start alongside the signer.
        - **Write access.** Only Michael, via the provisioning identity used at
          § 8, may write the trust-state record. CP's runtime service identity
@@ -451,24 +456,23 @@ protected run — never a persistent, reused runner key.
   ID binding, and the measured TTL remain pending provisioning (§ 10 note
   below). Rather than a long-lived key trusted by the target host, the
   controller requests a short-lived OpenBao-issued SSH certificate
-  (`secret/ssh` engine, `<placeholder>` role) signed over the per-run public
+  (dedicated `gate0-ssh/` mount, role `rehearsal-controller`, adopted
+  2026-10-06, § 12; it replaces the earlier `secret/ssh` proposal) signed over the per-run public
   key, scoped to the target(s) named by `LANE3_PROBE_HOST` and the vantage
   variables in § 6, with:
-  - **TTL:** `<placeholder, short — e.g. matching or shorter than the run's
-    expected duration>`. **Ruled in principle (§ 10 item 5); the execution
+  - **TTL:** a **600-second ceiling**; the issued TTL is **measured**, never
+    assumed from the role (adopted 2026-10-06, § 12). **Ruled in principle (§ 10 item 5); the execution
     repository is selected in § 11:** measure the certificate lifetime
     against the provisioned real run and SSH signing role before fixing it.
-  - **`valid_principals`:** `<placeholder, restricted to the exact
-    controller/service account(s) the target(s) accept for this role — not
-    a wildcard>`.
-  - **Extensions:** `<placeholder, restricted to only the extensions the
-    controller's actual connection needs (e.g. no `permit-agent-forwarding`,
-    no `permit-port-forwarding` unless the controller genuinely requires
-    them)>`.
-  - **Certificate key ID:** `<placeholder, bound to the run — e.g. the run
-    ID or the same identifier used elsewhere in this section — so the
-    certificate itself, not just the harness evidence, carries a
-    per-run-traceable identity>`.
+  - **`valid_principals`:** `dotmac-gate0-controller` only; no wildcard, no
+    root, no general deploy principal (adopted 2026-10-06, § 12).
+  - **Extensions:** none: no forwarding of any kind and no PTY (adopted
+    2026-10-06, § 12).
+  - **Certificate key ID:** `gate0:<repository-id>:<run-id>:<run-attempt>`,
+    bound at runtime (adopted 2026-10-06, § 12). **The key ID alone is not
+    evidence.** Controller key possession and the run, attempt and lease
+    binding are independently verified, not read from the certificate's own
+    label.
   Reference: https://openbao.org/docs/secrets/ssh/signed-ssh-certificates/
 - **Destruction:** both the private key and any issued certificate are
   deleted from the runner's filesystem at the end of the run, in the
@@ -603,7 +607,7 @@ spec grants no agent authority to perform these actions:
 | **Pending § 11 admission:** Provision the OpenBao JWT auth role and its policies (§ 3, § 4) against the exact public repository and workflow claims | Michael |
 | **Pending § 11 admission:** Generate and store the Ed25519 rehearsal-issuer signer at `secret/dotmac/platform-cp/rehearsal-issuer/signing-key` (§ 4) | Michael |
 | **Pending § 11 admission:** Generate the dedicated harness-evidence attester key (§ 10 item 1) — a distinct attester identity from the rehearsal-issuer signer, at its own custody path, with its own trust-state record | Michael |
-| **Pending § 11 admission:** Create the verifier trust-state record (`trusted_key_ids`, `revoked_key_ids`; public identifiers only) at `<placeholder: trust-state path>`, write every update to it (including future revocations), and grant CP's service identity read-only access — never write — on it (§ 4) | Michael, via the provisioning identity only — never CP's runtime identity, and never the runner or its workflow token |
+| **Pending § 11 admission:** Create the verifier trust-state record (`trusted_key_ids`, `revoked_key_ids`; public identifiers only) at `secret/dotmac/platform-cp/rehearsal-issuer/trust-state` (and the attester's at `secret/dotmac/platform-cp/rehearsal-attester/trust-state`), write every update to it (including future revocations), and grant CP's service identity read-only access — never write — on it (§ 4) | Michael, via the provisioning identity only — never CP's runtime identity, and never the runner or its workflow token |
 | **Pending § 11 admission:** Pin the minimum trust-state version — the durable floor (§ 10 item 4) — in independently controlled, immutable CP deployment configuration | Michael |
 | **Pending § 11 admission:** Configure the OpenBao SSH CA / signing role for controller certificates (§ 5) — CA role, `valid_principals`, extensions and measured TTL, per the § 5 selection | Michael |
 | **Unresolved (§ 11):** Design and verify private delivery of observer, jump and inside-vantage configuration through Starter/Foundation infrastructure; put none of it in the public execution repository | Starter/Foundation infrastructure owner (ADR-0013 § A7.6) |
@@ -930,3 +934,28 @@ refusal or OIDC/OpenBao negative test had run. The VM was powered off and its
 temporary proxy stopped after the failed attempt; its disk is retained for
 diagnosis. The canary is not the privileged runner. This partial setup
 neither closes D nor permits Foundation successor allocation.
+
+## 12. Amendment — provisioning values adopted 2026-10-06
+
+Michael ruled on 2026-10-06. The values below replace the corresponding
+placeholders in §§ 3–5 and § 8. **This amendment authorizes no provisioning.**
+Key generation, auth-mount changes, VM creation and privileged runner
+attachment remain **not authorized**. Step A1's human-run metadata inventory
+(read-only) must first confirm the planned paths and mounts are absent.
+
+| Item | Adopted value | Status |
+| --- | --- | --- |
+| OIDC audience (§ 3) | `urn:dotmac:gate0:rehearsal-issuer` in `bound_audiences` | Adopted |
+| SSH CA mount and principal (§ 5) | Dedicated mount `gate0-ssh/`, role `rehearsal-controller`, `valid_principals` = `dotmac-gate0-controller` only, no wildcard or root. This replaces the earlier `secret/ssh` proposal | Adopted |
+| Controller certificate (§ 5) | No extensions (no forwarding, no PTY); **600 s ceiling**; issued TTL **measured**; key ID `gate0:<repository-id>:<run-id>:<run-attempt>` bound at runtime. **The key ID alone is insufficient:** controller key possession and the run, attempt and lease binding are independently verified | Adopted |
+| Issuer and attester keys (§ 4) | `gate0-rehearsal-issuer-v1` at `secret/dotmac/platform-cp/rehearsal-issuer/signing-key`; `gate0-harness-attester-v1` at `secret/dotmac/platform-cp/rehearsal-attester/signing-key`. Fingerprints are measured from the public halves at provisioning | Adopted |
+| Trust-state records (§ 4, § 8) | `secret/dotmac/platform-cp/rehearsal-issuer/trust-state` and `secret/dotmac/platform-cp/rehearsal-attester/trust-state`. Public identifiers only; Michael-only writes; CP service identity read-only | Adopted |
+| Initial trust floor (§ 10 item 4) | Version 1 for the new records only, pinned in immutable CP deployment configuration; never lowered by an OpenBao or Observe backup | Adopted |
+| Issuer and attester service auth | Separate AppRoles `platform-cp-rehearsal-issuer` and `platform-cp-rehearsal-attester`; response-wrapped, single-use bootstrap SecretIDs delivered through the provisioner only; `auth/approle` enabled explicitly | Adopted (design) |
+| Issuer and attester runtimes | VMs `gate0-issuer-01` and `gate0-attester-01` on two different physical hosts (ruled 2026-10-02) | **Pending:** physical host selection and VM creation |
+| Runner-to-OpenBao transport | The existing Observe WireGuard path | **Pending live proof:** accepted only after the route, the peer identity and the absence of any non-tunnel path are proven |
+| OIDC token TTL (§ 3) | Five minutes, non-renewable, as the starting proposal | Unchanged: subject to provisioned-role validation; non-renewability is checked on the role, not inferred from a max TTL |
+
+The fixed names in §§ 2, 3 and 11 (repository, workflow, Environment, runner
+group, JWT role `rehearsal-issuer-protected`) are unchanged.
+
