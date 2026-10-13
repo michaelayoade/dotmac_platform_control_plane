@@ -445,6 +445,7 @@ ASSEMBLY_KERNEL_SYMBOLS: Final[dict[str, frozenset[str]]] = {
     "dotmac_kernel.api_documentation": frozenset(
         {"environment_api_documentation_policy"}
     ),
+    "dotmac_kernel.config": frozenset({"settings", "validate_settings"}),
     "dotmac_kernel.db": frozenset(
         {
             "PlatformSessionLocal",

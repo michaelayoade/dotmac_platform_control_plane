@@ -388,6 +388,16 @@ jobs:
             platform "$group" "$name" --help > /dev/null
           done < /tmp/commands.txt
 
+          # Product-owned material acceptance uses the installed wheel, with
+          # networking disabled. Default development app configuration is valid;
+          # the relay must refuse its absent dispatcher even in development.
+          platform deployment candidate-material-probe --role app > /tmp/material-app.json
+          python3 -c 'import json; d=json.load(open("/tmp/material-app.json")); assert set(d)=={"schema","status","checks"}; assert d["schema"]=="CandidateMaterialProbeResult.v1"; assert d["status"]=="ready"'
+          status=0
+          platform deployment candidate-material-probe --role relay > /tmp/material-relay.json || status=$?
+          test "$status" -eq 3
+          python3 -c 'import json; d=json.load(open("/tmp/material-relay.json")); assert d["status"]=="refused"; assert {c["name"]:c["status"] for c in d["checks"]}["relay_dispatcher"]=="refused"'
+
           # The 3-versus-4 split has to survive the container boundary, because
           # that is where an operator reads it. `docker run` and
           # `docker compose run` both propagate the container's status unchanged.

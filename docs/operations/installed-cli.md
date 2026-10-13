@@ -47,6 +47,38 @@ data every check reads, so it cannot drift from what the CLI actually does.
 
 Global flags: `--format json|table` (default `table`) and `--version`.
 
+## Candidate configuration and local material acceptance
+
+The explicit role selects the product's configuration/file acceptance checks:
+
+```sh
+dotmac-platform deployment candidate-material-probe --role app
+dotmac-platform deployment candidate-material-probe --role relay
+```
+
+Both roles reuse kernel settings validation. `app` also applies the existing
+Vendor runtime-mode validator and reads/validates/discards the existing primary
+and optional overlap licence signers. An absent overlap remains optional; a
+partial or malformed configured overlap is refused by its existing owner.
+`relay` requires the existing dispatcher configuration even when
+`VENDOR_RELAY_EXPECTED=false`. It does not apply app signing-mode or signer-file
+requirements.
+
+This command always prints the closed JSON `CandidateMaterialProbeResult.v1`
+document, including when the global format defaults to `table`. Its only fields
+are `schema`, `status`, and `checks`; each check has only fixed `name` and
+`status` fields. Exit `0` means `ready`, `3` means `refused`, and `4` means
+`unavailable`. A known refusal wins an unavailable check. Import, evaluation and
+exception diagnostics are suppressed; no input values or error prose appear.
+
+`vendor_cp.deployment.candidate_materials.probe` owns this result. The CLI is
+its adapter, declared in `vendor_cp.cli.owners`. This source change adds the
+installed command and its tests; descriptor phase wiring remains a separate
+integration decision. `ready` establishes configuration and mounted-file
+acceptance only. It establishes no database connectivity, OpenBao availability,
+network availability, complete process startup, or deployment permission. The
+probe neither installs process-global signers nor starts the assembly or relay.
+
 ## Draining the platform outbox
 
 `dotmac-platform relay drain --worker-id <id>` claims one batch of

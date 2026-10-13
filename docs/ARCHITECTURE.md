@@ -219,6 +219,35 @@ and Vendor — rather than the tables someone remembered to name.
   list that could only ever prove what someone remembered; a future `v012` table
   is swept the moment its migration runs.
 
+## Candidate material acceptance ownership
+
+`vendor_cp.deployment.candidate_materials.probe` owns the immutable
+`CandidateMaterialProbeResult.v1` acceptance verdict. Its CLI adapter is
+`dotmac-platform deployment candidate-material-probe --role app|relay`, enrolled
+in the installed owner table. The engineering standards profile records this
+service authority and typed result leaf under the existing governance pin.
+
+Both roles delegate baseline configuration acceptance to
+`dotmac_kernel.config.settings` and `validate_settings`. The `app` role delegates
+Vendor runtime modes to `validate_runtime_configuration`, then reads, validates
+and discards signers through `build_licence_signer` and `build_overlap_signer`.
+The signing adapter remains the signer/custody owner, with its existing required
+primary and optional overlap semantics. The `relay` role uses the pure
+`vendor_cp.relay.config.require_dispatcher_dsn`, also re-exported by its existing
+runner, and requires that dispatcher regardless of `relay_expected`. App signer
+requirements do not become relay requirements.
+
+This service checks configuration and local mounted files only. It creates no
+runtime, installs no global signers and contacts no database, OpenBao or network
+service. Its readiness verdict is neither full process-startup proof nor
+permission to deploy. Source-only role/material coverage is compared in both
+directions with the accepted descriptor by tests; runtime evaluation does not
+load Foundation or the descriptor. Descriptor phase integration is separate.
+The CLI emits only fixed check names and statuses, with import/evaluation
+stdout, stderr and logging suppressed. Known owner refusals take precedence
+over unavailable evidence, with exits `0`, `3`, and `4` for ready, refused and
+unavailable respectively.
+
 ## Allocation authority (ADR-0006)
 
 `dotmac-entitlement-allocation` owns allocations. `v014` transferred the

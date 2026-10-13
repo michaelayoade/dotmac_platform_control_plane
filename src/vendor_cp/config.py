@@ -13,14 +13,13 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from vendor_cp.config_errors import (
+    ProductionConfigurationError as ProductionConfigurationError,
+)
 from vendor_cp.product_release_pins import (
     ProductReleasePin,
     parse_product_release_pins,
 )
-
-
-class ProductionConfigurationError(RuntimeError):
-    """The process would start with a production-unsafe identity or mode."""
 
 
 @dataclass(frozen=True)

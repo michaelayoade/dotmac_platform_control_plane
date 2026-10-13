@@ -413,6 +413,15 @@ def build_parser() -> _Parser:
     )
     deployment_sub = deployment.add_subparsers(dest="name", parser_class=_Parser)
 
+    material_probe = _command(
+        deployment_sub,
+        "deployment",
+        "candidate-material-probe",
+        "validate candidate configuration and local materials without startup",
+    )
+    material_probe.add_argument("--role", choices=("app", "relay"), required=True)
+    material_probe.set_defaults(handler=commands.deployment_candidate_material_probe)
+
     register_target = _command(
         deployment_sub,
         "deployment",
@@ -614,6 +623,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command not in by_command():
         parser.error(f"{command!r} has no declared owner")
+
+    if command == "deployment candidate-material-probe":
+        from vendor_cp.deployment.candidate_materials import (
+            CandidateMaterialProbeResult,
+            quiet_evaluation,
+            unavailable_result,
+        )
+
+        with quiet_evaluation():
+            try:
+                probe_result: CandidateMaterialProbeResult = args.handler(args)
+                if type(probe_result) is not CandidateMaterialProbeResult:
+                    probe_result = unavailable_result()
+                document = probe_result.json_document()
+                code = probe_result.exit_code
+            except BaseException:
+                probe_result = unavailable_result()
+                document = probe_result.json_document()
+                code = probe_result.exit_code
+        print(document)
+        return code
 
     try:
         result = args.handler(args)
