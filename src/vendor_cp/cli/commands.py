@@ -26,12 +26,15 @@ import argparse
 import json
 import tomllib
 from dataclasses import asdict, is_dataclass
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 from uuid import UUID
 
 from vendor_cp.cli.exits import ExitCode, refuse
 from vendor_cp.cli.io import Result, read_bytes, read_secret
 from vendor_cp.cli.runtime import platform_db
+
+if TYPE_CHECKING:
+    from vendor_cp.deployment.candidate_materials import CandidateMaterialProbeResult
 
 
 def _fields(value: object) -> dict[str, object]:
@@ -41,6 +44,15 @@ def _fields(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         return {str(key): item for key, item in value.items()}
     return {"value": value}
+
+
+def deployment_candidate_material_probe(
+    args: argparse.Namespace,
+) -> CandidateMaterialProbeResult:
+    """Delegate configuration and file acceptance to the product owner."""
+    from vendor_cp.deployment.candidate_materials import probe
+
+    return probe(role=args.role)
 
 
 # ── admin ───────────────────────────────────────────────────────────────────

@@ -67,6 +67,12 @@ from vendor_cp.allocations.consumer import ContractEventConsumer
 from vendor_cp.config import VendorSettings, vendor_settings
 from vendor_cp.relay import heartbeat
 from vendor_cp.relay.approval_router import ApprovalEventRouter
+from vendor_cp.relay.config import (
+    RelayNotConfiguredError as RelayNotConfiguredError,
+)
+from vendor_cp.relay.config import (
+    require_dispatcher_dsn as require_dispatcher_dsn,
+)
 
 logger = logging.getLogger("vendor_cp.relay.runner")
 
@@ -75,15 +81,6 @@ logger = logging.getLogger("vendor_cp.relay.runner")
 #: shared instance cannot be mutated by a caller, and one bound object keeps the
 #: default stable for the life of the process.
 DEFAULT_POLICY: Final[RelayPolicy] = RelayPolicy()
-
-
-class RelayNotConfiguredError(RuntimeError):
-    """No dispatcher credential, so there is nothing to drain WITH.
-
-    Distinct from "nothing to drain": one is a deployment that cannot run the
-    relay, the other is a relay with an empty queue, and they are the two states
-    this package exists to keep apart.
-    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,19 +150,6 @@ def dispatcher_runtime(dsn: str) -> DatabaseRuntime:
         platform_pool_size=1,
         platform_max_overflow=0,
     )
-
-
-def require_dispatcher_dsn(settings: VendorSettings = vendor_settings) -> str:
-    """The configured dispatcher DSN, or a refusal naming what is missing."""
-    dsn = settings.relay_dispatcher_database_url.strip()
-    if not dsn:
-        raise RelayNotConfiguredError(
-            "VENDOR_RELAY_DISPATCHER_DATABASE_URL is unset, so the platform "
-            "outbox relay has no dispatcher credential and cannot claim a "
-            "batch. Set it to the `platform_outbox_dispatcher` role's DSN "
-            "against the one control-plane database."
-        )
-    return dsn
 
 
 def composed(settings: VendorSettings = vendor_settings) -> RelayComposition:

@@ -77,7 +77,29 @@ def test_the_profile_tracks_the_remaining_vendor_licensing_boundary() -> None:
                 "tests/architecture/test_licensing_authority.py",
                 "tests/unit/test_licence_key_rotation.py",
             ],
-        }
+        },
+        {
+            "authority_id": "candidate-material-acceptance",
+            "subject": (
+                "Role-specific candidate configuration and local signer-file "
+                "acceptance through existing product owners."
+            ),
+            "protected_resources": ["candidate-material-acceptance-verdict"],
+            "owner_component": "candidate-material-probe",
+            "owner_implementation": "src/vendor_cp/deployment/candidate_materials.py",
+            "decision_interface": "vendor_cp.deployment.candidate_materials.probe",
+            "canonical_writer_paths": [
+                "src/vendor_cp/deployment/candidate_materials.py"
+            ],
+            "adapter_paths": [
+                "src/vendor_cp/cli/commands.py",
+                "src/vendor_cp/cli/__init__.py",
+            ],
+            "drift_test_paths": [
+                "tests/unit/test_candidate_materials.py",
+                "tests/architecture/test_engineering_standards_adoption.py",
+            ],
+        },
     ]
     assert profile["typed_contract_surfaces"] == [
         {
@@ -86,7 +108,14 @@ def test_the_profile_tracks_the_remaining_vendor_licensing_boundary() -> None:
             "require_public_annotations": True,
             "forbid_any": True,
             "require_immutable_records": True,
-        }
+        },
+        {
+            "surface_id": "candidate-material-probe-result",
+            "paths": ["src/vendor_cp/deployment/candidate_materials.py"],
+            "require_public_annotations": True,
+            "forbid_any": True,
+            "require_immutable_records": True,
+        },
     ]
 
 

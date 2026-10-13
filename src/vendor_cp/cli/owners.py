@@ -55,6 +55,13 @@ class Owner:
 #: argument parser in both directions, so a command added without an owner and
 #: an owner declared without a command both fail.
 OWNERS: Final[tuple[Owner, ...]] = (
+    Owner(
+        "deployment candidate-material-probe",
+        "vendor_cp.deployment.candidate_materials",
+        "probe",
+        False,
+        "validate candidate configuration and local materials without startup",
+    ),
     # ── admin ──────────────────────────────────────────────────────────────
     Owner(
         "admin create",
