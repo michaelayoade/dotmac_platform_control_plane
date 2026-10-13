@@ -21,20 +21,40 @@ The host then performs one ordered operation:
    declaration from the versioned template while preserving every held secret
    and operator-owned value;
 2. pull the exact digest;
-3. require the already-running PostgreSQL container to be uniquely identified
+3. run the installed `dotmac-platform deployment candidate-material-probe` for
+   `app`, then `relay`, through each existing Compose service with
+   `--rm --no-deps -T --entrypoint dotmac-platform`;
+4. require the already-running PostgreSQL container to be uniquely identified
    and healthy; the deploy never starts or recreates it;
-4. verify that initialization created `app_admin` as a non-superuser,
+5. verify that initialization created `app_admin` as a non-superuser,
    `BYPASSRLS` database/schema owner and removed the bootstrap verifier;
-5. take and publish a host-local recovery bundle, then verify its on-disk
+6. take and publish a host-local recovery bundle, then verify its on-disk
    `SHA256SUMS` before continuing;
-6. reconcile the product-manifest volume to UID/GID 10001 and mode `0750`
+7. reconcile the product-manifest volume to UID/GID 10001 and mode `0750`
    through the isolated, capability-limited `manifest-init` service;
-7. run `dotmac-platform admin migrate`, the owner that composes all eight
+8. run `dotmac-platform admin migrate`, the owner that composes all eight
    lineages, as an installed console script inside the `ops` container;
-8. start the relay with `--no-deps`, replace the app with `--no-deps`, and prove
+9. start the relay with `--no-deps`, replace the app with `--no-deps`, and prove
    `/health` and `/health/ready` on the loopback port while declaring
    `Host: vendor.dotmac.io`, so the probe passes through the same trusted-host
    boundary as production traffic rather than weakening it for an IP-only probe.
+
+The candidate probes use the pulled immutable image through the existing
+`ENV_FILE`/`COMPOSE_FILE` wrapper and the actual app/relay service environment,
+including their derived database DSNs and read-only primary signing-key mount.
+The accepted runtime shape has one app replica and one relay replica. The
+explicit entrypoint bypasses API startup and the relay loop; `--no-deps` keeps
+Compose from starting dependencies. A refusal, unavailable CLI or Compose error
+stops before database inspection/exec, backup, manifest initialization, migration
+or service replacement. Both probe output streams are discarded; the adapter
+reports only the affected role and the stopped action.
+
+These are local candidate-material acceptance checks, not database, OpenBao or
+network readiness checks, and they do not prove full application startup.
+Compose creates one-off containers and may ensure networks and volumes exist,
+so the preflight is not mutation-free. The existing forward-only migration and
+rollback rules still apply. This hardens the native emergency executor now;
+it does not adopt the Foundation V4 lifecycle or advance release Gate 0 or D7.
 
 The official Postgres image creates `POSTGRES_USER=postgres` as its bootstrap
 superuser on a fresh volume. The first-cluster initializer creates the distinct
