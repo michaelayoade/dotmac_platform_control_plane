@@ -908,9 +908,9 @@ def test_the_console_login_claim_matches_the_measured_artifact() -> None:
     drives_the_login = (
         "/platform/login" in battery and "form login yields a session" in battery
     )
-    assert declares_form_parser and drives_the_login, (
-        "the premise changed; revisit the claim rather than this assertion"
-    )
+    assert (
+        declares_form_parser and drives_the_login
+    ), "the premise changed; revisit the claim rather than this assertion"
 
     present_tense = (
         "the assembly declares no form-parsing library",
@@ -988,9 +988,9 @@ def test_the_app_container_does_not_hold_the_migration_dsn() -> None:
     )
 
     assert "MIGRATION_DATABASE_URL:" not in active_app
-    assert "app_admin" not in active_app, (
-        "no alias of the owner credential may reach the long-running app"
-    )
+    assert (
+        "app_admin" not in active_app
+    ), "no alias of the owner credential may reach the long-running app"
     # SENSITIVITY: the app still declares its two runtime materials, so an
     # empty or mis-sliced block cannot satisfy the absences above vacuously.
     assert "DATABASE_URL:" in active_app
@@ -1067,9 +1067,9 @@ def test_no_declared_long_running_role_may_hold_the_owner_material() -> None:
             f"the long-running {role['code']!r} role holds {owner_material}, a "
             "standing owner credential in every process of that container"
         )
-        assert "app_admin" not in _active(block), (
-            f"no alias of the owner credential may reach {role['code']!r}"
-        )
+        assert "app_admin" not in _active(
+            block
+        ), f"no alias of the owner credential may reach {role['code']!r}"
         # SENSITIVITY, per role: the block really was found and really was read.
         # Without this, a renamed service would yield an empty block and satisfy
         # every absence above by finding nothing at all.
@@ -1331,6 +1331,6 @@ def test_no_dispatcher_material_is_committed_anywhere() -> None:
                 continue
             stripped = line.strip()
             assigned = stripped.partition("=")[2] if stripped.count("=") else ""
-            assert assigned == "" or "${" in line or stripped.startswith("#"), (
-                f"{relative}:{number} assigns a value to the dispatcher password"
-            )
+            assert (
+                assigned == "" or "${" in line or stripped.startswith("#")
+            ), f"{relative}:{number} assigns a value to the dispatcher password"
