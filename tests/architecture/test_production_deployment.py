@@ -8,8 +8,11 @@ source code, or start the application before its backup and composed migrations.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -539,42 +542,187 @@ def test_host_bootstrap_requires_held_key_and_a_registered_certbot_contact() -> 
     assert "certbot certonly" in bootstrap
 
 
-def test_the_deploy_refuses_a_fatal_environment_before_it_touches_anything() -> None:
-    """The failure must arrive before the migrations, not in the lifespan.
-
-    `compose up -d app` is the SEVENTH action this script takes. The image is
-    pulled, the database started, the role and ownership contracts read, a
-    recovery bundle published and verified, the manifest volume initialised,
-    and THE MIGRATIONS APPLIED before the application is ever started — so a
-    configuration error left to the
-    application's own `validate_settings` call arrives with the schema already
-    advanced and the service down.
-
-    Both checks are asserted, and they are not redundant. The env-file greps are
-    a dependency-free floor that needs no image; the artifact's verdict cannot
-    drift from the kernel, because it IS the kernel's function.
-    """
+def test_the_deploy_probes_runtime_material_before_database_work() -> None:
+    """Keep the cheap CSRF floor, then delegate acceptance to the product CLI."""
     deploy = _text("scripts/deploy_production.sh")
     commands = _commands(deploy)
 
     csrf_present = commands.index("CSRF_SECRET is absent or empty")
     csrf_length = commands.index("CSRF_SECRET is shorter than 32 bytes")
     csrf_distinct = commands.index("CSRF_SECRET must differ from JWT_SECRET")
-    verdict = commands.index("the image refuses this host environment")
+    pull = commands.index('docker pull "$VENDOR_APP_IMAGE"')
+    probe = commands.index("deployment candidate-material-probe")
     require_existing_db = commands.index("compose ps --status running -q db")
+    backup = commands.index('mkdir -p "$BACKUP_DIR"')
     migrate = commands.index("dotmac-platform admin migrate")
-
     assert (
         csrf_present
         < csrf_length
         < csrf_distinct
-        < verdict
+        < pull
+        < probe
         < require_existing_db
+        < backup
         < migrate
     )
-    # The artifact's own function, not a re-implementation of its rules.
-    assert "validate_settings" in deploy
-    assert "--network none" in deploy
+    assert "validate_settings" not in commands
+    assert "placeholder" not in commands
+    assert "docker run" not in commands
+
+
+@pytest.mark.parametrize(
+    ("failed_role", "probe_status"),
+    [
+        (None, 0),
+        ("app", 3),
+        ("app", 4),
+        ("app", 127),
+        ("relay", 3),
+        ("relay", 4),
+        ("relay", 125),
+        ("relay", 127),
+    ],
+)
+def test_material_probe_commands_fail_closed_before_database_work(
+    tmp_path: Path, failed_role: str | None, probe_status: int
+) -> None:
+    """Record real adapter commands; fake Docker never opens a daemon/socket.
+
+    Successful probes reach an intentionally absent database barrier. Every
+    refusal must stop sooner, even when a broken CLI emits raw secret prose.
+    """
+    env_file = tmp_path / "runtime.env"
+    env_file.write_text(
+        "APP_ENV=production\nSERVER_NAME=vendor-cp-prod\n"
+        "ENVIRONMENT=production\nPLATFORM_ROOT_DOMAIN=vendor.dotmac.io\n"
+        "VENDOR_DEPLOYMENT_PROFILE=production-bootstrap\nCSRF_ENABLED=true\n"
+        f"CSRF_SECRET={'c' * 32}\nJWT_SECRET={'j' * 32}\n"
+        f"SESSION_HASH_SECRET={'s' * 32}\n",
+        encoding="utf-8",
+    )
+    host_id = tmp_path / "host-id"
+    host_id.write_text("vendor-cp-prod\n", encoding="utf-8")
+    compose_file = tmp_path / "selected-compose.yml"
+    compose_file.write_text(_text("docker-compose.production.yml"), encoding="utf-8")
+    record = tmp_path / "docker.jsonl"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['COMMAND_RECORD'], 'a') as stream:\n"
+        "    stream.write(json.dumps({'args': args, "
+        "'image': os.environ.get('VENDOR_APP_IMAGE')}) + '\\n')\n"
+        "if args[0] == 'pull':\n"
+        "    sys.exit(0)\n"
+        "if 'candidate-material-probe' in args:\n"
+        "    print('raw-secret-canary-out')\n"
+        "    print('raw-secret-canary-err', file=sys.stderr)\n"
+        "    sys.exit(int(os.environ['PROBE_STATUS']) "
+        "if args[-1] == os.environ['FAILED_ROLE'] else 0)\n"
+        "if 'ps' in args:\n"
+        "    sys.exit(0)\n"
+        "sys.exit(99)\n",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o700)
+    backup_dir = tmp_path / "backups"
+    digest = "sha256:" + "a" * 64
+    image = f"ghcr.io/michaelayoade/dotmac_vendor_control_plane@{digest}"
+    result = subprocess.run(  # noqa: S603 -- fixed bash and repository script
+        [  # noqa: S607 -- executable is fixed to bash
+            "bash",
+            str(ROOT / "scripts/deploy_production.sh"),
+            digest,
+            "test-change",
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "ENV_FILE": str(env_file),
+            "COMPOSE_FILE": str(compose_file),
+            "HOST_ID_FILE": str(host_id),
+            "BACKUP_DIR": str(backup_dir),
+            "LOCK_FILE": str(tmp_path / "deploy.lock"),
+            "COMMAND_RECORD": str(record),
+            "FAILED_ROLE": failed_role or "",
+            "PROBE_STATUS": str(probe_status),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert result.returncode == 1
+    assert "raw-secret-canary" not in result.stdout + result.stderr
+    assert not backup_dir.exists()
+    calls = [json.loads(line) for line in record.read_text().splitlines()]
+    assert calls[0] == {"args": ["pull", image], "image": image}
+    prefix = ["compose", "--env-file", str(env_file), "-f", str(compose_file)]
+    roles = ["app"] if failed_role == "app" else ["app", "relay"]
+    expected = [
+        {
+            "args": prefix
+            + [
+                "run",
+                "--rm",
+                "--no-deps",
+                "-T",
+                "--entrypoint",
+                "dotmac-platform",
+                role,
+                "deployment",
+                "candidate-material-probe",
+                "--role",
+                role,
+            ],
+            "image": image,
+        }
+        for role in roles
+    ]
+    if failed_role is None:
+        expected.append(
+            {
+                "args": prefix + ["ps", "--status", "running", "-q", "db"],
+                "image": image,
+            }
+        )
+        assert "expected exactly one running existing db container" in result.stderr
+    else:
+        assert result.stderr == (
+            f"candidate material probe failed for {failed_role}; "
+            "deployment stopped before database checks, backup or migration\n"
+        )
+    # No exec, backup, DDL, manifest-init or service replacement can precede refusal.
+    assert calls[1:] == expected
+
+
+def test_material_probes_reuse_runtime_service_environment_and_signing_mount() -> None:
+    """Command recording binds roles; this checks the existing service bindings."""
+    compose = _text("docker-compose.production.yml")
+    for role in ("app", "relay"):
+        block = _compose_service_block(compose, role)
+        assert "env_file: .env" in block
+        assert (
+            "DATABASE_URL: postgresql+psycopg://app_user:"
+            "${VENDOR_DB_APP_USER_PASSWORD:?" in block
+        )
+        assert (
+            "PLATFORM_DATABASE_URL: postgresql+psycopg://platform_api:"
+            "${VENDOR_DB_PLATFORM_API_PASSWORD:?" in block
+        )
+        assert (
+            "${VENDOR_LICENCE_SIGNING_KEY_HOST_FILE:?Set "
+            "VENDOR_LICENCE_SIGNING_KEY_HOST_FILE}:"
+            "/run/secrets/dotmac/vendor-control-plane/licence-signing/primary.key:ro"
+            in block
+        )
+        assert "MIGRATION_DATABASE_URL:" not in block
+    relay = _compose_service_block(compose, "relay")
+    assert (
+        "VENDOR_RELAY_DISPATCHER_DATABASE_URL: postgresql+psycopg://"
+        "platform_outbox_dispatcher:${VENDOR_DB_DISPATCHER_PASSWORD:?" in relay
+    )
 
 
 def test_the_recovery_bundle_is_atomic_and_gates_the_migration() -> None:

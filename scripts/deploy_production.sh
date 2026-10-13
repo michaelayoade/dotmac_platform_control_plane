@@ -73,7 +73,7 @@ printf '%s %s\n' "$$" "legacy-freeze ${DIGEST}" >"$LOCK_FILE"
 # a gate that quietly admits is how a bypass survives a rewrite. Until the
 # successor demonstrates a real admit path, this hardened legacy path remains
 # production's emergency executor: canonical lock held, identifiers validated,
-# no mutation above this line.
+# no service replacement or schema advancement above this line.
 
 [[ -f "$ENV_FILE" ]] || die "$ENV_FILE is missing"
 grep -Fqx 'APP_ENV=production' "$ENV_FILE" || die "APP_ENV marker mismatch"
@@ -90,7 +90,7 @@ grep -Fqx 'PLATFORM_ROOT_DOMAIN=vendor.dotmac.io' "$ENV_FILE" \
 # the one that runs on every restart this script does not perform.
 grep -Fqx 'VENDOR_DEPLOYMENT_PROFILE=production-bootstrap' "$ENV_FILE" \
     || die "deployment profile is not production-bootstrap"
-# ── The kernel's production-fatal settings, checked BEFORE anything is touched ─
+# ── Fast environment floor, before candidate containers or database work ─────
 #
 # Look at the order of this script. `compose up -d --no-deps app --wait` is the
 # final service mutation. The existing database is REQUIRED healthy;
@@ -151,32 +151,20 @@ compose() {
 
 docker pull "$VENDOR_APP_IMAGE"
 
-# The ARTIFACT's own verdict on this host's environment, still before the host
-# is touched. The greps above are a fast, dependency-free floor that restates
-# three of the kernel's rules and will drift from them; this asks the image that
-# is about to run, using the very function its lifespan calls. A clean answer
-# here is the answer the boot will give — except that it arrives before the
-# database has been started, a recovery bundle published or verified, a
-# manifest volume initialised, or a single migration applied.
-#
-# The two DSNs are placeholders. Compose supplies the real ones from its own
-# `environment:` block, so they are absent from the env file and would be
-# reported as missing; `--network none` guarantees neither is dialled.
-#
-# `validate_settings` returns error strings that name SETTINGS and never values,
-# which is what makes it safe to print this verdict.
-readonly ENVIRONMENT_VERDICT="$(docker run --rm --network none \
-    --env-file "$ENV_FILE" \
-    --env DATABASE_URL=postgresql+psycopg://placeholder@127.0.0.1:5432/none \
-    --env PLATFORM_DATABASE_URL=postgresql+psycopg://placeholder@127.0.0.1:5432/none \
-    --entrypoint python "$VENDOR_APP_IMAGE" -c \
-    'from dotmac_kernel.config import settings, validate_settings
-for error in validate_settings(settings):
-    print(error)')"
-[[ -z "$ENVIRONMENT_VERDICT" ]] || die "the image refuses this host environment:
-${ENVIRONMENT_VERDICT}
-Nothing has been changed — no container started, no migration applied.
-${CSRF_REMEDY}"
+# Ask the installed product owner through each actual runtime service. Compose
+# supplies the service's database environment and read-only primary signing-key
+# mount; no placeholder material or second validator lives in this adapter.
+# Override the entrypoint/command so neither API startup nor the relay loop runs.
+# These one-offs create containers and may ensure networks/volumes exist. They
+# precede database inspection/exec, recovery-bundle work and all migrations.
+# The CLI owns the typed verdict and exit status. Discard both output streams:
+# an unavailable CLI, Compose failure or refusal produces only our fixed message.
+for role in app relay; do
+    if ! compose run --rm --no-deps -T --entrypoint dotmac-platform "$role" \
+        deployment candidate-material-probe --role "$role" >/dev/null 2>&1; then
+        die "candidate material probe failed for ${role}; deployment stopped before database checks, backup or migration"
+    fi
+done
 
 # The production database volume predates the relay. Docker's init directory
 # runs only for a NEW data directory, so bringing `db` up here cannot repair an
@@ -286,7 +274,7 @@ for role in app_admin app_user platform_api outbox_dispatcher \
     grep -Eq "^CREATE ROLE \"?${role}\"?;\$" "${BUNDLE_TMP}/globals.sql" || die \
 "cluster globals capture does not create role ${role}. The pair would restore \
 without the grant/revoke matrix that IS this database's plane separation, and \
-the restore would look successful. Nothing has been changed."
+the restore would look successful. No migration or service replacement has run."
 done
 
 #    And the other direction, because `--no-role-passwords` is a flag and a flag
