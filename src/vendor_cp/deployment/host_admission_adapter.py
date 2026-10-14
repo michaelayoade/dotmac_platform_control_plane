@@ -64,16 +64,11 @@ class HostAdmissionAdapterUsageError(ValueError):
 
 
 class DispatchApprovalSubjectUnavailable(Exception):
-    """Dispatch refused: the plan requires approval, and no approval barrier exists.
+    """No composed Foundation approval barrier or usable frozen plan exists.
 
-    C2 holds an approval FOR SHARE through every approval-dependent Control
-    transition, so that a withdrawal cannot commit in the window between the
-    check and the effect. A FOUNDATION_EXECUTION plan has no Approvals subject
-    type yet, so there is nothing to hold at dispatch. Michael decided on
-    2026-09-26 (C2-D1) that dispatch FAILS CLOSED for any plan that requires
-    approval, or that cannot be found, until Gate 3 defines that subject. This
-    is a refusal, not a wiring mistake, so it is deliberately not a
-    `HostAdmissionAdapterUsageError`.
+    The distinct Foundation subject is owned by CP's approval service. The
+    host adapter receives its barrier at startup and refuses an absent binding;
+    it never treats an approval-exempt plan as launch authority.
     """
 
     code = "c2_dispatch_approval_subject_unavailable"
@@ -309,7 +304,7 @@ class ControlFoundationV3Bindings:
     attest_pair: Callable[..., object]
     lookup_committed: Callable[..., object]
     #: Control's public `get_plan`. Dispatch reads the plan's approval
-    #: requirement from it before finalizing (C2-D1: fail closed).
+    #: coordinates from it before entering the live approval barrier.
     get_plan: Callable[..., object]
     foreign_root_type: Callable[..., object]
     foreign_evidence_type: Callable[..., object]
@@ -330,6 +325,16 @@ class FoundationHostV3Bindings:
     execution_context_type: type[object]
 
 
+class FoundationApprovalBarrier(Protocol):
+    def __call__(
+        self,
+        db: Session,
+        *,
+        plan_id: UUID,
+        transition: Callable[[object], object],
+    ) -> object: ...
+
+
 @dataclass(frozen=True, slots=True)
 class FoundationV3Sources:
     """Trusted local factories/observers; none is selected by a request.
@@ -343,6 +348,9 @@ class FoundationV3Sources:
     host_admission: Callable[[], HostAdmissionObservation]
     execution_context: Callable[[], object]
     clock: Callable[[], datetime]
+    # Startup binds foundation_approval.hold_foundation_transition. An absent
+    # binding is a named refusal, never an approval-exempt execution path.
+    held_transition: FoundationApprovalBarrier | None = None
 
 
 class _ControlReceiptAttester:
@@ -547,45 +555,42 @@ class _FoundationV3Provider:
                 raise HostAdmissionAdapterUsageError(
                     "F2 resolution and V3 finalization require separate sessions"
                 )
-            self._refuse_an_approval_requiring_plan(
-                session, _field(continuation.execution_facts, "plan_id")
-            )
-            self._control.finalize(
-                session, context=resolved, foreign_evidence=foreign, execution=execution
-            )
+            held_transition = self._sources.held_transition
+            if held_transition is None:
+                raise DispatchApprovalSubjectUnavailable(
+                    "Foundation execution approval barrier is not composed"
+                )
+            try:
+                plan_id = UUID(str(_field(continuation.execution_facts, "plan_id")))
+            except ValueError as exc:
+                raise DispatchApprovalSubjectUnavailable(
+                    "Foundation execution plan id is invalid"
+                ) from exc
+
+            # A non-locking owner read binds the observation to the carried
+            # decision. The startup barrier re-reads under its Approvals hold.
+            plan = self._control.get_plan(session, plan_id)
+            if plan is None or (
+                _field(plan, "approval_decision_ref")
+                != _field(continuation.execution_facts, "approval_decision_ref")
+                or _field(plan, "plan_digest")
+                != _field(continuation.execution_facts, "control_plan_digest")
+            ):
+                raise DispatchApprovalSubjectUnavailable(
+                    "Foundation observed approval binding changed"
+                )
+
+            def transition(held: object) -> object:
+                return self._control.finalize(
+                    session,
+                    context=resolved,
+                    foreign_evidence=foreign,
+                    execution=execution,
+                )
+
+            held_transition(session, plan_id=plan_id, transition=transition)
             session.commit()
         # No fallible work follows the successful Control commit.
-
-    def _refuse_an_approval_requiring_plan(
-        self, session: Session, plan_id: object
-    ) -> None:
-        """C2-D1: fail closed at dispatch until a Foundation plan has an
-        Approvals subject that a barrier could hold.
-
-        The plan id comes from the observed execution facts, the same value
-        that becomes `expected_context.plan_id`. Control's `finalize` refuses a
-        coordinate mismatch between that context and the plan it locks, so the
-        plan checked here is the plan that would be consumed. A malformed id,
-        a missing plan, or a plan without an explicit `requires_approval=False`
-        all refuse before `finalize` is called.
-        """
-        try:
-            parsed = UUID(str(plan_id))
-        except ValueError as exc:
-            raise DispatchApprovalSubjectUnavailable(
-                f"dispatch plan id {plan_id!r} is not a UUID"
-            ) from exc
-        plan = self._control.get_plan(session, parsed)
-        if plan is None:
-            raise DispatchApprovalSubjectUnavailable(
-                f"dispatch plan {parsed} does not exist"
-            )
-        if getattr(plan, "requires_approval", True) is not False:
-            raise DispatchApprovalSubjectUnavailable(
-                f"dispatch plan {parsed} requires approval, and FOUNDATION_EXECUTION "
-                "plans have no Approvals subject for the C2 barrier to hold; "
-                "dispatch fails closed until Gate 3 (C2-D1)"
-            )
 
     def lookup_committed(self, *, control_consumption_ref: str) -> object:
         """Read Control's typed committed marker after a crash, never reconsume."""
@@ -717,6 +722,7 @@ __all__ = [
     "HostAdmissionObservation",
     "ControlFoundationV3Bindings",
     "FoundationHostV3Bindings",
+    "FoundationApprovalBarrier",
     "FoundationV3Sources",
     "FoundationV3ProviderPair",
     "compose_foundation_v3_providers",

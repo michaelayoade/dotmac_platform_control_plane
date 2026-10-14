@@ -137,6 +137,12 @@ class ApprovalEventRouter:
 
         from vendor_cp.contracts.adapter import record_agreement_approval_withdrawal
         from vendor_cp.contracts_authority import APPROVAL_SUBJECT_TYPE
+        from vendor_cp.deployment.foundation_approval import (
+            SUBJECT_TYPE as FOUNDATION_SUBJECT_TYPE,
+        )
+        from vendor_cp.deployment.foundation_approval import (
+            classify_foundation_approval_withdrawal,
+        )
         from vendor_cp.deployment.protected_rehearsal_issuer import (
             SUBJECT_TYPE as ISSUER_SUBJECT_TYPE,
         )
@@ -149,6 +155,8 @@ class ApprovalEventRouter:
         handler: WithdrawalHandler
         if subject_type == ISSUER_SUBJECT_TYPE:
             handler = classify_approval_withdrawal
+        elif subject_type == FOUNDATION_SUBJECT_TYPE:
+            handler = classify_foundation_approval_withdrawal
         elif subject_type == APPROVAL_SUBJECT_TYPE:
             handler = _agreement_handler_adapter(record_agreement_approval_withdrawal)
         else:
