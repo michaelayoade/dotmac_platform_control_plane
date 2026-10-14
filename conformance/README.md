@@ -5,31 +5,43 @@
 The required `CI / postgres` job runs
 `test_candidate_renderer_real_foundation.py` and
 `test_host_admission_conformance.py` against the complete CP wheel, its locked
-Control `0.1.0a17` and Approvals `0.1.0a8` dependencies, and a test-only
-Foundation wheel built from clean exact Starter source
+Control `0.1.0a17`, Approvals `0.1.0a8` and Kernel `0.1.0a100` dependencies,
+and a test-only Foundation wheel built from clean exact Starter source
 `d74bf8dd8c399dd92047174365403b861f82ddd0`. The job migrates the full composition
 on disposable PostgreSQL, then invokes these cases as `platform_api`.
 
 The workflow replaces CP's editable install with the built wheel, installs the
 Foundation wheel without changing the runtime lock, copies only the two test
-files, conftest and accepted descriptor into `RUNNER_TEMP`, and runs there.
+files, conftest, separately authored `fixtures/renderer-component.toml` and the
+unchanged production descriptor into `RUNNER_TEMP`, and runs there.
 Each imported owner/service must resolve under that interpreter's installed
 `purelib`/`platlib`. Build hashes and installed versions/origins are recorded in
 CI. The source commit plus build hash identifies tested Foundation bytes;
 it is **not** evidence of an eligible published Foundation successor, a new
 runtime pin, a candidate allocation or deployment adoption.
 
-`scripts/check_foundation_composition_junit.py` requires twenty exact named
-cases: four renderer variants, ten component security cases and six CP V3
-composition cases. An omitted, duplicated, renamed, skipped or failed case
-refuses the gate. The separate rehearsal-issuer harness keeps its restricted
+The installed module `python -m vendor_cp.deployment.conformance_report`
+requires twenty-one exact named cases: five renderer variants, ten component
+security cases and six CP V3 composition cases. An omitted, duplicated, renamed,
+skipped or failed case refuses the gate. The separate rehearsal-issuer harness keeps its restricted
 Control/Kernel dependency closure and no longer runs these full CP tests.
 
-Renderer cases compare CP's exact two-field candidate substitution with real
-Foundation canonical descriptor/plan output, prove changed prestate and profile
-coordinates change the execution digest, and refuse a dictionary pretending to
-be `HostPrestateV1`. Their synthetic V1 profile coordinates test transport and
-rendering only; they supply no canonical V2 admission or receipt evidence.
+Positive renderer cases use the independently authored fictional
+`conformance/fixtures/renderer-component.toml`, never a stripped or modified
+production descriptor. They compare CP's exact two-field candidate substitution
+with real Foundation canonical descriptor/plan output, prove changed prestate
+and synthetic profile coordinates change the execution digest, and refuse a
+dictionary pretending to be `HostPrestateV1`. These are transport/render
+component proofs, not production compatibility or canonical profile admission.
+
+A separate required case reads the actual promoted `deploy/product.toml`
+byte-for-byte, establishes its promised `row_counts` verification and absent
+`external_executor`, and requires the real installed Foundation `SpecError`:
+`backup.verification.unperformable` at `backup.datasets[0]`. CI compares the
+copied production file to the original before execution. This expected refusal
+is negative compatibility evidence; it is never counted as a positive
+production render. D7's actual row-count verification owner remains **OPEN**.
+No verification promise is removed and no replacement executor is invented.
 
 Every host fixture now opens and decides an actual Approvals request, approves
 through CP's live shared-lock barrier, then requests a signed rollout and
@@ -58,8 +70,9 @@ marker-scope constant as test-only private dependencies. They are not production
 imports and must be re-proven at each artifact change. Public committed lookup
 independently checks durable marker assertions.
 
-The ordinary migration run also emits a separate approval report. The same
-checker with `--approval` requires all twenty-one named cases from
+The ordinary migration run also emits a separate approval report. After the
+actual CP wheel is installed and execution moves outside the checkout, the same
+installed module with `--approval` requires all twenty-one named cases from
 `tests/migration/test_foundation_approval.py`, including both withdrawal
 orderings at actual approve, signed rollout and signed dispatch commands, with
 caller single-commit and peer lock-timeout probes. Its ephemeral HMAC signer

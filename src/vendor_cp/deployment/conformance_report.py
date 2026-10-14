@@ -33,10 +33,11 @@ EXPECTED = frozenset(
     | {
         (RENDERER, name)
         for name in (
-            "test_installed_renderer_preserves_descriptor_and_exact_two_field_derivation",
-            "test_changed_frozen_coordinates_change_real_foundation_plan[prestate]",
-            "test_changed_frozen_coordinates_change_real_foundation_plan[profile]",
+            "test_synthetic_installed_renderer_preserves_exact_two_field_derivation",
+            "test_synthetic_frozen_coordinates_change_real_foundation_plan[prestate]",
+            "test_synthetic_frozen_coordinates_change_real_foundation_plan[profile]",
             "test_dictionary_prestate_cannot_substitute_for_foundation_value",
+            "test_actual_production_descriptor_row_counts_without_executor_is_refused",
         )
     }
 )
@@ -73,6 +74,8 @@ def check_report(path: Path, *, approval: bool = False) -> None:
     # The XML is the runner-local pytest report, never an external document.
     root = ElementTree.parse(path).getroot()  # noqa: S314
     cases = root.findall(".//testcase")
+    identities: list[object]
+    expected: frozenset[object]
     if approval:
         cases = [
             case
@@ -87,7 +90,7 @@ def check_report(path: Path, *, approval: bool = False) -> None:
     if len(cases) != len(expected) or set(identities) != expected:
         raise ValueError(
             f"Foundation composition collected {identities!r}; expected "
-            f"{sorted(expected)!r} exactly once"
+            f"{sorted(map(str, expected))!r} exactly once"
         )
     for case in cases:
         if any(
@@ -104,7 +107,8 @@ def main() -> int:
         arguments = arguments[1:]
     if len(arguments) != 1:
         raise SystemExit(
-            "usage: check_foundation_composition_junit.py " "[--approval] JUNIT_XML"
+            "usage: python -m vendor_cp.deployment.conformance_report "
+            "[--approval] JUNIT_XML"
         )
     try:
         check_report(Path(arguments[0]), approval=approval)

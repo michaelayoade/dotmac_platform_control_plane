@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import sysconfig
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from dotmac_deployment_foundation.application_profile import (
 )
 from dotmac_deployment_foundation.document import build_canonical_document
 from dotmac_deployment_foundation.engine.plan import build_plan
+from dotmac_deployment_foundation.errors import SpecError
 from dotmac_deployment_foundation.execution_plan import (
     HostPrestateV1,
     render_execution_plan,
@@ -35,7 +37,8 @@ from vendor_cp.deployment.candidate import (
     render_candidate,
 )
 
-DESCRIPTOR = Path(__file__).resolve().parents[1] / "deploy/product.toml"
+SYNTHETIC_DESCRIPTOR = Path(__file__).parent / "fixtures/renderer-component.toml"
+PRODUCTION_DESCRIPTOR = Path(__file__).resolve().parents[1] / "deploy/product.toml"
 
 
 @pytest.fixture
@@ -74,7 +77,7 @@ def _profile_coordinate(version: str = "1.0.0") -> str:
     return profile_digest(profile.as_document())
 
 
-def test_installed_renderer_preserves_descriptor_and_exact_two_field_derivation(
+def test_synthetic_installed_renderer_preserves_exact_two_field_derivation(
     image: CandidateImage,
 ) -> None:
     for value in (HostPrestateV1, ProductDeploymentSpec, render_candidate):
@@ -84,19 +87,19 @@ def test_installed_renderer_preserves_descriptor_and_exact_two_field_derivation(
             origin.is_relative_to(Path(sysconfig.get_path(kind)).resolve())
             for kind in ("purelib", "platlib")
         ), origin
-    before = DESCRIPTOR.read_bytes()
-    accepted = ProductDeploymentSpec.load(str(DESCRIPTOR))
+    before = SYNTHETIC_DESCRIPTOR.read_bytes()
+    synthetic_spec = ProductDeploymentSpec.load(str(SYNTHETIC_DESCRIPTOR))
     expected = dataclasses.replace(
-        accepted, image=image.reference, source_revision=image.source_revision
+        synthetic_spec, image=image.reference, source_revision=image.source_revision
     )
-    for field in dataclasses.fields(accepted):
+    for field in dataclasses.fields(synthetic_spec):
         if field.name not in {"image", "source_revision"}:
-            assert getattr(expected, field.name) == getattr(accepted, field.name)
+            assert getattr(expected, field.name) == getattr(synthetic_spec, field.name)
     document = build_canonical_document(expected)
     prestate = HostPrestateV1((("app", "sha256:" + "f" * 64),))
     coordinate = _profile_coordinate()
     rendered = render_candidate(
-        str(DESCRIPTOR),
+        str(SYNTHETIC_DESCRIPTOR),
         image,
         target="qualified-test-target",
         operation="deploy",
@@ -118,21 +121,21 @@ def test_installed_renderer_preserves_descriptor_and_exact_two_field_derivation(
     assert rendered.execution_plan_digest == independent.digest()
     assert rendered.prestate is prestate
     assert rendered.application_profile_digest == coordinate
-    assert DESCRIPTOR.read_bytes() == before
+    assert SYNTHETIC_DESCRIPTOR.read_bytes() == before
     plan = json.loads(rendered.canonical_plan_bytes)
     assert plan["image_reference"] == image.reference
     assert plan["source_revision"] == image.source_revision
 
 
 @pytest.mark.parametrize("changed", ["prestate", "profile"])
-def test_changed_frozen_coordinates_change_real_foundation_plan(
+def test_synthetic_frozen_coordinates_change_real_foundation_plan(
     image: CandidateImage,
     changed: str,
 ) -> None:
     prestate = HostPrestateV1((("app", "sha256:" + "f" * 64),))
     coordinate = _profile_coordinate()
     baseline = render_candidate(
-        str(DESCRIPTOR),
+        str(SYNTHETIC_DESCRIPTOR),
         image,
         target="qualified-test-target",
         operation="deploy",
@@ -140,7 +143,7 @@ def test_changed_frozen_coordinates_change_real_foundation_plan(
         application_profile_digest=coordinate,
     )
     altered = render_candidate(
-        str(DESCRIPTOR),
+        str(SYNTHETIC_DESCRIPTOR),
         image,
         target="qualified-test-target",
         operation="deploy",
@@ -164,10 +167,30 @@ def test_dictionary_prestate_cannot_substitute_for_foundation_value(
 ) -> None:
     with pytest.raises(CandidateRefused, match="candidate_prestate_unavailable"):
         render_candidate(
-            str(DESCRIPTOR),
+            str(SYNTHETIC_DESCRIPTOR),
             image,
             target="qualified-test-target",
             operation="deploy",
             prestate={"roles": []},  # type: ignore[arg-type]
             application_profile_digest=_profile_coordinate(),
         )
+
+
+def test_actual_production_descriptor_row_counts_without_executor_is_refused() -> None:
+    """The real production promise remains unsupported by this exact owner.
+
+    This is required refusal evidence, not positive production compatibility.
+    No parser input is stripped, rewritten or replaced by the synthetic fixture.
+    """
+    before = PRODUCTION_DESCRIPTOR.read_bytes()
+    declared = tomllib.loads(before.decode("utf-8"))
+    dataset = declared["backup"]["datasets"][0]
+    assert "row_counts" in dataset["verify"]
+    assert "external_executor" not in dataset
+    try:
+        with pytest.raises(SpecError) as refused:
+            ProductDeploymentSpec.load(str(PRODUCTION_DESCRIPTOR))
+        assert refused.value.code == "backup.verification.unperformable"
+        assert refused.value.where == "backup.datasets[0]"
+    finally:
+        assert PRODUCTION_DESCRIPTOR.read_bytes() == before

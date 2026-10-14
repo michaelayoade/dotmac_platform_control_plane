@@ -72,3 +72,23 @@ Foundation artifact is not a candidate allocation, eligible production pin or
 profile admission. Real production service callers, canonical profile/receipt,
 shared executor/effects composition and deployment/recovery acceptance remain
 separate requirements; green source tests cannot replace them.
+
+
+The renderer's positive conformance is explicitly a COMPONENT proof using the
+separately authored fictional `conformance/fixtures/renderer-component.toml`.
+It is never derived by weakening the promoted production descriptor. The
+required actual-descriptor case preserves `deploy/product.toml` byte-for-byte,
+checks its `row_counts` promise and lack of `external_executor`, and requires
+Foundation source `d74bf8dd8c399dd92047174365403b861f82ddd0` to refuse with
+`SpecError.code = backup.verification.unperformable` and
+`SpecError.where = backup.datasets[0]`. The installed report module requires this
+negative case alongside the synthetic transport cases; it cannot disappear or
+skip while those cases pass.
+
+Transport/render and signed-authority component proofs do not establish
+production descriptor compatibility, canonical admission or deployment
+completion. **D7's actual row-count verification owner is OPEN.** A real owner
+and its evidence must discharge the existing promise before production
+compatibility can be claimed. Expected refusal preserves that gap; it does not
+turn it into positive acceptance, remove the promise, invent an external
+executor or authorize descriptor/pin changes. CP remains draft and incomplete.

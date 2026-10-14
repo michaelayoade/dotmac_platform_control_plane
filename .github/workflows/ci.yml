@@ -104,8 +104,6 @@ jobs:
           set -euo pipefail
           poetry run pytest tests/migration -q -rs \
             --junitxml="$RUNNER_TEMP/foundation-approval.xml"
-          poetry run python scripts/check_foundation_composition_junit.py --approval \
-            "$RUNNER_TEMP/foundation-approval.xml"
       # The ordinary migration suite may skip optional Foundation imports.
       # This separate required step makes those four tests an executed gate
       # against one immutable Foundation source without changing CP's runtime
@@ -156,10 +154,12 @@ jobs:
             "$RUNNER_TEMP"/foundation-composition-wheels/*.whl dist/*.whl
           composition_python="$(poetry env info --executable)"
           acceptance_root="$RUNNER_TEMP/foundation-composition"
-          mkdir -p "$acceptance_root/conformance" "$acceptance_root/deploy"
+          mkdir -p "$acceptance_root/conformance/fixtures" "$acceptance_root/deploy"
           cp conformance/conftest.py conformance/test_host_admission_conformance.py \
             conformance/test_candidate_renderer_real_foundation.py "$acceptance_root/conformance/"
+          cp conformance/fixtures/renderer-component.toml "$acceptance_root/conformance/fixtures/renderer-component.toml"
           cp deploy/product.toml "$acceptance_root/deploy/product.toml"
+          cmp -- deploy/product.toml "$acceptance_root/deploy/product.toml"
           cd "$acceptance_root"
           "$composition_python" - <<'PY'
           import sysconfig
@@ -172,6 +172,7 @@ jobs:
           import vendor_cp.deployment.foundation_approval as approval_service
           import vendor_cp.deployment.host_admission_adapter as host_adapter
           import vendor_cp.deployment.runtime as runtime
+          import vendor_cp.deployment.conformance_report as conformance_report
           for distribution, expected in (
               ("dotmac-deployment-control", "0.1.0a17"),
               ("dotmac-approvals", "0.1.0a8"),
@@ -179,16 +180,18 @@ jobs:
           ):
               assert version(distribution) == expected, distribution
           installed_roots = [Path(sysconfig.get_path(kind)).resolve() for kind in ("purelib", "platlib")]
-          for module in (control, approvals, foundation, candidate, approval_service, host_adapter, runtime):
+          for module in (control, approvals, foundation, candidate, approval_service, host_adapter, runtime, conformance_report):
               origin = Path(module.__file__).resolve()
               assert any(origin.is_relative_to(root) for root in installed_roots), (module.__name__, origin)
               print(module.__name__, origin)
           PY
+          "$composition_python" -m vendor_cp.deployment.conformance_report --approval \
+            "$RUNNER_TEMP/foundation-approval.xml"
           "$composition_python" -m pytest -q -rs --rootdir="$acceptance_root" \
             conformance/test_candidate_renderer_real_foundation.py \
             conformance/test_host_admission_conformance.py \
             --junitxml="$RUNNER_TEMP/foundation-composition.xml"
-          "$composition_python" "$GITHUB_WORKSPACE/scripts/check_foundation_composition_junit.py" \
+          "$composition_python" -m vendor_cp.deployment.conformance_report \
             "$RUNNER_TEMP/foundation-composition.xml"
       - name: Retain Foundation composition case report
         if: always()

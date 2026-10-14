@@ -185,7 +185,7 @@ def test_harness_proves_the_application_control_and_kernel_artifact_pins() -> No
     assert "rehearsal_issuer_harness/" in workflow
     composition = (ROOT / ".github/workflows/ci.yml").read_text()
     assert "conformance/test_host_admission_conformance.py" in composition
-    assert "scripts/check_foundation_composition_junit.py" in composition
+    assert "-m vendor_cp.deployment.conformance_report" in composition
     assert "d74bf8dd8c399dd92047174365403b861f82ddd0" in composition
 
 

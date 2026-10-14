@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from runpy import run_path
 from xml.etree import ElementTree
 
 import pytest
 
+from vendor_cp.deployment.conformance_report import (
+    APPROVAL_EXPECTED,
+    EXPECTED,
+    check_report,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
-CHECKER = ROOT / "scripts/check_foundation_composition_junit.py"
-_checker = run_path(str(CHECKER))
-EXPECTED = _checker["EXPECTED"]
-check_report = _checker["check_report"]
-APPROVAL_EXPECTED = _checker["APPROVAL_EXPECTED"]
 
 
 def _report(path, *, omitted=None, skipped=None, extra=None):
@@ -35,11 +35,19 @@ def test_named_gate_accepts_complete_run_and_refuses_skip_omission_duplicate(tmp
     path = tmp_path / "composition.xml"
     _report(path)
     check_report(path)
-    identity = min(EXPECTED)
-    for kwargs in ({"omitted": identity}, {"skipped": identity}, {"extra": identity}):
-        _report(path, **kwargs)
-        with pytest.raises(ValueError):
-            check_report(path)
+    production_refusal = (
+        "conformance.test_candidate_renderer_real_foundation",
+        "test_actual_production_descriptor_row_counts_without_executor_is_refused",
+    )
+    for identity in (min(EXPECTED), production_refusal):
+        for kwargs in (
+            {"omitted": identity},
+            {"skipped": identity},
+            {"extra": identity},
+        ):
+            _report(path, **kwargs)
+            with pytest.raises(ValueError):
+                check_report(path)
     # Same name, wrong module is also an omitted required case.
     _report(path, omitted=identity, extra=("different.module", identity[1]))
     with pytest.raises(ValueError):
@@ -65,15 +73,36 @@ def test_gate_names_every_host_and_renderer_case_including_parameter_variants():
         for module, name in EXPECTED
         if module.endswith("test_candidate_renderer_real_foundation")
     }
-    assert len(renderer_cases) == 4
+    assert len(renderer_cases) == 5
+    renderer_tree = ast.parse(
+        (ROOT / "conformance/test_candidate_renderer_real_foundation.py").read_text()
+    )
+    renderer_functions = {
+        node.name
+        for node in renderer_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    }
+    assert {name.split("[", 1)[0] for name in renderer_cases} == renderer_functions
+    assert len(EXPECTED) == 21 and len(APPROVAL_EXPECTED) == 21
     assert (
-        "test_changed_frozen_coordinates_change_real_foundation_plan[prestate]"
+        "test_synthetic_frozen_coordinates_change_real_foundation_plan[prestate]"
         in renderer_cases
     )
     assert (
-        "test_changed_frozen_coordinates_change_real_foundation_plan[profile]"
+        "test_synthetic_frozen_coordinates_change_real_foundation_plan[profile]"
         in renderer_cases
     )
+    assert (
+        "test_actual_production_descriptor_row_counts_without_executor_is_refused"
+        in renderer_cases
+    )
+    renderer_source = (
+        ROOT / "conformance/test_candidate_renderer_real_foundation.py"
+    ).read_text()
+    assert "fixtures/renderer-component.toml" in renderer_source
+    assert '"backup.verification.unperformable"' in renderer_source
+    assert '"backup.datasets[0]"' in renderer_source
+    assert (ROOT / "conformance/fixtures/renderer-component.toml").is_file()
 
 
 def test_required_postgres_job_installs_complete_closure_and_runs_outside_checkout():
@@ -93,7 +122,20 @@ def test_required_postgres_job_installs_complete_closure_and_runs_outside_checko
     assert '("dotmac-approvals", "0.1.0a8")' in postgres
     assert "conformance/test_candidate_renderer_real_foundation.py" in postgres
     assert "conformance/test_host_admission_conformance.py" in postgres
-    assert "scripts/check_foundation_composition_junit.py" in postgres
+    assert "conformance/fixtures/renderer-component.toml" in postgres
+    assert (
+        'cmp -- deploy/product.toml "$acceptance_root/deploy/product.toml"' in postgres
+    )
+    assert "-m vendor_cp.deployment.conformance_report" in postgres
+    installed = postgres.index("--no-index --no-deps --force-reinstall")
+    outside_checkout = postgres.index('cd "$acceptance_root"')
+    origin_check = postgres.index("for module in (")
+    approval_gate = postgres.index(
+        "-m vendor_cp.deployment.conformance_report --approval"
+    )
+    assert installed < outside_checkout < origin_check < approval_gate
+    assert "conformance_report):" in postgres
+    assert not (ROOT / "scripts/check_foundation_composition_junit.py").exists()
     assert "d74bf8dd8c399dd92047174365403b861f82ddd0" in postgres
     assert "PYTHONPATH:" not in postgres.split("Installed Foundation renderer", 1)[1]
     assert postgres.index("dotmac-platform admin migrate") < postgres.index(
@@ -149,5 +191,5 @@ def test_named_approval_gate_cannot_skip_an_owner_race(tmp_path):
     with pytest.raises(ValueError, match="collected"):
         check_report(path, approval=True)
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-    assert "check_foundation_composition_junit.py --approval" in workflow
+    assert "-m vendor_cp.deployment.conformance_report --approval" in workflow
     assert '--junitxml="$RUNNER_TEMP/foundation-approval.xml"' in workflow
