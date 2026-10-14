@@ -28,3 +28,13 @@ command = ["component-service"]
 cpus = "0.25"
 memory = "64m"
 pids = 32
+
+# Fictional readiness contract for parser/render coverage, never executed here.
+[roles.health.ready]
+path = "/component-ready"
+port = 8080
+probe = ["component-health", "ready"]
+interval_seconds = 10
+timeout_seconds = 2
+retries = 3
+start_period_seconds = 0

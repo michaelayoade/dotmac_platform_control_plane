@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TypeVar
 from xml.etree import ElementTree
 
 HOST = "conformance.test_host_admission_conformance"
@@ -70,27 +71,35 @@ APPROVAL_EXPECTED = frozenset(
 )
 
 
+_Identity = TypeVar("_Identity")
+
+
+def _require_exact_identities(
+    identities: list[_Identity], expected: frozenset[_Identity]
+) -> None:
+    if len(identities) != len(expected) or frozenset(identities) != expected:
+        raise ValueError(
+            f"Foundation composition collected {identities!r}; expected "
+            f"{sorted(map(str, expected))!r} exactly once"
+        )
+
+
 def check_report(path: Path, *, approval: bool = False) -> None:
     # The XML is the runner-local pytest report, never an external document.
     root = ElementTree.parse(path).getroot()  # noqa: S314
     cases = root.findall(".//testcase")
-    identities: list[object]
-    expected: frozenset[object]
     if approval:
         cases = [
             case
             for case in cases
             if case.get("classname", "").endswith(".test_foundation_approval")
         ]
-        identities = [case.get("name") for case in cases]
-        expected = APPROVAL_EXPECTED
+        _require_exact_identities(
+            [case.get("name") for case in cases], APPROVAL_EXPECTED
+        )
     else:
-        identities = [(case.get("classname"), case.get("name")) for case in cases]
-        expected = EXPECTED
-    if len(cases) != len(expected) or set(identities) != expected:
-        raise ValueError(
-            f"Foundation composition collected {identities!r}; expected "
-            f"{sorted(map(str, expected))!r} exactly once"
+        _require_exact_identities(
+            [(case.get("classname"), case.get("name")) for case in cases], EXPECTED
         )
     for case in cases:
         if any(
