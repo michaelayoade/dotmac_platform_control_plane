@@ -1,0 +1,166 @@
+{
+  "contract": "KernelAdoptionDeclaration.v2",
+  "applicability": "applicable",
+  "declared_at": "2026-09-07",
+  "source_predecessor": "f8865b1a43a6d6769d5fa3a3ab3eddfdf296cffb",
+  "source_surface": {
+    "algorithm": "dmg-kernel-surface-v2",
+    "digest": "sha256:33c3416b83effa7a4bb78ce290016e5f75d4a358a7e00cefbb92411e1a6340aa"
+  },
+  "kernel_catalogue": {
+    "version": "0.1.0a98",
+    "revision": "ae7320876ad91d5bf4639d634d65a6e8fd36bb00",
+    "artifact_digest": "sha256:27405c57c4af395224cdd2f4366c0144207e9df2eab4ca8a8ed1142c1d0859fa",
+    "catalogue_digest": "sha256:0352bf42b7199e98196641470d79a29fe2087ac0bbd7550633bab0b41f80e6d0"
+  },
+  "required_surfaces": [
+    {
+      "module": "dotmac_kernel",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.audit",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.features",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.idempotency",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.licensing",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.messaging",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.messaging.platform_worker",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.migrations",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.migrations.catalog",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.models",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.planes",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.platform_auth",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.prerequisites",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.providers.provisioning",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.security",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    },
+    {
+      "module": "dotmac_kernel.session_runtime",
+      "floor": "0.1.0a98",
+      "proven_by": "scripts/kernel_floor.py"
+    }
+  ],
+  "prohibited_surfaces": [],
+  "transitional_surfaces": [
+    {
+      "module": "dotmac_kernel.db",
+      "owner": "Vendor Control Plane runtime owner",
+      "expiry": "2026-09-30",
+      "retirement_issue": "https://github.com/michaelayoade/dotmac_platform_control_plane/issues/179",
+      "replacement": "one product-owned DatabaseRuntime exposed through this assembly's own session boundaries, replacing the kernel's module-level engine built at import time from DATABASE_URL",
+      "baseline": [
+        {
+          "path": "src/vendor_cp/accounts/router.py",
+          "symbol": "get_platform_db"
+        },
+        {
+          "path": "src/vendor_cp/allocations/router.py",
+          "symbol": "get_platform_db"
+        },
+        {
+          "path": "src/vendor_cp/approvals/router.py",
+          "symbol": "get_platform_db"
+        },
+        {
+          "path": "src/vendor_cp/cli/runtime.py",
+          "symbol": "platform_session"
+        },
+        {
+          "path": "src/vendor_cp/contracts/router.py",
+          "symbol": "get_platform_db"
+        },
+        {
+          "path": "src/vendor_cp/licensing/router.py",
+          "symbol": "get_platform_db"
+        },
+        {
+          "path": "src/vendor_cp/offers/router.py",
+          "symbol": "get_platform_db"
+        },
+        {
+          "path": "src/vendor_cp/readiness/router.py",
+          "symbol": "get_platform_db"
+        },
+        {
+          "path": "src/vendor_cp/relay/runner.py",
+          "symbol": "runtime"
+        },
+        {
+          "path": "src/vendor_cp/release_evidence/service.py",
+          "symbol": "conflict_savepoint"
+        },
+        {
+          "path": "src/vendor_cp/rotation_runtime_oracle.pyprogram",
+          "symbol": "PlatformSessionLocal"
+        },
+        {
+          "path": "src/vendor_cp/rotation_runtime_oracle.pyprogram",
+          "symbol": "SessionLocal"
+        },
+        {
+          "path": "src/vendor_cp/rotation_runtime_oracle.pyprogram",
+          "symbol": "engine"
+        },
+        {
+          "path": "src/vendor_cp/rotation_runtime_oracle.pyprogram",
+          "symbol": "platform_engine"
+        }
+      ]
+    }
+  ]
+}
