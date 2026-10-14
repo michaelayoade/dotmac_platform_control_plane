@@ -1,13 +1,13 @@
-"""The five-by-five purpose matrix, and the control that makes it mean anything.
+"""The six-by-six purpose matrix, and the control that makes it mean anything.
 
-`accept_release_evidence` must accept five correct-purpose diagonals and refuse
-twenty ordered cross-purpose pairings, **from installed artifacts**. This is the
+`accept_release_evidence` must accept six correct-purpose diagonals and refuse
+thirty ordered cross-purpose pairings, **from installed artifacts**. This is the
 harness, and it is built control-first for a reason the numbers make obvious:
 
-    a verifier that refuses everything scores 20/20 on the refusals and 0/5 on
+    a verifier that refuses everything scores 30/30 on the refusals and 0/6 on
     the diagonals.
 
-Twenty passing refusals are worthless without evidence that the verifier could
+Thirty passing refusals are worthless without evidence that the verifier could
 have accepted something. So `MatrixResult.meaningful` is False whenever no
 diagonal was accepted, and the harness reports UNKNOWN rather than a score.
 That is the same rule as `vendor_cp.deployment.table_inventory`: a result you
@@ -17,7 +17,7 @@ could not establish is not a zero.
 
 The harness is proved here with constructed identities, so its discrimination is
 demonstrable today. The real run needs the installed artifacts, and two of the
-five purposes have no reachable pointer type yet:
+six purposes have no reachable pointer type yet:
 
 * `deployment_dispatch` — no descriptor exists anywhere;
 * `deployment_recovery` — Control's, and the installed Control publishes no
@@ -41,13 +41,14 @@ from typing import Final
 from vendor_cp.deployment.signers import (
     AUTHORIZATION_PURPOSE,
     EXECUTION_OBSERVATION_PURPOSE,
+    REHEARSAL_ISSUER_PURPOSE,
     RELEASE_EVIDENCE_PURPOSE,
 )
 
 DISPATCH_PURPOSE: Final = "deployment_dispatch"
 RECOVERY_PURPOSE: Final = "deployment_recovery"
 
-#: The five, in a fixed order so a matrix is diffable between runs. Ordered
+#: The six, in a fixed order so a matrix is diffable between runs. Ordered
 #: cross-purpose pairings means the (signer, expected) pairs are enumerated in
 #: this order, not gathered into a set.
 PURPOSES: Final[tuple[str, ...]] = (
@@ -56,6 +57,7 @@ PURPOSES: Final[tuple[str, ...]] = (
     RELEASE_EVIDENCE_PURPOSE,
     DISPATCH_PURPOSE,
     RECOVERY_PURPOSE,
+    REHEARSAL_ISSUER_PURPOSE,
 )
 
 
@@ -72,7 +74,7 @@ class CellOutcome(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class MatrixResult:
-    """The full five-by-five, and whether it may be believed."""
+    """The full six-by-six, and whether it may be believed."""
 
     accepted_diagonals: int
     refused_cross: int
@@ -159,26 +161,26 @@ def _declared_purpose(pointer: type) -> str:
 # ── the control that makes the other twenty-five mean anything ──────────────
 
 
-def test_a_broken_shut_verifier_scores_a_perfect_twenty_and_is_refused() -> None:
+def test_a_broken_shut_verifier_scores_a_perfect_thirty_and_is_refused() -> None:
     """THE CONTROL, BUILT FIRST.
 
-    A verifier refusing everything gets all twenty cross-purpose refusals right
+    A verifier refusing everything gets all thirty cross-purpose refusals right
     and every diagonal wrong. The refusal count alone cannot tell it from a
     working verifier, which is exactly why the count alone is never the result.
     """
     result = run_matrix(_broken_shut, available=ALL)
-    assert result.refused_cross == 20
+    assert result.refused_cross == 30
     assert result.accepted_diagonals == 0
     assert result.meaningful is False, (
-        "a verifier that refuses everything scored twenty refusals and was " "believed"
+        "a verifier that refuses everything scored thirty refusals and was " "believed"
     )
 
 
-def test_a_working_verifier_is_meaningful_and_scores_five_and_twenty() -> None:
+def test_a_working_verifier_is_meaningful_and_scores_six_and_thirty() -> None:
     """NON-VACUITY for the control: a harness that called everything
     meaningless would pass the test above while measuring nothing."""
     result = run_matrix(_correct, available=ALL)
-    assert (result.accepted_diagonals, result.refused_cross) == (5, 20)
+    assert (result.accepted_diagonals, result.refused_cross) == (6, 30)
     assert result.meaningful is True
     assert result.complete is True
 
@@ -188,7 +190,7 @@ def test_a_broken_open_verifier_refuses_nothing_and_is_caught_by_the_count() -> 
     and it is still wrong, which is why the refusal count is asserted separately
     rather than folded into one verdict."""
     result = run_matrix(_broken_open, available=ALL)
-    assert result.accepted_diagonals == 5
+    assert result.accepted_diagonals == 6
     assert result.meaningful is True
     assert result.refused_cross == 0
 
@@ -204,10 +206,10 @@ def test_an_absent_purpose_yields_unknown_rather_than_refusals() -> None:
     result = run_matrix(_correct, available=available)
     assert result.absent_purposes == (DISPATCH_PURPOSE, RECOVERY_PURPOSE)
     assert result.complete is False
-    # Three of five diagonals, and the cross-pairings among those three only.
-    assert result.accepted_diagonals == 3
-    assert result.refused_cross == 6
-    assert result.unknown_cells == 16
+    # Four of six diagonals, and the cross-pairings among those four only.
+    assert result.accepted_diagonals == 4
+    assert result.refused_cross == 12
+    assert result.unknown_cells == 20
 
 
 def test_absence_cannot_inflate_the_refusal_count() -> None:
@@ -233,7 +235,7 @@ def test_the_reachable_purposes_are_measured_not_assumed() -> None:
     """The ordering fact, measured and recorded rather than skipped.
 
     Two purposes have no reachable pointer type and the verifying artifact is
-    not installed here, so the five-by-five cannot yet run against artifacts.
+    not installed here, so the six-by-six cannot yet run against artifacts.
     This asserts what IS reachable, so the day it changes the number moves and
     somebody notices — rather than a skip that stays silent through the change
     it was waiting for.
@@ -243,6 +245,7 @@ def test_the_reachable_purposes_are_measured_not_assumed() -> None:
     from vendor_cp.deployment.signers import (
         AuthorizationSignerPointer,
         ObservationSignerPointer,
+        RehearsalIssuerSignerPointer,
         ReleaseEvidenceSignerPointer,
     )
 
@@ -256,6 +259,7 @@ def test_the_reachable_purposes_are_measured_not_assumed() -> None:
             AuthorizationSignerPointer,
             ObservationSignerPointer,
             ReleaseEvidenceSignerPointer,
+            RehearsalIssuerSignerPointer,
         )
     }
     assert dataclasses.is_dataclass(AuthorizationSignerPointer)
@@ -263,6 +267,7 @@ def test_the_reachable_purposes_are_measured_not_assumed() -> None:
         AUTHORIZATION_PURPOSE,
         EXECUTION_OBSERVATION_PURPOSE,
         RELEASE_EVIDENCE_PURPOSE,
+        REHEARSAL_ISSUER_PURPOSE,
     }
     # The two that are not: neither is this product's to type.
     assert DISPATCH_PURPOSE not in typed
@@ -281,6 +286,14 @@ def test_the_release_evidence_purpose_is_no_longer_untyped() -> None:
     from vendor_cp.deployment.signers import ReleaseEvidenceSignerPointer
 
     assert _declared_purpose(ReleaseEvidenceSignerPointer) == RELEASE_EVIDENCE_PURPOSE
+
+
+def test_the_rehearsal_issuer_purpose_has_a_typed_pointer() -> None:
+    """The sixth purpose, asserted the same way as the fifth: a fourth
+    descriptor class exists and declares exactly `REHEARSAL_ISSUER_PURPOSE`."""
+    from vendor_cp.deployment.signers import RehearsalIssuerSignerPointer
+
+    assert _declared_purpose(RehearsalIssuerSignerPointer) == REHEARSAL_ISSUER_PURPOSE
 
 
 def test_the_purpose_reader_reads_a_value_and_not_a_descriptor() -> None:
