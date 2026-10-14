@@ -109,7 +109,8 @@ def _composition(
     fail_finalizer: bool = False,
     fail_second_commit: bool = False,
     reuse_session: bool = False,
-    plan_requires_approval: bool | None = False,
+    plan_requires_approval: bool | None = True,
+    missing_barrier: bool = False,
     plan_id: str = "00000000-0000-0000-0000-0000000000a1",
 ):
     events: list[str] = []
@@ -205,7 +206,12 @@ def _composition(
         assert str(requested) == plan_id
         if plan_requires_approval is None:
             return None
-        return SimpleNamespace(id=requested, requires_approval=plan_requires_approval)
+        return SimpleNamespace(
+            id=requested,
+            requires_approval=plan_requires_approval,
+            approval_decision_ref="approval",
+            plan_digest="sha256:plan",
+        )
 
     control = ControlFoundationV3Bindings(
         resolve_context=resolve,
@@ -227,6 +233,17 @@ def _composition(
         consumption_request_type=_Request,
         execution_context_type=_Facts,
     )
+
+    def held_transition(session, *, plan_id, transition):
+        events.append("hold")
+        assert session is sessions[-1]
+        plan = get_plan(session, plan_id)
+        if plan is None or plan.requires_approval is not True:
+            raise DispatchApprovalSubjectUnavailable(
+                "Foundation approval binding unavailable"
+            )
+        return transition(object())
+
     sources = FoundationV3Sources(
         sessions=sessions_factory,
         host_admission=lambda: HostAdmissionObservation(
@@ -234,6 +251,7 @@ def _composition(
         ),
         execution_context=lambda: current_facts[0],
         clock=lambda: datetime(2026, 9, 25, tzinfo=UTC),
+        held_transition=None if missing_barrier else held_transition,
     )
     providers = compose_foundation_v3_providers(
         control=control, foundation=foundation, sources=sources
@@ -282,6 +300,8 @@ def test_f2_closes_session_before_real_verification_and_v3_commits_before_return
         "commit",
         "close",
         "foundation",
+        "get_plan",
+        "hold",
         "get_plan",
         "finalize",
         "commit",
@@ -362,22 +382,24 @@ def test_session_factory_cannot_reuse_the_f2_session_for_v3() -> None:
 
 
 @pytest.mark.parametrize(
-    ("requires_approval", "plan_id", "match"),
+    ("requires_approval", "plan_id", "missing_barrier", "match"),
     [
-        (True, "00000000-0000-0000-0000-0000000000a1", "requires approval"),
-        (None, "00000000-0000-0000-0000-0000000000a1", "does not exist"),
-        (False, "not-a-uuid", "is not a UUID"),
+        (False, "00000000-0000-0000-0000-0000000000a1", False, "binding unavailable"),
+        (None, "00000000-0000-0000-0000-0000000000a1", False, "binding changed"),
+        (True, "not-a-uuid", False, "plan id is invalid"),
+        (True, "00000000-0000-0000-0000-0000000000a1", True, "not composed"),
     ],
 )
-def test_dispatch_fails_closed_for_an_approval_requiring_or_unknown_plan(
-    requires_approval: bool | None, plan_id: str, match: str
+def test_dispatch_requires_a_bound_approval_barrier(
+    requires_approval,
+    plan_id,
+    missing_barrier,
+    match,
 ) -> None:
-    """C2-D1 (Michael, 2026-09-26): a FOUNDATION_EXECUTION plan has no Approvals
-    subject for the C2 barrier to hold, so dispatch refuses any plan that
-    requires approval, is missing, or is named by a malformed id. Control's
-    finalizer is never reached, and nothing is committed."""
     providers, events, _, engine, resolved, _ = _composition(
-        plan_requires_approval=requires_approval, plan_id=plan_id
+        plan_requires_approval=requires_approval,
+        plan_id=plan_id,
+        missing_barrier=missing_barrier,
     )
     _, trace = providers.host_source.admit_host_source()
     with pytest.raises(DispatchApprovalSubjectUnavailable, match=match):
@@ -388,17 +410,14 @@ def test_dispatch_fails_closed_for_an_approval_requiring_or_unknown_plan(
     assert _marker_count(engine) == 0
 
 
-def test_the_approval_check_runs_before_the_finalizer_in_the_same_session() -> None:
-    """Non-vacuity for the refusal above: a plan that explicitly does not
-    require approval still dispatches, and the check comes first."""
-    providers, events, _, engine, resolved, _ = _composition(
-        plan_requires_approval=False
-    )
+def test_the_finalizer_runs_inside_the_startup_barrier_before_commit() -> None:
+    providers, events, _, engine, resolved, _ = _composition()
     _, trace = providers.host_source.admit_host_source()
     providers.execution_authority.consume_dispatch(
         request=_request(trace, resolved.dispatch_id)
     )
-    assert events.index("get_plan") < events.index("finalize")
+    assert events.index("hold") < events.index("finalize")
+    assert events[events.index("finalize") + 1 :] == ["commit", "close"]
     assert _marker_count(engine) == 1
 
 

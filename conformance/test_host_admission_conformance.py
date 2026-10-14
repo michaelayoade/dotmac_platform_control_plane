@@ -1,11 +1,13 @@
-"""Real-wheel Control/Foundation component conformance and CP V3 refusal.
+"""Installed Control/Approvals/Foundation components and real CP V3 barriers.
 
 The ten component cases use a TEST-OWNED resolve/verify/finalize driver with
 Control's actual FoundationDispatchConsumptionV1 signed-pair input. They do
 not call CP's obsolete pre-V3 helper and do not prove CP execution adoption.
-A separate case drives CP's real startup-bound V3 provider through genuine
-Foundation F2 admission and proves its C2-D1 approval-subject refusal happens
-before Control finalization, consumption or launch. Gate 3 remains open.
+The CP cases use the actual Approvals request and decision, held rollout and
+held dispatch, then drive the real startup-bound V3 provider through Foundation
+F2 and Control finalization. They prove withdrawal orderings, missing-barrier
+refusal, transactional consumption, replay refusal and ambiguous-commit lookup.
+Canonical profile admission and deployment adoption remain separate obligations.
 
 All packages are installed as exact wheels in disposable CI. The Foundation
 wheel is a test-only build from a pinned source commit, not an allocated or
@@ -40,8 +42,6 @@ import pytest
 # see here". By the time this module is even imported, conftest.py's
 # pytest_configure has already confirmed CONFORMANCE_DATABASE_URL is set.
 from dotmac_deployment_control import (
-    ApprovalEvidence,
-    ApprovePlanCommand,
     AuthorizationSignature,
     AuthorizationSignerIdentity,
     BindTargetHostCommand,
@@ -60,23 +60,18 @@ from dotmac_deployment_control import (
     HostAdmissionRefusedError,
     ProposePlanCommand,
     RegisterTargetCommand,
-    RequestRolloutCommand,
     SetDesiredStateCommand,
     SetTargetAdmissionPolicyCommand,
+    TransitionRefusedError,
     activate_credential,
     admit_and_consume_host_admission,
-    approve_plan,
-    attest_foundation_execution_pair,
     bind_target_host,
-    dispatch_attempt,
     enrol_host_admission_credential,
-    get_plan,
     install_foundation_consumption_security,
     install_host_admission_security,
     lookup_foundation_execution_consumption,
     propose_plan,
     register_target,
-    request_rollout,
     resolve_host_admission_context,
     revoke_credential,
     set_desired_state,
@@ -100,17 +95,14 @@ from dotmac_deployment_control.models import (
 )
 from dotmac_deployment_foundation import (
     AttestationEnvelopeV2,
-    AttestationPairVerificationResultV1,
     AttestationTrustPolicy,
     AttestationTrustRootV2,
     CandidateAttestationSubjectV2,
     ControlConsumptionRequestV3,
     Digest,
     ExecutionContextV3,
-    HostSourceAdmissionTrace,
     InstalledHostAttestationSubjectV2,
     PreconditionFailed,
-    admit_host_source,
     attestation_envelope_digest,
     verify_attestation_pair,
 )
@@ -121,22 +113,26 @@ from dotmac_deployment_foundation.host_source import read_installed_artifact
 # imports it from here too.
 from dotmac_deployment_foundation.trusted_host_source import candidate_subject_digest
 from dotmac_kernel.idempotency_models import PlatformIdempotencyRecord
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-# The LEAF module only -- see its own docstring and
-# tests/architecture/test_host_admission_adapter_import_boundary.py. NEVER
-# `vendor_cp.deployment.adapter`, which pulls in this application's entire
-# approvals/identity/licensing closure and would defeat the whole point of
-# the leaf split.
-from vendor_cp.deployment.host_admission_adapter import (
-    ControlFoundationV3Bindings,
-    DispatchApprovalSubjectUnavailable,
-    FoundationHostV3Bindings,
-    FoundationV3Sources,
-    HostAdmissionObservation,
-    compose_foundation_v3_providers,
+# The complete installed CP approval closure is intentional in this suite.
+# The isolated issuer harness remains a different dependency boundary.
+from vendor_cp.approvals import adapter as approvals
+from vendor_cp.approvals_authority import bare_content_hash
+from vendor_cp.deployment.approval_barrier import ApprovalBarrierUnavailable
+from vendor_cp.deployment.foundation_approval import (
+    approve_foundation_plan,
+    dispatch_foundation_attempt,
+    open_foundation_approval,
+    request_foundation_rollout,
 )
+from vendor_cp.deployment.host_admission_adapter import (
+    DispatchApprovalSubjectUnavailable,
+    HostAdmissionObservation,
+)
+from vendor_cp.deployment.runtime import build_foundation_v3_providers
 
 # No pytestmark skipif here. `conformance/conftest.py`'s `pytest_configure`
 # already raised a hard `pytest.UsageError` before collection ever reached
@@ -440,10 +436,13 @@ def _installed_module_audit_actions() -> None:
     Same pattern as every one of Control's own unit tests (e.g.
     `tests/unit/test_deployment_control_intent.py`) -- verified there, not
     guessed."""
+    from dotmac_approvals import module as approvals_module
     from dotmac_deployment_control import module
     from dotmac_kernel.audit_actions import AuditActionRegistry, install_audit_actions
 
-    install_audit_actions(AuditActionRegistry.from_manifests([module]))
+    install_audit_actions(
+        AuditActionRegistry.from_manifests([module, approvals_module])
+    )
 
 
 # ── Control-side setup: target, plan, rollout, dispatch, host-admission
@@ -483,6 +482,7 @@ def _set_desired(db: Session, target_id: uuid.UUID) -> Any:
 
 
 def _approved_plan(db: Session, target_id: uuid.UUID) -> Any:
+    policy = f"{_POLICY}.{uuid.uuid4().hex[:12]}"
     plan = propose_plan(
         db,
         ProposePlanCommand(
@@ -493,40 +493,54 @@ def _approved_plan(db: Session, target_id: uuid.UUID) -> Any:
             execution_plan_digest=_EXECUTION_PLAN,
             purpose="foundation_execution",
             requires_approval=True,
-            approval_policy_code=_POLICY,
+            approval_policy_code=policy,
             approval_policy_version=_POLICY_VERSION,
         ),
     )
-    return approve_plan(
+    # Proposal holds Control locks. End that transaction BEFORE taking an
+    # Approvals hold; decision writing also ends before the shared hold.
+    db.commit()
+    approvals.publish_policy_version(
         db,
-        ApprovePlanCommand(
+        approvals.PublishPolicyCommand(
             command_id=_cmd(),
-            plan_id=plan.id,
-            evidence=ApprovalEvidence(
-                policy_code=_POLICY,
-                policy_version=_POLICY_VERSION,
-                decision_ref=f"apr-{uuid.uuid4().hex[:8]}",
-                content_digest=plan.plan_digest or "",
-                decided_at=datetime.now(UTC),
-                operation="deploy",
-                execution_plan_digest=_EXECUTION_PLAN,
-                decision_status="granted",
-            ),
+            policy_code=policy,
+            version=_POLICY_VERSION,
+            quorum=1,
+            allow_self_approval=False,
         ),
     )
+    opened = open_foundation_approval(
+        db, command_id=_cmd(), plan_id=plan.id, requested_by=uuid.uuid4()
+    )
+    approvals.record_decision(
+        db,
+        approvals.RecordDecisionCommand(
+            command_id=_cmd(),
+            request_id=opened.request_id,
+            approver_id=uuid.uuid4(),
+            content_hash=bare_content_hash(plan.plan_digest),
+        ),
+    )
+    db.commit()
+    approved = approve_foundation_plan(
+        db, command_id=_cmd(), plan_id=plan.id, approval_request_id=opened.request_id
+    )
+    db.commit()
+    return approved
 
 
 def _rollout(db: Session, plan_id: uuid.UUID, signer: _AuthorizationSigner) -> Any:
-    return request_rollout(
+    rollout = request_foundation_rollout(
         db,
-        RequestRolloutCommand(
-            command_id=_cmd(),
-            rollout_ref=f"rol-{uuid.uuid4().hex[:8]}",
-            plan_id=plan_id,
-            authorization_expires_at=datetime(2099, 1, 1, tzinfo=UTC),
-        ),
+        command_id=_cmd(),
+        rollout_ref=f"rol-{uuid.uuid4().hex[:8]}",
+        plan_id=plan_id,
+        authorization_expires_at=datetime(2099, 1, 1, tzinfo=UTC),
         signer=signer,
     )
+    db.commit()
+    return rollout
 
 
 class _AdmissionCoordinate:
@@ -574,8 +588,8 @@ def _build_admission_coordinate(
     # Every identity below is suffixed with a fresh per-call token. The
     # commands this function calls (register_target, enrol_host_admission_
     # credential, enrol_root, ...) run through `process_once_platform`, which
-    # commits internally for at-most-once durability -- the outer `db`
-    # fixture's rollback-on-teardown does NOT undo them. Multiple tests in one
+    # uses the caller's transaction. Setup explicitly commits each authority
+    # phase, so fixture rollback does not undo those phases. Multiple tests in one
     # process therefore each need their own key_id/host_id/custody subject,
     # or the second test to run collides with the first's already-committed
     # rows (real defect found by actually running this against Postgres,
@@ -590,13 +604,14 @@ def _build_admission_coordinate(
     authorization_signer = _AuthorizationSigner()
     rollout = _rollout(db, plan.id, authorization_signer)
     dispatch_signer = _DispatchSigner()
-    dispatch_attempt(
+    dispatch_foundation_attempt(
         db,
         command_id=_cmd(),
         rollout_id=rollout.id,
         verifier=_AuthorizationVerifier(authorization_signer),
         dispatch_signer=dispatch_signer,
     )
+    db.commit()
     stored_dispatch = control_service._stored_dispatch_coordinate(
         db, _latest_attempt_id(db, rollout.id)
     )
@@ -1465,116 +1480,258 @@ def test_component_observer_runs_only_after_the_admission_transaction_commits(
     assert events == ["resolve_commit", "admit_commit", "launch"]
 
 
-def test_real_cp_v3_refuses_an_approval_requiring_plan_before_finalization(
-    db: Session,
-) -> None:
-    """Current CP composition is fail-closed, not positively adopted at Gate 0.
+class _TrackedSession(Session):
+    def commit(self) -> None:
+        # CP invokes this only after the real finalizer returns. Observe that
+        # boundary without replacing any owner function or live barrier.
+        if self.info.get("finalization"):
+            self.info["finalizations"].append("owner_returned")
+            self.info["events"].append("finalize")
+            observer = self.info.get("after_finalize")
+            if observer is not None:
+                observer(self)
+        self.info["events"].append("commit")
+        super().commit()
+        if self.info.get("lost_commit_ack"):
+            raise RuntimeError("lost commit acknowledgement")
 
-    Real Foundation F2 first verifies both envelopes against Control-derived
-    roots and reads the actual installed wheel. The real CP V3 provider then
-    reads the real plan and refuses the still-unowned Approvals subject.
-    No get_plan fake, row edits, compatibility consumer or alternate launch.
-    """
-    coordinate = _build_admission_coordinate(db, now=_NOW)
+    def close(self) -> None:
+        self.info["events"].append("close")
+        super().close()
+
+
+def _real_cp_v3(
+    db: Session,
+    coordinate: _AdmissionCoordinate,
+    *,
+    missing_barrier: bool = False,
+    after_finalize: Any = None,
+    autocommit_finalizer: bool = False,
+    lost_commit_ack: bool = False,
+) -> Any:
     install_host_admission_security(
         verifier=coordinate.presentation_verifier, clock=coordinate.clock
     )
     db.commit()
     engine = create_engine(CONFORMANCE_DATABASE_URL, future=True)
+    events: list[str] = []
     sessions: list[Session] = []
     finalizations: list[object] = []
-    read_plans: list[object] = []
 
     def _session() -> Session:
-        session = Session(bind=engine)
+        binding = engine
+        if autocommit_finalizer and len(sessions) == 1:
+            binding = engine.execution_options(isolation_level="AUTOCOMMIT")
+        session = _TrackedSession(bind=binding)
+        session.info["events"] = events
+        session.info["finalization"] = len(sessions) == 1
+        session.info["finalizations"] = finalizations
+        session.info["after_finalize"] = after_finalize
+        session.info["lost_commit_ack"] = lost_commit_ack and len(sessions) == 1
         sessions.append(session)
         return session
 
-    def _real_f2(**kwargs: Any) -> Any:
-        assert len(sessions) == 1 and not sessions[0].in_transaction()
-        assert not db.in_transaction()
-        return admit_host_source(**kwargs)
+    observed_f2 = False
 
-    def _finalize(session: Session, **kwargs: Any) -> Any:
-        finalizations.append(kwargs)
-        return admit_and_consume_host_admission(session, **kwargs)
+    def execution_context() -> ExecutionContextV3:
+        nonlocal observed_f2
+        if not observed_f2:
+            # Host-source admission reads these observations after genuine F2.
+            assert len(sessions) == 1 and not sessions[0].in_transaction()
+            assert events[-1] == "close" and not db.in_transaction()
+            events.append("foundation")
+            observed_f2 = True
+        return coordinate.facts
 
-    def _checked_get_plan(session: Session, plan_id: uuid.UUID) -> Any:
-        assert plan_id == uuid.UUID(coordinate.facts.plan_id)
-        plan = get_plan(session, plan_id)
-        assert plan is not None, "the real plan read must succeed"
-        assert plan.requires_approval is True
-        assert plan.target_id == coordinate.target_id
-        read_plans.append(plan)
-        return plan
-
-    providers = compose_foundation_v3_providers(
-        control=ControlFoundationV3Bindings(
-            resolve_context=resolve_host_admission_context,
-            finalize=_finalize,
-            attest_pair=attest_foundation_execution_pair,
-            lookup_committed=lookup_foundation_execution_consumption,
-            get_plan=_checked_get_plan,
-            foreign_root_type=HostAdmissionForeignRootV1,
-            foreign_evidence_type=HostAdmissionForeignVerificationEvidenceV1,
-            execution_context_type=FoundationExecutionContextV1,
-            consumption_request_type=FoundationDispatchConsumptionV1,
+    providers = build_foundation_v3_providers(
+        sessions=_session,
+        host_admission=lambda: HostAdmissionObservation(
+            coordinate.attempt_id,
+            coordinate.presentation,
+            coordinate.candidate_envelope,
+            coordinate.installed_envelope,
         ),
-        foundation=FoundationHostV3Bindings(
-            admit_host_source=_real_f2,
-            trust_policy_from_context=_build_trust_policy_from_resolved_context,
-            verifier=coordinate.foundation_verifier,
-            trace_type=HostSourceAdmissionTrace,
-            pair_result_type=AttestationPairVerificationResultV1,
-            consumption_request_type=ControlConsumptionRequestV3,
-            execution_context_type=ExecutionContextV3,
-        ),
-        sources=FoundationV3Sources(
-            sessions=_session,
-            host_admission=lambda: HostAdmissionObservation(
-                coordinate.attempt_id,
-                coordinate.presentation,
-                coordinate.candidate_envelope,
-                coordinate.installed_envelope,
-            ),
-            execution_context=lambda: coordinate.facts,
-            clock=coordinate.clock.now,
+        execution_context=execution_context,
+        clock=coordinate.clock.now,
+        attestation_verifier=coordinate.foundation_verifier,
+    )
+    if missing_barrier:
+        # Negative sensitivity only: production factory never accepts an
+        # alternate barrier. Removing its private binding must fail closed.
+        authority = providers.execution_authority
+        authority._sources = dataclasses.replace(  # noqa: SLF001
+            authority._sources,
+            held_transition=None,  # noqa: SLF001
+        )
+    return providers, engine, events, sessions, finalizations
+
+
+def _v3_request(providers: Any, coordinate: _AdmissionCoordinate) -> Any:
+    source, trace = providers.host_source.admit_host_source()
+    assert source.artifact_digest == read_installed_artifact().artifact_digest
+    # Compare the factory's actual Control-to-Foundation mapping with the
+    # independently assembled enrolled-root policy used to sign this fixture.
+    resolved = trace.opaque_finalization.context
+    installed_policy = providers.host_source._foundation.trust_policy_from_context(  # noqa: SLF001
+        resolved
+    )
+    assert installed_policy == coordinate.trust_policy
+    return ControlConsumptionRequestV3(
+        authorization_material_json=coordinate.execution.authorization_material_json,
+        dispatch_material_json=coordinate.execution.dispatch_material_json,
+        host_source_trace=trace,
+        expected_execution_plan_digest=_EXECUTION_PLAN,
+        control_consumption_ref=coordinate.execution.control_consumption_ref,
+    )
+
+
+def _withdraw_coordinate(db: Session, coordinate: _AdmissionCoordinate) -> None:
+    approvals.withdraw_request(
+        db,
+        approvals.WithdrawRequestCommand(
+            request_id=uuid.UUID(coordinate.facts.approval_decision_ref),
+            actor_id=uuid.uuid4(),
+            authority_ref="hosted-finalizer-proof",
+            reason="Hosted Foundation finalizer withdrawal proof",
+            external_ref=_cmd(),
         ),
     )
+
+
+def test_real_cp_v3_missing_startup_barrier_refuses_before_finalization(
+    db: Session,
+) -> None:
+    coordinate = _build_admission_coordinate(db, now=_NOW)
+    providers, engine, events, sessions, finalizations = _real_cp_v3(
+        db, coordinate, missing_barrier=True
+    )
     try:
-        source, trace = providers.host_source.admit_host_source()
-        assert source.artifact_digest == read_installed_artifact().artifact_digest
-        request = ControlConsumptionRequestV3(
-            authorization_material_json=coordinate.execution.authorization_material_json,
-            dispatch_material_json=coordinate.execution.dispatch_material_json,
-            host_source_trace=trace,
-            expected_execution_plan_digest=_EXECUTION_PLAN,
-            control_consumption_ref=coordinate.execution.control_consumption_ref,
-        )
-        with pytest.raises(DispatchApprovalSubjectUnavailable) as refused:
+        request = _v3_request(providers, coordinate)
+        with pytest.raises(DispatchApprovalSubjectUnavailable, match="not composed"):
             providers.execution_authority.consume_dispatch(request=request)
-        assert refused.value.code == "c2_dispatch_approval_subject_unavailable"
-        assert "requires approval" in str(refused.value)
-        assert len(read_plans) == 1
-        assert len(sessions) == 2 and sessions[0] is not sessions[1]
-        assert all(not session.in_transaction() for session in sessions)
         assert finalizations == []
         assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
-        assert (
-            lookup_foundation_execution_consumption(
-                db, control_consumption_ref=coordinate.execution.control_consumption_ref
-            )
-            is None
-        )
-        # Sensitivity: a missing-plan lookup must not pass as the same typed
-        # approval-subject refusal. The same checked reader must fail first.
-        with pytest.MonkeyPatch.context() as plant:
-            plant.setitem(globals(), "get_plan", lambda *_: None)
-            with pytest.raises(AssertionError, match="real plan read must succeed"):
-                _checked_get_plan(db, uuid.UUID(coordinate.facts.plan_id))
+        assert len(sessions) == 2 and sessions[0] is not sessions[1]
+        assert events == ["commit", "close", "foundation", "close"]
     finally:
-        for session in sessions:
-            session.close()
+        engine.dispose()
+
+
+def test_real_cp_v3_held_finalizer_commits_once_and_lookup_recovers(
+    db: Session,
+) -> None:
+    coordinate = _build_admission_coordinate(db, now=_NOW)
+    providers, engine, events, sessions, finalizations = _real_cp_v3(db, coordinate)
+    try:
+        request = _v3_request(providers, coordinate)
+        providers.execution_authority.consume_dispatch(request=request)
+        assert events == [
+            "commit",
+            "close",
+            "foundation",
+            "finalize",
+            "commit",
+            "close",
+        ]
+        assert len(sessions) == 2 and sessions[0] is not sessions[1]
+        assert len(finalizations) == 1
+        assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
+        committed = providers.execution_authority.lookup_committed(
+            control_consumption_ref=coordinate.execution.control_consumption_ref
+        )
+        assert committed.attempt_id == coordinate.attempt_id
+        with pytest.raises(
+            TransitionRefusedError, match="dispatch_consumption_already_consumed"
+        ):
+            providers.execution_authority.consume_dispatch(request=request)
+        assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
+    finally:
+        engine.dispose()
+
+
+def test_real_cp_v3_withdrawal_first_refuses_before_owner_finalizer(
+    db: Session,
+) -> None:
+    coordinate = _build_admission_coordinate(db, now=_NOW)
+    providers, engine, _, _, finalizations = _real_cp_v3(db, coordinate)
+    try:
+        request = _v3_request(providers, coordinate)
+        with Session(engine) as peer:
+            _withdraw_coordinate(peer, coordinate)
+            peer.commit()
+        with pytest.raises(approvals.ApprovalNotHeld) as refused:
+            providers.execution_authority.consume_dispatch(request=request)
+        assert refused.value.code is approvals.ApprovalHoldRefusal.WITHDRAWN
+        assert finalizations == []
+        assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
+    finally:
+        engine.dispose()
+
+
+def test_real_cp_v3_transition_first_holds_withdrawal_through_owner_commit(
+    db: Session,
+) -> None:
+    coordinate = _build_admission_coordinate(db, now=_NOW)
+    blocked: list[str] = []
+
+    def after_finalize(session: Session) -> None:
+        assert session.in_transaction()
+        with Session(session.get_bind()) as peer:
+            peer.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            with pytest.raises(OperationalError) as refused:
+                _withdraw_coordinate(peer, coordinate)
+            assert getattr(refused.value.orig, "sqlstate", None) == "55P03"
+            blocked.append("withdrawal_waited")
+            peer.rollback()
+
+    providers, engine, _, _, finalizations = _real_cp_v3(
+        db, coordinate, after_finalize=after_finalize
+    )
+    try:
+        request = _v3_request(providers, coordinate)
+        providers.execution_authority.consume_dispatch(request=request)
+        assert blocked == ["withdrawal_waited"] and len(finalizations) == 1
+        with Session(engine) as peer:
+            _withdraw_coordinate(peer, coordinate)
+            peer.commit()
+        # A later withdrawal cannot erase a permanent committed consumption.
+        assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
+    finally:
+        engine.dispose()
+
+
+def test_real_cp_v3_autocommit_refuses_before_owner_finalizer(db: Session) -> None:
+    coordinate = _build_admission_coordinate(db, now=_NOW)
+    providers, engine, _, _, finalizations = _real_cp_v3(
+        db, coordinate, autocommit_finalizer=True
+    )
+    try:
+        request = _v3_request(providers, coordinate)
+        with pytest.raises(ApprovalBarrierUnavailable):
+            providers.execution_authority.consume_dispatch(request=request)
+        assert finalizations == []
+        assert _idempotency_marker_count(db, coordinate.attempt_id) == 0
+    finally:
+        engine.dispose()
+
+
+def test_real_cp_v3_ambiguous_commit_uses_fresh_committed_lookup(db: Session) -> None:
+    coordinate = _build_admission_coordinate(db, now=_NOW)
+    providers, engine, _, sessions, finalizations = _real_cp_v3(
+        db, coordinate, lost_commit_ack=True
+    )
+    try:
+        request = _v3_request(providers, coordinate)
+        with pytest.raises(RuntimeError, match="lost commit acknowledgement"):
+            providers.execution_authority.consume_dispatch(request=request)
+        assert len(finalizations) == 1
+        committed = providers.execution_authority.lookup_committed(
+            control_consumption_ref=coordinate.execution.control_consumption_ref
+        )
+        assert len(sessions) == 3 and sessions[2] is not sessions[1]
+        assert committed.attempt_id == coordinate.attempt_id
+        assert _idempotency_marker_count(db, coordinate.attempt_id) == 1
+    finally:
         engine.dispose()
 
 

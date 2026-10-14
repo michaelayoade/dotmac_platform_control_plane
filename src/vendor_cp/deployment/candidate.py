@@ -66,7 +66,10 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
+
+if TYPE_CHECKING:
+    from dotmac_deployment_foundation.execution_plan import HostPrestateV1
 
 __all__ = [
     "RECEIPT_CONTRACT",
@@ -248,11 +251,19 @@ def admit_candidate_image(
 
 @dataclass(frozen=True, slots=True)
 class RenderedCandidate:
-    """The three values the packet carries, produced together or not at all."""
+    """Foundation bytes, distinct digests and their frozen render coordinates.
+
+    Rendering binds a profile coordinate; it does not establish profile admission.
+    The production proposal owner must supply the retained V2 profile/admission
+    receipt. CP's local V1 discovery report cannot satisfy that prerequisite.
+    """
 
     descriptor_digest: str
     execution_plan_digest: str
     canonical_plan_bytes: bytes
+    canonical_descriptor_bytes: bytes
+    prestate: HostPrestateV1
+    application_profile_digest: str
 
 
 class PlanRenderer(Protocol):
@@ -270,6 +281,8 @@ class PlanRenderer(Protocol):
         image: CandidateImage,
         target: str,
         operation: str,
+        prestate: HostPrestateV1,
+        application_profile_digest: str,
     ) -> RenderedCandidate: ...
 
 
@@ -279,6 +292,8 @@ def _foundation_renderer(
     image: CandidateImage,
     target: str,
     operation: str,
+    prestate: HostPrestateV1,
+    application_profile_digest: str,
 ) -> RenderedCandidate:
     """Replace two fields, then let the Foundation say what that means.
 
@@ -295,6 +310,7 @@ def _foundation_renderer(
             build_plan,
         )
         from dotmac_deployment_foundation.execution_plan import (  # noqa: PLC0415
+            HostPrestateV1,
             render_execution_plan,
         )
         from dotmac_deployment_foundation.spec import (  # noqa: PLC0415
@@ -308,6 +324,10 @@ def _foundation_renderer(
             "second answer to what was authorized"
         ) from error
 
+    if not isinstance(prestate, HostPrestateV1):
+        raise CandidateRefused(
+            "candidate_prestate_unavailable: expected HostPrestateV1"
+        )
     accepted = ProductDeploymentSpec.load(descriptor_path)
     # ONLY these two. Anything else changed here would be a descriptor edit
     # wearing a derivation's clothes, and the approver would be approving a
@@ -324,11 +344,16 @@ def _foundation_renderer(
         target=target,
         operation=operation,
         descriptor_digest=document.sha256_digest(),
+        prestate=prestate,
+        application_profile_digest=application_profile_digest,
     )
     return RenderedCandidate(
         descriptor_digest=document.sha256_digest(),
         execution_plan_digest=plan.digest(),
         canonical_plan_bytes=plan.canonical_bytes(),
+        canonical_descriptor_bytes=document.canonical_bytes(),
+        prestate=prestate,
+        application_profile_digest=application_profile_digest,
     )
 
 
@@ -338,6 +363,8 @@ def render_candidate(
     *,
     target: str,
     operation: str,
+    prestate: HostPrestateV1,
+    application_profile_digest: str,
     renderer: PlanRenderer | None = None,
 ) -> RenderedCandidate:
     """Derive the candidate's canonical document and execution plan.
@@ -349,10 +376,26 @@ def render_candidate(
     Re-run at execution time from the SAME accepted descriptor and the SAME
     receipt, this returns the same digest — which is what makes recomputing
     before execution a check rather than a ceremony.
+
+    Prestate is an actual Foundation value observed by the composition owner;
+    an empty observed prestate means a first deployment, never an absence
+    fallback. The profile coordinate comes from Foundation canonicalization,
+    with artifact-bound admission checked by the proposal owner separately.
     """
     if not target.strip():
         raise CandidateRefused(
             "a candidate with no target is one that authorizes every host"
+        )
+    if prestate is None:
+        raise CandidateRefused(
+            "candidate_prestate_unavailable: observed prestate required"
+        )
+    if not isinstance(application_profile_digest, str) or not _SHA256.fullmatch(
+        application_profile_digest
+    ):
+        raise CandidateRefused(
+            "candidate_profile_coordinate_unavailable: "
+            "canonical profile digest required"
         )
     render = _foundation_renderer if renderer is None else renderer
     return render(
@@ -360,4 +403,6 @@ def render_candidate(
         image=image,
         target=target,
         operation=operation,
+        prestate=prestate,
+        application_profile_digest=application_profile_digest,
     )

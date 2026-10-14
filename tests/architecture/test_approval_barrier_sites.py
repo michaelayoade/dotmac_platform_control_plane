@@ -9,13 +9,8 @@ to one of Control's approval-dependent transitions (`approve_plan`,
 and requires it to be lexically inside a function passed as `held_transition`'s
 `transition=` argument, or inside `approval_barrier.py` itself.
 
-`host_admission_adapter.py`'s `finalize` call is allowlisted explicitly,
-because it dispatches a `FOUNDATION_EXECUTION` plan that has no Approvals
-subject at all. Michael decided C2-D1 on 2026-09-26: dispatch FAILS CLOSED for
-an approval-requiring Foundation plan until Gate 3 defines its subject, and
-`test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check` below
-enforces that premise structurally. An exemption states an enforceable premise
-(AGENTS.md), not a bare pass.
+Foundation execution uses its distinct subject at all four transitions,
+including the Session-B finalizer. No finalizer exemption remains.
 
 `authorize_deployment`/`propose_deployment_plan` (`deployment/adapter.py`) are
 asserted to still raise `PlanInputDerivationUnavailable` before reaching any
@@ -72,19 +67,18 @@ _CA_EVIDENCE_COMMANDS = frozenset({"approve", "activate", "reinstate"})
 #: name in the function.
 ALLOWLIST: frozenset[tuple[str, str, str]] = frozenset(
     {
-        # FOUNDATION_EXECUTION plans have no Approvals subject to hold. C2-D1
-        # (Michael, 2026-09-26): dispatch fails closed instead —
-        # `_refuse_an_approval_requiring_plan` runs before this finalize and
-        # refuses any plan without an explicit requires_approval=False
-        # (proved in tests/unit/test_foundation_v3_provider.py and ordered by
-        # `test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check`).
-        ("deployment/host_admission_adapter.py", "consume_dispatch", "finalize"),
-        # Startup composition only checks that the bound callable IS callable;
-        # it never calls it.
+        # Startup validates callability only; execution requires a live hold.
         (
             "deployment/host_admission_adapter.py",
             "compose_foundation_v3_providers",
             "finalize",
+        ),
+        # Startup hands over the public function, never invokes it. The
+        # premise is checked below, including the mandatory local live hold.
+        (
+            "deployment/runtime.py",
+            "build_foundation_v3_providers",
+            "admit_and_consume_host_admission",
         ),
     }
 )
@@ -328,41 +322,67 @@ def test_every_guarded_control_call_is_barriered_or_allowlisted() -> None:
     assert violations == [], "\n".join(violations)
 
 
-def test_the_allowlisted_finalize_call_still_exists_at_its_named_site() -> None:
-    """A stale allowlist entry that no longer matches any real call would
-    hide a regression rather than document one."""
+def test_foundation_finalizer_is_inside_the_live_barrier() -> None:
     source = HOST_ADMISSION_ADAPTER.read_text()
-    tree = ast.parse(source)
-    matched = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _call_name(node) == "finalize":
-            enclosing = _enclosing_function_names(tree, node)
-            if enclosing and enclosing[0] == "consume_dispatch":
-                matched = True
-    assert matched, (
-        "host_admission_adapter.py no longer calls finalize() inside "
-        "consume_dispatch(); the ALLOWLIST entry naming that premise is stale "
-        "and must be reviewed"
+    assert "_refuse_an_approval_requiring_plan" not in source
+    assert "held_transition(session, plan_id=plan_id, transition=transition)" in source
+    assert (
+        find_unguarded_calls(source, filename="deployment/host_admission_adapter.py")
+        == []
     )
 
 
-def test_the_allowlisted_finalize_is_preceded_by_the_fail_closed_check() -> None:
-    """The allowlist premise, enforced: inside `consume_dispatch`, the C2-D1
-    refusal is called on an earlier line than `finalize`, in the same block."""
-    tree = ast.parse(HOST_ADMISSION_ADAPTER.read_text())
-    (consume,) = (
+def test_startup_finalizer_reference_only_binds_the_real_barriered_provider() -> None:
+    tree = ast.parse((SRC / "deployment" / "runtime.py").read_text())
+    factory = next(
         node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "consume_dispatch"
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "build_foundation_v3_providers"
     )
-    lines = {
-        _call_name(node): node.lineno
-        for node in ast.walk(consume)
-        if isinstance(node, ast.Call)
-        and _call_name(node) in {"finalize", "_refuse_an_approval_requiring_plan"}
+    assert {arg.arg for arg in factory.args.kwonlyargs} == {
+        "sessions",
+        "host_admission",
+        "execution_context",
+        "clock",
+        "attestation_verifier",
     }
-    assert set(lines) == {"finalize", "_refuse_an_approval_requiring_plan"}, lines
-    assert lines["_refuse_an_approval_requiring_plan"] < lines["finalize"]
+    assert factory.args.kwarg is None and factory.args.vararg is None
+    references = _guarded_references(factory)
+    assert len(references) == 1
+    node, name = references[0]
+    assert name == "admit_and_consume_host_admission"
+    parents = _parents(tree)
+    keyword = parents[node]
+    assert isinstance(keyword, ast.keyword) and keyword.arg == "finalize"
+    binding = parents[keyword]
+    assert isinstance(binding, ast.Call)
+    assert _call_name(binding) == "ControlFoundationV3Bindings"
+    sources = [
+        node
+        for node in ast.walk(factory)
+        if isinstance(node, ast.Call) and _call_name(node) == "FoundationV3Sources"
+    ]
+    assert len(sources) == 1
+    holds = [kw.value for kw in sources[0].keywords if kw.arg == "held_transition"]
+    assert len(holds) == 1 and isinstance(holds[0], ast.Name)
+    assert holds[0].id == "hold"
+    hold = next(
+        node
+        for node in factory.body
+        if isinstance(node, ast.FunctionDef) and node.name == "hold"
+    )
+    assert len(hold.body) == 1 and isinstance(hold.body[0], ast.Return)
+    call = hold.body[0].value
+    assert isinstance(call, ast.Call)
+    assert _call_name(call) == "hold_foundation_transition"
+    assert any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "vendor_cp.deployment.foundation_approval"
+        and [(alias.name, alias.asname) for alias in node.names]
+        == [("hold_foundation_transition", None)]
+        for node in factory.body
+    )
 
 
 def test_authorize_deployment_and_propose_plan_still_raise_before_any_call() -> None:
@@ -488,7 +508,7 @@ def test_the_detector_flags_a_planted_bare_agreement_module_approve_call() -> No
     assert "approve_without_a_barrier" in violations[0]
 
 
-def test_the_allowlist_exempts_one_name_not_the_whole_function() -> None:
+def test_no_host_finalizer_reference_is_exempt() -> None:
     """An allowlisted (file, function, finalize) entry must not exempt a new
     guarded call added to the same function."""
     source = (
@@ -500,8 +520,9 @@ def test_the_allowlist_exempts_one_name_not_the_whole_function() -> None:
     violations = find_unguarded_calls(
         source, filename="deployment/host_admission_adapter.py"
     )
-    assert len(violations) == 1
-    assert "approve_plan" in violations[0]
+    assert len(violations) == 2
+    assert any("approve_plan" in violation for violation in violations)
+    assert any("finalize" in violation for violation in violations)
 
 
 def test_the_detector_flags_an_unaliased_commercial_agreements_command() -> None:
