@@ -54,7 +54,7 @@ def subject_id(plan: PlanView) -> str:
             "Foundation plan approval binding unavailable"
         )
     bare_content_hash(plan.execution_plan_digest)
-    bare_content_hash(cast(str, plan.plan_digest))
+    bare_content_hash(plan.plan_digest)
     subject = (
         f"v1|{plan.id}|{plan.purpose}|{plan.operation}|{plan.execution_plan_digest}"
     )

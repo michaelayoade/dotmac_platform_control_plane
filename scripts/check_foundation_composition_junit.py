@@ -49,6 +49,7 @@ APPROVAL_EXPECTED = frozenset(
         "test_withdrawal_first_refuses_approval_or_later_carried_transition[False]",
         "test_withdrawal_first_refuses_approval_or_later_carried_transition[True]",
         "test_live_carried_barrier_blocks_withdrawal_until_caller_commit",
+        "test_commit_measurement_ignores_savepoint_release_but_counts_root_commit",
         "test_withdrawal_router_revokes_and_replays_exact_event_then_conflicts",
         "test_approval_exempt_plan_is_not_a_foundation_approval_subject",
         *(

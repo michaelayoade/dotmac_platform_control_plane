@@ -59,7 +59,7 @@ imports and must be re-proven at each artifact change. Public committed lookup
 independently checks durable marker assertions.
 
 The ordinary migration run also emits a separate approval report. The same
-checker with `--approval` requires all twenty named cases from
+checker with `--approval` requires all twenty-one named cases from
 `tests/migration/test_foundation_approval.py`, including both withdrawal
 orderings at actual approve, signed rollout and signed dispatch commands, with
 caller single-commit and peer lock-timeout probes. Its ephemeral HMAC signer

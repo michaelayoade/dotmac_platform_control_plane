@@ -11,6 +11,7 @@ import base64
 import hashlib
 import hmac
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -18,6 +19,7 @@ from uuid import UUID, uuid4
 import dotmac_deployment_control as control
 import pytest
 from alembic import command
+from dotmac_kernel import PlatformAdmin
 from dotmac_kernel.messaging import ClaimedPlatformEvent, PlatformOutboxEvent
 from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.engine import Engine
@@ -54,6 +56,21 @@ def engine(scratch_db: str, url_for: Callable[..., str]) -> Iterator[Engine]:
     online = create_engine(url_for(scratch_db, database, user="platform_api"))
     yield online
     online.dispose()
+
+
+@contextmanager
+def _count_root_commits(engine: Engine) -> Iterator[tuple[Session, list[str]]]:
+    # Match test_approval_barrier_conformance's engine-level measurement:
+    # Session.after_commit also fires for RELEASE SAVEPOINT. A dedicated
+    # engine excludes the withdrawal peer's genuine commits from this count.
+    observed = create_engine(engine.url, future=True)
+    commits: list[str] = []
+    event.listen(observed, "commit", lambda _conn: commits.append("commit"))
+    try:
+        with Session(observed) as db:
+            yield db, commits
+    finally:
+        observed.dispose()
 
 
 def _seed(engine: Engine, *, operation: str = "deploy") -> tuple[UUID, UUID]:
@@ -122,11 +139,20 @@ def _seed(engine: Engine, *, operation: str = "deploy") -> tuple[UUID, UUID]:
 
 
 def _withdraw(db: Session, request_id: UUID) -> None:
+    # Control forwards this event actor to the kernel audit FK. Use a real
+    # synthetic platform admin persisted in the same test transaction.
+    actor = PlatformAdmin(
+        id=uuid4(),
+        email=f"foundation-withdrawal-{uuid4().hex}@example.invalid",
+        password_hash="x",
+    )
+    db.add(actor)
+    db.flush()
     approvals.withdraw_request(
         db,
         approvals.WithdrawRequestCommand(
             request_id=request_id,
-            actor_id=uuid4(),
+            actor_id=actor.id,
             authority_ref="hosted-test",
             reason="Hosted withdrawal proof",
             external_ref=uuid4().hex,
@@ -137,9 +163,7 @@ def _withdraw(db: Session, request_id: UUID) -> None:
 @pytest.mark.parametrize("operation", ["deploy", "rollback"])
 def test_real_approval_has_distinct_subject_and_one_caller_commit(engine, operation):
     plan_id, request_id = _seed(engine, operation=operation)
-    commits = []
-    with Session(engine) as db:
-        event.listen(db, "after_commit", lambda _: commits.append("commit"))
+    with _count_root_commits(engine) as (db, commits):
         approved = approve_foundation_plan(
             db, command_id=uuid4().hex, plan_id=plan_id, approval_request_id=request_id
         )
@@ -479,9 +503,7 @@ def _run_stage(db: Session, stage: str, fixture: _Stage):
 @pytest.mark.parametrize("stage", ["approve", "rollout", "dispatch"])
 def test_owner_transition_first_holds_withdrawal_until_single_commit(engine, stage):
     fixture = _seed_stage(engine, stage)
-    commits = []
-    with Session(engine) as db:
-        event.listen(db, "after_commit", lambda _: commits.append("commit"))
+    with _count_root_commits(engine) as (db, commits):
         transitioned = _run_stage(db, stage, fixture)
         assert transitioned is not None and commits == []
         with Session(engine) as peer:
@@ -525,3 +547,21 @@ def test_withdrawal_first_refuses_real_owner_transition_without_signed_output(
         assert plan.status == ("proposed" if stage == "approve" else "approved")
         if stage == "dispatch":
             assert len(control.get_rollout(db, fixture.rollout_id).attempts) == 0
+
+
+def test_commit_measurement_ignores_savepoint_release_but_counts_root_commit(engine):
+    """Sensitivity: a released savepoint must not impersonate a DB commit."""
+    with _count_root_commits(engine) as (db, commits):
+        session_notifications = []
+        event.listen(
+            db, "after_commit", lambda _: session_notifications.append("notified")
+        )
+        db.execute(text("SELECT 1"))
+        with db.begin_nested():
+            db.execute(text("SELECT 1"))
+        # The misleading event really fired; the root observer rejects it.
+        assert session_notifications == ["notified"]
+        assert commits == [] and db.in_transaction()
+        db.commit()
+        assert commits == ["commit"] and not db.in_transaction()
+        assert session_notifications == ["notified", "notified"]
