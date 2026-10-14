@@ -5,7 +5,8 @@
 The required `CI / postgres` job runs
 `test_candidate_renderer_real_foundation.py` and
 `test_host_admission_conformance.py` against the complete CP wheel, its locked
-Control `0.1.0a17`, Approvals `0.1.0a8` and Kernel `0.1.0a100` dependencies,
+Kernel `0.1.0a100` dependency,
+plus Control `0.1.0a17` and Approvals `0.1.0a8`,
 and a test-only Foundation wheel built from clean exact Starter source
 `d74bf8dd8c399dd92047174365403b861f82ddd0`. The job migrates the full composition
 on disposable PostgreSQL, then invokes these cases as `platform_api`.
