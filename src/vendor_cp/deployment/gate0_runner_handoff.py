@@ -306,13 +306,13 @@ def decode_root_event(raw: bytes, campaign: str) -> tuple[str, bytes]:
     ):
         raise ProviderRefused()
     try:
-        root = base64.b64decode(cast(str, doc["root_b64"]), validate=True)
+        root = base64.b64decode(doc["root_b64"], validate=True)
     except ValueError:
         raise ProviderRefused() from None
     if base64.b64encode(root).decode("ascii") != doc["root_b64"]:
         raise ProviderRefused()
     strict_object(root, _MAX_ROOT)
-    return cast(str, doc["host"]), root
+    return doc["host"], root
 
 
 def encode_case_a_complete(
@@ -596,7 +596,8 @@ def _peer_binding(value: object) -> tuple[int, int, str]:
 
 def _deadline(instant: str, wall: datetime, mono: float) -> float:
     at = datetime.fromisoformat(instant.replace("Z", "+00:00"))
-    if at.tzinfo is None or at.utcoffset().total_seconds() != 0:
+    offset = at.utcoffset()
+    if at.tzinfo is None or offset is None or offset.total_seconds() != 0:
         raise ProviderRefused()
     return mono + (at - wall).total_seconds()
 
@@ -713,7 +714,7 @@ def _qualified_receiver(doc: ReceiverInstallation) -> None:
     _hash(receipt["native_receipt_digest"])
     if (
         type(receipt["source_revision"]) is not str
-        or re.fullmatch(r"[0-9a-f]{40}", cast(str, receipt["source_revision"])) is None
+        or re.fullmatch(r"[0-9a-f]{40}", receipt["source_revision"]) is None
     ):
         raise ProviderRefused()
 
@@ -845,7 +846,7 @@ def _qualified_agent(doc: HolderInstallation) -> None:
     _hash(receipt["native_receipt_digest"])
     if (
         type(receipt["custody_owner_ref"]) is not str
-        or not 0 < len(cast(str, receipt["custody_owner_ref"])) <= 512
+        or not 0 < len(receipt["custody_owner_ref"]) <= 512
     ):
         raise ProviderRefused()
 
