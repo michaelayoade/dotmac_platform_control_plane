@@ -177,8 +177,10 @@ def inspect_case_report(
         raise Gate0ReportRefused(ReportRefusal.INCOMPLETE)
     prerequisites = _shape(document["prerequisites"], set(_PREREQUISITES))
     unknown = []
-    for name in _PREREQUISITES:
-        prerequisite = _shape(prerequisites[name], {"state", "evidence_digest"})
+    for prerequisite_name in _PREREQUISITES:
+        prerequisite = _shape(
+            prerequisites[prerequisite_name], {"state", "evidence_digest"}
+        )
         state = prerequisite["state"]
         if state not in ("accepted", "unknown", "blocked"):
             raise Gate0ReportRefused(ReportRefusal.PREREQUISITES)
@@ -188,7 +190,7 @@ def inspect_case_report(
         else:
             if prerequisite["evidence_digest"] is not None:
                 raise Gate0ReportRefused(ReportRefusal.PREREQUISITES)
-            unknown.append(name)
+            unknown.append(prerequisite_name)
     if unknown and document["evidence_class"] == "protected_live":
         raise Gate0ReportRefused(ReportRefusal.PREREQUISITES)
     cases = document["cases"]

@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from time import monotonic
+from typing import cast
 from uuid import UUID
 
 from cryptography.exceptions import InvalidSignature
@@ -159,7 +160,10 @@ def _aware_datetime(value: object) -> bool:
 
 
 def _finite_monotonic(value: object) -> bool:
-    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    if type(value) not in (int, float):
+        return False
+    number = cast(int | float, value)
+    return math.isfinite(number) and number >= 0
 
 
 def _utc_now() -> datetime:
