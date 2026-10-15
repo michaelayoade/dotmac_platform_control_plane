@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, timedelta
-from typing import TYPE_CHECKING, Literal, Protocol
+from time import monotonic
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -54,11 +56,32 @@ class CompositionIncomplete(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class WindowFreshness:
+    """Original process-local clock mapping; never a wire/JSON authority term."""
+
+    origin: float
+    deadline: float
+
+    def __post_init__(self) -> None:
+        if not (
+            math.isfinite(self.origin)
+            and math.isfinite(self.deadline)
+            and 0 < self.deadline - self.origin <= 300
+        ):
+            raise CompositionRefused()
+
+    def require_open(self) -> None:
+        if not self.origin <= monotonic() < self.deadline:
+            raise CompositionRefused()
+
+
+@dataclass(frozen=True, slots=True)
 class AdmissionExpectation:
     """Facts supplied by an independent authenticated admission boundary.
 
     The dataclass validates shape only. It is not a GitHub/approval oracle.
-    Policy/request/target expectations are not derived from the checked plan.
+    Production terms come from the frozen owner window and exact approval hold.
+    Optional unbound values serve only explicitly synthetic mechanism tests.
     """
 
     operation: AdmittedOperation
@@ -67,6 +90,9 @@ class AdmissionExpectation:
     approval_request_id: UUID
     approval_policy_code: str
     approval_policy_version: int
+    frozen_window_bytes: bytes | None = None
+    window_digest: str | None = None
+    window_freshness: WindowFreshness | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -82,6 +108,21 @@ class AdmissionExpectation:
             or self.approval_policy_version < 1
         ):
             raise CompositionRefused()
+        if (
+            self.window_freshness is not None
+            and type(self.window_freshness) is not WindowFreshness
+        ):
+            raise CompositionRefused()
+        if (self.frozen_window_bytes is None) != (self.window_digest is None):
+            raise CompositionRefused()
+        if self.frozen_window_bytes is not None:
+            if (
+                type(self.frozen_window_bytes) is not bytes
+                or not 0 < len(self.frozen_window_bytes) <= 32768
+                or self.window_digest
+                != "sha256:" + hashlib.sha256(self.frozen_window_bytes).hexdigest()
+            ):
+                raise CompositionRefused()
 
 
 class AdmissionPort(Protocol):
@@ -167,7 +208,9 @@ class Gate0Composition:
         admission: AdmissionPort | None,
         proof_resolver: ProofResolver | None,
         verifier: BoundedHarnessVerifier,
+        require_frozen_window: bool = False,
     ) -> None:
+        self._require_frozen_window = require_frozen_window
         self._sessions = sessions
         self._admission, self._resolver, self._verifier = (
             admission,
@@ -194,6 +237,9 @@ class Gate0Composition:
                 result.approval_request_id,
                 result.approval_policy_code,
                 result.approval_policy_version,
+                result.frozen_window_bytes,
+                result.window_digest,
+                result.window_freshness,
             )
             if result.operation.phase != phase or result.operation.plan_id != str(
                 plan_id
@@ -236,6 +282,33 @@ class Gate0Composition:
             or plan.approval_policy_version != expected.approval_policy_version
         ):
             raise CompositionRefused()
+        if self._require_frozen_window or expected.frozen_window_bytes is not None:
+            from vendor_cp.deployment.gate0_window import FrozenIssuerWindow
+
+            if (
+                expected.frozen_window_bytes is None
+                or expected.window_digest is None
+                or expected.window_freshness is None
+            ):
+                raise CompositionRefused()
+            expected.window_freshness.require_open()
+            window = FrozenIssuerWindow.from_plan(plan)
+            if (
+                window.canonical_bytes != expected.frozen_window_bytes
+                or window.digest != expected.window_digest
+            ):
+                raise CompositionRefused()
+            rederived = window.expectation(
+                plan,
+                target,
+                cast(Literal["issue", "consume"], operation.phase),
+                binding if operation.phase == "consume" else None,
+                freshness=expected.window_freshness,
+            )
+            if rederived != expected:
+                raise CompositionRefused()
+            if binding is not None:
+                window.check_authorization_times(binding.parsed.statement)
         # PlanView.purpose is display-only: the actual CP/Control mutation still
         # re-derives authority under its own locks. No view becomes a grant.
         if binding is not None:
@@ -280,6 +353,9 @@ class Gate0Composition:
                 expected.approval_request_id,
                 expected.approval_policy_code,
                 expected.approval_policy_version,
+                expected.frozen_window_bytes,
+                expected.window_digest,
+                expected.window_freshness,
             )
             proof = self._resolver(resolver_input)
             # Resolver must bound its wire response before constructing a value;
@@ -290,6 +366,12 @@ class Gate0Composition:
         if failed:
             raise CompositionRefused()
         raise CompositionRefused()
+
+    def _require_window_open(self, expected: AdmissionExpectation) -> None:
+        if self._require_frozen_window or expected.frozen_window_bytes is not None:
+            if expected.window_freshness is None:
+                raise CompositionRefused()
+            expected.window_freshness.require_open()
 
     def _mutate(
         self,
@@ -304,8 +386,12 @@ class Gate0Composition:
         try:
             self._check_plan(db, expected, binding)  # ordinary reads, never FOR UPDATE
             self._verifier._require_open()
+            self._require_window_open(expected)
             result = transition(db)
+            if self._require_frozen_window or expected.frozen_window_bytes is not None:
+                self._check_plan(db, expected, binding)
             self._verifier._require_open()
+            self._require_window_open(expected)
             commit_started = True
             db.commit()
         except BaseException as caught:
@@ -446,6 +532,7 @@ def assemble_gate0_composition(
     signer: RehearsalIssuerAuthorizationSigner | None,
     authorization_verifier: RehearsalIssuerAuthorizationVerifier | None,
     authorization_ttl: timedelta,
+    require_frozen_window: bool = False,
 ) -> Gate0Composition:
     """Trusted startup only; no default custody/admission/transport or reinstall."""
     from dotmac_deployment_control import install_rehearsal_issuer_security
@@ -476,4 +563,5 @@ def assemble_gate0_composition(
         admission=admission,
         proof_resolver=proof_resolver,
         verifier=verifier,
+        require_frozen_window=require_frozen_window,
     )

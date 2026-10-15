@@ -52,19 +52,41 @@ class ProposeIssuerPlan:
 
 
 class PlanFacts(Protocol):
-    id: UUID
-    purpose: str
-    operation: str | None
-    execution_plan_digest: str | None
-    plan_digest: str | None
-    approval_policy_code: str | None
-    approval_policy_version: int | None
-    approval_decision_ref: str | None
-    #: Read by `classify_approval_withdrawal`'s pre-read and status branches
-    #: only; every other function above ignores these three.
-    status: str
-    approval_decision_status: str | None
-    approval_revocation_ref: str | None
+    """Read-only public plan facts; this seam never mutates an owner view."""
+
+    @property
+    def id(self) -> UUID: ...
+
+    @property
+    def purpose(self) -> str: ...
+
+    @property
+    def operation(self) -> str | None: ...
+
+    @property
+    def execution_plan_digest(self) -> str | None: ...
+
+    @property
+    def plan_digest(self) -> str | None: ...
+
+    @property
+    def approval_policy_code(self) -> str | None: ...
+
+    @property
+    def approval_policy_version(self) -> int | None: ...
+
+    @property
+    def approval_decision_ref(self) -> str | None: ...
+
+    # Read by classify_approval_withdrawal's pre-read and status branches only.
+    @property
+    def status(self) -> str: ...
+
+    @property
+    def approval_decision_status(self) -> str | None: ...
+
+    @property
+    def approval_revocation_ref(self) -> str | None: ...
 
 
 def _subject(plan: PlanFacts) -> str:
@@ -89,6 +111,10 @@ def _subject(plan: PlanFacts) -> str:
             "issuer approval subject exceeds Approvals' 200-character limit"
         )
     return subject
+
+
+# Public CP reuse point: one canonical subject for preflight and mutation holds.
+issuer_approval_subject = _subject
 
 
 def _evidence_digest(document: object) -> str:

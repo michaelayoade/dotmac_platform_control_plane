@@ -56,6 +56,20 @@ class Owner:
 #: an owner declared without a command both fail.
 OWNERS: Final[tuple[Owner, ...]] = (
     Owner(
+        "gate0 issuer-run",
+        "vendor_cp.deployment.gate0_services",
+        "issuer_run",
+        True,
+        "finite issue/standing/consume composition; requires adopted startup bindings",
+    ),
+    Owner(
+        "gate0 attester-session",
+        "vendor_cp.deployment.gate0_services",
+        "attester_session",
+        False,
+        "fixed authenticated SSH proof exchange; requires trusted daemon binding",
+    ),
+    Owner(
         "deployment candidate-material-probe",
         "vendor_cp.deployment.candidate_materials",
         "probe",

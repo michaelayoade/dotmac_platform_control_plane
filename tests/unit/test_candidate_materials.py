@@ -369,6 +369,14 @@ def test_installed_entry_point_probe_and_import_time_refusal(tmp_path: Path) -> 
 
     del env["VENDOR_RELAY_EXPECTED"]
     env["JWT_TTL_SECONDS"] = "synthetic-sensitive-canary"
+    # Parser/help must stay cold even when runtime configuration is malformed.
+    # Gate-0 owner modules are irrelevant to this safe diagnostic path.
+    help_result = subprocess.run(  # noqa: S603 -- fixed installed CLI/help, synthetic environment
+        argv[:4] + ["--help"], env=env, cwd=tmp_path, capture_output=True, text=True
+    )
+    assert help_result.returncode == 0
+    assert "synthetic-sensitive-canary" not in help_result.stdout + help_result.stderr
+    assert not help_result.stderr
     result = subprocess.run(argv, env=env, cwd=tmp_path, capture_output=True, text=True)  # noqa: S603
     assert result.returncode == 3
     wire = json.loads(result.stdout)
@@ -378,3 +386,47 @@ def test_installed_entry_point_probe_and_import_time_refusal(tmp_path: Path) -> 
     ] == "refused"
     assert "synthetic-sensitive-canary" not in result.stdout + result.stderr
     assert not result.stderr
+
+
+@pytest.mark.parametrize(
+    "command,default_refusal",
+    [
+        ("issuer-run", b"DATABASE_BINDING_UNQUALIFIED\n"),
+        ("attester-session", b"TRUSTED_SSHD_BINDING_UNCONFIGURED\n"),
+    ],
+)
+def test_installed_gate0_cold_import_refuses_without_sensitive_diagnostics(
+    tmp_path: Path, command: str, default_refusal: bytes
+) -> None:
+    from vendor_cp.identity import DISTRIBUTION
+
+    script = (
+        "from importlib.metadata import distribution; "
+        f"e=next(e for e in distribution({DISTRIBUTION!r}).entry_points "
+        "if e.name=='dotmac-platform'); e.load()()"
+    )
+    argv = [sys.executable, "-c", script, "gate0", command]
+    env = {
+        "PATH": os.defpath,
+        "DATABASE_URL": "postgresql+psycopg://x@localhost/test",
+        "PLATFORM_DATABASE_URL": "postgresql+psycopg://x@localhost/test",
+        "JWT_TTL_SECONDS": "synthetic-sensitive-canary",
+    }
+    result = subprocess.run(  # noqa: S603 -- fixed installed service, synthetic environment
+        argv, env=env, cwd=tmp_path, capture_output=True
+    )
+    assert result.returncode == 3
+    assert result.stdout == b""
+    assert result.stderr == b"GATE0_SERVICE_REFUSED\n"
+    assert b"synthetic-sensitive-canary" not in result.stdout + result.stderr
+    assert b"Traceback" not in result.stderr
+
+    # Separate cold process: valid configuration still reaches the selected
+    # owner's normal unconfigured refusal rather than the import-error guard.
+    del env["JWT_TTL_SECONDS"]
+    default = subprocess.run(  # noqa: S603 -- same fixed installed service
+        argv, env=env, cwd=tmp_path, capture_output=True
+    )
+    assert default.returncode == 3
+    assert default.stdout == b""
+    assert default.stderr == default_refusal
