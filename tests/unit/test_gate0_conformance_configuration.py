@@ -1,14 +1,21 @@
 """Only the two explicitly selected non-database mechanisms bypass the DB guard."""
 
+import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conformance.conftest import pytest_configure
 
 ROOT = Path(__file__).resolve().parents[2] / "conformance"
 D16 = str(ROOT / "test_d16_source_verifier_real_foundation.py")
 ARCHIVE = str(ROOT / "test_gate0_e_archive_gpg.py")
+_SPEC = importlib.util.spec_from_file_location(
+    "gate0_conformance_guard_under_test", ROOT / "conftest.py"
+)
+assert _SPEC is not None and _SPEC.loader is not None
+_GUARD = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_GUARD)
+pytest_configure = _GUARD.pytest_configure
 
 
 @pytest.mark.parametrize("requested", [[D16], [ARCHIVE], [ARCHIVE + "::test_selected"]])

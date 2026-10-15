@@ -61,8 +61,11 @@ authorization, and the consume proof predates the real withdrawal event.
 
 This source layer deliberately has no `AcceptedE`, accepted-prerequisite flag,
 installed policy loader, producer oracle, five-file archive preparation or final
-readiness receipt writer. Accepted B/C1/C2/D owner record formats have not been
-located and must not be invented. Concrete GitHub producer verification, complete
+readiness receipt writer. B and C1 have existing adopted decisions, immutable
+source revisions and successful hosted checks: CP #200, Starter #753, and CP
+#201/#204. Their source acceptance must be bound to those actual owner artifacts;
+the historical undecided C1 wording does not reopen that decision. A new
+acceptance lifecycle must not be invented. Concrete GitHub producer verification, complete
 prerequisite evidence/acceptance, installed source/runtime qualification, actual
 runner key cleanup, B custody verification and immutable publication remain
 coordinator integration work. The proposed digest-bound B verification and

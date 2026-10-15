@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import signal
@@ -51,7 +52,10 @@ def operation() -> AdmittedOperation:
         operation="deploy",
         execution_plan_digest="sha256:" + "2" * 64,
         certificate_digest="sha256:" + "3" * 64,
-        ca_fingerprint="SHA256:" + "B" * 43,
+        ca_fingerprint="SHA256:"
+        + base64.b64encode(hashlib.sha256(b"synthetic-ca-coordinate").digest())
+        .decode("ascii")
+        .rstrip("="),
     )
 
 
