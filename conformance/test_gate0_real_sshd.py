@@ -121,6 +121,21 @@ def daemon(record_property):
         account = pwd.getpwnam(username)
         uid, gid = account.pw_uid, account.pw_gid
         assert uid > 0
+        # Diagnose startup access before treating a refused command as a
+        # security proof. This runs the same isolated installed interpreter
+        # under the exact daemon worker identity, outside the checkout.
+        run(
+            [
+                "/usr/sbin/runuser",
+                "-u",
+                username,
+                "--",
+                sys.executable,
+                "-I",
+                "-c",
+                "import vendor_cp.deployment.gate0_services",
+            ]
+        )
         now = datetime.now(UTC)
         controller, ca, attester, host = (
             Ed25519PrivateKey.generate() for _ in range(4)

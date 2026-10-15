@@ -15,7 +15,7 @@ import stat
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol
 from uuid import UUID
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -172,7 +172,7 @@ class AttesterSession:
         token = request["workload_token"]
         if not isinstance(token, str) or not 0 < len(token) <= 16384:
             raise ServiceRefused()
-        phase = cast(Literal["issue", "consume"], request["phase"])
+        phase = request["phase"]
         authorization = (
             None
             if request["authorization"] is None
