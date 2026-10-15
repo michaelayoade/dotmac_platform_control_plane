@@ -1224,6 +1224,7 @@ class SlotExecutionBoundary:
         if not (self.path / "cgroup.kill").is_file():
             raise ProviderRefused()
         self._closed = False
+        self._cleanup_complete = False
         self._watchdog_pid: int | None = None
         self._watchdog_write: int | None = None
 
@@ -1278,8 +1279,13 @@ class SlotExecutionBoundary:
             os.close(fd)
 
     def terminate_and_confirm_empty(self) -> None:
-        if self._closed:
+        if self._cleanup_complete:
             return  # only this root owner can re-enter a retired boundary
+        if self._closed:
+            raise ProviderRefused()
+        # Retire on the first attempt, but never turn an unknown/failed cleanup
+        # into successful idempotence. Completion also requires guardian reap.
+        self._closed = True
         fd = os.open("cgroup.kill", os.O_WRONLY | os.O_CLOEXEC, dir_fd=self._fd)
         try:
             _write(fd, b"1")
@@ -1294,7 +1300,6 @@ class SlotExecutionBoundary:
             finally:
                 os.close(fd)
             if b"populated 0" in events:
-                self._closed = True
                 os.close(self._fd)
                 if self._watchdog_write is not None:
                     os.close(self._watchdog_write)
@@ -1309,9 +1314,11 @@ class SlotExecutionBoundary:
                         if child:
                             if status != 0:
                                 raise ProviderRefused()
+                            self._cleanup_complete = True
                             return
                         time.sleep(0.01)
                     raise ProviderRefused()
+                self._cleanup_complete = True
                 return
             time.sleep(0.01)
         raise ProviderRefused()

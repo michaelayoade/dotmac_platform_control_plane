@@ -886,6 +886,68 @@ def test_failed_or_ineffective_privilege_seal_is_refused(monkeypatch, failure):
         launch._seal_network_privileges()
 
 
+def synthetic_cleanup_boundary(monkeypatch):
+    """Synthetic cgroup I/O only; never evidence of kernel quiescence."""
+    boundary = object.__new__(launch.SlotExecutionBoundary)
+    boundary._closed = False
+    boundary._cleanup_complete = False
+    boundary._fd = 101
+    boundary._watchdog_pid = 202
+    boundary._watchdog_write = 303
+    events = []
+    monkeypatch.setattr(
+        launch.os,
+        "open",
+        lambda name, flags, *, dir_fd: events.append(("open", name)) or 404,
+    )
+    monkeypatch.setattr(launch.os, "close", lambda fd: events.append(("close", fd)))
+    monkeypatch.setattr(
+        launch, "_write", lambda fd, value: events.append(("write", value))
+    )
+    monkeypatch.setattr(launch, "_bytes", lambda fd, size: b"populated 0\n")
+    monkeypatch.setattr(launch.time, "monotonic", lambda: 0)
+    return boundary, events
+
+
+@pytest.mark.parametrize("failure", ["waitpid-error", "guardian-failure"])
+def test_cleanup_failure_after_empty_readback_is_sticky(monkeypatch, failure):
+    boundary, events = synthetic_cleanup_boundary(monkeypatch)
+
+    def waitpid(pid, flags):
+        events.append(("waitpid", pid))
+        if failure == "waitpid-error":
+            raise ChildProcessError()
+        return pid, 1
+
+    monkeypatch.setattr(launch.os, "waitpid", waitpid)
+    with pytest.raises((ChildProcessError, launch.ProviderRefused)):
+        boundary.terminate_and_confirm_empty()
+    assert boundary._closed and not boundary._cleanup_complete
+    assert ("close", boundary._fd) in events
+    assert ("waitpid", 202) in events
+    attempted = list(events)
+    with pytest.raises(launch.ProviderRefused):
+        boundary.terminate_and_confirm_empty()
+    assert events == attempted
+
+
+def test_cleanup_is_idempotent_only_after_empty_readback_and_guardian_reap(monkeypatch):
+    boundary, events = synthetic_cleanup_boundary(monkeypatch)
+
+    def waitpid(pid, flags):
+        assert not boundary._cleanup_complete
+        events.append(("waitpid", pid))
+        return pid, 0
+
+    monkeypatch.setattr(launch.os, "waitpid", waitpid)
+    boundary.terminate_and_confirm_empty()
+    assert boundary._closed and boundary._cleanup_complete
+    assert events[-1] == ("waitpid", 202)
+    completed = list(events)
+    boundary.terminate_and_confirm_empty()
+    assert events == completed
+
+
 def test_preflight_guardian_empty_and_privilege_seal_precede_publication(monkeypatch):
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
     supervisor.clocks = SimpleNamespace(
