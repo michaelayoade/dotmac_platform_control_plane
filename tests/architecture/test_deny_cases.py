@@ -78,10 +78,12 @@ def _executed_python() -> list[Path]:
 #: A vendor-defined function whose NAME claims to authenticate a platform actor.
 #: Names, not bodies: the enforceable premise is that this repository composes
 #: the kernel's owners and defines none, so any local definition of one is the
-#: violation regardless of what it does.
+#: violation regardless of what it does. The identifier component
+#: "authorization" names a signed artifact/permission, not authentication.
+#: Other actor markers still fire even when that component is also present.
 _AUTHENTICATION_DEFINITION = re.compile(
     r"^\s*(?:async\s+)?def\s+((?:require|authenticate|verify)_[a-z_]*"
-    r"(?:platform|admin|web|session|auth)[a-z_]*)\s*\(",
+    r"(?:platform|admin|web|session|auth(?!orization(?:_|\b)))[a-z_]*)\s*\(",
     re.MULTILINE,
 )
 
@@ -365,6 +367,10 @@ def test_d4_the_vendor_re_implements_no_authentication() -> None:
         "def require_platform_admin(request):\n    return None\n",
         "async def authenticate_web_session(request):\n    return None\n",
         "    def verify_admin_cookie(self, token):\n        return None\n",
+        "def verify_auth_token(token):\n    return None\n",
+        "def verify_authentication_cookie(token):\n    return None\n",
+        "def verify_authorization_platform_actor(token):\n    return None\n",
+        "def verify_authorization_web_session(token):\n    return None\n",
     ],
 )
 def test_d4_the_re_implementation_detector_sees_a_planted_definition(
@@ -375,6 +381,25 @@ def test_d4_the_re_implementation_detector_sees_a_planted_definition(
     the pattern stopped matching anything at all. Each form the detector claims
     to see gets a probe: module-level, `async`, and nested in a class."""
     assert _AUTHENTICATION_DEFINITION.findall(planted)
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        "def verify_rehearsal_issuer_authorization("
+        "self, *, canonical_bytes, signature):\n    return False\n",
+        "def verify_release_authorization_signature(document):\n    return False\n",
+    ],
+)
+def test_d4_signed_authorization_artifacts_are_not_actor_authentication(
+    planted: str,
+) -> None:
+    """Artifact verification returns no platform principal or session.
+
+    The public Control protocol's exact method name remains legal. Adding an
+    actor marker still fires the positive detector vectors above.
+    """
+    assert not _AUTHENTICATION_DEFINITION.findall(planted)
 
 
 # ── D5 — only the kernel's PUBLIC surface; no private/internal/copied code ────

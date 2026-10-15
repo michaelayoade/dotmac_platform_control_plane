@@ -12,8 +12,9 @@ session-observation evidence or authority-database qualification.
 
 `gate0_services.assemble_issuer_startup` composes role-local issuer material,
 concrete workload admission and an attester public verifier.
-`serve_issuer` obtains sessions only from
-`dotmac_kernel.db.runtime.platform_session_factory`. It assembles Control security
+Trusted assembly injects the qualified `OwnerWindowReader` kernel runtime
+platform session factory; production `IssuerWorker` refuses a factory with a
+different identity or no binding. It assembles Control security
 once and retains that composition across issue, standing and consume. Neither
 payloads nor the service create a database, engine, role, table, approval, ledger,
 trust root or issuer identity. The selected CP database must be the same authority

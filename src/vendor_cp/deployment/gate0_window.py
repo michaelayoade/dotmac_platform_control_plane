@@ -27,7 +27,6 @@ from vendor_cp.deployment.gate0_role_custody import ProviderRefused, json_record
 from vendor_cp.deployment.gate0_runtime import AdmittedOperation, _ssh_fingerprint
 
 if TYPE_CHECKING:
-    from dotmac_approvals import HeldPlatformApproval
     from dotmac_deployment_control import (
         PlanView,
         RehearsalIssuerAuthorizationSignerIdentity,
@@ -37,6 +36,8 @@ if TYPE_CHECKING:
     )
     from dotmac_kernel.session_runtime import DatabaseRuntime
     from sqlalchemy.orm import Session
+
+    from vendor_cp.approvals.adapter import HeldPlatformApproval
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 

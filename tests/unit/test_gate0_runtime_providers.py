@@ -655,7 +655,6 @@ def combined_worker(jwt_case, monkeypatch):
     from types import SimpleNamespace
 
     import dotmac_deployment_control as control
-    from dotmac_kernel.db import runtime
 
     from vendor_cp.deployment import gate0_composition as composition
     from vendor_cp.deployment import gate0_services as services
@@ -790,7 +789,6 @@ def combined_worker(jwt_case, monkeypatch):
             standing=SimpleNamespace(value="synthetic-standing"), refusal=None
         )
 
-    monkeypatch.setattr(runtime, "platform_session_factory", session)
     monkeypatch.setattr(
         control, "get_plan", lambda db, selected: plan if selected == plan.id else None
     )
@@ -824,6 +822,7 @@ def combined_worker(jwt_case, monkeypatch):
         "synthetic-actor",
         True,
         require_frozen_window=False,  # Explicit unbound synthetic bridge case.
+        sessions=session,
     )
     registry._expires = wall + timedelta(seconds=120)
     registry._now = lambda: wall

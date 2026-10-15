@@ -54,6 +54,7 @@ def test_one_install_is_retained_across_issue_and_consume(monkeypatch):
     monkeypatch.setattr(services, "assemble_gate0_composition", assemble)
     startup = SimpleNamespace(
         database_qualified=True,
+        sessions=lambda: pytest.fail("synthetic dispatch must not open a session"),
         require_frozen_window=False,  # Explicit synthetic dispatch mechanism.
         actor_ref="synthetic-management-actor",
         verifier=SimpleNamespace(_require_open=lambda: None),
@@ -85,6 +86,7 @@ def test_one_install_is_retained_across_issue_and_consume(monkeypatch):
     )
     worker.run(channel)
     assert len(installations) == 1
+    assert installations[0]["sessions"] is startup.sessions
     assert worker.composition is composition
     assert calls == [
         ("issue", "synthetic-management-actor", plan_id),
@@ -115,6 +117,7 @@ def test_request_cannot_select_actor_code_or_database(monkeypatch):
     )
     startup = SimpleNamespace(
         database_qualified=True,
+        sessions=lambda: pytest.fail("synthetic dispatch must not open a session"),
         require_frozen_window=False,  # Explicit synthetic dispatch mechanism.
         actor_ref="synthetic-management",
         verifier=SimpleNamespace(_require_open=lambda: None),
@@ -152,6 +155,7 @@ def test_committed_mutation_with_lost_response_is_incomplete(monkeypatch):
     )
     startup = SimpleNamespace(
         database_qualified=True,
+        sessions=lambda: pytest.fail("synthetic dispatch must not open a session"),
         require_frozen_window=False,  # Explicit synthetic dispatch mechanism.
         actor_ref="synthetic-management",
         verifier=SimpleNamespace(_require_open=lambda: None),
@@ -205,3 +209,61 @@ def test_standing_bridge_forwards_actual_envelope_only_for_consume(admission_pha
     ]
     assert worker._request["authorization"] == services.encode(b"actual-owner-envelope")
     assert "workload_token" not in worker._request
+
+
+def test_missing_startup_sessions_refuses_before_owner_install(monkeypatch):
+    installs = []
+    monkeypatch.setattr(
+        services, "assemble_gate0_composition", lambda **kwargs: installs.append(kwargs)
+    )
+    with pytest.raises(ServiceRefused):
+        services.IssuerWorker(
+            SimpleNamespace(
+                database_qualified=True, actor_ref="synthetic-actor", sessions=None
+            )
+        )
+    assert installs == []
+
+
+@pytest.mark.parametrize("matching_factory", [False, True])
+def test_production_sessions_must_be_the_owner_reader_runtime_factory(
+    monkeypatch, matching_factory
+):
+    from vendor_cp.deployment.gate0_workload_admission import OwnerWorkloadAdmission
+
+    installs = []
+    monkeypatch.setattr(
+        services, "assemble_gate0_composition", lambda **kwargs: installs.append(kwargs)
+    )
+    # Sensitivity: even a caller that asserts qualification and passes an
+    # exact owner-admission instance cannot substitute the mutation factory.
+    # This synthetic boundary test constructs an incomplete provider only to
+    # isolate factory identity; its positive is not live DB qualification.
+    admission = object.__new__(OwnerWorkloadAdmission)
+
+    def trusted_factory():
+        pytest.fail("session provenance check must not open the trusted database")
+
+    admission._reader = SimpleNamespace(
+        _runtime=SimpleNamespace(platform_session_factory=trusted_factory)
+    )
+    startup = SimpleNamespace(
+        database_qualified=True,
+        actor_ref="synthetic-actor",
+        require_frozen_window=True,
+        admission=admission,
+        sessions=trusted_factory
+        if matching_factory
+        else lambda: pytest.fail("unrelated database was opened"),
+        verifier=object(),
+        signer=object(),
+        authorization_verifier=object(),
+        authorization_ttl=object(),
+    )
+    if matching_factory:
+        services.IssuerWorker(startup)
+        assert len(installs) == 1 and installs[0]["sessions"] is trusted_factory
+    else:
+        with pytest.raises(ServiceRefused):
+            services.IssuerWorker(startup)
+        assert installs == []

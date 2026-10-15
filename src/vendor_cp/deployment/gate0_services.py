@@ -46,6 +46,7 @@ if TYPE_CHECKING:
         RehearsalIssuerAuthorizationSigner,
         RehearsalIssuerAuthorizationVerifier,
     )
+    from sqlalchemy.orm import Session
 
     from vendor_cp.deployment.gate0_role_custody import RoleMaterial
     from vendor_cp.deployment.gate0_workload_admission import WorkloadAdmission
@@ -104,6 +105,7 @@ class IssuerStartup:
     database_qualified: bool
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
     require_frozen_window: bool = True
+    sessions: Callable[[], Session] | None = None
 
 
 class IssuerWorker:
@@ -114,14 +116,25 @@ class IssuerWorker:
             startup.database_qualified is not True
             or not startup.actor_ref
             or len(startup.actor_ref) > 512
+            or startup.sessions is None
         ):
             raise ServiceRefused()
-        from dotmac_kernel.db import runtime
+        if startup.require_frozen_window:
+            from vendor_cp.deployment.gate0_workload_admission import (
+                OwnerWorkloadAdmission,
+            )
+
+            if (
+                type(startup.admission) is not OwnerWorkloadAdmission
+                or startup.sessions
+                is not startup.admission._reader._runtime.platform_session_factory
+            ):
+                raise ServiceRefused()
 
         self._startup = startup
         self._request: dict[str, object] | None = None
         self.composition: Gate0Composition = assemble_gate0_composition(
-            sessions=runtime.platform_session_factory,
+            sessions=startup.sessions,
             admission=self._admit,
             proof_resolver=self._proof,
             verifier=startup.verifier,
@@ -333,6 +346,7 @@ def assemble_issuer_startup(
         actor_ref,
         database_qualified,
         require_frozen_window=True,
+        sessions=admission._reader._runtime.platform_session_factory,
     )
 
 
