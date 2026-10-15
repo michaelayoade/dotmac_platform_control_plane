@@ -17,7 +17,7 @@ import time
 from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from vendor_cp.deployment.gate0_database import (
     DatabaseExpectation,
@@ -34,7 +34,17 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from vendor_cp.deployment.gate0_collection_projection import CollectionInstallation
-    from vendor_cp.deployment_profile import VendorDeploymentProfile
+
+
+class SelectedProfileIdentity(Protocol):
+    """Identity handed off by composition; this module never selects a profile."""
+
+    @property
+    def code(self) -> str: ...
+
+    @property
+    def version(self) -> str: ...
+
 
 _PINNED_BYTES: bytes | None = None
 
@@ -167,7 +177,7 @@ def _database(value: object) -> DatabaseExpectation:
 
 
 def load_installed_collection(
-    profile: VendorDeploymentProfile,
+    profile: SelectedProfileIdentity,
 ) -> CollectionInstallation:
     """Measure the existing runtime and retain the fixed original clocks."""
     from uuid import UUID
@@ -277,7 +287,7 @@ def load_installed_collection(
     return installed
 
 
-def bind_installed_collection(app: FastAPI, profile: VendorDeploymentProfile) -> None:
+def bind_installed_collection(app: FastAPI, profile: SelectedProfileIdentity) -> None:
     """Only the two actually constructed declared routes activate installation I/O."""
     from fastapi.routing import APIRoute
 

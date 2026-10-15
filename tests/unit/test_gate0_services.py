@@ -291,6 +291,7 @@ def refusal_association_case(monkeypatch):
     expected = SimpleNamespace(
         operation=SimpleNamespace(plan_id=str(plan), phase="consume"),
         window_digest=services.digest(b"synthetic-window"),
+        authentication_freshness=None,
     )
     owner = b"synthetic-new-owner-proof"
     new_digest = services.digest(owner)

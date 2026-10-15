@@ -849,6 +849,7 @@ def combined_worker(jwt_case, monkeypatch):
     class Channel:
         def __init__(self, requests):
             self.requests, self.output = iter(requests), []
+            self.deadline = original._deadline
 
         def receive(self, allow_eof=False):
             return next(self.requests, None)
@@ -901,7 +902,9 @@ def test_combined_issue_standing_consume_retains_install_and_phase_binding(
 ):
     case = combined_worker
     channel = case.channel([case.request(p) for p in ("issue", "standing", "consume")])
+    original_deadline = channel.deadline
     case.worker.run(channel)
+    assert channel.deadline == original_deadline
     assert [item["operation"] for item in channel.output] == [
         "issue",
         "standing",
@@ -933,8 +936,11 @@ def test_combined_lifecycle_substitutions_refuse(combined_worker, substitution):
         case.plan.plan_digest = "sha256:" + "9" * 64
     else:
         case.transport.document = {"keys": []}
+    channel = case.channel([request])
+    original_deadline = channel.deadline
     with pytest.raises(ValueError):
-        case.worker.run(case.channel([request]))
+        case.worker.run(channel)
+    assert channel.deadline == original_deadline
     assert case.effects == ["issue", "commit"]
     assert len(case.installs) == 1
 

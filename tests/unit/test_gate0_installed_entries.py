@@ -531,16 +531,20 @@ def test_issuer_submission_refresh_precedes_owner_operation(monkeypatch, failed_
         ]
     )
     channel = SimpleNamespace(
+        deadline=monotonic() + startup.authorization_ttl.total_seconds(),
         receive=lambda allow_eof=False: next(requests, None),
         send=lambda result: events.append("result"),
     )
+    original_deadline = channel.deadline
     worker = services.IssuerWorker(startup)
     if failed_phase:
         with pytest.raises(ProviderRefused):
             worker.run(channel)
         assert events == ["refresh-submission"]
+        assert channel.deadline == original_deadline
     else:
         worker.run(channel)
+        assert channel.deadline == original_deadline
         assert events == [
             "refresh-submission",
             "issue",
