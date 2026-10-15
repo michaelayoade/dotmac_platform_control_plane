@@ -419,6 +419,8 @@ class DownloadedReleaseFacts:
     immutable: bool
     assets: tuple[ReleaseAssetFact, ...]
     observations: tuple[GitHubObservation, ...] = field(repr=False)
+    raw_tag_sha: str
+    owner_id: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1829,10 +1831,11 @@ class InstalledGate0GitHubReads:
             )
         }
 
-    def _tag_commit(self, pin: ReleasePin) -> str:
+    def _tag_binding(self, pin: ReleasePin) -> tuple[str, str]:
         ref = _obj(self._read(EndpointCode.TAG_REF, identifier=pin.tag))
         _require(ref["ref"] == "refs/tags/" + pin.tag)
         target = _obj(ref["object"])
+        raw_tag_sha = _hex(target["sha"], 40)
         visited = set()
         for depth in range(5):
             sha = _hex(target["sha"], 40)
@@ -1840,12 +1843,15 @@ class InstalledGate0GitHubReads:
             visited.add(sha)
             if target["type"] == "commit":
                 _require(sha == pin.commit)
-                return sha
+                return raw_tag_sha, sha
             _require(target["type"] == "tag" and depth < 4)
             tag = _obj(self._read(EndpointCode.TAG, identifier=sha))
             _require(_hex(tag["sha"], 40) == sha)
             target = _obj(tag["object"])
         raise GitHubReadRefused()
+
+    def _tag_commit(self, pin: ReleasePin) -> str:
+        return self._tag_binding(pin)[1]
 
     def _release_facts(self, published: bool) -> DownloadedReleaseFacts:
         pin = self._release_pin(published)
@@ -1927,7 +1933,7 @@ class InstalledGate0GitHubReads:
             producer,
             self._policies[self._producer.run_id],
         )
-        peeled = self._tag_commit(pin)
+        tag_binding = self._tag_binding(pin)
         after_inventory = self._pages(
             EndpointCode.ASSETS, None, 32, identifier=pin.release_id
         )
@@ -1950,17 +1956,19 @@ class InstalledGate0GitHubReads:
                 published,
             )
             == before
-            and self._tag_commit(pin) == peeled
+            and self._tag_binding(pin) == tag_binding
         )
         return DownloadedReleaseFacts(
             self._repository.repository_id,
             pin.release_id,
             pin.tag,
-            peeled,
+            tag_binding[1],
             not published,
             before["immutable"],
             tuple(facts),
             tuple(self._observations),
+            tag_binding[0],
+            self._repository.owner_id,
         )
 
     def draft_snapshot(self) -> DownloadedReleaseFacts:

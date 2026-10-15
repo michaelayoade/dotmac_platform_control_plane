@@ -727,6 +727,41 @@ def test_tag_cycle_and_wrong_commit_refuse(producer):
         owner._tag_commit(pin)
 
 
+def test_tag_binding_preserves_raw_annotated_identity(producer):
+    owner, responses = producer
+    pin = gh.ReleasePin(22, "gate0-selected", "a" * 40, ())
+    responses[gh.EndpointCode.TAG_REF] = {
+        "ref": "refs/tags/gate0-selected",
+        "object": {"type": "tag", "sha": "b" * 40},
+    }
+    responses[gh.EndpointCode.TAG] = {
+        "sha": "b" * 40,
+        "object": {"type": "commit", "sha": "a" * 40},
+    }
+    assert owner._tag_binding(pin) == ("b" * 40, "a" * 40)
+    responses[gh.EndpointCode.TAG_REF]["object"] = {"type": "commit", "sha": "a" * 40}
+    assert owner._tag_binding(pin) == ("a" * 40, "a" * 40)
+
+
+def test_tag_binding_detects_new_tag_object_at_same_commit(producer):
+    owner, responses = producer
+    pin = gh.ReleasePin(22, "gate0-selected", "a" * 40, ())
+    responses[gh.EndpointCode.TAG_REF] = {
+        "ref": "refs/tags/gate0-selected",
+        "object": {"type": "tag", "sha": "b" * 40},
+    }
+    responses[gh.EndpointCode.TAG] = {
+        "sha": "b" * 40,
+        "object": {"type": "commit", "sha": "a" * 40},
+    }
+    before = owner._tag_binding(pin)
+    responses[gh.EndpointCode.TAG_REF]["object"]["sha"] = "c" * 40
+    responses[gh.EndpointCode.TAG]["sha"] = "c" * 40
+    after = owner._tag_binding(pin)
+    assert before[1] == after[1]
+    assert before != after
+
+
 def test_documented_attempt_jobs_shape_needs_no_job_attempt(producer):
     owner, responses = producer
     assert "run_attempt" not in responses[gh.EndpointCode.JOBS]["jobs"][0]
