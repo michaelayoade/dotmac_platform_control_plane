@@ -18,8 +18,10 @@ import multiprocessing
 import os
 import pwd
 import select
+import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import sysconfig
@@ -42,6 +44,7 @@ from vendor_cp.deployment import gate0_launch as launch
 from vendor_cp.deployment import gate0_role_custody as custody
 
 K = 0x400E3
+_NATIVE_STATUS_ROOT = Path("/run/gate0-native-status")
 
 
 _STAGES = frozenset(
@@ -492,7 +495,7 @@ def _worker(supervisor_pid, port, entry_marker):
         reader.close()
 
 
-def _native_role_image():
+def _native_role_image_body(evidence, deadline):
     assert os.environ.get("GITHUB_ACTIONS") == "true", "hosted-only native proof"
     assert os.getpid() == 1 and os.geteuid() == 0, "isolated image PID1 required"
     assert (
@@ -501,6 +504,7 @@ def _native_role_image():
         .is_relative_to(Path(sysconfig.get_path("purelib")).resolve())
     )
     assert not (launch.ROOT / "packet.json").exists(), "no operational installation"
+    assert not _NATIVE_STATUS_ROOT.exists(), "no native fixture rearm"
     inventory = json.loads(Path("/app/gate0_native_tools.json").read_bytes())
     assert inventory["schema"] == "Gate0NativeTools.v1"
     for name in (
@@ -575,6 +579,8 @@ def _native_role_image():
         worker_status.mkdir(mode=0o700)
         os.chown(worker_status, 10032, pwd.getpwuid(10032).pw_gid)
         entry_marker = worker_status / "entered"
+        _NATIVE_STATUS_ROOT.mkdir(mode=0o700)
+        os.chown(_NATIVE_STATUS_ROOT, 10032, pwd.getpwuid(10032).pw_gid)
         assert directory.stat().st_uid == 0
         assert stat.S_IMODE(directory.stat().st_mode) == 0o755
         assert worker_status.stat().st_uid == 10032
@@ -632,7 +638,7 @@ def _native_role_image():
             worker_path = Path(__file__).resolve()
             assert " " not in str(worker_path) and " " not in sys.executable
             worker_command = (
-                f"{sys.executable} -I -B {worker_path} "
+                f"exec {sys.executable} -I -B {worker_path} "
                 f"--native-worker 1 {echo_port} {entry_marker}"
             )
             config = directory / "sshd_config"
@@ -710,9 +716,9 @@ LogLevel ERROR
                 _, daemon_error = refused_daemon.communicate(timeout=3)
                 assert refused_client.returncode == 255
                 assert refused_daemon.returncode is not None
-                assert (
-                    refused_daemon.returncode >= 0
-                ), "authentication monitor was killed"
+                assert refused_daemon.returncode >= 0, (
+                    "authentication monitor was killed"
+                )
                 assert refused_output == b""
                 assert b"GATE0_NATIVE_STAGE=worker_entered" not in refused_error
                 assert b"Permission denied (publickey)" in refused_error
@@ -737,9 +743,9 @@ LogLevel ERROR
                     pid, _ = os.waitpid(-1, os.WNOHANG)
                 except ChildProcessError:
                     break
-                assert (
-                    time.monotonic() < refusal_cleanup_end
-                ), "refused authentication descendant remained"
+                assert time.monotonic() < refusal_cleanup_end, (
+                    "refused authentication descendant remained"
+                )
                 if pid == 0:
                     time.sleep(0.02)
             assert not Path("/proc/1/task/1/children").read_text().strip()
@@ -781,17 +787,21 @@ LogLevel ERROR
                         connection.settimeout(3)
                         received = connection.recv(64)
                         if negative:
-                            assert (
-                                received == b""
-                            ), "payload preceded native device refusal"
+                            assert received == b"", (
+                                "payload preceded native device refusal"
+                            )
                         else:
                             assert received == b"gate0-native-synthetic"
                             connection.sendall(b"native-readback")
                 output, client_error = ssh_client.communicate(timeout=8)
                 daemon.wait(timeout=3)
-                if ssh_client.returncode != 0 or daemon.returncode != 0:
-                    raise AssertionError("native positive SSH exchange failed")
-                assert daemon.returncode == 0
+                assert ssh_client.returncode == 0
+                assert type(daemon.returncode) is int and 0 <= daemon.returncode <= 255
+                evidence["socket_session"] = {
+                    "client_returncode": ssh_client.returncode,
+                    "daemon_returncode": daemon.returncode,
+                    "daemon_termination": "exited",
+                }
                 report = json.loads(output)
                 assert entry_marker.is_file(), "positive did not enter fixed worker"
                 assert report["worker"] == [0, 0, 0, 0, K, 1]
@@ -844,32 +854,306 @@ LogLevel ERROR
                             process.stdout.close()
                         if process.stderr is not None:
                             process.stderr.close()
-        # PID1 must reap any exited privsep/spawn grandchildren as well.
-        cleanup_end = time.monotonic() + 3
-        while Path("/proc/1/task/1/children").read_text().strip():
-            try:
-                pid, _ = os.waitpid(-1, os.WNOHANG)
-            except ChildProcessError:
-                break
-            assert time.monotonic() < cleanup_end, "native descendant remained"
-            if pid == 0:
-                time.sleep(0.02)
-        assert not Path("/proc/1/task/1/children").read_text().strip()
-        print(
-            json.dumps(
-                {
-                    "schema": "Gate0NativeNetworkPrivilegeProof.v1",
-                    "passed": True,
-                    "supervisor_capabilities": launch._proc_capabilities(1),
-                    "worker": report,
-                    "wrong_principal_refused_under_k": True,
-                    "refused_authentication_boundary_empty": True,
-                    "full_wireguard_installation_qualified": False,
-                    "live_readiness": False,
-                },
-                sort_keys=True,
-            )
+            evidence["worker"] = report
+            evidence["wrong_principal_refused_under_k"] = True
+            evidence["refused_authentication_boundary_empty"] = True
+            _reap_native_children(min(deadline, time.monotonic() + 3), kill=False)
+            for mode in ("0", "3", "5", "signal"):
+                observation = _characterize_status(
+                    mode,
+                    directory,
+                    worker_path,
+                    config,
+                    worker_command,
+                    ssh_listener,
+                    ssh_arguments,
+                    deadline,
+                    evidence["status_characterization"],
+                )
+                assert observation["characterization_passed"]
+
+
+def _native_status_worker(mode):
+    # Test-only fixed commands. No production CLI, authority or custody input.
+    assert mode in ("0", "3", "5", "signal")
+    assert not os.environ.get("SSH_ORIGINAL_COMMAND")
+    assert not os.environ.get("SSH_TTY")
+    assert "-cert-v01@openssh.com" in Path(os.environ["SSH_USER_AUTH"]).read_text()
+    launch._require_worker_privileges(10032, 1)
+    terminal_path = _NATIVE_STATUS_ROOT / ("terminal-" + mode + ".json")
+    declared = {"0": 0, "3": 3, "5": 5, "signal": None}[mode]
+    terminal = None
+    if mode in ("0", "3"):
+        terminal = {
+            "schema": "Gate0NativeComponentTerminal.v1",
+            "case": mode,
+            "worker_declared_exit_code": declared,
+            "synthetic_only": True,
+        }
+        descriptor = os.open(
+            terminal_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400
         )
+        try:
+            launch._write(descriptor, launch.canonical(terminal))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    document = {
+        "schema": "Gate0NativeCommandOutput.v1",
+        "case": mode,
+        "worker_declared_exit_code": declared,
+    }
+    raw = launch.canonical(document)
+    launch._write(1, struct.pack("!I", len(raw)) + raw)
+    if mode == "signal":
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("fixed signal command survived")
+    return declared
+
+
+def _reap_native_children(deadline, *, kill):
+    # This isolated fixture is PID1. Enumerate/reap all actual adopted children;
+    # process groups are not used as a descendant-empty substitute.
+    while Path("/proc/1/task/1/children").read_text().strip():
+        assert time.monotonic() < deadline, "native descendant remained"
+        if kill:
+            for child in Path("/proc/1/task/1/children").read_text().split():
+                try:
+                    os.kill(int(child), signal.SIGKILL)
+                except ProcessLookupError:
+                    continue
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            pid = 0
+        if pid == 0:
+            time.sleep(0.01)
+    assert not Path("/proc/1/task/1/children").read_text().strip()
+
+
+def _characterize_status(
+    mode,
+    directory,
+    worker_path,
+    config,
+    original_command,
+    listener,
+    arguments,
+    deadline,
+    observations,
+):
+    assert mode in ("0", "3", "5", "signal")
+    terminal_path = _NATIVE_STATUS_ROOT / ("terminal-" + mode + ".json")
+    command = f"exec {sys.executable} -I -B {worker_path} --native-status-{mode}"
+    text = config.read_text()
+    assert "ForceCommand " + original_command + "\n" in text
+    config.chmod(0o600)
+    config.write_text(
+        text.replace(
+            "ForceCommand " + original_command + "\n", "ForceCommand " + command + "\n"
+        )
+    )
+    config.chmod(0o444)
+    client = daemon = None
+    daemon_wait_started = False
+    completed = False
+    failure = None
+    observation = {
+        "case": mode,
+        "client_returncode": None,
+        "daemon_returncode": None,
+        "daemon_termination": "wait_failed",
+        "worker_terminal": None,
+        "worker_declared_exit_code": None,
+        "framed_output_eof": False,
+        "characterization_passed": False,
+        "authority_case_qualified": False,
+    }
+    observations.append(observation)
+    try:
+        client = subprocess.Popen(
+            arguments,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        listener.settimeout(max(0.001, min(3, deadline - time.monotonic())))
+        accepted, _ = listener.accept()
+        with accepted:
+            daemon = subprocess.Popen(
+                ["/usr/sbin/sshd", "-i", "-e", "-f", str(config)],
+                stdin=accepted,
+                stdout=accepted,
+                stderr=subprocess.DEVNULL,
+            )
+        output, _ = client.communicate(
+            timeout=max(0.001, min(3, deadline - time.monotonic()))
+        )
+        daemon_wait_started = True
+        daemon.wait(timeout=max(0.001, min(3, deadline - time.monotonic())))
+        completed = time.monotonic() < deadline
+        observation["client_returncode"] = client.returncode
+        observation["daemon_returncode"] = daemon.returncode
+        observation["daemon_termination"] = (
+            "exited"
+            if type(daemon.returncode) is int and 0 <= daemon.returncode <= 255
+            else "signaled"
+        )
+        if terminal_path.exists():
+            observation["worker_terminal"] = launch.strict_object(
+                terminal_path.read_bytes(), 4096
+            )
+        declared = {"0": 0, "3": 3, "5": 5, "signal": None}[mode]
+        expected_output = launch.canonical(
+            {
+                "schema": "Gate0NativeCommandOutput.v1",
+                "case": mode,
+                "worker_declared_exit_code": declared,
+            }
+        )
+        observation["framed_output_eof"] = (
+            output == struct.pack("!I", len(expected_output)) + expected_output
+        )
+        if observation["framed_output_eof"]:
+            observation["worker_declared_exit_code"] = declared
+        expected_client = {"0": 0, "3": 3, "5": 5, "signal": 255}[mode]
+        terminal = observation["worker_terminal"]
+        terminal_matches = (
+            terminal
+            == {
+                "schema": "Gate0NativeComponentTerminal.v1",
+                "case": mode,
+                "worker_declared_exit_code": declared,
+                "synthetic_only": True,
+            }
+            if mode in ("0", "3")
+            else terminal is None
+        )
+        observation["characterization_passed"] = (
+            completed
+            and observation["daemon_termination"] == "exited"
+            and client.returncode == expected_client
+            and observation["framed_output_eof"]
+            and terminal_matches
+        )
+    except BaseException as error:
+        failure = error
+        if isinstance(error, subprocess.TimeoutExpired):
+            observation["daemon_termination"] = (
+                "wait_timeout" if daemon_wait_started else "forced_cleanup"
+            )
+    finally:
+        # Every child, stream and adopted descendant is attempted even on mismatch.
+        for process in (daemon, client):
+            if process is None:
+                continue
+            if process.poll() is None:
+                if (
+                    process is daemon
+                    and observation["daemon_termination"] == "wait_failed"
+                ):
+                    observation["daemon_termination"] = "forced_cleanup"
+                try:
+                    process.kill()
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+            try:
+                process.wait(timeout=max(0.001, min(2, deadline - time.monotonic())))
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException as error:
+                        if failure is None:
+                            failure = error
+        if client is not None:
+            observation["client_returncode"] = client.returncode
+        if daemon is not None:
+            observation["daemon_returncode"] = daemon.returncode
+        try:
+            config.chmod(0o600)
+            config.write_text(text)
+            config.chmod(0o444)
+        except BaseException as error:
+            if failure is None:
+                failure = error
+        try:
+            _reap_native_children(min(deadline, time.monotonic() + 2), kill=True)
+        except BaseException as error:
+            if failure is None:
+                failure = error
+        observation["subtree_empty"] = (
+            not Path("/proc/1/task/1/children").read_text().strip()
+        )
+        observation["characterization_passed"] = (
+            observation["characterization_passed"]
+            and failure is None
+            and observation["subtree_empty"]
+        )
+    if failure is not None:
+        raise failure
+    return observation
+
+
+def _native_role_image():
+    # The existing outer wrapper remains60s. Reserve a final bounded cleanup tail.
+    started = time.monotonic()
+    evidence = {
+        "schema": "Gate0NativeNetworkPrivilegeProof.v1",
+        "passed": False,
+        "status_characterization": [],
+        "full_wireguard_installation_qualified": False,
+        "live_readiness": False,
+    }
+    failure = None
+    try:
+        _native_role_image_body(evidence, started + 55)
+    except BaseException as error:
+        failure = error
+        name = type(error).__name__
+        evidence["failure_class"] = name if name in _FAILURE_CLASSES else "other"
+    finally:
+        try:
+            assert os.getpid() == 1 and os.geteuid() == 0
+            _reap_native_children(min(started + 60, time.monotonic() + 3), kill=True)
+            evidence["subtree_empty"] = (
+                not Path("/proc/1/task/1/children").read_text().strip()
+            )
+        except BaseException as error:
+            evidence["subtree_empty"] = False
+            if failure is None:
+                failure = error
+        evidence["supervisor_capabilities"] = list(
+            launch._proc_capabilities(os.getpid())
+        )
+        evidence["passed"] = failure is None and evidence["subtree_empty"]
+        raw = json.dumps(evidence, sort_keys=True)
+        decoded = json.loads(raw)
+        assert len(raw.encode()) <= 65536 and decoded == evidence
+        assert decoded["schema"] == "Gate0NativeNetworkPrivilegeProof.v1"
+        assert decoded["live_readiness"] is False
+        assert decoded["full_wireguard_installation_qualified"] is False
+        if decoded["passed"]:
+            assert decoded["supervisor_capabilities"] == [K, K, 0, 0, K, 1]
+            assert [item["case"] for item in decoded["status_characterization"]] == [
+                "0",
+                "3",
+                "5",
+                "signal",
+            ]
+            assert all(
+                item["characterization_passed"]
+                and item["subtree_empty"]
+                and not item["authority_case_qualified"]
+                for item in decoded["status_characterization"]
+            )
+        print(raw, flush=True)
+    if failure is not None:
+        raise failure
 
 
 if __name__ == "__main__":
@@ -879,6 +1163,15 @@ if __name__ == "__main__":
         except Exception as error:
             _failure("worker_failed", error)
             raise
+    elif len(sys.argv) == 2 and sys.argv[1] in {
+        "--native-status-0",
+        "--native-status-3",
+        "--native-status-5",
+        "--native-status-signal",
+    }:
+        raise SystemExit(
+            _native_status_worker(sys.argv[1].removeprefix("--native-status-"))
+        )
     else:
         assert len(sys.argv) == 1
         _native_role_image()

@@ -30,7 +30,7 @@ def native_boundary():
     ), "installed wheel required"
     # The hosted installation owner supplies only this root delegation. Missing
     # cgroup.kill/delegation is failure, not a skip or process-group fallback.
-    boundary = gate0_launch.SlotExecutionBoundary("a_issue")
+    boundary = gate0_launch.SlotExecutionBoundary("issue")
     try:
         yield boundary
     finally:
@@ -114,7 +114,11 @@ def test_watchdog_kills_when_coordinator_crashes(native_boundary):
             break
         time.sleep(0.01)
     assert b"populated 0" in (boundary.path / "cgroup.events").read_bytes()
-    boundary.terminate_and_confirm_empty()
+    # This parent did not own/reap the guardian started in the forked copy.
+    # Empty descendants prove crash containment, not complete E cleanup.
+    with pytest.raises(gate0_launch.ProviderRefused):
+        boundary.terminate_and_confirm_empty()
+    assert boundary._closed and not boundary._cleanup_complete
 
 
 def test_installed_supervise_command_refuses_missing_operational_packet():

@@ -69,6 +69,7 @@ from dotmac_approvals.models import (
 )
 from dotmac_approvals.service import (
     evaluate_platform_approval,
+    get_platform_withdrawal,
     hold_platform_approval,
     publish_platform_policy_version,
     record_platform_decision,
@@ -249,6 +250,68 @@ def request_identity_evidence(db: Session, request_id: UUID) -> RequestIdentityE
             DecisionIdentityEvidence(row.id, row.actor_id, row.action, row.decided_at)
             for row in rows
         ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class WithdrawalIdentityEvidence:
+    """Bounded immutable owner provenance; free-text reason is never retained."""
+
+    request_id: UUID
+    withdrawal_id: UUID
+    actor_id: UUID
+    authority_ref: str
+    approved_at: datetime
+    effective_at: datetime
+    external_ref: str
+
+
+def withdrawal_for_reference(
+    db: Session, *, request_id: UUID, external_ref: str
+) -> WithdrawalIdentityEvidence | None:
+    """Read one existing withdrawal by request and exact human reference.
+
+    The public owner getter selects the request. Its immutable withdrawal UUID
+    is the outbox event UUID under the published Approvals trigger contract;
+    the human external reference is never parsed or treated as that UUID.
+    This read neither mutates nor commits and exposes no free-text reason.
+    """
+    if (
+        type(request_id) is not UUID
+        or type(external_ref) is not str
+        or not 0 < len(external_ref) <= 200
+        or external_ref != external_ref.strip()
+        or any(
+            ord(character) < 32 or ord(character) == 127 for character in external_ref
+        )
+    ):
+        raise ConflictError("approval_withdrawal_reference_refused")
+    owner = get_platform_withdrawal(db, request_id=request_id)
+    if owner is None:
+        return None
+    if owner.external_ref != external_ref:
+        raise ConflictError("approval_withdrawal_reference_mismatch")
+    if (
+        type(owner.withdrawal_id) is not UUID
+        or type(owner.actor_id) is not UUID
+        or type(owner.authority_ref) is not str
+        or not 0 < len(owner.authority_ref) <= 200
+        or not owner.authority_ref.strip()
+        or type(owner.approved_at) is not datetime
+        or type(owner.effective_at) is not datetime
+        or owner.approved_at.tzinfo is None
+        or owner.effective_at.tzinfo is None
+        or owner.effective_at < owner.approved_at
+    ):
+        raise ConflictError("approval_withdrawal_identity_refused")
+    return WithdrawalIdentityEvidence(
+        request_id,
+        owner.withdrawal_id,
+        owner.actor_id,
+        owner.authority_ref,
+        owner.approved_at,
+        owner.effective_at,
+        owner.external_ref,
     )
 
 
@@ -510,6 +573,7 @@ __all__ = [
     "RecordDecisionCommand",
     "RequestView",
     "WithdrawRequestCommand",
+    "WithdrawalIdentityEvidence",
     "approved_request_evidence",
     "evaluate_request",
     "hold_approval",
@@ -518,4 +582,5 @@ __all__ = [
     "record_decision",
     "request_identity_evidence",
     "withdraw_request",
+    "withdrawal_for_reference",
 ]

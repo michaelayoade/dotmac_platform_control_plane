@@ -78,6 +78,11 @@ def test_bootstrap_real_database_identity_refusal_precedes_secret(
             "require_run_role_terms",
             lambda *args, **kwargs: None,
         )
+        monkeypatch.setattr(
+            InstalledLaunchContext,
+            "require_capture_selection",
+            lambda *args, **kwargs: None,
+        )
         secrets = []
         monkeypatch.setattr(bootstrap, "_custody", lambda *args: secrets.append(True))
         statements = []
@@ -130,9 +135,8 @@ def test_bootstrap_real_database_identity_refusal_precedes_secret(
             1000,
             500,
         )
-        selections = tuple(
-            CaptureSelection(digest, UUID(int=i), digest, UUID(int=3), UUID(int=i + 3))
-            for i in (1, 2)
+        selection = CaptureSelection(
+            digest, UUID(int=1), digest, UUID(int=3), UUID(int=4)
         )
         management = ManagementDeliveryInstallation(
             digest,
@@ -149,14 +153,14 @@ def test_bootstrap_real_database_identity_refusal_precedes_secret(
             digest,
             digest,
             digest,
-            selections,
+            selection,
         )
         installation = ActualIssuerInstallation(
             identity,
             custody,
             expected,
             UUID(int=3),
-            (UUID(int=1), UUID(int=2)),
+            UUID(int=1),
             PublicKeyPin("synthetic-attester", bytes(range(32))),
             60,
             "synthetic-admin",

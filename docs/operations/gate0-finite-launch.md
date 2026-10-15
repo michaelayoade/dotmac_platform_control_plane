@@ -46,13 +46,19 @@ bootstrap and maps original expiry once. Attester acceptance caps at 30 seconds;
 management/sender transfer caps at 10 seconds, all bounded by original deadline.
 Existing token/HTTP budgets and byte/frame/command limits are unchanged.
 
-Daemon and worker status are separate. Root requires actual pinned `sshd -i`
-daemon return code0 before acceptance deadline. After custody/descriptors close,
+Daemon and worker status are separate. Root records a normally reaped pinned
+`sshd -i` daemon status in the OS exit-code domain0..255 before the original
+acceptance deadline. This neutral lifecycle domain supplies no command-success
+or authority meaning: ordinary completed client disconnect can yield daemon255.
+There is no daemon0/255 success allowlist. Root-observed signal termination,
+wait timeout, forced cleanup and failed wait remain incomplete even if later
+cleanup reaps code0. After custody/descriptors close,
 the fixed issuer wrapper calls `finish_issuer(IssuerProcessResult)`. Its terminal
 record declares worker3, contains the bounded transcript digest and final typed
 consume owner_refused outcome, and binds hS/hL/case/window. Root reads that file
 only after killing the issuer cgroup, populated0 readback and guardian reap.
-Attester slots similarly need daemon0 and post-custody success terminal.
+Attester slots similarly need timely normal daemon reaping and a post-custody
+success terminal.
 The collector separately requires actual authenticated pinned SSH client3 for
 issuer and client0 for each attester, complete transcript/proof and EOF from
 that invocation. Worker declarations never become root-observed worker exits.
@@ -91,6 +97,34 @@ reconciliation, not blind republish. The record always says
 delivery_status=unconfirmed; only actual protected
 receipt establishes delivery. Export failure preserves the exclusive local
 record for reconciliation and records a root failure without retry.
+
+`daemon_observations` has exact keys `issuer` on IDP3 and
+`management,issue,consume` on NS3. Each closed Gate0DaemonObservation.v1 records
+boundary, actual child PID/start, daemon_returncode, termination, completed_at,
+completed_elapsed_seconds and phase_deadline_elapsed_seconds. Elapsed values
+retain the root's original monotonic origin. Worker terminal envelopes no longer
+contain an invented daemon0. Normally reaped numbers remain diagnostic; exact
+terminal/protocol/client and cleanup joins determine eligibility.
+
+NS3 `management_capture` retains the exact root-committed CaptureInstallReadback
+and its canonical digest only after the existing EOF/request/selection/atomic
+publication/readback-send protocol. Timely normal management daemon reaping and
+complete cleanup allow only local roster progression, without claiming remote
+delivery. IDP3 `capture_delivery` retains matching readback/digest after its actual
+capture_sender child returns exactly0. That fixed sender still waits for actual
+authenticated SSH client0, exact readback and EOF. The external finalizer joins
+both root records by hS/window/coordinates/end/readback bytes/digest; a lost
+response or sender client255 remains incomplete and never retries publication.
+
+The focused native component keeps the existing UID/capability/socket positive
+and negative checks and adds fixed test-only exec commands0,3,5 and signal.
+It records actual client status separately from outer daemon status, fixed framed
+output/EOF and synthetic terminal availability/declaration. Command5/signal can
+be successfully characterized while remaining ineligible authority evidence.
+Every mismatch still attempts child/stream/adopted PID1 subtree teardown and
+emits bounded JSON diagnostics. The existing outer60-second budget is unchanged;
+no real owner, protected approval, custody, full topology or E qualification
+follows from these synthetic component records.
 
 The protected management process must actually launch the fixed supervisor and
 retain its output with known host/source/packet binding. This source does not

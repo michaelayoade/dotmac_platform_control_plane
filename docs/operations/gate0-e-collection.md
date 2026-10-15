@@ -17,9 +17,13 @@ and captured consume bundle for its terminal replay refusal. The pinned Control
 a17 mapping is issuance `ENVELOPE_MISMATCH`; it counts only with the prior
 matching committed spend, consumed standing and identical signed proof. B uses
 a separate plan, request, window, lease, controller certificate and command. It
-captures its consume proof before a real operator withdrawal, reads the existing
-relay's exact durable APPLIED outcome, then attempts use through current
-workload authentication and approval admission. The collector neither decides
+captures its consume proof before a real operator withdrawal, resolves the exact
+human `external_ref` through Approvals' public immutable withdrawal read, and
+reads the existing relay's exact durable APPLIED outcome by that withdrawal UUID.
+The owner trigger uses this UUID as its event ID; the human reference is a
+separate private provenance field and never substitutes for the event ID. The
+collector checks the exact request, event, subject, plan and authorization,
+then attempts use through current workload authentication and approval admission. The collector neither decides
 approval nor withdraws it, directly revokes Control, drains production relay,
 retries a mutation, renews a window or continues after terminal refusal.
 
@@ -40,8 +44,10 @@ four-proof/512-KiB retention and existing 16-frame/2-MiB and eight-command bound
 The hosted PostgreSQL fixture characterizes A through actual service framing,
 owner transactions, synthetic signed SSH/custody material and actual pinned
 refusal enums. It also exercises real Approvals withdrawal and relay revocation
-for B. A paired fresh-process service/collector A/B fixture and native installed
-Linux SSH/root-cleanup qualification remain required. Fixtures do not establish
+for B. Component tests cover these owner seams; final qualification still needs
+the actual protected two-start A/B campaign and native installed Linux
+SSH/root-cleanup evidence. A full synthetic campaign is not an acceptance gate.
+Fixtures do not establish
 genuine human decisions, protected producer identity, host custody or archive
 acceptance. Both terminal cases need separately authenticated actual root
 cleanup; a worker's declared exit and sshd parent exit are distinct from the

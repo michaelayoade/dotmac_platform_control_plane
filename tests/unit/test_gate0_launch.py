@@ -135,6 +135,10 @@ def test_postactivation_failure_is_unknown_and_cancellation_is_preserved(
 ):
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
     supervisor._boundaries = {}
+    supervisor._daemon_observations = {}
+    supervisor._daemon_live = {}
+    supervisor._management_capture = None
+    supervisor._capture_delivery = None
     supervisor._phase_completed = {}
     supervisor._activated = False
     monkeypatch.setattr(launch, "_load_local_packet", lambda: {"host_role": "issuer"})
@@ -161,6 +165,10 @@ def test_postactivation_failure_is_unknown_and_cancellation_is_preserved(
 def test_issuer_missing_or_legacy_success_terminal_is_refused(tmp_path, monkeypatch):
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
     supervisor._boundaries = {}
+    supervisor._daemon_observations = {}
+    supervisor._daemon_live = {}
+    supervisor._management_capture = None
+    supervisor._capture_delivery = None
     supervisor._phase_completed = {}
     supervisor.worker_uid, supervisor.packet_digest = os.geteuid(), "sha256:" + "a" * 64
     monkeypatch.setattr(
@@ -252,6 +260,10 @@ def test_late_zero_exit_cannot_advance_within_still_open_common_window(monkeypat
     monkeypatch.setattr(launch.time, "monotonic", lambda: clock[0])
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
     supervisor._boundaries = {}
+    supervisor._daemon_observations = {}
+    supervisor._daemon_live = {}
+    supervisor._management_capture = None
+    supervisor._capture_delivery = None
     supervisor._phase_completed = {}
     supervisor.clocks = launch.LaunchClocks.start(
         datetime.now(UTC) + timedelta(seconds=120)
@@ -293,6 +305,7 @@ def test_late_zero_exit_cannot_advance_within_still_open_common_window(monkeypat
             emptied.append(True)
 
     class Process:
+        pid = os.getpid()
         returncode = 0
 
         def wait(self, timeout):
@@ -322,6 +335,10 @@ def test_issuer_acceptance_deadline_excludes_bounded_cleanup_tail(
     monkeypatch.setattr(launch.time, "monotonic", lambda: clock[0])
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
     supervisor._boundaries = {}
+    supervisor._daemon_observations = {}
+    supervisor._daemon_live = {}
+    supervisor._management_capture = None
+    supervisor._capture_delivery = None
     supervisor._phase_completed = {}
     supervisor.clocks = launch.LaunchClocks.start(
         datetime.now(UTC) + timedelta(seconds=120)
@@ -434,6 +451,7 @@ def test_issuer_acceptance_deadline_excludes_bounded_cleanup_tail(
                 clock[0] = deadline
 
     class Process:
+        pid = os.getpid()
         returncode = 0
 
         def wait(self, timeout):
@@ -522,6 +540,10 @@ def test_parent_rejects_trailing_staged_frame_before_publication(monkeypatch):
     parent, receiver = socket.socketpair()
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
     supervisor._boundaries = {}
+    supervisor._daemon_observations = {}
+    supervisor._daemon_live = {}
+    supervisor._management_capture = None
+    supervisor._capture_delivery = None
     supervisor._phase_completed = {}
     supervisor.state = launch.LaunchState.AWAITING_CAPTURE
     supervisor.clocks = launch.LaunchClocks.start(
@@ -1004,9 +1026,15 @@ def test_cleanup_is_idempotent_only_after_empty_readback_and_guardian_reap(monke
 def test_preflight_guardian_empty_and_privilege_seal_precede_publication(monkeypatch):
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
     supervisor._boundaries = {}
+    supervisor._daemon_observations = {}
+    supervisor._daemon_live = {}
+    supervisor._management_capture = None
+    supervisor._capture_delivery = None
     supervisor._phase_completed = {}
     supervisor.clocks = SimpleNamespace(
-        deadline=launch.time.monotonic() + 30, require_open=lambda: None
+        deadline=launch.time.monotonic() + 30,
+        monotonic_origin=launch.time.monotonic(),
+        require_open=lambda: None,
     )
     events = []
     boundary = SimpleNamespace(
@@ -1052,6 +1080,10 @@ def test_new_root_owned_socket_mode_precedes_nonroot_ownership(
 ):
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
     supervisor._boundaries = {}
+    supervisor._daemon_observations = {}
+    supervisor._daemon_live = {}
+    supervisor._management_capture = None
+    supervisor._capture_delivery = None
     supervisor._phase_completed = {}
     supervisor.worker_uid = 10031
     supervisor.clocks = SimpleNamespace(deadline=launch.time.monotonic() + 10)
@@ -1199,7 +1231,7 @@ def test_cleanup_document_reports_missing_final_close_or_boundary():
 
 
 @pytest.mark.parametrize(
-    "change", [None, "local", "case", "window", "declared", "extra"]
+    "change", [None, "local", "case", "window", "declared", "declared5", "extra"]
 )
 def test_post_cleanup_typed_terminal_is_case_bound_worker_declaration(
     monkeypatch, tmp_path, change
@@ -1257,6 +1289,7 @@ def test_post_cleanup_typed_terminal_is_case_bound_worker_declaration(
             "case": ("case_kind", "consume_replay"),
             "window": ("window_digest", "sha256:" + "b" * 64),
             "declared": ("worker_declared_exit_code", 0),
+            "declared5": ("worker_declared_exit_code", 5),
             "extra": ("cleanup", True),
         }[change]
         document[key] = value
@@ -1276,7 +1309,7 @@ def test_post_cleanup_typed_terminal_is_case_bound_worker_declaration(
     else:
         supervisor._require_terminal_success("issuer")
         observed = supervisor._terminals["issuer"]
-        assert observed["daemon_returncode"] == 0
+        assert "daemon_returncode" not in observed
         assert observed["worker_terminal"] == document
         assert "observed_worker_exit_code" not in observed
 
@@ -1300,6 +1333,10 @@ def synthetic_cleanup_supervisor():
     supervisor._cleanup_completed_at = None
     supervisor._removed = []
     supervisor._boundaries = {}
+    supervisor._daemon_observations = {}
+    supervisor._daemon_live = {}
+    supervisor._management_capture = None
+    supervisor._capture_delivery = None
     supervisor._terminals = {}
     supervisor._phase_completed = {}
     supervisor._management_listener = None
@@ -1477,7 +1514,9 @@ def test_issuer_body_error_stays_primary_through_guardian_reap_and_fd_errors(
     supervisor._boundary = None
     supervisor._activated = False
     supervisor.clocks = SimpleNamespace(
-        deadline=launch.time.monotonic() + 30, require_open=lambda: None
+        deadline=launch.time.monotonic() + 30,
+        monotonic_origin=launch.time.monotonic(),
+        require_open=lambda: None,
     )
     events = []
     execution = (
@@ -1540,7 +1579,9 @@ def test_issuer_body_error_stays_primary_through_guardian_reap_and_fd_errors(
     monkeypatch.setattr(
         launch.subprocess,
         "Popen",
-        lambda *args, **kwargs: SimpleNamespace(wait=wait, kill=kill),
+        lambda *args, **kwargs: SimpleNamespace(
+            pid=os.getpid(), returncode=None, wait=wait, kill=kill
+        ),
     )
 
     def receive(*args):
@@ -1638,4 +1679,151 @@ def test_first_guardian_failure_survives_sticky_boundary_retirement_repeat():
     assert guardian.__cause__ is sticky
     assert supervisor._failure_reason is launch.CleanupReason.BOUNDARY_FAILED
     assert supervisor._cleanup_failed
+    assert supervisor.cleanup_document()["outcome"] == "incomplete"
+
+
+@pytest.mark.parametrize("code", [0, 1, 3, 5, 42, 127, 255])
+def test_normal_daemon_codes_are_lifecycle_observations_without_authority(
+    monkeypatch, code
+):
+    supervisor = synthetic_cleanup_supervisor()
+    clock = [1000.0]
+    monkeypatch.setattr(launch.time, "monotonic", lambda: clock[0])
+    supervisor.clocks = launch.LaunchClocks.start(
+        datetime.now(UTC) + timedelta(seconds=120)
+    )
+    process = SimpleNamespace(
+        pid=os.getpid(), returncode=code, wait=lambda timeout: None
+    )
+    supervisor._pin_daemon("issuer", process, 1030.0)
+    clock[0] = 1001.0
+    supervisor._wait_daemon(process, 1030.0)
+    observed = supervisor._daemon_observations["issuer"]
+    assert observed == {
+        "schema": "Gate0DaemonObservation.v1",
+        "boundary": "issuer",
+        "pid": os.getpid(),
+        "process_start": launch._process_identity(os.getpid()),
+        "daemon_returncode": code,
+        "termination": "exited",
+        "completed_at": observed["completed_at"],
+        "completed_elapsed_seconds": 1.0,
+        "phase_deadline_elapsed_seconds": 30.0,
+    }
+    assert supervisor.cleanup_document()["outcome"] == "incomplete"
+    assert not supervisor._terminals  # A daemon number cannot replace typed terminal.
+    assert "observed_worker_exit_code" not in observed
+
+
+@pytest.mark.parametrize("code", [-15, -9, None, True, 256])
+def test_daemon_signal_or_invalid_status_never_satisfies_mechanics(monkeypatch, code):
+    supervisor = synthetic_cleanup_supervisor()
+    supervisor.clocks = launch.LaunchClocks.start(
+        datetime.now(UTC) + timedelta(seconds=30)
+    )
+    process = SimpleNamespace(
+        pid=os.getpid(), returncode=code, wait=lambda timeout: None
+    )
+    supervisor._pin_daemon("issuer", process, supervisor.clocks.deadline)
+    with pytest.raises(launch.LaunchIncomplete):
+        supervisor._wait_daemon(process, supervisor.clocks.deadline)
+    assert supervisor._daemon_observations["issuer"]["termination"] in (
+        "signaled",
+        "wait_failed",
+    )
+    assert supervisor.cleanup_document()["outcome"] == "incomplete"
+
+
+def test_daemon_timeout_then_normal_cleanup_wait_does_not_reclassify_completion():
+    supervisor = synthetic_cleanup_supervisor()
+    supervisor.clocks = launch.LaunchClocks.start(
+        datetime.now(UTC) + timedelta(seconds=30)
+    )
+    calls = [0]
+    process = SimpleNamespace(pid=os.getpid(), returncode=None)
+
+    def wait(timeout):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise launch.subprocess.TimeoutExpired("synthetic daemon", timeout)
+        process.returncode = 255
+
+    process.wait = wait
+    boundary = SimpleNamespace(terminate_and_confirm_empty=lambda: None)
+    supervisor._pin_daemon("issuer", process, supervisor.clocks.deadline)
+    with pytest.raises(launch.subprocess.TimeoutExpired):
+        supervisor._wait_daemon(process, supervisor.clocks.deadline)
+    supervisor._retire_resources(boundary, process)
+    observation = supervisor._daemon_observations["issuer"]
+    assert observation["termination"] == "wait_timeout"
+    assert observation["daemon_returncode"] == 255
+    assert supervisor.cleanup_document()["outcome"] == "incomplete"
+
+
+def test_forced_cleanup_with_zero_reap_does_not_create_normal_daemon_acceptance():
+    supervisor = synthetic_cleanup_supervisor()
+    supervisor.clocks = launch.LaunchClocks.start(
+        datetime.now(UTC) + timedelta(seconds=30)
+    )
+    process = SimpleNamespace(pid=os.getpid(), returncode=None)
+    process.wait = lambda timeout: setattr(process, "returncode", 0)
+    boundary = SimpleNamespace(terminate_and_confirm_empty=lambda: None)
+    supervisor._pin_daemon("issuer", process, supervisor.clocks.deadline)
+    supervisor._retire_resources(boundary, process)
+    assert supervisor._daemon_observations["issuer"]["termination"] == "forced_cleanup"
+    assert supervisor._daemon_observations["issuer"]["daemon_returncode"] == 0
+    assert supervisor.cleanup_document()["outcome"] == "incomplete"
+
+
+def test_normal_daemon255_observed_at_phase_end_is_late_without_deadline_refresh(
+    monkeypatch,
+):
+    supervisor = synthetic_cleanup_supervisor()
+    clock = [1000.0]
+    monkeypatch.setattr(launch.time, "monotonic", lambda: clock[0])
+    supervisor.clocks = launch.LaunchClocks.start(
+        datetime.now(UTC) + timedelta(seconds=120)
+    )
+    original = supervisor.clocks.deadline
+    process = SimpleNamespace(
+        pid=os.getpid(),
+        returncode=255,
+        wait=lambda timeout: clock.__setitem__(0, 1030.0),
+    )
+    supervisor._pin_daemon("issuer", process, 1030.0)
+    with pytest.raises(ProviderRefused):
+        supervisor._wait_daemon(process, 1030.0)
+    observation = supervisor._daemon_observations["issuer"]
+    assert observation["termination"] == "exited"
+    assert (
+        observation["completed_elapsed_seconds"]
+        == observation["phase_deadline_elapsed_seconds"]
+    )
+    assert supervisor.clocks.deadline == original
+    assert supervisor.cleanup_document()["outcome"] == "incomplete"
+
+
+def test_normal_daemon255_cannot_replace_missing_post_cleanup_worker_terminal(
+    tmp_path, monkeypatch
+):
+    supervisor = synthetic_cleanup_supervisor()
+    supervisor.worker_uid = os.geteuid()
+    supervisor.clocks = launch.LaunchClocks.start(
+        datetime.now(UTC) + timedelta(seconds=30)
+    )
+    process = SimpleNamespace(
+        pid=os.getpid(), returncode=255, wait=lambda timeout: None
+    )
+    supervisor._pin_daemon("issuer", process, supervisor.clocks.deadline)
+    supervisor._wait_daemon(process, supervisor.clocks.deadline)
+    monkeypatch.setattr(
+        launch,
+        "_protected",
+        lambda *args, **kwargs: os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY),
+    )
+    # These worker failures have no eligible post-custody typed terminal. Root's
+    # normal daemon lifecycle is deliberately unable to infer their SSH status.
+    with pytest.raises(FileNotFoundError):
+        supervisor._require_terminal_success("issuer")
+    assert not supervisor._terminals
     assert supervisor.cleanup_document()["outcome"] == "incomplete"

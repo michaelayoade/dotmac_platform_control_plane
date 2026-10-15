@@ -291,6 +291,23 @@ class LaunchState(StrEnum):
     TERMINAL = "TERMINAL"
 
 
+DaemonTermination = Literal[
+    "exited", "signaled", "wait_timeout", "forced_cleanup", "wait_failed"
+]
+
+
+class DaemonObservation(TypedDict):
+    schema: str
+    boundary: str
+    pid: int
+    process_start: str
+    daemon_returncode: int | None
+    termination: DaemonTermination
+    completed_at: str
+    completed_elapsed_seconds: float
+    phase_deadline_elapsed_seconds: float
+
+
 class CleanupReason(StrEnum):
     COMPLETED = "completed_mechanics"
     EXECUTION_INCOMPLETE = "execution_incomplete"
@@ -2159,6 +2176,10 @@ class FiniteGate0Supervisor:
             raise ProviderRefused()
         self._boundaries: dict[str, SlotExecutionBoundary] = {}
         self._terminals: dict[str, dict[str, object]] = {}
+        self._daemon_observations: dict[str, DaemonObservation] = {}
+        self._daemon_live: dict[int, tuple[str, int, str, float]] = {}
+        self._management_capture: dict[str, object] | None = None
+        self._capture_delivery: dict[str, object] | None = None
         self._phase_completed: dict[str, str] = {}
         self._cleanup_complete = False
         self._mechanics_complete = False
@@ -2190,6 +2211,64 @@ class FiniteGate0Supervisor:
         if getattr(self, "_failure_reason", None) is None:
             self._failure_reason = reason
 
+    def _pin_daemon(
+        self, boundary: str, process: subprocess.Popen[bytes], deadline: float
+    ) -> None:
+        if boundary not in (*SLOTS, "issuer", "management"):
+            raise ProviderRefused()
+        self._daemon_live[id(process)] = (
+            boundary,
+            process.pid,
+            _process_identity(process.pid),
+            deadline,
+        )
+
+    def _record_daemon(
+        self,
+        process: subprocess.Popen[bytes],
+        termination: DaemonTermination,
+    ) -> None:
+        boundary, pid, started, deadline = self._daemon_live[id(process)]
+        mono = time.monotonic()
+        code = process.returncode
+        if code is not None and (type(code) is not int or not -255 <= code <= 255):
+            code = None
+            termination = "wait_failed"
+        self._daemon_observations[boundary] = {
+            "schema": "Gate0DaemonObservation.v1",
+            "boundary": boundary,
+            "pid": pid,
+            "process_start": started,
+            "daemon_returncode": code,
+            "termination": termination,
+            "completed_at": datetime.now(UTC).isoformat(),
+            "completed_elapsed_seconds": mono - self.clocks.monotonic_origin,
+            "phase_deadline_elapsed_seconds": deadline - self.clocks.monotonic_origin,
+        }
+
+    def _wait_daemon(self, process: subprocess.Popen[bytes], deadline: float) -> None:
+        try:
+            process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            self._record_daemon(process, "wait_timeout")
+            raise
+        except BaseException:
+            self._record_daemon(process, "wait_failed")
+            raise
+        code = process.returncode
+        if type(code) is not int or not 0 <= code <= 255:
+            self._record_daemon(
+                process, "signaled" if type(code) is int and code < 0 else "wait_failed"
+            )
+            raise LaunchIncomplete()
+        self._record_daemon(process, "exited")
+        self._require_phase_open(deadline)
+
+    @staticmethod
+    def _capture_completion(readback: CaptureInstallReadback) -> dict[str, object]:
+        document = readback.document()
+        return {"readback": document, "readback_digest": _digest(canonical(document))}
+
     def _retire_resources(
         self,
         boundary: SlotExecutionBoundary,
@@ -2200,6 +2279,10 @@ class FiniteGate0Supervisor:
     ) -> None:
         """Keep the first failure while attempting every bounded local teardown."""
         failure: BaseException | None = None
+        if process is not None and id(process) in getattr(self, "_daemon_live", {}):
+            name = self._daemon_live[id(process)][0]
+            if name not in self._daemon_observations:
+                self._record_daemon(process, "forced_cleanup")
         try:
             boundary.terminate_and_confirm_empty()
         except BaseException as error:
@@ -2231,6 +2314,11 @@ class FiniteGate0Supervisor:
                     self._remember_failure(CleanupReason.DESCRIPTOR_CLOSE_FAILED)
                     if failure is None:
                         failure = error
+        if process is not None and id(process) in getattr(self, "_daemon_live", {}):
+            name = self._daemon_live[id(process)][0]
+            observation = self._daemon_observations.get(name)
+            if observation is not None and observation["termination"] != "exited":
+                self._record_daemon(process, observation["termination"])
         if failure is not None:
             if primary_failure is not None:
                 raise primary_failure from failure
@@ -2615,13 +2703,12 @@ class FiniteGate0Supervisor:
                 preexec_fn=boundary.enter_child,
             )
             self._activated = True
+            self._pin_daemon(slot, process, slot_deadline)
             connection.close()
 
             # This root process stays OUTSIDE the worker cgroup. Its timed wait
             # is the original-deadline process boundary even for native DB hangs.
-            process.wait(timeout=max(0.001, slot_deadline - time.monotonic()))
-            if process.returncode != 0:
-                raise ProviderRefused()
+            self._wait_daemon(process, slot_deadline)
             self._require_phase_open(slot_deadline)
             self.clocks.require_open()
             self._require_phase_open(slot_deadline)
@@ -2681,6 +2768,7 @@ class FiniteGate0Supervisor:
                 preexec_fn=boundary.enter_child,
             )
             self._activated = True
+            self._pin_daemon("issuer", process, self.clocks.deadline)
             connection.close()
             public_export, source_peer, export_connection, export_deadline = (
                 self._receive_issuer_export(export_listener)
@@ -2695,9 +2783,7 @@ class FiniteGate0Supervisor:
             export_connection.shutdown(socket.SHUT_WR)
             self._require_phase_open(export_deadline)
             export_connection.close()
-            process.wait(timeout=max(0.001, self.clocks.deadline - time.monotonic()))
-            if process.returncode != 0:
-                raise ProviderRefused()
+            self._wait_daemon(process, self.clocks.deadline)
             self.clocks.require_open()
             self._phase_completed["issuer"] = datetime.now(UTC).isoformat()
 
@@ -2890,6 +2976,7 @@ class FiniteGate0Supervisor:
             if process.returncode != 0:
                 raise ProviderRefused()
             self._require_phase_open(deadline)
+            self._capture_delivery = self._capture_completion(expected)
             self._phase_completed["capture_sender"] = datetime.now(UTC).isoformat()
             self._retire_resources(boundary, None)
             self._sender_boundary = None
@@ -2944,11 +3031,11 @@ class FiniteGate0Supervisor:
                 preexec_fn=boundary.enter_child,
             )
             self._activated = True
+            self._pin_daemon("management", process, management_deadline)
             connection.close()
             result = self.serve_capture_once(expected)
-            process.wait(timeout=max(0.001, management_deadline - time.monotonic()))
-            if process.returncode != 0:
-                raise ProviderRefused()
+            self._management_capture = self._capture_completion(result)
+            self._wait_daemon(process, management_deadline)
             self._require_phase_open(management_deadline)
             self._phase_completed["management"] = datetime.now(UTC).isoformat()
             self._retire_resources(boundary, None)
@@ -3069,7 +3156,6 @@ class FiniteGate0Supervisor:
                 ):
                     raise ProviderRefused()
                 self._terminals[slot] = {
-                    "daemon_returncode": 0,
                     "worker_terminal_digest": _digest(raw),
                     "worker_terminal": terminal,
                 }
@@ -3263,11 +3349,26 @@ class FiniteGate0Supervisor:
             else {"preflight", "management", *SLOTS}
         )
         terminals = {"issuer"} if role == "issuer" else set(SLOTS)
+        daemon_keys = {"issuer"} if role == "issuer" else {"management", *SLOTS}
+        capture_completion = (
+            self._capture_delivery if role == "issuer" else self._management_capture
+        )
         complete = (
             self._cleanup_complete
             and self._mechanics_complete
             and set(self._boundaries) == expected
             and set(self._terminals) == terminals
+            and set(self._daemon_observations) == daemon_keys
+            and all(
+                observation["termination"] == "exited"
+                and type(observation["daemon_returncode"]) is int
+                and 0 <= observation["daemon_returncode"] <= 255
+                and 0
+                <= observation["completed_elapsed_seconds"]
+                < observation["phase_deadline_elapsed_seconds"]
+                for observation in self._daemon_observations.values()
+            )
+            and capture_completion is not None
             and all(
                 boundary._evidence is not None for boundary in self._boundaries.values()
             )
@@ -3305,6 +3406,10 @@ class FiniteGate0Supervisor:
             "expires_at": self.clocks.expires_at.isoformat(),
             "phase_completed_at": dict(self._phase_completed),
             "terminals": dict(self._terminals),
+            "daemon_observations": dict(self._daemon_observations),
+            "capture_delivery"
+            if role == "issuer"
+            else "management_capture": capture_completion,
             "boundaries": completed_boundaries,
             "removed": list(self._removed),
             "expected_removed": list(self._transient_paths()),

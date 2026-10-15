@@ -753,6 +753,16 @@ def _worker(inputs):
             == authorization_binding(second_issued.authorization_document).digest
         )
 
+        human_external_ref = "synthetic-human-reference-" + uuid4().hex
+        withdrawal_actor = uuid4()
+        with platform.platform_session() as db:
+            assert (
+                approvals.withdrawal_for_reference(
+                    db, request_id=second_request, external_ref=human_external_ref
+                )
+                is None
+            )
+
         def withdraw_between_preflight_and_mutation(expected):
             proof = resolve(expected)
             with platform.platform_session() as db:
@@ -760,10 +770,10 @@ def _worker(inputs):
                     db,
                     approvals.WithdrawRequestCommand(
                         second_request,
-                        uuid4(),
+                        withdrawal_actor,
                         "synthetic-human",
                         "withdraw-test",
-                        uuid4().hex,
+                        human_external_ref,
                     ),
                 )
             return proof
@@ -788,6 +798,28 @@ def _worker(inputs):
             readers[second].read(
                 "consume", second, second_issued.authorization_document
             )
+        # Actual public owner read resolves the human reference to the immutable
+        # UUID used by the Approvals outbox trigger; pending relay stays absent.
+        with platform.platform_session() as db:
+            withdrawal = approvals.withdrawal_for_reference(
+                db, request_id=second_request, external_ref=human_external_ref
+            )
+            assert withdrawal is not None
+            assert withdrawal.actor_id == withdrawal_actor
+            assert str(withdrawal.withdrawal_id) != human_external_ref
+            assert (
+                approvals.withdrawal_for_reference(
+                    db, request_id=second_request, external_ref=human_external_ref
+                )
+                == withdrawal
+            )
+            assert outcomes_for_event(db, withdrawal.withdrawal_id) == ()
+            from dotmac_kernel import ConflictError
+
+            with pytest.raises(ConflictError):
+                approvals.withdrawal_for_reference(
+                    db, request_id=second_request, external_ref="wrong-human-reference"
+                )
         composition = RelayComposition(
             dispatcher.platform_session_factory,
             platform.platform_session_factory,
@@ -815,11 +847,17 @@ def _worker(inputs):
                 .all()
             )
             assert len(rows) == 1 and rows[0].status == OutboxStatus.SENT.value
-            outcomes = outcomes_for_event(db, rows[0].id)
+            assert rows[0].id == withdrawal.withdrawal_id
+            assert rows[0].payload["external_ref"] == human_external_ref
+            outcomes = outcomes_for_event(db, withdrawal.withdrawal_id)
             assert (
                 len(outcomes) == 1
                 and outcomes[0].disposition is WithdrawalDisposition.APPLIED
             )
+            assert outcomes[0].event_id == withdrawal.withdrawal_id
+            assert outcomes[0].approval_request_id == second_request
+            assert outcomes[0].withdrawal_ref == str(withdrawal.withdrawal_id)
+            assert outcomes[0].plan_id == second
             assert outcomes[0].evidence["authorizations_revoked"] == [
                 second_issued.authorization_id
             ]

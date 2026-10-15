@@ -806,14 +806,14 @@ class FixedEvidenceCollector:
         self._b_consume = consume_bundle
 
     def observe_b_withdrawal(
-        self, *, sessions: Callable[[], Session], withdrawal_ref: str
+        self, *, sessions: Callable[[], Session], external_ref: str
     ) -> bool:
         db: Session | None = None
         observed: bytes | None = None
         failed = False
         try:
             db = sessions()
-            observed = self._read_b_withdrawal(db=db, withdrawal_ref=withdrawal_ref)
+            observed = self._read_b_withdrawal(db=db, external_ref=external_ref)
         except BaseException:
             failed = True
         finally:
@@ -833,11 +833,12 @@ class FixedEvidenceCollector:
         self._b_revocation = observed
         return True
 
-    def _read_b_withdrawal(self, *, db: Session, withdrawal_ref: str) -> bytes | None:
+    def _read_b_withdrawal(self, *, db: Session, external_ref: str) -> bytes | None:
         """Bounded read of existing relay progress; never drain or mutate it."""
+        from vendor_cp.approvals.adapter import withdrawal_for_reference
         from vendor_cp.relay.withdrawal_outcomes import (
             WithdrawalDisposition,
-            outcomes_for_request,
+            outcomes_for_event,
         )
 
         if (
@@ -852,9 +853,16 @@ class FixedEvidenceCollector:
         if self._withdrawal_reads > 16 or expected.window_freshness is None:
             raise ServiceRefused()
         expected.window_freshness.require_open()
-        rows = outcomes_for_request(
-            db, request_id=expected.approval_request_id, withdrawal_ref=withdrawal_ref
+        withdrawal = withdrawal_for_reference(
+            db, request_id=expected.approval_request_id, external_ref=external_ref
         )
+        if withdrawal is None:
+            return None
+        if withdrawal.request_id != expected.approval_request_id:
+            raise ServiceRefused()
+        # The public Approvals trigger uses the immutable withdrawal UUID as
+        # its event UUID. The operator's external reference is a separate fact.
+        rows = outcomes_for_event(db, withdrawal.withdrawal_id, limit=3)
         if not rows:
             return None
         authorization_id = strict_object(self._b_issue.result_bytes)["authorization_id"]
@@ -863,7 +871,8 @@ class FixedEvidenceCollector:
             or rows[0].disposition is not WithdrawalDisposition.APPLIED
             or rows[0].event_type != "approval.withdrawn"
             or rows[0].approval_request_id != expected.approval_request_id
-            or rows[0].withdrawal_ref != withdrawal_ref
+            or rows[0].event_id != withdrawal.withdrawal_id
+            or rows[0].withdrawal_ref != str(withdrawal.withdrawal_id)
             or _DIGEST.fullmatch(rows[0].payload_digest) is None
             or rows[0].subject_type
             != strict_object(self._approvals["b"])["subject_type"]
@@ -878,6 +887,12 @@ class FixedEvidenceCollector:
                 "payload_digest": rows[0].payload_digest,
                 "request_id": str(rows[0].approval_request_id),
                 "withdrawal_ref": rows[0].withdrawal_ref,
+                "withdrawal_id": str(withdrawal.withdrawal_id),
+                "external_ref": withdrawal.external_ref,
+                "actor_id": str(withdrawal.actor_id),
+                "authority_ref": withdrawal.authority_ref,
+                "approved_at": withdrawal.approved_at.isoformat(),
+                "effective_at": withdrawal.effective_at.isoformat(),
                 "plan_id": str(rows[0].plan_id),
                 "disposition": rows[0].disposition.value,
                 "authorizations_revoked": [authorization_id],
