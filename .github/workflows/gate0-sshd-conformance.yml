@@ -76,6 +76,16 @@ jobs:
           python_path="$(poetry env info --executable)"
           cd "$task_dir"
           sudo --preserve-env=GITHUB_ACTIONS,GATE0_SSHD_QUALIFICATION_JSON "$python_path" -m pytest -c /dev/null -q test_gate0_real_sshd.py --junitxml="$RUNNER_TEMP/gate0-installed-sshd.xml" -o junit_family=xunit1
+      - name: Prove native descendant cleanup from the installed wheel
+        run: |
+          set -euo pipefail
+          task_dir="$RUNNER_TEMP/gate0-installed-conformance"
+          cp conformance/test_gate0_finite_launch.py "$task_dir/"
+          python_path="$(poetry env info --executable)"
+          sudo mkdir -m 700 /sys/fs/cgroup/dotmac-gate0
+          trap 'sudo rmdir /sys/fs/cgroup/dotmac-gate0' EXIT
+          cd "$task_dir"
+          sudo --preserve-env=GITHUB_ACTIONS "$python_path" -m pytest -c /dev/null -q test_gate0_finite_launch.py -k 'not installed_supervise_command' --junitxml="$RUNNER_TEMP/gate0-installed-cgroup.xml" -o junit_family=xunit1
       - name: Retain exact public artifact identities and test results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -84,5 +94,44 @@ jobs:
           path: |
             ${{ runner.temp }}/gate0-ssh-artifacts/qualified-binaries.json
             ${{ runner.temp }}/gate0-installed-sshd.xml
+            ${{ runner.temp }}/gate0-installed-cgroup.xml
+          if-no-files-found: error
+          retention-days: 30
+
+  role-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build an unpublished finite-role candidate
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          source_revision="$(git rev-parse HEAD)"
+          DOCKER_BUILDKIT=1 docker build --target gate0-role \
+            --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
+            --build-arg "SOURCE_REVISION=$source_revision" \
+            --tag gate0-role-qualified-local .
+          docker image inspect gate0-role-qualified-local > "$RUNNER_TEMP/gate0-role-image.json"
+      - name: Check those image bytes with no network or operational inputs
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --cap-add SETUID --cap-add SETGID --cap-add SYS_CHROOT \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m \
+            --mount type=bind,source="$PWD/conformance/gate0_role_image_smoke.py",target=/qualification.py,readonly \
+            --entrypoint /opt/venv/bin/python gate0-role-qualified-local \
+            -I -B /qualification.py > "$RUNNER_TEMP/gate0-role-smoke.json"
+      - name: Retain candidate identity and smoke evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate0-role-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gate0-role-image.json
+            ${{ runner.temp }}/gate0-role-smoke.json
           if-no-files-found: error
           retention-days: 30

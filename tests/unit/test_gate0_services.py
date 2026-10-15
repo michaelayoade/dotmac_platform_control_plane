@@ -56,6 +56,7 @@ def test_one_install_is_retained_across_issue_and_consume(monkeypatch):
         database_qualified=True,
         sessions=lambda: pytest.fail("synthetic dispatch must not open a session"),
         require_frozen_window=False,  # Explicit synthetic dispatch mechanism.
+        custody=None,
         actor_ref="synthetic-management-actor",
         verifier=SimpleNamespace(_require_open=lambda: None),
         admission=None,
@@ -119,6 +120,7 @@ def test_request_cannot_select_actor_code_or_database(monkeypatch):
         database_qualified=True,
         sessions=lambda: pytest.fail("synthetic dispatch must not open a session"),
         require_frozen_window=False,  # Explicit synthetic dispatch mechanism.
+        custody=None,
         actor_ref="synthetic-management",
         verifier=SimpleNamespace(_require_open=lambda: None),
         signer=object(),
@@ -157,6 +159,7 @@ def test_committed_mutation_with_lost_response_is_incomplete(monkeypatch):
         database_qualified=True,
         sessions=lambda: pytest.fail("synthetic dispatch must not open a session"),
         require_frozen_window=False,  # Explicit synthetic dispatch mechanism.
+        custody=None,
         actor_ref="synthetic-management",
         verifier=SimpleNamespace(_require_open=lambda: None),
         signer=object(),

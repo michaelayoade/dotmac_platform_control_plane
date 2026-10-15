@@ -975,3 +975,32 @@ def test_child_fallback_broken_pipe_emits_no_exception_details(monkeypatch, caps
     )
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
+
+
+def test_original_launch_clock_maps_short_window_without_renewal(jwt_case, monkeypatch):
+    import vendor_cp.deployment.gate0_workload_admission as module
+    from vendor_cp.deployment.gate0_window import WindowClockOrigin
+
+    _, window, _, _ = jwt_case
+    now = datetime.now(UTC)
+    import vendor_cp.deployment.gate0_window as clocks
+
+    monkeypatch.setattr(clocks.time, "monotonic", lambda: 140.0)
+    original = WindowClockOrigin(now - timedelta(seconds=40), 100.0, 200.0)
+    short = replace(window, approved_until=now + timedelta(seconds=10))
+    admission = WorkloadAdmission(
+        windows=(short,),
+        transport=BoundedJSONTransport(GITHUB_ISSUER),
+        expires_at=now + timedelta(seconds=50),
+        clock_origin=original,
+    )
+    assert admission._origin == 100.0
+    assert admission._window_deadlines[
+        ("issue", short.expectation.operation.plan_id)
+    ] == pytest.approx(150.0)
+    monkeypatch.setattr(module.time, "monotonic", lambda: 151.0)
+    with pytest.raises(ProviderRefused):
+        admission._window("issue", UUID(short.expectation.operation.plan_id))
+    assert admission._window_deadlines[
+        ("issue", short.expectation.operation.plan_id)
+    ] == pytest.approx(150.0)

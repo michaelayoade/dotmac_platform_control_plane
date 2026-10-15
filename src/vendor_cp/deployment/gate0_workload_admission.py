@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from vendor_cp.deployment.gate0_window import (
         ApprovedWindowBinding,
         OwnerWindowReader,
+        WindowClockOrigin,
     )
 
 
@@ -135,7 +136,14 @@ class WorkloadAdmission:
         windows: tuple[ProposedApprovedWindow, ...] | None = None,
         transport: BoundedJSONTransport | None = None,
         expires_at: datetime | None = None,
+        clock_origin: WindowClockOrigin | None = None,
     ) -> None:
+        from vendor_cp.deployment.gate0_window import WindowClockOrigin
+
+        if clock_origin is not None:
+            if type(clock_origin) is not WindowClockOrigin:
+                raise ProviderRefused()
+            clock_origin.__post_init__()
         self._attempts = 0
         self._windows: tuple[ProposedApprovedWindow, ...] = ()
         self._transport: BoundedJSONTransport | None = None
@@ -143,8 +151,16 @@ class WorkloadAdmission:
         self._expires = expires_at
         self._started_at = datetime.now(UTC)
         self._origin = time.monotonic()
+        if clock_origin is not None:
+            self._started_at = clock_origin.started_at
+            self._origin = clock_origin.monotonic_origin
         self._window_deadlines: dict[tuple[str, str], float] = {}
-        if windows is None and transport is None and expires_at is None:
+        if (
+            windows is None
+            and transport is None
+            and expires_at is None
+            and clock_origin is None
+        ):
             return
         if (
             type(windows) is not tuple
@@ -165,6 +181,10 @@ class WorkloadAdmission:
             raise ProviderRefused()
         self._windows, self._transport = windows, transport
         self._deadline = self._origin + (expires_at - self._started_at).total_seconds()
+        if clock_origin is not None:
+            if not 0 < (expires_at - self._started_at).total_seconds() <= 300:
+                raise ProviderRefused()
+            self._deadline = min(self._deadline, clock_origin.deadline)
         self._window_deadlines = {
             (
                 w.expectation.operation.phase,
@@ -470,6 +490,7 @@ class ApprovedAtStartAdmission(WorkloadAdmission):
         authorization_verifier: RehearsalIssuerAuthorizationVerifier,
         transport: BoundedJSONTransport | None = None,
         expires_at: datetime | None = None,
+        clock_origin: WindowClockOrigin | None = None,
     ) -> None:
         from vendor_cp.deployment.gate0_window import (
             ApprovedWindowBinding,
@@ -505,7 +526,10 @@ class ApprovedAtStartAdmission(WorkloadAdmission):
             window.digest,
         )
         super().__init__(
-            windows=(snapshot,), transport=transport, expires_at=expires_at
+            windows=(snapshot,),
+            transport=transport,
+            expires_at=expires_at,
+            clock_origin=clock_origin,
         )
         # The sender's monotonic coordinates are never portable. Map the
         # authenticated absolute end once at this process's own startup.

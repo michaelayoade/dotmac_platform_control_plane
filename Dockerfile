@@ -133,6 +133,58 @@ RUN VENDOR_MIGRATION_ROOT=/app python -m vendor_cp.deployment.image_heads \
         --source-revision "$SOURCE_REVISION" \
         --output /app/migration_heads.json
 
+# Ubuntu matches the qualified 9.6 SSH artifact's libc ABI. The application
+# runtime below remains the default target; role builds select gate0-role.
+FROM ubuntu:24.04@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b AS gate0-role
+
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/michaelayoade/dotmac_platform_control_plane" \
+      org.opencontainers.image.revision="$SOURCE_REVISION" \
+      io.dotmac.runtime="gate0-finite-role"
+
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       ca-certificates python3 iproute2 nftables wireguard-tools \
+       libffi8 libsqlite3-0 libbz2-1.0 liblzma5 libexpat1 libreadline8t64 \
+       libncursesw6 libuuid1 zlib1g
+COPY conformance/openssh-ubuntu-artifacts.json /opt/openssh-ubuntu-artifacts.json
+COPY .github/candidate/prepare_gate0_native.py /opt/prepare_gate0_native.py
+RUN python3 -I -B /opt/prepare_gate0_native.py \
+    && rm -rf /opt/gate0-native-build /opt/prepare_gate0_native.py \
+       /opt/openssh-ubuntu-artifacts.json /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /var/empty/dotmac-gate0 \
+    && useradd --system --no-create-home --shell /usr/sbin/nologin \
+         --home-dir /run/sshd sshd \
+    && for record in issuer:10031 attester:10032 management:10033 capture-sender:10034; do \
+         name="${record%:*}"; uid="${record#*:}"; \
+         useradd --no-create-home --uid "$uid" --password x --shell /bin/sh \
+           --home-dir "/var/empty/dotmac-gate0/$name" "gate0-$name"; \
+         mkdir -p "/var/empty/dotmac-gate0/$name"; \
+         chmod 555 "/var/empty/dotmac-gate0/$name"; \
+       done
+# Copy the exact Python and installed-wheel environment produced by the shared
+# builder. Hosted role acceptance proves the forward libc/SSL compatibility.
+COPY --from=builder /usr/local /usr/local
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /app/distributions.json /app/distributions.json
+COPY --from=builder /app/application_foundation_profile.json /app/application_foundation_profile.json
+COPY --from=builder /app/migration_heads.json /app/migration_heads.json
+RUN ldconfig \
+    && chmod 444 /app/*json \
+    && /opt/venv/bin/dotmac-platform --version \
+    && /usr/bin/ssh -V
+
+# Root supervises the declared delegated cgroup; signing workers use fixed
+# unprivileged UIDs. No key, launch packet, Docker socket or auto-start fallback.
+USER 0:0
+ENTRYPOINT ["/opt/venv/bin/dotmac-platform", "gate0", "supervise"]
+
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 
 ARG SOURCE_REVISION=unknown

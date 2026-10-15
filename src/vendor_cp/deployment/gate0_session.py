@@ -15,8 +15,11 @@ import stat
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from vendor_cp.deployment.gate0_role_custody import RoleCustody
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import (
@@ -155,6 +158,9 @@ class AttesterSession:
     sign: Callable[[bytes], bytes]
     expires_at: datetime
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
+    custody: RoleCustody | None = None
+    required_phase: Literal["issue", "consume"] | None = None
+    required_plan_id: UUID | None = None
 
     def run(self, channel: FramedChannel, authenticated_certificate: bytes) -> None:
         """Exactly two input frames, one active challenge, then terminal output."""
@@ -175,6 +181,11 @@ class AttesterSession:
             phase = "consume"
         else:
             raise ServiceRefused()
+        plan_id = UUID(str(request["plan_id"]))
+        if (self.required_phase is not None and phase != self.required_phase) or (
+            self.required_plan_id is not None and plan_id != self.required_plan_id
+        ):
+            raise ServiceRefused()
         token = request["workload_token"]
         if not isinstance(token, str) or not 0 < len(token) <= 16384:
             raise ServiceRefused()
@@ -186,9 +197,7 @@ class AttesterSession:
         if (phase == "issue") != (authorization is None):
             raise ServiceRefused()
         try:
-            expected = self.admission.admit(
-                token, phase, UUID(str(request["plan_id"])), authorization
-            )
+            expected = self.admission.admit(token, phase, plan_id, authorization)
         finally:
             request.pop("workload_token", None)
             del token
@@ -209,6 +218,8 @@ class AttesterSession:
         ):
             raise ServiceRefused()
         channel.require_open()
+        if self.custody is not None:
+            self.custody.refresh(phase="challenge")
         producer = AttesterProofProducer(
             admitted=AdmittedOperation(**asdict(operation)),
             ca_public_key=self.ca_public_key,
@@ -240,6 +251,8 @@ class AttesterSession:
         # frames and bounds a peer that never closes under the same deadline.
         if channel.receive(allow_eof=True) is not None:
             raise ServiceRefused()
+        if self.custody is not None:
+            self.custody.refresh(phase="complete")
         proof = producer.complete_challenge(
             challenge.challenge_id, decode(response["sshsig"], 16384)
         )

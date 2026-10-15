@@ -657,3 +657,68 @@ def test_detached_admission_and_proof_preserve_original_freshness(signed_binding
     assert driver._proof(admitted) == "synthetic-proof"
     assert seen[0] is not admitted
     assert seen[0].window_freshness is original.window_freshness
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["future-wall", "future-monotonic", "expired", "too-long", "nonfinite", "naive"],
+)
+def test_original_reader_clock_origin_is_local_bounded_and_not_renewable(invalid):
+    import math
+    import time
+
+    from vendor_cp.deployment.gate0_window import WindowClockOrigin
+
+    now, origin = datetime.now(UTC), time.monotonic()
+    started, mapped, deadline = now, origin, origin + 120
+    if invalid == "future-wall":
+        started += timedelta(seconds=1)
+    elif invalid == "future-monotonic":
+        mapped += 10
+    elif invalid == "expired":
+        deadline = origin - 1
+    elif invalid == "too-long":
+        deadline = origin + 301
+    elif invalid == "nonfinite":
+        deadline = math.inf
+    else:
+        started = now.replace(tzinfo=None)
+    with pytest.raises(ProviderRefused):
+        WindowClockOrigin(started, mapped, deadline)
+
+
+def test_owner_reader_uses_original_launch_mapping_before_first_read(monkeypatch):
+    import time
+
+    from dotmac_kernel.session_runtime import DatabaseRuntime
+
+    from vendor_cp.deployment.gate0_window import OwnerWindowReader, WindowClockOrigin
+
+    # No engine or connection is created. This type-only synthetic fixture
+    # verifies initialization; real owner reads remain in the migration suite.
+    runtime = object.__new__(DatabaseRuntime)
+    now, origin = datetime.now(UTC), time.monotonic()
+    local = WindowClockOrigin(now - timedelta(seconds=30), origin - 30, origin + 90)
+    reader = OwnerWindowReader(
+        runtime=runtime,
+        rehearsal_target_id=UUID(int=2),
+        issuer_identity=object(),
+        authorization_verifier=object(),
+        expires_at=now + timedelta(seconds=60),
+        database_io_qualified=True,
+        clock_origin=local,
+    )
+    assert reader._started == local.started_at
+    assert reader._origin == local.monotonic_origin
+    assert reader._deadline == min(local.deadline, local.monotonic_origin + 90)
+    assert reader._freshness == {}
+    with pytest.raises(ProviderRefused):
+        OwnerWindowReader(
+            runtime=runtime,
+            rehearsal_target_id=UUID(int=2),
+            issuer_identity=object(),
+            authorization_verifier=object(),
+            expires_at=now + timedelta(seconds=280),
+            database_io_qualified=True,
+            clock_origin=local,
+        )  # Original launch duration, not remaining duration, exceeds 300.

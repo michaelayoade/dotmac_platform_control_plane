@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     )
     from sqlalchemy.orm import Session
 
-    from vendor_cp.deployment.gate0_role_custody import RoleMaterial
+    from vendor_cp.deployment.gate0_role_custody import RoleCustody, RoleMaterial
     from vendor_cp.deployment.gate0_workload_admission import WorkloadAdmission
 
 
@@ -106,6 +106,7 @@ class IssuerStartup:
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
     require_frozen_window: bool = True
     sessions: Callable[[], Session] | None = None
+    custody: RoleCustody | None = None
 
 
 class IssuerWorker:
@@ -210,6 +211,8 @@ class IssuerWorker:
             self._request = request
             committed = False
             try:
+                if self._startup.custody is not None:
+                    self._startup.custody.refresh(phase="submission")
                 if phase == "issue":
                     command_id = request["command_id"]
                     if (
@@ -300,6 +303,7 @@ def assemble_issuer_startup(
     authorization_ttl: timedelta,
     actor_ref: str,
     database_qualified: bool,
+    custody: RoleCustody | None = None,
 ) -> IssuerStartup:
     """Fixed trusted assembly over concrete role custody and admission adapters.
 
@@ -347,6 +351,7 @@ def assemble_issuer_startup(
         database_qualified,
         require_frozen_window=True,
         sessions=admission._reader._runtime.platform_session_factory,
+        custody=custody,
     )
 
 
@@ -356,6 +361,9 @@ def assemble_attester_session(
     admission: WorkloadAdmission,
     ca_public_key: bytes,
     expires_at: datetime,
+    custody: RoleCustody | None = None,
+    required_phase: Literal["issue", "consume"] | None = None,
+    required_plan_id: UUID | None = None,
 ) -> AttesterSession:
     from vendor_cp.deployment.gate0_workload_admission import ApprovedAtStartAdmission
 
@@ -383,17 +391,25 @@ def assemble_attester_session(
         material.attester_trust,
         material.attester_sign,
         expires_at,
+        custody=custody,
+        required_phase=required_phase,
+        required_plan_id=required_plan_id,
     )
 
 
 def issuer_run(startup: IssuerStartup | None = None) -> int:
     """No accepted authority DB/admission/custody binding is installed yet."""
+    from vendor_cp.deployment.gate0_role_custody import CustodyProfile, RoleCustody
     from vendor_cp.deployment.gate0_workload_admission import OwnerWorkloadAdmission
 
     if (
         startup is None
         or type(startup.admission) is not OwnerWorkloadAdmission
         or startup.require_frozen_window is not True
+        or type(startup.custody) is not RoleCustody
+        or startup.custody.profile is not CustodyProfile.ISSUER_FINITE_V1
+        or startup.custody._material is None
+        or startup.custody._material.key is not startup.signer
     ):
         print("DATABASE_BINDING_UNQUALIFIED", file=sys.stderr)
         return 3
@@ -419,20 +435,37 @@ def issuer_run(startup: IssuerStartup | None = None) -> int:
 
 
 def attester_session(
-    session: AttesterSession | None = None, reader: SshdSessionReader | None = None
+    session: AttesterSession | None = None,
+    reader: SshdSessionReader | None = None,
+    *,
+    deadline: float | None = None,
 ) -> int:
     """Standalone environment variables cannot enable an authenticated worker."""
+    from vendor_cp.deployment.gate0_role_custody import CustodyProfile, RoleCustody
+
     if session is None or reader is None:
         print("TRUSTED_SSHD_BINDING_UNCONFIGURED", file=sys.stderr)
         return 3
     try:
+        if (
+            type(session.custody) is not RoleCustody
+            or session.custody.profile is not CustodyProfile.ATTESTER_FINITE_V1
+            or session.custody._material is None
+            or session.trust_state is not session.custody._material.attester_trust
+            or session.sign != session.custody._material.attester_sign
+            or session.required_phase is None
+            or session.required_plan_id is None
+        ):
+            raise ServiceRefused()
         duration = min(30.0, (session.expires_at - session.now()).total_seconds())
         if duration <= 0:
+            raise ServiceRefused()
+        if deadline is None:
             raise ServiceRefused()
         channel = FramedChannel(
             sys.stdin.fileno(),
             sys.stdout.fileno(),
-            deadline=monotonic() + duration,
+            deadline=min(deadline, monotonic() + duration),
             maximum_frames=3,
         )
         serve_attester(session, reader, channel, os.environ)
@@ -443,3 +476,195 @@ def attester_session(
     except Exception:
         print("GATE0_SERVICE_REFUSED", file=sys.stderr)
         return 3
+
+
+def run_installed_issuer() -> int:
+    """Prepare the fixed installed owner, publish capture, then serve commands."""
+    execution_started = False
+    try:
+        from vendor_cp.deployment.gate0_bootstrap import (
+            load_issuer_installation,
+            prepare_installed_issuer,
+        )
+        from vendor_cp.deployment.gate0_launch import (
+            CaptureInstallReadback,
+            InstalledLaunchContext,
+        )
+        from vendor_cp.deployment.gate0_management_delivery import (
+            install_document,
+            verify_readback,
+        )
+
+        context = InstalledLaunchContext.from_installed()
+        installation = load_issuer_installation(context)
+        with prepare_installed_issuer(context, installation) as prepared:
+            with context.open_issuer_capture_export() as connection:
+                channel = FramedChannel(
+                    connection.fileno(),
+                    connection.fileno(),
+                    deadline=min(context.deadline, monotonic() + 10),
+                    maximum_frames=2,
+                )
+                channel.send(
+                    install_document(
+                        context.packet_digest,
+                        prepared.captures,
+                        installation.management_delivery.captures,
+                    )
+                )
+                import socket
+
+                connection.shutdown(socket.SHUT_WR)
+                readback = channel.receive()
+                if readback is None:
+                    raise ServiceRefused()
+                verify_readback(
+                    readback,
+                    CaptureInstallReadback(
+                        context.packet_digest,
+                        (
+                            prepared.captures[0].coordinates,
+                            prepared.captures[1].coordinates,
+                        ),
+                        context.expires_at,
+                    ),
+                )
+                if channel.receive(allow_eof=True) is not None:
+                    raise ServiceRefused()
+            context.require_open()
+            execution_started = True
+            result = issuer_run(prepared.startup)
+        # sshd's exit status alone cannot attest the forced worker's outcome.
+        # Publish only after custody cleanup, and only for confirmed success.
+        if result == 0:
+            context.finish_issuer_success()
+        return result
+    except ServiceCancelled:
+        print("GATE0_SERVICE_CANCELLED", file=sys.stderr)
+        return 5
+    except Exception:
+        if execution_started:
+            print("GATE0_SERVICE_INCOMPLETE", file=sys.stderr)
+            return 5
+        print("DATABASE_BINDING_UNQUALIFIED", file=sys.stderr)
+        return 3
+
+
+def run_installed_attester() -> int:
+    """One claimed installed slot; parent accepts only its terminal success."""
+    execution_started = False
+    try:
+        from vendor_cp.deployment.gate0_bootstrap import (
+            load_attester_installation,
+            prepare_installed_attester,
+        )
+        from vendor_cp.deployment.gate0_launch import InstalledLaunchContext
+
+        context = InstalledLaunchContext.from_installed()
+        installation = load_attester_installation(context)
+        with prepare_installed_attester(context, installation) as prepared:
+            execution_started = True
+            result = attester_session(
+                prepared.session, prepared.reader, deadline=prepared.deadline
+            )
+        # Custody teardown must finish before a terminal success is visible.
+        context.finish_slot("success" if result == 0 else "refused")
+        return result
+    except ServiceCancelled:
+        print("GATE0_SERVICE_CANCELLED", file=sys.stderr)
+        return 5
+    except Exception:
+        if execution_started:
+            print("GATE0_SERVICE_INCOMPLETE", file=sys.stderr)
+            return 5
+        print("TRUSTED_SSHD_BINDING_UNCONFIGURED", file=sys.stderr)
+        return 3
+
+
+def run_installed_capture_receiver() -> int:
+    """Fixed management SSH endpoint, with publication owned by its parent."""
+    try:
+        from vendor_cp.deployment.gate0_bootstrap import (
+            load_management_delivery_installation,
+        )
+        from vendor_cp.deployment.gate0_launch import InstalledLaunchContext
+        from vendor_cp.deployment.gate0_management_delivery import (
+            receive_capture_install,
+        )
+
+        context = InstalledLaunchContext.from_installed()
+        installation = load_management_delivery_installation(context)
+        channel = FramedChannel(
+            sys.stdin.fileno(),
+            sys.stdout.fileno(),
+            deadline=min(context.deadline, monotonic() + 10),
+            maximum_frames=2,
+        )
+        receive_capture_install(
+            context=context,
+            channel=channel,
+            selections=installation.captures,
+            absolute_end=context.expires_at,
+        )
+        return 0
+    except ServiceCancelled:
+        print("GATE0_SERVICE_CANCELLED", file=sys.stderr)
+        return 5
+    except Exception:
+        print("GATE0_CAPTURE_REFUSED", file=sys.stderr)
+        return 3
+
+
+def run_installed_capture_sender() -> int:
+    """Separate management identity; ACK uses only the parent's private stream."""
+    try:
+        from vendor_cp.deployment.gate0_bootstrap import (
+            load_management_delivery_installation,
+        )
+        from vendor_cp.deployment.gate0_launch import InstalledLaunchContext
+        from vendor_cp.deployment.gate0_management_delivery import push_capture_install
+
+        context = InstalledLaunchContext.from_installed()
+        installation = load_management_delivery_installation(context)
+        push_capture_install(context=context, installation=installation)
+        return 0
+    except ServiceCancelled:
+        print("GATE0_SERVICE_CANCELLED", file=sys.stderr)
+        return 5
+    except Exception:
+        print("GATE0_CAPTURE_REFUSED", file=sys.stderr)
+        return 3
+
+
+def run_installed_supervisor() -> int:
+    """One fixed root-owned launch; no caller-selected command or resource."""
+    supervisor = None
+    result = 5
+    incomplete_error: type[Exception] = ServiceIncomplete
+    try:
+        from vendor_cp.deployment.gate0_launch import (
+            FiniteGate0Supervisor,
+            LaunchIncomplete,
+        )
+
+        incomplete_error = LaunchIncomplete
+        supervisor = FiniteGate0Supervisor.from_installed()
+        supervisor.run()
+        result = 0
+    except ServiceCancelled:
+        print("GATE0_SERVICE_CANCELLED", file=sys.stderr)
+        result = 5
+    except incomplete_error:
+        print("GATE0_LAUNCH_INCOMPLETE", file=sys.stderr)
+        result = 5
+    except Exception:
+        print("GATE0_LAUNCH_REFUSED", file=sys.stderr)
+        result = 3
+    finally:
+        if supervisor is not None:
+            try:
+                supervisor.close()
+            except Exception:
+                print("GATE0_LAUNCH_INCOMPLETE", file=sys.stderr)
+                result = 5
+    return result

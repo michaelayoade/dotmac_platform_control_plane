@@ -8,20 +8,28 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
+import ipaddress
 import json
 import math
 import multiprocessing
 import os
+import re
 import select
+import signal
+import socket
+import stat
 import struct
+import subprocess
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from multiprocessing.connection import Connection
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, BinaryIO, Literal, cast
 from urllib.parse import urlsplit
 
 from cryptography.exceptions import InvalidSignature
@@ -185,6 +193,51 @@ def _receive_message(
     return exact(length)
 
 
+def _spawn_request(
+    target: Callable[..., None],
+    args: tuple[object, ...],
+    deadline: float,
+    *,
+    process_group: bool = False,
+) -> bytes:
+    """Shared spawn/IPC bound, reserving teardown time inside the I/O deadline."""
+    remaining = deadline - time.monotonic()
+    receive_deadline = deadline - min(0.2, max(0.0, remaining) / 10)
+    if time.monotonic() >= receive_deadline:
+        raise ProviderRefused()
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(target=target, args=(child, *args), daemon=True)
+    failed, raw = False, b""
+    try:
+        process.start()
+        child.close()
+        raw = _receive_message(parent, receive_deadline)
+    except Exception:
+        failed = True
+    finally:
+        parent.close()
+        child.close()
+        if process.pid is not None:
+            try:
+                if process_group:
+                    try:
+                        if os.getpgid(process.pid) == process.pid:
+                            os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if process.is_alive():
+                    process.kill()
+                process.join(timeout=min(0.2, max(0.0, deadline - time.monotonic())))
+                if process.is_alive():
+                    failed = True
+            except Exception:
+                failed = True
+    if failed or time.monotonic() >= deadline:
+        raise ProviderRefused()
+    return raw
+
+
 @dataclass(frozen=True, slots=True)
 class BoundedJSONTransport:
     """Fixed HTTPS origin, no redirects/proxies; hard parent cancellation bound.
@@ -245,39 +298,11 @@ class BoundedJSONTransport:
         )
         if body is not None and len(body) > 32768:
             raise ProviderRefused()
-        parent, child = multiprocessing.get_context("spawn").Pipe(duplex=False)
-        process = multiprocessing.get_context("spawn").Process(
-            target=_http_child,
-            args=(
-                child,
-                self.origin.rstrip("/") + path,
-                method,
-                token,
-                body,
-                remaining,
-                131072,
-            ),
-            daemon=True,
+        raw = _spawn_request(
+            _http_child,
+            (self.origin.rstrip("/") + path, method, token, body, remaining, 131072),
+            io_deadline,
         )
-        failed = False
-        raw = b""
-        try:
-            process.start()
-            child.close()
-            raw = _receive_message(parent, io_deadline)
-        except Exception:
-            failed = True
-        finally:
-            parent.close()
-            child.close()
-            if process.pid is not None:
-                if process.is_alive():
-                    process.kill()
-                process.join(timeout=0.2)
-                if process.is_alive():
-                    failed = True
-        if failed or time.monotonic() >= io_deadline:
-            raise ProviderRefused()
         result = strict_json(raw)
         if time.monotonic() >= io_deadline:
             raise ProviderRefused()
@@ -297,6 +322,439 @@ class RolePaths:
             f"platform-cp-rehearsal-{role}",
             f"secret/data/dotmac/platform-cp/rehearsal-{role}/signing-key",
         )
+
+
+_PIN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_INTERFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}\Z")
+_WG_BINARY = "/usr/bin/wg"
+_NETWORK_FILE = "/run/dotmac-gate0/network.json"
+
+
+def _private_ipv4(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        address = ipaddress.IPv4Address(value)
+        return str(address) == value and any(
+            address in ipaddress.IPv4Network(network)
+            for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        )
+    except ValueError:
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class WireGuardBaoEndpoint:
+    """Closed public pins; a digest alone never authenticates the launch.
+
+    Bootstrap must bind these pins to its measured local launch context.
+    Namespace/firewall immutability and permission to inspect WG and bind the
+    device remain independent installation obligations, never boolean inputs.
+    """
+
+    role: Literal["issuer", "attester"]
+    address: str
+    port: int
+    local_address: str
+    interface: str
+    interface_index: int
+    namespace_device: int
+    namespace_inode: int
+    peer_fingerprint: str
+    peer_allowed_ip: str
+    wg_binary_digest: str
+    network_config_digest: str
+    launch_packet_digest: str
+    timeout: float = 5.0
+
+    def __post_init__(self) -> None:
+        if (
+            self.role not in ("issuer", "attester")
+            or not _private_ipv4(self.address)
+            or not _private_ipv4(self.local_address)
+            or self.address == self.local_address
+            or type(self.port) is not int
+            or not 1 <= self.port <= 65535
+            or type(self.interface) is not str
+            or _INTERFACE.fullmatch(self.interface) is None
+            or self.interface in (".", "..")
+            or any(
+                type(v) is not int or not 0 < v <= 18446744073709551615
+                for v in (
+                    self.interface_index,
+                    self.namespace_device,
+                    self.namespace_inode,
+                )
+            )
+            or self.interface_index > 2147483647
+            or self.peer_allowed_ip != self.address + "/32"
+            or any(
+                type(v) is not str or _PIN.fullmatch(v) is None
+                for v in (
+                    self.peer_fingerprint,
+                    self.wg_binary_digest,
+                    self.network_config_digest,
+                    self.launch_packet_digest,
+                )
+            )
+            or type(self.timeout) not in (int, float)
+            or not math.isfinite(self.timeout)
+            or not 0 < self.timeout <= 5
+        ):
+            raise ProviderRefused()
+
+
+def _protected_digest(path: str, maximum: int, *, executable: bool = False) -> str:
+    """Fixed source-owned paths only, with no-follow protected parent walk."""
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        root = os.fstat(descriptor)
+        if root.st_uid != 0 or root.st_mode & 0o022:
+            raise ProviderRefused()
+        parts = path.strip("/").split("/")
+        for part in parts[:-1]:
+            child = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor
+            )
+            os.close(descriptor)
+            descriptor = child
+            metadata = os.fstat(descriptor)
+            if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+                raise ProviderRefused()
+        file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
+        try:
+            metadata = os.fstat(file_fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != 0
+                or metadata.st_mode & 0o022
+                or metadata.st_mode & 0o6000
+                or not 0 < metadata.st_size <= maximum
+                or executable
+                and not metadata.st_mode & 0o111
+            ):
+                raise ProviderRefused()
+            digest = hashlib.sha256()
+            count = 0
+            while True:
+                data = os.read(file_fd, min(65536, maximum + 1 - count))
+                if not data:
+                    break
+                count += len(data)
+                if count > maximum:
+                    raise ProviderRefused()
+                digest.update(data)
+            after = os.fstat(file_fd)
+            if count != metadata.st_size or any(
+                getattr(after, field) != getattr(metadata, field)
+                for field in (
+                    "st_dev",
+                    "st_ino",
+                    "st_mode",
+                    "st_uid",
+                    "st_size",
+                    "st_mtime_ns",
+                    "st_ctime_ns",
+                )
+            ):
+                raise ProviderRefused()
+            return "sha256:" + digest.hexdigest()
+        finally:
+            os.close(file_fd)
+    finally:
+        os.close(descriptor)
+
+
+def _remaining(deadline: float) -> float:
+    value = deadline - time.monotonic()
+    if value <= 0:
+        raise ProviderRefused()
+    return value
+
+
+def _wg_public(
+    interface: str, field_name: Literal["peers", "allowed-ips"], deadline: float
+) -> bytes:
+    """Only two public WG views. Never dump, showconf or private-key access.
+
+    Runs inside the transport child's process group so parent cancellation
+    also kills a stalled WG tool. Output is bounded before allocation grows.
+    """
+    process = subprocess.Popen(  # noqa: S603 -- fixed pinned binary and public fields
+        [_WG_BINARY, "show", interface, field_name],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        close_fds=True,
+    )
+    try:
+        if process.stdout is None:
+            raise ProviderRefused()
+        descriptor = process.stdout.fileno()
+        os.set_blocking(descriptor, False)
+        result = bytearray()
+        while True:
+            ready, _, _ = select.select([descriptor], [], [], _remaining(deadline))
+            if not ready:
+                raise ProviderRefused()
+            try:
+                part = os.read(descriptor, 4097 - len(result))
+            except (BlockingIOError, InterruptedError):
+                continue
+            if not part:
+                break
+            result.extend(part)
+            if len(result) > 4096:
+                raise ProviderRefused()
+        if process.wait(timeout=_remaining(deadline)) != 0:
+            raise ProviderRefused()
+        return bytes(result)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=0.2)
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def _namespace(endpoint: WireGuardBaoEndpoint) -> None:
+    observed = os.stat("/proc/self/ns/net")
+    if (observed.st_dev, observed.st_ino) != (
+        endpoint.namespace_device,
+        endpoint.namespace_inode,
+    ) or socket.if_nametoindex(endpoint.interface) != endpoint.interface_index:
+        raise ProviderRefused()
+
+
+def _wireguard_facts(endpoint: WireGuardBaoEndpoint, deadline: float) -> None:
+    _namespace(endpoint)
+    if (
+        _protected_digest(_WG_BINARY, 16777216, executable=True)
+        != endpoint.wg_binary_digest
+        or _protected_digest(_NETWORK_FILE, 32768) != endpoint.network_config_digest
+    ):
+        raise ProviderRefused()
+    peer = _wg_public(endpoint.interface, "peers", deadline).decode("ascii").strip()
+    raw = base64.b64decode(peer, validate=True)
+    if len(raw) != 32 or base64.b64encode(raw).decode() != peer:
+        raise ProviderRefused()
+    if _fingerprint(raw) != endpoint.peer_fingerprint:
+        raise ProviderRefused()
+    allowed = _wg_public(endpoint.interface, "allowed-ips", deadline).decode("ascii")
+    if allowed.split() != [peer, endpoint.peer_allowed_ip]:
+        raise ProviderRefused()
+    _namespace(endpoint)
+
+
+class _BoundedHTTPReader:
+    """HTTPResponse decoder with a cumulative header/chunk/trailer line bound."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self.stream = stream
+        self.line_bytes = 0
+
+    def readline(self, size: int = -1) -> bytes:
+        remaining = 16384 - self.line_bytes
+        line = self.stream.readline(
+            min(size, remaining + 1) if size >= 0 else remaining + 1
+        )
+        self.line_bytes += len(line)
+        if self.line_bytes > 16384:
+            raise ProviderRefused()
+        return line
+
+    def read(self, size: int = -1) -> bytes:
+        if not 0 <= size <= 131073:
+            raise ProviderRefused()
+        return self.stream.read(size)
+
+    def close(self) -> None:
+        self.stream.close()
+
+
+class _BoundedHTTPSocket:
+    def __init__(self, connected: socket.socket) -> None:
+        self.connected = connected
+
+    def makefile(self, mode: str) -> _BoundedHTTPReader:
+        if mode != "rb":
+            raise ProviderRefused()
+        return _BoundedHTTPReader(cast(BinaryIO, self.connected.makefile("rb")))
+
+
+def _bao_response(connected: socket.socket) -> bytes:
+    response = http.client.HTTPResponse(
+        cast(socket.socket, _BoundedHTTPSocket(connected))
+    )
+    try:
+        response.begin()
+        length = response.headers.get_all("Content-Length", [])
+        transfer = response.headers.get_all("Transfer-Encoding", [])
+        if (
+            response.status != 200
+            or response.headers.get("Content-Encoding", "identity") != "identity"
+            or len(length) > 1
+            or len(transfer) > 1
+            or bool(length) == bool(transfer)
+            or transfer
+            and transfer != ["chunked"]
+            or length
+            and (
+                re.fullmatch(r"[0-9]{1,6}", length[0]) is None
+                or not 0 < int(length[0]) <= 131072
+            )
+        ):
+            raise ProviderRefused()
+        raw = response.read(131073)
+        if not 0 < len(raw) <= 131072 or length and len(raw) != int(length[0]):
+            raise ProviderRefused()
+        return raw
+    finally:
+        response.close()
+
+
+def _socket_readback(connected: socket.socket, endpoint: WireGuardBaoEndpoint) -> None:
+    _namespace(endpoint)
+    bound = connected.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16)
+    if (
+        bound.rstrip(b"\0") != endpoint.interface.encode("ascii")
+        or connected.getsockname()[0] != endpoint.local_address
+        or connected.getpeername() != (endpoint.address, endpoint.port)
+    ):
+        raise ProviderRefused()
+
+
+def _wg_http_child(
+    connection: Connection,
+    endpoint: WireGuardBaoEndpoint,
+    path: str,
+    method: str,
+    token: str | None,
+    body: bytes | None,
+    deadline: float,
+) -> None:
+    try:
+        # The qualified supervisor must own the entire container/cgroup: this
+        # transport/tool group must not survive abrupt death of its caller.
+        # Linux launch qualification must permit this. No permission fallback.
+        os.setsid()
+        _wireguard_facts(endpoint, deadline)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connected:
+            connected.settimeout(_remaining(deadline))
+            connected.setsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_BINDTODEVICE,
+                endpoint.interface.encode("ascii") + b"\0",
+            )
+            connected.bind((endpoint.local_address, 0))
+            if connected.getsockopt(
+                socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16
+            ).rstrip(b"\0") != endpoint.interface.encode("ascii"):
+                raise ProviderRefused()
+            _namespace(endpoint)
+            connected.connect((endpoint.address, endpoint.port))
+            _socket_readback(connected, endpoint)
+            headers = (
+                f"{method} {path} HTTP/1.1\r\n"
+                f"Host: {endpoint.address}:{endpoint.port}\r\n"
+                "Connection: close\r\nContent-Type: application/json\r\n"
+                "Accept-Encoding: identity\r\n"
+            )
+            if token is not None:
+                headers += "X-Vault-Token: " + token + "\r\n"
+            headers += f"Content-Length: {len(body or b'')}\r\n\r\n"
+            connected.settimeout(_remaining(deadline))
+            connected.sendall(headers.encode("ascii") + (body or b""))
+            raw = _bao_response(connected)
+            _remaining(deadline)
+        connection.send_bytes(raw)
+    except Exception:
+        try:
+            connection.send_bytes(b"")
+        except Exception:  # noqa: S110 -- child emits no diagnostics
+            pass
+    finally:
+        connection.close()
+
+
+@dataclass(frozen=True, slots=True)
+class WireGuardBaoTransport:
+    endpoint: WireGuardBaoEndpoint
+
+    def __post_init__(self) -> None:
+        if type(self.endpoint) is not WireGuardBaoEndpoint:
+            raise ProviderRefused()
+
+    def request(
+        self,
+        path: str,
+        *,
+        method: str,
+        token: str | None,
+        document: Mapping[str, object] | None,
+        deadline: float,
+    ) -> JSONRecord:
+        paths = RolePaths.for_role(self.endpoint.role)
+        allowed = {
+            ("POST", "/v1/sys/wrapping/lookup"),
+            ("POST", "/v1/sys/wrapping/unwrap"),
+            ("POST", "/v1/auth/approle/login"),
+            ("GET", "/v1/auth/token/lookup-self"),
+            ("GET", "/v1/" + paths.seed),
+            ("GET", "/v1/secret/data/dotmac/platform-cp/rehearsal-issuer/trust-state"),
+            (
+                "GET",
+                "/v1/secret/data/dotmac/platform-cp/rehearsal-attester/trust-state",
+            ),
+        }
+        if (
+            type(method) is not str
+            or type(path) is not str
+            or (method, path) not in allowed
+            or type(deadline) not in (int, float)
+            or not math.isfinite(deadline)
+            or token is not None
+            and (
+                type(token) is not str
+                or not 0 < len(token) <= 8192
+                or any(not 33 <= ord(c) <= 126 for c in token)
+            )
+            or method == "GET"
+            and (token is None or document is not None)
+            or path.endswith("/login")
+            and (
+                token is not None
+                or document is None
+                or set(document) != {"role_id", "secret_id"}
+                or any(
+                    type(v) is not str or not 0 < len(v) <= 8192
+                    for v in document.values()
+                )
+            )
+            or path.endswith("/lookup")
+            and (token is None or document != {"token": token})
+            or path.endswith("/unwrap")
+            and (token is None or document != {})
+        ):
+            raise ProviderRefused()
+        io_deadline = min(deadline, time.monotonic() + self.endpoint.timeout)
+        _remaining(io_deadline)
+        body = (
+            None if document is None else json.dumps(document, allow_nan=False).encode()
+        )
+        if body is not None and len(body) > 32768:
+            raise ProviderRefused()
+        result = strict_json(
+            _spawn_request(
+                _wg_http_child,
+                (self.endpoint, path, method, token, body, io_deadline),
+                io_deadline,
+                process_group=True,
+            )
+        )
+        _remaining(io_deadline)
+        return result
 
 
 def _fingerprint(raw: bytes) -> str:
@@ -466,6 +924,25 @@ class RoleMaterial:
         return self.key.attester_sign
 
 
+class CustodyProfile(StrEnum):
+    """Two fixed finite allocations; installation cannot invent numeric caps."""
+
+    ISSUER_FINITE_V1 = "issuer-finite-v1"
+    ATTESTER_FINITE_V1 = "attester-finite-v1"
+
+    @property
+    def role(self) -> Literal["issuer", "attester"]:
+        return "issuer" if self is CustodyProfile.ISSUER_FINITE_V1 else "attester"
+
+    @property
+    def token_limit(self) -> int:
+        return 20 if self is CustodyProfile.ISSUER_FINITE_V1 else 8
+
+    @property
+    def http_limit(self) -> int:
+        return self.token_limit + 3
+
+
 class RoleCustody:
     """One bootstrap per instance; exact paths, <=300s and <=32 token uses.
 
@@ -473,6 +950,8 @@ class RoleCustody:
     A4 provisional {key_id, private_key_b64url} wire encoding.
     No callback decoder is executed.
     Public refresh is explicit. Failure poisons the provider; no renewal/retry.
+    Production uses a named finite profile and the original local deadline;
+    the legacy library profile retains its 32-use ceiling.
     """
 
     def __init__(
@@ -483,13 +962,29 @@ class RoleCustody:
         key_id: str,
         public_key: bytes,
         minimum_versions: dict[str, int],
-        transport: BoundedJSONTransport | None = None,
+        transport: BoundedJSONTransport | WireGuardBaoTransport | None = None,
         seed_format: Literal["a4-provisional-private-key-b64url"] | None = None,
         expires_at: datetime | None = None,
+        profile: CustodyProfile | None = None,
+        launch_deadline: float | None = None,
     ) -> None:
         self.paths = RolePaths.for_role(role)
         if (
-            type(transport) is not BoundedJSONTransport
+            type(transport) not in (BoundedJSONTransport, WireGuardBaoTransport)
+            or type(transport) is WireGuardBaoTransport
+            and transport.endpoint.role != role
+            or profile is not None
+            and (
+                type(profile) is not CustodyProfile
+                or profile.role != role
+                or launch_deadline is None
+            )
+            or launch_deadline is not None
+            and (
+                type(launch_deadline) not in (int, float)
+                or not math.isfinite(launch_deadline)
+                or not 0 < launch_deadline - time.monotonic() <= 300
+            )
             or seed_format != "a4-provisional-private-key-b64url"
             or type(public_key) is not bytes
             or len(public_key) != 32
@@ -505,16 +1000,23 @@ class RoleCustody:
         ):
             raise ProviderRefused()
         self.role, self.role_id, self.key_id = role, role_id, key_id
-        self.public_key, self.transport = public_key, transport
+        self.public_key = public_key
+        self.transport = cast(BoundedJSONTransport | WireGuardBaoTransport, transport)
         self.minimum_versions = dict(minimum_versions)
         self.expires_at = expires_at
         self.started_at = datetime.now(UTC)
         self.origin = time.monotonic()
         self.deadline = self.origin + (expires_at - self.started_at).total_seconds()
+        if launch_deadline is not None:
+            self.deadline = min(self.deadline, launch_deadline)
+        self.profile = profile
         self._started = False
         self._closed = False
         self._token: str | None = None
         self._uses = 0
+        self._token_attempts = 0
+        self._http_attempts = 0
+        self._phases = 0
         self._material: RoleMaterial | None = None
 
     def _request(
@@ -531,10 +1033,23 @@ class RoleCustody:
             or not self.started_at <= datetime.now(UTC) < self.expires_at
         ):
             raise ProviderRefused()
-        if token == self._token and token is not None:
+        is_service = token == self._token and token is not None
+        if (
+            is_service
+            and (
+                self._uses >= 32
+                or self.profile is not None
+                and self._token_attempts >= self.profile.token_limit
+            )
+            or self.profile is not None
+            and self._http_attempts >= self.profile.http_limit
+        ):
+            raise ProviderRefused()
+        # Count attempts before I/O; failed or ambiguous requests are never free.
+        self._http_attempts += 1
+        if is_service:
+            self._token_attempts += 1
             self._uses += 1
-            if self._uses > 32:
-                raise ProviderRefused()
         return self.transport.request(
             path, method=method, token=token, document=document, deadline=self.deadline
         )
@@ -616,7 +1131,8 @@ class RoleCustody:
                 or not 0 < json_integer(lookup["ttl"]) <= 300
             ):
                 raise ProviderRefused()
-            self._uses = 32 - json_integer(lookup["num_uses"])
+            self._uses = max(self._uses, 32 - json_integer(lookup["num_uses"]))
+            self._precheck_budget(token_uses=3, http_calls=3)
             self.deadline = min(
                 self.deadline, time.monotonic() + json_integer(lookup["ttl"])
             )
@@ -686,11 +1202,50 @@ class RoleCustody:
             )["data"]
         )
 
-    def refresh(self) -> None:
+    def _precheck_budget(self, *, token_uses: int, http_calls: int) -> None:
+        if (
+            self._closed
+            or not self.origin <= time.monotonic() < self.deadline
+            or not self.started_at <= datetime.now(UTC) < self.expires_at
+            or self._uses + token_uses > 32
+            or self.profile is not None
+            and (
+                self._token_attempts + token_uses > self.profile.token_limit
+                or self._http_attempts + http_calls > self.profile.http_limit
+            )
+        ):
+            raise ProviderRefused()
+
+    def precheck_phase(
+        self, phase: Literal["submission", "challenge", "complete"]
+    ) -> None:
+        """Pure availability check; refresh reserves the phase exactly once."""
+        if self._material is None or self.profile is None:
+            raise ProviderRefused()
+        if self.profile is CustodyProfile.ISSUER_FINITE_V1:
+            valid = phase == "submission" and self._phases < 8
+        else:
+            valid = (self._phases, phase) in ((0, "challenge"), (1, "complete"))
+        if not valid:
+            raise ProviderRefused()
+        self._precheck_budget(token_uses=2, http_calls=2)
+
+    def refresh(
+        self, *, phase: Literal["submission", "challenge", "complete"] | None = None
+    ) -> None:
         if self._material is None or self._closed:
             raise ProviderRefused()
         failed = False
         try:
+            if self.profile is not None:
+                if phase is None:
+                    raise ProviderRefused()
+                self.precheck_phase(phase)
+                self._phases += 1
+            elif phase is not None:
+                raise ProviderRefused()
+            else:
+                self._precheck_budget(token_uses=2, http_calls=2)
             for role, state in (
                 ("issuer", self._material.issuer_trust),
                 ("attester", self._material.attester_trust),

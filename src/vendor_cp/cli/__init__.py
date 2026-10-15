@@ -564,6 +564,11 @@ def build_parser() -> _Parser:
     _command(
         gate0_sub, "gate0", "attester-session", "serve one fixed SSH proof exchange"
     )
+    _command(
+        gate0_sub, "gate0", "capture-install", "receive one protected capture batch"
+    )
+    _command(gate0_sub, "gate0", "capture-send", "send the parent's captured batch")
+    _command(gate0_sub, "gate0", "supervise", "run one fixed installed role window")
 
     # ── diagnose ───────────────────────────────────────────────────────────
     diagnose_group = groups.add_parser("diagnose", help="questions about this process")
@@ -632,7 +637,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command not in by_command():
         parser.error(f"{command!r} has no declared owner")
 
-    if command in {"gate0 issuer-run", "gate0 attester-session"}:
+    if command in {
+        "gate0 issuer-run",
+        "gate0 attester-session",
+        "gate0 capture-install",
+        "gate0 capture-send",
+        "gate0 supervise",
+    }:
         # These owners speak a closed binary stdio protocol. Generic CLI result
         # rendering would corrupt the service's stdout stream.
         # Runtime/custody owners load only for the selected service. Building
@@ -647,8 +658,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return int(ExitCode.REFUSED)
 
         if command == "gate0 issuer-run":
-            return gate0_services.issuer_run()
-        return gate0_services.attester_session()
+            return gate0_services.run_installed_issuer()
+        if command == "gate0 attester-session":
+            return gate0_services.run_installed_attester()
+        if command == "gate0 capture-install":
+            return gate0_services.run_installed_capture_receiver()
+        if command == "gate0 capture-send":
+            return gate0_services.run_installed_capture_sender()
+        return gate0_services.run_installed_supervisor()
 
     if command == "deployment candidate-material-probe":
         from vendor_cp.deployment.candidate_materials import (

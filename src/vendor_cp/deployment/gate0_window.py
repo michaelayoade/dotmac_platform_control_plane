@@ -7,10 +7,11 @@ NS3 receives approved-at-start public data; only IDP3 rechecks current approval.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import time
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 from uuid import UUID
 
@@ -434,6 +435,30 @@ def derive_consume_expectation(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class WindowClockOrigin:
+    """Trusted local launch clocks; never portable window/capture authority."""
+
+    started_at: datetime
+    monotonic_origin: float
+    deadline: float
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.started_at) is not datetime
+            or self.started_at.tzinfo is None
+            or self.started_at.utcoffset() != timedelta(0)
+            or self.started_at > datetime.now(UTC)
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in (self.monotonic_origin, self.deadline)
+            )
+            or not 0 <= self.monotonic_origin <= time.monotonic() < self.deadline
+            or not 0 < self.deadline - self.monotonic_origin <= 300
+        ):
+            raise ProviderRefused()
+
+
 class OwnerWindowReader:
     """Current public Control snapshot plus the existing exact-content hold.
 
@@ -452,6 +477,7 @@ class OwnerWindowReader:
         expires_at: datetime | None = None,
         database_io_qualified: bool = False,
         rehearsal_target_id: UUID | None = None,
+        clock_origin: WindowClockOrigin | None = None,
     ) -> None:
         from dotmac_kernel.session_runtime import DatabaseRuntime
 
@@ -472,9 +498,22 @@ class OwnerWindowReader:
             authorization_verifier,
         )
         self._target_id = rehearsal_target_id
-        self._started, self._origin = datetime.now(UTC), time.monotonic()
+        if clock_origin is not None:
+            if type(clock_origin) is not WindowClockOrigin:
+                raise ProviderRefused()
+            clock_origin.__post_init__()
+            if not 0 < (expires_at - clock_origin.started_at).total_seconds() <= 300:
+                raise ProviderRefused()
+            self._started, self._origin = (
+                clock_origin.started_at,
+                clock_origin.monotonic_origin,
+            )
+        else:
+            self._started, self._origin = datetime.now(UTC), time.monotonic()
         self._expires = expires_at
         self._deadline = self._origin + (expires_at - self._started).total_seconds()
+        if clock_origin is not None:
+            self._deadline = min(self._deadline, clock_origin.deadline)
         self._freshness: dict[tuple[UUID, str], WindowFreshness] = {}
 
     def _open(self) -> None:
