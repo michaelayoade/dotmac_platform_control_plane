@@ -105,10 +105,11 @@ class RunnerProjectionCase:
             or capture["target_id"] != doc["target"]["id"]
             or packet["controller_ca_fingerprint"]
             != doc["controller"]["ca_fingerprint"]
-            or any(
-                packet[k] != doc[k] for k in ("case_kind", "not_before", "expires_at")
-            )
-            or any(packet[k] != doc["github"][k] for k in ("run_id", "run_attempt"))
+            or packet["case_kind"] != doc["case_kind"]
+            or packet["not_before"] != doc["not_before"]
+            or packet["expires_at"] != doc["expires_at"]
+            or packet["run_id"] != doc["github"]["run_id"]
+            or packet["run_attempt"] != doc["github"]["run_attempt"]
         ):
             raise ProviderRefused()
 
@@ -137,15 +138,20 @@ class RunnerProjectionCase:
     @property
     def binding(self) -> dict[str, str]:
         packet, window = parse_run_document(self.shared_packet), self.window
-        return dict(
-            packet["capture"],
-            launch_packet_digest="sha256:"
+        capture = packet["capture"]
+        return {
+            "window_digest": capture["window_digest"],
+            "plan_id": capture["plan_id"],
+            "plan_digest": capture["plan_digest"],
+            "target_id": capture["target_id"],
+            "approval_request_id": capture["approval_request_id"],
+            "launch_packet_digest": "sha256:"
             + hashlib.sha256(self.shared_packet).hexdigest(),
-            case_kind=packet["case_kind"],
-            window_id=window.document["window_id"],
-            run_id=packet["run_id"],
-            run_attempt=packet["run_attempt"],
-        )
+            "case_kind": packet["case_kind"],
+            "window_id": window.document["window_id"],
+            "run_id": packet["run_id"],
+            "run_attempt": packet["run_attempt"],
+        }
 
     def require_open(self) -> None:
         now = datetime.now(UTC)
@@ -179,9 +185,10 @@ def _jwt_deadline(token: str, case: RunnerProjectionCase) -> float:
         or type(claims.get("exp")) is not int
     ):
         raise ProviderRefused()
+    expiry = cast(int, claims["exp"])
     return min(
         case.deadline,
-        case.monotonic_origin + claims["exp"] - case.wall_origin.timestamp(),
+        case.monotonic_origin + expiry - case.wall_origin.timestamp(),
         time.monotonic() + 5.0,
     )
 
@@ -209,7 +216,8 @@ class _ProjectionHTTPResponse(http.client.HTTPResponse):
         self._bounded_stream = cast(_BoundedHTTPReader, self.fp)
 
     def _close_conn(self) -> None:
-        self.fp = None
+        # HTTPResponse uses None for framed completion; typeshed narrows fp.
+        self.fp = None  # type: ignore[assignment]
 
     def require_eof(self) -> None:
         if not self.isclosed() or self._bounded_stream.read(1):
@@ -223,14 +231,15 @@ class _ProjectionHTTPResponse(http.client.HTTPResponse):
 
 
 def _decode_response(response: _ProjectionHTTPResponse) -> bytes:
-    lengths = response.headers.get_all("Content-Length", [])
-    transfers = response.headers.get_all("Transfer-Encoding", [])
+    lengths = response.headers.get_all("Content-Length") or []
+    transfers = response.headers.get_all("Transfer-Encoding") or []
     if (
         response.status != 200
         or len(response.getheaders()) > 64
-        or response.headers.get_all("Content-Type", []) != ["application/json"]
-        or response.headers.get_all("Content-Encoding", []) not in ([], ["identity"])
-        or response.headers.get_all("Location", [])
+        or (response.headers.get_all("Content-Type") or []) != ["application/json"]
+        or (response.headers.get_all("Content-Encoding") or [])
+        not in ([], ["identity"])
+        or (response.headers.get_all("Location") or [])
         or len(lengths) > 1
         or len(transfers) > 1
         or bool(lengths) == bool(transfers)
@@ -581,11 +590,12 @@ class RunnerProjectionClient:
             or len({c.binding["plan_id"] for c in cases}) != 2
             or len({c.binding["approval_request_id"] for c in cases}) != 2
             or len({(c.wall_origin, c.monotonic_origin) for c in cases}) != 1
-            or any(
-                cases[0].window.document["controller"][key]
-                == cases[1].window.document["controller"][key]
-                for key in ("lease_id", "fingerprint", "certificate_digest")
-            )
+            or cases[0].window.document["controller"]["lease_id"]
+            == cases[1].window.document["controller"]["lease_id"]
+            or cases[0].window.document["controller"]["fingerprint"]
+            == cases[1].window.document["controller"]["fingerprint"]
+            or cases[0].window.document["controller"]["certificate_digest"]
+            == cases[1].window.document["controller"]["certificate_digest"]
             or cases[0].window.document["github"] != cases[1].window.document["github"]
         ):
             raise ProviderRefused()
