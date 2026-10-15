@@ -562,6 +562,15 @@ def build_parser() -> _Parser:
     gate0_sub = gate0.add_subparsers(dest="name", parser_class=_Parser)
     _command(gate0_sub, "gate0", "issuer-run", "run one finite issuer window")
     _command(gate0_sub, "gate0", "collect-e", "collect private finite E evidence")
+    _command(
+        gate0_sub, "gate0", "bootstrap-collector", "launch the fixed isolated collector"
+    )
+    _command(
+        gate0_sub,
+        "gate0",
+        "collect-e-credential",
+        "collect with the fixed private credential",
+    )
     _command(gate0_sub, "gate0", "handoff-holder", "forward fixed root evidence")
     _command(gate0_sub, "gate0", "handoff-receiver", "receive fixed root evidence")
     _command(
@@ -644,6 +653,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         from vendor_cp.cli.commands import gate0_collect_e
 
         return gate0_collect_e(args)
+
+    if command in {"gate0 bootstrap-collector", "gate0 collect-e-credential"}:
+        try:
+            if command == "gate0 bootstrap-collector":
+                from vendor_cp.deployment.gate0_runner_bootstrap import (
+                    run_installed_bootstrap,
+                )
+
+                return run_installed_bootstrap()
+            from vendor_cp.deployment.gate0_runner_credential import (
+                run_installed_credential_collection,
+            )
+
+            return run_installed_credential_collection()
+        except Exception:
+            print("GATE0_BOOTSTRAP_UNAVAILABLE", file=sys.stderr)
+            return int(ExitCode.REFUSED)
 
     if command in {"gate0 handoff-holder", "gate0 handoff-receiver"}:
         try:
