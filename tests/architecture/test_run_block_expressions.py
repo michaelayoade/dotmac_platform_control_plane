@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from run_block_expressions import (
     RUN_BLOCK_EXPRESSION_BASELINE,
     WORKFLOWS_DIR,
@@ -95,15 +96,17 @@ def test_kernel_lock_workflow_carries_no_baseline_entry() -> None:
     ]
 
 
-def test_the_measured_shape_matches_the_recorded_eight_sites_and_nineteen_openers() -> (
-    None
-):
+def test_the_measured_shape_matches_the_one_remaining_deploy_site() -> None:
     """NON-VACUITY. This is the measured shape, not an assumption — a guard
     that always found zero sites would pass for the wrong reason."""
 
     sites = run_block_expression_sites()
-    assert len(sites) == 8, sites
-    assert sum(site.count for site in sites) == 19, sites
+    assert len(sites) == 1, sites
+    assert sum(site.count for site in sites) == 1, sites
+    assert sites[0].workflow == "production-deploy.yml"
+    assert not any(
+        key[0] == "production-image.yml" for key in RUN_BLOCK_EXPRESSION_BASELINE
+    )
 
 
 # ── the extraction itself: sensitivity, near-miss, structured-field scope ──
@@ -249,6 +252,63 @@ def test_multiple_openers_in_one_body_are_all_counted(tmp_path: Path) -> None:
     assert sites == [ExpressionSite("plant.yml", "demo", "Three openers", 3)]
 
 
+def test_a_sequence_anchor_is_inspected_in_each_executing_job(tmp_path: Path) -> None:
+    workflow_dir = _write(
+        tmp_path,
+        "jobs:\n"
+        "  original:\n"
+        "    steps: &publish_steps\n"
+        "      - name: Shared expression plant\n"
+        "        run: |\n"
+        "          echo ${{ inputs.thing }}\n"
+        "  protected_role:\n"
+        "    environment: production\n"
+        "    steps: *publish_steps\n",
+    )
+    sites = run_block_expression_sites(workflow_dir)
+    assert sites == [
+        ExpressionSite("plant.yml", "original", "Shared expression plant", 1),
+        ExpressionSite("plant.yml", "protected_role", "Shared expression plant", 1),
+    ]
+    # Neither alias execution is admitted by the remaining deploy exception.
+    extra, missing, drifted = baseline_mismatches(
+        {site.key: site.count for site in sites}, {}
+    )
+    assert len(extra) == 2 and not missing and not drifted
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "  caller:\n    steps: *missing\n",
+        "  caller:\n    steps: *later\n"
+        "  later:\n    steps: &later\n      - run: echo hi\n",
+        "  first:\n    steps: &same\n      - run: echo first\n"
+        "  second:\n    steps: &same\n      - run: echo second\n",
+        "  caller:\n    steps: []\n",
+        "  caller:\n    steps:\n      - *hidden_step\n",
+        "  caller:\n    steps:\n      - &hidden_step\n        run: echo hi\n",
+        "  caller:\n    steps:\n      - run: echo first\n"
+        "    steps:\n      - run: echo second\n",
+    ],
+    ids=[
+        "unknown",
+        "forward",
+        "duplicate",
+        "inline",
+        "item-alias",
+        "item-anchor",
+        "two-keys",
+    ],
+)
+def test_unsupported_sequence_shapes_fail_instead_of_hiding_jobs(
+    tmp_path: Path, body: str
+) -> None:
+    workflow_dir = _write(tmp_path, "jobs:\n" + body)
+    with pytest.raises(ValueError):
+        run_block_expression_sites(workflow_dir)
+
+
 # ── the baseline comparison in isolation ────────────────────────────────────
 
 
@@ -286,3 +346,97 @@ def test_an_exactly_matching_baseline_reports_nothing() -> None:
     baseline = {("w.yml", "job", "Step"): 1}
     extra, missing, drifted = baseline_mismatches(dict(baseline), baseline)
     assert extra == {} and missing == {} and drifted == {}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "  anchored: &hidden\n    steps:\n      - run: echo hi\n",
+        "  reused: *hidden\n",
+        "  direct:\n    steps:\n      - run: *command\n",
+        "  direct:\n    steps:\n      - run: &command echo hi\n",
+        "  original:\n    steps: &shared\n      - run: *command\n"
+        "  reused:\n    steps: *shared\n",
+    ],
+)
+def test_unsupported_job_and_run_aliases_cannot_hide_execution(
+    tmp_path: Path, body: str
+) -> None:
+    workflow_dir = _write(
+        tmp_path, "env:\n  COMMAND: &command 'echo ${{ inputs.thing }}'\njobs:\n" + body
+    )
+    with pytest.raises(ValueError):
+        run_block_expression_sites(workflow_dir)
+
+
+def test_shell_asterisks_inside_run_body_are_not_yaml_aliases(tmp_path: Path) -> None:
+    workflow_dir = _write(
+        tmp_path, "jobs:\n  demo:\n    steps:\n      - run: |\n          echo *\n"
+    )
+    assert run_block_expression_sites(workflow_dir) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '  "quoted":\n    steps:\n      - run: *command\n',
+        '  direct:\n    steps:\n      - "run": *command\n',
+        "  direct:\n    steps:\n      - 'run': *command\n",
+        "  direct:\n    steps:\n      - {run: *command}\n",
+        "  direct:\n    steps:\n      - run: !!str *command\n",
+        "  direct:\n    steps:\n      - run: echo hi\n"
+        "  direct:\n    steps:\n      - run: echo bye\n",
+    ],
+)
+def test_noncanonical_yaml_mappings_cannot_hide_run_aliases(
+    tmp_path: Path, body: str
+) -> None:
+    workflow_dir = _write(
+        tmp_path, "env:\n  COMMAND: &command 'echo ${{ inputs.thing }}'\njobs:\n" + body
+    )
+    with pytest.raises(ValueError):
+        run_block_expression_sites(workflow_dir)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '  direct:\n    "steps": *shared\n',
+        "  direct:\n    steps : *shared\n",
+        "  direct:\n    steps:\n      - run : *command\n",
+        "  direct:\n    steps:\n      - run: *command\n        run: echo hi\n",
+        "  direct:\n    steps:\n      - run:\n          *command\n",
+    ],
+)
+def test_alternate_steps_keys_and_multiline_run_alias_refuse(
+    tmp_path: Path, body: str
+) -> None:
+    workflow_dir = _write(tmp_path, "jobs:\n" + body)
+    with pytest.raises(ValueError):
+        run_block_expression_sites(workflow_dir)
+
+
+def test_column_zero_comments_preserve_jobs_and_steps(tmp_path: Path) -> None:
+    workflow_dir = _write(
+        tmp_path,
+        "jobs:\n  first:\n# comment inside job\n    steps: &shared\n"
+        "      - name: Visible\n        run: echo ${{ inputs.thing }}\n"
+        "# comment between jobs\n  second:\n    steps: *shared\n",
+    )
+    sites = run_block_expression_sites(workflow_dir)
+    assert [site.job for site in sites] == ["first", "second"]
+    assert all(site.count == 1 for site in sites)
+
+
+@pytest.mark.parametrize(
+    "tail", ["env:\n  VALUE: hi\n", "permissions:\n  contents: read\n"]
+)
+def test_noncomment_top_level_mapping_ends_jobs(tmp_path: Path, tail: str) -> None:
+    workflow_dir = _write(
+        tmp_path,
+        "jobs:\n  first:\n    steps:\n      - name: Visible\n"
+        "        run: echo ${{ inputs.thing }}\n" + tail,
+    )
+    assert run_block_expression_sites(workflow_dir) == [
+        ExpressionSite("plant.yml", "first", "Visible", 1)
+    ]
