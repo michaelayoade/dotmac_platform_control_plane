@@ -95,6 +95,7 @@ def test_native_wrapper_bounds_the_exact_candidate_and_private_namespace() -> No
         "--cap-add NET_ADMIN",
         "--security-opt no-new-privileges:true",
         "--pids-limit 96 --memory 512m --cpus 1",
+        "--tmpfs /run:rw,nosuid,nodev,noexec,size=16m,mode=0755",
         "timeout --signal=TERM --kill-after=5s 60s",
         '--entrypoint /opt/venv/bin/python "$image"',
         'docker container rm -f "$owned_id"',

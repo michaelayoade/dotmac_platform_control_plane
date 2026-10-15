@@ -22,8 +22,9 @@ from vendor_cp.deployment import gate0_launch as launch
 from vendor_cp.deployment import gate0_management_delivery as delivery
 from vendor_cp.deployment import gate0_services as services
 from vendor_cp.deployment.gate0_capture import CaptureCoordinates
+from vendor_cp.deployment.gate0_collection import IssuerOutcome, OutcomeKind
 from vendor_cp.deployment.gate0_composition import PhaseResult
-from vendor_cp.deployment.gate0_framing import ServiceRefused
+from vendor_cp.deployment.gate0_framing import ServiceRefused, canonical
 from vendor_cp.deployment.gate0_role_custody import (
     CustodyProfile,
     ProviderRefused,
@@ -49,21 +50,39 @@ def entry_stdio(monkeypatch):
 
 @pytest.fixture
 def issuer_entry(monkeypatch, entry_stdio):
+    from dotmac_deployment_control import RehearsalIssuerIssuanceRefusalCode
+
     events = []
     digest = "sha256:" + "a" * 64
-    coordinates = tuple(
-        CaptureCoordinates(
-            digest, digest, UUID(int=i), digest, UUID(int=3), UUID(int=i + 3)
-        )
-        for i in (1, 2)
+    coordinate = CaptureCoordinates(
+        digest, digest, UUID(int=1), digest, UUID(int=3), UUID(int=4)
     )
     startup = object()
     prepared = SimpleNamespace(
-        startup=startup,
-        captures=tuple(SimpleNamespace(coordinates=c) for c in coordinates),
+        startup=startup, capture=SimpleNamespace(coordinates=coordinate)
+    )
+    terminal = IssuerOutcome(
+        1,
+        "consume",
+        digest,
+        digest,
+        digest,
+        digest,
+        OutcomeKind.OWNER_REFUSED,
+        "control.issuance",
+        RehearsalIssuerIssuanceRefusalCode.ENVELOPE_MISMATCH.value,
+        canonical({}),
     )
     state = SimpleNamespace(
-        ack=None, eof=None, teardown_error=False, serve_error=False, serve_result=0
+        ack=None,
+        eof=None,
+        teardown_error=False,
+        serve_error=False,
+        serve_result=services.IssuerProcessResult(3, (terminal,)),
+        export_close_error=False,
+        entry_error=False,
+        terminal_error=False,
+        terminal_written=False,
     )
 
     class Connection:
@@ -72,6 +91,8 @@ def issuer_entry(monkeypatch, entry_stdio):
 
         def __exit__(self, *args):
             events.append("export-closed")
+            if state.export_close_error:
+                raise RuntimeError("synthetic-sensitive-descriptor-close-canary")
 
         def fileno(self):
             return 22
@@ -82,19 +103,30 @@ def issuer_entry(monkeypatch, entry_stdio):
             assert direction == socket.SHUT_WR
             events.append("half-close")
 
+    def finish_issuer(result):
+        assert result is state.serve_result
+        assert events[-1] == "prepare-exit"
+        assert "export-closed" in events
+        events.append("issuer-terminal")
+        if state.terminal_error:
+            raise RuntimeError("synthetic-sensitive-terminal-write-canary")
+        state.terminal_written = True
+
     context = SimpleNamespace(
         packet_digest=digest,
         expires_at=datetime.now(UTC) + timedelta(seconds=60),
         deadline=monotonic() + 5,
         open_issuer_capture_export=lambda: Connection(),
         require_open=lambda: events.append("require-open"),
-        finish_issuer_success=lambda: events.append("issuer-success"),
+        finish_issuer=finish_issuer,
     )
     installation = SimpleNamespace(
-        management_delivery=SimpleNamespace(captures=("a", "b"))
+        plan_id=coordinate.plan_id,
+        management_delivery=SimpleNamespace(capture=object()),
     )
+    state.installation = installation
     state.ack = launch.CaptureInstallReadback(
-        digest, coordinates, context.expires_at
+        digest, coordinate, context.expires_at
     ).document()
     monkeypatch.setattr(
         launch.InstalledLaunchContext,
@@ -110,6 +142,8 @@ def issuer_entry(monkeypatch, entry_stdio):
         assert selected is context and installed is installation
         events.append("prepare-enter")
         try:
+            if state.entry_error:
+                raise RuntimeError("synthetic-sensitive-pre-yield-canary")
             yield prepared
         finally:
             events.append("prepare-exit")
@@ -117,9 +151,13 @@ def issuer_entry(monkeypatch, entry_stdio):
                 raise RuntimeError("synthetic-sensitive-teardown-canary")
 
     monkeypatch.setattr(bootstrap, "prepare_installed_issuer", prepare)
-    monkeypatch.setattr(
-        delivery, "install_document", lambda *args: {"schema": "synthetic-export"}
-    )
+
+    def install_document(packet_digest, capture, selection):
+        assert packet_digest == digest and capture is prepared.capture
+        assert selection is installation.management_delivery.capture
+        return {"schema": "synthetic-export"}
+
+    monkeypatch.setattr(delivery, "install_document", install_document)
 
     class Channel:
         def __init__(self, *args, **kwargs):
@@ -148,13 +186,13 @@ def issuer_entry(monkeypatch, entry_stdio):
             raise RuntimeError("synthetic-sensitive-execution-canary")
         return state.serve_result
 
-    monkeypatch.setattr(services, "issuer_run", serve)
+    monkeypatch.setattr(services, "issuer_run_result", serve)
     return state, events, context, entry_stdio
 
 
 def test_installed_issuer_requires_exact_ack_and_eof_before_serving(issuer_entry):
     _, events, _, stdio = issuer_entry
-    assert services.run_installed_issuer() == 0
+    assert services.run_installed_issuer() == 3
     assert events == [
         "prepare-enter",
         "send",
@@ -165,7 +203,7 @@ def test_installed_issuer_requires_exact_ack_and_eof_before_serving(issuer_entry
         "require-open",
         "serve",
         "prepare-exit",
-        "issuer-success",
+        "issuer-terminal",
     ]
     assert stdio.stdout.getvalue() == "" and stdio.stderr.getvalue() == ""
 
@@ -199,7 +237,7 @@ def test_installed_issuer_post_execution_failure_is_incomplete(issuer_entry, fai
     state.serve_error = failure == "execution"
     assert services.run_installed_issuer() == 5
     assert "serve" in events and events[-1] == "prepare-exit"
-    assert "issuer-success" not in events
+    assert "issuer-terminal" not in events
     assert stdio.stderr.getvalue() == "GATE0_SERVICE_INCOMPLETE\n"
     assert stdio.stdout.getvalue() == ""
 
@@ -278,7 +316,7 @@ def test_installed_management_entries_wait_for_exchange_and_sanitize_failure(
     context = SimpleNamespace(
         deadline=monotonic() + 5, expires_at=datetime.now(UTC) + timedelta(seconds=60)
     )
-    installation = SimpleNamespace(captures=("a", "b"))
+    installation = SimpleNamespace(capture=object())
     monkeypatch.setattr(
         launch.InstalledLaunchContext,
         "from_installed",
@@ -296,7 +334,7 @@ def test_installed_management_entries_wait_for_exchange_and_sanitize_failure(
         if operation == "push_capture_install":
             assert kwargs["installation"] is installation
         else:
-            assert kwargs["selections"] is installation.captures
+            assert kwargs["selection"] is installation.capture
             assert kwargs["absolute_end"] is context.expires_at
         events.append("exchange")
         if failure == "refused":
@@ -322,6 +360,11 @@ def test_installed_supervisor_cleanup_failure_overrides_success_or_refusal(
     events = []
 
     class Supervisor:
+        mechanics_outcome = "complete"
+
+        def export_cleanup(self):
+            events.append("export")
+
         def run(self):
             events.append("run")
             if run_refused:
@@ -338,9 +381,9 @@ def test_installed_supervisor_cleanup_failure_overrides_success_or_refusal(
         classmethod(lambda cls: Supervisor()),
     )
     assert services.run_installed_supervisor() == (
-        5 if cleanup_failed else 3 if run_refused else 0
+        5 if cleanup_failed or run_refused else 0
     )
-    assert events == ["run", "close"]
+    assert events == ["run", "close", "export"]
     assert entry_stdio.stdout.getvalue() == ""
     assert "canary" not in entry_stdio.stderr.getvalue()
     if cleanup_failed:
@@ -349,10 +392,10 @@ def test_installed_supervisor_cleanup_failure_overrides_success_or_refusal(
 
 def test_installed_issuer_nonzero_never_publishes_success(issuer_entry):
     state, events, _, stdio = issuer_entry
-    state.serve_result = 3
+    state.serve_result = services.IssuerProcessResult(3)
     assert services.run_installed_issuer() == 3
     assert events[-2:] == ["serve", "prepare-exit"]
-    assert "issuer-success" not in events
+    assert "issuer-terminal" not in events
     assert stdio.stdout.getvalue() == ""
 
 
@@ -362,6 +405,11 @@ def test_installed_supervisor_incomplete_run_remains_incomplete_after_cleanup(
     events = []
 
     class Supervisor:
+        mechanics_outcome = "incomplete"
+
+        def export_cleanup(self):
+            events.append("export")
+
         def run(self):
             events.append("run")
             raise launch.LaunchIncomplete()
@@ -375,7 +423,7 @@ def test_installed_supervisor_incomplete_run_remains_incomplete_after_cleanup(
         classmethod(lambda cls: Supervisor()),
     )
     assert services.run_installed_supervisor() == 5
-    assert events == ["run", "close"]
+    assert events == ["run", "close", "export"]
     assert entry_stdio.stderr.getvalue() == "GATE0_LAUNCH_INCOMPLETE\n"
     assert entry_stdio.stdout.getvalue() == ""
 
@@ -507,3 +555,119 @@ def test_attester_refresh_challenge_then_eof_then_complete_before_signing(
         session.run(exchange, setup["cert"])
         assert phases == ["challenge", "complete"]
         assert len(exchange.output) == 2 and len(setup["calls"]) == 3
+
+
+@pytest.mark.parametrize(
+    "failure", ["descriptor-close", "custody-close-before-serve", "terminal-write"]
+)
+def test_installed_issuer_failed_close_or_terminal_write_cannot_publish(
+    issuer_entry, failure
+):
+    state, events, _, stdio = issuer_entry
+    if failure == "descriptor-close":
+        state.export_close_error = True
+    elif failure == "custody-close-before-serve":
+        state.ack = None
+        state.teardown_error = True
+    else:
+        state.terminal_error = True
+    assert services.run_installed_issuer() == 5
+    assert not state.terminal_written
+    assert events.count("prepare-exit") == 1
+    assert events.count("export-closed") == 1
+    if failure != "terminal-write":
+        assert "serve" not in events and "issuer-terminal" not in events
+    else:
+        assert events[-2:] == ["prepare-exit", "issuer-terminal"]
+    assert stdio.stderr.getvalue() == "GATE0_SERVICE_INCOMPLETE\n"
+    assert stdio.stdout.getvalue() == ""
+
+
+@pytest.mark.parametrize("exit_code", [0, 3, 5])
+def test_installed_issuer_diagnostic_result_is_not_an_eligible_terminal(
+    issuer_entry, exit_code
+):
+    state, events, _, _ = issuer_entry
+    state.serve_result = services.IssuerProcessResult(exit_code)
+    assert services.run_installed_issuer() == exit_code
+    assert "issuer-terminal" not in events and not state.terminal_written
+    assert events[-1] == "prepare-exit"
+
+
+@pytest.mark.parametrize(
+    "failure", [None, "run", "close", "export", "owner-incomplete", "cancel-close"]
+)
+def test_root_cleanup_export_occurs_once_after_outer_close_with_derived_outcome(
+    monkeypatch, entry_stdio, failure
+):
+    events = []
+
+    class Supervisor:
+        mechanics_outcome = (
+            "incomplete"
+            if failure in ("run", "close", "owner-incomplete", "cancel-close")
+            else "complete"
+        )
+
+        def run(self):
+            events.append("run")
+            if failure == "run":
+                raise launch.LaunchIncomplete()
+
+        def close(self):
+            events.append("close")
+            if failure == "close":
+                raise RuntimeError("sensitive-close")
+            if failure == "cancel-close":
+                raise services.ServiceCancelled()
+
+        def export_cleanup(self):
+            assert events[-1] == "close"
+            events.append("export")
+            if failure == "export":
+                raise RuntimeError("sensitive-export")
+
+    monkeypatch.setattr(
+        launch.FiniteGate0Supervisor,
+        "from_installed",
+        classmethod(lambda cls: Supervisor()),
+    )
+    assert services.run_installed_supervisor() == (0 if failure is None else 5)
+    assert events == ["run", "close", "export"]
+    assert entry_stdio.stdout.getvalue() == ""
+    assert "sensitive" not in entry_stdio.stderr.getvalue()
+
+
+def test_installed_issuer_rejects_capture_for_different_installed_plan(issuer_entry):
+    state, events, _, stdio = issuer_entry
+    state.installation.plan_id = UUID(int=99)
+    assert services.run_installed_issuer() == 3
+    assert events == ["prepare-enter", "prepare-exit"]
+    assert not state.terminal_written
+    assert stdio.stdout.getvalue() == ""
+
+
+@pytest.mark.parametrize("cleanup_uncertain", [False, True])
+def test_installed_issuer_pre_yield_failure_is_incomplete_without_terminal(
+    issuer_entry, cleanup_uncertain
+):
+    state, events, _, stdio = issuer_entry
+    state.entry_error = True
+    state.teardown_error = cleanup_uncertain
+    assert services.run_installed_issuer() == 5
+    assert events == ["prepare-enter", "prepare-exit"]
+    assert not state.terminal_written
+    assert stdio.stderr.getvalue() == "GATE0_SERVICE_INCOMPLETE\n"
+    assert stdio.stdout.getvalue() == ""
+
+
+def test_installed_issuer_post_entry_refusal_with_confirmed_close_stays_refused(
+    issuer_entry,
+):
+    state, events, _, stdio = issuer_entry
+    state.ack = None
+    assert services.run_installed_issuer() == 3
+    assert events[-2:] == ["export-closed", "prepare-exit"]
+    assert "serve" not in events and not state.terminal_written
+    assert stdio.stderr.getvalue() == "DATABASE_BINDING_UNQUALIFIED\n"
+    assert stdio.stdout.getvalue() == ""

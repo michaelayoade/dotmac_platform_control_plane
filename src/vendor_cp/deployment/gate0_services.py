@@ -11,7 +11,7 @@ import os
 import signal
 import sys
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -48,6 +48,8 @@ from vendor_cp.deployment.gate0_session import (
 from vendor_cp.deployment.rehearsal_issuer_seam import RehearsalIssuerCommand
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
     from dotmac_deployment_control import (
         RehearsalIssuerAuthorizationSigner,
         RehearsalIssuerAuthorizationVerifier,
@@ -645,6 +647,8 @@ def attester_session(
 def run_installed_issuer() -> int:
     """Prepare the fixed installed owner, publish capture, then serve commands."""
     execution_started = False
+    cleanup_failed = False
+    preparation_entry_pending = False
     try:
         from vendor_cp.deployment.gate0_bootstrap import (
             load_issuer_installation,
@@ -661,8 +665,49 @@ def run_installed_issuer() -> int:
 
         context = InstalledLaunchContext.from_installed()
         installation = load_issuer_installation(context)
-        with prepare_installed_issuer(context, installation) as prepared:
-            with context.open_issuer_capture_export() as connection:
+        with ExitStack() as custody_scope:
+            preparation = prepare_installed_issuer(context, installation)
+            # Entry includes generator-owned database/custody setup and may
+            # fail while cleaning up before it yields any observable state.
+            preparation_entry_pending = True
+            prepared = preparation.__enter__()
+            preparation_entry_pending = False
+
+            def close_custody(
+                error_type: type[BaseException] | None,
+                error: BaseException | None,
+                traceback: TracebackType | None,
+            ) -> Literal[False]:
+                nonlocal cleanup_failed
+                try:
+                    if preparation.__exit__(error_type, error, traceback):
+                        raise ServiceIncomplete()
+                except BaseException:
+                    cleanup_failed = True
+                    raise
+                return False
+
+            custody_scope.push(close_custody)
+            if prepared.capture.coordinates.plan_id != installation.plan_id:
+                raise ServiceRefused()
+            with ExitStack() as descriptor_scope:
+                export = context.open_issuer_capture_export()
+                connection = export.__enter__()
+
+                def close_export(
+                    error_type: type[BaseException] | None,
+                    error: BaseException | None,
+                    traceback: TracebackType | None,
+                ) -> Literal[False]:
+                    nonlocal cleanup_failed
+                    try:
+                        export.__exit__(error_type, error, traceback)
+                    except BaseException:
+                        cleanup_failed = True
+                        raise
+                    return False
+
+                descriptor_scope.push(close_export)
                 channel = FramedChannel(
                     connection.fileno(),
                     connection.fileno(),
@@ -672,8 +717,8 @@ def run_installed_issuer() -> int:
                 channel.send(
                     install_document(
                         context.packet_digest,
-                        prepared.captures,
-                        installation.management_delivery.captures,
+                        prepared.capture,
+                        installation.management_delivery.capture,
                     )
                 )
                 import socket
@@ -686,10 +731,7 @@ def run_installed_issuer() -> int:
                     readback,
                     CaptureInstallReadback(
                         context.packet_digest,
-                        (
-                            prepared.captures[0].coordinates,
-                            prepared.captures[1].coordinates,
-                        ),
+                        prepared.capture.coordinates,
                         context.expires_at,
                     ),
                 )
@@ -697,21 +739,31 @@ def run_installed_issuer() -> int:
                     raise ServiceRefused()
             context.require_open()
             execution_started = True
-            result = issuer_run(prepared.startup)
-        # sshd's exit status alone cannot attest the forced worker's outcome.
-        # Publish only after custody cleanup, and only for confirmed success.
-        if result == 0:
-            context.finish_issuer_success()
-        return result
+            result = issuer_run_result(prepared.startup)
+        # Only a real typed owner terminal can publish this worker declaration.
+        # Custody and every management descriptor have already closed. sshd's
+        # daemon status and the authenticated SSH client's status remain distinct.
+        if type(result) is not IssuerProcessResult:
+            raise ServiceIncomplete()
+        if (
+            result.exit_code == 3
+            and result.outcomes
+            and result.outcomes[-1].kind is OutcomeKind.OWNER_REFUSED
+        ):
+            context.finish_issuer(result)
+        return result.exit_code
     except ServiceCancelled:
         print("GATE0_SERVICE_CANCELLED", file=sys.stderr)
         return 5
     except Exception:
-        if execution_started:
+        if preparation_entry_pending or execution_started or cleanup_failed:
             print("GATE0_SERVICE_INCOMPLETE", file=sys.stderr)
             return 5
         print("DATABASE_BINDING_UNQUALIFIED", file=sys.stderr)
         return 3
+    except BaseException:
+        print("GATE0_SERVICE_INCOMPLETE", file=sys.stderr)
+        return 5
 
 
 def run_installed_attester() -> int:
@@ -767,7 +819,7 @@ def run_installed_capture_receiver() -> int:
         receive_capture_install(
             context=context,
             channel=channel,
-            selections=installation.captures,
+            selection=installation.capture,
             absolute_end=context.expires_at,
         )
         return 0
@@ -801,7 +853,7 @@ def run_installed_capture_sender() -> int:
 
 
 def run_installed_supervisor() -> int:
-    """One fixed root-owned launch; no caller-selected command or resource."""
+    """Export root mechanics once after outer close; no worker-exit claim."""
     supervisor = None
     result = 5
     incomplete_error: type[Exception] = ServiceIncomplete
@@ -823,12 +875,26 @@ def run_installed_supervisor() -> int:
         result = 5
     except Exception:
         print("GATE0_LAUNCH_REFUSED", file=sys.stderr)
-        result = 3
+        result = 3 if supervisor is None else 5
+    except BaseException:
+        print("GATE0_LAUNCH_INCOMPLETE", file=sys.stderr)
+        result = 5
     finally:
         if supervisor is not None:
             try:
                 supervisor.close()
-            except Exception:
+            except BaseException:
                 print("GATE0_LAUNCH_INCOMPLETE", file=sys.stderr)
                 result = 5
+    if supervisor is not None:
+        # The owner derives complete/incomplete diagnostics from actual run and
+        # close state. Export never receives a caller-provided success verdict.
+        # A private incomplete export is useful evidence but cannot qualify E.
+        try:
+            supervisor.export_cleanup()
+            if supervisor.mechanics_outcome != "complete":
+                result = 5
+        except BaseException:
+            print("GATE0_LAUNCH_INCOMPLETE", file=sys.stderr)
+            result = 5
     return result

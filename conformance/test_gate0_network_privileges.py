@@ -521,7 +521,13 @@ def _native_role_image():
     _run(["/usr/sbin/ip", "address", "add", "10.251.0.2/32", "dev", "lo"])
     _run(["/usr/sbin/ip", "link", "add", "g0proof", "type", "wireguard"])
     Path("/run/sshd").mkdir(mode=0o755, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="g0-native-") as directory_name:
+    # StrictModes traverses every principals-file ancestor. /tmp is deliberately
+    # world-writable and is not a valid fixture parent, even with a private leaf.
+    for ancestor in (Path("/"), Path("/run")):
+        status = ancestor.stat()
+        assert stat.S_ISDIR(status.st_mode) and status.st_uid == 0
+        assert stat.S_IMODE(status.st_mode) & 0o022 == 0
+    with tempfile.TemporaryDirectory(prefix="g0-native-", dir="/run") as directory_name:
         directory = Path(directory_name)
         directory.chmod(0o755)
         host, client, ca, wrong_client = (
@@ -631,6 +637,7 @@ def _native_role_image():
             )
             config = directory / "sshd_config"
             config.write_text(f"""HostKey {directory}/host
+StrictModes yes
 UsePAM no
 PasswordAuthentication no
 KbdInteractiveAuthentication no

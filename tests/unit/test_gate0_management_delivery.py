@@ -82,6 +82,7 @@ def captured(monkeypatch):
     document = {
         "schema": "Gate0IssuerWindow.v1",
         "window_id": "synthetic-capture-window",
+        "case_kind": "consume_replay",
         "not_before": (now - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
         "expires_at": (now + timedelta(seconds=120)).isoformat().replace("+00:00", "Z"),
         "purpose": "rehearsal_issuer_operation",
@@ -165,69 +166,42 @@ def captured(monkeypatch):
 
 
 @pytest.fixture
-def install_case(captured, monkeypatch):
+def install_case(captured):
     from vendor_cp.deployment.gate0_management_delivery import install_document
 
-    reader, binding, first, _ = captured
-    second_binding = replace(
-        binding,
-        expectation=replace(
-            binding.expectation,
-            operation=replace(binding.expectation.operation, plan_id=str(UUID(int=4))),
-            approval_request_id=UUID(int=5),
-        ),
-    )
-    monkeypatch.setattr(
-        OwnerWindowReader,
-        "read",
-        lambda self, phase, plan_id, authorization_document=None: second_binding,
-    )
-    second = export_approved_start(reader, (UUID(int=4),))[0]
-    selections = tuple(
-        CaptureSelection(
-            c.window_digest,
-            c.plan_id,
-            c.plan_digest,
-            c.target_id,
-            c.approval_request_id,
-        )
-        for c in (first.coordinates, second.coordinates)
+    _, _, capture, _ = captured
+    c = capture.coordinates
+    selection = CaptureSelection(
+        c.window_digest, c.plan_id, c.plan_digest, c.target_id, c.approval_request_id
     )
     packet = "sha256:" + "a" * 64
-    return (
-        packet,
-        (first, second),
-        selections,
-        install_document(packet, (first, second), selections),
-    )
+    return packet, capture, selection, install_document(packet, capture, selection)
 
 
-def test_actual_canonical_capture_pair_and_mutation_refusals(install_case):
+def test_actual_canonical_single_capture_and_mutation_refusals(install_case):
     from copy import deepcopy
 
     from vendor_cp.deployment.gate0_management_delivery import validate_install
 
-    packet, captures, selections, document = install_case
-    assert validate_install(document, packet, selections) == tuple(
-        c.coordinates for c in captures
-    )
+    packet, capture, selection, document = install_case
+    assert validate_install(document, packet, selection) == capture.coordinates
     mutations = []
     mutations.append(document | {"authenticated": True})
     bad = deepcopy(document)
-    bad["captures"][1]["slot"] = "a"
+    bad["captures"] = [bad.pop("capture"), bad.get("capture")]
     mutations.append(bad)
     bad = deepcopy(document)
-    bad["captures"][0]["coordinates"]["capture_digest"] = "sha256:" + "f" * 64
+    bad["capture"]["coordinates"]["capture_digest"] = "sha256:" + "f" * 64
     mutations.append(bad)
     bad = deepcopy(document)
-    bad["captures"][0]["coordinates"]["approval_request_id"] = str(UUID(int=99))
+    bad["capture"]["coordinates"]["approval_request_id"] = str(UUID(int=99))
     mutations.append(bad)
     bad = deepcopy(document)
-    bad["captures"][0]["capture_b64"] += "\n"
+    bad["capture"]["capture_b64"] += "\n"
     mutations.append(bad)
     for mutation in mutations:
         with pytest.raises(ValueError):
-            validate_install(mutation, packet, selections)
+            validate_install(mutation, packet, selection)
 
 
 def _synthetic_management_context(monkeypatch, packet, end, parent):
@@ -261,14 +235,12 @@ def test_receiver_half_close_precedes_root_publication_and_exact_readback(
     from vendor_cp.deployment.gate0_launch import CaptureInstallReadback
     from vendor_cp.deployment.gate0_management_delivery import receive_capture_install
 
-    packet, captures, selections, document = install_case
+    packet, capture, selection, document = install_case
     end = datetime.now(UTC) + timedelta(seconds=60)
     client, receiver = socket.socketpair()
     worker, parent = socket.socketpair()
     seen = []
-    expected = CaptureInstallReadback(
-        packet, tuple(c.coordinates for c in captures), end
-    )
+    expected = CaptureInstallReadback(packet, capture.coordinates, end)
     context = _synthetic_management_context(monkeypatch, packet, end, worker)
 
     def commit():
@@ -304,7 +276,7 @@ def test_receiver_half_close_precedes_root_publication_and_exact_readback(
                 deadline=context.deadline,
                 maximum_frames=2,
             ),
-            selections=selections,
+            selection=selection,
             absolute_end=end,
         )
         assert outgoing.receive() == expected.document()
@@ -323,7 +295,7 @@ def test_receiver_missing_eof_never_opens_parent(install_case, monkeypatch):
     from vendor_cp.deployment.gate0_launch import InstalledLaunchContext
     from vendor_cp.deployment.gate0_management_delivery import receive_capture_install
 
-    packet, _, selections, document = install_case
+    packet, _, selection, document = install_case
     end = datetime.now(UTC) + timedelta(seconds=60)
     context = _synthetic_management_context(monkeypatch, packet, end, None)
     opened = []
@@ -344,7 +316,7 @@ def test_receiver_missing_eof_never_opens_parent(install_case, monkeypatch):
                 channel=FramedChannel(
                     receiver.fileno(), receiver.fileno(), deadline=deadline
                 ),
-                selections=selections,
+                selection=selection,
                 absolute_end=end,
             )
         assert opened == []
@@ -451,7 +423,7 @@ def test_sender_uses_parent_export_fixed_ssh_and_returns_authenticated_ack(
         InstalledLaunchContext,
     )
 
-    packet, captures, selections, document = install_case
+    packet, capture, selection, document = install_case
     now = datetime.now(UTC)
     end = now + timedelta(seconds=60)
     binary = b"synthetic-client"
@@ -485,7 +457,7 @@ def test_sender_uses_parent_export_fixed_ssh_and_returns_authenticated_ack(
         pin(binary),
         packet,
         pin(config),
-        selections,
+        selection,
     )
     context = object.__new__(InstalledLaunchContext)
     for key, value in {
@@ -535,9 +507,7 @@ def test_sender_uses_parent_export_fixed_ssh_and_returns_authenticated_ack(
     monkeypatch.setattr(
         InstalledLaunchContext, "open_capture_export", lambda *args: sender.detach()
     )
-    expected = CaptureInstallReadback(
-        packet, tuple(c.coordinates for c in captures), end
-    )
+    expected = CaptureInstallReadback(packet, capture.coordinates, end)
     seen = []
 
     def parent():

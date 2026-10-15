@@ -48,7 +48,7 @@ timeout --signal=TERM --kill-after=5s 60s docker run --rm --name "$name" --cidfi
   --security-opt no-new-privileges:true \
   --pids-limit 96 --memory 512m --cpus 1 \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
-  --tmpfs /run:rw,nosuid,nodev,noexec,size=16m \
+  --tmpfs /run:rw,nosuid,nodev,noexec,size=16m,mode=0755 \
   --mount "type=bind,src=$workspace/conformance/test_gate0_network_privileges.py,dst=/qualification.py,readonly" \
   --env GITHUB_ACTIONS=true --entrypoint /opt/venv/bin/python "$image" \
   -I -B /qualification.py >&3

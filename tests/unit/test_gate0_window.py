@@ -19,6 +19,7 @@ def window_document():
     fingerprint = "SHA256:" + base64.b64encode(bytes(32)).decode().rstrip("=")
     return {
         "schema": "Gate0IssuerWindow.v1",
+        "case_kind": "consume_replay",
         "window_id": "synthetic-window",
         "not_before": (now - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
         "expires_at": (now + timedelta(seconds=120)).isoformat().replace("+00:00", "Z"),
@@ -937,3 +938,62 @@ def test_actual_worker_frames_one_typed_terminal_and_cannot_rearm(
     finally:
         left.close()
         right.close()
+
+
+@pytest.mark.parametrize("case_kind", ["consume_replay", "withdrawal_later_use"])
+def test_closed_case_kind_is_bound_to_canonical_owner_window(
+    window_document, case_kind
+):
+    value = dict(window_document, case_kind=case_kind)
+    parsed = FrozenIssuerWindow.parse(canonical(value))
+    assert parsed.document["case_kind"] == case_kind
+    other = dict(
+        value,
+        case_kind="withdrawal_later_use"
+        if case_kind == "consume_replay"
+        else "consume_replay",
+    )
+    assert FrozenIssuerWindow.parse(canonical(other)).digest != parsed.digest
+
+
+@pytest.mark.parametrize(
+    "case_kind",
+    [
+        None,
+        True,
+        1,
+        [],
+        {},
+        "A",
+        "consume",
+        " consume_replay",
+        "consume_replay ",
+        "WITHDRAWAL_LATER_USE",
+    ],
+)
+def test_case_kind_refuses_unknown_values_and_type_coercion(window_document, case_kind):
+    with pytest.raises(ProviderRefused):
+        FrozenIssuerWindow.parse(canonical(dict(window_document, case_kind=case_kind)))
+
+
+def test_case_kind_is_required_in_closed_window(window_document):
+    value = dict(window_document)
+    del value["case_kind"]
+    with pytest.raises(ProviderRefused):
+        FrozenIssuerWindow.parse(canonical(value))
+
+
+def test_changing_only_case_kind_invalidates_held_window_before_mutation(mutation_case):
+    from vendor_cp.deployment.gate0_composition import CompositionRefused
+
+    driver, plan, expected, events, document = mutation_case
+    plan.snapshot["spec"]["gate0_window_v1"] = dict(
+        document, case_kind="withdrawal_later_use"
+    )
+    with pytest.raises(CompositionRefused):
+        driver._mutate(
+            expected,
+            None,
+            lambda db: pytest.fail("changed case reached owner mutation"),
+        )
+    assert events == ["rollback", "close"]

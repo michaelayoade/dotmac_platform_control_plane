@@ -88,7 +88,7 @@ def synthetic_attester():
         bytes(range(32)),
         CaptureSelection(digest, UUID(int=1), digest, UUID(int=2), UUID(int=3)),
         "issue",
-        "a_issue",
+        "issue",
         1001,
     )
 
@@ -156,10 +156,7 @@ def synthetic_issuer():
     attester = synthetic_attester()
     identity = attester.identity
     digest = identity.packet_digest
-    selections = (
-        attester.capture,
-        replace(attester.capture, plan_id=UUID(int=4), approval_request_id=UUID(int=5)),
-    )
+    selection = attester.capture
     management = ManagementDeliveryInstallation(
         digest,
         identity.not_before,
@@ -175,7 +172,7 @@ def synthetic_issuer():
         digest,
         digest,
         digest,
-        selections,
+        selection,
     )
     database = DatabaseExpectation(
         "synthetic",
@@ -201,7 +198,7 @@ def synthetic_issuer():
         custody,
         database,
         attester.capture.target_id,
-        (UUID(int=1), UUID(int=4)),
+        UUID(int=1),
         attester.custody.key,
         60,
         "synthetic-admin",
@@ -280,10 +277,12 @@ def test_shared_role_mismatch_refuses_before_database_capture_or_custody(
     fingerprint = "SHA256:" + base64.b64encode(bytes(32)).decode("ascii").rstrip("=")
     run_document = {
         "schema": "Gate0RunIdentity.v1",
-        "run_id": "synthetic-bootstrap-binding",
+        "run_id": "2",
+        "run_attempt": "1",
+        "case_kind": "consume_replay",
         "not_before": installation.identity.not_before.isoformat(),
         "expires_at": installation.identity.expires_at.isoformat(),
-        "captures": {"a": selection, "b": dict(selection, plan_id=str(UUID(int=4)))},
+        "capture": selection,
         "roles": terms,
         "controller_ca_fingerprint": fingerprint,
         "management_key_fingerprint": fingerprint,
@@ -318,6 +317,9 @@ def test_shared_role_mismatch_refuses_before_database_capture_or_custody(
     # Only native file/process provenance is synthetic. The actual shared-run
     # parser, actual role-term comparator and both preparation paths execute.
     monkeypatch.setattr(bootstrap, "_installation", lambda *args: None)
+    monkeypatch.setattr(
+        launch.InstalledLaunchContext, "require_capture_selection", lambda *args: None
+    )
     monkeypatch.setattr(
         launch.InstalledLaunchContext, "require_installation", lambda *args: None
     )
@@ -380,13 +382,12 @@ def test_shared_role_terms_accept_both_hosts_with_distinct_local_packets(monkeyp
     run = canonical(
         {
             "schema": "Gate0RunIdentity.v1",
-            "run_id": "synthetic-two-hosts",
+            "run_id": "2",
+            "run_attempt": "1",
+            "case_kind": "consume_replay",
             "not_before": issuer.identity.not_before.isoformat(),
             "expires_at": issuer.identity.expires_at.isoformat(),
-            "captures": {
-                "a": selection,
-                "b": dict(selection, plan_id=str(UUID(int=4))),
-            },
+            "capture": selection,
             "roles": roles,
             "controller_ca_fingerprint": fingerprint,
             "management_key_fingerprint": fingerprint,
@@ -434,3 +435,59 @@ def test_shared_role_terms_accept_both_hosts_with_distinct_local_packets(monkeyp
         ("issuer", "sha256:" + "c" * 64),
         ("attester", "sha256:" + "d" * 64),
     ]
+
+
+def test_issuer_selection_mismatch_refuses_before_database_or_custody(monkeypatch):
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    import vendor_cp.deployment.gate0_bootstrap as bootstrap
+    import vendor_cp.deployment.gate0_launch as launch
+    from vendor_cp.deployment.gate0_management_delivery import selection_document
+
+    installation = synthetic_issuer()
+    context = object.__new__(launch.InstalledLaunchContext)
+    for key, value in {
+        "packet_digest": installation.identity.packet_digest,
+        "expires_at": installation.identity.expires_at,
+    }.items():
+        object.__setattr__(context, key, value)
+    selection = selection_document(installation.management_delivery.capture)
+    wrong = dict(selection, plan_id=str(UUID(int=99)))
+    end = installation.identity.expires_at.isoformat()
+    monkeypatch.setattr(bootstrap, "_installation", lambda *args: None)
+    monkeypatch.setattr(
+        launch.InstalledLaunchContext, "require_open", lambda self: None
+    )
+    monkeypatch.setattr(
+        launch,
+        "_load_local_packet",
+        lambda: {
+            "shared_run_digest": context.packet_digest,
+            "capture": wrong,
+            "run_end": end,
+        },
+    )
+    monkeypatch.setattr(
+        launch.RunIdentity,
+        "from_installed",
+        lambda: SimpleNamespace(
+            digest=context.packet_digest, canonical_bytes=b"synthetic-common"
+        ),
+    )
+    monkeypatch.setattr(
+        launch, "_run_document", lambda raw: {"capture": wrong, "expires_at": end}
+    )
+    touched = []
+    monkeypatch.setattr(
+        bootstrap,
+        "qualify_authority_database",
+        lambda *args: touched.append("database"),
+    )
+    monkeypatch.setattr(bootstrap, "_custody", lambda *args: touched.append("custody"))
+    with (
+        pytest.raises(ProviderRefused),
+        bootstrap.prepare_installed_issuer(context, installation),
+    ):
+        raise AssertionError("foreign selection yielded")
+    assert touched == []

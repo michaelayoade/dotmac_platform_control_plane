@@ -255,6 +255,7 @@ def _worker(inputs):
         return {
             "schema": "Gate0IssuerWindow.v1",
             "window_id": f"fixture-window-{index}",
+            "case_kind": "withdrawal_later_use" if index == "b" else "consume_replay",
             "not_before": (datetime.now(UTC) - timedelta(seconds=1))
             .isoformat()
             .replace("+00:00", "Z"),
@@ -577,6 +578,10 @@ def _worker(inputs):
                 == "fixture-window-snapshot-canary"
             )
         first, first_request = seed("a")
+        assert (
+            readers[first].read("issue", first).window.document["case_kind"]
+            == "consume_replay"
+        )
         # The actual worker performs the one process-wide security install.
         # Custody/actors here remain explicitly synthetic, while PostgreSQL,
         # held approval, signature verification and framed owner codec are real.
@@ -733,6 +738,10 @@ def _worker(inputs):
             is control.RehearsalIssuerAuthorizationStanding.CONSUMED
         )
         second, second_request = seed("b")
+        assert (
+            readers[second].read("issue", second).window.document["case_kind"]
+            == "withdrawal_later_use"
+        )
         second_issued = driver.issue(RehearsalIssuerCommand(uuid4().hex, second))
         documents[second] = second_issued.authorization_document
         ns3_approved_at_start = readers[second].read("issue", second)

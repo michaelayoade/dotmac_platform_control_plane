@@ -27,9 +27,9 @@ never an installation JSON self-hash.
 
 `prepare_installed_issuer(context, installation)` qualifies the existing authority
 runtime, bootstraps exactly the finite issuer custody profile, creates the actual
-owner window reader and exports the two configured plans through that reader's
+owner window reader and exports the singular configured plan through that reader's
 `read('issue', plan)` holds. `PreparedIssuer` retains the startup, exact custody,
-reader, two public captures and effective deadline. It never replaces the
+reader, one public capture and effective deadline. It never replaces the
 Foundation execution-plan digest with a capture/window hash.
 
 `prepare_installed_attester(context, installation)` obtains actual capture
@@ -83,10 +83,10 @@ retains its verified descriptor but does not read or copy key bytes. SSH opens t
 fixed immutable path: [OpenSSH 9.6 client source](https://github.com/openssh/openssh-portable/blob/V_9_6_P1/ssh.c)
 closes inherited descriptors at startup, so inheriting a key FD is insufficient.
 
-`receive_capture_install(context, channel, selections, absolute_end)` rejects a
+`receive_capture_install(context, channel, selection, absolute_end)` rejects a
 command or PTY, requires one bounded request plus EOF before opening the fixed
 root management channel, and stages only public data. Root verifies native peer
-credentials and packet scope, atomically commits both captures with no-replace
+credentials and packet scope, atomically commits the single capture with no-replace
 semantics, reopens and verifies them, and returns the exact common-end readback.
 The receiver has no active-slot rename/chown capability. Both management and sender
 boundaries require the finite supervisor's original ten-second phase clamp; each
@@ -95,7 +95,7 @@ most three hundred seconds.
 
 ## Qualification still required
 
-Actual source/image/config/SSH pins; target, policies and plans; existing management
+Actual source/image/config/SSH pins; target, policies and plan; existing management
 identity holder/read-only mount; host key and recipient UID; fixed WG namespace,
 peer, route and default-deny firewall facts; real DB coordinates/heads/least
 privilege/native bounds; finite supervisor/cgroup/watchdog privileges; per-slot

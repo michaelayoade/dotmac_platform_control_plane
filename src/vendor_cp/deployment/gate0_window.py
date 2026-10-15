@@ -60,6 +60,7 @@ class WindowController(TypedDict):
 class WindowDocument(TypedDict):
     schema: str
     window_id: str
+    case_kind: Literal["consume_replay", "withdrawal_later_use"]
     not_before: str
     expires_at: str
     purpose: str
@@ -112,12 +113,15 @@ class FrozenIssuerWindow:
                 raise ProviderRefused()
             _fields(
                 value,
-                "schema window_id not_before expires_at purpose allowed_phases github "
+                "schema window_id case_kind not_before expires_at purpose "
+                "allowed_phases github "
                 "target approval_policy plan_inputs controller "
                 "prerequisite_evidence_refs authorization_binding",
             )
             if (
                 value["schema"] != "Gate0IssuerWindow.v1"
+                or type(value["case_kind"]) is not str
+                or value["case_kind"] not in ("consume_replay", "withdrawal_later_use")
                 or value["purpose"] != "rehearsal_issuer_operation"
                 or value["allowed_phases"] != ["issue", "consume"]
                 or value["authorization_binding"] != "control_parsed_full_envelope_v1"

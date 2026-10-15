@@ -35,6 +35,7 @@ def captured(monkeypatch):
     fingerprint = "SHA256:" + base64.b64encode(bytes(32)).decode().rstrip("=")
     document = {
         "schema": "Gate0IssuerWindow.v1",
+        "case_kind": "consume_replay",
         "window_id": "synthetic-capture-window",
         "not_before": (now - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
         "expires_at": (now + timedelta(seconds=120)).isoformat().replace("+00:00", "Z"),

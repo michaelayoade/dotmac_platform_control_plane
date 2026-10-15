@@ -111,41 +111,23 @@ def _coordinates(value: object) -> CaptureCoordinates:
 
 def install_document(
     packet_digest: str,
-    captures: tuple[PublicCapture, PublicCapture],
-    selections: tuple[CaptureSelection, CaptureSelection],
+    capture: PublicCapture,
+    selection: CaptureSelection,
 ) -> dict[str, object]:
     _hash(packet_digest)
-    if (
-        type(captures) is not tuple
-        or len(captures) != 2
-        or type(selections) is not tuple
-        or len(selections) != 2
-        or selections[0].plan_id == selections[1].plan_id
-    ):
+    if type(capture) is not PublicCapture or type(selection) is not CaptureSelection:
         raise ProviderRefused()
-    entries: list[dict[str, object]] = []
-    for slot, capture, selection in zip(("a", "b"), captures, selections, strict=True):
-        if (
-            type(capture) is not PublicCapture
-            or type(selection) is not CaptureSelection
-        ):
-            raise ProviderRefused()
-        selection.require_coordinates(capture.coordinates)
-        decode_capture(capture.encoded, expected=capture.coordinates)
-        entries.append(
-            {
-                "slot": slot,
-                "coordinates": {
-                    key: str(value)
-                    for key, value in asdict(capture.coordinates).items()
-                },
-                "capture_b64": base64.b64encode(capture.encoded).decode("ascii"),
-            }
-        )
+    selection.require_coordinates(capture.coordinates)
+    decode_capture(capture.encoded, expected=capture.coordinates)
     result: dict[str, object] = {
         "schema": "Gate0CaptureInstall.v1",
         "launch_packet_digest": packet_digest,
-        "captures": entries,
+        "capture": {
+            "coordinates": {
+                key: str(value) for key, value in asdict(capture.coordinates).items()
+            },
+            "capture_b64": base64.b64encode(capture.encoded).decode("ascii"),
+        },
     }
     if len(canonical(result)) > MAX_INSTALL_BYTES:
         raise ProviderRefused()
@@ -155,40 +137,32 @@ def install_document(
 def validate_install(
     document: dict[str, object],
     packet_digest: str,
-    selections: tuple[CaptureSelection, CaptureSelection],
-) -> tuple[CaptureCoordinates, CaptureCoordinates]:
+    selection: CaptureSelection,
+) -> CaptureCoordinates:
     if (
-        set(document) != {"schema", "launch_packet_digest", "captures"}
+        set(document) != {"schema", "launch_packet_digest", "capture"}
         or document["schema"] != "Gate0CaptureInstall.v1"
         or document["launch_packet_digest"] != packet_digest
         or len(canonical(document)) > MAX_INSTALL_BYTES
+        or type(selection) is not CaptureSelection
     ):
         raise ProviderRefused()
-    entries = document["captures"]
-    if not isinstance(entries, list) or len(entries) != 2 or len(selections) != 2:
+    record = json_record(document["capture"])
+    if set(record) != {"coordinates", "capture_b64"}:
         raise ProviderRefused()
-    coordinates: list[CaptureCoordinates] = []
-    for slot, entry, selection in zip(("a", "b"), entries, selections, strict=True):
-        record = json_record(entry)
-        if (
-            set(record) != {"slot", "coordinates", "capture_b64"}
-            or record["slot"] != slot
-        ):
-            raise ProviderRefused()
-        coordinate = _coordinates(record["coordinates"])
-        selection.require_coordinates(coordinate)
-        text = json_string(record["capture_b64"])
-        if not 0 < len(text) <= 87384:
-            raise ProviderRefused()
-        try:
-            encoded = base64.b64decode(text, validate=True)
-        except (ValueError, binascii.Error):
-            raise ProviderRefused() from None
-        if base64.b64encode(encoded).decode("ascii") != text:
-            raise ProviderRefused()
-        decode_capture(encoded, expected=coordinate)
-        coordinates.append(coordinate)
-    return coordinates[0], coordinates[1]
+    coordinate = _coordinates(record["coordinates"])
+    selection.require_coordinates(coordinate)
+    text = json_string(record["capture_b64"])
+    if not 0 < len(text) <= 87384:
+        raise ProviderRefused()
+    try:
+        encoded = base64.b64decode(text, validate=True)
+    except (ValueError, binascii.Error):
+        raise ProviderRefused() from None
+    if base64.b64encode(encoded).decode("ascii") != text:
+        raise ProviderRefused()
+    decode_capture(encoded, expected=coordinate)
+    return coordinate
 
 
 def verify_readback(
@@ -202,7 +176,7 @@ def receive_capture_install(
     *,
     context: InstalledLaunchContext,
     channel: FramedChannel,
-    selections: tuple[CaptureSelection, CaptureSelection],
+    selection: CaptureSelection,
     absolute_end: datetime,
 ) -> None:
     """Stage one SSH-authenticated request; parent commits and owns readback.
@@ -227,7 +201,7 @@ def receive_capture_install(
     document = channel.receive()
     if document is None:
         raise ProviderRefused()
-    coordinates = validate_install(document, context.packet_digest, selections)
+    coordinates = validate_install(document, context.packet_digest, selection)
     if channel.receive(allow_eof=True) is not None:
         raise ProviderRefused()
     context.require_open()
@@ -269,7 +243,7 @@ class ManagementDeliveryInstallation:
     ssh_client_digest: str
     ssh_server_digest: str
     ssh_config_digest: str
-    captures: tuple[CaptureSelection, CaptureSelection]
+    capture: CaptureSelection
 
     def validate(self) -> None:
         import ipaddress
@@ -322,14 +296,10 @@ class ManagementDeliveryInstallation:
                     self.host_key_fingerprint,
                 )
             )
-            or type(self.captures) is not tuple
-            or len(self.captures) != 2
-            or any(type(value) is not CaptureSelection for value in self.captures)
-            or self.captures[0].plan_id == self.captures[1].plan_id
+            or type(self.capture) is not CaptureSelection
         ):
             raise ProviderRefused()
-        for selection in self.captures:
-            selection.__post_init__()
+        self.capture.__post_init__()
 
     def document(self) -> dict[str, object]:
         self.validate()
@@ -338,11 +308,11 @@ class ManagementDeliveryInstallation:
             **{
                 key: value
                 for key, value in asdict(self).items()
-                if key not in ("captures", "not_before", "expires_at")
+                if key not in ("capture", "not_before", "expires_at")
             },
             "not_before": self.not_before.isoformat().replace("+00:00", "Z"),
             "expires_at": self.expires_at.isoformat().replace("+00:00", "Z"),
-            "captures": [selection_document(item) for item in self.captures],
+            "capture": selection_document(self.capture),
         }
 
 
@@ -502,7 +472,7 @@ def push_capture_install(
         if document is None:
             raise ProviderRefused()
         coordinates = validate_install(
-            document, installation.launch_packet_digest, installation.captures
+            document, installation.launch_packet_digest, installation.capture
         )
         if export.receive(allow_eof=True) is not None:
             raise ProviderRefused()
@@ -516,7 +486,7 @@ def _ssh_exchange(
     context: InstalledLaunchContext,
     installation: ManagementDeliveryInstallation,
     document: dict[str, object],
-    coordinates: tuple[CaptureCoordinates, CaptureCoordinates],
+    coordinates: CaptureCoordinates,
     deadline: float,
 ) -> CaptureInstallReadback:
     import os

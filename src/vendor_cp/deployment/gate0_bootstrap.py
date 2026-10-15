@@ -171,7 +171,7 @@ class ActualIssuerInstallation:
     custody: CustodyInstallation
     database: DatabaseExpectation
     rehearsal_target_id: UUID
-    plans: tuple[UUID, UUID]
+    plan_id: UUID
     attester_key: PublicKeyPin
     authorization_ttl_seconds: int
     actor_ref: str
@@ -184,10 +184,7 @@ class ActualIssuerInstallation:
             or type(self.database) is not DatabaseExpectation
             or type(self.attester_key) is not PublicKeyPin
             or type(self.rehearsal_target_id) is not UUID
-            or type(self.plans) is not tuple
-            or len(self.plans) != 2
-            or any(type(plan) is not UUID for plan in self.plans)
-            or len(set(self.plans)) != 2
+            or type(self.plan_id) is not UUID
             or type(self.authorization_ttl_seconds) is not int
             or not 0 < self.authorization_ttl_seconds <= 300
             or type(self.actor_ref) is not str
@@ -200,14 +197,8 @@ class ActualIssuerInstallation:
         if (
             self.management_delivery.launch_packet_digest != self.identity.packet_digest
             or self.management_delivery.expires_at != self.identity.expires_at
-            or tuple(
-                selection.plan_id for selection in self.management_delivery.captures
-            )
-            != self.plans
-            or any(
-                selection.target_id != self.rehearsal_target_id
-                for selection in self.management_delivery.captures
-            )
+            or self.management_delivery.capture.plan_id != self.plan_id
+            or self.management_delivery.capture.target_id != self.rehearsal_target_id
         ):
             raise ProviderRefused()
         self.identity.validate()
@@ -228,7 +219,7 @@ class ActualIssuerInstallation:
             "custody": self.custody.document(),
             "database": asdict(self.database),
             "rehearsal_target_id": str(self.rehearsal_target_id),
-            "plans": [str(plan) for plan in self.plans],
+            "plan_id": str(self.plan_id),
             "attester_key": self.attester_key.document(),
             "authorization_ttl_seconds": self.authorization_ttl_seconds,
             "actor_ref": self.actor_ref,
@@ -258,8 +249,8 @@ class ActualAttesterInstallation:
             or type(self.phase) is not str
             or self.phase not in ("issue", "consume")
             or type(self.slot_id) is not str
-            or self.slot_id not in ("a_issue", "a_consume", "b_issue", "b_consume")
-            or self.slot_id.rsplit("_", 1)[1] != self.phase
+            or self.slot_id not in ("issue", "consume")
+            or self.slot_id != self.phase
             or type(self.worker_uid) is not int
             or self.worker_uid <= 0
         ):
@@ -363,7 +354,7 @@ class PreparedIssuer:
     startup: IssuerStartup
     custody: RoleCustody
     reader: OwnerWindowReader
-    captures: tuple[PublicCapture, PublicCapture]
+    capture: PublicCapture
     deadline: float
 
 
@@ -385,6 +376,9 @@ def prepare_installed_issuer(
         raise ProviderRefused()
     installation.validate()
     _installation(context, "issuer", installation.identity, installation.document())
+    context.require_capture_selection(
+        selection_document(installation.management_delivery.capture)
+    )
     context.require_run_role_terms(
         role="issuer",
         source_revision=installation.identity.source_revision,
@@ -429,13 +423,11 @@ def prepare_installed_issuer(
             database_qualified=True,
             custody=custody,
         )
-        captures = export_approved_start(reader, installation.plans)
-        if len(captures) != 2:
+        captures = export_approved_start(reader, (installation.plan_id,))
+        if len(captures) != 1:
             raise ProviderRefused()
         context.require_open()
-        yield PreparedIssuer(
-            startup, custody, reader, (captures[0], captures[1]), custody.deadline
-        )
+        yield PreparedIssuer(startup, custody, reader, captures[0], custody.deadline)
     finally:
         custody.close()
 
@@ -641,12 +633,7 @@ def _management(value: object) -> ManagementDeliveryInstallation:
     record = _record(
         value, ("schema", *ManagementDeliveryInstallation.__dataclass_fields__)
     )
-    captures = record["captures"]
-    if (
-        record["schema"] != "Gate0ManagementCaptureDelivery.v1"
-        or not isinstance(captures, list)
-        or len(captures) != 2
-    ):
+    if record["schema"] != "Gate0ManagementCaptureDelivery.v1":
         raise ProviderRefused()
     result = ManagementDeliveryInstallation(
         _string(record["launch_packet_digest"]),
@@ -663,7 +650,7 @@ def _management(value: object) -> ManagementDeliveryInstallation:
         _string(record["ssh_client_digest"]),
         _string(record["ssh_server_digest"]),
         _string(record["ssh_config_digest"]),
-        (parse_selection(captures[0]), parse_selection(captures[1])),
+        parse_selection(record["capture"]),
     )
     result.validate()
     return result
@@ -714,19 +701,14 @@ def load_issuer_installation(
         _installed_document(context),
         ("schema", *ActualIssuerInstallation.__dataclass_fields__),
     )
-    plans = document["plans"]
-    if (
-        document["schema"] != "Gate0IssuerInstallation.v1"
-        or not isinstance(plans, list)
-        or len(plans) != 2
-    ):
+    if document["schema"] != "Gate0IssuerInstallation.v1":
         raise ProviderRefused()
     result = ActualIssuerInstallation(
         _identity(document["identity"]),
         _custody_installation(document["custody"], "issuer"),
         _database(document["database"]),
         UUID(_string(document["rehearsal_target_id"])),
-        (UUID(_string(plans[0])), UUID(_string(plans[1]))),
+        UUID(_string(document["plan_id"])),
         _pin(document["attester_key"]),
         _integer(document["authorization_ttl_seconds"]),
         _string(document["actor_ref"]),

@@ -110,7 +110,7 @@ class IssuerOutcome:
             value["schema"] != "Gate0IssuerOutcome.v1"
             or value["readiness_accepted"] is not False
             or type(value["ordinal"]) is not int
-            or not 1 <= cast(int, value["ordinal"]) <= 8
+            or not 1 <= value["ordinal"] <= 8
             or value["operation"] not in ("issue", "consume", "standing")
         ):
             raise ServiceRefused()
@@ -128,7 +128,7 @@ class IssuerOutcome:
         try:
             if type(value["kind"]) is not str:
                 raise ServiceRefused()
-            kind = OutcomeKind(cast(str, value["kind"]))
+            kind = OutcomeKind(value["kind"])
         except (TypeError, ValueError):
             raise ServiceRefused() from None
         namespace, code = value["owner_namespace"], value["owner_code"]
@@ -213,15 +213,15 @@ class IssuerOutcome:
         elif kind is OutcomeKind.INCOMPLETE and result:
             raise ServiceRefused()
         return cls(
-            cast(int, value["ordinal"]),
-            cast(Literal["issue", "consume", "standing"], value["operation"]),
+            value["ordinal"],
+            value["operation"],
             cast(str, value["request_digest"]),
             cast(str | None, value["window_digest"]),
             cast(str | None, value["proof_digest"]),
             cast(str | None, value["bundle_digest"]),
             kind,
-            cast(str | None, namespace),
-            cast(str | None, code),
+            namespace,
+            code,
             canonical(result),
         )
 

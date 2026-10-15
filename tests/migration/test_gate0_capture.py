@@ -87,6 +87,7 @@ def test_real_owner_capture_frozen_plan_and_withdrawn_approval(scratch_db, url_f
             )
             window = {
                 "schema": "Gate0IssuerWindow.v1",
+                "case_kind": "consume_replay",
                 "window_id": "synthetic-capture-window",
                 "not_before": (now - timedelta(seconds=1))
                 .isoformat()

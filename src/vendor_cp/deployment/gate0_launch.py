@@ -26,7 +26,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, NotRequired, TypedDict
+from typing import IO, TYPE_CHECKING, Literal, NotRequired, TypedDict
+
+if TYPE_CHECKING:
+    from vendor_cp.deployment.gate0_services import IssuerProcessResult
 from uuid import UUID
 
 from vendor_cp.deployment.gate0_capture import CaptureCoordinates, decode_capture
@@ -38,7 +41,9 @@ from vendor_cp.deployment.gate0_role_custody import (
 
 ROOT = Path("/run/dotmac-gate0")
 CGROUP_ROOT = Path("/sys/fs/cgroup/dotmac-gate0")
-SLOTS = ("a_issue", "a_consume", "b_issue", "b_consume")
+CaseKind = Literal["consume_replay", "withdrawal_later_use"]
+AttesterSlot = Literal["issue", "consume"]
+SLOTS = ("issue", "consume")
 Role = Literal["issuer", "attester", "management", "capture_sender"]
 _SEAL = object()
 
@@ -286,6 +291,17 @@ class LaunchState(StrEnum):
     TERMINAL = "TERMINAL"
 
 
+class CleanupReason(StrEnum):
+    COMPLETED = "completed_mechanics"
+    EXECUTION_INCOMPLETE = "execution_incomplete"
+    BOUNDARY_FAILED = "boundary_cleanup_failed"
+    PROCESS_REAP_FAILED = "process_reap_failed"
+    DESCRIPTOR_CLOSE_FAILED = "descriptor_close_failed"
+    EPHEMERAL_FAILED = "ephemeral_cleanup_failed"
+    CLEANUP_MISSING = "cleanup_missing"
+    EXPORT_FAILED = "export_failed"
+
+
 class LaunchIncomplete(RuntimeError):
     """Execution started; refusal does not prove an authority mutation absent."""
 
@@ -398,17 +414,14 @@ class LaunchClocks:
 @dataclass(frozen=True, slots=True)
 class CaptureInstallReadback:
     launch_packet_digest: str
-    captures: tuple[CaptureCoordinates, CaptureCoordinates]
+    capture: CaptureCoordinates
     effective_end: datetime
 
     def document(self) -> dict[str, object]:
         return {
             "schema": "Gate0CaptureInstalled.v1",
             "launch_packet_digest": self.launch_packet_digest,
-            "captures": [
-                {"slot": name, "coordinates": _coordinate_document(coordinates)}
-                for name, coordinates in zip(("a", "b"), self.captures, strict=True)
-            ],
+            "capture": _coordinate_document(self.capture),
             "effective_end": self.effective_end.isoformat().replace("+00:00", "Z"),
         }
 
@@ -517,9 +530,12 @@ def _selection(value: object) -> CaptureSelection:
     return result
 
 
-def _selections(value: object) -> dict[str, CaptureSelection]:
-    item = _record(value, {"a", "b"})
-    return {"a": _selection(item["a"]), "b": _selection(item["b"])}
+def _case_kind(value: object) -> CaseKind:
+    if value == "consume_replay":
+        return "consume_replay"
+    if value == "withdrawal_later_use":
+        return "withdrawal_later_use"
+    raise ProviderRefused()
 
 
 class RoleTerms(TypedDict):
@@ -562,9 +578,11 @@ def _role_terms(value: object) -> RoleTerms:
 class RunDocument(TypedDict):
     schema: str
     run_id: str
+    run_attempt: str
+    case_kind: CaseKind
     not_before: str
     expires_at: str
-    captures: dict[str, CaptureSelection]
+    capture: CaptureSelection
     roles: dict[str, RoleTerms]
     controller_ca_fingerprint: str
     management_key_fingerprint: str
@@ -576,9 +594,11 @@ def _run_document(raw: bytes) -> RunDocument:
         {
             "schema",
             "run_id",
+            "run_attempt",
+            "case_kind",
             "not_before",
             "expires_at",
-            "captures",
+            "capture",
             "roles",
             "controller_ca_fingerprint",
             "management_key_fingerprint",
@@ -588,9 +608,11 @@ def _run_document(raw: bytes) -> RunDocument:
     result: RunDocument = {
         "schema": _text(item["schema"]),
         "run_id": _text(item["run_id"]),
+        "run_attempt": _text(item["run_attempt"]),
+        "case_kind": _case_kind(item["case_kind"]),
         "not_before": _text(item["not_before"]),
         "expires_at": _text(item["expires_at"]),
-        "captures": _selections(item["captures"]),
+        "capture": _selection(item["capture"]),
         "roles": {
             "issuer": _role_terms(roles["issuer"]),
             "attester": _role_terms(roles["attester"]),
@@ -601,7 +623,8 @@ def _run_document(raw: bytes) -> RunDocument:
     if (
         canonical(result) != raw
         or result["schema"] != "Gate0RunIdentity.v1"
-        or len(result["run_id"]) > 128
+        or re.fullmatch(r"[1-9][0-9]{0,127}", result["run_id"]) is None
+        or re.fullmatch(r"[1-9][0-9]{0,127}", result["run_attempt"]) is None
     ):
         raise ProviderRefused()
     start, end = _instant(result["not_before"]), _instant(result["expires_at"])
@@ -799,7 +822,7 @@ class LocalPacket(TypedDict):
     run_end: str
     network: Network
     binary_digests: dict[str, str]
-    captures: dict[str, CaptureSelection]
+    capture: CaptureSelection
     installation_digests: dict[str, str]
     ssh_endpoints: dict[str, SshEndpoint]
     sshd_digest: str
@@ -829,7 +852,7 @@ def _local_packet(raw: bytes) -> LocalPacket:
         "run_end",
         "network",
         "binary_digests",
-        "captures",
+        "capture",
         "installation_digests",
         "ssh_endpoints",
         "sshd_digest",
@@ -868,7 +891,7 @@ def _local_packet(raw: bytes) -> LocalPacket:
         "binary_digests": _hashes(
             item["binary_digests"], {"/usr/bin/wg", "/usr/sbin/ip", "/usr/sbin/nft"}
         ),
-        "captures": _selections(item["captures"]),
+        "capture": _selection(item["capture"]),
         "installation_digests": _hashes(item["installation_digests"], install_names),
         "ssh_endpoints": {
             key: _ssh_endpoint(value) for key, value in endpoints.items()
@@ -1077,38 +1100,31 @@ def _socket_endpoint(value: object) -> tuple[str, int]:
 
 @dataclass(frozen=True, slots=True)
 class CaptureEntry:
-    slot: Literal["a", "b"]
     coordinates: CaptureCoordinates
     encoded: bytes
 
 
-def _capture_entries(value: object) -> tuple[CaptureEntry, CaptureEntry]:
-    if not isinstance(value, list) or len(value) != 2:
+def _capture_entry(value: object) -> CaptureEntry:
+    item = _record(value, {"coordinates", "capture_b64"})
+    coordinates = _capture_coordinates(item["coordinates"])
+    text = _text(item["capture_b64"])
+    encoded = base64.b64decode(text, validate=True)
+    if base64.b64encode(encoded).decode("ascii") != text:
         raise ProviderRefused()
-    result: list[CaptureEntry] = []
-    for index, slot in enumerate(("a", "b")):
-        item = _record(value[index], {"slot", "coordinates", "capture_b64"})
-        if item["slot"] != slot:
-            raise ProviderRefused()
-        coordinates = _capture_coordinates(item["coordinates"])
-        encoded = base64.b64decode(_text(item["capture_b64"]), validate=True)
-        decode_capture(encoded, expected=coordinates)
-        result.append(CaptureEntry("a" if index == 0 else "b", coordinates, encoded))
-    return result[0], result[1]
+    decode_capture(encoded, expected=coordinates)
+    return CaptureEntry(coordinates, encoded)
 
 
-def _capture_request(
-    raw: bytes, packet_digest: str
-) -> tuple[CaptureEntry, CaptureEntry]:
+def _capture_request(raw: bytes, packet_digest: str) -> CaptureEntry:
     item = _record(
-        strict_object(raw, 196608), {"schema", "launch_packet_digest", "captures"}
+        strict_object(raw, 196608), {"schema", "launch_packet_digest", "capture"}
     )
     if (
         item["schema"] != "Gate0CaptureInstall.v1"
         or _sha(item["launch_packet_digest"]) != packet_digest
     ):
         raise ProviderRefused()
-    return _capture_entries(item["captures"])
+    return _capture_entry(item["capture"])
 
 
 def _selection_matches(
@@ -1124,22 +1140,13 @@ def _selection_matches(
 def _capture_readback(raw: bytes) -> CaptureInstallReadback:
     item = _record(
         strict_object(raw),
-        {"schema", "launch_packet_digest", "captures", "effective_end"},
+        {"schema", "launch_packet_digest", "capture", "effective_end"},
     )
     if item["schema"] != "Gate0CaptureInstalled.v1":
         raise ProviderRefused()
-    entries = item["captures"]
-    if not isinstance(entries, list) or len(entries) != 2:
-        raise ProviderRefused()
-    coordinates: list[CaptureCoordinates] = []
-    for index, name in enumerate(("a", "b")):
-        entry = _record(entries[index], {"slot", "coordinates"})
-        if entry["slot"] != name:
-            raise ProviderRefused()
-        coordinates.append(_capture_coordinates(entry["coordinates"]))
     return CaptureInstallReadback(
         _sha(item["launch_packet_digest"]),
-        (coordinates[0], coordinates[1]),
+        _capture_coordinates(item["capture"]),
         _instant(item["effective_end"]),
     )
 
@@ -1186,6 +1193,23 @@ class RunIdentity:
         return _digest(self.canonical_bytes)
 
 
+@dataclass(frozen=True, slots=True)
+class BoundaryCleanupEvidence:
+    boundary: str
+    cgroup_device: int
+    cgroup_inode: int
+    kill_issued: bool
+    populated: int
+    guardian_pid: int
+    guardian_start: str
+    guardian_wait_status: int
+
+    def document(self) -> dict[str, object]:
+        from dataclasses import asdict
+
+        return asdict(self)
+
+
 class SlotExecutionBoundary:
     """A root-owned cgroup v2 leaf; worker has no migration/delegation rights.
 
@@ -1223,6 +1247,10 @@ class SlotExecutionBoundary:
         self._fd = _protected(self.path, directory=True)
         if not (self.path / "cgroup.kill").is_file():
             raise ProviderRefused()
+        metadata = os.fstat(self._fd)
+        self._identity = (metadata.st_dev, metadata.st_ino)
+        self._owner_pid = os.getpid()
+        self._evidence: BoundaryCleanupEvidence | None = None
         self._closed = False
         self._cleanup_complete = False
         self._watchdog_pid: int | None = None
@@ -1241,6 +1269,11 @@ class SlotExecutionBoundary:
         if pid == 0:
             os.close(writer)
             try:
+                null = os.open("/dev/null", os.O_RDWR | os.O_CLOEXEC)
+                for standard in (0, 1, 2):
+                    os.dup2(null, standard)
+                if null > 2:
+                    os.close(null)
                 # A second guardian must not keep another boundary's parent
                 # pipe alive after coordinator crash. Keep only this watch FD
                 # and this cgroup FD; no inherited transport/key descriptors.
@@ -1261,6 +1294,7 @@ class SlotExecutionBoundary:
             os._exit(0)
         os.close(reader)
         self._watchdog_pid, self._watchdog_write = pid, writer
+        self._watchdog_start = _process_identity(pid)
 
     def require_watchdog(self) -> None:
         if (
@@ -1278,9 +1312,11 @@ class SlotExecutionBoundary:
         finally:
             os.close(fd)
 
-    def terminate_and_confirm_empty(self) -> None:
+    def terminate_and_confirm_empty(self) -> BoundaryCleanupEvidence | None:
         if self._cleanup_complete:
-            return  # only this root owner can re-enter a retired boundary
+            return (
+                self._evidence
+            )  # only this root owner can re-enter a retired boundary
         if self._closed:
             raise ProviderRefused()
         # Retire on the first attempt, but never turn an unknown/failed cleanup
@@ -1314,12 +1350,23 @@ class SlotExecutionBoundary:
                         if child:
                             if status != 0:
                                 raise ProviderRefused()
+                            self._evidence = BoundaryCleanupEvidence(
+                                self.path.name,
+                                *self._identity,
+                                True,
+                                0,
+                                guardian,
+                                self._watchdog_start,
+                                status,
+                            )
                             self._cleanup_complete = True
-                            return
+                            return self._evidence
                         time.sleep(0.01)
                     raise ProviderRefused()
+                if os.getpid() == self._owner_pid:
+                    raise ProviderRefused()
                 self._cleanup_complete = True
-                return
+                return None
             time.sleep(0.01)
         raise ProviderRefused()
 
@@ -1364,8 +1411,11 @@ class InstalledLaunchContext:
         packet = _read(ROOT / "packet.json")
         local = _local_packet(packet)
         run = RunIdentity.from_installed()
+        terms = _run_document(run.canonical_bytes)
         if (
-            _digest(packet) != record["local_packet_digest"]
+            local["capture"] != terms["capture"]
+            or local["run_end"] != terms["expires_at"]
+            or _digest(packet) != record["local_packet_digest"]
             or run.digest != record["packet_digest"]
             or local["shared_run_digest"] != run.digest
             or _digest(_read(Path("/etc/machine-id"), 4096))
@@ -1678,16 +1728,31 @@ class InstalledLaunchContext:
     def required_phase(self) -> Literal["issue", "consume"]:
         if self.role != "attester" or self.slot_id not in SLOTS:
             raise ProviderRefused()
-        return "issue" if self.slot_id in ("a_issue", "b_issue") else "consume"
+        return "issue" if self.slot_id == "issue" else "consume"
+
+    def require_capture_selection(self, selection: dict[str, object]) -> None:
+        self.require_open()
+        local = _load_local_packet()
+        run = RunIdentity.from_installed()
+        terms = _run_document(run.canonical_bytes)
+        if (
+            run.digest != self.packet_digest
+            or local["shared_run_digest"] != self.packet_digest
+            or _selection(selection) != local["capture"]
+            or local["capture"] != terms["capture"]
+            or _instant(local["run_end"]) != self.expires_at
+            or _instant(terms["expires_at"]) != self.expires_at
+        ):
+            raise ProviderRefused()
 
     def require_capture_slot(self, expected: CaptureCoordinates, phase: str) -> None:
         self.require_open()
         if self.role != "attester" or self.slot_id not in SLOTS:
             raise ProviderRefused()
-        if phase != self.slot_id.rsplit("_", 1)[1]:
+        if phase != self.slot_id:
             raise ProviderRefused()
         packet = _load_local_packet()
-        configured = packet["captures"][self.slot_id[0]]
+        configured = packet["capture"]
         if not _selection_matches(configured, expected):
             raise ProviderRefused()
 
@@ -1727,10 +1792,47 @@ class InstalledLaunchContext:
         finally:
             os.close(parent)
 
-    def finish_issuer_success(self) -> None:
-        """Fixed service calls only after its custody/descriptors have closed."""
+    @property
+    def case_kind(self) -> CaseKind:
+        return _run_document(RunIdentity.from_installed().canonical_bytes)["case_kind"]
+
+    def finish_issuer(self, result: IssuerProcessResult) -> None:
+        """Fixed wrapper calls only after successful custody and descriptor close."""
+        from vendor_cp.deployment.gate0_collection import IssuerOutcome, OutcomeKind
+        from vendor_cp.deployment.gate0_services import IssuerProcessResult
+
         self.require_open()
-        if self.role != "issuer":
+        if self.role != "issuer" or type(result) is not IssuerProcessResult:
+            raise ProviderRefused()
+        terms = _run_document(RunIdentity.from_installed().canonical_bytes)
+        if result.exit_code != 3 or not 1 <= len(result.outcomes) <= 8:
+            raise ProviderRefused()
+        for ordinal, outcome in enumerate(result.outcomes, 1):
+            if type(outcome) is not IssuerOutcome or outcome.ordinal != ordinal:
+                raise ProviderRefused()
+            IssuerOutcome.parse(outcome.document())
+            if outcome.window_digest != terms["capture"]["window_digest"]:
+                raise ProviderRefused()
+            if (
+                ordinal < len(result.outcomes)
+                and outcome.kind is OutcomeKind.OWNER_REFUSED
+            ):
+                raise ProviderRefused()
+        final = result.outcomes[-1]
+        if final.kind is not OutcomeKind.OWNER_REFUSED or final.operation != "consume":
+            raise ProviderRefused()
+        terminal = {
+            "schema": "Gate0IssuerTerminal.v1",
+            "launch_packet_digest": self.packet_digest,
+            "local_packet_digest": self.local_packet_digest,
+            "case_kind": terms["case_kind"],
+            "window_digest": terms["capture"]["window_digest"],
+            "worker_declared_exit_code": 3,
+            "transcript_digest": result.transcript_digest,
+            "terminal_outcome": final.document(),
+        }
+        raw = canonical(terminal)
+        if len(raw) > 65536:
             raise ProviderRefused()
         parent = _protected(
             ROOT / "status" / "issuer", directory=True, uid=self.worker_uid
@@ -1743,16 +1845,7 @@ class InstalledLaunchContext:
                 dir_fd=parent,
             )
             try:
-                _write(
-                    fd,
-                    canonical(
-                        {
-                            "schema": "Gate0IssuerTerminal.v1",
-                            "launch_packet_digest": self.packet_digest,
-                            "outcome": "success",
-                        }
-                    ),
-                )
+                _write(fd, raw)
                 os.fsync(fd)
             finally:
                 os.close(fd)
@@ -1781,7 +1874,7 @@ class InstalledLaunchContext:
             raise ProviderRefused()
         if expected != self.capture_coordinates():
             raise ProviderRefused()
-        name = "capture-" + self.slot_id[0] + ".json"
+        name = "capture.json"
         fd = _protected(ROOT / "captures" / name)
         try:
             raw = _bytes(fd, 65536)
@@ -1802,7 +1895,7 @@ class InstalledLaunchContext:
             or readback.effective_end != self.expires_at
         ):
             raise ProviderRefused()
-        selected = readback.captures[0 if self.slot_id[0] == "a" else 1]
+        selected = readback.capture
         self.require_capture_slot(selected, self.required_phase)
         return selected
 
@@ -1886,7 +1979,7 @@ def _no_replace(source: Path, destination: Path) -> None:
 
 
 class FiniteGate0Supervisor:
-    """One installed root launch, four attester slots, no recovery/retry loop."""
+    """One installed root launch, two attester slots, no recovery/retry loop."""
 
     @classmethod
     def from_installed(cls) -> FiniteGate0Supervisor:
@@ -1899,7 +1992,7 @@ class FiniteGate0Supervisor:
         if (
             packet["shared_run_digest"] != run.digest
             or packet["run_end"] != terms["expires_at"]
-            or packet["captures"] != terms["captures"]
+            or packet["capture"] != terms["capture"]
             or packet["machine_id_digest"]
             != _digest(_read(Path("/etc/machine-id"), 4096))
         ):
@@ -1917,7 +2010,7 @@ class FiniteGate0Supervisor:
         )
 
     def run(self) -> None:
-        """Fixed IDP3 issuer+sender or NS3 management+four attester sessions."""
+        """Fixed IDP3 issuer+sender or NS3 management+two attester sessions."""
         packet = _load_local_packet()
         role = packet["host_role"]
         listeners: list[socket.socket] = []
@@ -1929,6 +2022,7 @@ class FiniteGate0Supervisor:
                 connection = self._accept_wg(listener, "issuer")
                 listener.close()
                 self.run_issuer_connection(connection)
+                self._mechanics_complete = True
             elif role == "attester":
                 management = self._listen_wg("management")
                 listeners.append(management)
@@ -1940,27 +2034,41 @@ class FiniteGate0Supervisor:
                 for _ in SLOTS:
                     connection = self._accept_wg(listener, "attester")
                     self.run_attester_connection(connection)
+                self._mechanics_complete = True
             else:
                 raise ProviderRefused()
         except Exception as error:
+            self._remember_failure(CleanupReason.EXECUTION_INCOMPLETE)
             failure = error
             if self._activated:
                 raise LaunchIncomplete() from error
             raise
         except BaseException as cancellation:
+            self._remember_failure(CleanupReason.EXECUTION_INCOMPLETE)
             failure = cancellation
             raise
         finally:
+            cleanup_failure: BaseException | None = None
             for listener in listeners:
-                listener.close()
+                try:
+                    listener.close()
+                except BaseException as error:
+                    self._remember_failure(CleanupReason.DESCRIPTOR_CLOSE_FAILED)
+                    if cleanup_failure is None:
+                        cleanup_failure = error
             try:
                 self.close()
-            except Exception as cleanup:
-                if failure is not None and not isinstance(failure, Exception):
-                    raise failure from cleanup
+            except BaseException as error:
+                if not getattr(self, "_cleanup_failed", False):
+                    self._remember_failure(CleanupReason.EPHEMERAL_FAILED)
+                if cleanup_failure is None:
+                    cleanup_failure = error
+            if cleanup_failure is not None and failure is None:
+                if not isinstance(cleanup_failure, Exception):
+                    raise cleanup_failure
                 if self._activated:
-                    raise LaunchIncomplete() from cleanup
-                raise
+                    raise LaunchIncomplete() from cleanup_failure
+                raise cleanup_failure
 
     def _listen_wg(self, role: Role) -> socket.socket:
         self.clocks.require_open()
@@ -2014,6 +2122,15 @@ class FiniteGate0Supervisor:
             raise ProviderRefused()
         fd = _protected(ROOT, directory=True)
         os.close(fd)
+        for legacy in ("a_issue", "a_consume", "b_issue", "b_consume"):
+            for parent in ("installation", "secrets", "claims", "status"):
+                candidate = (
+                    ROOT
+                    / parent
+                    / (legacy + ".json" if parent == "installation" else legacy)
+                )
+                if candidate.exists() or candidate.is_symlink():
+                    raise ProviderRefused()
         mount = [
             line.split()
             for line in Path("/proc/self/mountinfo").read_text().splitlines()
@@ -2033,11 +2150,23 @@ class FiniteGate0Supervisor:
             0o400,
         )
         os.close(marker)
+        self._run_terms = _run_document(RunIdentity.from_installed().canonical_bytes)
+        self._local_terms = _local_packet(local)
         self.packet_digest, self.worker_uid = packet_digest, worker_uid
         self.local_packet_digest = _digest(local)
         self.machine_id_digest = _digest(_read(Path("/etc/machine-id"), 4096))
         if _local_packet(local)["machine_id_digest"] != self.machine_id_digest:
             raise ProviderRefused()
+        self._boundaries: dict[str, SlotExecutionBoundary] = {}
+        self._terminals: dict[str, dict[str, object]] = {}
+        self._phase_completed: dict[str, str] = {}
+        self._cleanup_complete = False
+        self._mechanics_complete = False
+        self._failure_reason: CleanupReason | None = None
+        self._cleanup_failed = False
+        self._cleanup_failure_reason: CleanupReason | None = None
+        self._cleanup_completed_at: str | None = None
+        self._removed: list[str] = []
         _prepare_network_privileges()
         self._measure_network()
         self.state = LaunchState.AWAITING_CAPTURE
@@ -2048,15 +2177,80 @@ class FiniteGate0Supervisor:
         self._active_deadline: float | None = None
         self._activated = False
 
+    def _remember_failure(self, reason: CleanupReason) -> None:
+        if reason in (
+            CleanupReason.BOUNDARY_FAILED,
+            CleanupReason.PROCESS_REAP_FAILED,
+            CleanupReason.DESCRIPTOR_CLOSE_FAILED,
+            CleanupReason.EPHEMERAL_FAILED,
+        ):
+            self._cleanup_failed = True
+            if getattr(self, "_cleanup_failure_reason", None) is None:
+                self._cleanup_failure_reason = reason
+        if getattr(self, "_failure_reason", None) is None:
+            self._failure_reason = reason
+
+    def _retire_resources(
+        self,
+        boundary: SlotExecutionBoundary,
+        process: subprocess.Popen[bytes] | None,
+        descriptors: tuple[IO[bytes] | socket.socket | None, ...] = (),
+        *,
+        primary_failure: BaseException | None = None,
+    ) -> None:
+        """Keep the first failure while attempting every bounded local teardown."""
+        failure: BaseException | None = None
+        try:
+            boundary.terminate_and_confirm_empty()
+        except BaseException as error:
+            self._remember_failure(CleanupReason.BOUNDARY_FAILED)
+            failure = error
+        if process is not None:
+            try:
+                process.wait(timeout=2)
+            except BaseException as error:
+                self._remember_failure(CleanupReason.PROCESS_REAP_FAILED)
+                if failure is None:
+                    failure = error
+                # Kill/reap the direct child even when cgroup cleanup is unknown.
+                # This does not substitute for complete descendant quiescence.
+                try:
+                    process.kill()
+                except BaseException:
+                    self._remember_failure(CleanupReason.PROCESS_REAP_FAILED)
+                # A failed kill does not prove the child is alive or reaped.
+                try:
+                    process.wait(timeout=2)
+                except BaseException:
+                    self._remember_failure(CleanupReason.PROCESS_REAP_FAILED)
+        for descriptor in descriptors:
+            if descriptor is not None:
+                try:
+                    descriptor.close()
+                except BaseException as error:
+                    self._remember_failure(CleanupReason.DESCRIPTOR_CLOSE_FAILED)
+                    if failure is None:
+                        failure = error
+        if failure is not None:
+            if primary_failure is not None:
+                raise primary_failure from failure
+            raise failure
+
     def _measure_network(self) -> None:
         boundary = SlotExecutionBoundary("preflight")
+        self._boundaries["preflight"] = boundary
+        primary_failure: BaseException | None = None
         try:
             boundary.start_watchdog(self.clocks.deadline)
             measurement = self._measure_network_scoped(boundary)
+        except BaseException as error:
+            self._remember_failure(CleanupReason.EXECUTION_INCOMPLETE)
+            primary_failure = error
+            raise
         finally:
             # Parent capdrop cannot revoke a child's capabilities. Empty/reaped
             # includes every privileged helper and the independent guardian.
-            boundary.terminate_and_confirm_empty()
+            self._retire_resources(boundary, None, primary_failure=primary_failure)
         self.clocks.require_open()
         _seal_network_privileges()
         self.clocks.require_open()
@@ -2098,9 +2292,9 @@ class FiniteGate0Supervisor:
                 close_fds=True,
                 preexec_fn=boundary.enter_child,
             )
-            if process.stdout is None:
-                raise ProviderRefused()
             try:
+                if process.stdout is None:
+                    raise ProviderRefused()
                 fd = process.stdout.fileno()
                 os.set_blocking(fd, False)
                 output = bytearray()
@@ -2118,12 +2312,15 @@ class FiniteGate0Supervisor:
                 if process.returncode != 0 or time.monotonic() >= deadline:
                     raise ProviderRefused()
                 return bytes(output)
-            except BaseException:
-                boundary.terminate_and_confirm_empty()
-                process.wait(timeout=2)
+            except BaseException as error:
+                self._remember_failure(CleanupReason.EXECUTION_INCOMPLETE)
+                self._retire_resources(
+                    boundary, process, (process.stdout,), primary_failure=error
+                )
                 raise
             finally:
-                process.stdout.close()
+                if process.stdout is not None:
+                    process.stdout.close()
 
         inventory = _observed_peer_inventory(
             public_query("/usr/bin/wg", ["show", interface, "peers"]),
@@ -2210,7 +2407,7 @@ class FiniteGate0Supervisor:
             raise
 
     def serve_capture_once(
-        self, expected: tuple[CaptureCoordinates, CaptureCoordinates] | None = None
+        self, expected: CaptureCoordinates | None = None
     ) -> CaptureInstallReadback:
         """One fixed local completion channel; no commands/paths are accepted."""
         if self.state != LaunchState.AWAITING_CAPTURE:
@@ -2251,16 +2448,14 @@ class FiniteGate0Supervisor:
     def commit_capture(
         self,
         stage_fd: int,
-        expected: tuple[CaptureCoordinates, CaptureCoordinates] | None = None,
+        expected: CaptureCoordinates | None = None,
     ) -> CaptureInstallReadback:
         """Root parent consumes its dedicated staging pipe through verified EOF.
 
         The receiver passes only public framed bytes, never an active inode,
         destination, observed_eof flag or permission to replace prior material.
         """
-        if self.state != LaunchState.AWAITING_CAPTURE or (
-            expected is not None and len(expected) != 2
-        ):
+        if self.state != LaunchState.AWAITING_CAPTURE:
             raise ProviderRefused()
         try:
             self.clocks.require_open()
@@ -2300,46 +2495,40 @@ class FiniteGate0Supervisor:
                     raise ProviderRefused()
             if len(raw) < 5 or struct.unpack("!I", raw[:4])[0] != len(raw) - 4:
                 raise ProviderRefused()
-            entries = _capture_request(bytes(raw[4:]), self.packet_digest)
+            entry = _capture_request(bytes(raw[4:]), self.packet_digest)
             if expected is None:
-                expected = (entries[0].coordinates, entries[1].coordinates)
-            for slot, coordinates in zip(("a", "b"), expected, strict=True):
-                if not _selection_matches(packet["captures"][slot], coordinates):
-                    raise ProviderRefused()
+                expected = entry.coordinates
+            if entry.coordinates != expected or not _selection_matches(
+                packet["capture"], expected
+            ):
+                raise ProviderRefused()
+            encoded = entry.encoded
+            capture = decode_capture(encoded, expected=expected)
+            window = capture.binding.window.document
+            terms = _run_document(RunIdentity.from_installed().canonical_bytes)
+            if (
+                window["controller"]["ca_fingerprint"]
+                != terms["controller_ca_fingerprint"]
+                or window["case_kind"] != terms["case_kind"]
+                or window["github"]["run_id"] != terms["run_id"]
+                or window["github"]["run_attempt"] != terms["run_attempt"]
+                or self.clocks.expires_at > _instant(window["expires_at"])
+            ):
+                raise ProviderRefused()
             temporary = ROOT / "capture-commit"
             os.mkdir(temporary, mode=0o700)
-            controllers = []
-            for name, entry, coordinates in zip(
-                ("a", "b"), entries, expected, strict=True
-            ):
-                if entry.slot != name or entry.coordinates != coordinates:
-                    raise ProviderRefused()
-                encoded = entry.encoded
-                capture = decode_capture(encoded, expected=coordinates)
-                window = capture.binding.window.document
-                terms = _run_document(RunIdentity.from_installed().canonical_bytes)
-                if (
-                    window["controller"]["ca_fingerprint"]
-                    != terms["controller_ca_fingerprint"]
-                ):
-                    raise ProviderRefused()
-                if self.clocks.expires_at > _instant(window["expires_at"]):
-                    raise ProviderRefused()
-                controllers.append(window["controller"]["fingerprint"])
-                fd = os.open(
-                    temporary / ("capture-" + name + ".json"),
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                    0o400,
-                )
-                try:
-                    _write(fd, encoded)
-                    os.fchown(fd, 0, pwd.getpwuid(self.worker_uid).pw_gid)
-                    os.fchmod(fd, 0o440)
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-            if len(set(controllers)) != 2:
-                raise ProviderRefused()
+            fd = os.open(
+                temporary / "capture.json",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o400,
+            )
+            try:
+                _write(fd, encoded)
+                os.fchown(fd, 0, pwd.getpwuid(self.worker_uid).pw_gid)
+                os.fchmod(fd, 0o440)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
             result = CaptureInstallReadback(
                 self.packet_digest, expected, self.clocks.expires_at
             )
@@ -2365,11 +2554,7 @@ class FiniteGate0Supervisor:
             self.clocks.require_open()
             self._require_phase_open(deadline)
             _no_replace(temporary, ROOT / "captures")
-            for name, coordinates in zip(("a", "b"), expected, strict=True):
-                decode_capture(
-                    _read(ROOT / "captures" / ("capture-" + name + ".json")),
-                    expected=coordinates,
-                )
+            decode_capture(_read(ROOT / "captures" / "capture.json"), expected=expected)
             self.clocks.require_open()
             self._require_phase_open(deadline)
             self.state = LaunchState.READY
@@ -2391,7 +2576,7 @@ class FiniteGate0Supervisor:
         """
         if (
             self.state not in (LaunchState.READY, LaunchState.READY_FOR_NEXT)
-            or self._index >= 4
+            or self._index >= len(SLOTS)
             or self._boundary is not None
         ):
             raise ProviderRefused()
@@ -2400,10 +2585,12 @@ class FiniteGate0Supervisor:
         slot = SLOTS[self._index]
         slot_deadline = min(self.clocks.deadline, time.monotonic() + 30)
         boundary = SlotExecutionBoundary(slot)
+        self._boundaries[slot] = boundary
         boundary.start_watchdog(slot_deadline)
         self._boundary = boundary
         self.state = LaunchState.SLOT_ACTIVE
         process = None
+        primary_failure: BaseException | None = None
         try:
             # Binary/config pins are protected installation measurements.
             packet = _load_local_packet()
@@ -2436,25 +2623,28 @@ class FiniteGate0Supervisor:
             if process.returncode != 0:
                 raise ProviderRefused()
             self._require_phase_open(slot_deadline)
-            self._require_terminal_success(slot)
             self.clocks.require_open()
             self._require_phase_open(slot_deadline)
-            boundary.terminate_and_confirm_empty()
-            self._require_phase_open(slot_deadline)
+            self._phase_completed[slot] = datetime.now(UTC).isoformat()
+            self._retire_resources(boundary, None)
+            self._require_terminal_success(slot)
             self._boundary = None
             self._index += 1
             self.state = (
-                LaunchState.TERMINAL if self._index == 4 else LaunchState.READY_FOR_NEXT
+                LaunchState.TERMINAL
+                if self._index == len(SLOTS)
+                else LaunchState.READY_FOR_NEXT
             )
-        except BaseException:
+        except BaseException as error:
+            self._remember_failure(CleanupReason.EXECUTION_INCOMPLETE)
+            primary_failure = error
             self.state = LaunchState.TERMINAL
-            boundary.terminate_and_confirm_empty()
-            if process is not None:
-                process.wait(timeout=2)
-            self._boundary = None
             raise
         finally:
-            connection.close()
+            self._retire_resources(
+                boundary, process, (connection,), primary_failure=primary_failure
+            )
+            self._boundary = None
 
     def run_issuer_connection(self, connection: socket.socket) -> None:
         """The fixed issuer sshd worker is bounded before its native DB connect."""
@@ -2463,9 +2653,11 @@ class FiniteGate0Supervisor:
         self.clocks.require_open()
         self._require_ssh_connection(connection, "issuer")
         boundary = SlotExecutionBoundary("issuer")
+        self._boundaries["issuer"] = boundary
         boundary.start_watchdog(self.clocks.deadline)
         self._boundary = boundary
         process = None
+        primary_failure: BaseException | None = None
         export_listener = None
         export_connection = None
         try:
@@ -2507,20 +2699,22 @@ class FiniteGate0Supervisor:
             if process.returncode != 0:
                 raise ProviderRefused()
             self.clocks.require_open()
-            self._require_terminal_success("issuer")
+            self._phase_completed["issuer"] = datetime.now(UTC).isoformat()
 
+        except BaseException as error:
+            self._remember_failure(CleanupReason.EXECUTION_INCOMPLETE)
+            primary_failure = error
+            raise
         finally:
             self.state = LaunchState.TERMINAL
-            boundary.terminate_and_confirm_empty()
-            if process is not None:
-                process.wait(timeout=2)
+            self._retire_resources(
+                boundary,
+                process,
+                (connection, export_listener, export_connection),
+                primary_failure=primary_failure,
+            )
             self._boundary = None
-            connection.close()
-            if export_listener is not None:
-                export_listener.close()
-            if export_connection is not None:
-                export_connection.close()
-        self.clocks.require_open()
+        self._require_terminal_success("issuer")
 
     def _bind_issuer_export(self) -> socket.socket:
         packet = _load_local_packet()
@@ -2580,19 +2774,21 @@ class FiniteGate0Supervisor:
             self._require_phase_open(deadline)
             if len(raw) < 5 or struct.unpack("!I", raw[:4])[0] != len(raw) - 4:
                 raise ProviderRefused()
-            entries = _capture_request(bytes(raw[4:]), self.packet_digest)
-            for entry in entries:
-                if not _selection_matches(
-                    packet["captures"][entry.slot], entry.coordinates
-                ):
-                    raise ProviderRefused()
-                captured = decode_capture(entry.encoded, expected=entry.coordinates)
-                terms = _run_document(RunIdentity.from_installed().canonical_bytes)
-                if (
-                    captured.binding.window.document["controller"]["ca_fingerprint"]
-                    != terms["controller_ca_fingerprint"]
-                ):
-                    raise ProviderRefused()
+            entry = _capture_request(bytes(raw[4:]), self.packet_digest)
+            if not _selection_matches(packet["capture"], entry.coordinates):
+                raise ProviderRefused()
+            captured = decode_capture(entry.encoded, expected=entry.coordinates)
+            window = captured.binding.window.document
+            terms = _run_document(RunIdentity.from_installed().canonical_bytes)
+            if (
+                window["controller"]["ca_fingerprint"]
+                != terms["controller_ca_fingerprint"]
+                or window["case_kind"] != terms["case_kind"]
+                or window["github"]["run_id"] != terms["run_id"]
+                or window["github"]["run_attempt"] != terms["run_attempt"]
+                or self.clocks.expires_at > _instant(window["expires_at"])
+            ):
+                raise ProviderRefused()
             self._require_phase_open(deadline)
             owned = connection
             connection = None
@@ -2607,10 +2803,12 @@ class FiniteGate0Supervisor:
         """Fixed sender child: public parent stream, existing RO identity mount."""
         self._require_phase_open(deadline)
         boundary = SlotExecutionBoundary("capture_sender")
+        self._boundaries["capture_sender"] = boundary
         boundary.start_watchdog(deadline)
         self._sender_boundary = boundary
         parent, sender = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         process = None
+        primary_failure: BaseException | None = None
         try:
             packet = _load_local_packet()
             uid = packet["capture_sender_uid"]
@@ -2683,7 +2881,7 @@ class FiniteGate0Supervisor:
             export = _capture_request(public_export[4:], self.packet_digest)
             expected = CaptureInstallReadback(
                 self.packet_digest,
-                (export[0].coordinates, export[1].coordinates),
+                export.coordinates,
                 self.clocks.expires_at,
             )
             if _capture_readback(bytes(response[4:])) != expected:
@@ -2692,22 +2890,24 @@ class FiniteGate0Supervisor:
             if process.returncode != 0:
                 raise ProviderRefused()
             self._require_phase_open(deadline)
-            boundary.terminate_and_confirm_empty()
-            self._require_phase_open(deadline)
+            self._phase_completed["capture_sender"] = datetime.now(UTC).isoformat()
+            self._retire_resources(boundary, None)
             self._sender_boundary = None
             return bytes(response)
+        except BaseException as error:
+            self._remember_failure(CleanupReason.EXECUTION_INCOMPLETE)
+            primary_failure = error
+            raise
         finally:
-            boundary.terminate_and_confirm_empty()
-            if process is not None:
-                process.wait(timeout=2)
+            self._retire_resources(
+                boundary, process, (parent, sender), primary_failure=primary_failure
+            )
             self._sender_boundary = None
-            parent.close()
-            sender.close()
 
     def run_management_connection(
         self,
         connection: socket.socket,
-        expected: tuple[CaptureCoordinates, CaptureCoordinates] | None = None,
+        expected: CaptureCoordinates | None = None,
     ) -> CaptureInstallReadback:
         """One management sshd stream and one bounded root publication channel."""
         if self.state != LaunchState.AWAITING_CAPTURE or self._boundary is not None:
@@ -2717,9 +2917,11 @@ class FiniteGate0Supervisor:
         self._active_deadline = management_deadline
         packet = _load_local_packet()
         boundary = SlotExecutionBoundary("management")
+        self._boundaries["management"] = boundary
         boundary.start_watchdog(management_deadline)
         self._boundary = boundary
         process = None
+        primary_failure: BaseException | None = None
         try:
             binary, config = Path("/usr/sbin/sshd"), ROOT / "management_sshd_config"
             if (
@@ -2748,22 +2950,25 @@ class FiniteGate0Supervisor:
             if process.returncode != 0:
                 raise ProviderRefused()
             self._require_phase_open(management_deadline)
-            boundary.terminate_and_confirm_empty()
-            self._require_phase_open(management_deadline)
+            self._phase_completed["management"] = datetime.now(UTC).isoformat()
+            self._retire_resources(boundary, None)
             self._boundary = None
             return result
-        except BaseException:
+        except BaseException as error:
+            self._remember_failure(CleanupReason.EXECUTION_INCOMPLETE)
+            primary_failure = error
             self.state = LaunchState.TERMINAL
-            boundary.terminate_and_confirm_empty()
-            if process is not None:
-                process.wait(timeout=2)
-            self._boundary = None
             raise
         finally:
-            connection.close()
-            if self._management_listener is not None:
-                self._management_listener.close()
-                self._management_listener = None
+            listener = self._management_listener
+            self._management_listener = None
+            self._retire_resources(
+                boundary,
+                process,
+                (connection, listener),
+                primary_failure=primary_failure,
+            )
+            self._boundary = None
 
     def _require_ssh_connection(self, connection: socket.socket, role: Role) -> None:
         """The accepted stream itself must match the protected WG ingress tuple."""
@@ -2813,22 +3018,61 @@ class FiniteGate0Supervisor:
                     or not stat.S_ISREG(info.st_mode)
                 ):
                     raise ProviderRefused()
-                fields = {"schema", "launch_packet_digest", "outcome"}
-                if slot != "issuer":
-                    fields.add("slot")
-                terminal = _record(strict_object(_bytes(fd, 4096)), fields)
-                expected_schema = (
-                    "Gate0IssuerTerminal.v1"
-                    if slot == "issuer"
-                    else "Gate0SlotTerminal.v1"
-                )
+                raw = _bytes(fd, 65536)
+                terminal = strict_object(raw, 65536)
+                if slot == "issuer":
+                    from vendor_cp.deployment.gate0_collection import (
+                        IssuerOutcome,
+                        OutcomeKind,
+                    )
+
+                    fields = {
+                        "schema",
+                        "launch_packet_digest",
+                        "local_packet_digest",
+                        "case_kind",
+                        "window_digest",
+                        "worker_declared_exit_code",
+                        "transcript_digest",
+                        "terminal_outcome",
+                    }
+                    terminal = _record(terminal, fields)
+                    terms = self._run_terms
+                    final = IssuerOutcome.parse(terminal["terminal_outcome"])
+                    if (
+                        terminal["schema"] != "Gate0IssuerTerminal.v1"
+                        or terminal["local_packet_digest"] != self.local_packet_digest
+                        or terminal["case_kind"] != terms["case_kind"]
+                        or terminal["window_digest"]
+                        != terms["capture"]["window_digest"]
+                        or type(terminal["worker_declared_exit_code"]) is not int
+                        or terminal["worker_declared_exit_code"] != 3
+                        or final.kind is not OutcomeKind.OWNER_REFUSED
+                        or final.operation != "consume"
+                        or final.window_digest != terminal["window_digest"]
+                    ):
+                        raise ProviderRefused()
+                    _sha(terminal["transcript_digest"])
+                else:
+                    terminal = _record(
+                        terminal, {"schema", "launch_packet_digest", "slot", "outcome"}
+                    )
+                    if (
+                        terminal["schema"] != "Gate0SlotTerminal.v1"
+                        or terminal["slot"] != slot
+                        or terminal["outcome"] != "success"
+                    ):
+                        raise ProviderRefused()
                 if (
-                    terminal["schema"] != expected_schema
-                    or _sha(terminal["launch_packet_digest"]) != self.packet_digest
-                    or terminal["outcome"] != "success"
-                    or (slot != "issuer" and terminal["slot"] != slot)
+                    terminal["launch_packet_digest"] != self.packet_digest
+                    or canonical(terminal) != raw
                 ):
                     raise ProviderRefused()
+                self._terminals[slot] = {
+                    "daemon_returncode": 0,
+                    "worker_terminal_digest": _digest(raw),
+                    "worker_terminal": terminal,
+                }
             finally:
                 os.close(fd)
         finally:
@@ -2880,8 +3124,6 @@ class FiniteGate0Supervisor:
         )
         for name in names:
             source = ROOT / "secrets" / name / "wrapping-token"
-            if name != slot and not source.exists():
-                continue  # no action mints an absent future slot wrapper
             fd = _protected(source)
             try:
                 os.fchown(fd, 0, group)
@@ -2917,32 +3159,214 @@ class FiniteGate0Supervisor:
             os.close(fd)
         os.replace(path, ROOT / "context.json")
 
+    @staticmethod
+    def _transient_paths() -> tuple[str, ...]:
+        return (
+            "context.json",
+            "context.next",
+            "sender-export.json",
+            "issuer-export.sock",
+            "management.sock",
+            "captures/capture.json",
+            "captures/readback.json",
+            "capture-commit/capture.json",
+            "capture-commit/readback.json",
+            *("secrets/" + name + "/wrapping-token" for name in (*SLOTS, "issuer")),
+            "captures",
+            "capture-commit",
+        )
+
     def close(self) -> None:
+        # Successful repeated closes retain the actual first completion instant.
+        # A failed close is never reclassified as complete on another invocation.
+        if getattr(self, "_cleanup_complete", False):
+            return
         self.state = LaunchState.TERMINAL
-        if self._sender_boundary is not None:
-            self._sender_boundary.terminate_and_confirm_empty()
-            self._sender_boundary = None
-        if self._boundary is not None:
-            self._boundary.terminate_and_confirm_empty()
-            self._boundary = None
-        # Only fixed ephemeral launch material, after whole-boundary proof.
-        # Keep supervisor-once/claims: cleanup cannot rearm this launch.
-        for name in (*SLOTS, "issuer"):
-            source = ROOT / "secrets" / name / "wrapping-token"
-            if source.exists():
-                fd = _protected(source)
+        self._cleanup_complete = False
+        failure: BaseException | None = None
+        for boundary in self._boundaries.values():
+            try:
+                self._retire_resources(boundary, None)
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+        listener = self._management_listener
+        self._management_listener = None
+        if listener is not None:
+            try:
+                listener.close()
+            except BaseException as error:
+                self._remember_failure(CleanupReason.DESCRIPTOR_CLOSE_FAILED)
+                if failure is None:
+                    failure = error
+        # Fixed paths only; terminal evidence, claims and once marker are retained.
+        for relative in self._transient_paths():
+            source = ROOT / relative
+            try:
                 try:
-                    os.fchmod(fd, 0)
-                finally:
-                    os.close(fd)
-                source.unlink()
-        for source in (
-            ROOT / "context.json",
-            ROOT / "captures" / "capture-a.json",
-            ROOT / "captures" / "capture-b.json",
-            ROOT / "captures" / "readback.json",
-        ):
-            if source.exists():
-                fd = _protected(source)
-                os.close(fd)
-                source.unlink()
+                    metadata = source.lstat()
+                except FileNotFoundError:
+                    if relative not in self._removed:
+                        self._removed.append(relative)
+                    continue
+                if relative in ("issuer-export.sock", "management.sock"):
+                    expected_uid = (
+                        self._local_terms["issuer_uid"]
+                        if relative == "issuer-export.sock"
+                        else self._local_terms["management_uid"]
+                    )
+                    parent = _protected(ROOT, directory=True)
+                    try:
+                        if (
+                            not stat.S_ISSOCK(metadata.st_mode)
+                            or metadata.st_uid != expected_uid
+                        ):
+                            raise ProviderRefused()
+                        os.unlink(relative, dir_fd=parent)
+                    finally:
+                        os.close(parent)
+                elif relative in ("captures", "capture-commit"):
+                    descriptor = _protected(source, directory=True)
+                    os.close(descriptor)
+                    source.rmdir()
+                else:
+                    descriptor = _protected(source)
+                    try:
+                        if relative.startswith("secrets/"):
+                            os.fchmod(descriptor, 0)
+                    finally:
+                        os.close(descriptor)
+                    source.unlink()
+                if source.exists() or source.is_symlink():
+                    raise ProviderRefused()
+                if relative not in self._removed:
+                    self._removed.append(relative)
+            except BaseException as error:
+                self._remember_failure(CleanupReason.EPHEMERAL_FAILED)
+                if failure is None:
+                    failure = error
+        if failure is not None:
+            raise failure
+        if getattr(self, "_cleanup_failed", False):
+            raise LaunchIncomplete()
+        self._cleanup_complete = True
+        self._cleanup_completed_at = datetime.now(UTC).isoformat()
+
+    def cleanup_document(self) -> dict[str, object]:
+        """Root mechanics evidence; protected collector still owes SSH status join."""
+        packet = self._local_terms
+        terms = self._run_terms
+        role = packet["host_role"]
+        expected = (
+            {"preflight", "issuer", "capture_sender"}
+            if role == "issuer"
+            else {"preflight", "management", *SLOTS}
+        )
+        terminals = {"issuer"} if role == "issuer" else set(SLOTS)
+        complete = (
+            self._cleanup_complete
+            and self._mechanics_complete
+            and set(self._boundaries) == expected
+            and set(self._terminals) == terminals
+            and all(
+                boundary._evidence is not None for boundary in self._boundaries.values()
+            )
+            and self._failure_reason is None
+        )
+        reason = (
+            CleanupReason.COMPLETED
+            if complete
+            else (
+                self._failure_reason
+                or (
+                    CleanupReason.CLEANUP_MISSING
+                    if not self._cleanup_complete
+                    else CleanupReason.EXECUTION_INCOMPLETE
+                )
+            )
+        )
+        completed_boundaries: list[dict[str, object]] = []
+        for name in sorted(self._boundaries):
+            evidence = self._boundaries[name]._evidence
+            if evidence is not None:
+                completed_boundaries.append(evidence.document())
+        return {
+            "schema": "Gate0LaunchCleanup.v1",
+            "host_role": role,
+            "case_kind": terms["case_kind"],
+            "launch_packet_digest": self.packet_digest,
+            "local_packet_digest": self.local_packet_digest,
+            "window_digest": terms["capture"]["window_digest"],
+            "machine_id_digest": self.machine_id_digest,
+            "network_measurement_digest": self.network_measurement_digest,
+            "supervisor_pid": os.getpid(),
+            "supervisor_start": _process_identity(os.getpid()),
+            "started_at": self.clocks.started_at.isoformat(),
+            "expires_at": self.clocks.expires_at.isoformat(),
+            "phase_completed_at": dict(self._phase_completed),
+            "terminals": dict(self._terminals),
+            "boundaries": completed_boundaries,
+            "removed": list(self._removed),
+            "expected_removed": list(self._transient_paths()),
+            "cleanup_completed_at": self._cleanup_completed_at,
+            "outcome": "complete" if complete else "incomplete",
+            "reason": reason.value,
+            "delivery_status": "unconfirmed",
+        }
+
+    @property
+    def mechanics_outcome(self) -> Literal["complete", "incomplete"]:
+        return (
+            "complete"
+            if self.cleanup_document()["outcome"] == "complete"
+            else "incomplete"
+        )
+
+    def export_cleanup(self) -> None:
+        try:
+            self._export_cleanup()
+        except BaseException:
+            self._remember_failure(CleanupReason.EXPORT_FAILED)
+            raise
+
+    def _export_cleanup(self) -> None:
+        """Emit one private artifact and bounded stdout frame after final close."""
+        raw = canonical(self.cleanup_document())
+        if len(raw) > 196608:
+            raise LaunchIncomplete()
+        status = ROOT / "status"
+        if not status.exists():
+            os.mkdir(status, mode=0o711)  # noqa: S103 -- fixed worker traversal
+        fd = _protected(status, directory=True)
+        try:
+            result = os.open(
+                "launch-cleanup.json",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o400,
+                dir_fd=fd,
+            )
+            try:
+                _write(result, raw)
+                os.fsync(result)
+            finally:
+                os.close(result)
+        finally:
+            os.close(fd)
+        frame = memoryview(struct.pack("!I", len(raw)) + raw)
+        was_blocking = os.get_blocking(1)
+        os.set_blocking(1, False)
+        try:
+            end = time.monotonic() + 2
+            while frame:
+                remaining = end - time.monotonic()
+                if remaining <= 0 or not select.select([], [1], [], remaining)[1]:
+                    raise LaunchIncomplete()
+                try:
+                    count = os.write(1, frame)
+                except BlockingIOError:
+                    continue
+                if count <= 0:
+                    raise LaunchIncomplete()
+                frame = frame[count:]
+        finally:
+            os.set_blocking(1, was_blocking)

@@ -60,7 +60,7 @@ def synthetic_local_packet():
         "binary_digests": {
             name: digest for name in ("/usr/bin/wg", "/usr/sbin/ip", "/usr/sbin/nft")
         },
-        "captures": {"a": selection, "b": dict(selection, plan_id=str(UUID(int=4)))},
+        "capture": selection,
         "installation_digests": {"issuer": digest, "capture_sender": digest},
         "ssh_endpoints": {
             "issuer": {
@@ -134,6 +134,8 @@ def test_postactivation_failure_is_unknown_and_cancellation_is_preserved(
     monkeypatch, cancel
 ):
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    supervisor._boundaries = {}
+    supervisor._phase_completed = {}
     supervisor._activated = False
     monkeypatch.setattr(launch, "_load_local_packet", lambda: {"host_role": "issuer"})
     client, listener = socket.socketpair()
@@ -156,8 +158,10 @@ def test_postactivation_failure_is_unknown_and_cancellation_is_preserved(
         listener.close()
 
 
-def test_issuer_terminal_success_record_is_required(tmp_path, monkeypatch):
+def test_issuer_missing_or_legacy_success_terminal_is_refused(tmp_path, monkeypatch):
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    supervisor._boundaries = {}
+    supervisor._phase_completed = {}
     supervisor.worker_uid, supervisor.packet_digest = os.geteuid(), "sha256:" + "a" * 64
     monkeypatch.setattr(
         launch,
@@ -177,7 +181,8 @@ def test_issuer_terminal_success_record_is_required(tmp_path, monkeypatch):
         )
     )
     path.chmod(0o400)
-    supervisor._require_terminal_success("issuer")
+    with pytest.raises(ProviderRefused):
+        supervisor._require_terminal_success("issuer")
 
 
 @pytest.mark.parametrize("role", ["issuer", "attester", "management"])
@@ -220,10 +225,12 @@ def test_common_run_identity_excludes_runtime_digest_cycles(monkeypatch, cyclic_
     fingerprint = "SHA256:" + base64.b64encode(bytes(32)).decode("ascii").rstrip("=")
     document = {
         "schema": "Gate0RunIdentity.v1",
-        "run_id": "synthetic-common-run",
+        "run_id": "2",
+        "run_attempt": "1",
+        "case_kind": "consume_replay",
         "not_before": (now - timedelta(seconds=1)).isoformat(),
         "expires_at": (now + timedelta(seconds=60)).isoformat(),
-        "captures": {"a": selection, "b": dict(selection, plan_id=str(UUID(int=4)))},
+        "capture": selection,
         "roles": {"issuer": role, "attester": role},
         "controller_ca_fingerprint": fingerprint,
         "management_key_fingerprint": fingerprint,
@@ -244,6 +251,8 @@ def test_late_zero_exit_cannot_advance_within_still_open_common_window(monkeypat
     clock = [1000.0]
     monkeypatch.setattr(launch.time, "monotonic", lambda: clock[0])
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    supervisor._boundaries = {}
+    supervisor._phase_completed = {}
     supervisor.clocks = launch.LaunchClocks.start(
         datetime.now(UTC) + timedelta(seconds=120)
     )
@@ -305,13 +314,15 @@ def test_late_zero_exit_cannot_advance_within_still_open_common_window(monkeypat
 
 
 @pytest.mark.parametrize("late_at", ["exit", "empty_proof"])
-def test_issuer_zero_exit_and_valid_terminal_cannot_outlive_common_deadline(
+def test_issuer_acceptance_deadline_excludes_bounded_cleanup_tail(
     tmp_path, monkeypatch, late_at
 ):
     # Mechanism fixture isolates acceptance timing; no installation is qualified.
     clock = [1000.0]
     monkeypatch.setattr(launch.time, "monotonic", lambda: clock[0])
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    supervisor._boundaries = {}
+    supervisor._phase_completed = {}
     supervisor.clocks = launch.LaunchClocks.start(
         datetime.now(UTC) + timedelta(seconds=120)
     )
@@ -320,24 +331,50 @@ def test_issuer_zero_exit_and_valid_terminal_cannot_outlive_common_deadline(
     supervisor._boundary, supervisor._activated = None, False
     supervisor.worker_uid = os.geteuid()
     supervisor.packet_digest = "sha256:" + "a" * 64
-    (tmp_path / "terminal.json").write_bytes(
-        launch.canonical(
-            {
-                "schema": "Gate0IssuerTerminal.v1",
-                "launch_packet_digest": supervisor.packet_digest,
-                "outcome": "success",
-            }
-        )
+    from vendor_cp.approvals.adapter import ApprovalHoldRefusal
+    from vendor_cp.deployment.gate0_collection import IssuerOutcome, OutcomeKind
+    from vendor_cp.deployment.gate0_services import IssuerProcessResult
+
+    h = supervisor.packet_digest
+    supervisor.local_packet_digest = h
+    supervisor._run_terms = {
+        "case_kind": "withdrawal_later_use",
+        "capture": {"window_digest": h},
+    }
+    supervisor._terminals = {}
+    outcome = IssuerOutcome(
+        1,
+        "consume",
+        h,
+        h,
+        h,
+        h,
+        OutcomeKind.OWNER_REFUSED,
+        "approvals",
+        ApprovalHoldRefusal.WITHDRAWN.value,
+        launch.canonical({}),
     )
+    result = IssuerProcessResult(3, (outcome,))
+    terminal = {
+        "schema": "Gate0IssuerTerminal.v1",
+        "launch_packet_digest": h,
+        "local_packet_digest": h,
+        "case_kind": "withdrawal_later_use",
+        "window_digest": h,
+        "worker_declared_exit_code": 3,
+        "transcript_digest": result.transcript_digest,
+        "terminal_outcome": outcome.document(),
+    }
+    (tmp_path / "terminal.json").write_bytes(launch.canonical(terminal))
     (tmp_path / "terminal.json").chmod(0o400)
-    # Prove the fixture contains a valid success record, rather than relying on
-    # a missing-record refusal to stand in for the deadline check.
+    # Exercise the actual new terminal parser before isolating timing.
     monkeypatch.setattr(
         launch,
         "_protected",
         lambda *args, **kwargs: os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY),
     )
     supervisor._require_terminal_success("issuer")
+    supervisor._terminals.clear()
     raw = b"synthetic-fixed-issuer-binary-and-config"
     digest = launch._digest(raw)
     monkeypatch.setattr(
@@ -406,8 +443,14 @@ def test_issuer_zero_exit_and_valid_terminal_cannot_outlive_common_deadline(
     monkeypatch.setattr(launch, "SlotExecutionBoundary", Boundary)
     monkeypatch.setattr(launch.subprocess, "Popen", lambda *args, **kwargs: Process())
     try:
-        with pytest.raises(launch.LaunchIncomplete):
+        if late_at == "exit":
+            with pytest.raises(launch.LaunchIncomplete):
+                supervisor.run()
+            assert not supervisor._terminals
+        else:
             supervisor.run()
+            assert supervisor._terminals["issuer"]["worker_terminal"] == terminal
+            assert clock[0] == deadline
         assert supervisor._activated
         assert supervisor.state == launch.LaunchState.TERMINAL
         assert emptied
@@ -441,7 +484,7 @@ def test_exclusive_claim_precedes_wrapper_and_denies_concurrent_invocations(
     # constructor accepts this substitution. Test the actual O_EXCL race.
     context = object.__new__(launch.InstalledLaunchContext)
     object.__setattr__(context, "role", "attester")
-    object.__setattr__(context, "slot_id", "a_issue")
+    object.__setattr__(context, "slot_id", "issue")
     object.__setattr__(context, "worker_uid", os.geteuid())
     object.__setattr__(context, "packet_digest", "sha256:" + "a" * 64)
     object.__setattr__(context, "expires_at", datetime.now(UTC) + timedelta(seconds=30))
@@ -471,13 +514,15 @@ def test_exclusive_claim_precedes_wrapper_and_denies_concurrent_invocations(
         results = list(workers.map(lambda _: invoke(), range(8)))
     assert results.count(42) == 1
     assert len(opened) == 1
-    assert (tmp_path / "a_issue").exists()
+    assert (tmp_path / "issue").exists()
     assert invoke() is None  # sequential channel also refuses before secret open
 
 
 def test_parent_rejects_trailing_staged_frame_before_publication(monkeypatch):
     parent, receiver = socket.socketpair()
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    supervisor._boundaries = {}
+    supervisor._phase_completed = {}
     supervisor.state = launch.LaunchState.AWAITING_CAPTURE
     supervisor.clocks = launch.LaunchClocks.start(
         datetime.now(UTC) + timedelta(seconds=30)
@@ -694,9 +739,11 @@ def measured_request_context(monkeypatch):
     monkeypatch.setattr(
         launch.Path,
         "stat",
-        lambda self, *a, **k: SimpleNamespace(st_dev=4, st_ino=1234)
-        if str(self) == "/proc/self/ns/net"
-        else original_stat(self, *a, **k),
+        lambda self, *a, **k: (
+            SimpleNamespace(st_dev=4, st_ino=1234)
+            if str(self) == "/proc/self/ns/net"
+            else original_stat(self, *a, **k)
+        ),
     )
     monkeypatch.setattr(launch.socket, "if_nametoindex", lambda interface: 3)
     return context, packet, measurement
@@ -876,9 +923,11 @@ def test_failed_or_ineffective_privilege_seal_is_refused(monkeypatch, failure):
         monkeypatch.setattr(
             launch,
             "_prctl",
-            lambda option, arg=0: (_ for _ in ()).throw(launch.ProviderRefused())
-            if option == 24
-            else original(option, arg),
+            lambda option, arg=0: (
+                (_ for _ in ()).throw(launch.ProviderRefused())
+                if option == 24
+                else original(option, arg)
+            ),
         )
     else:
         monkeypatch.setattr(launch, "_capset", lambda *args: None)
@@ -891,6 +940,10 @@ def synthetic_cleanup_boundary(monkeypatch):
     boundary = object.__new__(launch.SlotExecutionBoundary)
     boundary._closed = False
     boundary._cleanup_complete = False
+    boundary._evidence = None
+    boundary._identity = (1, 2)
+    boundary.path = launch.CGROUP_ROOT / "issue"
+    boundary._watchdog_start = "fixed-start"
     boundary._fd = 101
     boundary._watchdog_pid = 202
     boundary._watchdog_write = 303
@@ -950,6 +1003,8 @@ def test_cleanup_is_idempotent_only_after_empty_readback_and_guardian_reap(monke
 
 def test_preflight_guardian_empty_and_privilege_seal_precede_publication(monkeypatch):
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    supervisor._boundaries = {}
+    supervisor._phase_completed = {}
     supervisor.clocks = SimpleNamespace(
         deadline=launch.time.monotonic() + 30, require_open=lambda: None
     )
@@ -996,6 +1051,8 @@ def test_new_root_owned_socket_mode_precedes_nonroot_ownership(
     monkeypatch, method, name, uid
 ):
     supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    supervisor._boundaries = {}
+    supervisor._phase_completed = {}
     supervisor.worker_uid = 10031
     supervisor.clocks = SimpleNamespace(deadline=launch.time.monotonic() + 10)
     supervisor._active_deadline = None
@@ -1075,3 +1132,510 @@ def test_measurement_digest_cannot_be_replaced_or_omitted(monkeypatch):
         context.require_installation(
             "issuer", context.packet_digest, context.expires_at
         )
+
+
+@pytest.mark.parametrize("kind", ["consume_replay", "withdrawal_later_use"])
+def test_fixed_finite_case_slots_reject_legacy_roster(kind):
+    assert launch._case_kind(kind) == kind
+    assert launch.SLOTS == ("issue", "consume")
+    for stale in ("a_issue", "a_consume", "b_issue", "b_consume", "retry", ""):
+        with pytest.raises(ProviderRefused):
+            launch._case_kind(stale)
+    packet = synthetic_local_packet()
+    packet["captures"] = {"a": packet.pop("capture"), "b": {}}
+    with pytest.raises(ProviderRefused):
+        launch._local_packet(launch.canonical(packet))
+
+
+def test_cleanup_returns_measured_immutable_evidence_after_guardian_reap(monkeypatch):
+    boundary, events = synthetic_cleanup_boundary(monkeypatch)
+    monkeypatch.setattr(launch.os, "waitpid", lambda pid, flags: (pid, 0))
+    evidence = boundary.terminate_and_confirm_empty()
+    assert evidence == launch.BoundaryCleanupEvidence(
+        "issue", 1, 2, True, 0, 202, "fixed-start", 0
+    )
+    assert ("write", b"1") in events
+    before = list(events)
+    assert boundary.terminate_and_confirm_empty() is evidence
+    assert events == before
+
+
+@pytest.mark.parametrize("exit_code", [0, 5, -15, 255, True])
+def test_issuer_unknown_or_success_cannot_publish_expected_negative(
+    monkeypatch, exit_code
+):
+    from vendor_cp.deployment.gate0_services import IssuerProcessResult
+
+    context = object.__new__(launch.InstalledLaunchContext)
+    object.__setattr__(context, "role", "issuer")
+    monkeypatch.setattr(
+        launch.InstalledLaunchContext, "require_open", lambda self: None
+    )
+    monkeypatch.setattr(
+        launch.RunIdentity,
+        "from_installed",
+        lambda: SimpleNamespace(canonical_bytes=b"{}"),
+    )
+    monkeypatch.setattr(launch, "_run_document", lambda raw: {"capture": {}})
+    opened = []
+    monkeypatch.setattr(launch, "_protected", lambda *a, **kw: opened.append(a))
+    with pytest.raises(ProviderRefused):
+        context.finish_issuer(IssuerProcessResult(exit_code))
+    assert opened == []
+
+
+def test_cleanup_document_reports_missing_final_close_or_boundary():
+    supervisor = synthetic_cleanup_supervisor()
+    supervisor._mechanics_complete = True
+    supervisor._cleanup_complete = False
+    document = supervisor.cleanup_document()
+    assert document["outcome"] == "incomplete"
+    assert document["reason"] == "cleanup_missing"
+    assert document["cleanup_completed_at"] is None
+    supervisor._cleanup_complete = True
+    document = supervisor.cleanup_document()
+    assert document["outcome"] == "incomplete"
+    assert document["reason"] == "execution_incomplete"
+
+
+@pytest.mark.parametrize(
+    "change", [None, "local", "case", "window", "declared", "extra"]
+)
+def test_post_cleanup_typed_terminal_is_case_bound_worker_declaration(
+    monkeypatch, tmp_path, change
+):
+    from vendor_cp.approvals.adapter import ApprovalHoldRefusal
+    from vendor_cp.deployment.gate0_collection import IssuerOutcome, OutcomeKind
+    from vendor_cp.deployment.gate0_services import IssuerProcessResult
+
+    h = "sha256:" + "a" * 64
+    terms = {"case_kind": "withdrawal_later_use", "capture": {"window_digest": h}}
+    context = object.__new__(launch.InstalledLaunchContext)
+    for key, value in {
+        "role": "issuer",
+        "packet_digest": h,
+        "local_packet_digest": h,
+        "worker_uid": os.geteuid(),
+    }.items():
+        object.__setattr__(context, key, value)
+    monkeypatch.setattr(launch, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        launch.InstalledLaunchContext, "require_open", lambda self: None
+    )
+    monkeypatch.setattr(
+        launch.RunIdentity,
+        "from_installed",
+        lambda: SimpleNamespace(canonical_bytes=b"{}"),
+    )
+    monkeypatch.setattr(launch, "_run_document", lambda raw: terms)
+    monkeypatch.setattr(
+        launch, "_protected", lambda path, **kwargs: os.open(path, os.O_RDONLY)
+    )
+    parent = tmp_path / "status" / "issuer"
+    parent.mkdir(parents=True)
+    outcome = IssuerOutcome(
+        1,
+        "consume",
+        h,
+        h,
+        h,
+        h,
+        OutcomeKind.OWNER_REFUSED,
+        "approvals",
+        ApprovalHoldRefusal.WITHDRAWN.value,
+        launch.canonical({}),
+    )
+    result = IssuerProcessResult(3, (outcome,))
+    context.finish_issuer(result)
+    path = parent / "terminal.json"
+    document = launch.strict_object(path.read_bytes())
+    assert document["worker_declared_exit_code"] == 3
+    assert document["transcript_digest"] == result.transcript_digest
+    if change:
+        key, value = {
+            "local": ("local_packet_digest", "sha256:" + "b" * 64),
+            "case": ("case_kind", "consume_replay"),
+            "window": ("window_digest", "sha256:" + "b" * 64),
+            "declared": ("worker_declared_exit_code", 0),
+            "extra": ("cleanup", True),
+        }[change]
+        document[key] = value
+        path.chmod(0o600)
+        path.write_bytes(launch.canonical(document))
+        path.chmod(0o400)
+    supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    supervisor.worker_uid = os.geteuid()
+    supervisor.packet_digest = h
+    supervisor.local_packet_digest = h
+    supervisor._run_terms = terms
+    supervisor._terminals = {}
+    if change:
+        with pytest.raises(ProviderRefused):
+            supervisor._require_terminal_success("issuer")
+        assert not supervisor._terminals
+    else:
+        supervisor._require_terminal_success("issuer")
+        observed = supervisor._terminals["issuer"]
+        assert observed["daemon_returncode"] == 0
+        assert observed["worker_terminal"] == document
+        assert "observed_worker_exit_code" not in observed
+
+
+def synthetic_cleanup_supervisor():
+    supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    h = "sha256:" + "a" * 64
+    supervisor._local_terms = {
+        "host_role": "issuer",
+        "issuer_uid": os.geteuid(),
+        "management_uid": os.geteuid(),
+    }
+    supervisor._run_terms = {
+        "case_kind": "consume_replay",
+        "capture": {"window_digest": h},
+    }
+    supervisor._cleanup_complete = False
+    supervisor._cleanup_failed = False
+    supervisor._mechanics_complete = False
+    supervisor._failure_reason = None
+    supervisor._cleanup_completed_at = None
+    supervisor._removed = []
+    supervisor._boundaries = {}
+    supervisor._terminals = {}
+    supervisor._phase_completed = {}
+    supervisor._management_listener = None
+    supervisor.packet_digest = h
+    supervisor.local_packet_digest = h
+    supervisor.machine_id_digest = h
+    supervisor.network_measurement_digest = h
+    supervisor.clocks = SimpleNamespace(
+        started_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    return supervisor
+
+
+def test_boundary_failure_still_reaps_child_and_closes_every_descriptor():
+    supervisor = synthetic_cleanup_supervisor()
+    events = []
+    first = ChildProcessError("synthetic-guardian-failure")
+
+    def empty():
+        events.append("boundary")
+        raise first
+
+    boundary = SimpleNamespace(terminate_and_confirm_empty=empty)
+    process = SimpleNamespace(wait=lambda timeout: events.append(("wait", timeout)))
+    descriptors = tuple(
+        SimpleNamespace(close=lambda name=name: events.append(name))
+        for name in ("accepted", "export-listener", "export-stream")
+    )
+    with pytest.raises(ChildProcessError) as raised:
+        supervisor._retire_resources(boundary, process, descriptors)
+    assert raised.value is first
+    assert events == [
+        "boundary",
+        ("wait", 2),
+        "accepted",
+        "export-listener",
+        "export-stream",
+    ]
+    assert supervisor._failure_reason is launch.CleanupReason.BOUNDARY_FAILED
+    assert supervisor._cleanup_failed
+    assert not supervisor._terminals
+
+
+def test_failed_reap_stays_unknown_after_successful_retry_and_fd_closure():
+    supervisor = synthetic_cleanup_supervisor()
+    events = []
+    calls = [0]
+
+    def wait(timeout):
+        calls[0] += 1
+        events.append("wait")
+        if calls[0] == 1:
+            raise launch.subprocess.TimeoutExpired("synthetic", timeout)
+
+    process = SimpleNamespace(wait=wait, kill=lambda: events.append("kill"))
+    boundary = SimpleNamespace(
+        terminate_and_confirm_empty=lambda: events.append("empty")
+    )
+    descriptor = SimpleNamespace(close=lambda: events.append("close"))
+    with pytest.raises(launch.subprocess.TimeoutExpired):
+        supervisor._retire_resources(boundary, process, (descriptor,))
+    assert events == ["empty", "wait", "kill", "wait", "close"]
+    assert supervisor._cleanup_failed
+    assert supervisor._failure_reason is launch.CleanupReason.PROCESS_REAP_FAILED
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_final_close_attempts_all_boundaries_and_fixed_transient_inventory(
+    tmp_path, monkeypatch, failure
+):
+    supervisor = synthetic_cleanup_supervisor()
+    monkeypatch.setattr(launch, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        launch, "_protected", lambda path, **kwargs: os.open(path, os.O_RDONLY)
+    )
+    paths = supervisor._transient_paths()
+    for relative in paths:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if relative in ("captures", "capture-commit"):
+            path.mkdir(exist_ok=True)
+        elif relative not in ("issuer-export.sock", "management.sock"):
+            path.write_bytes(b"synthetic transient")
+    sockets = []
+    for relative in ("issuer-export.sock", "management.sock"):
+        connection = socket.socket(socket.AF_UNIX)
+        connection.bind(str(tmp_path / relative))
+        sockets.append(connection)
+    (tmp_path / "supervisor-once").touch()
+    (tmp_path / "claims").mkdir()
+    events = []
+
+    def retire(name):
+        events.append(name)
+        if failure and name == "first":
+            raise ChildProcessError("synthetic guardian failure")
+
+    for name in ("first", "second"):
+        supervisor._boundaries[name] = SimpleNamespace(
+            terminate_and_confirm_empty=lambda name=name: retire(name), _evidence=None
+        )
+    try:
+        if failure:
+            with pytest.raises(ChildProcessError):
+                supervisor.close()
+            assert not supervisor._cleanup_complete
+            assert supervisor._cleanup_completed_at is None
+        else:
+            supervisor.close()
+            completed_at = supervisor._cleanup_completed_at
+            monkeypatch.setattr(
+                launch,
+                "datetime",
+                SimpleNamespace(
+                    now=lambda tz: (_ for _ in ()).throw(
+                        AssertionError("timestamp recomputed")
+                    )
+                ),
+            )
+            supervisor.close()
+            assert supervisor.cleanup_document()["cleanup_completed_at"] == completed_at
+        assert events == ["first", "second"]
+        assert set(supervisor._removed) == set(paths)
+        assert all(not (tmp_path / path).exists() for path in paths)
+        assert (tmp_path / "supervisor-once").exists()
+        assert (tmp_path / "claims").exists()
+        document = supervisor.cleanup_document()
+        assert document["outcome"] == "incomplete"  # No fabricated terminal evidence.
+        assert document["delivery_status"] == "unconfirmed"
+    finally:
+        for connection in sockets:
+            connection.close()
+
+
+def test_kill_failure_still_attempts_final_reap_and_all_descriptor_closes():
+    supervisor = synthetic_cleanup_supervisor()
+    events = []
+    initial = launch.subprocess.TimeoutExpired("synthetic", 2)
+    calls = [0]
+
+    def wait(timeout):
+        events.append("wait")
+        calls[0] += 1
+        if calls[0] == 1:
+            raise initial
+
+    def kill():
+        events.append("kill")
+        raise ProcessLookupError("synthetic exited child")
+
+    process = SimpleNamespace(wait=wait, kill=kill)
+    boundary = SimpleNamespace(
+        terminate_and_confirm_empty=lambda: events.append("empty")
+    )
+    descriptors = tuple(
+        SimpleNamespace(close=lambda name=name: events.append(name))
+        for name in ("first", "last")
+    )
+    with pytest.raises(launch.subprocess.TimeoutExpired) as raised:
+        supervisor._retire_resources(boundary, process, descriptors)
+    assert raised.value is initial
+    assert events == ["empty", "wait", "kill", "wait", "first", "last"]
+    assert supervisor._cleanup_failed
+    assert not supervisor._terminals
+    assert supervisor.cleanup_document()["outcome"] == "incomplete"
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_issuer_body_error_stays_primary_through_guardian_reap_and_fd_errors(
+    monkeypatch, cancel
+):
+    supervisor = synthetic_cleanup_supervisor()
+    supervisor.state = launch.LaunchState.AWAITING_CAPTURE
+    supervisor._boundary = None
+    supervisor._activated = False
+    supervisor.clocks = SimpleNamespace(
+        deadline=launch.time.monotonic() + 30, require_open=lambda: None
+    )
+    events = []
+    execution = (
+        KeyboardInterrupt("synthetic cancel")
+        if cancel
+        else RuntimeError("unique execution failure")
+    )
+    guardian = ChildProcessError("distinct guardian failure")
+    closes = [0]
+
+    def close_stream():
+        events.append("accepted-close")
+        closes[0] += 1
+        if closes[0] > 1:
+            raise OSError("distinct descriptor failure")
+
+    connection = SimpleNamespace(fileno=lambda: 123, close=close_stream)
+
+    def close_listener():
+        events.append("listener-close")
+        raise OSError("distinct listener failure")
+
+    listener = SimpleNamespace(close=close_listener)
+
+    def empty():
+        events.append("boundary")
+        raise guardian
+
+    boundary = SimpleNamespace(
+        start_watchdog=lambda end: None,
+        require_watchdog=lambda: None,
+        enter_child=lambda: None,
+        terminate_and_confirm_empty=empty,
+        _evidence=None,
+    )
+    waits = [0]
+
+    def wait(timeout):
+        events.append("wait")
+        waits[0] += 1
+        if waits[0] == 1:
+            raise launch.subprocess.TimeoutExpired("synthetic", timeout)
+
+    def kill():
+        events.append("kill")
+        raise ProcessLookupError("synthetic exited child")
+
+    raw = b"synthetic pinned daemon/config"
+    h = launch._digest(raw)
+    monkeypatch.setattr(
+        launch,
+        "_load_local_packet",
+        lambda: {"sshd_digest": h, "issuer_sshd_config_digest": h},
+    )
+    monkeypatch.setattr(launch, "_read", lambda *args: raw)
+    monkeypatch.setattr(supervisor, "_require_ssh_connection", lambda *args: None)
+    monkeypatch.setattr(supervisor, "_publish_context", lambda *args: None)
+    monkeypatch.setattr(supervisor, "_bind_issuer_export", lambda: listener)
+    monkeypatch.setattr(launch, "SlotExecutionBoundary", lambda slot: boundary)
+    monkeypatch.setattr(
+        launch.subprocess,
+        "Popen",
+        lambda *args, **kwargs: SimpleNamespace(wait=wait, kill=kill),
+    )
+
+    def receive(*args):
+        events.append("receive")
+        raise execution
+
+    monkeypatch.setattr(supervisor, "_receive_issuer_export", receive)
+    monkeypatch.setattr(
+        supervisor,
+        "_require_terminal_success",
+        lambda *args: events.append("terminal-inspection"),
+    )
+    with pytest.raises(type(execution)) as raised:
+        supervisor.run_issuer_connection(connection)
+    assert raised.value is execution
+    assert execution.__cause__ is guardian
+    assert events == [
+        "accepted-close",
+        "receive",
+        "boundary",
+        "wait",
+        "kill",
+        "wait",
+        "accepted-close",
+        "listener-close",
+    ]
+    assert supervisor._failure_reason is launch.CleanupReason.EXECUTION_INCOMPLETE
+    assert supervisor._cleanup_failure_reason is launch.CleanupReason.BOUNDARY_FAILED
+    assert supervisor._cleanup_failed
+    assert not supervisor._terminals
+    # Supply the original root clock fields solely for diagnostic projection.
+    supervisor.clocks.started_at = datetime.now(UTC)
+    supervisor.clocks.expires_at = datetime.now(UTC) + timedelta(seconds=30)
+    assert supervisor.cleanup_document()["outcome"] == "incomplete"
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_outer_close_failure_preserves_original_run_exception_mapping(
+    monkeypatch, cancel
+):
+    supervisor = synthetic_cleanup_supervisor()
+    supervisor._activated = True
+    execution = (
+        KeyboardInterrupt("unique cancel")
+        if cancel
+        else RuntimeError("unique run failure")
+    )
+    cleanup = ChildProcessError("distinct outer cleanup")
+    events = []
+    listener = SimpleNamespace(close=lambda: events.append("listener-close"))
+    monkeypatch.setattr(launch, "_load_local_packet", lambda: {"host_role": "issuer"})
+    monkeypatch.setattr(supervisor, "_listen_wg", lambda role: listener)
+    monkeypatch.setattr(supervisor, "_accept_wg", lambda *args: object())
+
+    def execute(connection):
+        raise execution
+
+    def close():
+        events.append("outer-close")
+        raise cleanup
+
+    monkeypatch.setattr(supervisor, "run_issuer_connection", execute)
+    monkeypatch.setattr(supervisor, "close", close)
+    with pytest.raises(
+        KeyboardInterrupt if cancel else launch.LaunchIncomplete
+    ) as raised:
+        supervisor.run()
+    if cancel:
+        assert raised.value is execution
+    else:
+        assert raised.value.__cause__ is execution
+    assert supervisor._failure_reason is launch.CleanupReason.EXECUTION_INCOMPLETE
+    assert supervisor._cleanup_failed
+    assert events[-1] == "outer-close"
+    assert supervisor.cleanup_document()["outcome"] == "incomplete"
+
+
+def test_first_guardian_failure_survives_sticky_boundary_retirement_repeat():
+    supervisor = synthetic_cleanup_supervisor()
+    guardian = ChildProcessError("initial measured guardian failure")
+    sticky = ProviderRefused()
+    calls = [0]
+
+    def empty():
+        calls[0] += 1
+        raise guardian if calls[0] == 1 else sticky
+
+    boundary = SimpleNamespace(terminate_and_confirm_empty=empty)
+    with pytest.raises(ChildProcessError) as first:
+        supervisor._retire_resources(boundary, None)
+    assert first.value is guardian
+    with pytest.raises(ChildProcessError) as repeated:
+        supervisor._retire_resources(boundary, None, primary_failure=guardian)
+    assert repeated.value is guardian
+    assert guardian.__cause__ is sticky
+    assert supervisor._failure_reason is launch.CleanupReason.BOUNDARY_FAILED
+    assert supervisor._cleanup_failed
+    assert supervisor.cleanup_document()["outcome"] == "incomplete"
