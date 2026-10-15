@@ -65,6 +65,8 @@ def test_single_install_real_approvals_ssh_proof_issue_consume_withdrawal(
 
 def _worker(inputs):
     import dotmac_deployment_control as control
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import (
         Encoding,
@@ -87,13 +89,23 @@ def _worker(inputs):
         ssh_public_fingerprint,
     )
     from vendor_cp.deployment.gate0_composition import (
-        AdmissionExpectation,
         Gate0Composition,
         authorization_binding,
     )
-    from vendor_cp.deployment.gate0_runtime import (
-        AdmittedOperation,
-        BoundedHarnessVerifier,
+    from vendor_cp.deployment.gate0_role_custody import (
+        BoundedJSONTransport,
+        ProviderRefused,
+    )
+    from vendor_cp.deployment.gate0_runtime import BoundedHarnessVerifier
+    from vendor_cp.deployment.gate0_window import (
+        FrozenIssuerWindow,
+        OwnerWindowReader,
+        derive_consume_expectation,
+    )
+    from vendor_cp.deployment.gate0_workload_admission import (
+        _FIXED_CLAIMS,
+        GITHUB_ISSUER,
+        OwnerWorkloadAdmission,
     )
     from vendor_cp.deployment.protected_rehearsal_issuer import (
         ProposeIssuerPlan,
@@ -190,21 +202,125 @@ def _worker(inputs):
         signer=fixture_signer,
         authorization_verifier=fixture_signer,
         harness_verifier=verifier,
-        authorization_ttl=timedelta(seconds=120),
+        authorization_ttl=timedelta(seconds=30),
     )
     with pytest.raises(RuntimeError):
         control.install_rehearsal_issuer_security(
             signer=fixture_signer,
             authorization_verifier=fixture_signer,
             harness_verifier=verifier,
-            authorization_ttl=timedelta(seconds=120),
+            authorization_ttl=timedelta(seconds=30),
         )
     expectations = {}
     controllers = {}
     certificates = {}
-    selected = {}
+    readers, documents, owner_admissions = {}, {}, {}
+    synthetic_oidc = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    def url64(raw):
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    numbers = synthetic_oidc.public_key().public_numbers()
+    jwks = {
+        "keys": [
+            {
+                "kid": "synthetic-github",
+                "alg": "RS256",
+                "kty": "RSA",
+                "use": "sig",
+                "n": url64(numbers.n.to_bytes(256, "big")),
+                "e": url64(numbers.e.to_bytes(3, "big")),
+            }
+        ]
+    }
+
+    def fixture_jwks(transport, path, **kwargs):
+        assert transport.origin == GITHUB_ISSUER and path == "/.well-known/jwks"
+        assert kwargs["token"] is None
+        return jwks
+
+    # Explicit child fixture only: never installed in a wheel or CLI selector.
+    BoundedJSONTransport.request = fixture_jwks
+
+    def workload_token(plan_id):
+        github = json.loads(expectations[plan_id].frozen_window_bytes)["github"]
+        stamp = int(datetime.now(UTC).timestamp())
+        claims = dict(
+            github,
+            iat=stamp,
+            nbf=stamp,
+            exp=min(stamp + 30, int(expiry.timestamp())),
+            jti=uuid4().hex,
+        )
+        header = url64(
+            json.dumps(
+                {"alg": "RS256", "kid": "synthetic-github", "typ": "JWT"}
+            ).encode()
+        )
+        body = (header + "." + url64(json.dumps(claims).encode())).encode()
+        return (
+            body.decode()
+            + "."
+            + url64(synthetic_oidc.sign(body, padding.PKCS1v15(), hashes.SHA256()))
+        )
+
+    def make_window(target, index, key, cert):
+        return {
+            "schema": "Gate0IssuerWindow.v1",
+            "window_id": f"fixture-window-{index}",
+            "not_before": (datetime.now(UTC) - timedelta(seconds=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "expires_at": expiry.isoformat().replace("+00:00", "Z"),
+            "purpose": "rehearsal_issuer_operation",
+            "allowed_phases": ["issue", "consume"],
+            "github": dict(
+                _FIXED_CLAIMS,
+                run_id="2",
+                run_attempt="1",
+                sub="synthetic-subject",
+                workflow_sha="a" * 40,
+                environment_node_id="synthetic-environment-node",
+            ),
+            "target": {
+                "id": str(target.id),
+                "ref": target.target_ref,
+                "environment": "rehearsal",
+                "operation": "deploy",
+            },
+            "approval_policy": {"code": "gate0.synthetic", "version": 1},
+            "plan_inputs": {
+                "source_ref": "synthetic-source",
+                "config_ref": "synthetic-config",
+                "descriptor_digest": _digest(b"descriptor"),
+                "execution_plan_digest": _digest(b"operation"),
+            },
+            "controller": {
+                "lease_id": f"lease-{index}",
+                "fingerprint": ssh_public_fingerprint(key.public_key()),
+                "certificate_digest": _digest(cert),
+                "ca_fingerprint": ssh_public_fingerprint(ca.public_key()),
+                "principal": "dotmac-gate0-controller",
+                "certificate_ttl_ceiling_seconds": 600,
+            },
+            "prerequisite_evidence_refs": [_digest(b"synthetic-prerequisite")],
+            "authorization_binding": "control_parsed_full_envelope_v1",
+        }
 
     def seed(index):
+        key = Ed25519PrivateKey.generate()
+        now = int(datetime.now(UTC).timestamp())
+        cert = (
+            SSHCertificateBuilder()
+            .public_key(key.public_key())
+            .type(SSHCertificateType.USER)
+            .key_id(b"gate0:1397614140:2:1")
+            .valid_principals([b"dotmac-gate0-controller"])
+            .valid_after(now - 1)
+            .valid_before(now + 120)
+            .sign(ca)
+            .public_bytes()
+        )
         with platform.platform_session() as db:
             target = control.register_target(
                 db,
@@ -216,14 +332,15 @@ def _worker(inputs):
                     environment="rehearsal",
                 ),
             )
-            control.set_desired_state(
+            window = make_window(target, index, key, cert)
+            desired = control.set_desired_state(
                 db,
                 control.SetDesiredStateCommand(
                     command_id=uuid4().hex,
                     target_id=target.id,
                     desired=control.DesiredDeployment(
                         release_ref="synthetic-issuer-operation",
-                        spec={"replicas": 1},
+                        spec={"gate0_window_v1": window},
                         images=[],
                     ),
                 ),
@@ -237,7 +354,13 @@ def _worker(inputs):
                     _digest(b"operation"),
                     "gate0.synthetic",
                     1,
+                    expected_desired_revision=desired.desired_revision,
                 ),
+            )
+            frozen = FrozenIssuerWindow.from_plan(control.get_plan(db, plan.id))
+            assert (
+                frozen.document == window
+                and frozen.digest != plan.execution_plan_digest
             )
             approvals.publish_policy_version(
                 db,
@@ -264,51 +387,61 @@ def _worker(inputs):
                 plan_id=plan.id,
                 approval_request_id=request.request_id,
             )
-        key = Ed25519PrivateKey.generate()
-        controllers[plan.id] = key
-        now = int(datetime.now(UTC).timestamp())
-        cert = (
-            SSHCertificateBuilder()
-            .public_key(key.public_key())
-            .type(SSHCertificateType.USER)
-            .key_id(b"gate0:1:2:1")
-            .valid_principals([b"dotmac-gate0-controller"])
-            .valid_after(now - 1)
-            .valid_before(now + 120)
-            .sign(ca)
-            .public_bytes()
+        controllers[plan.id], certificates[plan.id] = key, cert
+        reader = OwnerWindowReader(
+            runtime=platform,
+            rehearsal_target_id=target.id,
+            issuer_identity=fixture_signer.rehearsal_issuer_identity,
+            authorization_verifier=fixture_signer,
+            expires_at=expiry,
+            database_io_qualified=True,
         )
-        certificates[plan.id] = cert
+        readers[plan.id] = reader
+        owner_admissions[plan.id] = OwnerWorkloadAdmission(
+            reader=reader, transport=BoundedJSONTransport(GITHUB_ISSUER)
+        )
+        captured = reader.read("issue", plan.id)
+        repeated = reader.read("issue", plan.id)
+        assert captured.expectation.window_freshness is not None
+        assert (
+            repeated.expectation.window_freshness
+            is captured.expectation.window_freshness
+        )
+        assert captured.expectation.window_freshness.origin == reader._origin
+        assert captured.expectation.window_freshness.deadline <= reader._deadline
+        expectations[plan.id] = captured.expectation
+        # Mutating current desired state cannot mutate the approved frozen window.
         with platform.platform_session() as db:
-            view = control.get_plan(db, plan.id)
-        op = AdmittedOperation(
-            "1",
-            "2",
-            "1",
-            "fixture-window",
-            "issue",
-            None,
-            None,
-            f"lease-{index}",
-            ssh_public_fingerprint(key.public_key()),
-            target.target_ref,
-            str(plan.id),
-            view.plan_digest,
-            "rehearsal_issuer_operation",
-            "deploy",
-            view.execution_plan_digest,
-            _digest(cert),
-            ssh_public_fingerprint(ca.public_key()),
-        )
-        expected = AdmissionExpectation(
-            op, target.id, "rehearsal", request.request_id, "gate0.synthetic", 1
-        )
-        expectations[plan.id] = expected
-        selected[("issue", plan.id)] = expected
+            current = control.get_target(db, target.id)
+            changed = {**window, "window_id": "unapproved-replacement"}
+            control.set_desired_state(
+                db,
+                control.SetDesiredStateCommand(
+                    command_id=uuid4().hex,
+                    target_id=target.id,
+                    desired=control.DesiredDeployment(
+                        release_ref="synthetic-replacement",
+                        spec={"gate0_window_v1": changed},
+                        images=[],
+                    ),
+                    expected_version=current.record_version,
+                ),
+            )
+            reread = control.get_plan(db, plan.id)
+            assert reread.plan_digest == plan.plan_digest
+            assert (
+                FrozenIssuerWindow.from_plan(reread).canonical_bytes
+                == frozen.canonical_bytes
+            )
         return plan.id, request.request_id
 
     def admission(phase, plan_id):
-        return selected.get((phase, plan_id))
+        return owner_admissions[plan_id].admit(
+            workload_token(plan_id),
+            phase,
+            plan_id,
+            documents.get(plan_id) if phase == "consume" else None,
+        )
 
     def resolve(expected):
         op = expected.operation
@@ -356,8 +489,52 @@ def _worker(inputs):
         admission=admission,
         proof_resolver=resolve,
         verifier=verifier,
+        require_frozen_window=True,
     )
     try:
+        canary, _ = seed("snapshot-canary")
+        with platform.platform_session() as db:
+            original_plan = control.get_plan(db, canary)
+            current_target = control.get_target(db, original_plan.target_id)
+            with pytest.raises(control.PlanRefusedError):
+                propose_issuer_plan(
+                    db,
+                    ProposeIssuerPlan(
+                        uuid4().hex,
+                        current_target.id,
+                        _digest(b"descriptor"),
+                        _digest(b"operation"),
+                        "gate0.synthetic",
+                        1,
+                        expected_desired_revision=original_plan.desired_revision,
+                    ),
+                )
+            replacement = propose_issuer_plan(
+                db,
+                ProposeIssuerPlan(
+                    uuid4().hex,
+                    current_target.id,
+                    _digest(b"descriptor"),
+                    _digest(b"operation"),
+                    "gate0.synthetic",
+                    1,
+                    expected_desired_revision=current_target.desired_revision,
+                ),
+            )
+            replacement_view = control.get_plan(db, replacement.id)
+            assert replacement_view.plan_digest != original_plan.plan_digest
+            assert (
+                replacement_view.execution_plan_digest
+                == original_plan.execution_plan_digest
+            )
+            assert (
+                FrozenIssuerWindow.from_plan(replacement_view).document["window_id"]
+                == "unapproved-replacement"
+            )
+            assert (
+                FrozenIssuerWindow.from_plan(original_plan).document["window_id"]
+                == "fixture-window-snapshot-canary"
+            )
         first, first_request = seed("a")
         issued = driver.issue(RehearsalIssuerCommand(uuid4().hex, first))
         assert issued.readiness_accepted is False
@@ -382,16 +559,37 @@ def _worker(inputs):
             is control.RehearsalIssuerAuthorizationStanding.VALID
         )
         binding = authorization_binding(issued.authorization_document)
-        consume = replace(
-            expectations[first],
-            operation=replace(
-                expectations[first].operation,
-                phase="consume",
-                authorization_digest=binding.digest,
-                authorization_issued_at=binding.issued_at,
-            ),
+        documents[first] = issued.authorization_document
+        consume = (
+            readers[first]
+            .read("consume", first, issued.authorization_document)
+            .expectation
         )
-        selected[("consume", first)] = consume
+        assert consume.operation.authorization_digest == binding.digest
+        assert consume.operation.authorization_issued_at == binding.issued_at
+        substituted = json.loads(issued.authorization_document)
+        substituted["signature"] = "forged-synthetic-signature"
+        with pytest.raises(ProviderRefused):
+            readers[first].read("consume", first, json.dumps(substituted).encode())
+        substituted = json.loads(issued.authorization_document)
+        substituted["statement"]["target_ref"] = "other-target"
+        with pytest.raises(ProviderRefused):
+            readers[first].read("consume", first, json.dumps(substituted).encode())
+        # Matching attacker bytes/digest do not match the actual frozen plan.
+        changed_window = json.loads(expectations[first].frozen_window_bytes)
+        changed_window["window_id"] = "substituted-window"
+        from vendor_cp.deployment.gate0_framing import canonical
+
+        changed_bytes = canonical(changed_window)
+        with pytest.raises(ValueError):
+            driver._preflight(
+                replace(
+                    expectations[first],
+                    frozen_window_bytes=changed_bytes,
+                    window_digest=_digest(changed_bytes),
+                ),
+                None,
+            )
         consumed = driver.consume(first, issued.authorization_document)
         assert consumed.authorization_id == issued.authorization_id
         # Replay reuses retained immutable proof; owner, not CP, rejects the spend.
@@ -411,26 +609,50 @@ def _worker(inputs):
             replay_driver.consume(first, issued.authorization_document)
         second, second_request = seed("b")
         second_issued = driver.issue(RehearsalIssuerCommand(uuid4().hex, second))
-        second_binding = authorization_binding(second_issued.authorization_document)
-        selected[("consume", second)] = replace(
-            expectations[second],
-            operation=replace(
-                expectations[second].operation,
-                phase="consume",
-                authorization_digest=second_binding.digest,
-                authorization_issued_at=second_binding.issued_at,
-            ),
+        documents[second] = second_issued.authorization_document
+        ns3_approved_at_start = readers[second].read("issue", second)
+        before_withdrawal = readers[second].read(
+            "consume", second, second_issued.authorization_document
         )
-        with platform.platform_session() as db:
-            approvals.withdraw_request(
-                db,
-                approvals.WithdrawRequestCommand(
-                    second_request,
-                    uuid4(),
-                    "synthetic-human",
-                    "withdraw-test",
-                    uuid4().hex,
-                ),
+        assert (
+            before_withdrawal.expectation.operation.authorization_digest
+            == authorization_binding(second_issued.authorization_document).digest
+        )
+
+        def withdraw_between_preflight_and_mutation(expected):
+            proof = resolve(expected)
+            with platform.platform_session() as db:
+                approvals.withdraw_request(
+                    db,
+                    approvals.WithdrawRequestCommand(
+                        second_request,
+                        uuid4(),
+                        "synthetic-human",
+                        "withdraw-test",
+                        uuid4().hex,
+                    ),
+                )
+            return proof
+
+        driver._resolver = withdraw_between_preflight_and_mutation
+        with pytest.raises(approvals.ApprovalNotHeld):
+            driver.consume(second, second_issued.authorization_document)
+        driver._resolver = resolve
+        # NS3 honestly retains only approved-at-start possession scope. It can
+        # derive a cryptographically valid envelope after withdrawal; IDP3's
+        # fresh owner read and actual mutation hold independently refuse it.
+        snapshot_consume = derive_consume_expectation(
+            ns3_approved_at_start,
+            second_issued.authorization_document,
+            fixture_signer.rehearsal_issuer_identity,
+            fixture_signer,
+        )
+        assert snapshot_consume.operation.phase == "consume"
+        with pytest.raises(ProviderRefused):
+            readers[second].read("issue", second)
+        with pytest.raises(ProviderRefused):
+            readers[second].read(
+                "consume", second, second_issued.authorization_document
             )
         composition = RelayComposition(
             dispatcher.platform_session_factory,
@@ -439,12 +661,15 @@ def _worker(inputs):
                 contracts=ContractEventConsumer(), approvals=ApprovalEventRouter()
             ),
         )
-        assert (
-            drain_once(
+        claimed = 0
+        for _ in range(16):
+            report = drain_once(
                 worker_id="gate0-composition-fixture", composition=composition
-            ).claimed
-            >= 1
-        )
+            )
+            claimed += report.claimed
+            if report.claimed == 0:
+                break
+        assert claimed >= 1
         with platform.platform_session() as db:
             rows = (
                 db.execute(
@@ -464,13 +689,11 @@ def _worker(inputs):
             assert outcomes[0].evidence["authorizations_revoked"] == [
                 second_issued.authorization_id
             ]
-        assert (
+        with pytest.raises(ValueError):
             driver.standing(
                 second_issued.authorization_document, second_issued.evidence_digest
-            ).standing
-            is not control.RehearsalIssuerAuthorizationStanding.VALID
-        )
-        with pytest.raises(approvals.ApprovalNotHeld):
+            )
+        with pytest.raises(ValueError):
             driver.consume(second, second_issued.authorization_document)
         assert verifier._retained_count == 4
         with platform.platform_session() as db:

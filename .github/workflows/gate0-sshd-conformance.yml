@@ -1,0 +1,78 @@
+name: Gate 0 installed SSH conformance
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  installed-sshd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-poetry
+      - name: Install locked dependencies and the built wheel
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          poetry install
+          poetry build --format wheel
+          poetry run python -m pip install --force-reinstall --no-deps dist/*.whl
+      - name: Verify exact public Ubuntu artifacts and prepare disposable binaries
+        run: |
+          python3 -I -B - <<'PYTHON'
+          import hashlib, json, os, pathlib, subprocess, urllib.request
+          root = pathlib.Path(os.environ["RUNNER_TEMP"]) / "gate0-ssh-artifacts"
+          root.mkdir(mode=0o700)
+          pins = json.loads(pathlib.Path("conformance/openssh-ubuntu-artifacts.json").read_bytes())
+          assert pins["schema"] == "Gate0HostedSshArtifacts.v1"
+          descriptor = {}
+          for item in pins["artifacts"]:
+              assert item["url"].startswith("https://security.ubuntu.com/ubuntu/pool/main/o/openssh/")
+              assert item["version"] == "1:9.6p1-3ubuntu13.19" and item["architecture"] == "amd64"
+              with urllib.request.urlopen(item["url"], timeout=20) as response:
+                  assert response.geturl() == item["url"]
+                  data = response.read(item["size"] + 1)
+              assert len(data) == item["size"]
+              assert hashlib.sha256(data).hexdigest() == item["sha256"]
+              archive = root / (item["package"] + ".deb")
+              archive.write_bytes(data)
+              extracted = root / item["package"]
+              subprocess.run(["dpkg-deb", "--extract", str(archive), str(extracted)], check=True, timeout=20)
+              binary = extracted / item["binary_path"]
+              role = "server" if item["package"] == "openssh-server" else "client"
+              descriptor[role] = {"path": str(binary), "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "archive_sha256": item["sha256"], "package_version": item["version"]}
+          path = root / "qualified-binaries.json"
+          path.write_text(json.dumps(descriptor, sort_keys=True) + "\n")
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write("GATE0_SSHD_QUALIFICATION_JSON=" + str(path) + "\n")
+          PYTHON
+      - name: Run installed-wheel conformance with a loopback-only task daemon
+        run: |
+          task_dir="$RUNNER_TEMP/gate0-installed-conformance"
+          mkdir -m 755 "$task_dir"
+          cp conformance/test_gate0_real_sshd.py conformance/gate0_synthetic_sshd_worker.py "$task_dir/"
+          python_path="$(poetry env info --executable)"
+          cd "$task_dir"
+          sudo --preserve-env=GITHUB_ACTIONS,GATE0_SSHD_QUALIFICATION_JSON "$python_path" -m pytest -c /dev/null -q test_gate0_real_sshd.py --junitxml="$RUNNER_TEMP/gate0-installed-sshd.xml" -o junit_family=xunit1
+      - name: Retain exact public artifact identities and test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate0-installed-sshd-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gate0-ssh-artifacts/qualified-binaries.json
+            ${{ runner.temp }}/gate0-installed-sshd.xml
+          if-no-files-found: error
+          retention-days: 30

@@ -74,6 +74,7 @@ GROUPS: Final[tuple[str, ...]] = (
     "withdrawal-conflicts",
     "deployment",
     "recovery",
+    "gate0",
     "diagnose",
 )
 
@@ -557,6 +558,17 @@ def build_parser() -> _Parser:
     bundle.add_argument("--out")
     bundle.set_defaults(handler=commands.recovery_bundle)
 
+    gate0 = groups.add_parser("gate0", help="finite protected service adapters")
+    gate0_sub = gate0.add_subparsers(dest="name", parser_class=_Parser)
+    from vendor_cp.deployment import gate0_services
+
+    issuer = _command(gate0_sub, "gate0", "issuer-run", "run one finite issuer window")
+    issuer.set_defaults(service_handler=gate0_services.issuer_run)
+    attester = _command(
+        gate0_sub, "gate0", "attester-session", "serve one fixed SSH proof exchange"
+    )
+    attester.set_defaults(service_handler=gate0_services.attester_session)
+
     # ── diagnose ───────────────────────────────────────────────────────────
     diagnose_group = groups.add_parser("diagnose", help="questions about this process")
     diagnose_sub = diagnose_group.add_subparsers(dest="name", parser_class=_Parser)
@@ -623,6 +635,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command not in by_command():
         parser.error(f"{command!r} has no declared owner")
+
+    if command in {"gate0 issuer-run", "gate0 attester-session"}:
+        # These owners speak a closed binary stdio protocol. Generic CLI result
+        # rendering would corrupt the service's stdout stream.
+        return int(args.service_handler())
 
     if command == "deployment candidate-material-probe":
         from vendor_cp.deployment.candidate_materials import (

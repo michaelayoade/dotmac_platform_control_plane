@@ -1,0 +1,23 @@
+{
+  "schema": "Gate0HostedSshArtifacts.v1",
+  "artifacts": [
+    {
+      "package": "openssh-server",
+      "version": "1:9.6p1-3ubuntu13.19",
+      "architecture": "amd64",
+      "url": "https://security.ubuntu.com/ubuntu/pool/main/o/openssh/openssh-server_9.6p1-3ubuntu13.19_amd64.deb",
+      "size": 511342,
+      "sha256": "dae4c1ee35cc57555f4e594805845c280350e2d40f0fecf84c6e8bb245848581",
+      "binary_path": "usr/sbin/sshd"
+    },
+    {
+      "package": "openssh-client",
+      "version": "1:9.6p1-3ubuntu13.19",
+      "architecture": "amd64",
+      "url": "https://security.ubuntu.com/ubuntu/pool/main/o/openssh/openssh-client_9.6p1-3ubuntu13.19_amd64.deb",
+      "size": 907922,
+      "sha256": "c77365e50089a9be1ccc4cb28a586d7485b9d83798e67b8ad6636e53cc921649",
+      "binary_path": "usr/bin/ssh"
+    }
+  ]
+}

@@ -91,6 +91,10 @@ def _subject(plan: PlanFacts) -> str:
     return subject
 
 
+# Public CP reuse point: one canonical subject for preflight and mutation holds.
+issuer_approval_subject = _subject
+
+
 def _evidence_digest(document: object) -> str:
     """A canonical `sha256:<64 hex>` digest of harness evidence.
 
