@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from time import monotonic
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 from cryptography.exceptions import InvalidSignature
@@ -29,6 +29,9 @@ from vendor_cp.deployment.rehearsal_issuer_trust_state import (
     RehearsalIssuerTrustState,
     TrustEligibility,
 )
+
+if TYPE_CHECKING:
+    from vendor_cp.deployment.gate0_attester import ProducedAttestation
 
 _DOMAIN = b"dotmac.cp.gate0.companion.v1\x00"
 _PURPOSE = "deployment_rehearsal_harness_evidence"
@@ -386,3 +389,394 @@ class ProtectedHarnessVerifier:
             )
             == TrustEligibility.ELIGIBLE
         )
+
+
+class ProofRegistrationRefused(ValueError):
+    """Bounded sanitized proof-cache refusal; never an authority verdict."""
+
+    def __init__(self) -> None:
+        super().__init__("gate0_proof_registration_refused")
+
+
+@dataclass(frozen=True, slots=True)
+class _RetainedProof:
+    owner_envelope: bytes
+    owner_bytes: bytes
+    owner_signature: bytes
+    key_id: str
+    algorithm: str
+    context: AttestationContext
+    companion: CompanionAttestation
+    transcript: bytes
+    metadata: bytes
+    leaf: ProtectedHarnessVerifier = field(compare=False, repr=False)
+
+    @property
+    def size(self) -> int:
+        return sum(
+            len(value)
+            for value in (
+                self.owner_envelope,
+                self.owner_bytes,
+                self.owner_signature,
+                self.companion.canonical_bytes,
+                self.companion.signature,
+                self.transcript,
+                self.metadata,
+            )
+        )
+
+
+def _strict_json(encoded: bytes, maximum: int) -> object:
+    if type(encoded) is not bytes or not encoded or len(encoded) > maximum:
+        raise ProofRegistrationRefused()
+    return json.loads(
+        encoded.decode("utf-8"),
+        object_pairs_hook=_unique_object,
+        parse_constant=_reject_nonfinite,
+    )
+
+
+def _reject_nonfinite(_: str) -> object:
+    raise ProofRegistrationRefused()
+
+
+def _bounded_base64(value: object, maximum: int) -> bytes:
+    if not isinstance(value, str) or len(value) > 4 * ((maximum + 2) // 3):
+        raise ProofRegistrationRefused()
+    decoded = base64.b64decode(value, validate=True)
+    if (
+        not decoded
+        or len(decoded) > maximum
+        or base64.b64encode(decoded).decode("ascii") != value
+    ):
+        raise ProofRegistrationRefused()
+    return decoded
+
+
+def _sha256(encoded: bytes) -> str:
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+class BoundedHarnessVerifier:
+    """Startup-fixed four-proof dispatcher; Control remains the spend owner.
+
+    Private registration is called only by the composed driver, never a route.
+    No eviction/reset/reinstall, mutable current phase or cached verification
+    flag. Every verification invokes the existing immutable leaf again.
+    """
+
+    def __init__(
+        self,
+        *,
+        key_id: str,
+        public_key: bytes,
+        trust_state: RehearsalIssuerTrustState,
+        expires_at: datetime,
+        now: Callable[[], datetime] = _utc_now,
+        monotonic_clock: Callable[[], float] = monotonic,
+    ) -> None:
+        from threading import Lock
+
+        started, origin = now(), monotonic_clock()
+        if not _aware_datetime(started) or not _aware_datetime(expires_at):
+            raise ProofRegistrationRefused()
+        started, expires_at = started.astimezone(UTC), expires_at.astimezone(UTC)
+        duration = (expires_at - started).total_seconds()
+        if (
+            not _finite_monotonic(origin)
+            or not math.isfinite(duration)
+            or not 0 < duration <= 600
+        ):
+            raise ProofRegistrationRefused()
+        deadline = origin + duration
+        if not math.isfinite(deadline) or deadline <= origin:
+            raise ProofRegistrationRefused()
+        if (
+            type(public_key) is not bytes
+            or len(public_key) != 32
+            or not isinstance(key_id, str)
+            or not key_id
+            or key_id != key_id.strip()
+            or len(key_id) > 512
+        ):
+            raise ProofRegistrationRefused()
+        if (
+            trust_state.eligibility(
+                key_id=key_id, public_key_fingerprint=_sha256(public_key)
+            )
+            != TrustEligibility.ELIGIBLE
+        ):
+            raise ProofRegistrationRefused()
+        self._key_id, self._public_key, self._trust = key_id, public_key, trust_state
+        self._expires, self._now, self._monotonic = expires_at, now, monotonic_clock
+        self._started, self._origin, self._deadline = started, origin, deadline
+        self._lock = Lock()
+        self._entries: dict[str, _RetainedProof] = {}
+        self._retained_bytes = 0
+
+    def _samples(self) -> tuple[datetime, float]:
+        wall, elapsed = self._now(), self._monotonic()
+        if not _aware_datetime(wall):
+            raise ProofRegistrationRefused()
+        wall = wall.astimezone(UTC)  # no caller tzinfo callback under the cache lock
+        if not self._samples_open(wall, elapsed):
+            raise ProofRegistrationRefused()
+        return wall, elapsed
+
+    def _samples_open(self, wall: datetime, elapsed: float) -> bool:
+        return (
+            _aware_datetime(wall)
+            and self._started <= wall < self._expires
+            and _finite_monotonic(elapsed)
+            and self._origin <= elapsed < self._deadline
+        )
+
+    def _require_open(self) -> None:
+        self._samples()
+
+    @property
+    def _retained_count(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def _evidence(self, digest: str) -> _RetainedProof:
+        self._require_open()
+        with self._lock:
+            entry = self._entries.get(digest)
+        if entry is None:
+            raise ProofRegistrationRefused()
+        self._require_open()
+        return entry
+
+    def _prepare(
+        self, proof: ProducedAttestation, expected: AdmittedOperation
+    ) -> _RetainedProof:
+        from cryptography.hazmat.primitives.serialization import (
+            SSHCertificate,
+            load_ssh_public_identity,
+        )
+        from dotmac_deployment_control import (
+            parse_signed_rehearsal_harness_evidence,
+            verify_rehearsal_harness_evidence_signature,
+        )
+
+        from vendor_cp.deployment.gate0_attester import ProducedAttestation
+
+        self._require_open()
+        if (
+            type(proof) is not ProducedAttestation
+            or type(expected) is not AdmittedOperation
+        ):
+            raise ProofRegistrationRefused()
+        if (
+            type(proof.context) is not AttestationContext
+            or type(proof.companion) is not CompanionAttestation
+        ):
+            raise ProofRegistrationRefused()
+        owner_envelope = proof.control_document
+        companion_bytes = proof.companion.canonical_bytes
+        companion_signature = proof.companion.signature
+        transcript_bytes = proof.public_proof_transcript
+        context_input = proof.context
+        raw_fields = (
+            owner_envelope,
+            companion_bytes,
+            companion_signature,
+            transcript_bytes,
+        )
+        if (
+            any(type(value) is not bytes for value in raw_fields)
+            or sum(map(len, raw_fields)) > 128 * 1024
+        ):
+            raise ProofRegistrationRefused()
+        # Round-trip only the CP context; exact owner/proof bytes remain untouched.
+        context_values = asdict(context_input)
+        metadata = json.dumps(
+            context_values,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("ascii")
+        if len(metadata) > 8192:
+            raise ProofRegistrationRefused()
+        context = AttestationContext(**json.loads(metadata))
+        actual_operation = {
+            key: value
+            for key, value in context_values.items()
+            if key not in {"challenge_digest", "proof_transcript_digest"}
+        }
+        if actual_operation != asdict(expected):
+            raise ProofRegistrationRefused()
+        envelope = _strict_json(owner_envelope, 128 * 1024)
+        parsed = parse_signed_rehearsal_harness_evidence(envelope)
+        if (
+            len(parsed.canonical_bytes) > 8192
+            or len(parsed.signature) != 64
+            or parsed.key_id != self._key_id
+            or parsed.algorithm != "ed25519"
+            or len(companion_bytes) > 8192
+            or len(companion_signature) != 64
+        ):
+            raise ProofRegistrationRefused()
+        transcript = _strict_json(transcript_bytes, 128 * 1024)
+        if (
+            not isinstance(transcript, dict)
+            or set(transcript) != {"schema", "certificate", "challenge", "sshsig"}
+            or transcript["schema"] != "Gate0PublicProofTranscript.v1"
+        ):
+            raise ProofRegistrationRefused()
+        certificate = _bounded_base64(transcript["certificate"], 16384)
+        challenge = _bounded_base64(transcript["challenge"], 8192)
+        _bounded_base64(transcript["sshsig"], 16384)
+        cert = load_ssh_public_identity(certificate)
+        if (
+            not isinstance(cert, SSHCertificate)
+            or cert.public_bytes() != certificate
+            or _sha256(certificate) != expected.certificate_digest
+        ):
+            raise ProofRegistrationRefused()
+        challenge_document = _strict_json(challenge, 8192)
+        if not isinstance(challenge_document, dict) or set(challenge_document) != {
+            "schema",
+            "instance_id",
+            "challenge_id",
+            "nonce",
+            "context",
+            "expires_at",
+        }:
+            raise ProofRegistrationRefused()
+        if challenge_document[
+            "schema"
+        ] != "Gate0PossessionChallenge.v1" or challenge_document["context"] != asdict(
+            expected
+        ):
+            raise ProofRegistrationRefused()
+        if any(
+            not isinstance(challenge_document[name], str)
+            or re.fullmatch(r"[0-9a-f]{64}", challenge_document[name]) is None
+            for name in ("instance_id", "challenge_id", "nonce")
+        ):
+            raise ProofRegistrationRefused()
+        expiry_value = challenge_document["expires_at"]
+        if not isinstance(expiry_value, str):
+            raise ProofRegistrationRefused()
+        challenge_expiry = datetime.fromisoformat(expiry_value)
+        if (
+            not _aware_datetime(challenge_expiry)
+            or not parsed.issued_at < challenge_expiry <= self._expires
+            or parsed.valid_until > self._expires
+            or parsed.valid_until.timestamp() > cert.valid_before
+            or parsed.issued_at.timestamp() < cert.valid_after
+        ):
+            raise ProofRegistrationRefused()
+        if (
+            _sha256(challenge) != context.challenge_digest
+            or _sha256(transcript_bytes) != context.proof_transcript_digest
+        ):
+            raise ProofRegistrationRefused()
+        companion = CompanionAttestation(companion_bytes, companion_signature)
+        lookup = _sha256(parsed.canonical_bytes)
+        leaf = ProtectedHarnessVerifier(
+            key_id=self._key_id,
+            public_key=self._public_key,
+            trust_state=self._trust,
+            context=context,
+            read_companion=lambda requested: companion if requested == lookup else None,
+            expires_at=self._expires,
+            now=self._now,
+            monotonic_clock=self._monotonic,
+        )
+        verify_rehearsal_harness_evidence_signature(
+            parsed, verifier=leaf, at=self._now()
+        )
+        self._require_open()
+        entry = _RetainedProof(
+            owner_envelope,
+            parsed.canonical_bytes,
+            parsed.signature,
+            parsed.key_id,
+            parsed.algorithm,
+            context,
+            companion,
+            transcript_bytes,
+            metadata,
+            leaf,
+        )
+        if entry.size > 128 * 1024:
+            raise ProofRegistrationRefused()
+        return entry
+
+    def _register(self, proof: ProducedAttestation, expected: AdmittedOperation) -> str:
+        failed = False
+        try:
+            entry = self._prepare(proof, expected)
+            key = _sha256(entry.owner_bytes)
+            samples = self._samples()  # All caller clocks/crypto run outside the lock.
+            with self._lock:
+                if not self._samples_open(*samples):
+                    raise ProofRegistrationRefused()
+                prior = self._entries.get(key)
+                if prior is not None:
+                    if prior != entry:
+                        raise ProofRegistrationRefused()
+                else:
+                    if (
+                        len(self._entries) >= 4
+                        or self._retained_bytes + entry.size > 512 * 1024
+                    ):
+                        raise ProofRegistrationRefused()
+                    self._entries[key] = entry
+                    self._retained_bytes += entry.size
+            # A clock can cross while awaiting the short lock; never return late.
+            # Retention grants nothing and remains append-only even on late refusal.
+            self._require_open()
+            return key
+        except Exception:
+            failed = True
+        if failed:
+            raise ProofRegistrationRefused()
+        raise ProofRegistrationRefused()
+
+    def verify_rehearsal_harness_evidence(
+        self,
+        *,
+        key_id: str,
+        algorithm: str,
+        purpose: str,
+        canonical_bytes: bytes,
+        signature: bytes,
+    ) -> bool:
+        try:
+            self._require_open()
+            if (
+                key_id != self._key_id
+                or algorithm != "ed25519"
+                or purpose != _PURPOSE
+                or type(canonical_bytes) is not bytes
+                or not canonical_bytes
+                or len(canonical_bytes) > 8192
+                or type(signature) is not bytes
+                or len(signature) != 64
+            ):
+                return False
+            entry = self._evidence(_sha256(canonical_bytes))
+            if (
+                entry.owner_bytes != canonical_bytes
+                or entry.owner_signature != signature
+                or entry.key_id != key_id
+                or entry.algorithm != algorithm
+            ):
+                return False
+            verified = entry.leaf.verify_rehearsal_harness_evidence(
+                key_id=key_id,
+                algorithm=algorithm,
+                purpose=purpose,
+                canonical_bytes=canonical_bytes,
+                signature=signature,
+            )
+            self._require_open()
+            return verified
+        except Exception:
+            return False

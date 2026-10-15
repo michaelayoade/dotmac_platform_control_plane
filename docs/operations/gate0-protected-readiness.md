@@ -128,7 +128,8 @@ from an independent authenticated provenance/plan/window authority. A frozen
 dataclass alone is not that authority. The consumer authenticates the enrolled
 attester's signed assertion and fixed context.
 The issuer signer cannot satisfy this fixed attester identity. Receipt
-authentication, E finalization and the real composition driver remain absent.
+authentication and E finalization remain absent. The bounded composition source
+below delegates phases to the existing owners; it does not supply live admission.
 
 Attester enrollment uses CP's `sha256:<hex>` fingerprint of the raw Ed25519
 public key, matched to the existing public trust record. Controller and CA
@@ -215,3 +216,51 @@ bootstrap must separately pin/measure the deployed OpenSSH binary/version.
 Proof establishes that the certified key signed this admitted operation's
 challenge; it does not observe GitHub OIDC, human approval or the key's later
 controller session. Those live composition observations remain E obligations.
+
+
+## Bounded phase composition source
+
+`gate0_composition.Gate0Composition` consumes independent `AdmissionExpectation`
+and `ProducedAttestation` ports, compares every admitted operation against public
+Control plan/target fields, and delegates issuance/consumption to the existing CP
+held-approval wrappers. It uses the injected kernel session factory, closes
+preflight before opening a clean standing session, and explicitly commits or
+rolls back each mutation. An ambiguous commit or cleanup returns the typed
+`CompositionIncomplete` outcome. No automatic recovery or second spend ledger is
+introduced. Phase results always report `readiness_accepted=False`.
+
+`BoundedHarnessVerifier` implements the unchanged public Control verifier
+protocol and authenticates registration through the existing immutable leaf.
+It retains at most four proofs, each at most 128 KiB, with a 512 KiB aggregate
+cap. It keys entries by the hash of exact Control canonical bytes and preserves
+original envelope bytes, signature metadata, companion, context and public
+transcript. Equal registration is idempotent; any retained-byte/context change
+under the same hash refuses. There is no eviction, reset, phase-switch flag or
+callback under the registry lock. Every lookup reruns the leaf, current public
+trust and the original startup wall/monotonic deadline; creating a later leaf
+cannot renew that enclosing window. Registration is private to the driver.
+These process-local entries are neither durable publication nor lease authority.
+
+Consumption binds the full public parsed authorization envelope: strict bounded
+JSON, `RehearsalIssuerAuthorizationV1.parse`, then `as_mapping`, serialized with
+sorted keys, comma/colon separators, ASCII escapes and nonfinite values refused.
+SHA-256 includes the signature and key metadata; transport whitespace does not
+change it. The companion also binds the actual statement issuance time in UTC
+ISO format with `Z`, preserving microseconds. Control v1 remains unchanged.
+
+Trusted startup may use `assemble_gate0_composition` to install the existing
+Control security port once with explicit signer/verifier and bounded TTL. There
+is no default signer, admission oracle, controller-session observer, custody
+loader, transport or receipt publisher. The resolver must bound its wire response
+and callback duration before construction; postchecks cannot interrupt an
+arbitrarily blocking synchronous callback. Independent admitted provenance,
+authenticated human route exposure, actual later controller action, accepted
+B/C1/C2/D and immutable receipt publication remain operational obligations.
+
+Focused unit tests author registry conflict/concurrency/cap/deadline/trust and
+phase/public-plan/transaction sensitivity checks. The isolated migration test
+authors one real owner installation, migrated PostgreSQL roles, synthetic
+Approvals actors/custody, actual certificate/SSHSIG producer, issue/standing/
+consume/replay, and a separate-controller withdrawal/relay/revocation path.
+These new tests have not been executed locally; execution is Git-hosted CI only.
+Synthetic CI evidence cannot close protected E readiness.

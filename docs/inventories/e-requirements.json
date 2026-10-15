@@ -1,6 +1,6 @@
 {
   "schema": "Gate0ERequirements.v1",
-  "scope": "Partial E proof-producer/verifier source plus provisional grouped report inventory; not closed A7.7/D7 matrix",
+  "scope": "Partial E proof producer/verifier and bounded phase composition source plus provisional grouped report inventory; not closed A7.7/D7 matrix",
   "prerequisites": {
     "B": {
       "state": "unknown",
@@ -273,6 +273,12 @@
       "owner": "B/C1/C2/D acceptance owners",
       "source": "docs/adr/0013-operator-authorization-issuer-and-its-bootstrap.md:A7.7; protected_issuer_conformance/release-evidence.json",
       "missing": "Published wheel records prove installable dependencies, not accepted B/C1/C2/D. All acceptance references remain unknown; D18 live convergence is separate."
+    },
+    {
+      "id": "independent_admission_and_session_observation",
+      "owner": "Protected runtime admission / selected transport owner",
+      "source": "src/vendor_cp/deployment/gate0_composition.py:AdmissionPort,ProofResolver,Gate0Composition; src/vendor_cp/deployment/gate0_runtime.py:BoundedHarnessVerifier",
+      "missing": "Bounded driver source delegates real owner transitions and preserves four immutable proofs; no production independent GitHub/acceptance admission provider or later authenticated controller-session/action observer is implemented. Injected synthetic CI fixtures prove composition only. Ambiguous consumption commit remains incomplete without a public exact-result recovery contract."
     }
   ],
   "reused_owners": {
@@ -284,7 +290,8 @@
     "online_role_migrations": "rehearsal_issuer_harness/conftest.py",
     "authenticated_human_decision": "src/vendor_cp/approvals/router.py:record_decision",
     "published_control_verifier": "Control 0.1.0a17, source 574418944d35ddf3559d17e59e9184b5f545ebe4, rehearsal_harness_evidence.py:RehearsalHarnessEvidenceVerifier",
-    "actual_ssh_possession_producer": "src/vendor_cp/deployment/gate0_attester.py:AttesterProofProducer"
+    "actual_ssh_possession_producer": "src/vendor_cp/deployment/gate0_attester.py:AttesterProofProducer",
+    "bounded_phase_composition": "src/vendor_cp/deployment/gate0_composition.py:Gate0Composition; src/vendor_cp/deployment/gate0_runtime.py:BoundedHarnessVerifier"
   },
   "validation": "Tests authored only. Run exclusively on Git-hosted CI; no synthetic report is protected readiness evidence.",
   "proof_producer_bounds": {
@@ -298,5 +305,15 @@
     "restart": "nonresumable; prior-instance responses unknown",
     "certificate_digest": "sha256 of SSHCertificate.public_bytes()",
     "provenance": "frozen context is supplied by independent authority; producer does not verify GitHub OIDC or later controller session"
+  },
+  "composition_bounds": {
+    "retained_proofs_max": 4,
+    "retained_proof_bytes_max": 131072,
+    "aggregate_retained_bytes_max": 524288,
+    "configured_window_seconds_max": 600,
+    "retention": "process-local append-only; no reset, eviction, durable publication or spend marker",
+    "authorization_digest": "sha256 of full public parsed authorization as_mapping canonical ASCII JSON including signature/key metadata",
+    "readiness_accepted": false,
+    "new_tests": "tests/unit/test_gate0_composition.py; tests/migration/test_gate0_composition.py; authored, Git-hosted execution pending"
   }
 }
