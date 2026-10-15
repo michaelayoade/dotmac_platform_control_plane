@@ -274,7 +274,7 @@ def _checked_certificate(
         certificate.type == SSHCertificateType.USER
         and certificate.valid_before >= end.timestamp()
     )
-    return cast(SSHCertificate, certificate)
+    return certificate
 
 
 class FileSlot(StrEnum):
@@ -577,7 +577,7 @@ class InstalledA9Lifecycle:
     def _ensure_directories(self) -> None:
         root = _directory(_ROOT)
         try:
-            _require(os.fstat(root).st_mode & 0o001)
+            _require((os.fstat(root).st_mode & 0o001) != 0)
             for name, mode, gid in (
                 ("keys", 0o750, self._doc["collector_gid"]),
                 ("lifecycle", 0o700, 0),
@@ -1417,18 +1417,18 @@ class InstalledA9Lifecycle:
         private_bytes = _read_fd(private_record.file_fd, 65536)
         public_bytes = _read_fd(public_record.file_fd, 65536)
         try:
-            private = load_ssh_private_key(private_bytes, password=None)
+            private_key = load_ssh_private_key(private_bytes, password=None)
             public = load_ssh_public_identity(public_bytes.rstrip(b"\n"))
             _require(
-                isinstance(private, Ed25519PrivateKey)
+                isinstance(private_key, Ed25519PrivateKey)
                 and isinstance(public, Ed25519PublicKey)
             )
-            private = cast(Ed25519PrivateKey, private)
+            private_key = cast(Ed25519PrivateKey, private_key)
             public = cast(Ed25519PublicKey, public)
             encoded = public.public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
             _require(
                 public_bytes in (encoded + b"\n", encoded + b" \n")
-                and private.public_key().public_bytes(
+                and private_key.public_key().public_bytes(
                     Encoding.OpenSSH, PublicFormat.OpenSSH
                 )
                 == encoded
@@ -2182,7 +2182,10 @@ class NativeJitInvocation:
         )
         values = self._call(("show", "--all", "--property=Version"), deadline)
         _require(
-            values == ("Version=" + native["systemd_version"] + "\n").encode("ascii")
+            values
+            == ("Version=" + cast(str, native["systemd_version"]) + "\n").encode(
+                "ascii"
+            )
         )
         _qualify_runner_mounts(
             self.selection["runner_binary"]["digest"],
@@ -2449,7 +2452,7 @@ class NativeJitInvocation:
                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                 )
                 _require(hasattr(os, "pidfd_open"))
-                self._pidfd = os.pidfd_open(cast(int, self.pid), 0)
+                self._pidfd = os.pidfd_open(self.pid, 0)
                 _require(
                     self._measure_main(
                         self._show(self.bounds.provisioning_end),
@@ -2539,7 +2542,7 @@ class NativeJitInvocation:
         _require(
             self.owns_binding(binding)
             and peer.family == socket.AF_UNIX
-            and peer.type & socket.SOCK_SEQPACKET
+            and (peer.type & socket.SOCK_SEQPACKET) != 0
         )
         self._require_current()
         pid, uid, gid = struct.unpack(
@@ -2607,7 +2610,6 @@ class NativeJitInvocation:
             self._stop_failed_start()
             raise LifecycleRefused()
         _require(type(record) is dict and record["cgroup"] == _JIT_GROUP)
-        record = cast(JSONRecord, record)
         self.pid, self.start, self.invocation = (
             record["pid"],
             record["start"],

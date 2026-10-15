@@ -155,7 +155,7 @@ def _read_jit_credential(uid: int) -> bytes:
             and stat.S_ISDIR(metadata.st_mode)
             and not metadata.st_mode & 0o022
         )
-        _require(os.fstatvfs(directory).f_flag & os.ST_RDONLY)
+        _require((os.fstatvfs(directory).f_flag & os.ST_RDONLY) != 0)
         fd = os.open(
             "jit-config", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory
         )

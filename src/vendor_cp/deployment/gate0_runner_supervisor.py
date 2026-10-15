@@ -272,7 +272,7 @@ class SupervisorManager:
         self.installation = installation
 
     def _call(self, arguments: tuple[str, ...], deadline: float) -> bytes:
-        allowed = {
+        allowed: set[tuple[str, ...]] = {
             ("start", "--no-block", _TIMER),
             ("start", "--no-block", _BOOTSTRAP),
             ("stop", "--no-block", _BOOTSTRAP),
@@ -816,7 +816,6 @@ def retire_and_export_collector(
             lock.close()
     _before(end)
     _require(raw is not None)
-    raw = cast(bytes, raw)
     result = strict_object(raw)
     success = (
         result.get("schema") == "Gate0A9OwnedFilesRetirement.v1"
