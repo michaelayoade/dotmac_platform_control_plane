@@ -31,13 +31,251 @@ from uuid import UUID
 
 from vendor_cp.deployment.gate0_capture import CaptureCoordinates, decode_capture
 from vendor_cp.deployment.gate0_framing import canonical, strict_object
-from vendor_cp.deployment.gate0_role_custody import ProviderRefused
+from vendor_cp.deployment.gate0_role_custody import (
+    ProviderRefused,
+    WireGuardBaoEndpoint,
+)
 
 ROOT = Path("/run/dotmac-gate0")
 CGROUP_ROOT = Path("/sys/fs/cgroup/dotmac-gate0")
 SLOTS = ("a_issue", "a_consume", "b_issue", "b_consume")
 Role = Literal["issuer", "attester", "management", "capture_sender"]
 _SEAL = object()
+
+
+# Fixed architect-reviewed capability profiles. These are not caller inputs.
+_CONTINUING_CAPS = 0x400E3  # CHOWN, DAC_OVERRIDE, KILL, SETGID, SETUID, SYS_CHROOT
+_PREFLIGHT_CAPS = 0x411E3  # continuing + SETPCAP + NET_ADMIN
+_SECUREBITS = 234
+
+
+class _CapHeader(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+    version: int
+    pid: int
+
+
+class _CapData(ctypes.Structure):
+    _fields_ = [
+        ("effective", ctypes.c_uint32),
+        ("permitted", ctypes.c_uint32),
+        ("inheritable", ctypes.c_uint32),
+    ]
+    effective: int
+    permitted: int
+    inheritable: int
+
+
+def _capget() -> tuple[int, int, int]:
+    libc = ctypes.CDLL(None, use_errno=True)
+    get = libc.capget
+    get.argtypes = [ctypes.POINTER(_CapHeader), ctypes.POINTER(_CapData)]
+    get.restype = ctypes.c_int
+    header, data = _CapHeader(0x20080522, 0), (_CapData * 2)()
+    if int(get(ctypes.byref(header), data)) != 0 or header.version != 0x20080522:
+        raise ProviderRefused()
+    return (
+        data[0].effective | (data[1].effective << 32),
+        data[0].permitted | (data[1].permitted << 32),
+        data[0].inheritable | (data[1].inheritable << 32),
+    )
+
+
+def _capset(effective: int, permitted: int, inheritable: int) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    put = libc.capset
+    put.argtypes = [ctypes.POINTER(_CapHeader), ctypes.POINTER(_CapData)]
+    put.restype = ctypes.c_int
+    header, data = _CapHeader(0x20080522, 0), (_CapData * 2)()
+    for index in range(2):
+        data[index].effective = (effective >> (index * 32)) & 0xFFFFFFFF
+        data[index].permitted = (permitted >> (index * 32)) & 0xFFFFFFFF
+        data[index].inheritable = (inheritable >> (index * 32)) & 0xFFFFFFFF
+    if int(put(ctypes.byref(header), data)) != 0:
+        raise ProviderRefused()
+
+
+def _prctl_raw(option: int, argument: int = 0, third: int = 0) -> int:
+    libc = ctypes.CDLL(None, use_errno=True)
+    call = libc.prctl
+    call.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    call.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    return int(call(option, argument, third, 0, 0))
+
+
+def _prctl(option: int, argument: int = 0, third: int = 0) -> int:
+    result = _prctl_raw(option, argument, third)
+    if result < 0:
+        raise ProviderRefused()
+    return result
+
+
+def _cap_last_cap() -> int:
+    raw = _read(Path("/proc/sys/kernel/cap_last_cap"), 16)
+    if re.fullmatch(rb"[0-9]{1,2}\n?", raw) is None:
+        raise ProviderRefused()
+    last = int(raw)
+    if not 18 <= last <= 63:
+        raise ProviderRefused()
+    for capability in range(last + 1):
+        if _prctl(23, capability) not in (0, 1):
+            raise ProviderRefused()
+    if _prctl_raw(23, last + 1) != -1 or ctypes.get_errno() != errno.EINVAL:
+        raise ProviderRefused()
+    return last
+
+
+def _ambient_set(last: int) -> int:
+    result = 0
+    for capability in range(last + 1):
+        present = _prctl(47, 1, capability)
+        if present not in (0, 1):
+            raise ProviderRefused()
+        result |= present << capability
+    return result
+
+
+def _bounding_set(last: int) -> int:
+    result = 0
+    for capability in range(last + 1):
+        present = _prctl(23, capability)
+        if present not in (0, 1):
+            raise ProviderRefused()
+        result |= present << capability
+    return result
+
+
+def _require_capability_profile(mask: int) -> None:
+    last = _cap_last_cap()
+    if not 18 <= last <= 63 or (
+        _capget() != (mask, mask, 0)
+        or _bounding_set(last) != mask
+        or _ambient_set(last) != 0
+        or _prctl(27) != _SECUREBITS
+        or _prctl(39) != 1
+    ):
+        raise ProviderRefused()
+
+
+def _require_initial_process() -> None:
+    pid = os.getpid()
+    if (
+        os.geteuid() != 0
+        or os.listdir("/proc/self/task") != [str(pid)]
+        or _read(Path(f"/proc/{pid}/task/{pid}/children"), 4096).strip()
+    ):
+        raise ProviderRefused()
+
+
+def _prepare_network_privileges() -> None:
+    _require_initial_process()
+    last = _cap_last_cap()
+    if not 18 <= last <= 63:
+        raise ProviderRefused()
+    _, permitted, _ = _capget()
+    if (
+        permitted & _PREFLIGHT_CAPS != _PREFLIGHT_CAPS
+        or _bounding_set(last) & _PREFLIGHT_CAPS != _PREFLIGHT_CAPS
+        or _prctl(27) not in (0, _SECUREBITS)
+    ):
+        raise ProviderRefused()
+    _prctl(47, 4)  # PR_CAP_AMBIENT_CLEAR_ALL
+    _prctl(28, _SECUREBITS)
+    if _prctl(27) != _SECUREBITS:
+        raise ProviderRefused()
+    _capset(_PREFLIGHT_CAPS, _PREFLIGHT_CAPS, 0)
+    for capability in range(last + 1):
+        if not _PREFLIGHT_CAPS & (1 << capability):
+            _prctl(24, capability)
+    _prctl(38, 1)  # irreversible no_new_privs, inherited across exec
+    _require_capability_profile(_PREFLIGHT_CAPS)
+
+
+def _seal_network_privileges() -> None:
+    _require_capability_profile(_PREFLIGHT_CAPS)
+    last = _cap_last_cap()
+    _capset(_CONTINUING_CAPS | (1 << 8), _CONTINUING_CAPS | (1 << 8), 0)
+    for capability in range(last + 1):
+        if capability != 8 and not _CONTINUING_CAPS & (1 << capability):
+            _prctl(24, capability)
+    _prctl(24, 8)  # SETPCAP last
+    _prctl(47, 4)
+    _capset(_CONTINUING_CAPS, _CONTINUING_CAPS, 0)
+    _require_capability_profile(_CONTINUING_CAPS)
+
+
+def _proc_capabilities(pid: int) -> tuple[int, int, int, int, int, int]:
+    # Kernel proc entries belong to their process UID, not the root file
+    # installer. Fixed native PID path, bounded read, no caller-selected file.
+    descriptor = os.open(
+        f"/proc/{pid}/status", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    )
+    try:
+        raw = _bytes(descriptor, 65536).decode("ascii")
+    finally:
+        os.close(descriptor)
+    names = ("CapEff", "CapPrm", "CapInh", "CapAmb", "CapBnd", "NoNewPrivs")
+    found: dict[str, int] = {}
+    for line in raw.splitlines():
+        key, separator, value = line.partition(":")
+        if key in names:
+            text = value.strip()
+            if (
+                key in found
+                or not separator
+                or re.fullmatch(
+                    r"[0-9a-f]{16}" if key != "NoNewPrivs" else r"[01]", text
+                )
+                is None
+            ):
+                raise ProviderRefused()
+            found[key] = int(text, 16 if key != "NoNewPrivs" else 10)
+    if set(found) != set(names):
+        raise ProviderRefused()
+    return (
+        found["CapEff"],
+        found["CapPrm"],
+        found["CapInh"],
+        found["CapAmb"],
+        found["CapBnd"],
+        found["NoNewPrivs"],
+    )
+
+
+def _require_worker_privileges(uid: int, supervisor_pid: int) -> None:
+    account = pwd.getpwuid(uid)
+    descriptor = os.open(
+        "/proc/self/status", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    )
+    try:
+        status = _bytes(descriptor, 65536).decode("ascii")
+    finally:
+        os.close(descriptor)
+    uid_rows = [
+        line.split()[1:] for line in status.splitlines() if line.startswith("Uid:")
+    ]
+    if (
+        uid <= 0
+        or os.getresuid() != (uid, uid, uid)
+        or uid_rows != [[str(uid)] * 4]
+        or os.getresgid() != (account.pw_gid,) * 3
+        or not set(os.getgroups()) <= {account.pw_gid}
+        or _proc_capabilities(os.getpid()) != (0, 0, 0, 0, _CONTINUING_CAPS, 1)
+        or _proc_capabilities(supervisor_pid)
+        != (_CONTINUING_CAPS, _CONTINUING_CAPS, 0, 0, _CONTINUING_CAPS, 1)
+        or _capget() != (0, 0, 0)
+        or _ambient_set(_cap_last_cap()) != 0
+        or _prctl(27) != _SECUREBITS
+        or _prctl(39) != 1
+    ):
+        raise ProviderRefused()
 
 
 class LaunchState(StrEnum):
@@ -375,6 +613,75 @@ def _run_document(raw: bytes) -> RunDocument:
     return result
 
 
+class WireGuardPeer(TypedDict):
+    public_key: str
+    allowed_ips: list[str]
+
+
+def _wg_key(value: object) -> str:
+    text = _text(value)
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except ValueError:
+        raise ProviderRefused() from None
+    if len(raw) != 32 or base64.b64encode(raw).decode("ascii") != text:
+        raise ProviderRefused()
+    return text
+
+
+def _peer_inventory(value: object) -> list[WireGuardPeer]:
+    if not isinstance(value, list) or not 0 < len(value) <= 32:
+        raise ProviderRefused()
+    result: list[WireGuardPeer] = []
+    keys: set[str] = set()
+    addresses: set[str] = set()
+    for unparsed in value:
+        item = _record(unparsed, {"public_key", "allowed_ips"})
+        key = _wg_key(item["public_key"])
+        entries = item["allowed_ips"]
+        if key in keys or not isinstance(entries, list) or not 0 < len(entries) <= 32:
+            raise ProviderRefused()
+        keys.add(key)
+        allowed: list[str] = []
+        for entry in entries:
+            text = _text(entry)
+            if not text.endswith("/32"):
+                raise ProviderRefused()
+            try:
+                address = _private_ipv4(text[:-3])
+            except ValueError:
+                raise ProviderRefused() from None
+            if address + "/32" != text or address in addresses:
+                raise ProviderRefused()
+            addresses.add(address)
+            allowed.append(text)
+        result.append({"public_key": key, "allowed_ips": sorted(allowed)})
+    return sorted(result, key=lambda peer: peer["public_key"])
+
+
+def _observed_peer_inventory(
+    peers_raw: bytes, allowed_raw: bytes
+) -> list[WireGuardPeer]:
+    try:
+        peers = [_wg_key(line) for line in peers_raw.decode("ascii").splitlines()]
+        entries: list[WireGuardPeer] = []
+        for line in allowed_raw.decode("ascii").splitlines():
+            fields = line.split("\t")
+            if len(fields) != 2:
+                raise ProviderRefused()
+            entries.append(
+                {"public_key": _wg_key(fields[0]), "allowed_ips": fields[1].split()}
+            )
+        inventory = _peer_inventory(entries)
+        if len(peers) != len(set(peers)) or sorted(peers) != [
+            peer["public_key"] for peer in inventory
+        ]:
+            raise ProviderRefused()
+        return inventory
+    except (ValueError, UnicodeError):
+        raise ProviderRefused() from None
+
+
 class Network(TypedDict):
     interface: str
     index: int
@@ -386,6 +693,7 @@ class Network(TypedDict):
     peer_allowed_ip: str
     route_document: str
     nft_ruleset_digest: str
+    peers: list[WireGuardPeer]
 
 
 def _private_ipv4(value: object) -> str:
@@ -411,6 +719,7 @@ def _network(value: object) -> Network:
             "local_address",
             "peer_public_key",
             "peer_allowed_ip",
+            "peers",
             "route_document",
             "nft_ruleset_digest",
         },
@@ -422,8 +731,9 @@ def _network(value: object) -> Network:
         "namespace_inode": _integer(item["namespace_inode"], minimum=1),
         "bao_address": _private_ipv4(item["bao_address"]),
         "local_address": _private_ipv4(item["local_address"]),
-        "peer_public_key": _text(item["peer_public_key"]),
+        "peer_public_key": _wg_key(item["peer_public_key"]),
         "peer_allowed_ip": _text(item["peer_allowed_ip"]),
+        "peers": _peer_inventory(item["peers"]),
         "route_document": _text(item["route_document"]),
         "nft_ruleset_digest": _sha(item["nft_ruleset_digest"]),
     }
@@ -435,6 +745,14 @@ def _network(value: object) -> Network:
         or len(key) != 32
         or base64.b64encode(key).decode("ascii") != result["peer_public_key"]
         or result["peer_allowed_ip"] != result["bao_address"] + "/32"
+    ):
+        raise ProviderRefused()
+    if {
+        "public_key": result["peer_public_key"],
+        "allowed_ips": [result["peer_allowed_ip"]],
+    } not in result["peers"] or any(
+        result["local_address"] + "/32" in peer["allowed_ips"]
+        for peer in result["peers"]
     ):
         raise ProviderRefused()
     return result
@@ -449,7 +767,7 @@ class SshEndpoint(TypedDict):
 def _ssh_endpoint(value: object) -> SshEndpoint:
     item = _record(value, {"local_address", "local_port", "remote_address"})
     port = _integer(item["local_port"], minimum=1)
-    if port > 65535:
+    if not 1024 <= port <= 65535:
         raise ProviderRefused()
     return {
         "local_address": _private_ipv4(item["local_address"]),
@@ -562,6 +880,16 @@ def _local_packet(raw: bytes) -> LocalPacket:
     if result["schema"] != "Gate0FiniteLaunch.v1":
         raise ProviderRefused()
     _instant(result["run_end"])
+    for endpoint in result["ssh_endpoints"].values():
+        if (
+            endpoint["local_address"] != result["network"]["local_address"]
+            or sum(
+                endpoint["remote_address"] + "/32" in peer["allowed_ips"]
+                for peer in result["network"]["peers"]
+            )
+            != 1
+        ):
+            raise ProviderRefused()
     if role == "issuer":
         result["issuer_uid"] = _integer(item["issuer_uid"], minimum=1)
         result["capture_sender_uid"] = _integer(item["capture_sender_uid"], minimum=1)
@@ -587,6 +915,7 @@ def _load_local_packet() -> LocalPacket:
 
 
 class ContextRecord(TypedDict):
+    network_measurement_digest: str
     packet_digest: str
     local_packet_digest: str
     machine_id_digest: str
@@ -606,6 +935,7 @@ def _context_record(raw: bytes) -> ContextRecord:
     item = _record(
         strict_object(raw),
         {
+            "network_measurement_digest",
             "packet_digest",
             "local_packet_digest",
             "machine_id_digest",
@@ -628,6 +958,7 @@ def _context_record(raw: bytes) -> ContextRecord:
     ):
         raise ProviderRefused()
     result: ContextRecord = {
+        "network_measurement_digest": _sha(item["network_measurement_digest"]),
         "packet_digest": _sha(item["packet_digest"]),
         "local_packet_digest": _sha(item["local_packet_digest"]),
         "machine_id_digest": _sha(item["machine_id_digest"]),
@@ -684,30 +1015,24 @@ class NetworkMeasurement(TypedDict):
     namespace_inode: int
     interface: str
     index: int
+    bao_address: str
+    local_address: str
     peer_public_key: str
     peer_allowed_ip: str
+    peers: list[WireGuardPeer]
     route_digest: str
     nft_ruleset_digest: str
+    started_at: str
+    monotonic_origin: float
+    deadline: float
+    expires_at: str
+    supervisor_pid: int
+    supervisor_start: str
 
 
 def _network_measurement(raw: bytes) -> NetworkMeasurement:
-    item = _record(
-        strict_object(raw),
-        {
-            "packet_digest",
-            "local_packet_digest",
-            "machine_id_digest",
-            "namespace_device",
-            "namespace_inode",
-            "interface",
-            "index",
-            "peer_public_key",
-            "peer_allowed_ip",
-            "route_digest",
-            "nft_ruleset_digest",
-        },
-    )
-    return {
+    item = _record(strict_object(raw), set(NetworkMeasurement.__annotations__))
+    result: NetworkMeasurement = {
         "packet_digest": _sha(item["packet_digest"]),
         "local_packet_digest": _sha(item["local_packet_digest"]),
         "machine_id_digest": _sha(item["machine_id_digest"]),
@@ -715,11 +1040,23 @@ def _network_measurement(raw: bytes) -> NetworkMeasurement:
         "namespace_inode": _integer(item["namespace_inode"], minimum=1),
         "interface": _text(item["interface"]),
         "index": _integer(item["index"], minimum=1),
-        "peer_public_key": _text(item["peer_public_key"]),
+        "bao_address": _private_ipv4(item["bao_address"]),
+        "local_address": _private_ipv4(item["local_address"]),
+        "peer_public_key": _wg_key(item["peer_public_key"]),
         "peer_allowed_ip": _text(item["peer_allowed_ip"]),
+        "peers": _peer_inventory(item["peers"]),
         "route_digest": _sha(item["route_digest"]),
         "nft_ruleset_digest": _sha(item["nft_ruleset_digest"]),
+        "started_at": _text(item["started_at"]),
+        "monotonic_origin": _number(item["monotonic_origin"]),
+        "deadline": _number(item["deadline"]),
+        "expires_at": _text(item["expires_at"]),
+        "supervisor_pid": _integer(item["supervisor_pid"], minimum=1),
+        "supervisor_start": _text(item["supervisor_start"]),
     }
+    _instant(result["started_at"])
+    _instant(result["expires_at"])
+    return result
 
 
 def _peer(channel: socket.socket) -> tuple[int, int, int]:
@@ -1001,6 +1338,7 @@ class InstalledLaunchContext:
     _boundary: str
     local_packet_digest: str
     machine_id_digest: str
+    network_measurement_digest: str
 
     def __init__(self, *, _seal: object | None = None, **values: object) -> None:
         if _seal is not _SEAL:
@@ -1043,6 +1381,7 @@ class InstalledLaunchContext:
             _boundary=record["boundary"],
             local_packet_digest=record["local_packet_digest"],
             machine_id_digest=record["machine_id_digest"],
+            network_measurement_digest=record["network_measurement_digest"],
         )
         result.require_open()
         return result
@@ -1052,6 +1391,7 @@ class InstalledLaunchContext:
             self.started_at, self.monotonic_origin, self.deadline, self.expires_at
         ).require_open()
         pid = self._supervisor_pid
+        _require_worker_privileges(self.worker_uid, pid)
         if (
             os.geteuid() != self.worker_uid
             or Path(f"/proc/{pid}").stat().st_uid != 0
@@ -1079,17 +1419,77 @@ class InstalledLaunchContext:
             or _digest(_read(Path("/etc/machine-id"), 4096)) != self.machine_id_digest
         ):
             raise ProviderRefused()
-        # Actual protected packet measurement is performed by the supervisor
-        # before this metadata exists. Native DB acquisition occurs inside the
-        # very same cgroup whose root parent enforces the original deadline.
-        measurement = _network_measurement(_read(ROOT / "network-measurement.json"))
+        self._require_network_measurement(_local_packet(local))
+
+    def _require_network_measurement(self, packet: LocalPacket) -> NetworkMeasurement:
+        raw = _read(ROOT / "network-measurement.json")
+        if _digest(raw) != self.network_measurement_digest:
+            raise ProviderRefused()
+        measurement = _network_measurement(raw)
         namespace = Path("/proc/self/ns/net").stat()
+        network = packet["network"]
+        start, end = (
+            _instant(measurement["started_at"]),
+            _instant(measurement["expires_at"]),
+        )
         if (
             measurement["packet_digest"] != self.packet_digest
             or measurement["local_packet_digest"] != self.local_packet_digest
             or measurement["machine_id_digest"] != self.machine_id_digest
             or measurement["namespace_device"] != namespace.st_dev
             or measurement["namespace_inode"] != namespace.st_ino
+            or measurement["started_at"] != self.started_at.isoformat()
+            or measurement["expires_at"] != self.expires_at.isoformat()
+            or measurement["monotonic_origin"] != self.monotonic_origin
+            or not 0 < (end - start).total_seconds() <= 300
+            or measurement["deadline"]
+            != self.monotonic_origin + (end - start).total_seconds()
+            or not self.monotonic_origin < self.deadline <= measurement["deadline"]
+            or measurement["supervisor_pid"] != self._supervisor_pid
+            or measurement["supervisor_start"] != self._supervisor_start
+            or measurement["namespace_device"] != network["namespace_device"]
+            or measurement["namespace_inode"] != network["namespace_inode"]
+            or measurement["interface"] != network["interface"]
+            or measurement["index"] != network["index"]
+            or measurement["bao_address"] != network["bao_address"]
+            or measurement["local_address"] != network["local_address"]
+            or measurement["peer_public_key"] != network["peer_public_key"]
+            or measurement["peer_allowed_ip"] != network["peer_allowed_ip"]
+            or measurement["peers"] != network["peers"]
+            or socket.if_nametoindex(network["interface"]) != network["index"]
+            or measurement["route_digest"]
+            != _digest(network["route_document"].encode("ascii"))
+            or measurement["nft_ruleset_digest"] != network["nft_ruleset_digest"]
+        ):
+            raise ProviderRefused()
+        return measurement
+
+    def require_bao_endpoint(
+        self, endpoint: WireGuardBaoEndpoint, deadline: float
+    ) -> None:
+        """Launch measurement + enforced immutability, not fresh WG netlink I/O."""
+        self.require_installation(self.role, self.packet_digest, self.expires_at)
+        if type(endpoint) is not WireGuardBaoEndpoint:
+            raise ProviderRefused()
+        endpoint.__post_init__()
+        packet = _load_local_packet()
+        measured = self._require_network_measurement(packet)
+        peer = base64.b64decode(measured["peer_public_key"], validate=True)
+        if (
+            endpoint.role != self.role
+            or endpoint.launch_packet_digest != self.packet_digest
+            or endpoint.interface != measured["interface"]
+            or endpoint.interface_index != measured["index"]
+            or endpoint.namespace_device != measured["namespace_device"]
+            or endpoint.namespace_inode != measured["namespace_inode"]
+            or endpoint.address != measured["bao_address"]
+            or endpoint.local_address != measured["local_address"]
+            or endpoint.peer_allowed_ip != measured["peer_allowed_ip"]
+            or endpoint.peer_fingerprint != _digest(peer)
+            or endpoint.wg_binary_digest != packet["binary_digests"]["/usr/bin/wg"]
+            or type(deadline) not in (int, float)
+            or not math.isfinite(deadline)
+            or not time.monotonic() < deadline <= self.deadline
         ):
             raise ProviderRefused()
 
@@ -1631,6 +2031,7 @@ class FiniteGate0Supervisor:
         self.machine_id_digest = _digest(_read(Path("/etc/machine-id"), 4096))
         if _local_packet(local)["machine_id_digest"] != self.machine_id_digest:
             raise ProviderRefused()
+        _prepare_network_privileges()
         self._measure_network()
         self.state = LaunchState.AWAITING_CAPTURE
         self._index = 0
@@ -1642,13 +2043,19 @@ class FiniteGate0Supervisor:
 
     def _measure_network(self) -> None:
         boundary = SlotExecutionBoundary("preflight")
-        boundary.start_watchdog(self.clocks.deadline)
         try:
-            self._measure_network_scoped(boundary)
+            boundary.start_watchdog(self.clocks.deadline)
+            measurement = self._measure_network_scoped(boundary)
         finally:
+            # Parent capdrop cannot revoke a child's capabilities. Empty/reaped
+            # includes every privileged helper and the independent guardian.
             boundary.terminate_and_confirm_empty()
+        self.clocks.require_open()
+        _seal_network_privileges()
+        self.clocks.require_open()
+        self._publish_network_measurement(measurement)
 
-    def _measure_network_scoped(self, boundary: SlotExecutionBoundary) -> None:
+    def _measure_network_scoped(self, boundary: SlotExecutionBoundary) -> bytes:
         """Compare actual PUBLIC kernel facts, never dump WG secret material.
 
         All expected facts and binary pins must be in the protected operational
@@ -1711,19 +2118,11 @@ class FiniteGate0Supervisor:
             finally:
                 process.stdout.close()
 
-        peers = (
-            public_query("/usr/bin/wg", ["show", interface, "peers"])
-            .decode("ascii")
-            .splitlines()
+        inventory = _observed_peer_inventory(
+            public_query("/usr/bin/wg", ["show", interface, "peers"]),
+            public_query("/usr/bin/wg", ["show", interface, "allowed-ips"]),
         )
-        allowed = (
-            public_query("/usr/bin/wg", ["show", interface, "allowed-ips"])
-            .decode("ascii")
-            .splitlines()
-        )
-        if peers != [network["peer_public_key"]] or allowed != [
-            network["peer_public_key"] + "\t" + network["peer_allowed_ip"]
-        ]:
+        if inventory != network["peers"]:
             raise ProviderRefused()
         route = public_query(
             "/usr/sbin/ip",
@@ -1755,10 +2154,25 @@ class FiniteGate0Supervisor:
                 "index": network["index"],
                 "peer_public_key": network["peer_public_key"],
                 "peer_allowed_ip": network["peer_allowed_ip"],
+                "bao_address": network["bao_address"],
+                "local_address": network["local_address"],
+                "peers": inventory,
+                "started_at": self.clocks.started_at.isoformat(),
+                "monotonic_origin": self.clocks.monotonic_origin,
+                "deadline": self.clocks.deadline,
+                "expires_at": self.clocks.expires_at.isoformat(),
+                "supervisor_pid": os.getpid(),
+                "supervisor_start": _process_identity(os.getpid()),
                 "route_digest": _digest(route),
                 "nft_ruleset_digest": _digest(rules),
             }
         )
+        return measurement
+
+    def _publish_network_measurement(self, measurement: bytes) -> None:
+        _require_capability_profile(_CONTINUING_CAPS)
+        _network_measurement(measurement)
+        self.network_measurement_digest = _digest(measurement)
         fd = os.open(
             ROOT / "network-measurement.json",
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -1780,8 +2194,8 @@ class FiniteGate0Supervisor:
             )
             listener.settimeout(deadline - time.monotonic())
             listener.bind(str(ROOT / "management.sock"))
-            os.chown(ROOT / "management.sock", management_uid, -1)
             os.chmod(ROOT / "management.sock", 0o600)
+            os.chown(ROOT / "management.sock", management_uid, -1)
             listener.listen(1)
             return listener
         except BaseException:
@@ -2109,8 +2523,8 @@ class FiniteGate0Supervisor:
         try:
             listener.settimeout(self.clocks.deadline - time.monotonic())
             listener.bind(str(ROOT / "issuer-export.sock"))
-            os.chown(ROOT / "issuer-export.sock", self.worker_uid, -1)
             os.chmod(ROOT / "issuer-export.sock", 0o600)
+            os.chown(ROOT / "issuer-export.sock", self.worker_uid, -1)
             listener.listen(1)
             return listener
         except BaseException:
@@ -2481,6 +2895,7 @@ class FiniteGate0Supervisor:
             "supervisor_pid": os.getpid(),
             "supervisor_start": _process_identity(os.getpid()),
             "boundary": "/dotmac-gate0/" + slot,
+            "network_measurement_digest": self.network_measurement_digest,
         }
         path = ROOT / "context.next"
         fd = os.open(

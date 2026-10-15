@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import pytest
+from run_block_expressions import _job_blocks, _resolved_step_blocks, _step_fields
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE_WORKFLOW = ROOT / ".github" / "workflows" / "production-image.yml"
@@ -483,9 +484,48 @@ def test_the_candidate_build_still_requires_the_tip() -> None:
     workflow no longer needs. A change that relaxed both would have read as one
     consistent decision and been wrong in half of it.
     """
+    _assert_candidate_tip_binding(_text(IMAGE_WORKFLOW))
+
+
+def _assert_candidate_tip_binding(workflow: str) -> None:
+    jobs = _resolved_step_blocks(_job_blocks(workflow))
+    assert set(jobs) == {"candidate", "gate0-role"}
+    for blocks in jobs.values():
+        steps = [_step_fields(block) for block in blocks]
+        selected = next(
+            step for step in steps if step.get("id", "").strip() == "select"
+        )
+        checked = next(
+            step
+            for step in steps
+            if step.get("name", "").strip()
+            == "Verify the source revision earned its way here"
+        )
+        assert 'current_main="$(git rev-parse HEAD)"' in selected["run"]
+        assert 'echo "current_main=$current_main"' in selected["run"]
+        assert (
+            "CURRENT_MAIN: ${{ steps.select.outputs.current_main }}" in checked["env"]
+        )
+        assert '--expect-head "${CURRENT_MAIN}"' in checked["run"]
+        assert "CURRENT_MAIN=" not in checked["run"]
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        (
+            "CURRENT_MAIN: ${{ steps.select.outputs.current_main }}",
+            "CURRENT_MAIN: wrong",
+        ),
+        ('--expect-head "${CURRENT_MAIN}"', '--expect-head "wrong"'),
+        ('echo "current_main=$current_main"', 'echo "unrelated=$current_main"'),
+    ],
+)
+def test_candidate_tip_binding_refuses_changed_data_flow(old: str, new: str) -> None:
     workflow = _text(IMAGE_WORKFLOW)
-    assert 'current_main="$(git rev-parse HEAD)"' in workflow
-    assert '--expect-head "${{ steps.select.outputs.current_main }}"' in workflow
+    assert old in workflow
+    with pytest.raises(AssertionError):
+        _assert_candidate_tip_binding(workflow.replace(old, new))
 
 
 # ── the acceptance battery covers what it claims to ─────────────────────────

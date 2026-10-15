@@ -22,7 +22,7 @@ device/source/peer loss still fails at the socket.
 
 The `network` section has exactly `interface`, `index`, `namespace_device`,
 `namespace_inode`, `bao_address`, `local_address`, `peer_public_key`,
-`peer_allowed_ip`, `route_document`, `nft_ruleset_digest`. `binary_digests` pins
+`peer_allowed_ip`, `peers`, `route_document`, `nft_ruleset_digest`. `binary_digests` pins
 the three fixed public query paths. These fields cannot allocate a new peer,
 route, firewall privilege or network capability. They remain unqualified until
 the installation owner provides and reviews actual values.
@@ -202,3 +202,68 @@ private status directory. Parent requires that exact record alongside daemon
 exit zero, then proves the whole boundary empty. Attester `finish_slot` likewise
 runs only after custody cleanup. Missing success, worker exit 5 or ambiguous
 daemon reporting therefore cannot be presented as a confirmed refusal.
+
+
+## Sealed network measurement and complete peer inventory
+
+The local network document now requires `peers`, a closed complete list of
+`{public_key, allowed_ips}` records (at most 32 peers, at most 32 addresses per
+peer). Keys are canonical public 32-byte base64; every address is one canonical
+RFC1918 IPv4 /32. Duplicate keys or address ownership, unknown fields, empty
+inventories and broader prefixes refuse. Root normalizes kernel ordering and
+compares the entire actual peer/AllowedIPs inventory in both directions. The
+existing `peer_public_key`/`peer_allowed_ip` fields select exactly Bao's sole /32
+on that peer; they do not grant all peers to Bao. Each SSH remote source must
+have exactly one inventory allocation, and local SSH listener ports are >=1024.
+No gateway, source translation, wildcard or subset qualification is implied.
+
+Before any helper or guardian, the single-thread root supervisor refuses any
+existing child, checks actual capget-v3 and supported capability bounds, then
+normalizes to P0=0x411e3. Ambient/inheritable sets are cleared, securebits234 are
+locked and no-new-privileges is set. P0 includes the fixed continuing K=0x400e3
+(CHOWN, DAC_OVERRIDE, KILL, SETGID, SETUID, SYS_CHROOT) plus temporary SETPCAP and
+NET_ADMIN. Initial permitted/bounding sets must already contain P0; missing
+privilege, unsupported ABI or syscall/readback failure is terminal.
+
+After the fixed pinned public WG/ip/nft queries, all preflight descendants and
+the independent guardian must be empty/reaped. Only then does root replace its
+permitted/effective sets, drop every bounding bit outside K (SETPCAP last), clear
+ambient and independently read back E=P=B=K, I=A=0, securebits234 and NNP1.
+No listener, SSH daemon or usable protected measurement/context is published
+before this final seal. Continuing watchdogs inherit K. Root-owned Unix socket
+modes are set before transfer to non-root owners; no FOWNER exception is added.
+UsePAM=no, no PTY/external authentication commands and the exact pinned daemon
+remain qualification conditions; native failure never widens K dynamically.
+
+The protected measurement binds original wall/monotonic coordinates, common
+and local packet/machine hashes, supervisor PID/start, namespace/device/index,
+complete inventory, exact Bao selection, route and nft digests. Its hash enters
+the root-owned worker context without a circular dependency on that context.
+Every custody request reloads and checks the concrete installed context,
+measurement, original deadline and actual live namespace/interface, then performs
+the actual fresh device/source bind and connected socket readbacks before any
+secret bytes. The worker never runs `wg`. This is measured-at-launch plus
+qualified namespace immutability, **not** fresh per-request WG netlink evidence.
+
+After real sshd UID switching and again in Python spawn, source requires real,
+effective, saved, filesystem UID equality, declared primary group without extra
+groups, E=P=I=A=0, inherited B=K and NNP1; the supervisor still has exactly K.
+Bounding K is a ceiling, not a worker capability grant. No NET_RAW, NET_ADMIN,
+SYS_ADMIN or SETPCAP is retained; no filecap/sudo helper or mutable namespace
+manager may remain in the qualified installation.
+External host root is still the explicit trusted installation boundary.
+
+`conformance/test_gate0_network_privileges.py` authors an isolated role-image
+PID1 proof with synthetic certificate authentication, pinned sshd, UID10032,
+Python spawn, actual cap loss/regain refusal, private namespace WG/route/nft
+mutation refusal and fresh socket/device-readback positive/negative. Under the
+same final K it also refuses a genuine accepted-CA certificate with a wrong
+principal, proves the fixed worker never entered, and requires the authentication
+monitor/privsep descendants to exit and be reaped before the positive session.
+It emits
+`Gate0NativeNetworkPrivilegeProof.v1` only after descendant reaping, with
+`full_wireguard_installation_qualified:false` and `live_readiness:false`.
+The coordinator must run it with bounded whole-container termination; it has
+not been executed locally. It does not qualify the full protected WG topology,
+actual transport/custody, delegated host cgroup mount, DNS/HA safety or E. Those
+require their existing independently authorized installed qualification packet.

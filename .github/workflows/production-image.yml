@@ -248,6 +248,7 @@ jobs:
               > role-smoke.json
             jq -e '.schema == "Gate0RoleImageSmoke.v1" and .passed == true and .live_readiness == false' \
               role-smoke.json > /dev/null
+            bash .github/candidate/accept_gate0_network.sh "${CANDIDATE_TAG}" "$GITHUB_WORKSPACE/role-native-network.json"
           else
             .github/candidate/acceptance.sh "${CANDIDATE_TAG}"
           fi
@@ -393,9 +394,10 @@ jobs:
             jq --arg repository "$IMAGE_REPOSITORY" \
               --arg profile_digest "sha256:$(sha256sum role-profile.json | cut -d' ' -f1)" \
               --arg smoke_digest "sha256:$(sha256sum role-smoke.json | cut -d' ' -f1)" \
+              --arg native_network_digest "sha256:$(sha256sum role-native-network.json | cut -d' ' -f1)" \
               '. + {contract:"dotmac-gate0-role-release-receipt/1", target:"gate0-role",
                 repository:$repository, profile_digest:$profile_digest,
-                smoke_digest:$smoke_digest, live_readiness:false}' \
+                smoke_digest:$smoke_digest, native_network_digest:$native_network_digest, live_readiness:false}' \
               release-receipt.json > role-release-receipt.json
             mv role-release-receipt.json release-receipt.json
           fi
@@ -417,6 +419,7 @@ jobs:
             candidate-distributions.json
             role-profile.json
             role-smoke.json
+            role-native-network.json
           retention-days: 90
 
   gate0-role:

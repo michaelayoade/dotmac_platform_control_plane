@@ -20,7 +20,6 @@ import signal
 import socket
 import stat
 import struct
-import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -348,8 +347,9 @@ class WireGuardBaoEndpoint:
     """Closed public pins; a digest alone never authenticates the launch.
 
     Bootstrap must bind these pins to its measured local launch context.
-    Namespace/firewall immutability and permission to inspect WG and bind the
-    device remain independent installation obligations, never boolean inputs.
+    Root-measured namespace/firewall immutability and the capability-free native
+    device bind remain installation obligations, never boolean inputs. The
+    worker consumes that measurement and executes no privileged WG query.
     """
 
     role: Literal["issuer", "attester"]
@@ -472,52 +472,6 @@ def _remaining(deadline: float) -> float:
     return value
 
 
-def _wg_public(
-    interface: str, field_name: Literal["peers", "allowed-ips"], deadline: float
-) -> bytes:
-    """Only two public WG views. Never dump, showconf or private-key access.
-
-    Runs inside the transport child's process group so parent cancellation
-    also kills a stalled WG tool. Output is bounded before allocation grows.
-    """
-    process = subprocess.Popen(  # noqa: S603 -- fixed pinned binary and public fields
-        [_WG_BINARY, "show", interface, field_name],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
-        close_fds=True,
-    )
-    try:
-        if process.stdout is None:
-            raise ProviderRefused()
-        descriptor = process.stdout.fileno()
-        os.set_blocking(descriptor, False)
-        result = bytearray()
-        while True:
-            ready, _, _ = select.select([descriptor], [], [], _remaining(deadline))
-            if not ready:
-                raise ProviderRefused()
-            try:
-                part = os.read(descriptor, 4097 - len(result))
-            except (BlockingIOError, InterruptedError):
-                continue
-            if not part:
-                break
-            result.extend(part)
-            if len(result) > 4096:
-                raise ProviderRefused()
-        if process.wait(timeout=_remaining(deadline)) != 0:
-            raise ProviderRefused()
-        return bytes(result)
-    finally:
-        if process.poll() is None:
-            process.kill()
-        process.wait(timeout=0.2)
-        if process.stdout is not None:
-            process.stdout.close()
-
-
 def _namespace(endpoint: WireGuardBaoEndpoint) -> None:
     observed = os.stat("/proc/self/ns/net")
     if (observed.st_dev, observed.st_ino) != (
@@ -535,15 +489,12 @@ def _wireguard_facts(endpoint: WireGuardBaoEndpoint, deadline: float) -> None:
         or _protected_digest(_NETWORK_FILE, 32768) != endpoint.network_config_digest
     ):
         raise ProviderRefused()
-    peer = _wg_public(endpoint.interface, "peers", deadline).decode("ascii").strip()
-    raw = base64.b64decode(peer, validate=True)
-    if len(raw) != 32 or base64.b64encode(raw).decode() != peer:
-        raise ProviderRefused()
-    if _fingerprint(raw) != endpoint.peer_fingerprint:
-        raise ProviderRefused()
-    allowed = _wg_public(endpoint.interface, "allowed-ips", deadline).decode("ascii")
-    if allowed.split() != [peer, endpoint.peer_allowed_ip]:
-        raise ProviderRefused()
+    # The actual root launch owner measured the full public WG inventory before
+    # irreversibly dropping network mutation privileges. Each request consumes
+    # its protected original context; the worker never executes a privileged wg.
+    from vendor_cp.deployment.gate0_launch import InstalledLaunchContext
+
+    InstalledLaunchContext.from_installed().require_bao_endpoint(endpoint, deadline)
     _namespace(endpoint)
 
 

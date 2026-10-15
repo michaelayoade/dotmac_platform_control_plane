@@ -23,7 +23,14 @@ a read-only root, dropped capabilities and only the smoke's existing
 SETUID/SETGID/SYS_CHROOT exceptions. Its profile source revision must match the
 independently selected revision. The smoke result must declare
 `Gate0RoleImageSmoke.v1`, `passed: true`, and `live_readiness: false`.
-This is native image acceptance, not an installed IDP3/NS3 launch qualification.
+The same candidate must also pass the bounded native capability/SSH/spawn/socket
+proof through `accept_gate0_network.sh`, in its own network/PID namespace with
+only the fixed preflight capabilities and an automatic whole-container deadline.
+The wrapper removes only the container ID returned by its own creation and
+checks cleanup before success. Its public report is retained and hash-bound
+into the role receipt. This synthetic native mechanism proof explicitly does
+not qualify full WireGuard installation or live readiness. These checks are
+native image acceptance, not an installed IDP3/NS3 launch qualification.
 
 For the role image, the publisher saves the candidate to a local archive and
 hashes the actual config JSON bytes, reading bounded regular archive members

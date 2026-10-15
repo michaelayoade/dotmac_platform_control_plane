@@ -243,25 +243,31 @@ def test_socket_mismatch_or_bind_permission_failure_sends_no_secrets(
     pipe.send_bytes.assert_called_once_with(b"")
 
 
-def test_public_peer_and_allowed_ips_checks_use_no_secret_wg_views(monkeypatch):
+def test_each_request_consumes_installed_measurement_without_privileged_wg(monkeypatch):
+    from vendor_cp.deployment import gate0_launch as launch
+
     monkeypatch.setattr(custody, "_namespace", Mock())
     monkeypatch.setattr(
         custody,
         "_protected_digest",
         lambda path, *a, **k: "sha256:" + ("a" if path == "/usr/bin/wg" else "b") * 64,
     )
-    public = base64.b64encode(bytes(range(32)))
-    command = Mock(side_effect=[public + b"\n", public + b"\t10.50.0.1/32\n"])
-    monkeypatch.setattr(custody, "_wg_public", command)
-    deadline = time.monotonic() + 2
-    custody._wireguard_facts(endpoint(), deadline)
-    assert [call.args for call in command.call_args_list] == [
-        ("wg0", "peers", deadline),
-        ("wg0", "allowed-ips", deadline),
+    context = Mock()
+    load = Mock(return_value=context)
+    monkeypatch.setattr(launch.InstalledLaunchContext, "from_installed", load)
+    # No wg command may exist in the transport; no privilege fallback is tried.
+    assert not hasattr(custody, "_wg_public")
+    value, deadline = endpoint(), time.monotonic() + 2
+    custody._wireguard_facts(value, deadline)
+    custody._wireguard_facts(value, deadline)
+    assert load.call_count == 2
+    assert [call.args for call in context.require_bao_endpoint.call_args_list] == [
+        (value, deadline),
+        (value, deadline),
     ]
-    command.side_effect = [public + b"\n", public + b"\t0.0.0.0/0\n"]
+    context.require_bao_endpoint.side_effect = custody.ProviderRefused
     with pytest.raises(custody.ProviderRefused):
-        custody._wireguard_facts(endpoint(), deadline)
+        custody._wireguard_facts(value, deadline)
 
 
 @pytest.mark.parametrize(

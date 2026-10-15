@@ -59,6 +59,8 @@ def _contract(text: str) -> None:
         '.github/candidate/acceptance.sh "${CANDIDATE_TAG}"',
         "dotmac-candidate-release-receipt/1",
         "dotmac-gate0-role-release-receipt/1",
+        'bash .github/candidate/accept_gate0_network.sh "${CANDIDATE_TAG}"',
+        "native_network_digest:$native_network_digest",
     ):
         assert term in runs, term
     assert "extractall(" not in runs
@@ -76,6 +78,7 @@ def _contract(text: str) -> None:
         assert term in accept, term
     assert (
         runs.index("/qualification.py")
+        < runs.index("accept_gate0_network.sh")
         < runs.index("docker login")
         < runs.index("docker push")
     )

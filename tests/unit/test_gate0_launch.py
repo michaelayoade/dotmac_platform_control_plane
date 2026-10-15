@@ -47,6 +47,13 @@ def synthetic_local_packet():
             "local_address": "10.0.0.1",
             "peer_public_key": public,
             "peer_allowed_ip": "10.0.0.2/32",
+            "peers": [
+                {"public_key": public, "allowed_ips": ["10.0.0.2/32"]},
+                {
+                    "public_key": base64.b64encode(bytes([1]) * 32).decode(),
+                    "allowed_ips": ["10.0.0.3/32"],
+                },
+            ],
             "route_document": "[]",
             "nft_ruleset_digest": digest,
         },
@@ -81,6 +88,7 @@ def synthetic_local_packet():
     [
         "uid_bool",
         "port_bool",
+        "low_port",
         "namespace_bool",
         "identity_bool",
         "hash_object",
@@ -95,6 +103,8 @@ def test_closed_typed_local_projection_refuses_bad_nested_values(field):
         packet["issuer_uid"] = True
     elif field == "port_bool":
         packet["ssh_endpoints"]["issuer"]["local_port"] = True
+    elif field == "low_port":
+        packet["ssh_endpoints"]["issuer"]["local_port"] = 22
     elif field == "namespace_bool":
         packet["network"]["namespace_inode"] = True
     elif field == "identity_bool":
@@ -494,3 +504,512 @@ def test_parent_rejects_trailing_staged_frame_before_publication(monkeypatch):
     finally:
         parent.close()
         receiver.close()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing_inventory",
+        "empty",
+        "duplicate_peer",
+        "duplicate_address",
+        "wildcard",
+        "subnet",
+        "public_ip",
+        "extra_field",
+        "bao_moved",
+        "bao_extra",
+        "ssh_missing",
+        "local_source",
+        "bad_key",
+    ],
+)
+def test_complete_peer_inventory_refuses_ambiguous_or_broader_scope(change):
+    packet = deepcopy(synthetic_local_packet())
+    network = packet["network"]
+    peers = network["peers"]
+    if change == "missing_inventory":
+        del network["peers"]
+    elif change == "empty":
+        network["peers"] = []
+    elif change == "duplicate_peer":
+        peers.append(deepcopy(peers[0]))
+    elif change == "duplicate_address":
+        peers[1]["allowed_ips"].append("10.0.0.2/32")
+    elif change in ("wildcard", "subnet", "public_ip"):
+        peers[1]["allowed_ips"] = {
+            "wildcard": ["0.0.0.0/0"],
+            "subnet": ["10.0.0.0/24"],
+            "public_ip": ["192.0.2.1/32"],
+        }[change]
+    elif change == "extra_field":
+        peers[0]["qualified"] = True
+    elif change == "bao_moved":
+        peers[0]["allowed_ips"], peers[1]["allowed_ips"] = (
+            peers[1]["allowed_ips"],
+            peers[0]["allowed_ips"],
+        )
+    elif change == "bao_extra":
+        peers[0]["allowed_ips"].append("10.0.0.4/32")
+    elif change == "ssh_missing":
+        packet["ssh_endpoints"]["issuer"]["remote_address"] = "10.0.0.4"
+    elif change == "local_source":
+        peers[1]["allowed_ips"] = [network["local_address"] + "/32"]
+    else:
+        peers[1]["public_key"] = "not-a-key"
+    with pytest.raises(launch.ProviderRefused):
+        launch._local_packet(launch.canonical(packet))
+
+
+def test_actual_inventory_normalizes_order_but_keeps_exact_full_equality():
+    network = synthetic_local_packet()["network"]
+    first, second = network["peers"]
+    expected = launch._peer_inventory(network["peers"])
+    # Kernel listing order is not authorization; membership in both directions is.
+    peers = (second["public_key"] + "\n" + first["public_key"] + "\n").encode()
+    allowed = (
+        first["public_key"]
+        + "\t10.0.0.2/32\n"
+        + second["public_key"]
+        + "\t10.0.0.3/32\n"
+    ).encode()
+    assert launch._observed_peer_inventory(peers, allowed) == expected
+    for changed_peers, changed_allowed in [
+        (peers + peers.splitlines()[0] + b"\n", allowed),
+        (peers, allowed + allowed.splitlines()[0] + b"\n"),
+        (peers, allowed.replace(b"10.0.0.2/32", b"10.0.0.2/24")),
+        (peers.splitlines()[0] + b"\n", allowed),
+    ]:
+        with pytest.raises(launch.ProviderRefused):
+            launch._observed_peer_inventory(changed_peers, changed_allowed)
+    subset = launch._observed_peer_inventory(
+        peers.splitlines()[0] + b"\n", allowed.splitlines()[1] + b"\n"
+    )
+    assert subset != expected  # Valid subset is still not full installed equality.
+
+
+def measured_request_context(monkeypatch):
+    packet = synthetic_local_packet()
+    public = base64.b64encode(bytes(range(32))).decode()
+    packet["network"].update(
+        peer_public_key=public,
+        peers=[
+            {"public_key": public, "allowed_ips": ["10.0.0.2/32"]},
+            {
+                "public_key": base64.b64encode(bytes([1]) * 32).decode(),
+                "allowed_ips": ["10.0.0.3/32"],
+            },
+        ],
+    )
+    now = datetime.now(UTC)
+    mono = launch.time.monotonic()
+    context = object.__new__(launch.InstalledLaunchContext)
+    values = dict(
+        packet_digest=packet["shared_run_digest"],
+        local_packet_digest=launch._digest(launch.canonical(packet)),
+        machine_id_digest=packet["machine_id_digest"],
+        role="issuer",
+        worker_uid=os.geteuid(),
+        slot_id=None,
+        started_at=now,
+        expires_at=now + timedelta(seconds=120),
+        monotonic_origin=mono,
+        deadline=mono + 90,
+        _supervisor_pid=12345,
+        _supervisor_start="synthetic-process-start",
+    )
+    for name, value in values.items():
+        object.__setattr__(context, name, value)
+    measurement = {
+        "packet_digest": context.packet_digest,
+        "local_packet_digest": context.local_packet_digest,
+        "machine_id_digest": context.machine_id_digest,
+        **{
+            name: packet["network"][name]
+            for name in (
+                "namespace_device",
+                "namespace_inode",
+                "interface",
+                "index",
+                "bao_address",
+                "local_address",
+                "peer_public_key",
+                "peer_allowed_ip",
+                "peers",
+            )
+        },
+        "route_digest": launch._digest(packet["network"]["route_document"].encode()),
+        "nft_ruleset_digest": packet["network"]["nft_ruleset_digest"],
+        "started_at": now.isoformat(),
+        "monotonic_origin": mono,
+        "deadline": mono + 120,
+        "expires_at": context.expires_at.isoformat(),
+        "supervisor_pid": 12345,
+        "supervisor_start": "synthetic-process-start",
+    }
+    object.__setattr__(
+        context,
+        "network_measurement_digest",
+        launch._digest(launch.canonical(measurement)),
+    )
+    monkeypatch.setattr(
+        launch.InstalledLaunchContext, "require_open", lambda self: None
+    )
+    monkeypatch.setattr(
+        launch,
+        "_load_local_packet",
+        lambda: launch._local_packet(launch.canonical(packet)),
+    )
+
+    def read(path, *args):
+        if path == launch.ROOT / "packet.json":
+            return launch.canonical(packet)
+        if path == launch.ROOT / "network-measurement.json":
+            return launch.canonical(measurement)
+        if str(path) == "/etc/machine-id":
+            return b"synthetic-machine"
+        raise AssertionError(path)
+
+    packet["machine_id_digest"] = launch._digest(b"synthetic-machine")
+    object.__setattr__(context, "machine_id_digest", packet["machine_id_digest"])
+    object.__setattr__(
+        context, "local_packet_digest", launch._digest(launch.canonical(packet))
+    )
+    measurement.update(
+        machine_id_digest=context.machine_id_digest,
+        local_packet_digest=context.local_packet_digest,
+    )
+    object.__setattr__(
+        context,
+        "network_measurement_digest",
+        launch._digest(launch.canonical(measurement)),
+    )
+    monkeypatch.setattr(launch, "_read", read)
+    monkeypatch.setattr(
+        launch.RunIdentity,
+        "from_installed",
+        lambda: SimpleNamespace(digest=context.packet_digest),
+    )
+    original_stat = launch.Path.stat
+    monkeypatch.setattr(
+        launch.Path,
+        "stat",
+        lambda self, *a, **k: SimpleNamespace(st_dev=4, st_ino=1234)
+        if str(self) == "/proc/self/ns/net"
+        else original_stat(self, *a, **k),
+    )
+    monkeypatch.setattr(launch.socket, "if_nametoindex", lambda interface: 3)
+    return context, packet, measurement
+
+
+def test_root_measurement_is_bound_to_original_context_and_endpoint(monkeypatch):
+    context, packet, measurement = measured_request_context(monkeypatch)
+    from vendor_cp.deployment.gate0_role_custody import WireGuardBaoEndpoint
+
+    value = WireGuardBaoEndpoint(
+        role="issuer",
+        address="10.0.0.2",
+        port=8200,
+        local_address="10.0.0.1",
+        interface="wgsynthetic",
+        interface_index=3,
+        namespace_device=4,
+        namespace_inode=1234,
+        peer_fingerprint="sha256:"
+        + launch.hashlib.sha256(bytes(range(32))).hexdigest(),
+        peer_allowed_ip="10.0.0.2/32",
+        wg_binary_digest=packet["binary_digests"]["/usr/bin/wg"],
+        network_config_digest="sha256:" + "b" * 64,
+        launch_packet_digest=context.packet_digest,
+    )
+    context.require_bao_endpoint(value, context.deadline - 1)
+    # No root measurement read/cache can renew the original operation bound.
+    with pytest.raises(launch.ProviderRefused):
+        context.require_bao_endpoint(value, context.deadline + 1)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("packet_digest", "sha256:" + "0" * 64),
+        ("supervisor_start", "fresh-process"),
+        ("supervisor_pid", 12346),
+        ("monotonic_origin", 1),
+        ("deadline", 1),
+        ("interface", "other"),
+        ("index", 4),
+        ("namespace_inode", 1235),
+        ("bao_address", "10.0.0.9"),
+        ("local_address", "10.0.0.8"),
+        ("peer_allowed_ip", "10.0.0.9/32"),
+        ("route_digest", "sha256:" + "0" * 64),
+        ("nft_ruleset_digest", "sha256:" + "0" * 64),
+    ],
+)
+def test_changed_or_fresh_launch_measurement_cannot_authorize_request(
+    monkeypatch, field, value
+):
+    context, packet, measurement = measured_request_context(monkeypatch)
+    measurement[field] = value
+    # Even a synthetic re-sealed digest must not make mismatched terms pass.
+    object.__setattr__(
+        context,
+        "network_measurement_digest",
+        launch._digest(launch.canonical(measurement)),
+    )
+    with pytest.raises(launch.ProviderRefused):
+        context.require_installation(
+            "issuer", context.packet_digest, context.expires_at
+        )
+
+
+class SyntheticCapabilities:
+    """Syscall state model only; never evidence of actual kernel privilege drop."""
+
+    def __init__(self):
+        self.effective = self.permitted = self.bounding = (1 << 41) - 1
+        self.inheritable = self.ambient = 1 << 12
+        self.securebits = self.nnp = 0
+        self.events = []
+
+    def capget(self):
+        return self.effective, self.permitted, self.inheritable
+
+    def capset(self, effective, permitted, inheritable):
+        assert effective & ~permitted == 0
+        assert permitted & ~self.permitted == 0
+        self.events.append(("capset", effective, permitted, inheritable))
+        self.effective, self.permitted, self.inheritable = (
+            effective,
+            permitted,
+            inheritable,
+        )
+
+    def prctl(self, option, argument=0):
+        if option == 23:
+            return int(bool(self.bounding & (1 << argument)))
+        if option == 24:
+            assert self.effective & (1 << 8)
+            self.bounding &= ~(1 << argument)
+            self.events.append(("drop", argument))
+        elif option == 27:
+            return self.securebits
+        elif option == 28:
+            self.securebits = argument
+        elif option == 38:
+            assert argument == 1
+            self.nnp = 1
+        elif option == 39:
+            return self.nnp
+        elif option == 47 and argument == 4:
+            self.ambient = 0
+        else:
+            raise AssertionError((option, argument))
+        return 0
+
+
+def synthetic_capability_syscalls(monkeypatch):
+    kernel = SyntheticCapabilities()
+    monkeypatch.setattr(launch, "_require_initial_process", lambda: None)
+    monkeypatch.setattr(launch, "_capget", kernel.capget)
+    monkeypatch.setattr(launch, "_capset", kernel.capset)
+    monkeypatch.setattr(launch, "_prctl", kernel.prctl)
+    monkeypatch.setattr(launch, "_cap_last_cap", lambda: 40)
+    monkeypatch.setattr(launch, "_ambient_set", lambda count: kernel.ambient)
+    return kernel
+
+
+def test_capability_normalization_then_irreversible_seal_exact_masks(monkeypatch):
+    kernel = synthetic_capability_syscalls(monkeypatch)
+    launch._prepare_network_privileges()
+    assert (kernel.effective, kernel.permitted, kernel.bounding) == (0x411E3,) * 3
+    assert kernel.inheritable == kernel.ambient == 0
+    assert kernel.securebits == 234 and kernel.nnp == 1
+    kernel.events.clear()
+    launch._seal_network_privileges()
+    assert (kernel.effective, kernel.permitted, kernel.bounding) == (0x400E3,) * 3
+    assert kernel.inheritable == kernel.ambient == 0
+    assert kernel.events[-1] == ("capset", 0x400E3, 0x400E3, 0)
+    drops = [
+        value for event, *values in kernel.events if event == "drop" for value in values
+    ]
+    assert drops[-1] == 8  # SETPCAP last; no authority remains to re-add NET_ADMIN.
+    assert 12 in drops and 13 not in [
+        i for i in range(41) if kernel.bounding & (1 << i)
+    ]
+
+
+@pytest.mark.parametrize("missing", [0, 5, 6, 7, 8, 12, 18])
+def test_missing_required_initial_privilege_refuses_without_helpers(
+    monkeypatch, missing
+):
+    kernel = synthetic_capability_syscalls(monkeypatch)
+    kernel.permitted &= ~(1 << missing)
+    with pytest.raises(launch.ProviderRefused):
+        launch._prepare_network_privileges()
+    assert kernel.events == []
+
+
+def test_unsupported_securebits_or_capability_space_is_terminal(monkeypatch):
+    kernel = synthetic_capability_syscalls(monkeypatch)
+    kernel.securebits = 1
+    with pytest.raises(launch.ProviderRefused):
+        launch._prepare_network_privileges()
+    kernel.securebits = 0
+    monkeypatch.setattr(launch, "_cap_last_cap", lambda: 64)
+    with pytest.raises(launch.ProviderRefused):
+        launch._prepare_network_privileges()
+
+
+@pytest.mark.parametrize("failure", ["capset", "drop", "readback"])
+def test_failed_or_ineffective_privilege_seal_is_refused(monkeypatch, failure):
+    kernel = synthetic_capability_syscalls(monkeypatch)
+    launch._prepare_network_privileges()
+    if failure == "capset":
+        monkeypatch.setattr(
+            launch,
+            "_capset",
+            lambda *args: (_ for _ in ()).throw(launch.ProviderRefused()),
+        )
+    elif failure == "drop":
+        original = kernel.prctl
+        monkeypatch.setattr(
+            launch,
+            "_prctl",
+            lambda option, arg=0: (_ for _ in ()).throw(launch.ProviderRefused())
+            if option == 24
+            else original(option, arg),
+        )
+    else:
+        monkeypatch.setattr(launch, "_capset", lambda *args: None)
+    with pytest.raises(launch.ProviderRefused):
+        launch._seal_network_privileges()
+
+
+def test_preflight_guardian_empty_and_privilege_seal_precede_publication(monkeypatch):
+    supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    supervisor.clocks = SimpleNamespace(
+        deadline=launch.time.monotonic() + 30, require_open=lambda: None
+    )
+    events = []
+    boundary = SimpleNamespace(
+        start_watchdog=lambda end: events.append("watchdog"),
+        terminate_and_confirm_empty=lambda: events.append("empty-and-reaped"),
+    )
+    monkeypatch.setattr(launch, "SlotExecutionBoundary", lambda slot: boundary)
+    monkeypatch.setattr(
+        supervisor,
+        "_measure_network_scoped",
+        lambda leaf: events.append("measured") or b"synthetic-public-measurement",
+    )
+    monkeypatch.setattr(
+        launch, "_seal_network_privileges", lambda: events.append("sealed")
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_publish_network_measurement",
+        lambda raw: events.append("published"),
+    )
+    supervisor._measure_network()
+    assert events == ["watchdog", "measured", "empty-and-reaped", "sealed", "published"]
+    events.clear()
+    monkeypatch.setattr(
+        boundary,
+        "terminate_and_confirm_empty",
+        lambda: (_ for _ in ()).throw(launch.ProviderRefused()),
+    )
+    with pytest.raises(launch.ProviderRefused):
+        supervisor._measure_network()
+    assert "sealed" not in events and "published" not in events
+
+
+@pytest.mark.parametrize(
+    "method,name,uid",
+    [
+        ("_bind_management_listener", "management.sock", 10033),
+        ("_bind_issuer_export", "issuer-export.sock", 10031),
+    ],
+)
+def test_new_root_owned_socket_mode_precedes_nonroot_ownership(
+    monkeypatch, method, name, uid
+):
+    supervisor = object.__new__(launch.FiniteGate0Supervisor)
+    supervisor.worker_uid = 10031
+    supervisor.clocks = SimpleNamespace(deadline=launch.time.monotonic() + 10)
+    supervisor._active_deadline = None
+    events = []
+    listener = SimpleNamespace(
+        settimeout=lambda value: None,
+        bind=lambda path: events.append(("bind", path)),
+        listen=lambda count: events.append(("listen", count)),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(launch.socket, "socket", lambda *args: listener)
+    monkeypatch.setattr(
+        launch,
+        "_load_local_packet",
+        lambda: {"management_uid": 10033, "issuer_uid": 10031},
+    )
+    monkeypatch.setattr(
+        launch.os, "chmod", lambda path, mode: events.append(("chmod", path, mode))
+    )
+    monkeypatch.setattr(
+        launch.os,
+        "chown",
+        lambda path, owner, group: events.append(("chown", path, owner, group)),
+    )
+    assert getattr(supervisor, method)() is listener
+    assert events == [
+        ("bind", str(launch.ROOT / name)),
+        ("chmod", launch.ROOT / name, 0o600),
+        ("chown", launch.ROOT / name, uid, -1),
+        ("listen", 1),
+    ]
+
+
+def test_missing_initial_bounding_capability_is_not_manufactured(monkeypatch):
+    kernel = synthetic_capability_syscalls(monkeypatch)
+    kernel.bounding &= ~(1 << 12)
+    with pytest.raises(launch.ProviderRefused):
+        launch._prepare_network_privileges()
+    assert kernel.events == []
+
+
+def test_future_supported_capabilities_are_removed_from_all_sets(monkeypatch):
+    kernel = synthetic_capability_syscalls(monkeypatch)
+    kernel.effective = kernel.permitted = kernel.bounding = (1 << 64) - 1
+    monkeypatch.setattr(launch, "_cap_last_cap", lambda: 63)
+    launch._prepare_network_privileges()
+    launch._seal_network_privileges()
+    assert (kernel.effective, kernel.permitted, kernel.bounding) == (0x400E3,) * 3
+    assert ("drop", 63) in kernel.events
+
+
+@pytest.mark.parametrize("existing", ["thread", "child"])
+def test_initial_privileged_helpers_or_threads_refuse_before_normalization(
+    monkeypatch, existing
+):
+    monkeypatch.setattr(launch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(launch.os, "getpid", lambda: 1)
+    monkeypatch.setattr(
+        launch.os, "listdir", lambda path: ["1", "2"] if existing == "thread" else ["1"]
+    )
+    monkeypatch.setattr(launch, "_read", lambda *args: b"17")
+    with pytest.raises(launch.ProviderRefused):
+        launch._require_initial_process()
+
+
+def test_measurement_digest_cannot_be_replaced_or_omitted(monkeypatch):
+    context, _, measurement = measured_request_context(monkeypatch)
+    measurement["index"] = 9
+    with pytest.raises(launch.ProviderRefused):
+        context.require_installation(
+            "issuer", context.packet_digest, context.expires_at
+        )
+    monkeypatch.setattr(
+        launch, "_read", lambda *args: (_ for _ in ()).throw(FileNotFoundError())
+    )
+    with pytest.raises(FileNotFoundError):
+        context.require_installation(
+            "issuer", context.packet_digest, context.expires_at
+        )
