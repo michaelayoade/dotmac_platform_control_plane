@@ -152,6 +152,17 @@ def dispatcher_runtime(dsn: str) -> DatabaseRuntime:
     )
 
 
+def authority_database_runtime() -> DatabaseRuntime:
+    """Return the assembly's configured kernel singleton without opening a session.
+
+    Keep this import at the existing relay-owned seam. It neither resolves the
+    dispatcher credential nor constructs a replacement authority runtime.
+    """
+    from dotmac_kernel.db import runtime
+
+    return runtime
+
+
 def composed(settings: VendorSettings = vendor_settings) -> RelayComposition:
     """The production arrangement: dispatcher and delivery credentials, consumers.
 
@@ -163,8 +174,7 @@ def composed(settings: VendorSettings = vendor_settings) -> RelayComposition:
     The transport is returned as the kernel's Protocol; one multiplexer
     delivers each claimed event to the two composed consumers in that session.
     """
-    from dotmac_kernel.db import runtime
-
+    runtime = authority_database_runtime()
     dispatcher = dispatcher_runtime(require_dispatcher_dsn(settings))
     return RelayComposition(
         dispatcher_sessions=dispatcher.platform_session_factory,
@@ -293,6 +303,7 @@ __all__ = [
     "DrainReport",
     "RelayComposition",
     "RelayNotConfiguredError",
+    "authority_database_runtime",
     "composed",
     "dispatcher_runtime",
     "drain_once",
