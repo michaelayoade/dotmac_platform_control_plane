@@ -717,6 +717,7 @@ def b_join_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         )
         session._completion = RunnerClientCompletion(100 + index, 0, True, elapsed)
         session._closed, session._processes = False, []
+        session._cleanup_failed = False
         sessions.append(session)
         proof_ids.append((digest(control), digest(raw)))
         expectations.append(
@@ -775,6 +776,7 @@ def b_join_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     issuer.installation, issuer.collector = ssh, collector
     issuer._completion = RunnerClientCompletion(110, 3, True, elapsed)
     issuer._closed, issuer._processes = False, []
+    issuer._cleanup_failed = False
     bindings, finals, sequences = [], {}, {}
     for host, role in (("IDP3", "issuer"), ("NS3", "attester")):
         terms = dict(

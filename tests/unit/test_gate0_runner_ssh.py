@@ -288,10 +288,19 @@ def test_common_cleanup_reaps_all_owned_children_after_deadline() -> None:
 
 
 def test_public_aggregate_cleanup_reaps_actual_owned_children_once() -> None:
-    started = monotonic()
     owners = [
-        owned_fixture("import time; time.sleep(60)", started - 1) for _ in range(3)
+        owned_fixture("import time; time.sleep(60)", monotonic() + 60) for _ in range(3)
     ]
+    # Construct a valid channel first, then model expiry before cleanup. No
+    # protocol operation is admitted after this fixture's service deadline.
+    for owner in owners:
+        owner.installation.deadline = owner.channel.deadline = monotonic() - 1
+        owner.installation.require_open = owner.channel.require_open
+        with pytest.raises(ServiceRefused):
+            owner.installation.require_open()
+        with pytest.raises(ServiceRefused):
+            owner.channel.require_open()
+    started = monotonic()
     close_owned_sessions(*owners)
     assert monotonic() - started < 2.5
     assert all(owner._closed and not owner._cleanup_failed for owner in owners)

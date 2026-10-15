@@ -207,7 +207,7 @@ def verify_controller_certificate(
     return cert
 
 
-def verify_retained_possession(
+def verify_retained_controller_evidence(
     public_key: Ed25519PublicKey,
     message: bytes,
     signature: bytes,

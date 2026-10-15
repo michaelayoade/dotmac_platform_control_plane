@@ -1071,7 +1071,7 @@ def verify_retained_bundle(
 
     from vendor_cp.deployment.gate0_attester import (
         verify_controller_certificate,
-        verify_retained_possession,
+        verify_retained_controller_evidence,
     )
     from vendor_cp.deployment.gate0_framing import canonical, strict_object
     from vendor_cp.deployment.gate0_observation import (
@@ -1162,7 +1162,9 @@ def verify_retained_bundle(
         controller = certificate.public_key()
         if not isinstance(controller, Ed25519PublicKey):
             raise ProofRegistrationRefused()
-        verify_retained_possession(controller, prepared.challenge, prepared.sshsig)
+        verify_retained_controller_evidence(
+            controller, prepared.challenge, prepared.sshsig
+        )
         observed_from, observed_until, invocation = verify_observation_signature(
             proof=proof,
             observation=observation,
