@@ -314,7 +314,7 @@ def _owner_scope(
         )
     ):
         raise ProviderRefused()
-    binding = {
+    binding: dict[str, object] = {
         "launch_packet_digest": selected.launch_packet_digest,
         "case_kind": selected.case_kind,
         "window_id": selected.window_id,

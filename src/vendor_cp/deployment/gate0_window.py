@@ -107,7 +107,7 @@ class FrozenIssuerWindow:
     def parse(cls, raw: bytes) -> FrozenIssuerWindow:
         failed = False
         try:
-            from vendor_cp.deployment.gate0_workload_admission import _FIXED_CLAIMS
+            from vendor_cp.deployment.gate0_github_jwt import _FIXED_CLAIMS
 
             value = cast(WindowDocument, strict_object(raw, 32768))
             if canonical(value) != raw:
