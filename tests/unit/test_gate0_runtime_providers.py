@@ -910,7 +910,15 @@ def test_combined_issue_standing_consume_retains_install_and_phase_binding(
         "standing",
         "consume",
     ]
-    assert case.effects == ["issue", "commit", "standing", "consume", "commit"]
+    # Standing is a read-only owner transaction and releases its hold by rollback.
+    assert case.effects == [
+        "issue",
+        "commit",
+        "standing",
+        "rollback",
+        "consume",
+        "commit",
+    ]
     assert len(case.installs) == 1 and len(case.entries) == 2
     assert case.transport.calls == 3
     assert all(item["readiness_accepted"] is False for item in channel.output)

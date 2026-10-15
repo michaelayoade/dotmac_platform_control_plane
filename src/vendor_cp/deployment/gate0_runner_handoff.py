@@ -1537,3 +1537,12 @@ class InstalledHandoffReceiver:
             local.shutdown(socket.SHUT_WR)
         finally:
             local.close()
+
+
+# The finite collector reuses these exact owners rather than copying framing,
+# protected-file traversal or kernel peer measurements. These helpers validate
+# mechanics; only the installed authenticated channel establishes provenance.
+OwnedHandoffIO = _OwnedIO
+read_protected_handoff = _protected_bytes
+measure_handoff_process = _process
+require_handoff_peer = _require_peer

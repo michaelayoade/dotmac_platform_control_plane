@@ -180,6 +180,8 @@ def test_approval_shape_and_owner_terms_refuse(case, runner_cases, change):  # n
         "https://cp.example.invalid?q=x",
         "https://cp.example.invalid#f",
         "https://127.0.0.1",
+        "https://192.0.2.1:443",
+        "https://[::1]",
         "https://cp.example.invalid\\evil",
         "https://CP.example.invalid",
     ],

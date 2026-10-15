@@ -31,6 +31,18 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from vendor_cp.deployment.gate0_composition import AdmissionExpectation
+    from vendor_cp.deployment.gate0_runner_collector_handoff import (
+        OwnedCollectorHandoff,
+    )
+    from vendor_cp.deployment.gate0_runner_projection import (
+        ApprovalProjection,
+        RunnerProjectionCase,
+        WithdrawalProjection,
+    )
+    from vendor_cp.deployment.gate0_runner_ssh import (
+        OwnedAttesterSession,
+        OwnedIssuerSession,
+    )
     from vendor_cp.deployment.gate0_runtime import BoundedHarnessVerifier
     from vendor_cp.deployment.gate0_window import ApprovedWindowBinding
 
@@ -368,10 +380,9 @@ class FixedCasePlan:
 class FixedEvidenceCollector:
     """Concrete fixed framed A/B choreography; no automatic human decisions.
 
-    Both FramedChannels belong to separately predeclared finite issuer starts.
-    Attester bundles arrive from their fixed paired proof invocations. Production
-    pipe/SSH construction and authenticated root cleanup are integration gates,
-    so the installed entrypoint cannot yet construct this mechanism.
+    The eager constructor is a hosted harness seam. Installed composition uses
+    for_installed, binds each actual owned issuer only when its case activates,
+    and cannot bind B before the actual root/session join sends A's ACK.
     """
 
     def __init__(
@@ -393,12 +404,18 @@ class FixedEvidenceCollector:
         ):
             raise ServiceRefused()
         self._plan = plan
+        self._installed = False
+        self._bindings = {"a": plan.case_a, "b": plan.case_b}
+        self._command_a, self._command_b = plan.command_a, plan.command_b
         self._a, self._b = FramedCaseCollector(case_a), FramedCaseCollector(case_b)
         self._verifier = verifier
         self._issuer_identity, self._authorization_verifier = (
             issuer_identity,
             authorization_verifier,
         )
+        self._initialize_evidence()
+
+    def _initialize_evidence(self) -> None:
         self._bundles: list[bytes] = []
         self._a_done = False
         self._a_authorization: bytes | None = None
@@ -414,10 +431,247 @@ class FixedEvidenceCollector:
         self._withdrawal_reads = 0
         self._b_use_started = False
         self._approvals: dict[str, bytes] = {}
+        self._a_join: bytes | None = None
+        self._a_join_started = False
+        self._binding_attempts: set[str] = set()
+        self._projections: dict[str, ApprovalProjection] = {}
+        self._issuers: dict[str, OwnedIssuerSession] = {}
+        self._verifiers: dict[str, BoundedHarnessVerifier] = {}
+
+    @classmethod
+    def for_installed(
+        cls,
+        *,
+        cases: tuple[RunnerProjectionCase, RunnerProjectionCase],
+        command_a: str,
+        command_b: str,
+        withdrawal_ref: str,
+    ) -> FixedEvidenceCollector:
+        """Retain inert selections only; no approval, freshness, verifier or I/O."""
+        from vendor_cp.deployment.gate0_runner_projection import RunnerProjectionCase
+
+        if (
+            type(cases) is not tuple
+            or len(cases) != 2
+            or any(type(case) is not RunnerProjectionCase for case in cases)
+            or command_a == command_b
+            or any(
+                type(value) is not str
+                or not 0 < len(value) <= 200
+                or value != value.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in value)
+                for value in (command_a, command_b, withdrawal_ref)
+            )
+        ):
+            raise ServiceRefused()
+        a, b = cases
+        first, second = a.window.document, b.window.document
+        if (
+            (first["case_kind"], second["case_kind"])
+            != ("consume_replay", "withdrawal_later_use")
+            or (a.wall_origin, a.monotonic_origin)
+            != (b.wall_origin, b.monotonic_origin)
+            or first["github"] != second["github"]
+            or first["window_id"] == second["window_id"]
+            or first["controller"]["lease_id"] == second["controller"]["lease_id"]
+            or first["controller"]["fingerprint"] == second["controller"]["fingerprint"]
+            or first["controller"]["certificate_digest"]
+            == second["controller"]["certificate_digest"]
+            or a.binding["plan_id"] == b.binding["plan_id"]
+            or a.binding["approval_request_id"] == b.binding["approval_request_id"]
+        ):
+            raise ServiceRefused()
+        result = cls.__new__(cls)
+        result._installed = True
+        result._cases = cases
+        result._command_a, result._command_b = command_a, command_b
+        result._withdrawal_ref = withdrawal_ref
+        result._bindings = {}
+        result._initialize_evidence()
+        return result
+
+    def _binding(self, case: str) -> ApprovedWindowBinding:
+        if case not in self._bindings:
+            raise ServiceRefused()
+        return self._bindings[case]
+
+    def _bind_case(
+        self,
+        case: Literal["a", "b"],
+        approval: ApprovalProjection,
+        issuer: OwnedIssuerSession,
+        verifier: BoundedHarnessVerifier,
+        issuer_identity: RehearsalIssuerAuthorizationSignerIdentity,
+        authorization_verifier: RehearsalIssuerAuthorizationVerifier,
+    ) -> None:
+        from datetime import datetime
+
+        from vendor_cp.deployment.gate0_runner_projection import (
+            ApprovalProjection,
+            decode_approval,
+        )
+        from vendor_cp.deployment.gate0_runner_ssh import OwnedIssuerSession
+        from vendor_cp.deployment.gate0_runtime import BoundedHarnessVerifier
+
+        if (
+            not self._installed
+            or case in self._binding_attempts
+            or case == "b"
+            and self._a_join is None
+            or case == "a"
+            and self._binding_attempts
+        ):
+            raise ServiceRefused()
+        self._binding_attempts.add(case)
+        selected = self._cases[0 if case == "a" else 1]
+        selected.require_open()
+        if (
+            type(approval) is not ApprovalProjection
+            or type(issuer) is not OwnedIssuerSession
+            or type(verifier) is not BoundedHarnessVerifier
+            or any(verifier is prior for prior in self._verifiers.values())
+            or verifier._retained_count
+        ):
+            raise ServiceRefused()
+        checked = decode_approval(approval.raw, selected)
+        if (
+            checked != approval
+            or type(issuer.collector) is not FramedCaseCollector
+            or issuer.collector.outcomes
+            or issuer.collector._channel is not issuer.channel
+            or issuer.completion is not None
+            or issuer.installation.deadline > selected.deadline
+            or issuer.channel.deadline > selected.deadline
+            or digest(issuer.certificate.public_bytes())
+            != checked.binding.expectation.operation.certificate_digest
+        ):
+            raise ServiceRefused()
+        expiry = datetime.fromisoformat(
+            selected.window.document["expires_at"].replace("Z", "+00:00")
+        )
+        if issuer.installation.expires_at > expiry:
+            raise ServiceRefused()
+        verifier.require_window(expires_at=expiry, deadline=selected.deadline)
+        issuer.installation.require_open()
+        selected.require_open()
+        self._bindings[case] = approval.binding
+        self._approvals[case] = approval.raw
+        self._projections[case] = approval
+        self._issuers[case] = issuer
+        self._verifiers[case] = verifier
+        if case == "a":
+            self._a = issuer.collector
+        else:
+            self._b = issuer.collector
+        self._verifier = verifier
+        self._issuer_identity, self._authorization_verifier = (
+            issuer_identity,
+            authorization_verifier,
+        )
+
+    def bind_case_a(
+        self,
+        approval: ApprovalProjection,
+        issuer: OwnedIssuerSession,
+        verifier: BoundedHarnessVerifier,
+        issuer_identity: RehearsalIssuerAuthorizationSignerIdentity,
+        authorization_verifier: RehearsalIssuerAuthorizationVerifier,
+    ) -> None:
+        self._bind_case(
+            "a", approval, issuer, verifier, issuer_identity, authorization_verifier
+        )
+
+    def bind_case_b(
+        self,
+        approval: ApprovalProjection,
+        issuer: OwnedIssuerSession,
+        verifier: BoundedHarnessVerifier,
+        issuer_identity: RehearsalIssuerAuthorizationSignerIdentity,
+        authorization_verifier: RehearsalIssuerAuthorizationVerifier,
+    ) -> None:
+        self._bind_case(
+            "b", approval, issuer, verifier, issuer_identity, authorization_verifier
+        )
+
+    def complete_case_a(
+        self,
+        root: OwnedCollectorHandoff,
+        issue_session: OwnedAttesterSession,
+        consume_session: OwnedAttesterSession,
+    ) -> bytes:
+        from vendor_cp.deployment.gate0_runner_collector_handoff import (
+            OwnedCollectorHandoff,
+        )
+        from vendor_cp.deployment.gate0_runner_ssh import OwnedAttesterSession
+
+        if (
+            not self._installed
+            or not self._a_done
+            or self._a_join_started
+            or self._a_expected is None
+            or type(root) is not OwnedCollectorHandoff
+            or type(issue_session) is not OwnedAttesterSession
+            or type(consume_session) is not OwnedAttesterSession
+            or issue_session is consume_session
+            or len(self._bundles) != 2
+            or issue_session.bundle != self._bundles[0]
+            or consume_session.bundle != self._bundles[1]
+        ):
+            raise ServiceRefused()
+        self._a_join_started = True
+        self._cases[0].require_open()
+        joined = root.complete_case_a(
+            self._issuers["a"],
+            issue_session,
+            consume_session,
+            issue_expected=self._binding("a").expectation,
+            consume_expected=self._a_expected,
+        )
+        # The concrete root owner returns only after its actual join and ACK.
+        self._cases[0].require_open()
+        self._a_join = joined
+        return joined
+
+    def observe_b_projection(self, projection: WithdrawalProjection) -> bool:
+        from vendor_cp.deployment.gate0_runner_projection import (
+            WithdrawalProjection,
+            decode_withdrawal,
+        )
+
+        if (
+            not self._installed
+            or self._a_join is None
+            or self._b_expected is None
+            or self._b_consume is None
+            or self._b_issue is None
+            or self._b_revocation is not None
+            or type(projection) is not WithdrawalProjection
+        ):
+            raise ServiceRefused()
+        self._withdrawal_reads += 1
+        if self._withdrawal_reads > 16:
+            raise ServiceRefused()
+        checked = decode_withdrawal(
+            projection.raw,
+            self._cases[1],
+            reference=self._withdrawal_ref,
+            approval=self._projections["b"],
+            authorization_ref=cast(
+                str, strict_object(self._b_issue.result_bytes)["authorization_id"]
+            ),
+        )
+        if checked != projection:
+            raise ServiceRefused()
+        if checked.state != "applied":
+            return False
+        self._b_revocation = checked.raw
+        return True
 
     def read_approval(
         self, *, case: Literal["a", "b"], sessions: Callable[[], Session]
     ) -> None:
+        if getattr(self, "_installed", False):
+            raise ServiceRefused()
         from dotmac_deployment_control import get_plan, get_target
 
         from vendor_cp.approvals.adapter import (
@@ -432,7 +686,7 @@ class FixedEvidenceCollector:
 
         if case not in ("a", "b") or case in self._approvals:
             raise ServiceRefused()
-        binding = self._plan.case_a if case == "a" else self._plan.case_b
+        binding = self._binding(case)
         expected = binding.expectation
         db: Session | None = None
         evidence: bytes | None = None
@@ -515,7 +769,11 @@ class FixedEvidenceCollector:
             verify_observation,
         )
 
-        if expected.window_digest is None:
+        if (
+            expected.window_digest is None
+            or len(self._bundles) >= 4
+            or sum(map(len, self._bundles)) + len(raw) > 512 * 1024
+        ):
             raise ServiceRefused()
         document = strict_object(raw)
         if canonical(document) != raw:
@@ -541,11 +799,6 @@ class FixedEvidenceCollector:
         proof_digest = verifier._register(proof, expected.operation)
         exported = verifier.export_registered(proof_digest)
         if exported.owner_envelope != proof.control_document:
-            raise ServiceRefused()
-        if (
-            len(self._bundles) >= 4
-            or sum(map(len, self._bundles)) + len(raw) > 512 * 1024
-        ):
             raise ServiceRefused()
         self._bundles.append(raw)
         return document, proof_digest
@@ -647,9 +900,9 @@ class FixedEvidenceCollector:
 
         if "a" not in self._approvals or self._a.outcomes or len(tokens) != 2:
             raise ServiceRefused()
-        binding = self._plan.case_a
+        binding = self._binding("a")
         authorization, issued = self._issue(
-            self._a, binding, self._plan.command_a, issue_bundle, tokens[0]
+            self._a, binding, self._command_a, issue_bundle, tokens[0]
         )
         self._standing(
             self._a,
@@ -754,9 +1007,9 @@ class FixedEvidenceCollector:
             or len(tokens) != 2
         ):
             raise ServiceRefused()
-        binding = self._plan.case_b
+        binding = self._binding("b")
         authorization, issued = self._issue(
-            self._b, binding, self._plan.command_b, issue_bundle, tokens[0]
+            self._b, binding, self._command_b, issue_bundle, tokens[0]
         )
         self._standing(
             self._b,
@@ -800,7 +1053,7 @@ class FixedEvidenceCollector:
             self._b_issue.proof_digest,
             token,
             RehearsalIssuerAuthorizationStanding.VALID,
-            self._plan.case_b.expectation,
+            self._binding("b").expectation,
             self._b_issue_bundle,
         )
         self._b_consume = consume_bundle
@@ -808,6 +1061,8 @@ class FixedEvidenceCollector:
     def observe_b_withdrawal(
         self, *, sessions: Callable[[], Session], external_ref: str
     ) -> bool:
+        if getattr(self, "_installed", False):
+            raise ServiceRefused()
         db: Session | None = None
         observed: bytes | None = None
         failed = False

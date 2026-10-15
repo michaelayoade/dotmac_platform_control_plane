@@ -39,7 +39,7 @@ _PREFIX = "/platform/vendor/gate0/collection/windows/"
 _REFERENCE = "X-Dotmac-Gate0-Withdrawal-Reference"
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _HOST = re.compile(
-    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\Z"
+    r"(?![0-9.]+\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\Z"
 )
 
 
@@ -252,7 +252,10 @@ def _decode_response(response: _ProjectionHTTPResponse) -> bytes:
         )
     ):
         raise ProviderRefused()
-    raw = response.read(_MAXIMUM + 1)
+    try:
+        raw = response.read(_MAXIMUM + 1)
+    except http.client.HTTPException:
+        raise ProviderRefused() from None
     if not 0 < len(raw) <= _MAXIMUM or lengths and len(raw) != int(lengths[0]):
         raise ProviderRefused()
     response.require_eof()
