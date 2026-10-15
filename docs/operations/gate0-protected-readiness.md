@@ -1,11 +1,13 @@
-# Gate-0 E: partial report-consumer source
+# Gate-0 E: proof producer, verifier and partial case report
 
-This source slice implements `inspect_case_report`, a strict offline inspector
-of retained case bytes. It is **not a completed E harness**, an authenticated
-readiness receipt verifier, or a protected execution entry point. It never
-returns readiness acceptance and has no signer, storage writer, runtime route,
-transport, custody reader or target action. Hash equality detects changed
-bytes; it authenticates neither the producer nor the reported outcome.
+This source slice implements an actual SSH possession proof producer, the
+published Control public-verifier adapter and `inspect_case_report`, a strict
+offline inspector of retained case bytes. It is **not a completed E harness**,
+an authenticated readiness receipt verifier or a protected execution entry
+point. No production signer, custody loader, listener, transport, receipt
+writer or target action is configured. The report inspector never accepts
+readiness: hash equality detects changed bytes but authenticates neither the
+producer nor the reported outcome.
 
 The caller supplies the frozen source-bundle digest and repository/run/attempt
 coordinate independently of the report. Inspection requires exact top-level
@@ -60,11 +62,13 @@ transactionally; a separate reservation API is not required. No substitute
 ledger or guessed owner field is added.
 
 Protected execution/finalization remains unavailable pending hosted composition
-of the existing human decision route, actual possession verification, adopted
-transport, hosted bootstrap/custody,
+of the existing human decision route, independent admitted provenance, actual
+controller-session identity observation, deployed transport and hosted custody,
 approved CP producer trust anchor, atomic immutable receipt destination and
 accepted B/C1/C2/D oracles. A GitHub Environment approval cannot become the
-Approvals decision. Pull remains proposed; no default enables W1–W5. Each
+Approvals decision. Private WireGuard plus constrained SSH is selected for
+design development; activation is a separately reviewed operational packet.
+Pull remains proposed; no default enables W1–W5. Each
 service receives only its own startup-held signer; runner receives neither.
 
 ## Ordered operational handoff (not executed)
@@ -102,7 +106,9 @@ attester public key, the existing `RehearsalIssuerTrustState`, a frozen
 `AttestationContext`, expiry and a read-only companion lookup at startup. It
 authenticates the exact owner canonical bytes and a domain-separated signed
 CP companion over their SHA-256 plus repository/run/attempt, lease, OpenSSH
-controller fingerprint, target, plan/digests, certificate digest and CA pin.
+controller fingerprint, target, plan/digests, certificate digest and CA pin,
+window, issue/consume phase, actual issued-authorization digest/time for
+consumption, challenge digest and retained public-proof transcript digest.
 Control v1 receives no extra fields. Context must be derived independently
 from admitted provenance and the real frozen Control plan, never from a request.
 
@@ -116,9 +122,11 @@ security installation owner only after the complete operational packet is
 approved. No installation or protected run is performed by this source.
 
 The companion is a proposed CP-owned attestation format, not a new Control API.
-Its producer must first perform actual SSH proof, certificate/CA/time checks
-and independent provenance verification. The adapter verifies the enrolled
-attester's assertion; it does not itself establish those underlying facts.
+The sibling producer now performs actual SSH proof and certificate/CA/time
+checks before signing. Its immutable `AdmittedOperation` input must still come
+from an independent authenticated provenance/plan/window authority. A frozen
+dataclass alone is not that authority. The consumer authenticates the enrolled
+attester's signed assertion and fixed context.
 The issuer signer cannot satisfy this fixed attester identity. Receipt
 authentication, E finalization and the real composition driver remain absent.
 
@@ -138,3 +146,72 @@ and signature verification, before returning true. The transport adapter must
 enforce its own bounded I/O deadline and cancellation: a blocking synchronous
 lookup cannot be interrupted by this verifier. Post-lookup checks prevent late
 acceptance; they do not claim to bound callback execution time.
+
+## Transport-independent proof producer
+
+`gate0_attester.AttesterProofProducer` receives an independently admitted
+operation, fixed CA public key and enrolled attester public identity/trust. Its
+role-local signing callback is injected with the dedicated attester purpose;
+there is no default signer or private-key loader. It validates cryptography
+50.0.0's public `SSHCertificate` signature, then separately requires its signer
+key equal the immutable CA. The initial profile accepts Ed25519 USER
+certificates, the sole `dotmac-gate0-controller` principal, empty critical
+options/extensions, exact run/attempt key ID, current validity and positive TTL
+no greater than 600 seconds. Key ID is a cross-check, never possession proof.
+Certificate digest means SHA-256 of the library's canonical `public_bytes()`,
+so input comments/whitespace cannot change the digest convention.
+
+`begin_challenge` creates unpredictable instance/challenge IDs and a 32-byte
+nonce. Exact challenge bytes bind admitted run/attempt/window, lease/target,
+plan/purpose/digests, certificate/controller, phase, expiry and the actual
+authorization digest/time for consumption. `complete_challenge` accepts only
+the producer's ID plus SSHSIG; no caller-replacement message or state is read.
+Under a lock it takes the pending record before verification/signing; concurrent
+completion and replay refuse. Inflight records prevent another active challenge
+for this producer's fixed lease/phase. Success and every failure are terminal.
+Up to 16 total records are retained without eviction in the bounded process
+window; each challenge lasts at most 30 seconds. Restart has new unpredictable
+identity and empty state: old responses cannot be imported or resumed. This is
+a small nonresumable proof protocol, not a durable authorization/lease ledger.
+
+Actual possession uses fixed `/usr/bin/ssh-keygen -Y verify`, fixed signer
+`gate0-controller` and namespace `dotmac-gate0-possession-v1`. The allowed-signers
+line contains only the reconstructed raw certificate public key and exact
+namespace restriction. No wildcard, CA-trust directive, caller path, shell,
+agent or private-key flag is accepted. Two public files are created exclusively
+with no-follow in an owned private temporary directory and removed afterward.
+Output is discarded. Timeout is at most two seconds and is further limited by
+remaining challenge/window duration. The fixed child deadline starts before
+public-file staging; remaining budget is rechecked immediately before launch. The subprocess owner kills/reaps its
+direct child on timeout. The operational supervisor must terminate cancelled
+services; this source supplies no restart/resumption facility.
+
+After proof, time/certificate/trust are rechecked. Control's unchanged v1 bytes
+use the real key fingerprint, frozen lease/target and bounded times; consume
+evidence requires a real clock reading strictly later than actual authorization
+issuance. No future timestamp is fabricated. The retained public transcript
+contains canonical certificate, exact challenge and SSHSIG; its digest and the
+challenge digest join the signed companion. Both owner and companion signatures
+are verified against the enrolled attester key before any bundle is returned.
+Invalid proof invokes no signing callback. Signer failure returns no partial
+bundle and never rearms a challenge. The bounded process-local state also
+reserves each exact Control evidence hash before the first signing callback,
+retaining that reservation on failure. Two valid proofs at an identical wall
+instant cannot publish different companions under the same resolver key; a
+new real clock reading is required for fresh owner bytes. This local constraint
+does not replace immutable publication conflict checks across authorized
+process lifetimes. Another instance or restart at the same wall instant may
+still produce the same owner hash with a different companion; the future
+immutable companion publisher must reject that conflict. External key use and durable publication
+cannot be made atomic by this process-local protocol; signer callbacks must
+bound their own execution and cancellation.
+
+Hosted-CI tests author real synthetic certificate/SSHSIG round trips through
+the producer and public verifier, refusal/concurrency/replay/privacy/deadline
+plants and public tool identity recording. Test-only keys never form a passing
+E receipt. No tests, key generation, private-key loading or subprocess probes
+were executed on a workstation or host during source authoring. Runtime
+bootstrap must separately pin/measure the deployed OpenSSH binary/version.
+Proof establishes that the certified key signed this admitted operation's
+challenge; it does not observe GitHub OIDC, human approval or the key's later
+controller session. Those live composition observations remain E obligations.

@@ -57,7 +57,7 @@ def _ssh_fingerprint(value: str) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
-class AttestationContext:
+class AdmittedOperation:
     """Frozen admission packet; never derived from untrusted owner evidence.
 
     Plan bindings must be checked against the real frozen Control plan by the
@@ -67,6 +67,10 @@ class AttestationContext:
     repository_id: str
     run_id: str
     run_attempt: str
+    window_id: str
+    phase: str
+    authorization_digest: str | None
+    authorization_issued_at: str | None
     lease_id: str
     controller_fingerprint: str
     target_ref: str
@@ -85,7 +89,8 @@ class AttestationContext:
             or not value
             or value != value.strip()
             or len(value) > 512
-            for value in values.values()
+            for key, value in values.items()
+            if key not in ("authorization_digest", "authorization_issued_at")
         ):
             raise ValueError("invalid frozen attestation context")
         if any(
@@ -93,6 +98,31 @@ class AttestationContext:
             for value in (self.repository_id, self.run_id, self.run_attempt)
         ):
             raise ValueError("invalid attestation run coordinate")
+        if self.phase not in ("issue", "consume"):
+            raise ValueError("expected issue or consume phase")
+        if self.phase == "issue":
+            if (
+                self.authorization_digest is not None
+                or self.authorization_issued_at is not None
+            ):
+                raise ValueError("issuance cannot name an existing authorization")
+        else:
+            if (
+                not isinstance(self.authorization_digest, str)
+                or _DIGEST.fullmatch(self.authorization_digest) is None
+            ):
+                raise ValueError("consumption requires actual authorization digest")
+            if (
+                not isinstance(self.authorization_issued_at, str)
+                or len(self.authorization_issued_at) > 64
+                or self.authorization_issued_at != self.authorization_issued_at.strip()
+            ):
+                raise ValueError(
+                    "consumption requires actual authorization issuance time"
+                )
+            issued = datetime.fromisoformat(self.authorization_issued_at)
+            if not _aware_datetime(issued):
+                raise ValueError("expected aware authorization issuance time")
         if str(UUID(self.plan_id)) != self.plan_id:
             raise ValueError("expected canonical Control plan UUID")
         if self.plan_purpose != "rehearsal_issuer_operation":
@@ -110,6 +140,25 @@ class AttestationContext:
             self.ca_fingerprint
         ):
             raise ValueError("expected actual OpenSSH public-key fingerprints")
+
+
+@dataclass(frozen=True, slots=True)
+class AttestationContext(AdmittedOperation):
+    """Admitted operation plus exact producer-generated challenge/proof binding."""
+
+    challenge_digest: str
+    proof_transcript_digest: str
+
+    def __post_init__(self) -> None:
+        AdmittedOperation.__post_init__(self)
+        if any(
+            _DIGEST.fullmatch(value) is None
+            for value in (
+                self.challenge_digest,
+                self.proof_transcript_digest,
+            )
+        ):
+            raise ValueError("expected exact challenge and public proof digests")
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,9 +186,12 @@ def companion_message(context: AttestationContext, control_bytes: bytes) -> byte
         "control_evidence_digest": "sha256:"
         + hashlib.sha256(control_bytes).hexdigest(),
     }
-    return _DOMAIN + json.dumps(
+    encoded = _DOMAIN + json.dumps(
         document, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("ascii")
+    if len(encoded) > 8192:
+        raise ValueError("invalid companion evidence bounds")
+    return encoded
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

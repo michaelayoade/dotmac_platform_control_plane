@@ -242,6 +242,12 @@ def attester_fixture():
         repository_id="1",
         run_id="2",
         run_attempt="1",
+        window_id="synthetic-window",
+        phase="issue",
+        authorization_digest=None,
+        authorization_issued_at=None,
+        challenge_digest=digest(b"synthetic challenge"),
+        proof_transcript_digest=digest(b"synthetic proof"),
         lease_id="lease-fixture",
         controller_fingerprint="SHA256:" + "A" * 43,
         target_ref="fixture-target",
@@ -356,6 +362,15 @@ def test_companion_cross_attempt_plan_or_exact_bytes_substitution_refuses(
     for changed in (
         replace(context, run_attempt="2"),
         replace(context, plan_digest=digest(b"other plan")),
+        replace(context, window_id="other-window"),
+        replace(context, challenge_digest=digest(b"other-challenge")),
+        replace(context, proof_transcript_digest=digest(b"other-proof")),
+        replace(
+            context,
+            phase="consume",
+            authorization_digest=digest(b"issued"),
+            authorization_issued_at="2026-10-14T00:00:00+00:00",
+        ),
     ):
         message = companion_message(changed, arguments["canonical_bytes"])
         changed_verifier = replace(
