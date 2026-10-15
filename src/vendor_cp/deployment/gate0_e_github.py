@@ -39,6 +39,7 @@ _INSTALLATION = "/run/dotmac-gate0-e/github-read.json"
 _ROOT_BINDING = "/etc/dotmac-gate0-e/github-read-binding.json"
 _CREDENTIAL = "/run/dotmac-gate0-e/github-read-token"
 _CA = "/etc/ssl/certs/ca-certificates.crt"
+_API_VERSION = "2026-03-10"
 _JSON_CAP = 1024 * 1024
 _CIPHER_CAP = 17 * 1024 * 1024
 _ZIP_CAP = _CIPHER_CAP + 256 * 1024
@@ -535,7 +536,7 @@ def _https(
                 headers.extend(
                     [
                         "Authorization: Bearer " + token.decode("ascii"),
-                        "X-GitHub-Api-Version: 2026-03-10",
+                        "X-GitHub-Api-Version: " + _API_VERSION,
                         "Accept: "
                         + (
                             "application/octet-stream"
@@ -1011,7 +1012,7 @@ class InstalledGate0GitHubReads:
                 and _digest(qual_raw) == _hex(binding["qualification_sha256"])
                 and qualification["installation_policy_digest"]
                 == installation["policy_digest"]
-                and qualification["api_version"] == "2026-03-10"
+                and qualification["api_version"] == _API_VERSION
                 and qualification["runtime_uid"] == binding["runtime_uid"]
             )
             _require(

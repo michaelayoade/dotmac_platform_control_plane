@@ -44,7 +44,8 @@ jobs:
       - name: Types
         run: poetry run mypy
       - name: Tests (boot + provisioning contract + D1–D5 deny cases)
-        run: poetry run pytest -q --junitxml="$RUNNER_TEMP/cp-source-tests.xml" -o junit_family=xunit1
+        timeout-minutes: 15
+        run: poetry run pytest -q --junitxml="$RUNNER_TEMP/cp-source-tests.xml" -o junit_family=xunit1 -o faulthandler_timeout=60
       - name: Measure trusted hosted GnuPG package fixtures
         # Synthetic mechanism qualification only. These identities do not pin
         # production tools, the B recipient, or any protected E installation.
