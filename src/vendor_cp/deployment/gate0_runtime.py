@@ -491,6 +491,7 @@ class BoundedHarnessVerifier:
         expires_at: datetime,
         now: Callable[[], datetime] = _utc_now,
         monotonic_clock: Callable[[], float] = monotonic,
+        deadline: float | None = None,
     ) -> None:
         from threading import Lock
 
@@ -505,7 +506,12 @@ class BoundedHarnessVerifier:
             or not 0 < duration <= 600
         ):
             raise ProofRegistrationRefused()
-        deadline = origin + duration
+        mapped_deadline = origin + duration
+        if deadline is not None:
+            if not _finite_monotonic(deadline) or deadline <= origin:
+                raise ProofRegistrationRefused()
+            mapped_deadline = min(mapped_deadline, deadline)
+        deadline = mapped_deadline
         if not math.isfinite(deadline) or deadline <= origin:
             raise ProofRegistrationRefused()
         if (
@@ -550,6 +556,17 @@ class BoundedHarnessVerifier:
 
     def _require_open(self) -> None:
         self._samples()
+
+    def require_window(self, *, expires_at: datetime, deadline: float) -> None:
+        """Check this verifier fits an original window without remapping it."""
+        if (
+            not _aware_datetime(expires_at)
+            or not _finite_monotonic(deadline)
+            or self._expires > expires_at.astimezone(UTC)
+            or self._deadline > deadline
+        ):
+            raise ProofRegistrationRefused()
+        self._require_open()
 
     @property
     def _retained_count(self) -> int:
