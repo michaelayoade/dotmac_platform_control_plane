@@ -81,7 +81,24 @@ projection_name}`, with fixed member names `gate0-evidence.pgp` and
 `gate0-evidence-public.json`. Release selection is `{release_id,tag,commit,assets}`;
 assets have `{id,name,size,sha256}`. Draft assets are exactly ciphertext then
 projection; published assets add `gate0-readiness-receipt.json` third. Exact tag and
-commit are root-selected; target_commitish is never commit proof.
+commit are root-selected. First-create draft reads require `target_commitish` to
+be the exact 40 lowercase hexadecimal selected producer head, checked both before
+and after the asset reads. They return separate `DraftReleaseFacts` with this
+`target_commitish`, exact assets and observations, and no `raw_tag_sha` or
+`peeled_commit` fields. No tag-ref or annotated-tag request is made for drafts;
+these facts establish the intended draft target, not tag existence, tag absence,
+immutable readiness or tag authority. The initially absent tag can be created by
+the later adopted publication sequence. A branch-like target such as `main`
+refuses for a draft.
+
+Published reads retain the existing `DownloadedReleaseFacts` contract and always
+verify the actual raw tag object and peeled selected commit before and after the
+final release/inventory checks. A release's `target_commitish` is never published
+commit proof. Missing tags, a moved raw tag even at the same peeled commit, wrong
+peeled commits, mutable releases or a missing third receipt asset still refuse.
+No absent-tag/404 fallback or new endpoint is introduced. Both draft and published
+phases retain their finite one-shot deadlines, byte/metadata checks and fresh
+post-read release/inventory anchors.
 
 The root binding has exactly `schema`, `installation_sha256`,
 `qualification_sha256`, `source_sha256`, `native_receipt_pin`, `runtime_uid`, with

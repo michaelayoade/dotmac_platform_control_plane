@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast, overload
 from urllib.parse import quote, urlsplit
 
 if TYPE_CHECKING:
@@ -421,6 +421,21 @@ class ReleaseAssetFact:
     sha256: str
     uploader_id: int
     raw_bytes: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class DraftReleaseFacts:
+    """Selected draft target and bytes; carries no observed Git tag authority."""
+
+    repository_id: int
+    release_id: int
+    tag: str
+    target_commitish: str
+    draft: bool
+    immutable: bool
+    assets: tuple[ReleaseAssetFact, ...]
+    observations: tuple[GitHubObservation, ...] = field(repr=False)
+    owner_id: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1902,7 +1917,7 @@ class InstalledGate0GitHubReads:
             )
         if published:
             _require(value["immutable"] is True and value["published_at"] is not None)
-        return {
+        anchor = {
             key: value[key]
             for key in (
                 "id",
@@ -1913,6 +1928,13 @@ class InstalledGate0GitHubReads:
                 "published_at",
             )
         }
+        if not published:
+            # A first-create draft need not create its Git tag until publication.
+            # This binds only GitHub's exact selected target statement, joined to
+            # the independently checked producer head by _release_facts.
+            _require(_hex(value["target_commitish"], 40) == pin.commit)
+            anchor["target_commitish"] = value["target_commitish"]
+        return anchor
 
     def _asset_metadata(self, value: object, pin: ReleaseAssetPin) -> dict[str, Any]:
         value = _obj(value)
@@ -1968,7 +1990,15 @@ class InstalledGate0GitHubReads:
     def _tag_commit(self, pin: ReleasePin) -> str:
         return self._tag_binding(pin)[1]
 
-    def _release_facts(self, published: bool) -> DownloadedReleaseFacts:
+    @overload
+    def _release_facts(self, published: Literal[False]) -> DraftReleaseFacts: ...
+
+    @overload
+    def _release_facts(self, published: Literal[True]) -> DownloadedReleaseFacts: ...
+
+    def _release_facts(
+        self, published: bool
+    ) -> DraftReleaseFacts | DownloadedReleaseFacts:
         pin = self._release_pin(published)
         run = self._producer
         if run is None:
@@ -2050,7 +2080,7 @@ class InstalledGate0GitHubReads:
             producer,
             self._policies[run.run_id],
         )
-        tag_binding = self._tag_binding(pin)
+        tag_binding = self._tag_binding(pin) if published else None
         after_inventory = self._pages(
             EndpointCode.ASSETS, None, 32, identifier=pin.release_id
         )
@@ -2073,8 +2103,22 @@ class InstalledGate0GitHubReads:
                 published,
             )
             == before
-            and self._tag_binding(pin) == tag_binding
         )
+        if not published:
+            return DraftReleaseFacts(
+                self._repository.repository_id,
+                pin.release_id,
+                pin.tag,
+                before["target_commitish"],
+                True,
+                before["immutable"],
+                tuple(facts),
+                tuple(self._observations),
+                self._repository.owner_id,
+            )
+        _require(self._tag_binding(pin) == tag_binding)
+        if tag_binding is None:
+            raise GitHubReadRefused()
         return DownloadedReleaseFacts(
             self._repository.repository_id,
             pin.release_id,
@@ -2088,7 +2132,7 @@ class InstalledGate0GitHubReads:
             self._repository.owner_id,
         )
 
-    def draft_snapshot(self) -> DownloadedReleaseFacts:
+    def draft_snapshot(self) -> DraftReleaseFacts:
         return self._phase("draft", 180, lambda: self._release_facts(False))
 
     def published_snapshot(self) -> DownloadedReleaseFacts:

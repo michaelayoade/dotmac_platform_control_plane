@@ -969,3 +969,236 @@ def test_artifact_upload_interval_keeps_subsecond_boundary(producer, delta):
             owner._artifact(owner._producer, pin, facts)["created_at"]
             == item["created_at"]
         )
+
+
+@pytest.fixture
+def release_snapshot(producer, monkeypatch):
+    """Real reader composition with only its HTTP response seam replaced."""
+    owner, responses = producer
+    original_get = gh.InstalledGate0GitHubReads._get
+    calls = []
+    counts = {}
+    changes = {}
+    assets = {}
+    asset_bytes = {}
+
+    def configure(published=False):
+        owner._installation["phase"] = "published" if published else "draft"
+        ciphertext = b"selected ciphertext"
+        projection = gh._canonical(
+            {
+                "schema": "Gate0EncryptedEvidenceProjection.v1",
+                "result": "encrypted_evidence",
+                "policy_digest": "sha256:" + "1" * 64,
+                "campaign_digest": "sha256:" + "2" * 64,
+                "source_bundle_digest": "sha256:" + "3" * 64,
+                "collection_digest": "sha256:" + "4" * 64,
+                "plaintext_archive_digest": "sha256:" + "5" * 64,
+                "inner_manifest_digest": "sha256:" + "6" * 64,
+                "ciphertext_digest": "sha256:" + gh._digest(ciphertext),
+                "ciphertext_bytes": len(ciphertext),
+                "producer": {
+                    "repository_id": 10,
+                    "owner_id": 11,
+                    "workflow_id": 12,
+                    "run_id": 17,
+                    "attempt": 1,
+                    "job_id": 18,
+                    "source_revision": "a" * 40,
+                },
+            }
+        )
+        selected = [
+            ("gate0-evidence.pgp", ciphertext),
+            ("gate0-evidence-public.json", projection),
+        ]
+        if published:
+            selected.append(("gate0-readiness-receipt.json", b"{}"))
+        for identifier, (name, raw) in enumerate(selected, 30):
+            asset_bytes[identifier] = raw
+            assets[identifier] = {
+                "id": identifier,
+                "name": name,
+                "state": "uploaded",
+                "size": len(raw),
+                "digest": "sha256:" + gh._digest(raw),
+                "content_type": "application/octet-stream",
+                "uploader": {"id": 14},
+                "created_at": "2026-10-15T10:06:00Z",
+                "updated_at": "2026-10-15T10:06:00Z",
+            }
+        owner._release = {
+            "release_id": 22,
+            "tag": "gate0-selected",
+            "commit": "a" * 40,
+            "assets": [
+                {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "size": item["size"],
+                    "sha256": item["digest"][7:],
+                }
+                for item in assets.values()
+            ],
+        }
+        responses[gh.EndpointCode.RELEASE] = {
+            "id": 22,
+            "tag_name": "gate0-selected",
+            "draft": not published,
+            "immutable": published,
+            "target_commitish": "a" * 40,
+            "created_at": "2026-10-15T10:06:00Z",
+            "published_at": "2026-10-15T10:07:00Z" if published else None,
+        }
+        responses[gh.EndpointCode.ASSETS] = list(assets.values())
+        if published:
+            owner._qualification["immutable_setting"] = {
+                "repository_id": 10,
+                "state": "enabled",
+                "response_sha256": "7" * 64,
+                "native_record_digest": "8" * 64,
+                "observed_at": "2026-10-15T10:00:00Z",
+            }
+            responses[gh.EndpointCode.TAG_REF] = {
+                "ref": "refs/tags/gate0-selected",
+                "object": {"type": "tag", "sha": "b" * 40},
+            }
+            responses[gh.EndpointCode.TAG] = {
+                "sha": "b" * 40,
+                "object": {"type": "commit", "sha": "a" * 40},
+            }
+        return owner
+
+    def get(self, code, run=None, identifier=None, page=0, maximum=gh._JSON_CAP):
+        calls.append((code, identifier))
+        counts[code] = counts.get(code, 0) + 1
+        change = changes.get((code, counts[code]))
+        if change is not None:
+            change()
+        if code not in (gh.EndpointCode.ASSET, gh.EndpointCode.ASSET_BYTES):
+            return original_get(self, code, run, identifier, page, maximum)
+        value = (
+            copy.deepcopy(assets[identifier])
+            if code is gh.EndpointCode.ASSET
+            else asset_bytes[identifier]
+        )
+        body = value if isinstance(value, bytes) else gh._canonical(value)
+        self._observations.append(
+            gh.GitHubObservation(
+                code,
+                page,
+                200,
+                gh._digest(body),
+                body,
+                "2026-10-15T10:08:00Z",
+                time.monotonic(),
+            )
+        )
+        return value, 0, 0
+
+    monkeypatch.setattr(gh.InstalledGate0GitHubReads, "_get", get)
+    return configure, responses, assets, asset_bytes, calls, changes
+
+
+def test_first_create_draft_binds_target_without_any_tag_request(release_snapshot):
+    configure, responses, _, _, calls, _ = release_snapshot
+    owner = configure()
+    assert (
+        gh.EndpointCode.TAG_REF not in responses
+        and gh.EndpointCode.TAG not in responses
+    )
+    facts = owner.draft_snapshot()
+    assert type(facts) is gh.DraftReleaseFacts and owner.owns_facts(facts)
+    assert facts.draft and facts.target_commitish == owner._producer.head_sha
+    assert not hasattr(facts, "raw_tag_sha") and not hasattr(facts, "peeled_commit")
+    assert all(
+        code not in (gh.EndpointCode.TAG_REF, gh.EndpointCode.TAG) for code, _ in calls
+    )
+    assert (
+        len(facts.assets) == 2 and facts.assets[0].raw_bytes == b"selected ciphertext"
+    )
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.draft_snapshot()
+    assert not owner.owns_facts(facts)
+
+
+@pytest.mark.parametrize("target", ["main", "b" * 40, "A" * 40, None, True])
+def test_draft_refuses_nonexact_selected_target(release_snapshot, target):
+    configure, responses, _, _, _, _ = release_snapshot
+    owner = configure()
+    responses[gh.EndpointCode.RELEASE]["target_commitish"] = target
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.draft_snapshot()
+    assert not owner._issued
+
+
+def test_draft_detects_target_mutation_during_asset_reads(release_snapshot):
+    configure, responses, _, _, _, changes = release_snapshot
+    owner = configure()
+    changes[(gh.EndpointCode.RELEASE, 2)] = lambda: responses[
+        gh.EndpointCode.RELEASE
+    ].update(target_commitish="b" * 40)
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.draft_snapshot()
+    assert not owner._issued and owner._observations == []
+
+
+@pytest.mark.parametrize("mutation", ["inventory", "bytes", "deadline"])
+def test_draft_keeps_inventory_byte_and_phase_bounds(release_snapshot, mutation):
+    configure, responses, _, asset_bytes, _, changes = release_snapshot
+    owner = configure()
+    if mutation == "inventory":
+        changes[(gh.EndpointCode.ASSETS, 2)] = lambda: responses[
+            gh.EndpointCode.ASSETS
+        ].pop()
+    elif mutation == "bytes":
+        asset_bytes[30] = b"substituted bytes"
+    else:
+
+        def expire():
+            owner._deadline = time.monotonic() - 1
+
+        changes[(gh.EndpointCode.RELEASE, 2)] = expire
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.draft_snapshot()
+    assert not owner._issued
+
+
+def test_published_snapshot_still_requires_real_annotated_tag_binding(release_snapshot):
+    configure, responses, _, _, calls, _ = release_snapshot
+    owner = configure(published=True)
+    # GitHub's branch-like target statement cannot replace actual tag authority.
+    responses[gh.EndpointCode.RELEASE]["target_commitish"] = "main"
+    facts = owner.published_snapshot()
+    assert type(facts) is gh.DownloadedReleaseFacts and owner.owns_facts(facts)
+    assert facts.raw_tag_sha == "b" * 40 and facts.peeled_commit == "a" * 40
+    assert not facts.draft and facts.immutable and len(facts.assets) == 3
+    assert sum(code is gh.EndpointCode.TAG_REF for code, _ in calls) == 2
+    assert sum(code is gh.EndpointCode.TAG for code, _ in calls) == 2
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing_tag", "wrong_commit", "retag_same_commit", "mutable", "missing_receipt"],
+)
+def test_published_tag_and_immutable_guards_remain_strict(release_snapshot, mutation):
+    configure, responses, _, _, _, changes = release_snapshot
+    owner = configure(published=True)
+    if mutation == "missing_tag":
+        responses.pop(gh.EndpointCode.TAG_REF)
+    elif mutation == "wrong_commit":
+        responses[gh.EndpointCode.TAG]["object"]["sha"] = "c" * 40
+    elif mutation == "retag_same_commit":
+
+        def retag():
+            responses[gh.EndpointCode.TAG_REF]["object"]["sha"] = "c" * 40
+            responses[gh.EndpointCode.TAG]["sha"] = "c" * 40
+
+        changes[(gh.EndpointCode.TAG_REF, 2)] = retag
+    elif mutation == "mutable":
+        responses[gh.EndpointCode.RELEASE]["immutable"] = False
+    else:
+        responses[gh.EndpointCode.ASSETS].pop()
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.published_snapshot()
+    assert not owner._issued
