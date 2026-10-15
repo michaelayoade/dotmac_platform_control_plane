@@ -56,6 +56,34 @@ class Owner:
 #: an owner declared without a command both fail.
 OWNERS: Final[tuple[Owner, ...]] = (
     Owner(
+        "gate0 lifecycle-run",
+        "vendor_cp.deployment.gate0_runner_supervisor",
+        "run_installed_lifecycle",
+        True,
+        "fixed root A9 lifecycle and original-bound supervisor",
+    ),
+    Owner(
+        "gate0 lifecycle-retire-jit",
+        "vendor_cp.deployment.gate0_runner_supervisor",
+        "run_installed_lifecycle_retirement",
+        True,
+        "fixed cleanup-only owned A9 runner retirement",
+    ),
+    Owner(
+        "gate0 jit-runner-credential",
+        "vendor_cp.deployment.gate0_runner_lifecycle_courier",
+        "run_installed_jit_runner",
+        True,
+        "fixed credential-fed ephemeral runner entry",
+    ),
+    Owner(
+        "gate0 courier-original-oidc",
+        "vendor_cp.deployment.gate0_runner_lifecycle_courier",
+        "run_installed_job_courier",
+        True,
+        "fixed protected-job original credential courier",
+    ),
+    Owner(
         "gate0 bootstrap-collector",
         "vendor_cp.deployment.gate0_runner_bootstrap",
         "run_installed_bootstrap",

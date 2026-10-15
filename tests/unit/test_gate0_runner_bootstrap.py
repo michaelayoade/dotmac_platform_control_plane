@@ -278,7 +278,17 @@ def test_credential_adapter_never_uses_argv_unit_environment_or_diagnostics(
 
 
 @pytest.mark.parametrize(
-    "phase", ["start", "read", "bind", "promote", "normal-show", "normal-empty", None]
+    "phase",
+    [
+        "start",
+        "read",
+        "bind",
+        "promote",
+        "normal-show",
+        "normal-empty",
+        "handoff",
+        None,
+    ],
 )
 def test_one_start_budget_and_original_cutoff_propagate_through_orchestration(
     candidate, monkeypatch, phase
@@ -311,6 +321,10 @@ def test_one_start_budget_and_original_cutoff_propagate_through_orchestration(
             self.invocation = None
             self.pid = None
             self.reads = 0
+            self._bound_identity = None
+            self.closed = False
+            self.fact = object()
+            self.retirement_calls = 0
 
         def qualify(self):
             return b"{}"
@@ -349,6 +363,7 @@ def test_one_start_budget_and_original_cutoff_propagate_through_orchestration(
             calls.append(("bind", deadline))
             self.invocation = "a" * 32
             self.pid = 123
+            self._bound_identity = (self.invocation, self.pid)
             if phase == "bind":
                 now[0] = 1002.1
 
@@ -358,11 +373,18 @@ def test_one_start_budget_and_original_cutoff_propagate_through_orchestration(
                 now[0] = 1302.1
             return "observed_populated_zero"
 
+        def retirement_facts(self, *, deadline):
+            assert not self.closed
+            self.retirement_calls += 1
+            assert self.retirement_calls == 1
+            calls.append(("retirement-fact", deadline))
+            return self.fact
+
         def stop_fixed_collector(self, deadline):
             calls.append(("failure-stop", deadline))
 
         def close(self):
-            pass
+            self.closed = True
 
     def promote(manager, deadline):
         calls.append(("promote", deadline))
@@ -370,6 +392,14 @@ def test_one_start_budget_and_original_cutoff_propagate_through_orchestration(
             now[0] = 1002.1
         return {"fixture": "same-inode"}
 
+    def handoff(manager, fact, deadline, *, complete):
+        assert not manager.closed and fact is manager.fact
+        calls.append(("file-handoff", deadline))
+        if phase == "handoff":
+            raise ProviderRefused()
+
+    monkeypatch.setattr(owner, "_retire_lifecycle_files", handoff)
+    monkeypatch.setattr(owner, "_publish_lifecycle_failure", lambda deadline: None)
     monkeypatch.setattr(owner, "NativeSystemManager", SyntheticManager)
     monkeypatch.setattr(owner, "_promote_listener", promote)
     result = owner.run_installed_bootstrap()
@@ -381,6 +411,9 @@ def test_one_start_budget_and_original_cutoff_propagate_through_orchestration(
     if phase is None:
         assert result == 0 and len(published) == 1
         assert published[0][1] == 1302.0 and published[0][2] < 1302.0
+        assert calls.index(("retirement-fact", 1302.0)) < calls.index(
+            ("file-handoff", 1302.0)
+        )
     else:
         assert result == 3 and published == []
         if phase in ("start", "read", "bind", "promote"):

@@ -114,6 +114,8 @@ _BOOTSTRAP_PROPERTIES = (
     "ExecStart",
     "ExecStop",
     "ExecStopPost",
+    "BindsTo",
+    "After",
 )
 _TIMER_PROPERTIES = (
     "ActiveState",
@@ -771,6 +773,8 @@ class NativeSystemManager:
             or bootstrap["Group"] != "0"
             or bootstrap["ExecStop"]
             or bootstrap["ExecStopPost"]
+            or "dotmac-gate0-a9-lifecycle.service" not in bootstrap["BindsTo"].split()
+            or "dotmac-gate0-a9-lifecycle.service" not in bootstrap["After"].split()
             or not bootstrap["ExecStart"].startswith(
                 "{ path="
                 + installed.binary.path
@@ -1264,6 +1268,24 @@ def _publish_normal_observation(raw: bytes, deadline: float) -> None:
     return
 
 
+def _retire_lifecycle_files(
+    manager: NativeSystemManager,
+    fact: CollectorRetirementFact,
+    deadline: float,
+    *,
+    complete: bool,
+) -> None:
+    from vendor_cp.deployment.gate0_runner_supervisor import retire_and_export_collector
+
+    retire_and_export_collector(manager, fact, deadline, complete=complete)
+
+
+def _publish_lifecycle_failure(deadline: float) -> None:
+    from vendor_cp.deployment.gate0_runner_supervisor import publish_bootstrap_failure
+
+    publish_bootstrap_failure(deadline)
+
+
 def run_installed_bootstrap() -> int:
     """Argument-free candidate root entry; success means normal manager retirement.
 
@@ -1271,6 +1293,9 @@ def run_installed_bootstrap() -> int:
     this operation. The independent original deadline stays armed on every exit.
     """
     manager: NativeSystemManager | None = None
+    retirement_fact: CollectorRetirementFact | None = None
+    retirement_attempted = False
+    handoff_attempted = False
     try:
         installed = BootstrapInstallation.from_installed()
         credential_source = read_protected_handoff(
@@ -1327,6 +1352,15 @@ def run_installed_bootstrap() -> int:
             if values["ActiveState"] in ("inactive", "failed"):
                 retirement = manager.observe_fixed_empty(values, installed.clock.cutoff)
                 _require_before(installed.clock.cutoff)
+                retirement_attempted = True
+                retirement_fact = manager.retirement_facts(
+                    deadline=installed.clock.cutoff
+                )
+                handoff_attempted = True
+                _retire_lifecycle_files(
+                    manager, retirement_fact, installed.clock.cutoff, complete=True
+                )
+                _require_before(installed.clock.cutoff)
                 manager.close()
                 _require_before(installed.clock.cutoff)
                 receipt = canonical(
@@ -1349,13 +1383,25 @@ def run_installed_bootstrap() -> int:
         raise ProviderRefused()
     except Exception:
         if manager is not None:
+            cleanup_end = manager.installation.clock.cleanup_end(time.monotonic())
             try:
-                manager.stop_fixed_collector(
-                    manager.installation.clock.cleanup_end(time.monotonic())
-                )
-            except Exception:
-                # No success receipt; the independent manager timer stays armed.
-                return 3
+                manager.stop_fixed_collector(cleanup_end)
+            except Exception:  # noqa: S110 -- private failure is never logged
+                pass
+            try:
+                if manager._bound_identity is not None:
+                    if not retirement_attempted:
+                        retirement_attempted = True
+                        retirement_fact = manager.retirement_facts(deadline=cleanup_end)
+                    if retirement_fact is not None and not handoff_attempted:
+                        handoff_attempted = True
+                        _retire_lifecycle_files(
+                            manager, retirement_fact, cleanup_end, complete=False
+                        )
+                if retirement_fact is None:
+                    _publish_lifecycle_failure(cleanup_end)
+            except Exception:  # noqa: S110 -- no forged retirement or success receipt
+                pass
         return 3
     finally:
         if manager is not None:

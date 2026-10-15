@@ -10,6 +10,26 @@ from vendor_cp.cli.owners import by_command
 
 ENTRIES = (
     (
+        "lifecycle-run",
+        "vendor_cp.deployment.gate0_runner_supervisor",
+        "run_installed_lifecycle",
+    ),
+    (
+        "lifecycle-retire-jit",
+        "vendor_cp.deployment.gate0_runner_supervisor",
+        "run_installed_lifecycle_retirement",
+    ),
+    (
+        "jit-runner-credential",
+        "vendor_cp.deployment.gate0_runner_lifecycle_courier",
+        "run_installed_jit_runner",
+    ),
+    (
+        "courier-original-oidc",
+        "vendor_cp.deployment.gate0_runner_lifecycle_courier",
+        "run_installed_job_courier",
+    ),
+    (
         "bootstrap-collector",
         "vendor_cp.deployment.gate0_runner_bootstrap",
         "run_installed_bootstrap",
@@ -36,6 +56,13 @@ def test_cli_reaches_only_the_declared_argument_free_owner(
 
     module = ModuleType(module_name)
     setattr(module, symbol, installed_owner)
+    if module_name.endswith("gate0_runner_lifecycle_courier"):
+        other = (
+            "run_installed_job_courier"
+            if symbol == "run_installed_jit_runner"
+            else "run_installed_jit_runner"
+        )
+        setattr(module, other, lambda: pytest.fail("unselected owner invoked"))
     monkeypatch.setitem(sys.modules, module_name, module)
     declared = by_command()[f"gate0 {command}"]
     assert (declared.module, declared.symbol, declared.mutates) == (
@@ -59,6 +86,13 @@ def test_bootstrap_cli_suppresses_private_owner_failure(
 
     module = ModuleType(module_name)
     setattr(module, symbol, unavailable)
+    if module_name.endswith("gate0_runner_lifecycle_courier"):
+        other = (
+            "run_installed_job_courier"
+            if symbol == "run_installed_jit_runner"
+            else "run_installed_jit_runner"
+        )
+        setattr(module, other, lambda: pytest.fail("unselected owner invoked"))
     monkeypatch.setitem(sys.modules, module_name, module)
     assert main(["gate0", command]) == 3
     output = capsys.readouterr()

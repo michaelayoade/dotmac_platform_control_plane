@@ -572,6 +572,25 @@ def build_parser() -> _Parser:
         "collect with the fixed private credential",
     )
     _command(gate0_sub, "gate0", "handoff-holder", "forward fixed root evidence")
+    _command(gate0_sub, "gate0", "lifecycle-run", "run the fixed A9 root lifecycle")
+    _command(
+        gate0_sub,
+        "gate0",
+        "lifecycle-retire-jit",
+        "retire the owned A9 runner invocation",
+    )
+    _command(
+        gate0_sub,
+        "gate0",
+        "jit-runner-credential",
+        "start the fixed credential-fed runner",
+    )
+    _command(
+        gate0_sub,
+        "gate0",
+        "courier-original-oidc",
+        "deliver the original job credential",
+    )
     _command(gate0_sub, "gate0", "handoff-receiver", "receive fixed root evidence")
     _command(
         gate0_sub, "gate0", "attester-session", "serve one fixed SSH proof exchange"
@@ -654,8 +673,39 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return gate0_collect_e(args)
 
-    if command in {"gate0 bootstrap-collector", "gate0 collect-e-credential"}:
+    if command in {
+        "gate0 bootstrap-collector",
+        "gate0 collect-e-credential",
+        "gate0 lifecycle-run",
+        "gate0 lifecycle-retire-jit",
+        "gate0 jit-runner-credential",
+        "gate0 courier-original-oidc",
+    }:
         try:
+            if command == "gate0 lifecycle-run":
+                from vendor_cp.deployment.gate0_runner_supervisor import (
+                    run_installed_lifecycle,
+                )
+
+                return run_installed_lifecycle()
+            if command == "gate0 lifecycle-retire-jit":
+                from vendor_cp.deployment.gate0_runner_supervisor import (
+                    run_installed_lifecycle_retirement,
+                )
+
+                return run_installed_lifecycle_retirement()
+            if command in {
+                "gate0 jit-runner-credential",
+                "gate0 courier-original-oidc",
+            }:
+                from vendor_cp.deployment.gate0_runner_lifecycle_courier import (
+                    run_installed_jit_runner,
+                    run_installed_job_courier,
+                )
+
+                if command == "gate0 jit-runner-credential":
+                    return run_installed_jit_runner()
+                return run_installed_job_courier()
             if command == "gate0 bootstrap-collector":
                 from vendor_cp.deployment.gate0_runner_bootstrap import (
                     run_installed_bootstrap,
