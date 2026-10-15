@@ -23,9 +23,11 @@ import struct
 import time
 import zipfile
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any, NoReturn, TypeVar, cast
 from urllib.parse import quote, urlsplit
 
 _INSTALLATION = "/run/dotmac-gate0-e/github-read.json"
@@ -36,6 +38,7 @@ _JSON_CAP = 1024 * 1024
 _CIPHER_CAP = 17 * 1024 * 1024
 _ZIP_CAP = _CIPHER_CAP + 256 * 1024
 _SEAL = object()
+_PhaseResult = TypeVar("_PhaseResult")
 
 
 class GitHubReadRefused(ValueError):
@@ -55,13 +58,14 @@ def _require(condition: bool) -> None:
 
 def _text(value: object, maximum: int = 512) -> str:
     _require(type(value) is str and 0 < len(value) <= maximum)
+    value = cast(str, value)
     _require(value.strip() == value and all(32 <= ord(c) < 127 for c in value))
     return value
 
 
 def _id(value: object) -> int:
     _require(type(value) is int and value > 0)
-    return value
+    return cast(int, value)
 
 
 def _hex(value: object, length: int = 64) -> str:
@@ -69,42 +73,43 @@ def _hex(value: object, length: int = 64) -> str:
         type(value) is str
         and re.fullmatch("[0-9a-f]{" + str(length) + "}", value) is not None
     )
-    return value
+    return cast(str, value)
 
 
-def _obj(value: object) -> dict:
+def _obj(value: object) -> dict[str, Any]:
+    # Dynamic JSON schema boundary; every consuming owner retains its validators.
     _require(type(value) is dict)
-    return value
+    return cast(dict[str, Any], value)
 
 
-def _closed(value: object, fields: str) -> dict:
+def _closed(value: object, fields: str) -> dict[str, Any]:
     value = _obj(value)
     _require(set(value) == set(fields.split()))
     return value
 
 
-def _array(value: object, maximum: int) -> list:
+def _array(value: object, maximum: int) -> list[Any]:
     _require(type(value) is list and len(value) <= maximum)
-    return value
+    return cast(list[Any], value)
 
 
 def _json(raw: bytes) -> object:
     _require(type(raw) is bytes and 0 < len(raw) <= _JSON_CAP)
 
-    def pairs(items):
-        result = {}
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
         for key, value in items:
             _require(key not in result)
             result[key] = value
         return result
 
-    def invalid(_):
+    def invalid(_: str) -> NoReturn:
         raise GitHubReadRefused()
 
     try:
-        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
+        value: object = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
 
-        def bounded(item, depth=0):
+        def bounded(item: object, depth: int = 0) -> None:
             _require(depth <= 32)
             if type(item) is dict:
                 _require(len(item) <= 2048)
@@ -143,6 +148,7 @@ def _instant(value: object) -> datetime:
     an unknown local offset and cannot establish the instant required here.
     """
     _require(type(value) is str and 20 <= len(value) <= 32)
+    value = cast(str, value)
     _require(
         re.fullmatch(
             r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
@@ -235,7 +241,7 @@ class RepositoryPin:
     repository_id: int
     owner_id: int
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         for item in (self.owner, self.name):
             _require(
                 type(item) is str
@@ -434,7 +440,7 @@ class PublicationFacts:
 
 
 class _Wire:
-    def __init__(self, channel: ssl.SSLSocket, deadline: float):
+    def __init__(self, channel: ssl.SSLSocket, deadline: float) -> None:
         self.channel, self.deadline, self.buffer = channel, deadline, bytearray()
 
     def read(self, count: int) -> bytes:
@@ -456,7 +462,7 @@ class _Wire:
             result.extend(self.read(1))
         return bytes(result[:-2])
 
-    def eof(self):
+    def eof(self) -> None:
         _require(not self.buffer)
         remaining = self.deadline - time.monotonic()
         _require(remaining > 0)
@@ -477,11 +483,10 @@ def _redirect(location: str, origins: tuple[str, ...]) -> tuple[str, str]:
         and not parsed.password
         and not parsed.fragment
     )
-    _require(
-        parsed.netloc == parsed.hostname or parsed.netloc == parsed.hostname + ":443"
-    )
+    hostname = cast(str, parsed.hostname)
+    _require(parsed.netloc == hostname or parsed.netloc == hostname + ":443")
     _require(parsed.path.startswith("/") and not parsed.path.startswith("//"))
-    return parsed.hostname, parsed.path + ("?" + parsed.query if parsed.query else "")
+    return hostname, parsed.path + ("?" + parsed.query if parsed.query else "")
 
 
 def _https(
@@ -491,7 +496,7 @@ def _https(
     binary: bool,
     maximum: int,
     deadline: float,
-):
+) -> tuple[int, dict[str, str], bytes]:
     """Resolve once; connect the exact checked address; SNI is original host."""
     addresses = socket.getaddrinfo(
         host, 443, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP
@@ -544,7 +549,7 @@ def _https(
                 is not None
             )
             status = int(status_line.split(b" ")[1])
-            fields = {}
+            fields: dict[str, str] = {}
             consumed = len(status_line) + 2
             for _ in range(129):
                 line = wire.line()
@@ -553,12 +558,14 @@ def _https(
                 if not line:
                     break
                 _require(len(fields) < 128 and b":" in line and not line[:1].isspace())
-                key, value = line.split(b":", 1)
-                _require(re.fullmatch(rb"[A-Za-z0-9!#$%&'*+.^_`|~-]+", key) is not None)
-                key = key.decode("ascii").lower()
+                key_bytes, value_bytes = line.split(b":", 1)
+                _require(
+                    re.fullmatch(rb"[A-Za-z0-9!#$%&'*+.^_`|~-]+", key_bytes) is not None
+                )
+                key = key_bytes.decode("ascii").lower()
                 _require(key not in fields)
-                _require(all(32 <= c < 127 or c == 9 for c in value))
-                fields[key] = value.decode("ascii").strip()
+                _require(all(32 <= c < 127 or c == 9 for c in value_bytes))
+                fields[key] = value_bytes.decode("ascii").strip()
             else:
                 raise GitHubReadRefused()
             _require(fields.get("content-encoding", "identity") == "identity")
@@ -608,11 +615,12 @@ def _pagination(link: str | None, path: str, page: int) -> tuple[int, int]:
     if link is None:
         return 0, 0
     _require(page > 0 and len(link) <= 8192)
-    found = {}
+    found: dict[str, int] = {}
     base = path.rsplit("page=", 1)[0]
     for part in link.split(","):
         match = re.fullmatch(r'\s*<([^<>]+)>; rel="(next|last|first|prev)"\s*', part)
         _require(match is not None and match[2] not in found)
+        match = cast(re.Match[str], match)
         coordinate = match[1]
         prefix = "https://api.github.com" + base
         _require(coordinate.startswith(prefix))
@@ -637,7 +645,7 @@ def _http_child(
     origins: tuple[str, ...],
     deadline: float,
     page: int,
-):
+) -> None:
     try:
         status, headers, body = _https(
             "api.github.com", path, token, binary, maximum, deadline
@@ -674,7 +682,7 @@ def _spawn_get(
     origins: tuple[str, ...],
     phase_deadline: float,
     page: int,
-):
+) -> tuple[int, int, int, bytes]:
     """One absolute deadline includes spawn, DNS, network, IPC, EOF and reap."""
     deadline = min(phase_deadline, time.monotonic() + (45 if binary else 10))
     work_deadline = deadline - 1.0
@@ -692,7 +700,7 @@ def _spawn_get(
         child.close()
         parent.setblocking(False)
 
-        def exact(count):
+        def exact(count: int) -> bytes:
             output = bytearray()
             while len(output) < count:
                 remaining = work_deadline - time.monotonic()
@@ -731,10 +739,10 @@ def _spawn_get(
             result = None
             raise GitHubReadRefused()
     _require(result is not None)
-    return result
+    return cast(tuple[int, int, int, bytes], result)
 
 
-def _pin_document(pin: object) -> tuple[dict, bytes]:
+def _pin_document(pin: object) -> tuple[dict[str, Any], bytes]:
     pin = _closed(pin, "path digest")
     path, digest = _text(pin["path"]), _hex(pin["digest"])
     _require(path.startswith("/etc/dotmac-gate0-e/") and path not in (_ROOT_BINDING,))
@@ -821,7 +829,7 @@ def _run(value: object, repository: RepositoryPin) -> RunPin:
     return RunPin(**(value | {"repository": repository, "workflow": workflow}))
 
 
-def _source_policy(run: RunPin) -> dict:
+def _source_policy(run: RunPin) -> dict[str, Any]:
     w = run.workflow
     policy, _ = _pin_document(
         dict(zip(("path", "digest"), w.source_policy_pin, strict=True))
@@ -916,7 +924,12 @@ class InstalledGate0GitHubReads:
         "_issued",
     )
 
-    def __init__(self, seal: object, installation: dict, qualification: dict):
+    def __init__(
+        self,
+        seal: object,
+        installation: dict[str, Any],
+        qualification: dict[str, Any],
+    ) -> None:
         _require(seal is _SEAL)
         self._installation = installation
         self._qualification = qualification
@@ -939,14 +952,13 @@ class InstalledGate0GitHubReads:
         self._transfer = installation["transfer"]
         self._release = installation["release"]
         self._origins = tuple(installation["download_origins"])
-        self._used, self._failed = set(), False
-        self._issued = []
-        self._observations, self._deadline, self._metadata, self._exchanges = (
-            [],
-            0.0,
-            0,
-            0,
-        )
+        self._used: set[str] = set()
+        self._failed = False
+        self._issued: list[object] = []
+        self._observations: list[GitHubObservation] = []
+        self._deadline = 0.0
+        self._metadata = 0
+        self._exchanges = 0
 
     @classmethod
     def from_installed(cls) -> InstalledGate0GitHubReads:
@@ -1096,7 +1108,14 @@ class InstalledGate0GitHubReads:
         """Live identity check; DTO construction/JSON never authenticates facts."""
         return not self._failed and any(facts is item for item in self._issued)
 
-    def _phase(self, name: str, seconds: int, operation, *, deadline=None):
+    def _phase(
+        self,
+        name: str,
+        seconds: int,
+        operation: Callable[[], _PhaseResult],
+        *,
+        deadline: float | None = None,
+    ) -> _PhaseResult:
         try:
             _require(
                 not self._failed
@@ -1106,8 +1125,11 @@ class InstalledGate0GitHubReads:
             self._used.add(name)
             self._deadline = time.monotonic() + seconds
             if deadline is not None or name == "protected_job":
-                _require(type(deadline) in (int, float) and math.isfinite(deadline))
-                self._deadline = min(self._deadline, deadline)
+                _require(
+                    type(deadline) in (int, float)
+                    and math.isfinite(cast(float, deadline))
+                )
+                self._deadline = min(self._deadline, cast(float, deadline))
             _require(time.monotonic() < self._deadline)
             self._observations, self._metadata, self._exchanges = [], 0, 0
             result = operation()
@@ -1126,11 +1148,11 @@ class InstalledGate0GitHubReads:
         run: RunPin | None,
         identifier: int | str | None,
         page: int,
-    ):
+    ) -> str:
         root = "/repos/" + self._repository.owner + "/" + self._repository.name
-        w = run.workflow if run else None
         paths = {EndpointCode.REPOSITORY: ""}
         if run:
+            w = run.workflow
             r = "/actions/runs/" + str(run.run_id)
             paths.update(
                 {
@@ -1195,7 +1217,7 @@ class InstalledGate0GitHubReads:
         identifier: int | str | None = None,
         page: int = 0,
         maximum: int = _JSON_CAP,
-    ):
+    ) -> tuple[object, int, int]:
         binary = code in (EndpointCode.ZIP, EndpointCode.ASSET_BYTES)
         _require(self._exchanges < 48 and time.monotonic() < self._deadline)
         # A download may make one additional CDN exchange.
@@ -1228,25 +1250,38 @@ class InstalledGate0GitHubReads:
         self._observations.append(observation)
         return (raw if binary else _json(raw)), next_page, last_page
 
-    def _read(self, code, run=None, identifier=None):
+    def _read(
+        self,
+        code: EndpointCode,
+        run: RunPin | None = None,
+        identifier: int | str | None = None,
+    ) -> object:
         value, next_page, last_page = self._get(code, run, identifier)
         _require(next_page == last_page == 0)
         return value
 
-    def _pages(self, code, field_name, maximum, run=None, identifier=None):
-        result, total = [], None
+    def _pages(
+        self,
+        code: EndpointCode,
+        field_name: str | None,
+        maximum: int,
+        run: RunPin | None = None,
+        identifier: int | str | None = None,
+    ) -> list[dict[str, Any]]:
+        result: list[Any] = []
+        total: int | None = None
         for page in range(1, 5):
             value, next_page, last_page = self._get(code, run, identifier, page)
             if field_name:
-                value = _obj(value)
-                count = value["total_count"]
+                document = _obj(value)
+                count = document["total_count"]
                 _require(
                     type(count) is int
                     and 0 <= count <= maximum
                     and (total is None or total == count)
                 )
                 total = count
-                items = _array(value[field_name], 100)
+                items = _array(document[field_name], 100)
             else:
                 items = _array(value, 100)
             result.extend(items)
@@ -1260,13 +1295,13 @@ class InstalledGate0GitHubReads:
                     and (total is None or len(result) == total)
                     and len(items) < 100
                 )
-                return result
+                return cast(list[dict[str, Any]], result)
             _require(
                 next_page == page + 1 and last_page >= next_page and len(items) == 100
             )
         raise GitHubReadRefused()
 
-    def _run_anchor(self, value: object, run: RunPin) -> dict:
+    def _run_anchor(self, value: object, run: RunPin) -> dict[str, Any]:
         value = _obj(value)
         w = run.workflow
         for key, expected in (
@@ -1629,9 +1664,12 @@ class InstalledGate0GitHubReads:
         )
 
     def producer_snapshot(self, stage: ProducerStage) -> ProducerFacts:
-        def observe():
+        def observe() -> ProducerFacts:
             _require(stage != ProducerStage.PROTECTED_JOB_STARTED)
-            return self._producer_facts(self._producer, stage)
+            run = self._producer
+            if run is None:
+                raise GitHubReadRefused()
+            return self._producer_facts(run, stage)
 
         return self._phase("producer", 90, observe)
 
@@ -1641,18 +1679,20 @@ class InstalledGate0GitHubReads:
         Original provisioning authority caps this one-use read phase. These facts
         authenticate GitHub observations, not local PID or cgroup ownership.
         """
-        return self._phase(
-            "protected_job",
-            90,
-            lambda: self._producer_facts(
-                self._producer, ProducerStage.PROTECTED_JOB_STARTED
-            ),
-            deadline=deadline,
-        )
+
+        def observe() -> ProducerFacts:
+            run = self._producer
+            if run is None:
+                raise GitHubReadRefused()
+            return self._producer_facts(run, ProducerStage.PROTECTED_JOB_STARTED)
+
+        return self._phase("protected_job", 90, observe, deadline=deadline)
 
     def publication_snapshot(self) -> PublicationFacts:
-        def observe():
+        def observe() -> PublicationFacts:
             run = self._publication
+            if run is None:
+                raise GitHubReadRefused()
             facts = self._producer_facts(run, ProducerStage.COLLECTION_SNAPSHOT)
             policy = self._policies[run.run_id]
             anchor = self._run_anchor(self._read(EndpointCode.RUN, run), run)
@@ -1671,7 +1711,7 @@ class InstalledGate0GitHubReads:
 
     def _artifact(
         self, run: RunPin, transfer: TransferPin, producer: ProducerFacts
-    ) -> dict:
+    ) -> dict[str, Any]:
         item = _obj(self._read(EndpointCode.ARTIFACT, identifier=transfer.artifact_id))
         _require(
             _id(item["id"]) == transfer.artifact_id
@@ -1724,7 +1764,7 @@ class InstalledGate0GitHubReads:
         }
 
     def encrypted_transfer(self) -> VerifiedProducerTransfer:
-        def observe():
+        def observe() -> VerifiedProducerTransfer:
             value = _closed(
                 self._transfer,
                 "artifact_id name expected_artifact_names ciphertext_name "
@@ -1741,12 +1781,11 @@ class InstalledGate0GitHubReads:
                 and value["projection_name"] == "gate0-evidence-public.json"
             )
             pin = TransferPin(_id(value["artifact_id"]), _text(value["name"]), names)
-            producer = self._producer_facts(
-                self._producer, ProducerStage.PRODUCER_JOB_COMPLETE
-            )
-            roster = self._pages(
-                EndpointCode.ARTIFACTS, "artifacts", 32, self._producer
-            )
+            run = self._producer
+            if run is None:
+                raise GitHubReadRefused()
+            producer = self._producer_facts(run, ProducerStage.PRODUCER_JOB_COMPLETE)
+            roster = self._pages(EndpointCode.ARTIFACTS, "artifacts", 32, run)
             _require(
                 len(roster) == len(names)
                 and {item["name"] for item in roster} == set(names)
@@ -1755,10 +1794,11 @@ class InstalledGate0GitHubReads:
                     for item in roster
                 )
             )
-            before = self._artifact(self._producer, pin, producer)
+            before = self._artifact(run, pin, producer)
             raw, next_page, last_page = self._get(
                 EndpointCode.ZIP, identifier=pin.artifact_id, maximum=_ZIP_CAP
             )
+            raw = cast(bytes, raw)  # ZIP is an exact binary endpoint.
             _require(
                 next_page == last_page == 0
                 and len(raw) == before["size_in_bytes"]
@@ -1769,17 +1809,15 @@ class InstalledGate0GitHubReads:
                 == "flat-two-stored-or-deflate-no-extra.v1"
             )
             ciphertext, projection = _unzip(raw)
-            policy = self._policies[self._producer.run_id]
+            policy = self._policies[run.run_id]
             for data, key in (
                 (ciphertext, "ciphertext_sha256"),
                 (projection, "projection_sha256"),
             ):
                 _require(policy[key] is None or _digest(data) == policy[key])
             _projection(projection, ciphertext, producer, policy)
-            _require(self._artifact(self._producer, pin, producer) == before)
-            self._run_anchor(
-                self._read(EndpointCode.RUN, self._producer), self._producer
-            )
+            _require(self._artifact(run, pin, producer) == before)
+            self._run_anchor(self._read(EndpointCode.RUN, run), run)
             return VerifiedProducerTransfer(
                 producer,
                 pin.artifact_id,
@@ -1838,7 +1876,9 @@ class InstalledGate0GitHubReads:
             tuple(assets),
         )
 
-    def _release_anchor(self, value: object, pin: ReleasePin, published: bool):
+    def _release_anchor(
+        self, value: object, pin: ReleasePin, published: bool
+    ) -> dict[str, Any]:
         value = _obj(value)
         _require(
             _id(value["id"]) == pin.release_id
@@ -1868,7 +1908,7 @@ class InstalledGate0GitHubReads:
             )
         }
 
-    def _asset_metadata(self, value: object, pin: ReleaseAssetPin):
+    def _asset_metadata(self, value: object, pin: ReleaseAssetPin) -> dict[str, Any]:
         value = _obj(value)
         _require(
             _id(value["id"]) == pin.id
@@ -1924,9 +1964,10 @@ class InstalledGate0GitHubReads:
 
     def _release_facts(self, published: bool) -> DownloadedReleaseFacts:
         pin = self._release_pin(published)
-        producer = self._producer_facts(
-            self._producer, ProducerStage.PRODUCER_RUN_COMPLETE
-        )
+        run = self._producer
+        if run is None:
+            raise GitHubReadRefused()
+        producer = self._producer_facts(run, ProducerStage.PRODUCER_RUN_COMPLETE)
         _require(pin.commit == producer.head_sha)
         repository = _obj(self._read(EndpointCode.REPOSITORY))
         _require(
@@ -1971,6 +2012,7 @@ class InstalledGate0GitHubReads:
                 identifier=asset.id,
                 maximum=_asset_cap(asset.name),
             )
+            raw = cast(bytes, raw)  # ASSET_BYTES is an exact binary endpoint.
             _require(
                 next_page == last_page == 0
                 and len(raw) == asset.size
@@ -2000,7 +2042,7 @@ class InstalledGate0GitHubReads:
             next(a.raw_bytes for a in facts if a.name == "gate0-evidence-public.json"),
             next(a.raw_bytes for a in facts if a.name == "gate0-evidence.pgp"),
             producer,
-            self._policies[self._producer.run_id],
+            self._policies[run.run_id],
         )
         tag_binding = self._tag_binding(pin)
         after_inventory = self._pages(
@@ -2160,19 +2202,20 @@ class InstalledGhReleaseVerifier:
     """Deliberately unavailable: no qualified official-tool transport yet."""
 
     @classmethod
-    def from_installed(cls):
+    def from_installed(cls) -> NoReturn:
         raise AttestationTransportUnqualified()
 
 
 def _prefixed_digest(value: object) -> str:
     _require(type(value) is str and value.startswith("sha256:"))
+    value = cast(str, value)
     _hex(value[7:])
     return value
 
 
 def _projection(
-    raw: bytes, ciphertext: bytes, producer: ProducerFacts, policy: dict
-) -> dict:
+    raw: bytes, ciphertext: bytes, producer: ProducerFacts, policy: dict[str, Any]
+) -> dict[str, Any]:
     _require(0 < len(raw) <= 65536)
     value = _closed(
         _json(raw),

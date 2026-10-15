@@ -11,6 +11,7 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 from vendor_cp.deployment.gate0_e_archive import (
     ARCHIVE_NAMES,
@@ -42,13 +43,14 @@ def _require(condition: bool) -> None:
 
 def _bare_digest(value: object) -> str:
     _require(type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None)
-    return value
+    return cast(str, value)
 
 
 def _digest(value: object) -> str:
     _require(type(value) is str and value.startswith("sha256:"))
-    _bare_digest(value[7:])
-    return value
+    text = cast(str, value)
+    _bare_digest(text[7:])
+    return text
 
 
 def _sha(raw: bytes) -> str:
@@ -159,7 +161,7 @@ def validate_encrypted_e_projection(raw: bytes) -> dict[str, object]:
                 "source_revision",
             }
         )
-        EProducerCoordinates(**producer)
+        EProducerCoordinates(**cast(dict[str, Any], producer))
         return value
     except Exception:
         raise EPreparationRefused() from None
