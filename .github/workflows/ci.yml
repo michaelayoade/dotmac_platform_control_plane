@@ -45,12 +45,59 @@ jobs:
         run: poetry run mypy
       - name: Tests (boot + provisioning contract + D1–D5 deny cases)
         run: poetry run pytest -q --junitxml="$RUNNER_TEMP/cp-source-tests.xml" -o junit_family=xunit1
+      - name: Measure trusted hosted GnuPG package fixtures
+        # Synthetic mechanism qualification only. These identities do not pin
+        # production tools, the B recipient, or any protected E installation.
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+          try:
+              verified = subprocess.run(
+                  ["/usr/bin/dpkg", "--verify", "gpg", "gpgconf"],
+                  check=True, capture_output=True, env=environment, timeout=10,
+              )
+              if verified.stdout:
+                  raise ValueError()
+              identities = {}
+              for name in ("gpg", "gpgconf"):
+                  path = Path("/usr/bin") / name
+                  version = subprocess.run(
+                      [str(path), "--no-options", "--version"]
+                      if name == "gpg" else [str(path), "--version"],
+                      check=True, capture_output=True, env=environment, timeout=5,
+                  ).stdout.decode("ascii").splitlines()[0]
+                  if re.fullmatch(re.escape(name) + r" \(GnuPG\) 2\.[0-9]+\.[0-9]+", version) is None:
+                      raise ValueError()
+                  prefix = "GATE0_TEST_QUALIFIED_" + name.upper()
+                  identities[prefix] = str(path)
+                  identities[prefix + "_SHA256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                  identities[prefix + "_VERSION"] = version
+              with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+                  for key, value in identities.items():
+                      output.write(key + "=" + value + "\n")
+              record = Path(os.environ["RUNNER_TEMP"]) / "cp-gpg-tool-identities.json"
+              record.write_text(json.dumps(identities, sort_keys=True) + "\n")
+              record.chmod(0o600)
+          except Exception:
+              raise SystemExit("GATE0_SYNTHETIC_GPG_QUALIFICATION_REFUSED") from None
+          PY
+      - name: Actual synthetic GnuPG archive conformance
+        run: poetry run pytest -q conformance/test_gate0_e_archive_gpg.py
       - name: Retain source-test results and synthetic tool identities
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cp-source-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/cp-source-tests.xml
+          path: |
+            ${{ runner.temp }}/cp-source-tests.xml
+            ${{ runner.temp }}/cp-gpg-tool-identities.json
           if-no-files-found: error
           retention-days: 30
       # Gate the temporary, read-only D16 tool against the actual immutable
