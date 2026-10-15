@@ -11,12 +11,15 @@ real custody, business approval, host cgroup mounts or Gate0/E readiness.
 # ruff: noqa: S603
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import multiprocessing
 import os
 import pwd
+import select
 import socket
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -41,6 +44,264 @@ from vendor_cp.deployment import gate0_role_custody as custody
 K = 0x400E3
 
 
+_STAGES = frozenset(
+    {
+        "worker_entered",
+        "worker_marker_created",
+        "worker_identity_checked",
+        "worker_authinfo_checked",
+        "worker_privileges_checked",
+        "worker_spawn_started",
+        "worker_failed",
+        "transport_entered",
+        "transport_privileges_checked",
+        "transport_socket_created",
+        "transport_device_bound",
+        "transport_initial_device_readback_checked",
+        "transport_source_bound",
+        "transport_connected",
+        "transport_socket_readback_checked",
+        "transport_device_mismatch_refused",
+        "transport_readback_received",
+        "transport_failed",
+        "positive_authentication_started",
+        "positive_exchange_failed",
+        "negative_socket_received",
+        "positive_socket_received",
+        "diagnostics_truncated",
+        "child_cleanup_deadline",
+    }
+)
+
+
+def _stage(value):
+    assert value in _STAGES
+    print("GATE0_NATIVE_STAGE=" + value, file=sys.stderr, flush=True)
+
+
+_FAILURE_CLASSES = frozenset(
+    {
+        "AssertionError",
+        "PermissionError",
+        "ProviderRefused",
+        "FileNotFoundError",
+        "TimeoutError",
+        "EOFError",
+        "KeyError",
+        "OSError",
+        "ConnectionRefusedError",
+        "other",
+    }
+)
+
+
+def _failure(stage, error):
+    _stage(stage)
+    kind = type(error).__name__
+    if kind not in _FAILURE_CLASSES:
+        kind = "other"
+    print("GATE0_NATIVE_FAILURE_CLASS=" + kind, file=sys.stderr, flush=True)
+    number = error.errno if isinstance(error, OSError) else 0
+    if type(number) is not int or not 0 <= number <= 4095:
+        number = 0
+    print(f"GATE0_NATIVE_ERRNO={number}", file=sys.stderr, flush=True)
+    ffi_number = ctypes.get_errno()
+    if type(ffi_number) is not int or not 0 <= ffi_number <= 4095:
+        ffi_number = 0
+    print(f"GATE0_NATIVE_FFI_ERRNO={ffi_number}", file=sys.stderr, flush=True)
+
+
+def _native_readbacks(stage):
+    assert stage in {"supervisor", "worker", "spawn"}
+    status = Path("/proc/self/status").read_text()
+    filesystem_uid = next(
+        line.split()[4] for line in status.splitlines() if line.startswith("Uid:")
+    )
+    document = {
+        "stage": stage,
+        "uids": list(os.getresuid()),
+        "filesystem_uid": int(filesystem_uid),
+        "gids": list(os.getresgid()),
+        "groups": sorted(os.getgroups()),
+        "capget": list(launch._capget()),
+        "proc_capabilities": [
+            int(
+                next(
+                    line.split()[1]
+                    for line in status.splitlines()
+                    if line.startswith(field + ":")
+                ),
+                base,
+            )
+            for field, base in (
+                ("CapEff", 16),
+                ("CapPrm", 16),
+                ("CapInh", 16),
+                ("CapAmb", 16),
+                ("CapBnd", 16),
+                ("NoNewPrivs", 10),
+            )
+        ],
+        "securebits": launch._prctl(27),
+        "nnp": launch._prctl(39),
+    }
+    assert _checked_readbacks(document)
+    print(
+        "GATE0_NATIVE_READBACK=" + json.dumps(document, sort_keys=True),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _checked_readbacks(document):
+    if (
+        not isinstance(document, dict)
+        or set(document)
+        != {
+            "stage",
+            "uids",
+            "filesystem_uid",
+            "gids",
+            "groups",
+            "capget",
+            "proc_capabilities",
+            "securebits",
+            "nnp",
+        }
+        or type(document["stage"]) is not str
+        or document["stage"] not in {"supervisor", "worker", "spawn"}
+    ):
+        return False
+    for field, length, maximum in (
+        ("uids", 3, 2**32 - 1),
+        ("gids", 3, 2**32 - 1),
+        ("capget", 3, 2**64 - 1),
+        ("proc_capabilities", 6, 2**64 - 1),
+    ):
+        values = document[field]
+        if (
+            not isinstance(values, list)
+            or len(values) != length
+            or not all(type(value) is int and 0 <= value <= maximum for value in values)
+        ):
+            return False
+    groups = document["groups"]
+    return (
+        isinstance(groups, list)
+        and len(groups) <= 64
+        and all(type(value) is int and 0 <= value < 2**32 for value in groups)
+        and type(document["filesystem_uid"]) is int
+        and 0 <= document["filesystem_uid"] < 2**32
+        and type(document["securebits"]) is int
+        and 0 <= document["securebits"] <= 255
+        and type(document["nnp"]) is int
+        and document["nnp"] in (0, 1)
+    )
+
+
+def _exit_code(name, code):
+    assert name in {"client", "daemon", "spawn"}
+    assert code is None or type(code) is int and -255 <= code <= 255
+    print(f"GATE0_NATIVE_EXIT_{name}={code}", file=sys.stderr, flush=True)
+
+
+def _safe_child_diagnostics(
+    client, daemon, buffers, captured_client_error=b"", *, emit=False
+):
+    # Fixed public stages only. Never copy raw SSH/worker stderr, tracebacks,
+    # credentials, private keys, request data or exception text into the log.
+    for name, process in (("client", client), ("daemon", daemon)):
+        if process is None:
+            if emit:
+                _exit_code(name, None)
+            continue
+        if emit:
+            _exit_code(name, process.poll())
+        stream = process.stderr
+        output = buffers.setdefault(name, bytearray())
+        if name == "client" and captured_client_error:
+            output.extend(captured_client_error[: max(0, 16384 - len(output))])
+        if stream is not None and not stream.closed:
+            descriptor = stream.fileno()
+            os.set_blocking(descriptor, False)
+            while len(output) < 16384 and select.select([descriptor], [], [], 0)[0]:
+                try:
+                    part = os.read(descriptor, min(4096, 16384 - len(output)))
+                except BlockingIOError:
+                    break
+                if not part:
+                    break
+                output.extend(part)
+        if not emit:
+            continue
+        if len(output) == 16384:
+            _stage("diagnostics_truncated")
+        if name == "daemon":
+            lowered = bytes(output).lower()
+            for needle, branch in (
+                (b"setgroups", "setgroups"),
+                (b"setresuid", "setresuid"),
+                (b"setresgid", "setresgid"),
+                (b"chroot", "chroot"),
+                (b"operation not permitted", "permission_refusal"),
+                (b"permission denied", "permission_refusal"),
+                (b"bad ownership", "ownership_refusal"),
+                (b"could not chdir", "cwd_refusal"),
+                (b"fatal:", "fatal"),
+            ):
+                if needle in lowered:
+                    print(
+                        "GATE0_NATIVE_DAEMON_CLASS=" + branch,
+                        file=sys.stderr,
+                        flush=True,
+                    )
+        for line in bytes(output).decode("ascii", errors="ignore").splitlines():
+            prefix, separator, value = line.partition("=")
+            if separator and prefix == "GATE0_NATIVE_STAGE" and value in _STAGES:
+                _stage(value)
+            elif (
+                separator
+                and prefix == "GATE0_NATIVE_FAILURE_CLASS"
+                and value in _FAILURE_CLASSES
+            ):
+                print(line, file=sys.stderr, flush=True)
+            elif (
+                separator
+                and prefix in {"GATE0_NATIVE_ERRNO", "GATE0_NATIVE_FFI_ERRNO"}
+                and value.isdecimal()
+                and 0 <= int(value) <= 4095
+            ):
+                print(f"{prefix}={int(value)}", file=sys.stderr, flush=True)
+            elif separator and prefix == "GATE0_NATIVE_EXIT_spawn":
+                if value == "None":
+                    _exit_code("spawn", None)
+                elif value.lstrip("-").isdecimal() and -255 <= int(value) <= 255:
+                    _exit_code("spawn", int(value))
+            elif separator and prefix == "GATE0_NATIVE_READBACK":
+                try:
+                    document = json.loads(value)
+                except (ValueError, TypeError, RecursionError):
+                    continue
+                if _checked_readbacks(document):
+                    print(
+                        prefix + "=" + json.dumps(document, sort_keys=True),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+
+def _accept_echo_or_exit(listener, client, daemon, deadline):
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or client.poll() is not None or daemon.poll() is not None:
+            raise AssertionError(
+                "native positive worker exited or exchange deadline elapsed"
+            )
+        if select.select([listener], [], [], min(0.05, remaining))[0]:
+            listener.settimeout(max(0.001, deadline - time.monotonic()))
+            return listener.accept()
+
+
 def _run(arguments, *, accepted=True):
     result = subprocess.run(arguments, capture_output=True, timeout=3, check=False)
     if accepted:
@@ -54,9 +315,11 @@ def _run(arguments, *, accepted=True):
     return result
 
 
-def _socket_child(writer, supervisor_pid, port):
+def _socket_child_body(writer, supervisor_pid, port):
     uid = 10032
+    _native_readbacks("spawn")
     launch._require_worker_privileges(uid, supervisor_pid)
+    _stage("transport_privileges_checked")
     namespace = Path("/proc/self/ns/net").stat()
     endpoint = custody.WireGuardBaoEndpoint(
         role="attester",
@@ -76,10 +339,21 @@ def _socket_child(writer, supervisor_pid, port):
     # Actual connected-device mismatch refuses before a synthetic payload.
     for negative in (True, False):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            _stage("transport_socket_created")
             connection.settimeout(3)
             connection.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b"lo\0")
+            _stage("transport_device_bound")
+            assert (
+                connection.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16
+                ).rstrip(b"\0")
+                == b"lo"
+            )
+            _stage("transport_initial_device_readback_checked")
             connection.bind((endpoint.local_address, 0))
+            _stage("transport_source_bound")
             connection.connect((endpoint.address, endpoint.port))
+            _stage("transport_connected")
             if negative:
                 wrong = replace(
                     endpoint,
@@ -89,13 +363,15 @@ def _socket_child(writer, supervisor_pid, port):
                 try:
                     custody._socket_readback(connection, wrong)
                 except custody.ProviderRefused:
-                    pass
+                    _stage("transport_device_mismatch_refused")
                 else:
                     raise AssertionError("wrong native bound device was accepted")
             else:
                 custody._socket_readback(connection, endpoint)
+                _stage("transport_socket_readback_checked")
                 connection.sendall(b"gate0-native-synthetic")
                 assert connection.recv(64) == b"native-readback"
+                _stage("transport_readback_received")
     assert launch._capget() == (0, 0, 0)
     writer.send_bytes(
         json.dumps(
@@ -110,26 +386,49 @@ def _socket_child(writer, supervisor_pid, port):
     writer.close()
 
 
+def _socket_child(writer, supervisor_pid, port):
+    _stage("transport_entered")
+    try:
+        _socket_child_body(writer, supervisor_pid, port)
+    except Exception as error:
+        _failure("transport_failed", error)
+        raise
+
+
 def _worker(supervisor_pid, port, entry_marker):
-    # First instruction of the fixed forced worker, before its own checks:
-    # authentication refusal must never reach even this marker.
+    # Fixed entry checkpoint and marker precede worker validation; an auth
+    # refusal must reach neither, even if marker creation itself would fail.
+    _stage("worker_entered")
+    _native_readbacks("worker")
     descriptor = os.open(
         entry_marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
     )
     os.close(descriptor)
+    _stage("worker_marker_created")
     assert os.geteuid() == 10032
+    _stage("worker_identity_checked")
     assert not os.environ.get("SSH_ORIGINAL_COMMAND")
     assert "-cert-v01@openssh.com" in Path(os.environ["SSH_USER_AUTH"]).read_text()
+    _stage("worker_authinfo_checked")
     launch._require_worker_privileges(10032, supervisor_pid)
+    _stage("worker_privileges_checked")
     context = multiprocessing.get_context("spawn")
     reader, writer = context.Pipe(duplex=False)
     process = context.Process(target=_socket_child, args=(writer, supervisor_pid, port))
     process.start()
+    _stage("worker_spawn_started")
     writer.close()
     try:
-        assert reader.poll(8), "native transport child did not respond"
+        spawn_deadline = time.monotonic() + 8
+        while not reader.poll(0.05):
+            if process.exitcode is not None or time.monotonic() >= spawn_deadline:
+                _exit_code("spawn", process.exitcode)
+                raise AssertionError(
+                    "native transport child exited or deadline elapsed"
+                )
         report = json.loads(reader.recv_bytes(65536))
         process.join(2)
+        _exit_code("spawn", process.exitcode)
         assert process.exitcode == 0
         assert report["capabilities"] == [0, 0, 0, 0, K, 1]
         print(
@@ -142,6 +441,7 @@ def _worker(supervisor_pid, port, entry_marker):
         if process.is_alive():
             process.kill()
         process.join(2)
+        _exit_code("spawn", process.exitcode)
         assert not process.is_alive()
         reader.close()
 
@@ -223,6 +523,12 @@ def _native_role_image():
         worker_status.mkdir(mode=0o700)
         os.chown(worker_status, 10032, pwd.getpwuid(10032).pw_gid)
         entry_marker = worker_status / "entered"
+        assert directory.stat().st_uid == 0
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o755
+        assert worker_status.stat().st_uid == 10032
+        assert worker_status.stat().st_gid == pwd.getpwuid(10032).pw_gid
+        assert stat.S_IMODE(worker_status.stat().st_mode) == 0o700
+        assert not entry_marker.exists()
         for name in ("ca.pub", "principals", "client-cert.pub"):
             (directory / name).chmod(0o444)
         launch._prepare_network_privileges()
@@ -234,6 +540,7 @@ def _native_role_image():
         assert not Path("/proc/1/task/1/children").read_text().strip()
         launch._seal_network_privileges()
         assert launch._proc_capabilities(1) == (K, K, 0, 0, K, 1)
+        _native_readbacks("supervisor")
         for mutation in (
             ["/usr/bin/wg", "set", "g0proof", "fwmark", "1"],
             ["/usr/sbin/ip", "route", "add", "blackhole", "10.251.0.99/32"],
@@ -354,6 +661,7 @@ LogLevel ERROR
                     refused_daemon.returncode >= 0
                 ), "authentication monitor was killed"
                 assert refused_output == b""
+                assert b"GATE0_NATIVE_STAGE=worker_entered" not in refused_error
                 assert b"Permission denied (publickey)" in refused_error
                 assert b"principal" in daemon_error.lower()
                 assert not entry_marker.exists(), "refused principal entered worker"
@@ -383,12 +691,15 @@ LogLevel ERROR
                     time.sleep(0.02)
             assert not Path("/proc/1/task/1/children").read_text().strip()
             assert not entry_marker.exists()
+            _stage("positive_authentication_started")
             ssh_client = subprocess.Popen(
                 ssh_arguments,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
             daemon = None
+            client_error = b""
+            diagnostic_buffers = {}
             try:
                 accepted, _ = ssh_listener.accept()
                 with accepted:
@@ -405,7 +716,14 @@ LogLevel ERROR
                         stderr=subprocess.PIPE,
                     )
                 for negative in (True, False):
-                    connection, _ = echo_listener.accept()
+                    connection, _ = _accept_echo_or_exit(
+                        echo_listener, ssh_client, daemon, time.monotonic() + 8
+                    )
+                    _stage(
+                        "negative_socket_received"
+                        if negative
+                        else "positive_socket_received"
+                    )
                     with connection:
                         connection.settimeout(3)
                         received = connection.recv(64)
@@ -416,21 +734,59 @@ LogLevel ERROR
                         else:
                             assert received == b"gate0-native-synthetic"
                             connection.sendall(b"native-readback")
-                output, error = ssh_client.communicate(timeout=8)
+                output, client_error = ssh_client.communicate(timeout=8)
                 daemon.wait(timeout=3)
-                assert ssh_client.returncode == 0, error.decode(errors="replace")
+                if ssh_client.returncode != 0 or daemon.returncode != 0:
+                    raise AssertionError("native positive SSH exchange failed")
                 assert daemon.returncode == 0
                 report = json.loads(output)
                 assert entry_marker.is_file(), "positive did not enter fixed worker"
                 assert report["worker"] == [0, 0, 0, 0, K, 1]
                 assert report["spawn"]["fresh_socket_exchange"] is True
                 assert report["spawn"]["device_mismatch_refused"] is True
+            except Exception as failure:
+                _failure("positive_exchange_failed", failure)
+                if isinstance(failure, subprocess.TimeoutExpired) and isinstance(
+                    failure.stderr, bytes
+                ):
+                    client_error = failure.stderr
+                _safe_child_diagnostics(
+                    ssh_client, daemon, diagnostic_buffers, client_error
+                )
+                raise
             finally:
-                for process in (ssh_client, daemon):
+                # Close the server first, allowing the client to forward its
+                # final fixed worker diagnostics before its own bounded close.
+                for process in (daemon, ssh_client):
                     if process is not None:
+                        close_deadline = time.monotonic() + 3
+                        while (
+                            process is ssh_client
+                            and process.poll() is None
+                            and time.monotonic() < close_deadline - 0.1
+                        ):
+                            _safe_child_diagnostics(
+                                ssh_client, daemon, diagnostic_buffers
+                            )
+                            time.sleep(
+                                min(
+                                    0.02,
+                                    max(0, close_deadline - 0.1 - time.monotonic()),
+                                )
+                            )
                         if process.poll() is None:
+                            if process is ssh_client:
+                                _stage("child_cleanup_deadline")
                             process.kill()
-                        process.wait(timeout=3)
+                        process.wait(
+                            timeout=max(0.001, close_deadline - time.monotonic())
+                        )
+                        _safe_child_diagnostics(ssh_client, daemon, diagnostic_buffers)
+                _safe_child_diagnostics(
+                    ssh_client, daemon, diagnostic_buffers, emit=True
+                )
+                for process in (daemon, ssh_client):
+                    if process is not None:
                         if process.stdout is not None:
                             process.stdout.close()
                         if process.stderr is not None:
@@ -465,7 +821,11 @@ LogLevel ERROR
 
 if __name__ == "__main__":
     if len(sys.argv) == 5 and sys.argv[1] == "--native-worker":
-        _worker(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
+        try:
+            _worker(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
+        except Exception as error:
+            _failure("worker_failed", error)
+            raise
     else:
         assert len(sys.argv) == 1
         _native_role_image()
