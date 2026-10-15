@@ -569,6 +569,11 @@ class _BoundedHTTPReader:
             raise ProviderRefused()
         return self.stream.read(size)
 
+    def flush(self) -> None:
+        # HTTPResponse.close() calls IOBase.close(), which flushes its input
+        # wrapper before closing it. This read-only stream has no write buffer.
+        self.stream.flush()
+
     def close(self) -> None:
         self.stream.close()
 

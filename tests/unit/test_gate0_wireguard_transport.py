@@ -289,6 +289,16 @@ def test_bounded_standard_http_decoder_accepts_explicit_framing(raw):
         + b"a" * 16384
         + b"\r\nContent-Length: 2\r\n\r\n{}",
     ],
+    ids=[
+        "redirect",
+        "missing-framing",
+        "oversized-length",
+        "short-body",
+        "duplicate-length",
+        "ambiguous-framing",
+        "compression",
+        "oversized-header",
+    ],
 )
 def test_response_redirect_ambiguous_or_unbounded_framing_refuses(raw):
     with pytest.raises((custody.ProviderRefused, ValueError, OSError)):
@@ -528,3 +538,73 @@ def test_unqualified_network_facts_fail_before_socket_or_token_io(monkeypatch):
     create.assert_not_called()
     pipe.send_bytes.assert_called_once_with(b"")
     assert connected.sent == []
+
+
+@pytest.mark.parametrize(
+    "raw,refused",
+    [
+        (b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}", False),
+        (b"HTTP/1.1 302 Found\r\nContent-Length: 2\r\n\r\n{}", True),
+        (b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{}", True),
+        (
+            b"HTTP/1.1 200 OK\r\nX-Large: "
+            + b"a" * 16384
+            + b"\r\nContent-Length: 2\r\n\r\n{}",
+            True,
+        ),
+    ],
+    ids=[
+        "success",
+        "redirect-refusal",
+        "short-body-refusal",
+        "oversized-header-refusal",
+    ],
+)
+def test_httpresponse_cleanup_closes_stream_and_preserves_refusal(raw, refused):
+    events = []
+
+    class TrackedInput(io.BytesIO):
+        def flush(self):
+            events.append("flush")
+            return super().flush()
+
+        def close(self):
+            events.append("close")
+            return super().close()
+
+    stream = TrackedInput(raw)
+    connected = SyntheticSocket(raw)
+    connected.makefile = Mock(return_value=stream)
+    if refused:
+        with pytest.raises(custody.ProviderRefused):
+            custody._bao_response(connected)
+        assert events.index("flush") < events.index("close")
+    else:
+        assert custody._bao_response(connected) == b"{}"
+    assert stream.closed and events[-1] == "close"
+    connected.makefile.assert_called_once_with("rb")
+
+
+def test_httpresponse_flush_error_is_closed_and_redacted_by_child(monkeypatch, capsys):
+    class FailingFlush(io.BytesIO):
+        def flush(self):
+            raise OSError("synthetic-sensitive-close-marker")
+
+    stream = FailingFlush(b"HTTP/1.1 302 Found\r\nContent-Length: 2\r\n\r\n{}")
+    connected = SyntheticSocket()
+    connected.makefile = Mock(return_value=stream)
+    _, pipe = child_fixture(monkeypatch, connected)
+    custody._wg_http_child(
+        pipe,
+        endpoint(),
+        "/v1/auth/token/lookup-self",
+        "GET",
+        "synthetic-sensitive-token",
+        None,
+        time.monotonic() + 2,
+    )
+    pipe.send_bytes.assert_called_once_with(b"")
+    pipe.close.assert_called_once_with()
+    assert stream.closed
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""

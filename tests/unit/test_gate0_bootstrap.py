@@ -104,6 +104,8 @@ def test_protected_attester_document_closed_roundtrip(monkeypatch):
     assert module.load_attester_installation(None) == installation
     for mutate in (
         lambda doc: doc.update(authenticated=True),
+        lambda doc: doc.update(ca_public_key=doc["ca_public_key_b64"]),
+        lambda doc: doc.update(ca_public_key=doc.pop("ca_public_key_b64")),
         lambda doc: doc["custody"].update(profile="unlimited"),
         lambda doc: doc["custody"]["endpoint"].update(url="https://caller.invalid"),
         lambda doc: doc.update(phase="standing"),

@@ -747,7 +747,17 @@ def load_attester_installation(
 
     document = _record(
         _installed_document(context),
-        ("schema", *ActualAttesterInstallation.__dataclass_fields__),
+        (
+            "schema",
+            "identity",
+            "custody",
+            "issuer_key",
+            "ca_public_key_b64",
+            "capture",
+            "phase",
+            "slot_id",
+            "worker_uid",
+        ),
     )
     phase: Literal["issue", "consume"]
     if document["phase"] == "issue":

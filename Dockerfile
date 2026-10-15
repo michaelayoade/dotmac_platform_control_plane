@@ -142,15 +142,16 @@ LABEL org.opencontainers.image.source="https://github.com/michaelayoade/dotmac_p
       org.opencontainers.image.revision="$SOURCE_REVISION" \
       io.dotmac.runtime="gate0-finite-role"
 
-ENV VIRTUAL_ENV=/opt/venv \
-    PATH=/opt/venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+ENV POETRY_HOME=/opt/poetry \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/opt/poetry/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-       ca-certificates python3 iproute2 nftables wireguard-tools \
+       ca-certificates python3 python3-venv iproute2 nftables wireguard-tools \
        libffi8 libsqlite3-0 libbz2-1.0 liblzma5 libexpat1 libreadline8t64 \
        libncursesw6 libuuid1 zlib1g
 COPY conformance/openssh-ubuntu-artifacts.json /opt/openssh-ubuntu-artifacts.json
@@ -168,14 +169,37 @@ RUN python3 -I -B /opt/prepare_gate0_native.py \
          mkdir -p "/var/empty/dotmac-gate0/$name"; \
          chmod 555 "/var/empty/dotmac-gate0/$name"; \
        done
-# Copy the exact Python and installed-wheel environment produced by the shared
-# builder. Hosted role acceptance proves the forward libc/SSL compatibility.
-COPY --from=builder /usr/local /usr/local
-COPY --from=builder /opt/venv /opt/venv
+# A Debian interpreter cannot be copied onto Ubuntu's older OpenSSL ABI.
+# Create this environment on the role's native Python, install the SAME locked
+# dependency artifacts, and install the exact application wheel built once by
+# the shared builder. No movable/cross-distribution virtual environment is used.
+COPY .github/bootstrap/poetry-requirements.txt /opt/poetry-requirements.txt
+RUN /usr/bin/python3 -m venv "$POETRY_HOME" \
+    && "$POETRY_HOME/bin/pip" install --disable-pip-version-check \
+       --require-hashes --only-binary=:all: \
+       --requirement /opt/poetry-requirements.txt \
+    && /usr/bin/python3 -m venv "$VIRTUAL_ENV" \
+    && poetry config virtualenvs.create false
+COPY pyproject.toml poetry.lock README.md ./
+RUN --mount=type=secret,id=forgejo_token \
+    POETRY_HTTP_BASIC_FORGEJO_USERNAME=ci-reader \
+    POETRY_HTTP_BASIC_FORGEJO_PASSWORD="$(cat /run/secrets/forgejo_token)" \
+    poetry install --only main --no-root --no-interaction --no-ansi
+COPY --from=builder /app/dist /app/dist
+RUN "$VIRTUAL_ENV/bin/pip" install --no-deps --no-index /app/dist/*.whl
 COPY --from=builder /app/distributions.json /app/distributions.json
-COPY --from=builder /app/application_foundation_profile.json /app/application_foundation_profile.json
-COPY --from=builder /app/migration_heads.json /app/migration_heads.json
-RUN ldconfig \
+COPY --from=builder /app/alembic /app/alembic
+COPY --from=builder /app/alembic.ini /app/alembic.ini
+# Measure claims from this installed role environment, rather than inheriting
+# the application image's runtime-specific profile and lineage readback.
+RUN DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+    PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+    python -m vendor_cp.deployment.profile \
+        --source-revision "$SOURCE_REVISION" --dist-dir /app/dist \
+        --lock /app/poetry.lock --output /app/application_foundation_profile.json \
+    && VENDOR_MIGRATION_ROOT=/app python -m vendor_cp.deployment.image_heads \
+        --emit --source-revision "$SOURCE_REVISION" \
+        --output /app/migration_heads.json \
     && chmod 444 /app/*json \
     && /opt/venv/bin/dotmac-platform --version \
     && /usr/bin/ssh -V

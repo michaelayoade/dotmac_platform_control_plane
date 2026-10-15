@@ -14,6 +14,7 @@ import pwd
 import socket
 import ssl
 import subprocess
+import sys
 import sysconfig
 import tempfile
 import time
@@ -143,6 +144,7 @@ def main() -> None:
                 "schema": "Gate0RoleImageSmoke.v1",
                 "passed": True,
                 "native_versions": versions,
+                "python": sys.version.split()[0],
                 "ssl": ssl.OPENSSL_VERSION,
                 "psycopg": psycopg.__version__,
                 "live_readiness": False,
