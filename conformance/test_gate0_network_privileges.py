@@ -236,25 +236,71 @@ def _safe_child_diagnostics(
             continue
         if len(output) == 16384:
             _stage("diagnostics_truncated")
-        if name == "daemon":
-            lowered = bytes(output).lower()
-            for needle, branch in (
-                (b"setgroups", "setgroups"),
-                (b"setresuid", "setresuid"),
-                (b"setresgid", "setresgid"),
-                (b"chroot", "chroot"),
-                (b"operation not permitted", "permission_refusal"),
-                (b"permission denied", "permission_refusal"),
-                (b"bad ownership", "ownership_refusal"),
-                (b"could not chdir", "cwd_refusal"),
-                (b"fatal:", "fatal"),
-            ):
-                if needle in lowered:
-                    print(
-                        "GATE0_NATIVE_DAEMON_CLASS=" + branch,
-                        file=sys.stderr,
-                        flush=True,
-                    )
+        print(f"GATE0_NATIVE_STDERR_BYTES_{name}={len(output)}", file=sys.stderr)
+        # Session-child failures travel over the SSH channel to client stderr;
+        # only monitor/daemon failures necessarily remain in daemon stderr.
+        # These fixed hints are diagnostic, never a refusal/pass criterion.
+        lowered = bytes(output).lower()
+        emitted = set()
+        for needle, branch in (
+            (b"prepare_auth_info_file", "auth_info_file"),
+            (b"mkstemp", "temporary_file"),
+            (b"write:", "file_write"),
+            (b"close:", "file_close"),
+            (b"do_exec_no_pty", "session_execution"),
+            (b"socketpair", "socketpair"),
+            (b"pipe", "pipe"),
+            (b"fork", "fork"),
+            (b"setsid failed:", "session_setsid"),
+            (b"dup2 stdin", "session_stdio"),
+            (b"dup2 stdout", "session_stdio"),
+            (b"dup2 stderr", "session_stdio"),
+            (b"setlogin failed:", "setlogin"),
+            (b"unable to set user context", "user_context"),
+            (b"setgroups", "setgroups"),
+            (b"initgroups", "initgroups"),
+            (b"setgid", "setgid"),
+            (b"setreuid", "setreuid"),
+            (b"setresuid", "setresuid"),
+            (b"setresgid", "setresgid"),
+            (b"failed to set uids to", "set_uids"),
+            (b"chroot", "chroot"),
+            (b"authentication", "authentication"),
+            (b"certificate", "certificate"),
+            (b"signature", "signature"),
+            (b"publickey", "publickey"),
+            (b"monitor", "monitor"),
+            (b"mm_", "monitor_function"),
+            (b"keystate", "key_state"),
+            (b"ssh_msg", "monitor_message"),
+            (b"reexec", "reexec"),
+            (b"prctl", "prctl"),
+            (b"permanently_set_uid", "permanent_uid"),
+            (b"restore old", "restore_identity"),
+            (b"no such file", "missing_path"),
+            (b"read-only file system", "read_only"),
+            (b"operation not permitted", "permission_refusal"),
+            (b"permission denied", "permission_refusal"),
+            (b"bad ownership", "ownership_refusal"),
+            (b"could not chdir", "cwd_refusal"),
+            (b"refusing non-sftp session", "session_policy"),
+            (b"fatal", "fatal"),
+            (b"disconnect", "disconnect"),
+            (b"connection closed", "connection_closed"),
+        ):
+            if needle in lowered and branch not in emitted:
+                emitted.add(branch)
+                print(
+                    f"GATE0_NATIVE_CLASS_{name}=" + branch,
+                    file=sys.stderr,
+                    flush=True,
+                )
+        if output and not emitted:
+            print(
+                f"GATE0_NATIVE_CLASS_{name}=unclassified_nonempty",
+                file=sys.stderr,
+                flush=True,
+            )
         for line in bytes(output).decode("ascii", errors="ignore").splitlines():
             prefix, separator, value = line.partition("=")
             if separator and prefix == "GATE0_NATIVE_STAGE" and value in _STAGES:
