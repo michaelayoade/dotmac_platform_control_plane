@@ -18,7 +18,7 @@ import time
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -58,7 +58,13 @@ from vendor_cp.deployment.gate0_runner_ssh import (
     OwnedIssuerSession,
 )
 from vendor_cp.deployment.gate0_services import IssuerProcessResult
-from vendor_cp.deployment.rehearsal_issuer_trust_state import TrustEligibility
+from vendor_cp.deployment.rehearsal_issuer_trust_state import (
+    RehearsalIssuerTrustState,
+    TrustEligibility,
+)
+
+if TYPE_CHECKING:
+    from vendor_cp.deployment.gate0_launch_phase import RootListener
 
 _STAGING = Path("/run/dotmac-gate0-collector/session/collector.sock")
 _FINAL = Path("/run/dotmac-gate0-handoff/collector.sock")
@@ -86,9 +92,9 @@ def _instant(value: object) -> datetime:
 
 
 def _number(value: object) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value):
+    if type(value) not in (int, float) or not math.isfinite(cast(int | float, value)):
         raise ProviderRefused()
-    return float(value)
+    return float(cast(int | float, value))
 
 
 def _integer(value: object, *, minimum: int = 1) -> int:
@@ -298,7 +304,7 @@ class OwnedCollectorHandoff:
         self._phase_index = 0
         self._b_final_drain = False
         self._terminals = {}
-        self._attester_state = None
+        self._attester_state: RehearsalIssuerTrustState | None = None
         self._sequences = {
             name: RootFrameSequence(binding)
             for name, binding in zip(("IDP3", "NS3"), case.roots, strict=True)
@@ -461,7 +467,8 @@ class OwnedCollectorHandoff:
         doc = strict_object(root)
         endpoint = case.issuer if host == "IDP3" else case.attester
         if kind != "management_listening":
-            listener = doc["listener"]
+            # RootFrameSequence.accept decoded and validated this phase above.
+            listener = cast("RootListener", doc["listener"])
             if (
                 listener["local_address"],
                 listener["local_port"],
@@ -533,9 +540,13 @@ class OwnedCollectorHandoff:
                 ):
                     raise ProviderRefused()
             else:
-                host = doc.get("host")
-                if host not in self._sequences or host in self._terminals:
+                candidate_host = doc.get("host")
+                if (
+                    candidate_host not in self._sequences
+                    or candidate_host in self._terminals
+                ):
                     raise ProviderRefused()
+                host = cast(str, candidate_host)
                 sequence = self._sequences[host]
                 if (
                     decode_terminal(
@@ -836,7 +847,10 @@ class OwnedCollectorHandoff:
                 encode_case_a_complete(
                     self.installation.campaign_digest,
                     join,
-                    tuple(self._sequences[h].final_bytes() for h in ("IDP3", "NS3")),
+                    (
+                        self._sequences["IDP3"].final_bytes(),
+                        self._sequences["NS3"].final_bytes(),
+                    ),
                 )
             )
             self._case(case)

@@ -399,6 +399,9 @@ class FixedEvidenceCollector:
     and cannot bind B before the actual root/session join sends A's ACK.
     """
 
+    _cases: tuple[RunnerProjectionCase, RunnerProjectionCase]
+    _withdrawal_ref: str
+
     def __init__(
         self,
         *,

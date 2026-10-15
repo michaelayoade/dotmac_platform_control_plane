@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import (
     SSHCertificate,
     load_ssh_public_identity,
@@ -20,7 +21,11 @@ from cryptography.hazmat.primitives.serialization import (
 
 from vendor_cp.deployment.gate0_attester import ssh_public_fingerprint
 from vendor_cp.deployment.gate0_framing import canonical, strict_object
-from vendor_cp.deployment.gate0_launch import _local_packet, parse_run_document
+from vendor_cp.deployment.gate0_launch import (
+    RoleTerms,
+    _local_packet,
+    parse_run_document,
+)
 from vendor_cp.deployment.gate0_role_custody import ProviderRefused
 from vendor_cp.deployment.gate0_runner_handoff import RootHostBinding
 from vendor_cp.deployment.gate0_runner_projection import RunnerProjectionCase, _instant
@@ -174,7 +179,7 @@ class InstalledPublicTrust:
         )
 
 
-def _trust(value: object, role: dict[str, str]) -> InstalledPublicTrust:
+def _trust(value: object, role: RoleTerms) -> InstalledPublicTrust:
     doc = _fields(value, "record floor source_ref qualification")
     _, raw = _read_pin(doc["record"])
     _, floor_raw = _read_pin(doc["floor"])
@@ -305,12 +310,16 @@ def _case(
     known, _ = _read_pin(doc["known_hosts"])
     cert = load_ssh_public_identity(certificate_raw.rstrip(b"\n"))
     controller = window["controller"]
+    if not isinstance(cert, SSHCertificate):
+        raise ProviderRefused()
+    public_key, signature_key = cert.public_key(), cert.signature_key()
     if (
-        not isinstance(cert, SSHCertificate)
+        not isinstance(public_key, Ed25519PublicKey)
+        or not isinstance(signature_key, Ed25519PublicKey)
         or certificate_raw.rstrip(b"\n") != cert.public_bytes()
         or _hash(cert.public_bytes()) != controller["certificate_digest"]
-        or ssh_public_fingerprint(cert.public_key()) != controller["fingerprint"]
-        or ssh_public_fingerprint(cert.signature_key()) != controller["ca_fingerprint"]
+        or ssh_public_fingerprint(public_key) != controller["fingerprint"]
+        or ssh_public_fingerprint(signature_key) != controller["ca_fingerprint"]
         or cert.valid_principals != [controller["principal"].encode()]
         or cert.valid_after > _instant(window["not_before"]).timestamp()
         or cert.valid_before < _instant(window["expires_at"]).timestamp()
@@ -322,8 +331,9 @@ def _case(
     return InstalledRunnerCase(
         selected,
         _text(doc["command_id"]),
-        tuple(roots),
-        *endpoints,
+        (roots[0], roots[1]),
+        endpoints[0],
+        endpoints[1],
         ssh,
         keygen,
         private,
@@ -428,7 +438,9 @@ class InstalledRunnerCollection:
         broker_doc = _fields(doc["broker"], "origin path query qualification")
         broker_pin, _ = _read_pin(broker_doc["qualification"])
         broker = JobBrokerBinding(
-            *(_text(broker_doc[k], 8192) for k in ("origin", "path", "query")),
+            _text(broker_doc["origin"], 8192),
+            _text(broker_doc["path"], 8192),
+            _text(broker_doc["query"], 8192),
             "sha256:" + broker_pin.sha256,
         )
         job = _fields(
@@ -512,11 +524,12 @@ class InstalledRunnerCollection:
                     "launch_packet_digest",
                 )
             )
-            or any(
-                a.projection.window.document["controller"][k]
-                == b.projection.window.document["controller"][k]
-                for k in ("lease_id", "fingerprint", "certificate_digest")
-            )
+            or a.projection.window.document["controller"]["lease_id"]
+            == b.projection.window.document["controller"]["lease_id"]
+            or a.projection.window.document["controller"]["fingerprint"]
+            == b.projection.window.document["controller"]["fingerprint"]
+            or a.projection.window.document["controller"]["certificate_digest"]
+            == b.projection.window.document["controller"]["certificate_digest"]
             or len({r.terms["local_packet_digest"] for c in cases for r in c.roots})
             != 4
         ):

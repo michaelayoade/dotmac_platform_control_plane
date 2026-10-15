@@ -10,6 +10,7 @@ import ssl
 import time
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
+from typing import cast
 from urllib.parse import quote, unquote_plus, urlsplit
 
 from vendor_cp.deployment.gate0_framing import strict_object
@@ -225,10 +226,14 @@ class InstalledJobTokens:
             if any(claims.get(k) != v for k, v in expected.items()):
                 raise ProviderRefused()
             # Payload checks only restrict output. They do not authenticate JWTs.
+            if any(type(claims.get(k)) is not int for k in ("iat", "nbf", "exp")):
+                raise ProviderRefused()
+            issued_at = cast(int, claims["iat"])
+            not_before = cast(int, claims["nbf"])
+            expires_at = cast(int, claims["exp"])
             if (
-                any(type(claims.get(k)) is not int for k in ("iat", "nbf", "exp"))
-                or not claims["iat"] <= claims["nbf"] <= time.time() < claims["exp"]
-                or not 0 < claims["exp"] - claims["iat"] <= 300
+                not issued_at <= not_before <= time.time() < expires_at
+                or not 0 < expires_at - issued_at <= 300
             ):
                 raise ProviderRefused()
             case.require_open()

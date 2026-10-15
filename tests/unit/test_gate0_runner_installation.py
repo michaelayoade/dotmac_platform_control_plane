@@ -640,3 +640,106 @@ def test_complete_descriptor_rejects_individual_qualification_and_case_swaps(
         model.seal()
     with pytest.raises(ProviderRefused):
         loader.InstalledRunnerCollection.from_installed()
+
+
+@pytest.mark.parametrize(
+    "unsupported", ["public-rsa", "public-ecdsa", "signature-rsa", "signature-ecdsa"]
+)
+def test_complete_loader_refuses_non_ed25519_certificate_keys_before_fingerprint(
+    installed_model, monkeypatch, unsupported
+):
+    """Real synthetic certificates with otherwise consistently rebound inputs.
+
+    This deliberately tightens loader policy to match the active SSH qualifier.
+    A planted fingerprint call detects acceptance of an unsupported key type.
+    """
+    import base64
+    import hashlib
+
+    from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+    from cryptography.hazmat.primitives.serialization import (
+        Encoding,
+        NoEncryption,
+        PrivateFormat,
+        PublicFormat,
+        SSHCertificateBuilder,
+        SSHCertificateType,
+    )
+
+    from vendor_cp.deployment.gate0_framing import canonical, strict_object
+    from vendor_cp.deployment.gate0_window import FrozenIssuerWindow
+
+    model = installed_model
+    case = model.descriptor["cases"][0]
+    window = strict_object(model.files[case["frozen_window"]["path"]])
+    public_private = ed25519.Ed25519PrivateKey.from_private_bytes(bytes([1]) * 32)
+    signature_private = ed25519.Ed25519PrivateKey.from_private_bytes(bytes([80]) * 32)
+    alternate = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        if unsupported.endswith("rsa")
+        else ec.derive_private_key(42, ec.SECP256R1())
+    )
+    if unsupported.startswith("public"):
+        public_private = alternate
+    else:
+        signature_private = alternate
+    certificate = (
+        SSHCertificateBuilder()
+        .public_key(public_private.public_key())
+        .serial(1)
+        .type(SSHCertificateType.USER)
+        .key_id(b"case-0")
+        .valid_principals([b"dotmac-gate0-controller"])
+        .valid_after(int(loader._instant(window["not_before"]).timestamp()))
+        .valid_before(int(loader._instant(window["expires_at"]).timestamp()))
+        .sign(signature_private)
+        .public_bytes()
+    )
+
+    def fingerprint(key):
+        encoded = key.public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH)
+        raw = base64.b64decode(encoded.split(b" ")[1], validate=True)
+        return "SHA256:" + base64.b64encode(
+            hashlib.sha256(raw).digest()
+        ).decode().rstrip("=")
+
+    window["controller"].update(
+        fingerprint=fingerprint(public_private.public_key()),
+        ca_fingerprint=fingerprint(signature_private.public_key()),
+        certificate_digest=loader._hash(certificate),
+    )
+    frozen = FrozenIssuerWindow.parse(canonical(window))
+    case["frozen_window"] = model.pin(
+        case["frozen_window"]["path"], frozen.canonical_bytes
+    )
+    packet = strict_object(model.files[case["shared_packet"]["path"]])
+    packet["capture"]["window_digest"] = frozen.digest
+    packet["controller_ca_fingerprint"] = window["controller"]["ca_fingerprint"]
+    packet["management_key_fingerprint"] = window["controller"]["fingerprint"]
+    shared = canonical(packet)
+    case["shared_packet"] = model.pin(case["shared_packet"]["path"], shared)
+    case["certificate"] = model.pin(case["certificate"]["path"], certificate)
+    case["private_key"] = model.pin(
+        case["private_key"]["path"],
+        public_private.private_bytes(
+            Encoding.PEM, PrivateFormat.OpenSSH, NoEncryption()
+        ),
+    )
+    for host in case["hosts"].values():
+        local = strict_object(model.files[host["local_packet"]["path"]])
+        local.update(shared_run_digest=loader._hash(shared), capture=packet["capture"])
+        local_raw = canonical(local)
+        host["local_packet"] = model.pin(host["local_packet"]["path"], local_raw)
+        host["binding"].update(
+            launch_packet_digest=loader._hash(shared),
+            local_packet_digest=loader._hash(local_raw),
+            window_digest=frozen.digest,
+        )
+    model.seal()
+    monkeypatch.setattr(
+        loader,
+        "ssh_public_fingerprint",
+        lambda _: pytest.fail("unsupported key reached fingerprint use"),
+    )
+    with pytest.raises(ProviderRefused):
+        loader.InstalledRunnerCollection.from_installed()

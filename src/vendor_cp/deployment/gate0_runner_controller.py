@@ -8,6 +8,7 @@ import stat
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from dotmac_deployment_control import RehearsalIssuerAuthorizationSignerIdentity
 
@@ -263,9 +264,14 @@ class InstalledCollectionController:
             core.prepare_b(
                 consume_bundle=consume_bundle_b, token=tokens.next(b.projection)
             )
-            authorization_id = strict_object(
-                issuer_b.collector.outcomes[0].result_bytes
-            )["authorization_id"]
+            # issue_b consumed an IssuerOutcome.from_document result, whose
+            # committed-result guard requires this exact field to be a string.
+            authorization_id = cast(
+                str,
+                strict_object(issuer_b.collector.outcomes[0].result_bytes)[
+                    "authorization_id"
+                ],
+            )
             withdrawal_raw = []
             for read_index in range(16):
                 b.projection.require_open()
