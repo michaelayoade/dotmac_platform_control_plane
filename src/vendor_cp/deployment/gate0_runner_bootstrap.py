@@ -582,6 +582,36 @@ def _cleanup_manager_request(process: subprocess.Popen[bytes], deadline: float) 
         raise ProviderRefused()
 
 
+_RETIREMENT_SEAL = object()
+
+
+def _empty_cgroup_result(events: bytes, control_group: str) -> str:
+    if events:
+        populated = [
+            line for line in events.splitlines() if line.startswith(b"populated ")
+        ]
+        if populated == [b"populated 0"]:
+            return "observed_populated_zero"
+        # A positive or malformed retained observation cannot be overridden by
+        # an empty manager path, including contradictory duplicate fields.
+        raise ProviderRefused()
+    if control_group == "":
+        return "manager_retired_control_group"
+    raise ProviderRefused()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CollectorRetirementFact:
+    observation_digest: str
+    observation: bytes = field(repr=False)
+    normal: bool
+    _seal: object = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if self._seal is not _RETIREMENT_SEAL:
+            raise ProviderRefused()
+
+
 class NativeSystemManager:
     """Only this campaign's fixed manager verbs; no service/command escape hatch."""
 
@@ -594,6 +624,12 @@ class NativeSystemManager:
         self.start: str | None = None
         self.cgroup: str | None = None
         self._events = -1
+        self._bound_identity: tuple[object, ...] | None = None
+        self._events_identity: tuple[int, int] | None = None
+        self._retirement: CollectorRetirementFact | None = None
+        self._retirement_claimed = False
+        self._closed = False
+        self._bind_claimed = False
 
     def _call(self, arguments: tuple[str, ...], deadline: float) -> bytes:
         allowed: set[tuple[str, ...]] = {
@@ -798,6 +834,14 @@ class NativeSystemManager:
         return values
 
     def bind_actual_collector(self, values: dict[str, str], deadline: float) -> None:
+        if (
+            self._closed
+            or self._bind_claimed
+            or self._bound_identity is not None
+            or self._events >= 0
+        ):
+            raise ProviderRefused()
+        self._bind_claimed = True
         deadline = min(deadline, self.installation.clock.cutoff)
         _require_before(deadline)
         installed = self.installation
@@ -896,7 +940,10 @@ class NativeSystemManager:
         self._events = os.open(
             "/sys/fs/cgroup" + cgroup + "/cgroup.events", os.O_RDONLY | os.O_NOFOLLOW
         )
+        event_stat = os.fstat(self._events)
+        self._events_identity = (event_stat.st_dev, event_stat.st_ino)
         _require_before(deadline)
+        self._bound_identity = (self.invocation, self.pid, self.start, self.cgroup)
 
     def stop_fixed_collector(self, deadline: float) -> None:
         self._call(("stop", "--no-block", _COLLECTOR), deadline)
@@ -925,14 +972,114 @@ class NativeSystemManager:
         except OSError:
             events = b""
         _require_before(deadline)
-        if b"populated 0" in events.splitlines():
-            return "observed_populated_zero"
-        if values["ControlGroup"] == "":
-            # Qualified manager retirement result, never absence of a path alone.
-            return "manager_retired_control_group"
-        raise ProviderRefused()
+        return _empty_cgroup_result(events, values["ControlGroup"])
+
+    def retirement_facts(self, *, deadline: float) -> CollectorRetirementFact:
+        """Measure this bound invocation's actual retirement, including failed exits.
+
+        This factual cleanup capability grants no normal-completion or E claim.
+        It remains owned only while this same manager retains its native handles.
+        """
+        try:
+            if self._closed or self._retirement_claimed:
+                raise ProviderRefused()
+            self._retirement_claimed = True
+            if type(deadline) not in (int, float) or not math.isfinite(deadline):
+                raise ProviderRefused()
+            end = min(deadline, self.installation.clock.cutoff + _CLEANUP_SECONDS)
+            _require_before(end)
+            identity = (self.invocation, self.pid, self.start, self.cgroup)
+            if (
+                self._bound_identity is None
+                or identity != self._bound_identity
+                or self._events < 0
+                or self._events_identity is None
+            ):
+                raise ProviderRefused()
+            event_stat = os.fstat(self._events)
+            if (event_stat.st_dev, event_stat.st_ino) != self._events_identity:
+                raise ProviderRefused()
+            while time.monotonic() < end:
+                values = self._show(_COLLECTOR, _SERVICE_PROPERTIES, end)
+                if values["InvocationID"] != self.invocation:
+                    raise ProviderRefused()
+                if (
+                    values["ActiveState"] in ("inactive", "failed")
+                    and values["MainPID"] == "0"
+                ):
+                    break
+                time.sleep(min(0.01, max(0, end - time.monotonic())))
+            else:
+                raise ProviderRefused()
+            if (
+                values["LoadState"] != "loaded"
+                or values["FragmentPath"] != str(_UNIT_ROOT / _COLLECTOR)
+                or values["DropInPaths"] != ""
+                or (values["ActiveState"], values["SubState"])
+                not in (("inactive", "dead"), ("failed", "failed"))
+                or values["ControlGroup"] not in ("", self.cgroup)
+            ):
+                raise ProviderRefused()
+            try:
+                events = os.pread(self._events, 4096, 0)
+            except OSError:
+                events = b""
+            retirement = _empty_cgroup_result(events, values["ControlGroup"])
+            if self._show(_COLLECTOR, _SERVICE_PROPERTIES, end) != values:
+                raise ProviderRefused()
+            _require_before(end)
+            normal = (
+                values["Result"] == "success"
+                and values["ExecMainCode"] == "1"
+                and values["ExecMainStatus"] == "0"
+                and values["ActiveState"] == "inactive"
+            )
+            observation = canonical(
+                dict(
+                    schema="Gate0A9CollectorRetirementObservation.v1",
+                    campaign_digest=self.installation.campaign,
+                    invocation_id=self.invocation,
+                    original_pid=self.pid,
+                    original_start=self.start,
+                    original_cgroup=self.cgroup,
+                    manager=values,
+                    retirement=retirement,
+                    normal=normal,
+                )
+            )
+            fact = CollectorRetirementFact(
+                "sha256:" + hashlib.sha256(observation).hexdigest(),
+                observation,
+                normal,
+                _RETIREMENT_SEAL,
+            )
+            _require_before(end)
+            self._retirement = fact
+            return fact
+        except Exception:
+            self._retirement = None
+            raise ProviderRefused() from None
+
+    def owns_retirement(self, fact: object) -> bool:
+        valid = (
+            not self._closed
+            and self._events >= 0
+            and fact is self._retirement
+            and type(fact) is CollectorRetirementFact
+            and self._bound_identity
+            == (self.invocation, self.pid, self.start, self.cgroup)
+        )
+        if not valid:
+            return False
+        try:
+            event_stat = os.fstat(self._events)
+            return (event_stat.st_dev, event_stat.st_ino) == self._events_identity
+        except OSError:
+            return False
 
     def close(self) -> None:
+        self._retirement = None
+        self._closed = True
         if self._events >= 0:
             os.close(self._events)
             self._events = -1

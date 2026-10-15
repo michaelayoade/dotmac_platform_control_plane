@@ -722,3 +722,139 @@ def test_normal_publication_close_and_final_check_share_owned_rollback_path(
     else:
         assert removed == [] and closes == [77] and len(directories) == 1
     assert "bootstrap-observation.pending" not in removed
+
+
+def _bound_retirement_manager(candidate, monkeypatch, tmp_path):
+    manager = owner.NativeSystemManager(candidate)
+    manager.invocation, manager.pid, manager.start = "a" * 32, 18, "77"
+    manager.cgroup = "/system.slice/" + owner._COLLECTOR
+    path = tmp_path / "events"
+    path.write_bytes(b"populated 0\nfrozen 0\n")
+    manager._events = owner.os.open(path, owner.os.O_RDONLY)
+    metadata = owner.os.fstat(manager._events)
+    manager._events_identity = (metadata.st_dev, metadata.st_ino)
+    manager._bound_identity = (
+        manager.invocation,
+        manager.pid,
+        manager.start,
+        manager.cgroup,
+    )
+    values = dict(
+        LoadState="loaded",
+        FragmentPath=str(owner._UNIT_ROOT / owner._COLLECTOR),
+        DropInPaths="",
+        InvocationID=manager.invocation,
+        MainPID="0",
+        ActiveState="inactive",
+        SubState="dead",
+        ControlGroup=manager.cgroup,
+        Result="success",
+        ExecMainCode="1",
+        ExecMainStatus="0",
+    )
+    monkeypatch.setattr(owner.time, "monotonic", lambda: 1010.0)
+    monkeypatch.setattr(manager, "_show", lambda *args: dict(values))
+    return manager, values, path
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_retirement_fact_requires_same_live_native_owner(
+    candidate, monkeypatch, tmp_path, failed
+):
+    manager, values, _ = _bound_retirement_manager(candidate, monkeypatch, tmp_path)
+    if failed:
+        values.update(
+            ActiveState="failed",
+            SubState="failed",
+            Result="signal",
+            ExecMainCode="2",
+            ExecMainStatus="9",
+        )
+    try:
+        fact = manager.retirement_facts(deadline=1012.0)
+        assert fact.normal is not failed
+        assert (
+            fact.observation_digest
+            == "sha256:" + owner.hashlib.sha256(fact.observation).hexdigest()
+        )
+        assert manager.owns_retirement(fact)
+        assert not manager.owns_retirement(replace(fact))
+        manager.close()
+        assert not manager.owns_retirement(fact)
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "unbound",
+        "replaced-events",
+        "invocation",
+        "foreign-group",
+        "dropin",
+        "populated",
+    ],
+)
+def test_retirement_fact_refuses_unowned_or_nonempty_state(
+    candidate, monkeypatch, tmp_path, change
+):
+    manager, values, path = _bound_retirement_manager(candidate, monkeypatch, tmp_path)
+    if change == "unbound":
+        manager._bound_identity = None
+    elif change == "replaced-events":
+        manager._events_identity = (0, 0)
+    elif change == "invocation":
+        values["InvocationID"] = "b" * 32
+    elif change == "foreign-group":
+        values["ControlGroup"] = "/system.slice/foreign.service"
+    elif change == "dropin":
+        values["DropInPaths"] = "/etc/systemd/system/foreign.service.d/foreign.conf"
+    else:
+        path.write_bytes(b"populated 1\nfrozen 0\n")
+    try:
+        with pytest.raises(ProviderRefused):
+            manager.retirement_facts(deadline=1012.0)
+        assert manager._retirement is None
+        with pytest.raises(ProviderRefused):
+            manager.retirement_facts(deadline=1012.0)
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize(
+    "events", [b"populated 1\n", b"populated 0\npopulated 1\n", b"frozen 0\n"]
+)
+def test_empty_manager_path_cannot_override_retained_nonempty_or_malformed_events(
+    candidate, monkeypatch, tmp_path, events
+):
+    manager, values, path = _bound_retirement_manager(candidate, monkeypatch, tmp_path)
+    values.update(ControlGroup="", StateChangeTimestampMonotonic="1009000000")
+    path.write_bytes(events)
+    try:
+        with pytest.raises(ProviderRefused):
+            manager.observe_fixed_empty(values, 1012.0)
+        with pytest.raises(ProviderRefused):
+            manager.retirement_facts(deadline=1012.0)
+        assert manager._retirement is None
+    finally:
+        manager.close()
+
+
+def test_bound_manager_cannot_rebind_or_replace_retirement_fact(
+    candidate, monkeypatch, tmp_path
+):
+    manager, _, _ = _bound_retirement_manager(candidate, monkeypatch, tmp_path)
+    try:
+        fact = manager.retirement_facts(deadline=1012.0)
+        original_fd = manager._events
+        original_identity = manager._bound_identity
+        with pytest.raises(ProviderRefused):
+            manager.bind_actual_collector({}, 1012.0)
+        assert manager._events == original_fd
+        assert manager._bound_identity == original_identity
+        assert manager.owns_retirement(fact)
+    finally:
+        manager.close()
+    with pytest.raises(ProviderRefused):
+        manager.bind_actual_collector({}, 1012.0)
