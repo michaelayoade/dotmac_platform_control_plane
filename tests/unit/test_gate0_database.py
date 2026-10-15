@@ -83,6 +83,8 @@ def test_success_retains_runtime_and_rolls_back_read_only_measurement(monkeypatc
     statements = [str(call.args[0]) for call in session.execute.call_args_list]
     assert statements[0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
     assert "set_config('statement_timeout'" in statements[1]
+    assert "host(inet_server_addr())" in statements[2]
+    assert "inet_server_addr()::text" not in statements[2]
     assert all(s.startswith("SELECT") for s in statements[1:])
     assert session.execute.call_args_list[1].args[1] == {
         "statement": "1000",
@@ -99,6 +101,8 @@ def test_success_retains_runtime_and_rolls_back_read_only_measurement(monkeypatc
         {"database": ""},
         {"role": "bad;role"},
         {"server_address": "hostname"},
+        {"server_address": "192.0.2.1/32"},
+        {"server_address": "2001:db8::1/128"},
         {"server_port": True},
         {"tls": 1},
         {"schemas": ()},

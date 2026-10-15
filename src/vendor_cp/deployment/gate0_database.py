@@ -177,7 +177,7 @@ def qualify_authority_database(
         )
         identity = session.execute(
             text(
-                "SELECT current_database(), current_user, inet_server_addr()::text, "
+                "SELECT current_database(), current_user, host(inet_server_addr()), "
                 "inet_server_port(), COALESCE((SELECT ssl FROM pg_catalog.pg_stat_ssl "
                 "WHERE pid = pg_backend_pid()), false)"
             )

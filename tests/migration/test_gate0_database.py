@@ -34,7 +34,7 @@ def test_real_postgres_read_only_identity_heads_and_mismatch_refusal(
         with owner.platform_session() as session:
             database, address, port, tls = session.execute(
                 text(
-                    "SELECT current_database(), inet_server_addr()::text, "
+                    "SELECT current_database(), host(inet_server_addr()), "
                     "inet_server_port(), "
                     "COALESCE((SELECT ssl FROM pg_catalog.pg_stat_ssl "
                     "WHERE pid = pg_backend_pid()), false)"

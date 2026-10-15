@@ -1,4 +1,9 @@
-"""Hosted test-only fixed launch adapter; never included in the CP wheel."""
+"""Hosted test-only SSH/library adapter; never included in the CP wheel.
+
+This exercises real sshd authentication and installed library proof exchange.
+It deliberately does not qualify installed bootstrap/custody or select the
+production CLI entrypoint, whose finite-custody requirements remain intact.
+"""
 
 import base64
 import fcntl
@@ -6,9 +11,9 @@ import json
 import os
 import stat
 import sys
-from datetime import datetime
-from functools import partial
+from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from uuid import UUID
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -22,6 +27,7 @@ os.environ.setdefault(
 
 from vendor_cp.deployment import gate0_services  # noqa: E402
 from vendor_cp.deployment.gate0_composition import AdmissionExpectation  # noqa: E402
+from vendor_cp.deployment.gate0_framing import FramedChannel  # noqa: E402
 from vendor_cp.deployment.gate0_runtime import AdmittedOperation  # noqa: E402
 from vendor_cp.deployment.gate0_session import (  # noqa: E402
     AttesterSession,
@@ -33,6 +39,13 @@ from vendor_cp.deployment.rehearsal_issuer_trust_state import (
 
 
 def run_session(config):
+    # One fixture-local original bound, never a new production clock/capability.
+    started_at, origin = datetime.now(UTC), monotonic()
+    expires_at = datetime.fromisoformat(config["expires_at"])
+    remaining = (expires_at - started_at).total_seconds()
+    if not 0 < remaining <= 300:
+        raise ValueError("synthetic_startup_refused")
+    deadline = origin + min(remaining, 30)
     operation = AdmittedOperation(**config["operation"])
     expected = AdmissionExpectation(
         operation, UUID(int=2), "rehearsal", UUID(int=3), "synthetic-policy", 1
@@ -68,20 +81,25 @@ def run_session(config):
         public,
         trust,
         private.sign,
-        datetime.fromisoformat(config["expires_at"]),
+        expires_at,
     )
     directory = os.open("/tmp", os.O_RDONLY | os.O_DIRECTORY)  # noqa: S108 -- real daemon fixture mount
     try:
-        # Test-only in-memory composition. Production has no selector or flag.
-        fixed = partial(
-            gate0_services.attester_session,
+        # Explicit synthetic library composition, not a production override.
+        # Real sshd ExposeAuthInfo and all cryptographic checks remain active.
+        channel = FramedChannel(
+            sys.stdin.fileno(),
+            sys.stdout.fileno(),
+            deadline=deadline,
+            maximum_frames=3,
+        )
+        gate0_services.serve_attester(
             session,
             SshdSessionReader(directory, os.geteuid()),
+            channel,
+            os.environ,
         )
-        gate0_services.attester_session = fixed
-        from vendor_cp.cli import main as cli_main
-
-        return cli_main(["gate0", "attester-session"])
+        return 0
     finally:
         os.close(directory)
 
@@ -136,6 +154,8 @@ def main():
         ):
             raise ValueError("synthetic_startup_refused")
         return run_session(json.loads(raw))
+    except gate0_services.ServiceCancelled:
+        return 5
     except Exception:
         return 3
     finally:

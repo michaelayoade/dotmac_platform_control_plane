@@ -1999,8 +1999,8 @@ class FiniteGate0Supervisor:
             # started by this root finite parent. All descendants inherit it.
             process = subprocess.Popen(  # noqa: S603 -- fixed pinned daemon vector
                 [str(binary), "-i", "-e", "-f", str(config)],
-                stdin=connection,
-                stdout=connection,
+                stdin=connection.fileno(),
+                stdout=connection.fileno(),
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
                 env={"PATH": "/usr/sbin:/usr/bin"},
@@ -2060,8 +2060,8 @@ class FiniteGate0Supervisor:
             export_listener = self._bind_issuer_export()
             process = subprocess.Popen(  # noqa: S603 -- fixed pinned issuer daemon
                 [str(binary), "-i", "-e", "-f", str(config)],
-                stdin=connection,
-                stdout=connection,
+                stdin=connection.fileno(),
+                stdout=connection.fileno(),
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
                 env={"PATH": "/usr/sbin:/usr/bin"},
@@ -2313,8 +2313,8 @@ class FiniteGate0Supervisor:
             self._management_listener = self._bind_management_listener()
             process = subprocess.Popen(  # noqa: S603 -- fixed pinned management daemon
                 [str(binary), "-i", "-e", "-f", str(config)],
-                stdin=connection,
-                stdout=connection,
+                stdin=connection.fileno(),
+                stdout=connection.fileno(),
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
                 env={"PATH": "/usr/sbin:/usr/bin"},

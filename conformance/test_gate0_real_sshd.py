@@ -3,6 +3,9 @@
 This suite is outside default pytest testpaths and is explicitly invoked by
 the coordinator-owned installed-sshd workflow and artifact pins. Missing
 bindings fail; source pins are not hosted qualification or live acceptance.
+The fixed synthetic worker calls the installed proof library, not production
+bootstrap. Finite custody, WG and supervisor qualification require separate
+installed-path evidence; no fixture patches a production CLI gate.
 """
 # Fixed hosted test fixture vectors only; no production request selects commands.
 # ruff: noqa: S603
@@ -375,7 +378,7 @@ def client(daemon, options=(), command=()):
         "LD_PRELOAD",
     ],
 )
-def test_real_certificate_authentication_installed_dispatch_and_same_key_proof(
+def test_real_certificate_authentication_installed_library_and_same_key_proof(
     daemon, attempt_environment_override
 ):
     environment = os.environ.copy()
@@ -677,4 +680,29 @@ def test_unprotected_fixture_startup_refuses_before_challenge(daemon, change):
         check=False,
     )
     assert result.returncode == 3 and result.stdout == b""
+    assert b"Traceback" not in result.stderr
+
+
+def test_installed_cli_cannot_select_synthetic_library_fixture(daemon):
+    # This authenticated fixture UID can read its root-protected synthetic
+    # config, but that never enables the production installation/custody gate.
+    result = subprocess.run(
+        [
+            "/usr/sbin/runuser",
+            "--user",
+            daemon["user"],
+            "--",
+            sys.executable,
+            "-I",
+            "-c",
+            "from vendor_cp.cli import main; "
+            "raise SystemExit(main(['gate0', 'attester-session']))",
+        ],
+        input=b"",
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 3 and result.stdout == b""
+    assert b"TRUSTED_SSHD_BINDING_UNCONFIGURED" in result.stderr
     assert b"Traceback" not in result.stderr

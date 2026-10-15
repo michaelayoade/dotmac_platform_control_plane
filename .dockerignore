@@ -3,6 +3,9 @@
 !.github/bootstrap
 .github/bootstrap/*
 !.github/bootstrap/poetry-requirements.txt
+!.github/candidate
+.github/candidate/*
+!.github/candidate/prepare_gate0_native.py
 .venv
 .mypy_cache
 .pytest_cache
