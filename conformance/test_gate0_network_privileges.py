@@ -716,9 +716,9 @@ LogLevel ERROR
                 _, daemon_error = refused_daemon.communicate(timeout=3)
                 assert refused_client.returncode == 255
                 assert refused_daemon.returncode is not None
-                assert refused_daemon.returncode >= 0, (
-                    "authentication monitor was killed"
-                )
+                assert (
+                    refused_daemon.returncode >= 0
+                ), "authentication monitor was killed"
                 assert refused_output == b""
                 assert b"GATE0_NATIVE_STAGE=worker_entered" not in refused_error
                 assert b"Permission denied (publickey)" in refused_error
@@ -743,9 +743,9 @@ LogLevel ERROR
                     pid, _ = os.waitpid(-1, os.WNOHANG)
                 except ChildProcessError:
                     break
-                assert time.monotonic() < refusal_cleanup_end, (
-                    "refused authentication descendant remained"
-                )
+                assert (
+                    time.monotonic() < refusal_cleanup_end
+                ), "refused authentication descendant remained"
                 if pid == 0:
                     time.sleep(0.02)
             assert not Path("/proc/1/task/1/children").read_text().strip()
@@ -787,9 +787,9 @@ LogLevel ERROR
                         connection.settimeout(3)
                         received = connection.recv(64)
                         if negative:
-                            assert received == b"", (
-                                "payload preceded native device refusal"
-                            )
+                            assert (
+                                received == b""
+                            ), "payload preceded native device refusal"
                         else:
                             assert received == b"gate0-native-synthetic"
                             connection.sendall(b"native-readback")
