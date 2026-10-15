@@ -201,6 +201,10 @@ class AttesterSession:
         finally:
             request.pop("workload_token", None)
             del token
+        authentication = expected.authentication_freshness
+        if authentication is not None:
+            authentication.require_open()
+            channel.deadline = min(channel.deadline, authentication.deadline)
         operation = expected.operation
         certificate = load_ssh_public_identity(authenticated_certificate)
         if not isinstance(certificate, SSHCertificate):
@@ -228,7 +232,13 @@ class AttesterSession:
             attester_public_key=self.public_key,
             trust_state=self.trust_state,
             sign=self.sign,
-            expires_at=min(self.expires_at, started + timedelta(seconds=30)),
+            expires_at=min(
+                self.expires_at,
+                started + timedelta(seconds=30),
+                self.expires_at
+                if authentication is None
+                else authentication.expires_at,
+            ),
             now=self.now,
         )
         challenge = producer.begin_challenge(authenticated_certificate)
@@ -253,6 +263,8 @@ class AttesterSession:
             raise ServiceRefused()
         if self.custody is not None:
             self.custody.refresh(phase="complete")
+        if authentication is not None:
+            authentication.require_open()
         proof = producer.complete_challenge(
             challenge.challenge_id, decode(response["sshsig"], 16384)
         )
@@ -269,6 +281,10 @@ class AttesterSession:
         signature = self.sign(message)
         Ed25519PublicKey.from_public_bytes(self.public_key).verify(signature, message)
         producer._clock()
+        if authentication is not None:
+            authentication.require_open()
         channel.send(
             bundle_document(proof, SignedSessionObservation(message, signature))
         )
+        if authentication is not None:
+            authentication.require_open()

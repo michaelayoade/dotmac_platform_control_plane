@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from vendor_cp.approvals.adapter import HeldPlatformApproval
+    from vendor_cp.deployment.gate0_composition import RequestAuthenticationFreshness
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
@@ -495,9 +496,15 @@ class AuthenticatedApprovalWithdrawal(ProviderRefused):
     Trusted source contract, not an unforgeable Python capability or grant.
     """
 
-    def __init__(self, denial: OwnerWindowWithdrawal) -> None:
+    def __init__(
+        self,
+        denial: OwnerWindowWithdrawal,
+        *,
+        authentication_freshness: RequestAuthenticationFreshness | None = None,
+    ) -> None:
         ValueError.__init__(self, "gate0_authenticated_approval_withdrawn")
         self.denial = denial
+        self.authentication_freshness = authentication_freshness
 
 
 class OwnerWindowReader:

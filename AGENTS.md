@@ -47,6 +47,19 @@ disagree, fix the drift.
    survived (**D4**; ADR-0014;
    `tests/architecture/test_browser_authentication_ownership.py`,
    `tests/unit/test_console_browser_authentication.py`).
+
+   **Gate 0 workload reads (design adopted 2026-10-15).** The separately
+   inventoried `gate0_collection_reads` surface authenticates the protected A9
+   GitHub job through the existing shared workload-signature verifier and exact
+   CP-owned frozen-window selection. Its two finite read projections each have
+   that single workload authentication owner. Existing platform-actor routes
+   retain their kernel-owned authentication. The approval projection obtains
+   the existing current owner hold; the withdrawal projection verifies original
+   scope and durable owner evidence after withdrawal. Neither projection grants
+   approval, consumption, administrative access or arbitrary resource lookup.
+   Constructed dependency-graph tests cover the workload surface independently.
+   Existing profiles withhold it; the explicit candidate profile and its
+   production acceptance require review before operational publication.
 6. **Vendor logic lives in services; routes/web are thin adapters.** Business
    decisions have one named owner; adapters validate-authorise-delegate.
 7. **Atomic, idempotent, audited mutations.** Account/lifecycle commands are

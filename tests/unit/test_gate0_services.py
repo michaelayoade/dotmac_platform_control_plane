@@ -1,5 +1,6 @@
 """Hosted-only finite worker dispatch and single-install checks."""
 
+import time
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -14,6 +15,7 @@ class SyntheticManagementChannel:
     def __init__(self, requests):
         self.requests = iter(requests)
         self.output = []
+        self.deadline = time.monotonic() + 120
 
     def receive(self, allow_eof=False):
         return next(self.requests, None)

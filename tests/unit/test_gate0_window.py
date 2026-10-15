@@ -757,6 +757,9 @@ def test_withdrawal_only_survives_authenticated_exact_original_window(
     admission._attempts = 0
     admission._transport = object()
     admission._reader = SimpleNamespace(read=read)
+    admission._origin = expected.window_freshness.origin
+    admission._started_at = datetime.now(UTC)
+    admission._deadline = expected.window_freshness.deadline
     monkeypatch.setattr(admission, "_open", lambda: None)
     claims = dict(binding.window.document["github"])
     now = int(datetime.now(UTC).timestamp())
@@ -764,7 +767,7 @@ def test_withdrawal_only_survives_authenticated_exact_original_window(
     if change == "run":
         claims["run_id"] = "999"
     if change == "expiry":
-        claims["exp"] = now + 301
+        claims["exp"] = now - 1
 
     def verified(token):
         events.append("jwt")

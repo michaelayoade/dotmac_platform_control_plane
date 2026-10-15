@@ -115,8 +115,7 @@ class SyntheticBao:
             result = {
                 "data": {
                     "creation_path": (
-                        f"auth/approle/role/platform-cp-rehearsal-{self.role}"
-                        "/secret-id"
+                        f"auth/approle/role/platform-cp-rehearsal-{self.role}/secret-id"
                     ),
                     "creation_time": datetime.now(UTC).isoformat(),
                     "creation_ttl": 60,
@@ -397,7 +396,9 @@ def jwt_case():
 
 def test_valid_synthetic_jwt_and_window_and_no_cache(jwt_case):
     admission, window, transport, token = jwt_case
-    assert admission.admit(token(), "issue", UUID(int=1)) == window.expectation
+    admitted = admission.admit(token(), "issue", UUID(int=1))
+    assert replace(admitted, authentication_freshness=None) == window.expectation
+    assert admitted.authentication_freshness is not None
     assert (
         admission.window_record_digest(window.expectation)
         == window.authority_record_digest
@@ -576,7 +577,9 @@ def test_jwks_rejects_duplicate_key_ids(jwt_case):
 
 def test_cached_record_cannot_extend_original_deadline(jwt_case, monkeypatch):
     admission, window, _, token = jwt_case
-    assert admission.admit(token(), "issue", UUID(int=1)) == window.expectation
+    admitted = admission.admit(token(), "issue", UUID(int=1))
+    assert replace(admitted, authentication_freshness=None) == window.expectation
+    assert admitted.authentication_freshness is not None
     monkeypatch.setattr(
         "vendor_cp.deployment.gate0_workload_admission.time.monotonic",
         lambda: admission._deadline + 1,

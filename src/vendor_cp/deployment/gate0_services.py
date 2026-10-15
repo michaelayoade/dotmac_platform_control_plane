@@ -235,6 +235,8 @@ class IssuerWorker:
         # Attribute only the successfully verified, registered and retained
         # proof from this submission. Historical plan/phase matches are not
         # evidence of which proof this operation actually evaluated.
+        if expected.authentication_freshness is not None:
+            expected.authentication_freshness.require_open()
         self._current_proof_identity = (evidence_digest, digest(raw_bundle))
         return proof
 
@@ -355,7 +357,21 @@ class IssuerWorker:
                     None,
                     canonical(data),
                 )
-                channel.send(outcome.document())
+                authentication = (
+                    None if expected is None else expected.authentication_freshness
+                )
+                original_deadline = channel.deadline
+                try:
+                    if authentication is not None:
+                        authentication.require_open()
+                        channel.deadline = min(
+                            original_deadline, authentication.deadline
+                        )
+                    channel.send(outcome.document())
+                    if authentication is not None:
+                        authentication.require_open()
+                finally:
+                    channel.deadline = original_deadline
                 self.outcomes.append(outcome)
             except (
                 AuthenticatedApprovalWithdrawal,
@@ -365,7 +381,11 @@ class IssuerWorker:
                 if committed:
                     raise ServiceIncomplete() from None
                 expected = self._expected
+                authentication = (
+                    None if expected is None else expected.authentication_freshness
+                )
                 if isinstance(caught, AuthenticatedApprovalWithdrawal):
+                    authentication = caught.authentication_freshness
                     window_digest = caught.denial.window.digest
                     namespace, code = "approvals", ApprovalHoldRefusal.WITHDRAWN.value
                 elif isinstance(caught, ApprovalNotHeld):
@@ -395,13 +415,24 @@ class IssuerWorker:
                     code,
                     canonical({}),
                 )
+                if authentication is not None:
+                    authentication.require_open()
                 self.terminal_outcome = outcome
-                self.outcomes.append(outcome)
+                original_deadline = channel.deadline
                 try:
+                    if authentication is not None:
+                        channel.deadline = min(
+                            original_deadline, authentication.deadline
+                        )
                     channel.send(outcome.document())
+                    if authentication is not None:
+                        authentication.require_open()
                 except BaseException:
                     self.terminal_outcome = None
                     raise ServiceIncomplete() from None
+                finally:
+                    channel.deadline = original_deadline
+                self.outcomes.append(outcome)
                 raise ServiceOwnerRefused(outcome) from None
             except BaseException:
                 if committed:

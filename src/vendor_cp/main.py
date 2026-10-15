@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from dotmac_kernel import create_app
 
-from vendor_cp.assembly import build_spec
+from vendor_cp.assembly import build_spec_with_profile
+from vendor_cp.deployment.gate0_collection_installation import bind_installed_collection
 
-app = create_app(build_spec())
+_spec, _profile = build_spec_with_profile()
+app = create_app(_spec)
+bind_installed_collection(app, _profile)

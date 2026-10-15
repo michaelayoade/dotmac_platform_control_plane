@@ -7,28 +7,28 @@ bindings remain UNCONFIGURED; constructors never create approval authority.
 
 from __future__ import annotations
 
-import base64
 import re
 import time
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import UUID
-
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from vendor_cp.deployment.gate0_composition import (
     AdmissionExpectation,
+    RequestAuthenticationFreshness,
     WindowFreshness,
     authorization_binding,
+)
+from vendor_cp.deployment.gate0_github_jwt import (
+    _FIXED_CLAIMS,
+    GITHUB_ISSUER,
+    VerifiedClaims,
+    verify_github_claims,
 )
 from vendor_cp.deployment.gate0_role_custody import (
     BoundedJSONTransport,
     ProviderRefused,
-    json_record,
-    json_string,
-    strict_json,
 )
 
 if TYPE_CHECKING:
@@ -42,49 +42,6 @@ if TYPE_CHECKING:
         OwnerWindowReader,
         WindowClockOrigin,
     )
-
-
-class VerifiedClaims(TypedDict):
-    iat: int
-    nbf: int
-    exp: int
-    jti: str
-    run_id: str
-    run_attempt: str
-
-
-GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
-GITHUB_JWKS_PATH = "/.well-known/jwks"
-_FIXED_CLAIMS = {
-    "iss": GITHUB_ISSUER,
-    "aud": "urn:dotmac:gate0:rehearsal-issuer",
-    "repository": "dotmac-tech/gate0-issuer-execution",
-    "repository_id": "1397614140",
-    "repository_owner_id": "335992433",
-    "environment": "rehearsal-issuer-protected",
-    "ref": "refs/heads/main",
-    "workflow_ref": (
-        "dotmac-tech/gate0-issuer-execution/"
-        ".github/workflows/gate0-issuer.yml@refs/heads/main"
-    ),
-    "event_name": "workflow_dispatch",
-}
-
-
-def _decode(value: str, maximum: int) -> bytes:
-    if (
-        type(value) is not str
-        or not value
-        or len(value) > maximum
-        or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None
-    ):
-        raise ProviderRefused()
-    raw = base64.b64decode(
-        value + "=" * (-len(value) % 4), altchars=b"-_", validate=True
-    )
-    if base64.urlsafe_b64encode(raw).rstrip(b"=").decode() != value:
-        raise ProviderRefused()
-    return raw
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,93 +182,33 @@ class WorkloadAdmission:
 
     def _claims(self, token: str) -> VerifiedClaims:
         self._open()
-        if type(token) is not str or not 0 < len(token) <= 32768:
+        if self._transport is None:
             raise ProviderRefused()
-        parts = token.split(".")
-        if len(parts) != 3:
-            raise ProviderRefused()
-        header = strict_json(_decode(parts[0], 4096), 4096)
-        if (
-            not {"alg", "kid", "typ"} <= set(header)
-            or set(header) - {"alg", "kid", "typ", "x5t"}
-            or header["alg"] != "RS256"
-            or header["typ"] != "JWT"
-            or not 0 < len(json_string(header["kid"])) <= 512
-        ):
-            raise ProviderRefused()
-        claims = cast(VerifiedClaims, strict_json(_decode(parts[1], 24576), 24576))
-        if any(claims.get(key) != value for key, value in _FIXED_CLAIMS.items()):
-            raise ProviderRefused()
-        if "job_workflow_ref" in claims or "job_workflow_sha" in claims:
-            raise ProviderRefused()
-        now = datetime.now(UTC).timestamp()
-        if (
-            any(type(claims.get(key)) is not int for key in ("iat", "nbf", "exp"))
-            or not claims["iat"] <= now < claims["exp"]
-            or not claims["nbf"] <= now
-            or not claims["iat"] <= claims["nbf"] < claims["exp"]
-            or not 0 < claims["exp"] - claims["iat"] <= 300
-            or type(claims.get("jti")) is not str
-            or not 0 < len(claims["jti"]) <= 512
-            or any(
-                type(claims.get(key)) is not str
-                or re.fullmatch(r"[1-9][0-9]{0,19}", json_string(claims.get(key)))
-                is None
-                for key in ("run_id", "run_attempt")
-            )
-        ):
-            raise ProviderRefused()
-        jwt_deadline = min(self._deadline, time.monotonic() + claims["exp"] - now)
-        transport = self._transport
-        if transport is None:
-            raise ProviderRefused()
-        jwks = transport.request(
-            GITHUB_JWKS_PATH,
-            method="GET",
-            token=None,
-            document=None,
-            deadline=jwt_deadline,
-        )
-        raw_keys = jwks.get("keys")
-        if (
-            type(raw_keys) is not list
-            or not 0 < len(raw_keys) <= 16
-            or any(type(k) is not dict for k in raw_keys)
-        ):
-            raise ProviderRefused()
-        keys = [json_record(k) for k in cast(list[object], raw_keys)]
-        ids = [json_string(k.get("kid")) for k in keys]
-        if any(type(kid) is not str for kid in ids) or len(ids) != len(set(ids)):
-            raise ProviderRefused()
-        selected = [k for k in keys if k["kid"] == header["kid"]]
-        if len(selected) != 1:
-            raise ProviderRefused()
-        key = selected[0]
-        if (
-            key.get("kty") != "RSA"
-            or key.get("alg") != "RS256"
-            or key.get("use") != "sig"
-            or any(name in key for name in ("d", "p", "q", "dp", "dq", "qi", "oth"))
-            or ("key_ops" in key and key["key_ops"] != ["verify"])
-        ):
-            raise ProviderRefused()
-        n = int.from_bytes(_decode(json_string(key["n"]), 1400), "big")
-        e = int.from_bytes(_decode(json_string(key["e"]), 16), "big")
-        if not 2048 <= n.bit_length() <= 8192 or e != 65537:
-            raise ProviderRefused()
-        rsa.RSAPublicNumbers(e, n).public_key().verify(
-            _decode(parts[2], 1400),
-            (parts[0] + "." + parts[1]).encode("ascii"),
-            padding.PKCS1v15(),
-            hashes.SHA256(),
+        claims = verify_github_claims(
+            token, transport=self._transport, deadline=self._deadline
         )
         self._open()
-        if (
-            datetime.now(UTC).timestamp() >= claims["exp"]
-            or time.monotonic() >= jwt_deadline
-        ):
-            raise ProviderRefused()
         return claims
+
+    def _authentication_freshness(
+        self,
+        claims: VerifiedClaims,
+        window_end: datetime,
+        original_deadline: float,
+    ) -> RequestAuthenticationFreshness:
+        effective_end = min(window_end.timestamp(), claims["exp"])
+        freshness = RequestAuthenticationFreshness(
+            self._origin,
+            min(
+                self._deadline,
+                original_deadline,
+                self._origin + effective_end - self._started_at.timestamp(),
+            ),
+            datetime.fromtimestamp(effective_end, UTC),
+        )
+        self._open()
+        freshness.require_open()
+        return freshness
 
     def admit(
         self,
@@ -335,7 +232,6 @@ class WorkloadAdmission:
                 or claims.get("sub") != window.subject
                 or claims.get("workflow_sha") != window.workflow_sha
                 or claims["iat"] < window.approved_from.timestamp()
-                or claims["exp"] > window.approved_until.timestamp()
             ):
                 raise ProviderRefused()
             if phase == "issue":
@@ -351,7 +247,14 @@ class WorkloadAdmission:
                 ):
                     raise ProviderRefused()
             self._window(phase, plan_id)
-            result = window.expectation
+            authentication = self._authentication_freshness(
+                claims,
+                window.approved_until,
+                self._window_deadlines[(phase, str(plan_id))],
+            )
+            result = replace(
+                window.expectation, authentication_freshness=authentication
+            )
         except Exception:
             failed = True
         if failed or result is None:
@@ -366,7 +269,9 @@ class WorkloadAdmission:
             cast(Literal["issue", "consume"], expected.operation.phase),
             UUID(expected.operation.plan_id),
         )
-        if asdict(window.expectation) != asdict(expected):
+        if asdict(window.expectation) != asdict(
+            replace(expected, authentication_freshness=None)
+        ):
             raise ProviderRefused()
         return window.authority_record_digest
 
@@ -441,10 +346,6 @@ class OwnerWorkloadAdmission(WorkloadAdmission):
                 < datetime.fromisoformat(
                     document["not_before"].replace("Z", "+00:00")
                 ).timestamp()
-                or claims["exp"]
-                > datetime.fromisoformat(
-                    document["expires_at"].replace("Z", "+00:00")
-                ).timestamp()
             ):
                 raise ProviderRefused()
             self._open()
@@ -452,13 +353,25 @@ class OwnerWorkloadAdmission(WorkloadAdmission):
                 document["expires_at"].replace("Z", "+00:00")
             ):
                 raise ProviderRefused()
+            original_freshness = (
+                denial.freshness
+                if denial is not None
+                else (None if expected is None else expected.window_freshness)
+            )
+            if original_freshness is None:
+                raise ProviderRefused()
+            authentication = self._authentication_freshness(
+                claims,
+                datetime.fromisoformat(document["expires_at"].replace("Z", "+00:00")),
+                original_freshness.deadline,
+            )
             if denial is not None:
                 denial.freshness.require_open()
             else:
                 if expected is None or expected.window_freshness is None:
                     raise ProviderRefused()
                 expected.window_freshness.require_open()
-                result = expected
+                result = replace(expected, authentication_freshness=authentication)
         except Exception:
             failed = True
         if failed:
@@ -466,7 +379,10 @@ class OwnerWorkloadAdmission(WorkloadAdmission):
             raise ProviderRefused()
         if denial is not None:
             self._transport = None
-            raise AuthenticatedApprovalWithdrawal(denial)
+            authentication.require_open()
+            raise AuthenticatedApprovalWithdrawal(
+                denial, authentication_freshness=authentication
+            )
         if result is None:
             self._transport = None
             raise ProviderRefused()
@@ -613,7 +529,6 @@ class ApprovedAtStartAdmission(WorkloadAdmission):
                     for key, value in document["github"].items()
                 )
                 or claims["iat"] < self._windows[0].approved_from.timestamp()
-                or claims["exp"] > self._windows[0].approved_until.timestamp()
             ):
                 raise ProviderRefused()
             self._window(
@@ -622,7 +537,12 @@ class ApprovedAtStartAdmission(WorkloadAdmission):
             if expected.window_freshness is None:
                 raise ProviderRefused()
             expected.window_freshness.require_open()
-            result = expected
+            authentication = self._authentication_freshness(
+                claims,
+                self._windows[0].approved_until,
+                expected.window_freshness.deadline,
+            )
+            result = replace(expected, authentication_freshness=authentication)
         except Exception:
             failed = True
         if failed or result is None:

@@ -605,7 +605,7 @@ class RunDocument(TypedDict):
     management_key_fingerprint: str
 
 
-def _run_document(raw: bytes) -> RunDocument:
+def parse_run_document(raw: bytes) -> RunDocument:
     item = _record(
         strict_object(raw),
         {
@@ -645,9 +645,17 @@ def _run_document(raw: bytes) -> RunDocument:
     ):
         raise ProviderRefused()
     start, end = _instant(result["not_before"]), _instant(result["expires_at"])
+    if not 0 < (end - start).total_seconds() <= 300:
+        raise ProviderRefused()
+    return result
+
+
+def _run_document(raw: bytes) -> RunDocument:
+    result = parse_run_document(raw)
     if (
-        not start <= datetime.now(UTC) < end
-        or not 0 < (end - start).total_seconds() <= 300
+        not _instant(result["not_before"])
+        <= datetime.now(UTC)
+        < _instant(result["expires_at"])
     ):
         raise ProviderRefused()
     return result
