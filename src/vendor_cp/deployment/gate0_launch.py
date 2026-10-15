@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Literal, NotRequired, TypedDict
+from typing import IO, TYPE_CHECKING, Literal, NotRequired, TypedDict, cast
 
 if TYPE_CHECKING:
     from vendor_cp.deployment.gate0_services import IssuerProcessResult
@@ -1781,13 +1781,27 @@ class InstalledLaunchContext:
         if not _selection_matches(configured, expected):
             raise ProviderRefused()
 
-    def finish_slot(self, outcome: Literal["success", "refused"]) -> None:
+    def finish_slot(
+        self,
+        outcome: Literal["success", "refused"],
+        *,
+        bundle_digest: str | None = None,
+        invocation_id: str | None = None,
+    ) -> None:
         self.require_open()
         if (
             self.role != "attester"
             or self.slot_id not in SLOTS
             or outcome not in ("success", "refused")
         ):
+            raise ProviderRefused()
+        if outcome == "success":
+            if bundle_digest is None or invocation_id is None:
+                raise ProviderRefused()
+            _sha(bundle_digest)
+            if re.fullmatch(r"[0-9a-f]{64}", invocation_id) is None:
+                raise ProviderRefused()
+        elif bundle_digest is not None or invocation_id is not None:
             raise ProviderRefused()
         parent = _protected(
             ROOT / "status" / self.slot_id, directory=True, uid=self.worker_uid
@@ -1808,6 +1822,8 @@ class InstalledLaunchContext:
                             "launch_packet_digest": self.packet_digest,
                             "slot": self.slot_id,
                             "outcome": outcome,
+                            "bundle_digest": bundle_digest,
+                            "invocation_id": invocation_id,
                         }
                     ),
                 )
@@ -2003,6 +2019,29 @@ def _no_replace(source: Path, destination: Path) -> None:
         raise ProviderRefused()
 
 
+def _write_public_root_frame(raw: bytes, *, deadline: float) -> None:
+    """Only this root supervisor owns reserved stdout; no worker shares it."""
+    frame = memoryview(struct.pack("!I", len(raw)) + raw)
+    was_blocking = os.get_blocking(1)
+    os.set_blocking(1, False)
+    try:
+        while frame:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([], [1], [], remaining)[1]:
+                raise LaunchIncomplete()
+            try:
+                count = os.write(1, frame)
+            except BlockingIOError:
+                continue
+            if count <= 0:
+                raise LaunchIncomplete()
+            frame = frame[count:]
+        if time.monotonic() >= deadline:
+            raise LaunchIncomplete()
+    finally:
+        os.set_blocking(1, was_blocking)
+
+
 class FiniteGate0Supervisor:
     """One installed root launch, two attester slots, no recovery/retry loop."""
 
@@ -2044,6 +2083,7 @@ class FiniteGate0Supervisor:
             if role == "issuer":
                 listener = self._listen_wg("issuer")
                 listeners.append(listener)
+                self._emit_phase("issuer_listening", listener)
                 connection = self._accept_wg(listener, "issuer")
                 listener.close()
                 self.run_issuer_connection(connection)
@@ -2051,11 +2091,13 @@ class FiniteGate0Supervisor:
             elif role == "attester":
                 management = self._listen_wg("management")
                 listeners.append(management)
+                self._emit_phase("management_listening", management)
                 connection = self._accept_wg(management, "management")
                 management.close()
                 self.run_management_connection(connection)
                 listener = self._listen_wg("attester")
                 listeners.append(listener)
+                self._emit_phase("attester_listening_after_capture", listener)
                 for _ in SLOTS:
                     connection = self._accept_wg(listener, "attester")
                     self.run_attester_connection(connection)
@@ -2094,6 +2136,134 @@ class FiniteGate0Supervisor:
                 if self._activated:
                     raise LaunchIncomplete() from cleanup_failure
                 raise cleanup_failure
+
+    def _emit_phase(self, phase: str, listener: socket.socket) -> None:
+        """Publish actual sealed listener state once, in the fixed host order."""
+        from vendor_cp.deployment.gate0_launch_phase import (
+            RootLaunchPhase,
+            RootPhaseName,
+            encode_phase,
+        )
+
+        try:
+            self.clocks.require_open()
+            if self._failure_reason is not None:
+                raise ProviderRefused()
+            packet = self._local_terms
+            terms = self._run_terms
+            expected = (
+                ("issuer_listening",)
+                if packet["host_role"] == "issuer"
+                else ("management_listening", "attester_listening_after_capture")
+            )
+            if (
+                self._startup_phases != list(expected[: len(self._startup_phases)])
+                or len(self._startup_phases) >= len(expected)
+                or phase != expected[len(self._startup_phases)]
+            ):
+                raise ProviderRefused()
+            role: Role = (
+                "issuer"
+                if phase == "issuer_listening"
+                else "management"
+                if phase == "management_listening"
+                else "attester"
+            )
+            endpoint = packet["ssh_endpoints"][role]
+            interface = packet["network"]["interface"]
+            if (
+                _socket_endpoint(listener.getsockname())
+                != (endpoint["local_address"], endpoint["local_port"])
+                or listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN) != 1
+                or listener.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16)
+                .rstrip(b"\0")
+                .decode("ascii")
+                != interface
+            ):
+                raise ProviderRefused()
+            _require_capability_profile(_CONTINUING_CAPS)
+            measurement_raw = _read(ROOT / "network-measurement.json", 32768)
+            measurement = _network_measurement(measurement_raw)
+            pid, process_start = os.getpid(), _process_identity(os.getpid())
+            preflight = self._boundaries.get("preflight")
+            if (
+                _digest(measurement_raw) != self.network_measurement_digest
+                or measurement["packet_digest"] != self.packet_digest
+                or measurement["local_packet_digest"] != self.local_packet_digest
+                or measurement["machine_id_digest"] != self.machine_id_digest
+                or measurement["supervisor_pid"] != pid
+                or measurement["supervisor_start"] != process_start
+                or measurement["monotonic_origin"] != self.clocks.monotonic_origin
+                or measurement["deadline"] != self.clocks.deadline
+                or _instant(measurement["started_at"]) != self.clocks.started_at
+                or _instant(measurement["expires_at"]) != self.clocks.expires_at
+                or measurement["interface"] != interface
+                or measurement["local_address"] != endpoint["local_address"]
+                or preflight is None
+                or preflight._evidence is None
+            ):
+                raise ProviderRefused()
+            capture = None
+            if phase == "attester_listening_after_capture":
+                boundary = self._boundaries.get("management")
+                daemon = self._daemon_observations.get("management")
+                daemon_code = None if daemon is None else daemon["daemon_returncode"]
+                if (
+                    self._management_capture is None
+                    or "management" not in self._phase_completed
+                    or self._boundary is not None
+                    or self._management_listener is not None
+                    or boundary is None
+                    or boundary._evidence is None
+                    or daemon is None
+                    or daemon["termination"] != "exited"
+                    or type(daemon_code) is not int
+                    or not 0 <= daemon_code <= 255
+                    or not 0
+                    <= daemon["completed_elapsed_seconds"]
+                    < daemon["phase_deadline_elapsed_seconds"]
+                ):
+                    raise ProviderRefused()
+                capture = self._management_capture
+            mono = time.monotonic()
+            document: RootLaunchPhase = {
+                "schema": "Gate0RootLaunchPhase.v1",
+                "host_role": packet["host_role"],
+                "case_kind": terms["case_kind"],
+                "launch_packet_digest": self.packet_digest,
+                "local_packet_digest": self.local_packet_digest,
+                "window_digest": terms["capture"]["window_digest"],
+                "machine_id_digest": self.machine_id_digest,
+                "network_measurement_digest": self.network_measurement_digest,
+                "supervisor_pid": pid,
+                "supervisor_start": process_start,
+                "not_before": terms["not_before"],
+                "started_at": self.clocks.started_at.isoformat(),
+                "expires_at": self.clocks.expires_at.isoformat(),
+                "monotonic_origin": self.clocks.monotonic_origin,
+                "deadline": self.clocks.deadline,
+                "emitted_at": datetime.now(UTC).isoformat(),
+                "emitted_elapsed_seconds": mono - self.clocks.monotonic_origin,
+                "phase": cast(RootPhaseName, phase),
+                "listener": {
+                    "role": role,
+                    "interface": interface,
+                    "local_address": endpoint["local_address"],
+                    "local_port": endpoint["local_port"],
+                    "remote_address": endpoint["remote_address"],
+                },
+                "management_capture": capture,
+            }
+            raw = encode_phase(document)
+            self.clocks.require_open()
+            _write_public_root_frame(
+                raw, deadline=min(self.clocks.deadline, time.monotonic() + 2)
+            )
+            self.clocks.require_open()
+            self._startup_phases.append(phase)
+        except BaseException:
+            self._remember_failure(CleanupReason.EXPORT_FAILED)
+            raise
 
     def _listen_wg(self, role: Role) -> socket.socket:
         self.clocks.require_open()
@@ -2189,6 +2359,7 @@ class FiniteGate0Supervisor:
         self._management_capture: dict[str, object] | None = None
         self._capture_delivery: dict[str, object] | None = None
         self._phase_completed: dict[str, str] = {}
+        self._startup_phases: list[str] = []
         self._cleanup_complete = False
         self._mechanics_complete = False
         self._failure_reason: CleanupReason | None = None
@@ -3150,12 +3321,26 @@ class FiniteGate0Supervisor:
                     _sha(terminal["transcript_digest"])
                 else:
                     terminal = _record(
-                        terminal, {"schema", "launch_packet_digest", "slot", "outcome"}
+                        terminal,
+                        {
+                            "schema",
+                            "launch_packet_digest",
+                            "slot",
+                            "outcome",
+                            "bundle_digest",
+                            "invocation_id",
+                        },
                     )
                     if (
                         terminal["schema"] != "Gate0SlotTerminal.v1"
                         or terminal["slot"] != slot
                         or terminal["outcome"] != "success"
+                    ):
+                        raise ProviderRefused()
+                    _sha(terminal["bundle_digest"])
+                    if (
+                        re.fullmatch(r"[0-9a-f]{64}", _text(terminal["invocation_id"]))
+                        is None
                     ):
                         raise ProviderRefused()
                 if (
@@ -3465,21 +3650,4 @@ class FiniteGate0Supervisor:
                 os.close(result)
         finally:
             os.close(fd)
-        frame = memoryview(struct.pack("!I", len(raw)) + raw)
-        was_blocking = os.get_blocking(1)
-        os.set_blocking(1, False)
-        try:
-            end = time.monotonic() + 2
-            while frame:
-                remaining = end - time.monotonic()
-                if remaining <= 0 or not select.select([], [1], [], remaining)[1]:
-                    raise LaunchIncomplete()
-                try:
-                    count = os.write(1, frame)
-                except BlockingIOError:
-                    continue
-                if count <= 0:
-                    raise LaunchIncomplete()
-                frame = frame[count:]
-        finally:
-            os.set_blocking(1, was_blocking)
+        _write_public_root_frame(raw, deadline=time.monotonic() + 2)

@@ -13,7 +13,7 @@ import re
 import secrets
 import stat
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID
@@ -31,8 +31,11 @@ from vendor_cp.deployment.gate0_attester import (
     AttesterProofProducer,
     ssh_public_fingerprint,
 )
-from vendor_cp.deployment.gate0_composition import AdmissionExpectation
-from vendor_cp.deployment.gate0_framing import FramedChannel, ServiceRefused
+from vendor_cp.deployment.gate0_composition import (
+    AdmissionExpectation,
+    RequestAuthenticationFreshness,
+)
+from vendor_cp.deployment.gate0_framing import FramedChannel, ServiceRefused, canonical
 from vendor_cp.deployment.gate0_observation import (
     SignedSessionObservation,
     bundle_document,
@@ -149,6 +152,19 @@ class SessionAdmission(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class AttesterSessionCompletion:
+    """Local retained identity of the actual complete signed bundle write."""
+
+    bundle_digest: str
+    invocation_id: str
+    authentication_freshness: RequestAuthenticationFreshness | None = None
+
+    def require_open(self) -> None:
+        if self.authentication_freshness is not None:
+            self.authentication_freshness.require_open()
+
+
+@dataclass(frozen=True, slots=True)
 class AttesterSession:
     admission: SessionAdmission
     ca_public_key: bytes
@@ -161,9 +177,14 @@ class AttesterSession:
     custody: RoleCustody | None = None
     required_phase: Literal["issue", "consume"] | None = None
     required_plan_id: UUID | None = None
+    completion: AttesterSessionCompletion | None = field(
+        default=None, init=False, compare=False
+    )
 
     def run(self, channel: FramedChannel, authenticated_certificate: bytes) -> None:
         """Exactly two input frames, one active challenge, then terminal output."""
+        if self.completion is not None:
+            raise ServiceRefused()
         started = self.now()
         invocation_id = secrets.token_hex(32)
         request = channel.receive()
@@ -283,8 +304,16 @@ class AttesterSession:
         producer._clock()
         if authentication is not None:
             authentication.require_open()
-        channel.send(
-            bundle_document(proof, SignedSessionObservation(message, signature))
-        )
+        bundle = bundle_document(proof, SignedSessionObservation(message, signature))
+        raw_bundle = canonical(bundle)
+        channel.send(bundle)
         if authentication is not None:
             authentication.require_open()
+        channel.require_open()
+        object.__setattr__(
+            self,
+            "completion",
+            AttesterSessionCompletion(
+                digest(raw_bundle), invocation_id, authentication
+            ),
+        )

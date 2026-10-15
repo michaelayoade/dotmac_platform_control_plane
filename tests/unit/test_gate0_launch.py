@@ -144,6 +144,7 @@ def test_postactivation_failure_is_unknown_and_cancellation_is_preserved(
     monkeypatch.setattr(launch, "_load_local_packet", lambda: {"host_role": "issuer"})
     client, listener = socket.socketpair()
     monkeypatch.setattr(supervisor, "_listen_wg", lambda role: listener)
+    monkeypatch.setattr(supervisor, "_emit_phase", lambda *args: None)
     monkeypatch.setattr(supervisor, "_accept_wg", lambda *args: client)
     monkeypatch.setattr(supervisor, "close", lambda: None)
 
@@ -408,6 +409,7 @@ def test_issuer_acceptance_deadline_excludes_bounded_cleanup_tail(
     monkeypatch.setattr(supervisor, "_require_ssh_connection", lambda *args: None)
     closed_listener = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(supervisor, "_listen_wg", lambda *args: closed_listener)
+    monkeypatch.setattr(supervisor, "_emit_phase", lambda *args: None)
     monkeypatch.setattr(supervisor, "_bind_issuer_export", lambda: closed_listener)
     monkeypatch.setattr(supervisor, "close", lambda: None)
     client, peer = socket.socketpair()
@@ -1634,6 +1636,7 @@ def test_outer_close_failure_preserves_original_run_exception_mapping(
     listener = SimpleNamespace(close=lambda: events.append("listener-close"))
     monkeypatch.setattr(launch, "_load_local_packet", lambda: {"host_role": "issuer"})
     monkeypatch.setattr(supervisor, "_listen_wg", lambda role: listener)
+    monkeypatch.setattr(supervisor, "_emit_phase", lambda *args: None)
     monkeypatch.setattr(supervisor, "_accept_wg", lambda *args: object())
 
     def execute(connection):

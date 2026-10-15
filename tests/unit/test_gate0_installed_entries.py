@@ -242,16 +242,48 @@ def test_installed_issuer_post_execution_failure_is_incomplete(issuer_entry, fai
     assert stdio.stdout.getvalue() == ""
 
 
-@pytest.mark.parametrize("outcome", ["success", "refused", "exception", "teardown"])
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "success",
+        "refused",
+        "exception",
+        "teardown",
+        "missing_completion",
+        "late_completion",
+    ],
+)
 def test_installed_attester_retains_original_deadline_and_finishes_after_cleanup(
     monkeypatch, entry_stdio, outcome
 ):
     events = []
     deadline = monotonic() + 7
-    prepared = SimpleNamespace(session=object(), reader=object(), deadline=deadline)
-    context = SimpleNamespace(
-        finish_slot=lambda result: events.append(("finish", result))
+
+    def require_open():
+        if outcome == "late_completion" and "cleanup" in events:
+            raise RuntimeError("synthetic expired request")
+
+    completion = SimpleNamespace(
+        bundle_digest="sha256:" + "a" * 64,
+        invocation_id="b" * 64,
+        require_open=require_open,
     )
+    prepared = SimpleNamespace(
+        session=SimpleNamespace(completion=None), reader=object(), deadline=deadline
+    )
+
+    def finish(result, **identity):
+        assert identity == (
+            {
+                "bundle_digest": completion.bundle_digest,
+                "invocation_id": completion.invocation_id,
+            }
+            if result == "success"
+            else {}
+        )
+        events.append(("finish", result))
+
+    context = SimpleNamespace(finish_slot=finish)
     monkeypatch.setattr(
         launch.InstalledLaunchContext,
         "from_installed",
@@ -280,11 +312,13 @@ def test_installed_attester_retains_original_deadline_and_finishes_after_cleanup
         if outcome == "exception":
             raise RuntimeError("synthetic-sensitive-exchange-canary")
         events.append("exchange-return")
+        if outcome not in ("refused", "missing_completion"):
+            session.completion = completion
         return 3 if outcome == "refused" else 0
 
     monkeypatch.setattr(services, "attester_session", exchange)
     status = services.run_installed_attester()
-    if outcome in ("exception", "teardown"):
+    if outcome in ("exception", "teardown", "missing_completion", "late_completion"):
         assert status == 5
         assert not any(
             isinstance(event, tuple) and event[0] == "finish" for event in events

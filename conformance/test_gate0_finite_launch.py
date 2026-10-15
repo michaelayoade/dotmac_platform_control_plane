@@ -149,3 +149,65 @@ def test_installed_supervise_command_refuses_missing_operational_packet():
         check=False,
     )
     assert refused.returncode != 0
+
+
+def test_root_reserved_stdout_frame_uses_actual_pipe_and_confirmed_eof():
+    """Native framing mechanism only, not authenticated holder provenance."""
+    assert os.environ.get("GITHUB_ACTIONS") == "true", "hosted-only pipe proof"
+    reader, writer = os.pipe2(os.O_CLOEXEC)
+    child = os.fork()
+    if child == 0:
+        try:
+            os.close(reader)
+            os.dup2(writer, 1)
+            os.close(writer)
+            gate0_launch._write_public_root_frame(
+                b"synthetic-public-phase", deadline=time.monotonic() + 1
+            )
+        except BaseException:
+            os._exit(5)
+        os._exit(0)
+    os.close(writer)
+    try:
+        assert select.select([reader], [], [], 2)[0]
+        expected = b"\x00\x00\x00\x16synthetic-public-phase"
+        raw = bytearray()
+        while len(raw) < len(expected):
+            assert select.select([reader], [], [], 2)[0]
+            part = os.read(reader, len(expected) - len(raw))
+            assert part
+            raw.extend(part)
+        assert bytes(raw) == expected
+        assert select.select([reader], [], [], 2)[0]
+        assert os.read(reader, 1) == b""
+        waited, status = os.waitpid(child, 0)
+        assert waited == child and os.waitstatus_to_exitcode(status) == 0
+    finally:
+        os.close(reader)
+
+
+def test_root_reserved_stdout_original_deadline_cannot_emit_late_frame():
+    assert os.environ.get("GITHUB_ACTIONS") == "true", "hosted-only pipe proof"
+    reader, writer = os.pipe2(os.O_CLOEXEC)
+    child = os.fork()
+    if child == 0:
+        try:
+            os.close(reader)
+            os.dup2(writer, 1)
+            os.close(writer)
+            gate0_launch._write_public_root_frame(
+                b"late", deadline=time.monotonic() - 1
+            )
+        except gate0_launch.LaunchIncomplete:
+            os._exit(3)
+        except BaseException:
+            os._exit(5)
+        os._exit(0)
+    os.close(writer)
+    try:
+        assert select.select([reader], [], [], 2)[0]
+        assert os.read(reader, 1) == b""
+        waited, status = os.waitpid(child, 0)
+        assert waited == child and os.waitstatus_to_exitcode(status) == 3
+    finally:
+        os.close(reader)

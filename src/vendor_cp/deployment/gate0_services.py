@@ -815,7 +815,19 @@ def run_installed_attester() -> int:
                 prepared.session, prepared.reader, deadline=prepared.deadline
             )
         # Custody teardown must finish before a terminal success is visible.
-        context.finish_slot("success" if result == 0 else "refused")
+        completion = prepared.session.completion
+        if result == 0:
+            if completion is None:
+                raise ServiceIncomplete()
+            completion.require_open()
+            context.finish_slot(
+                "success",
+                bundle_digest=completion.bundle_digest,
+                invocation_id=completion.invocation_id,
+            )
+            completion.require_open()
+        else:
+            context.finish_slot("refused")
         return result
     except ServiceCancelled:
         print("GATE0_SERVICE_CANCELLED", file=sys.stderr)

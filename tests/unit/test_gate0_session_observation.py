@@ -176,9 +176,18 @@ def session(setup):
 def test_completed_same_channel_exchange_produces_signed_observation(proof_setup):
     setup = proof_setup
     exchange = SyntheticExchange(setup)
-    session(setup).run(exchange, setup["cert"])
+    instance = session(setup)
+    instance.run(exchange, setup["cert"])
+    assert instance.completion is not None
+    assert instance.completion.bundle_digest == digest(canonical(exchange.output[-1]))
     proof, sidecar = parse_bundle(exchange.output[-1])
     verify(setup, proof, sidecar)
+    assert (
+        instance.completion.invocation_id
+        == json.loads(sidecar.canonical_bytes[len(DOMAIN) :])["invocation_id"]
+    )
+    with pytest.raises(ServiceRefused):
+        instance.run(SyntheticExchange(setup), setup["cert"])
     assert len(setup["calls"]) == 3
 
 

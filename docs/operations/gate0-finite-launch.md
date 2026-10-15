@@ -197,3 +197,50 @@ The coordinator must run it with bounded whole-container termination; it has
 not been executed locally. It does not qualify the full protected WG topology,
 actual transport/custody, delegated host cgroup mount, DNS/HA safety or E. Those
 require their existing independently authorized installed qualification packet.
+
+## Root startup phases and attester cross-channel identity
+
+The source reserves supervisor stdout for five root frames per case, forwarded
+by the separately adopted authenticated operational holder. On NS3 it first
+emits `management_listening` after the actual management socket is bound and
+listening and the original sealed network/preflight measurement is rechecked.
+Only then may the holder start IDP3's fixed invocation and its single-attempt
+capture sender. IDP3 emits `issuer_listening` after its actual listener bind.
+NS3 emits `attester_listening_after_capture` only after actual capture commit and
+readback, timely normal management-daemon reap, boundary/guardian cleanup, and
+actual attester listener bind. Two existing final `Gate0LaunchCleanup.v1` frames
+follow after outer close; their existing export is preserved.
+
+`gate0_launch_phase.decode_phase` owns the full closed
+`Gate0RootLaunchPhase.v1` codec. Each canonical frame is bounded to 16 KiB and
+binds common/local packet hashes, case/window, machine and network measurement,
+supervisor PID/start identity, original approved/root wall and monotonic clocks,
+emission time/elapsed, closed phase and actual fixed listener tuple. The
+post-capture phase additionally carries the exact existing management capture
+readback and its digest. The root enforces its host's finite phase order, and
+writes under `min(original deadline, now + 2 seconds)` without retries. Output
+failure is sticky and enters existing cleanup; no replacement invocation,
+worker, credential, custodian, listener or operation deadline is introduced.
+The final cleanup export keeps its existing bounded tail and
+`delivery_status=unconfirmed`. Only actual authenticated holder receipt and
+upstream EOF/client wait can qualify delivery.
+
+The installed attester retains the SHA256 of the exact canonical signed bundle
+only after its complete response write and final freshness checks, together with
+the actual signed observation `invocation_id`. After custody teardown its
+`Gate0SlotTerminal.v1` worker declaration includes those two fields. The root
+strictly validates and retains that terminal in its existing cleanup record.
+The protected collector must compare them against its actual verified client
+bundle and invocation; a worker's success word alone cannot complete that join.
+Normal root sshd exit codes 0 through 255 remain neutral lifecycle measurements,
+separate from the collector's actual issuer SSH client 3 and attester client 0.
+
+The phase parser authenticates nothing. Pipes, hashes, file permissions and
+process status do not manufacture holder provenance. Actual operational holder
+identity, the existing A9 management receiver endpoint, immutable forced-command
+installation, host/source/image/packet pins and live campaign authorization
+remain unqualified. Focused codec, ordering, capture/cleanup, terminal-identity and
+native framing tests are source checks; none has been executed during this
+static preparation or counts as protected A9/root/E acceptance. Strategy A still
+requires the separately authorized actual bounded campaign, without an extra
+full synthetic campaign gate.
