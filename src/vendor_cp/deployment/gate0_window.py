@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         PlanView,
         RehearsalIssuerAuthorizationSignerIdentity,
         RehearsalIssuerAuthorizationStatementV1,
+        RehearsalIssuerAuthorizationSubject,
         RehearsalIssuerAuthorizationVerifier,
         TargetView,
     )
@@ -268,12 +269,27 @@ class FrozenIssuerWindow:
     def check_authorization_times(
         self, statement: RehearsalIssuerAuthorizationStatementV1
     ) -> None:
+        self.check_retained_authorization_times(
+            statement, observed_at=datetime.now(UTC)
+        )
+
+    def check_retained_authorization_times(
+        self,
+        statement: RehearsalIssuerAuthorizationStatementV1,
+        *,
+        observed_at: datetime,
+    ) -> None:
+        """Original signed times only; never live eligibility."""
         document = self.document
-        if not _instant(
-            document["not_before"]
-        ) <= statement.not_before <= statement.issued_at <= datetime.now(
-            UTC
-        ) or statement.expires_at > _instant(document["expires_at"]):
+        if (
+            observed_at.tzinfo is None
+            or observed_at.utcoffset() != timedelta(0)
+            or not _instant(document["not_before"])
+            <= statement.not_before
+            <= statement.issued_at
+            <= observed_at
+            or statement.expires_at > _instant(document["expires_at"])
+        ):
             raise ProviderRefused()
 
     def expectation(
@@ -390,6 +406,33 @@ class ApprovedWindowBinding:
             raise ProviderRefused()
 
 
+def issuer_authorization_subject(
+    operation: AdmittedOperation,
+    *,
+    target_id: str,
+    environment: str,
+    descriptor_digest: str,
+    authorized_image_digests: tuple[str, ...],
+    signer_public_key_fingerprint: str,
+) -> RehearsalIssuerAuthorizationSubject:
+    """One exact subject builder for live and historical Control verification."""
+    from dotmac_deployment_control import RehearsalIssuerAuthorizationSubject
+
+    return RehearsalIssuerAuthorizationSubject(
+        immutable_reference=operation.plan_id,
+        target_id=target_id,
+        target_ref=operation.target_ref,
+        desired_state_digest=operation.plan_digest,
+        profile_digest=descriptor_digest,
+        authorized_image_digests=authorized_image_digests,
+        execution_plan_digest=operation.execution_plan_digest,
+        controller_fingerprint=operation.controller_fingerprint,
+        environment=environment,
+        signer_public_key_fingerprint=signer_public_key_fingerprint,
+        lease_id=operation.lease_id,
+    )
+
+
 def derive_consume_expectation(
     binding: ApprovedWindowBinding,
     actual_document: bytes,
@@ -397,7 +440,6 @@ def derive_consume_expectation(
     authorization_verifier: RehearsalIssuerAuthorizationVerifier,
 ) -> AdmissionExpectation:
     from dotmac_deployment_control import (
-        RehearsalIssuerAuthorizationSubject,
         verify_rehearsal_issuer_authorization,
     )
 
@@ -409,18 +451,13 @@ def derive_consume_expectation(
     expected = binding.expectation
     op = expected.operation
     actual = authorization_binding(actual_document)
-    subject = RehearsalIssuerAuthorizationSubject(
-        immutable_reference=op.plan_id,
+    subject = issuer_authorization_subject(
+        op,
         target_id=str(expected.target_id),
-        target_ref=op.target_ref,
-        desired_state_digest=op.plan_digest,
-        profile_digest=binding.descriptor_digest,
-        authorized_image_digests=binding.authorized_image_digests,
-        execution_plan_digest=op.execution_plan_digest,
-        controller_fingerprint=op.controller_fingerprint,
         environment=expected.environment,
+        descriptor_digest=binding.descriptor_digest,
+        authorized_image_digests=binding.authorized_image_digests,
         signer_public_key_fingerprint=issuer_identity.public_key_fingerprint,
-        lease_id=op.lease_id,
     )
     verified = verify_rehearsal_issuer_authorization(
         actual.parsed.as_mapping(),

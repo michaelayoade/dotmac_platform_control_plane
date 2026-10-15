@@ -681,3 +681,357 @@ def test_original_request_deadline_covers_semantic_decoder(
                 authorization_ref="actual-B-authorization",
             )
     assert len(request_deadlines) == 1
+
+
+@pytest.fixture
+def retained_vectors(case, runner_cases):  # noqa: F811
+    selected = runner_cases[1]
+    window = selected.window.document
+    start = datetime(2020, 1, 1, tzinfo=UTC)
+    end = start + timedelta(seconds=120)
+    window["not_before"] = start.isoformat().replace("+00:00", "Z")
+    window["expires_at"] = end.isoformat().replace("+00:00", "Z")
+    frozen = canonical(window)
+    packet = strict_object(selected.shared_packet)
+    packet["not_before"], packet["expires_at"] = (
+        window["not_before"],
+        window["expires_at"],
+    )
+    packet["capture"]["window_digest"] = FrozenIssuerWindow.parse(frozen).digest
+    retained = client.RetainedProjectionCase(canonical(packet), frozen)
+    raw = strict_object(approval_bytes(case, retained))
+    approved = start - timedelta(seconds=1)
+    observed = start + timedelta(seconds=1)
+    raw["observed_at"] = observed.isoformat()
+    raw["approval"]["decided_at"] = approved.isoformat()
+    raw["approval"]["decisions"][0]["decided_at"] = approved.isoformat()
+    approval = client.decode_retained_approval(canonical(raw), retained)
+    event = str(UUID(int=90))
+    withdrawal = dict(
+        schema="Gate0CollectionWithdrawal.v1",
+        binding=retained.binding,
+        state="applied",
+        observed_at=(start + timedelta(seconds=20)).isoformat(),
+        withdrawal=dict(
+            request_id=retained.binding["approval_request_id"],
+            withdrawal_id=event,
+            actor_id=str(UUID(int=91)),
+            authority_ref="human-authority",
+            approved_at=approved.isoformat(),
+            effective_at=(start + timedelta(seconds=15)).isoformat(),
+            external_ref="human-ref",
+        ),
+        relay=dict(
+            event_id=event,
+            payload_digest="sha256:" + "9" * 64,
+            event_type="approval.withdrawn",
+            request_id=retained.binding["approval_request_id"],
+            subject_type=raw["approval"]["subject_type"],
+            subject_id=raw["approval"]["subject_id"],
+            plan_id=retained.binding["plan_id"],
+            withdrawal_ref=event,
+            disposition="applied",
+            authorizations_revoked=["actual-B-authorization"],
+        ),
+    )
+    return retained, approval, withdrawal
+
+
+def test_retained_projection_is_old_facts_without_live_authority(
+    retained_vectors, runner_cases, monkeypatch
+):
+    retained, approval, withdrawal = retained_vectors
+    monkeypatch.setattr(
+        client.time,
+        "monotonic",
+        lambda: pytest.fail("historical decoder consulted live clock"),
+    )
+    assert client.decode_retained_approval(approval.raw, retained) == approval
+    assert approval.facts.phase == "issue"
+    assert not hasattr(approval, "binding") and not hasattr(retained, "deadline")
+    result = client.decode_retained_withdrawal(
+        canonical(withdrawal),
+        retained,
+        reference="human-ref",
+        approval=approval,
+        authorization_ref="actual-B-authorization",
+    )
+    assert result.state == "applied"
+    assert result.observed_at.year == 2020
+    from vendor_cp.deployment.gate0_window import derive_consume_expectation
+
+    with pytest.raises(ProviderRefused):
+        derive_consume_expectation(approval, b"{}", object(), object())
+    cp = client.RunnerProjectionClient("https://cp.example.invalid", runner_cases)
+    with pytest.raises(ProviderRefused):
+        cp.approval(retained, "token")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "window_digest",
+        "plan_id",
+        "plan_digest",
+        "target_id",
+        "approval_request_id",
+        "launch_packet_digest",
+        "case_kind",
+        "window_id",
+        "run_id",
+        "run_attempt",
+    ],
+)
+def test_retained_approval_reuses_every_binding_predicate(retained_vectors, field):
+    retained, approval, _ = retained_vectors
+    value = strict_object(approval.raw)
+    value["binding"][field] = "foreign"
+    with pytest.raises(ProviderRefused):
+        client.decode_retained_approval(canonical(value), retained)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "after-window",
+        "before-window",
+        "subject",
+        "policy",
+        "canonical",
+        "null-image",
+        "duplicate-decision",
+    ],
+)
+def test_retained_approval_original_bounds_and_semantics(retained_vectors, change):
+    retained, approval, _ = retained_vectors
+    value = strict_object(approval.raw)
+    if change == "after-window":
+        value["observed_at"] = retained.window.document["expires_at"]
+    elif change == "before-window":
+        value["observed_at"] = approval.approved_at.isoformat()
+    elif change == "subject":
+        value["approval"]["subject_id"] = "foreign"
+    elif change == "policy":
+        value["approval"]["policy_version"] = True
+    elif change == "null-image":
+        value["authorized_image_digests"] = None
+    elif change == "duplicate-decision":
+        value["approval"]["decisions"] *= 2
+    raw = canonical(value) + (b" " if change == "canonical" else b"")
+    with pytest.raises((ProviderRefused, ValueError)):
+        client.decode_retained_approval(raw, retained)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "effective-after-window",
+        "observed-after-window",
+        "observed-before-approval",
+        "scope",
+        "reference",
+        "event",
+        "revoked-ref",
+        "null-withdrawal",
+        "null-relay",
+        "pending-with-record",
+        "pending-relay-with-record",
+    ],
+)
+def test_retained_withdrawal_original_order_scope_and_null_pairs(
+    retained_vectors, change
+):
+    retained, approval, value = retained_vectors
+    if change == "effective-after-window":
+        value["withdrawal"]["effective_at"] = retained.window.document["expires_at"]
+    elif change == "observed-after-window":
+        value["observed_at"] = retained.window.document["expires_at"]
+    elif change == "observed-before-approval":
+        value["observed_at"] = retained.window.document["not_before"]
+    elif change == "scope":
+        value["withdrawal"]["request_id"] = str(UUID(int=123))
+    elif change == "reference":
+        value["withdrawal"]["external_ref"] = "foreign"
+    elif change == "event":
+        value["relay"]["event_id"] = str(UUID(int=123))
+    elif change == "revoked-ref":
+        value["relay"]["authorizations_revoked"] = ["foreign"]
+    elif change == "null-withdrawal":
+        value["withdrawal"] = None
+    elif change == "null-relay":
+        value["relay"] = None
+    elif change == "pending-with-record":
+        value["state"] = "pending_withdrawal"
+    elif change == "pending-relay-with-record":
+        value["state"] = "pending_relay"
+    with pytest.raises(ProviderRefused):
+        client.decode_retained_withdrawal(
+            canonical(value),
+            retained,
+            reference="human-ref",
+            approval=approval,
+            authorization_ref="actual-B-authorization",
+        )
+
+
+@pytest.fixture
+def retained_signed_authorization(retained_vectors):
+    import hashlib
+    from types import MappingProxyType
+
+    import dotmac_deployment_control as control
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    from vendor_cp.deployment.rehearsal_issuer_trust_state import TrustStateSnapshot
+
+    retained, approval, _ = retained_vectors
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    fingerprint = "sha256:" + hashlib.sha256(public).hexdigest()
+    op = approval.facts
+    statement = control.RehearsalIssuerAuthorizationStatementV1(
+        authorization_id="retained-authorization",
+        immutable_reference=op.plan_id,
+        target_id=retained.binding["target_id"],
+        target_ref=op.target_ref,
+        target_provenance=control.A6ProvenanceKind.DERIVED,
+        desired_state_digest=op.plan_digest,
+        desired_state_provenance=control.A6ProvenanceKind.DERIVED,
+        profile_digest=approval.descriptor_digest,
+        profile_provenance=control.A6ProvenanceKind.DERIVED,
+        authorized_image_digests=approval.authorized_image_digests,
+        authorized_images_provenance=control.A6ProvenanceKind.DERIVED,
+        execution_plan_digest=op.execution_plan_digest,
+        execution_plan_provenance=control.A6ProvenanceKind.DERIVED,
+        controller_fingerprint=op.controller_fingerprint,
+        key_id="retained-key",
+        algorithm="ed25519",
+        public_key_fingerprint=fingerprint,
+        lease_id=op.lease_id,
+        single_use_reference="retained-once",
+        environment="rehearsal",
+        not_before=approval.observed_at,
+        issued_at=approval.observed_at + timedelta(seconds=1),
+        expires_at=approval.observed_at + timedelta(seconds=31),
+        control_version="0.1.0a17",
+    )
+    snapshot = TrustStateSnapshot(
+        1, MappingProxyType({"retained-key": fingerprint}), frozenset()
+    )
+    return approval, key, public, statement, snapshot
+
+
+def signed_authorization(statement, key):
+    import dotmac_deployment_control as control
+
+    return canonical(
+        control.RehearsalIssuerAuthorizationV1(
+            statement, base64.b64encode(key.sign(statement.canonical_bytes())).decode()
+        ).as_mapping()
+    )
+
+
+def test_retained_signed_consume_expired_now_is_valid_only_at_original_time(
+    retained_signed_authorization,
+):
+    approval, key, public, statement, snapshot = retained_signed_authorization
+    assert statement.expires_at < datetime.now(UTC)
+    operation = client.derive_retained_consume_operation(
+        approval,
+        signed_authorization(statement, key),
+        key_id=statement.key_id,
+        public_key=public,
+        trust_state=snapshot,
+    )
+    assert operation.phase == "consume" and operation.authorization_digest is not None
+    assert not hasattr(operation, "window_freshness")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "subject",
+        "key",
+        "revoked",
+        "fingerprint",
+        "outside-window",
+        "before-observation",
+        "signature",
+    ],
+)
+def test_retained_signature_subject_and_snapshot_refusals(
+    retained_signed_authorization, change
+):
+    from dataclasses import replace
+
+    import dotmac_deployment_control as control
+
+    from vendor_cp.deployment.rehearsal_issuer_trust_state import TrustStateSnapshot
+
+    approval, key, public, statement, snapshot = retained_signed_authorization
+    key_id = statement.key_id
+    if change == "subject":
+        statement = replace(statement, target_ref="foreign")
+    elif change == "key":
+        key_id = "foreign"
+    elif change == "revoked":
+        snapshot = TrustStateSnapshot(
+            snapshot.version, snapshot.trusted_key_ids, frozenset({statement.key_id})
+        )
+    elif change == "fingerprint":
+        snapshot = TrustStateSnapshot(
+            snapshot.version, {statement.key_id: "sha256:" + "0" * 64}, frozenset()
+        )
+    elif change == "outside-window":
+        statement = replace(
+            statement, expires_at=statement.expires_at + timedelta(seconds=120)
+        )
+    elif change == "before-observation":
+        statement = replace(
+            statement,
+            not_before=statement.not_before - timedelta(seconds=2),
+            issued_at=statement.issued_at - timedelta(seconds=2),
+        )
+    authorization = signed_authorization(statement, key)
+    if change == "signature":
+        value = strict_object(authorization)
+        value["signature"] = base64.b64encode(bytes(64)).decode()
+        authorization = canonical(value)
+    with pytest.raises(
+        (ProviderRefused, control.RehearsalIssuerAuthorizationRefusedError, ValueError)
+    ):
+        client.derive_retained_consume_operation(
+            approval,
+            authorization,
+            key_id=key_id,
+            public_key=public,
+            trust_state=snapshot,
+        )
+
+
+def test_retained_signature_predicate_refuses_wrong_purpose_without_live_clock(
+    retained_signed_authorization, monkeypatch
+):
+    from vendor_cp.deployment.gate0_role_custody import RetainedIssuerVerifier
+
+    approval, key, public, statement, snapshot = retained_signed_authorization
+    verifier = RetainedIssuerVerifier(statement.key_id, public, snapshot)
+    monkeypatch.setattr(
+        client.time,
+        "monotonic",
+        lambda: pytest.fail("retained signature consulted clock"),
+    )
+    arguments = dict(
+        key_id=statement.key_id,
+        algorithm=statement.algorithm,
+        public_key_fingerprint=statement.public_key_fingerprint,
+        canonical_bytes=statement.canonical_bytes(),
+        signature=base64.b64encode(key.sign(statement.canonical_bytes())).decode(),
+    )
+    assert verifier.verify_rehearsal_issuer_authorization(
+        purpose="deployment_rehearsal_issuer", **arguments
+    )
+    assert not verifier.verify_rehearsal_issuer_authorization(
+        purpose="foreign", **arguments
+    )

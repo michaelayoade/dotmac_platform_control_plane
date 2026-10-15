@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from multiprocessing.connection import Connection
+from types import MappingProxyType
 from typing import TYPE_CHECKING, BinaryIO, Literal, cast
 from urllib.parse import urlsplit
 
@@ -41,6 +42,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from vendor_cp.deployment.rehearsal_issuer_trust_state import (
     RehearsalIssuerTrustState,
     TrustEligibility,
+    TrustStateSnapshot,
 )
 
 if TYPE_CHECKING:
@@ -792,6 +794,99 @@ class LocalRoleKey:
         )
 
 
+def _verify_public_issuer_signature(
+    expected_key_id: str,
+    public_key: bytes,
+    snapshot: TrustStateSnapshot | None,
+    *,
+    key_id: str,
+    algorithm: str,
+    purpose: str,
+    public_key_fingerprint: str,
+    canonical_bytes: bytes,
+    signature: str,
+) -> bool:
+    """Shared public signature/purpose/original-snapshot predicate; no clocks."""
+    try:
+        if (
+            key_id != expected_key_id
+            or algorithm != "ed25519"
+            or purpose != "deployment_rehearsal_issuer"
+            or public_key_fingerprint != _fingerprint(public_key)
+            or snapshot is None
+            or snapshot.eligibility(
+                key_id=key_id, public_key_fingerprint=public_key_fingerprint
+            )
+            != TrustEligibility.ELIGIBLE
+            or type(canonical_bytes) is not bytes
+            or not 0 < len(canonical_bytes) <= 131072
+        ):
+            return False
+        Ed25519PublicKey.from_public_bytes(public_key).verify(
+            base64.b64decode(signature, validate=True), canonical_bytes
+        )
+        return True
+    except (InvalidSignature, ValueError, TypeError):
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedIssuerVerifier:
+    """Signature facts against an original snapshot, never current eligibility.
+
+    The caller independently authenticates original snapshot/floor provenance.
+    This has no clock, custody, refresh, signing key, or admission capability.
+    """
+
+    key_id: str
+    public_key: bytes
+    trust: TrustStateSnapshot
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.key_id) is not str
+            or not 0 < len(self.key_id) <= 512
+            or type(self.public_key) is not bytes
+            or len(self.public_key) != 32
+            or type(self.trust) is not TrustStateSnapshot
+            or type(self.trust.version) is not int
+            or self.trust.version < 1
+        ):
+            raise ProviderRefused()
+        # Detach even a manually constructed DTO's mutable backing map/set.
+        object.__setattr__(
+            self,
+            "trust",
+            TrustStateSnapshot(
+                self.trust.version,
+                MappingProxyType(dict(self.trust.trusted_key_ids)),
+                frozenset(self.trust.revoked_key_ids),
+            ),
+        )
+
+    def verify_rehearsal_issuer_authorization(
+        self,
+        *,
+        key_id: str,
+        algorithm: str,
+        purpose: str,
+        public_key_fingerprint: str,
+        canonical_bytes: bytes,
+        signature: str,
+    ) -> bool:
+        return _verify_public_issuer_signature(
+            self.key_id,
+            self.public_key,
+            self.trust,
+            key_id=key_id,
+            algorithm=algorithm,
+            purpose=purpose,
+            public_key_fingerprint=public_key_fingerprint,
+            canonical_bytes=canonical_bytes,
+            signature=signature,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class PublicIssuerVerifier:
     key_id: str
@@ -816,21 +911,24 @@ class PublicIssuerVerifier:
             if (
                 not self.monotonic_origin <= time.monotonic() < self.deadline
                 or not self.started_at <= datetime.now(UTC) < self.expires_at
-                or key_id != self.key_id
-                or algorithm != "ed25519"
-                or purpose != "deployment_rehearsal_issuer"
-                or public_key_fingerprint != _fingerprint(self.public_key)
                 or self.trust.eligibility(
                     key_id=key_id, public_key_fingerprint=public_key_fingerprint
                 )
                 != TrustEligibility.ELIGIBLE
-                or type(canonical_bytes) is not bytes
-                or not 0 < len(canonical_bytes) <= 131072
             ):
                 return False
-            Ed25519PublicKey.from_public_bytes(self.public_key).verify(
-                base64.b64decode(signature, validate=True), canonical_bytes
-            )
+            if not _verify_public_issuer_signature(
+                self.key_id,
+                self.public_key,
+                self.trust.snapshot,
+                key_id=key_id,
+                algorithm=algorithm,
+                purpose=purpose,
+                public_key_fingerprint=public_key_fingerprint,
+                canonical_bytes=canonical_bytes,
+                signature=signature,
+            ):
+                return False
             return (
                 self.monotonic_origin <= time.monotonic() < self.deadline
                 and self.started_at <= datetime.now(UTC) < self.expires_at

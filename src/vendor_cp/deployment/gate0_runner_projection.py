@@ -15,24 +15,36 @@ import re
 import socket
 import ssl
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from multiprocessing.connection import Connection
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from vendor_cp.deployment.gate0_composition import AdmissionExpectation, WindowFreshness
+from vendor_cp.deployment.gate0_composition import (
+    AdmissionExpectation,
+    WindowFreshness,
+    authorization_binding,
+)
 from vendor_cp.deployment.gate0_framing import canonical, strict_object
 from vendor_cp.deployment.gate0_launch import parse_run_document
 from vendor_cp.deployment.gate0_role_custody import (
     ProviderRefused,
+    RetainedIssuerVerifier,
     _BoundedHTTPReader,
     _BoundedHTTPSocket,
     _spawn_request,
 )
 from vendor_cp.deployment.gate0_runtime import AdmittedOperation
-from vendor_cp.deployment.gate0_window import ApprovedWindowBinding, FrozenIssuerWindow
+from vendor_cp.deployment.gate0_window import (
+    ApprovedWindowBinding,
+    FrozenIssuerWindow,
+    issuer_authorization_subject,
+)
+
+if TYPE_CHECKING:
+    from vendor_cp.deployment.rehearsal_issuer_trust_state import TrustStateSnapshot
 
 _MAXIMUM = 65536
 _PREFIX = "/platform/vendor/gate0/collection/windows/"
@@ -81,6 +93,60 @@ def _instant(value: object) -> datetime:
     return result
 
 
+def _static_case(shared_packet: bytes, frozen_window: bytes) -> None:
+    packet = parse_run_document(shared_packet)
+    window = FrozenIssuerWindow.parse(frozen_window)
+    doc, capture = window.document, packet["capture"]
+    if (
+        capture["window_digest"] != window.digest
+        or capture["target_id"] != doc["target"]["id"]
+        or packet["controller_ca_fingerprint"] != doc["controller"]["ca_fingerprint"]
+        or packet["case_kind"] != doc["case_kind"]
+        or packet["not_before"] != doc["not_before"]
+        or packet["expires_at"] != doc["expires_at"]
+        or packet["run_id"] != doc["github"]["run_id"]
+        or packet["run_attempt"] != doc["github"]["run_attempt"]
+    ):
+        raise ProviderRefused()
+
+
+def _projection_binding(shared_packet: bytes, frozen_window: bytes) -> dict[str, str]:
+    packet = parse_run_document(shared_packet)
+    window = FrozenIssuerWindow.parse(frozen_window)
+    capture = packet["capture"]
+    return {
+        "window_digest": capture["window_digest"],
+        "plan_id": capture["plan_id"],
+        "plan_digest": capture["plan_digest"],
+        "target_id": capture["target_id"],
+        "approval_request_id": capture["approval_request_id"],
+        "launch_packet_digest": "sha256:" + hashlib.sha256(shared_packet).hexdigest(),
+        "case_kind": packet["case_kind"],
+        "window_id": window.document["window_id"],
+        "run_id": packet["run_id"],
+        "run_attempt": packet["run_attempt"],
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedProjectionCase:
+    """Historical original bytes only; shape never authenticates their producer."""
+
+    shared_packet: bytes = field(repr=False)
+    frozen_window: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        _static_case(self.shared_packet, self.frozen_window)
+
+    @property
+    def window(self) -> FrozenIssuerWindow:
+        return FrozenIssuerWindow.parse(self.frozen_window)
+
+    @property
+    def binding(self) -> dict[str, str]:
+        return _projection_binding(self.shared_packet, self.frozen_window)
+
+
 @dataclass(frozen=True, slots=True)
 class RunnerProjectionCase:
     """Inert protected inputs and one original clock mapping; no authenticity claim."""
@@ -91,8 +157,7 @@ class RunnerProjectionCase:
     monotonic_origin: float
 
     def __post_init__(self) -> None:
-        packet, window = parse_run_document(self.shared_packet), self.window
-        doc, capture = window.document, packet["capture"]
+        _static_case(self.shared_packet, self.frozen_window)
         if (
             type(self.wall_origin) is not datetime
             or self.wall_origin.tzinfo is None
@@ -101,15 +166,6 @@ class RunnerProjectionCase:
             or type(self.monotonic_origin) not in (int, float)
             or not math.isfinite(self.monotonic_origin)
             or not 0 <= self.monotonic_origin <= time.monotonic()
-            or capture["window_digest"] != window.digest
-            or capture["target_id"] != doc["target"]["id"]
-            or packet["controller_ca_fingerprint"]
-            != doc["controller"]["ca_fingerprint"]
-            or packet["case_kind"] != doc["case_kind"]
-            or packet["not_before"] != doc["not_before"]
-            or packet["expires_at"] != doc["expires_at"]
-            or packet["run_id"] != doc["github"]["run_id"]
-            or packet["run_attempt"] != doc["github"]["run_attempt"]
         ):
             raise ProviderRefused()
 
@@ -137,21 +193,7 @@ class RunnerProjectionCase:
 
     @property
     def binding(self) -> dict[str, str]:
-        packet, window = parse_run_document(self.shared_packet), self.window
-        capture = packet["capture"]
-        return {
-            "window_digest": capture["window_digest"],
-            "plan_id": capture["plan_id"],
-            "plan_digest": capture["plan_digest"],
-            "target_id": capture["target_id"],
-            "approval_request_id": capture["approval_request_id"],
-            "launch_packet_digest": "sha256:"
-            + hashlib.sha256(self.shared_packet).hexdigest(),
-            "case_kind": packet["case_kind"],
-            "window_id": window.document["window_id"],
-            "run_id": packet["run_id"],
-            "run_attempt": packet["run_attempt"],
-        }
+        return _projection_binding(self.shared_packet, self.frozen_window)
 
     def require_open(self) -> None:
         now = datetime.now(UTC)
@@ -353,10 +395,36 @@ class WithdrawalProjection:
     withdrawal_id: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class RetainedApprovalProjection:
+    """Historical facts, deliberately without a live binding or freshness owner."""
+
+    raw: bytes = field(repr=False)
+    approved_at: datetime
+    observed_at: datetime
+    case: RetainedProjectionCase
+    descriptor_digest: str
+    authorized_image_digests: tuple[str, ...]
+
+    @property
+    def facts(self) -> AdmittedOperation:
+        """Original issue terms only, with no freshness or admission owner."""
+        if decode_retained_approval(self.raw, self.case) != self:
+            raise ProviderRefused()
+        return _retained_issue_operation(self)
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedWithdrawalProjection:
+    raw: bytes = field(repr=False)
+    state: str
+    withdrawal_id: str | None
+    observed_at: datetime
+
+
 def _document(
-    raw: bytes, case: RunnerProjectionCase, schema: str, fields: str
+    raw: bytes, case: RetainedProjectionCase, schema: str, fields: str
 ) -> dict[str, Any]:
-    case.require_open()
     doc = _fields(strict_object(raw, _MAXIMUM), fields)
     if (
         canonical(doc) != raw
@@ -366,18 +434,17 @@ def _document(
         raise ProviderRefused()
     observed = _instant(doc["observed_at"])
     window = case.window.document
-    if (
-        not _instant(window["not_before"])
-        <= observed
-        <= datetime.now(UTC)
-        < _instant(window["expires_at"])
-    ):
+    if not _instant(window["not_before"]) <= observed < _instant(window["expires_at"]):
         raise ProviderRefused()
     return doc
 
 
-def decode_approval(raw: bytes, case: RunnerProjectionCase) -> ApprovalProjection:
-    """Pure approved-at-read adapter; use only after authenticated CP transport."""
+def decode_retained_approval(
+    raw: bytes, case: RetainedProjectionCase
+) -> RetainedApprovalProjection:
+    """Verify original DTO facts, never current approval or producer provenance."""
+    if type(case) is not RetainedProjectionCase:
+        raise ProviderRefused()
     doc = _document(
         raw,
         case,
@@ -438,6 +505,20 @@ def decode_approval(raw: bytes, case: RunnerProjectionCase) -> ApprovalProjectio
     if not approved or type(images) is not list or not 0 < len(images) <= 64:
         raise ProviderRefused()
     image_terms = tuple(_digest(image) for image in images)
+    return RetainedApprovalProjection(
+        raw,
+        decided,
+        _instant(doc["observed_at"]),
+        case,
+        doc["descriptor_digest"],
+        image_terms,
+    )
+
+
+def _retained_issue_operation(
+    approval: RetainedApprovalProjection,
+) -> AdmittedOperation:
+    w, b = approval.case.window.document, approval.case.binding
     g, c, t = w["github"], w["controller"], w["target"]
     operation = AdmittedOperation(
         g["repository_id"],
@@ -458,37 +539,109 @@ def decode_approval(raw: bytes, case: RunnerProjectionCase) -> ApprovalProjectio
         c["certificate_digest"],
         c["ca_fingerprint"],
     )
+    return operation
+
+
+def derive_retained_consume_operation(
+    approval: RetainedApprovalProjection,
+    authorization: bytes,
+    *,
+    key_id: str,
+    public_key: bytes,
+    trust_state: TrustStateSnapshot,
+) -> AdmittedOperation:
+    """Verify signed original terms at issued_at; return facts, no live capability.
+
+    Original trust record/floor and byte producer provenance remain independently
+    authenticated E inputs. No new approval/freshness or current eligibility.
+    """
+    from dotmac_deployment_control import verify_rehearsal_issuer_authorization
+
+    if type(approval) is not RetainedApprovalProjection:
+        raise ProviderRefused()
+    if decode_retained_approval(approval.raw, approval.case) != approval:
+        raise ProviderRefused()
+    operation = _retained_issue_operation(approval)
+    actual = authorization_binding(authorization)
+    verifier = RetainedIssuerVerifier(key_id, public_key, trust_state)
+    window = approval.case.window
+    target = window.document["target"]
+    subject = issuer_authorization_subject(
+        operation,
+        target_id=target["id"],
+        environment=target["environment"],
+        descriptor_digest=approval.descriptor_digest,
+        authorized_image_digests=approval.authorized_image_digests,
+        signer_public_key_fingerprint="sha256:"
+        + hashlib.sha256(public_key).hexdigest(),
+    )
+    verified = verify_rehearsal_issuer_authorization(
+        actual.parsed.as_mapping(),
+        verifier=verifier,
+        subject=subject,
+        at=actual.parsed.statement.issued_at,
+    )
+    window.check_retained_authorization_times(
+        verified.statement, observed_at=verified.statement.issued_at
+    )
+    if verified.statement.issued_at < approval.observed_at:
+        raise ProviderRefused()
+    return replace(
+        operation,
+        phase="consume",
+        authorization_digest=actual.digest,
+        authorization_issued_at=actual.issued_at,
+    )
+
+
+def decode_approval(raw: bytes, case: RunnerProjectionCase) -> ApprovalProjection:
+    """Approved-at-read adapter; current clocks remain required around semantics."""
+    case.require_open()
+    terms = decode_retained_approval(
+        raw, RetainedProjectionCase(case.shared_packet, case.frozen_window)
+    )
+    if terms.observed_at > datetime.now(UTC):
+        raise ProviderRefused()
+    window = case.window
+    w, b = window.document, case.binding
+    operation = _retained_issue_operation(terms)
+    t = w["target"]
     expectation = AdmissionExpectation(
         operation,
         UUID(t["id"]),
         t["environment"],
         UUID(b["approval_request_id"]),
-        approval["policy_code"],
-        approval["policy_version"],
+        w["approval_policy"]["code"],
+        w["approval_policy"]["version"],
         case.frozen_window,
         window.digest,
         WindowFreshness(case.start, case.deadline),
     )
     result = ApprovalProjection(
         raw,
-        decided,
+        terms.approved_at,
         ApprovedWindowBinding(
-            expectation, window, doc["descriptor_digest"], image_terms
+            expectation, window, terms.descriptor_digest, terms.authorized_image_digests
         ),
     )
     case.require_open()
     return result
 
 
-def decode_withdrawal(
+def decode_retained_withdrawal(
     raw: bytes,
-    case: RunnerProjectionCase,
+    case: RetainedProjectionCase,
     *,
     reference: str,
-    approval: ApprovalProjection,
+    approval: RetainedApprovalProjection,
     authorization_ref: str,
-) -> WithdrawalProjection:
-    """Match owner event/relay to the actual B issued authorization reference."""
+) -> RetainedWithdrawalProjection:
+    """Original event/relay facts; supplied reference still needs issuer provenance."""
+    if (
+        type(case) is not RetainedProjectionCase
+        or type(approval) is not RetainedApprovalProjection
+    ):
+        raise ProviderRefused()
     if case.window.document["case_kind"] != "withdrawal_later_use":
         raise ProviderRefused()
     _text(reference, 200)
@@ -500,14 +653,17 @@ def decode_withdrawal(
         "schema binding state withdrawal relay observed_at",
     )
     # Approval may be retained across withdrawal, but must be this exact case.
-    original = decode_approval(approval.raw, case)
+    original = decode_retained_approval(approval.raw, case)
     if original != approval:
+        raise ProviderRefused()
+    observed = _instant(doc["observed_at"])
+    if observed < approval.observed_at:
         raise ProviderRefused()
     state = doc["state"]
     if state == "pending_withdrawal":
         if doc["withdrawal"] is not None or doc["relay"] is not None:
             raise ProviderRefused()
-        return WithdrawalProjection(raw, state, None)
+        return RetainedWithdrawalProjection(raw, state, None, observed)
     if state not in ("pending_relay", "applied"):
         raise ProviderRefused()
     w = _fields(
@@ -555,8 +711,34 @@ def decode_withdrawal(
         )
         if any(relay[k] != v for k, v in expected.items()):
             raise ProviderRefused()
+    return RetainedWithdrawalProjection(raw, state, event, observed)
+
+
+def decode_withdrawal(
+    raw: bytes,
+    case: RunnerProjectionCase,
+    *,
+    reference: str,
+    approval: ApprovalProjection,
+    authorization_ref: str,
+) -> WithdrawalProjection:
+    """Live original-clock guard around the same retained owner predicates."""
     case.require_open()
-    return WithdrawalProjection(raw, state, event)
+    original = decode_approval(approval.raw, case)
+    if original != approval:
+        raise ProviderRefused()
+    retained_case = RetainedProjectionCase(case.shared_packet, case.frozen_window)
+    terms = decode_retained_withdrawal(
+        raw,
+        retained_case,
+        reference=reference,
+        approval=decode_retained_approval(approval.raw, retained_case),
+        authorization_ref=authorization_ref,
+    )
+    if terms.observed_at > datetime.now(UTC):
+        raise ProviderRefused()
+    case.require_open()
+    return WithdrawalProjection(raw, terms.state, terms.withdrawal_id)
 
 
 class RunnerProjectionClient:
