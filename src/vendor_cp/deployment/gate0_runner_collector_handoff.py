@@ -1015,7 +1015,10 @@ def verify_retained_root_case(
                 elif phase_index != 3:
                     raise ProviderRefused()
             else:
-                host = doc.get("host")
+                terminal_host = doc.get("host")
+                if type(terminal_host) is not str:
+                    raise ProviderRefused()
+                host = terminal_host
                 if phase_index != 3 or host not in sequences or host in terminals:
                     raise ProviderRefused()
                 if (

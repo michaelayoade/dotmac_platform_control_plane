@@ -180,14 +180,14 @@ class ERetainedCase:
                 ).items()
             ):
                 raise RetainedEvidenceRefused()
-        for trust, role in zip(
+        for trust, role_terms in zip(
             (self.issuer_trust, self.attester_trust),
             (packet["roles"]["issuer"], packet["roles"]["attester"]),
             strict=True,
         ):
-            if role["key_id"] != trust.key_id or role["public_key_b64"] != encode(
-                trust.public_key
-            ):
+            if role_terms["key_id"] != trust.key_id or role_terms[
+                "public_key_b64"
+            ] != encode(trust.public_key):
                 raise RetainedEvidenceRefused()
         if (
             self.issuer_trust.key_id == self.attester_trust.key_id

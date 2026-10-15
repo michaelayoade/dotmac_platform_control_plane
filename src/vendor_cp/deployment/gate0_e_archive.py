@@ -359,10 +359,10 @@ def _run(
                     pass
                 except BaseException:
                     cleanup_failed = True
-        for stream in (process.stdin, process.stdout):
-            if stream is not None:
+        for cleanup_stream in (process.stdin, process.stdout):
+            if cleanup_stream is not None:
                 try:
-                    stream.close()
+                    cleanup_stream.close()
                 except BaseException:
                     cleanup_failed = True
         if process.returncode is None:
