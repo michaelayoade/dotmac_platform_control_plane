@@ -1,0 +1,289 @@
+{
+  "schema": "Gate0ERequirements.v1",
+  "scope": "Partial source slice; grouped report inventory, not closed A7.7/D7 matrix",
+  "prerequisites": {
+    "B": {
+      "state": "unknown",
+      "acceptance_reference": null
+    },
+    "C1": {
+      "state": "unknown",
+      "acceptance_reference": null
+    },
+    "C2": {
+      "state": "unknown",
+      "acceptance_reference": null
+    },
+    "D": {
+      "state": "unknown",
+      "acceptance_reference": null
+    }
+  },
+  "cases": [
+    {
+      "case": "approved_issue_standing_consume",
+      "outcome": "succeeded",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "consumption_replay",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "separate_lease_withdrawal_convergence",
+      "outcome": "succeeded",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "revoked_lease_use",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "missing_approval",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "withdrawn_approval",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "wrong_plan_approval",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "withdrawal_consumption_race",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "missing_custody",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/rehearsal_issuer_trust_state.py:start,refresh,eligibility",
+      "existing_mechanism_test": "tests/unit/test_rehearsal_issuer_trust_state.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "incorrect_custody",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/rehearsal_issuer_trust_state.py:start,refresh,eligibility",
+      "existing_mechanism_test": "tests/unit/test_rehearsal_issuer_trust_state.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "stale_revoked_unknown_key",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/rehearsal_issuer_trust_state.py:start,refresh,eligibility",
+      "existing_mechanism_test": "tests/unit/test_rehearsal_issuer_trust_state.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "trust_floor_rollback",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/rehearsal_issuer_trust_state.py:start,refresh,eligibility",
+      "existing_mechanism_test": "tests/unit/test_rehearsal_issuer_trust_state.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "trust_refresh_failure",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/rehearsal_issuer_trust_state.py:start,refresh,eligibility",
+      "existing_mechanism_test": "tests/unit/test_rehearsal_issuer_trust_state.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "wrong_controller_or_substituted_key",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/rehearsal_issuer_trust_state.py:start,refresh,eligibility",
+      "existing_mechanism_test": "tests/unit/test_rehearsal_issuer_trust_state.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "repository_run_attempt_lease_target_plan_mismatch",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "invalid_or_tampered_attestation",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "stale_certificate_nonce_lease",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "cross_lease_controller_reuse",
+      "outcome": "refused",
+      "owner_source": "src/vendor_cp/deployment/protected_rehearsal_issuer.py:issue_authorization,consume_authorization",
+      "existing_mechanism_test": "rehearsal_issuer_harness/test_issuer.py",
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "exchange_overwrite_concurrency_bounds",
+      "outcome": "refused",
+      "owner_source": null,
+      "existing_mechanism_test": null,
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "restart_cancel_incomplete",
+      "outcome": "refused",
+      "owner_source": null,
+      "existing_mechanism_test": null,
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    },
+    {
+      "case": "cleanup",
+      "outcome": "succeeded",
+      "owner_source": null,
+      "existing_mechanism_test": null,
+      "required_evidence_class": "protected_live",
+      "live_evidence": null,
+      "state": "blocked",
+      "scope": "Provisional grouped case; protected runner must enumerate every subcase and pair each refusal with a positive control before final E schema adoption."
+    }
+  ],
+  "finalization_gaps": [
+    {
+      "id": "authenticated_human_decision_route",
+      "owner": "CP operator/Approvals",
+      "source": "src/vendor_cp/approvals/router.py:record_decision; src/vendor_cp/approvals/adapter.py:record_decision",
+      "missing": "Existing authenticated POST /platform/vendor/approvals/decisions derives approver from admin.id and delegates durable Approvals decision. Dedicated hosted composition/auth/DB/profile exposure not configured; no new human API is needed."
+    },
+    {
+      "id": "controller_possession_contract",
+      "owner": "CP attester adapter / Control public verifier",
+      "source": "src/vendor_cp/deployment/gate0_runtime.py:ProtectedHarnessVerifier; protected_issuer_conformance/release-evidence.json",
+      "missing": "CP adapter now authenticates existing Control a17 v1 evidence and a signed companion bound to fixed run/attempt/lease/plan/certificate/CA context. Independent actual OpenSSH possession/certificate verification and trusted context derivation remain to be implemented by the attester before signing. No lease reservation API needed: a17 accepts signed attester-chosen lease_id and owns permanent uniqueness."
+    },
+    {
+      "id": "adopted_transport",
+      "owner": "Operational packet/CP transport",
+      "source": "docs/design/gate0-d-implementation-spec.md:12; docs/operations/gate0-protected-readiness.md",
+      "missing": "Pull/W1-W5 remain proposed; no protected runtime transport adapter is enabled."
+    },
+    {
+      "id": "hosted_custody_bootstrap",
+      "owner": "Bootstrap coordinator",
+      "source": "src/vendor_cp/deployment/rehearsal_issuer_trust_state.py:RehearsalIssuerTrustState; docs/design/gate0-trust-state-policy.md",
+      "missing": "Public trust owner exists; hosted manifest, immutable floor/CA, purpose-separated custody and load-once startup identity adapters are not configured in this slice."
+    },
+    {
+      "id": "receipt_producer_trust",
+      "owner": "CP receipt producer",
+      "source": "docs/adr/0013-operator-authorization-issuer-and-its-bootstrap.md:A7.7; src/vendor_cp/deployment/gate0_readiness.py:inspect_case_report",
+      "missing": "No approved receipt producer identity, signature purpose or pinned verification anchor. Report hashes do not authenticate a producer or attester."
+    },
+    {
+      "id": "immutable_receipt_destination",
+      "owner": "CP receipt retention",
+      "source": "src/vendor_cp/deployment/issuer_receipts.py; docs/adr/0013-operator-authorization-issuer-and-its-bootstrap.md:A7.7",
+      "missing": "Issuer command receipts only record non-authorizing DB retries. They are not E receipts. First-create atomic durable E publication, conflict handling and retention destination remain absent."
+    },
+    {
+      "id": "accepted_prerequisite_oracles",
+      "owner": "B/C1/C2/D acceptance owners",
+      "source": "docs/adr/0013-operator-authorization-issuer-and-its-bootstrap.md:A7.7; protected_issuer_conformance/release-evidence.json",
+      "missing": "Published wheel records prove installable dependencies, not accepted B/C1/C2/D. All acceptance references remain unknown; D18 live convergence is separate."
+    }
+  ],
+  "reused_owners": {
+    "plan_approval_issue_consume": "src/vendor_cp/deployment/protected_rehearsal_issuer.py",
+    "held_barrier": "src/vendor_cp/deployment/approval_barrier.py:held_transition",
+    "withdrawal_relay": "src/vendor_cp/relay/approval_router.py",
+    "trust": "src/vendor_cp/deployment/rehearsal_issuer_trust_state.py",
+    "exact_publications": "protected_issuer_conformance/release-evidence.json",
+    "online_role_migrations": "rehearsal_issuer_harness/conftest.py",
+    "authenticated_human_decision": "src/vendor_cp/approvals/router.py:record_decision",
+    "published_control_verifier": "Control 0.1.0a17, source 574418944d35ddf3559d17e59e9184b5f545ebe4, rehearsal_harness_evidence.py:RehearsalHarnessEvidenceVerifier"
+  },
+  "validation": "Tests authored only. Run exclusively on Git-hosted CI; no synthetic report is protected readiness evidence."
+}
