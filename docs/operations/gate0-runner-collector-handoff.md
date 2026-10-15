@@ -13,8 +13,9 @@ root-protected existing receiver descriptor with that actual collector binding.
 The installer must qualify receiver-only access through group membership or ACL
 if the final socket uses mode0660; initial staging mode is0600. The final parent
 remains root-owned and non-writable. Root never substitutes a root-created
-listener or predicted/workflow-parent PID. This provisioning is required at
-execution and is not performed by source work.
+listener or predicted/workflow-parent PID. The candidate systemd bootstrap
+implements this publication sequence; it has not been installed or natively
+qualified. Complete trusted provisioning remains required at execution.
 
 The collector accepts one actual AF_UNIX receiver. Linux SO_PEERCRED, the measured
 receiver UID/PID/start, the protected receiver descriptor's self/campaign/cases,

@@ -3,8 +3,9 @@
 This source prepares the systemd option in the architecture recommendation. It
 is a candidate format and implementation for review, not design adoption,
 installed native qualification, source acceptance, campaign permission or E
-acceptance. No host/service/credential installation has been performed. Existing
-CLI dispatch remains coordinator integration work.
+acceptance. No host/service/credential installation has been performed. The
+argument-free `gate0 bootstrap-collector` and `gate0 collect-e-credential` CLI
+commands delegate to the installed bootstrap and credential owners.
 
 The argument-free `run_installed_bootstrap()` loads only root-protected
 `/run/dotmac-gate0-collector/bootstrap.json`. Its closed
@@ -162,6 +163,6 @@ operational acceptance from source tests.
 
 Local verification for this candidate is restricted to AST and pinned Ruff0.6.9.
 Unit tests use synthetic manager observations for source predicates and do not
-establish actual systemd/kernel behavior. Native execution, CLI integration,
-independent source review, design adoption and installed execution approval are
-still required.
+establish actual systemd/kernel behavior. The bootstrap and CLI integration have
+passed independent source review. Native qualification, design adoption and
+installed execution approval remain separate and unproven.
