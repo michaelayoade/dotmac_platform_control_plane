@@ -40,6 +40,7 @@ a redirect. No credentials are forwarded to them.
 
 | Phase | Non-null selections | Method |
 | --- | --- | --- |
+| protected_job | producer | protected_job_snapshot(deadline=original provisioning end) |
 | producer | producer | producer_snapshot(closed ProducerStage) |
 | transfer | producer, transfer | encrypted_transfer() |
 | draft | producer, release | draft_snapshot() |
@@ -52,6 +53,16 @@ need fresh exact installations, not retry loops. `owns_facts(result)` checks liv
 object identity; constructing a DTO, copying it or parsing JSON never restores
 live provenance. Returned immutable DTOs carry private repr-disabled exact
 observations and bytes. They have no acceptance/readiness field.
+
+The protected-job phase observes an assigned, in-progress job before collection.
+It preserves source, runner, review and policy checks without claiming future
+step success. The exact source-pinned courier step must be in progress and all
+its predecessors must have succeeded. Its one-use deadline is the earlier of the
+original provisioning
+end and the existing 90-second read cap. These GitHub facts do not authenticate
+local PID/cgroup ownership; the native JIT launcher must supply that separately.
+`PROTECTED_JOB_STARTED` marks only that courier step. Later producer stages
+require its successful completion; it cannot mark the sole artifact-upload step.
 
 Repository selection is `{owner,name,repository_id,owner_id}`. Run selection is
 `{repository,workflow,run_id,attempt,head_sha,branch,event,actor_id,triggering_actor_id}`.

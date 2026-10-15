@@ -11,6 +11,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import math
 import multiprocessing
 import os
 import re
@@ -199,6 +200,7 @@ def _protected(
 
 
 class ProducerStage(StrEnum):
+    PROTECTED_JOB_STARTED = "PROTECTED_JOB_STARTED"
     COLLECTION_SNAPSHOT = "COLLECTION_SNAPSHOT"
     PRODUCER_JOB_COMPLETE = "PRODUCER_JOB_COMPLETE"
     PRODUCER_RUN_COMPLETE = "PRODUCER_RUN_COMPLETE"
@@ -779,6 +781,9 @@ def _run(value: object, repository: RepositoryPin) -> RunPin:
         )
     )
     _require(
+        sum(s.required_stage == ProducerStage.PROTECTED_JOB_STARTED for s in steps) <= 1
+    )
+    _require(
         bool(steps)
         and [s.number for s in steps] == sorted({s.number for s in steps})
         and len({s.name for s in steps}) == len(steps)
@@ -867,7 +872,11 @@ def _source_policy(run: RunPin) -> dict:
         in [
             s.number
             for s in w.required_steps
-            if s.required_stage != ProducerStage.COLLECTION_SNAPSHOT
+            if s.required_stage
+            in (
+                ProducerStage.PRODUCER_JOB_COMPLETE,
+                ProducerStage.PRODUCER_RUN_COMPLETE,
+            )
         ]
     )
     _array(policy["branch_policies"], 32)
@@ -1041,9 +1050,18 @@ class InstalledGate0GitHubReads:
                 raise GitHubReadRefused()
             phase = installation["phase"]
             _require(
-                phase in ("producer", "transfer", "draft", "published", "publication")
+                phase
+                in (
+                    "protected_job",
+                    "producer",
+                    "transfer",
+                    "draft",
+                    "published",
+                    "publication",
+                )
             )
             required = {
+                "protected_job": (True, False, False, False),
                 "producer": (True, False, False, False),
                 "transfer": (True, False, True, False),
                 "draft": (True, False, False, True),
@@ -1078,7 +1096,7 @@ class InstalledGate0GitHubReads:
         """Live identity check; DTO construction/JSON never authenticates facts."""
         return not self._failed and any(facts is item for item in self._issued)
 
-    def _phase(self, name: str, seconds: int, operation):
+    def _phase(self, name: str, seconds: int, operation, *, deadline=None):
         try:
             _require(
                 not self._failed
@@ -1087,6 +1105,10 @@ class InstalledGate0GitHubReads:
             )
             self._used.add(name)
             self._deadline = time.monotonic() + seconds
+            if deadline is not None or name == "protected_job":
+                _require(type(deadline) in (int, float) and math.isfinite(deadline))
+                self._deadline = min(self._deadline, deadline)
+            _require(time.monotonic() < self._deadline)
             self._observations, self._metadata, self._exchanges = [], 0, 0
             result = operation()
             _require(time.monotonic() < self._deadline)
@@ -1454,8 +1476,27 @@ class InstalledGate0GitHubReads:
             == tuple((s.number, s.name) for s in w.required_steps)
         )
         ranks = {s: n for n, s in enumerate(ProducerStage)}
+        courier_number = None
+        if stage == ProducerStage.PROTECTED_JOB_STARTED:
+            couriers = [
+                s
+                for s in w.required_steps
+                if s.required_stage == ProducerStage.PROTECTED_JOB_STARTED
+            ]
+            _require(len(couriers) == 1)
+            courier_number = couriers[0].number
         for fact, pin in zip(job.steps, w.required_steps, strict=True):
-            if ranks[pin.required_stage] <= ranks[stage]:
+            if courier_number == pin.number:
+                _require(
+                    fact.status == "in_progress"
+                    and fact.conclusion is None
+                    and fact.started_at is not None
+                    and fact.completed_at is None
+                    and _instant(job.started_at) <= _instant(fact.started_at)
+                )
+            elif ranks[pin.required_stage] <= ranks[stage] or (
+                courier_number is not None and pin.number < courier_number
+            ):
                 _require(
                     fact.status == "completed"
                     and fact.conclusion == "success"
@@ -1465,7 +1506,18 @@ class InstalledGate0GitHubReads:
                 _require(_instant(job.started_at) <= _instant(fact.started_at))
                 if job.completed_at is not None:
                     _require(_instant(fact.completed_at) <= _instant(job.completed_at))
-        if stage != ProducerStage.COLLECTION_SNAPSHOT:
+        if stage == ProducerStage.PROTECTED_JOB_STARTED:
+            _require(
+                job.status == "in_progress"
+                and job.conclusion is None
+                and job.completed_at is None
+                and anchor["status"] == "in_progress"
+                and anchor["conclusion"] is None
+            )
+        if stage not in (
+            ProducerStage.PROTECTED_JOB_STARTED,
+            ProducerStage.COLLECTION_SNAPSHOT,
+        ):
             _require(
                 job.status == "completed"
                 and job.conclusion == "success"
@@ -1577,8 +1629,25 @@ class InstalledGate0GitHubReads:
         )
 
     def producer_snapshot(self, stage: ProducerStage) -> ProducerFacts:
+        def observe():
+            _require(stage != ProducerStage.PROTECTED_JOB_STARTED)
+            return self._producer_facts(self._producer, stage)
+
+        return self._phase("producer", 90, observe)
+
+    def protected_job_snapshot(self, *, deadline: float) -> ProducerFacts:
+        """Observe the assigned protected job before collection, without future success.
+
+        Original provisioning authority caps this one-use read phase. These facts
+        authenticate GitHub observations, not local PID or cgroup ownership.
+        """
         return self._phase(
-            "producer", 90, lambda: self._producer_facts(self._producer, stage)
+            "protected_job",
+            90,
+            lambda: self._producer_facts(
+                self._producer, ProducerStage.PROTECTED_JOB_STARTED
+            ),
+            deadline=deadline,
         )
 
     def publication_snapshot(self) -> PublicationFacts:

@@ -285,6 +285,102 @@ def test_future_stage_requires_upload_success(producer):
         owner.producer_snapshot(gh.ProducerStage.PRODUCER_JOB_COMPLETE)
 
 
+def _running_courier(producer):
+    owner, responses = producer
+    owner._installation["phase"] = "protected_job"
+    for endpoint in (gh.EndpointCode.RUN, gh.EndpointCode.ATTEMPT):
+        responses[endpoint].update(status="in_progress", conclusion=None)
+    job = responses[gh.EndpointCode.JOBS]["jobs"][0]
+    job.update(status="in_progress", conclusion=None, completed_at=None)
+    first, second = copy.deepcopy(job["steps"])
+    first.update(number=1, name="Prepare")
+    second.update(
+        number=2,
+        name="Courier",
+        status="in_progress",
+        conclusion=None,
+        completed_at=None,
+    )
+    future = [
+        dict(second, number=n, name=name, status="queued", started_at=None)
+        for n, name in ((3, "Collect"), (4, "Upload"))
+    ]
+    job["steps"] = [first, second, *future]
+    steps = (
+        gh.StepPin(1, "Prepare", gh.ProducerStage.COLLECTION_SNAPSHOT),
+        gh.StepPin(2, "Courier", gh.ProducerStage.PROTECTED_JOB_STARTED),
+        gh.StepPin(3, "Collect", gh.ProducerStage.COLLECTION_SNAPSHOT),
+        gh.StepPin(4, "Upload", gh.ProducerStage.PRODUCER_JOB_COMPLETE),
+    )
+    owner._producer = replace(
+        owner._producer,
+        workflow=replace(owner._producer.workflow, required_steps=steps),
+    )
+    owner._policies[17]["sole_artifact_step"] = 4
+    return owner, responses
+
+
+def test_protected_job_snapshot_precedes_collection_and_keeps_original_bound(producer):
+    owner, _ = _running_courier(producer)
+    original_end = time.monotonic() + 5
+    facts = owner.protected_job_snapshot(deadline=original_end)
+    assert facts.stage == gh.ProducerStage.PROTECTED_JOB_STARTED
+    assert owner.owns_facts(facts)
+    assert owner._deadline == original_end
+    assert facts.jobs[0].steps[1].status == "in_progress"
+    assert all(step.status == "queued" for step in facts.jobs[0].steps[2:])
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.protected_job_snapshot(deadline=original_end + 100)
+
+
+@pytest.mark.parametrize("step", [0, 1])
+def test_protected_job_requires_successful_predecessor_and_current_courier(
+    producer, step
+):
+    owner, responses = _running_courier(producer)
+    responses[gh.EndpointCode.JOBS]["jobs"][0]["steps"][step].update(
+        status="queued", conclusion=None, started_at=None, completed_at=None
+    )
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.protected_job_snapshot(deadline=time.monotonic() + 5)
+
+
+@pytest.mark.parametrize(
+    "deadline", [None, "future", True, float("inf"), float("nan"), 10**400, 0]
+)
+def test_protected_job_snapshot_refuses_invalid_original_bound(producer, deadline):
+    owner, _ = producer
+    owner._installation["phase"] = "protected_job"
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.protected_job_snapshot(deadline=deadline)
+    assert owner._failed and not owner._issued
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.protected_job_snapshot(deadline=time.monotonic() + 5)
+
+
+def test_invalid_second_protected_job_call_invalidates_owned_facts(producer):
+    owner, _ = _running_courier(producer)
+    facts = owner.protected_job_snapshot(deadline=time.monotonic() + 5)
+    assert owner.owns_facts(facts)
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.protected_job_snapshot(deadline=None)
+    assert not owner.owns_facts(facts)
+
+
+def test_protected_job_snapshot_rejects_already_completed_job(producer):
+    owner, _ = producer
+    owner._installation["phase"] = "protected_job"
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.protected_job_snapshot(deadline=time.monotonic() + 5)
+
+
+def test_producer_stage_cannot_bypass_provisioning_deadline(producer):
+    owner, _ = producer
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.producer_snapshot(gh.ProducerStage.PROTECTED_JOB_STARTED)
+    assert owner._failed
+
+
 @pytest.mark.parametrize(
     "body", [b'{"a":1,"a":2}', b'{"x":NaN}', b"[" * 33 + b"0" + b"]" * 33, b"{}" + b"x"]
 )
