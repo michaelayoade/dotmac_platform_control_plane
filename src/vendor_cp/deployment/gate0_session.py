@@ -166,13 +166,18 @@ class AttesterSession:
             or set(request)
             != {"schema", "phase", "plan_id", "workload_token", "authorization"}
             or request["schema"] != "Gate0SessionBegin.v1"
-            or request["phase"] not in ("issue", "consume")
         ):
+            raise ServiceRefused()
+        phase: Literal["issue", "consume"]
+        if request["phase"] == "issue":
+            phase = "issue"
+        elif request["phase"] == "consume":
+            phase = "consume"
+        else:
             raise ServiceRefused()
         token = request["workload_token"]
         if not isinstance(token, str) or not 0 < len(token) <= 16384:
             raise ServiceRefused()
-        phase = request["phase"]
         authorization = (
             None
             if request["authorization"] is None

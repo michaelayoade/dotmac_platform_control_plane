@@ -101,6 +101,7 @@ def daemon(record_property):
     directory.chmod(0o755)
     username = "g0" + directory.name.rsplit("-", 1)[1][:12]
     created = False
+    uid = None
     process = None
     log = None
     try:
@@ -307,6 +308,31 @@ LogLevel ERROR
         if log is not None:
             log.close()
         if created:
+            # sshd's listener exit does not imply that all session children
+            # have exited. Only this fixture's newly created UID is targeted;
+            # never force user deletion while it still owns processes.
+            assert uid is not None and uid > 0
+            assert pwd.getpwnam(username).pw_uid == uid
+            killed = subprocess.run(
+                ["/usr/bin/pkill", "-KILL", "-u", str(uid)],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            assert killed.returncode in (0, 1)
+            deadline = time.monotonic() + 5
+            while True:
+                remaining = subprocess.run(
+                    ["/usr/bin/pgrep", "-u", str(uid)],
+                    capture_output=True,
+                    timeout=1,
+                    check=False,
+                )
+                assert remaining.returncode in (0, 1)
+                if remaining.returncode == 1:
+                    break
+                assert time.monotonic() < deadline, "fixture worker did not exit"
+                time.sleep(0.05)
             run(["/usr/sbin/userdel", username])
         shutil.rmtree(directory)
 
