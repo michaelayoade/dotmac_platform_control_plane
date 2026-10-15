@@ -101,6 +101,52 @@ def observation_message(
     return DOMAIN + canonical(document)
 
 
+def verify_observation_signature(
+    *,
+    proof: ProducedAttestation,
+    observation: SignedSessionObservation,
+    operation: AdmittedOperation,
+    window_record_digest: str,
+    public_key: bytes,
+) -> tuple[datetime, datetime, str]:
+    """Same signed bytes/semantic predicate without a live freshness capability."""
+    if (
+        type(observation) is not SignedSessionObservation
+        or type(observation.canonical_bytes) is not bytes
+        or type(observation.signature) is not bytes
+        or not 0 < len(observation.canonical_bytes) <= 8192
+        or len(observation.signature) != 64
+        or not observation.canonical_bytes.startswith(DOMAIN)
+    ):
+        raise ServiceRefused()
+    try:
+        Ed25519PublicKey.from_public_bytes(public_key).verify(
+            observation.signature, observation.canonical_bytes
+        )
+        document = strict_object(observation.canonical_bytes[len(DOMAIN) :], 8192)
+        start = datetime.fromisoformat(str(document.get("observed_from")))
+        end = datetime.fromisoformat(str(document.get("observed_until")))
+        expected = observation_message(
+            proof=proof,
+            operation=operation,
+            window_record_digest=window_record_digest,
+            invocation_id=str(document.get("invocation_id")),
+            observed_from=start,
+            observed_until=end,
+        )
+        if expected != observation.canonical_bytes:
+            raise ServiceRefused()
+        owner = strict_object(
+            decode(strict_object(proof.control_document).get("canonical_bytes"), 8192)
+        )
+        issued = datetime.fromisoformat(str(owner.get("issued_at")))
+        if not start <= issued <= end:
+            raise ServiceRefused()
+        return start, end, str(document["invocation_id"])
+    except Exception:
+        raise ServiceRefused() from None
+
+
 def verify_observation(
     *,
     proof: ProducedAttestation,
@@ -134,33 +180,18 @@ def verify_observation(
     ):
         raise ServiceRefused()
     try:
-        Ed25519PublicKey.from_public_bytes(public_key).verify(
-            observation.signature, observation.canonical_bytes
+        start, end, _ = verify_observation_signature(
+            proof=proof,
+            observation=observation,
+            operation=operation,
+            window_record_digest=window_record_digest,
+            public_key=public_key,
         )
-        document = strict_object(observation.canonical_bytes[len(DOMAIN) :], 8192)
-        start = datetime.fromisoformat(str(document.get("observed_from")))
-        end = datetime.fromisoformat(str(document.get("observed_until")))
         if (
             now.tzinfo is None
             or not start <= end <= now
             or (now - end).total_seconds() > 30
         ):
-            raise ServiceRefused()
-        expected = observation_message(
-            proof=proof,
-            operation=operation,
-            window_record_digest=window_record_digest,
-            invocation_id=str(document.get("invocation_id")),
-            observed_from=start,
-            observed_until=end,
-        )
-        if expected != observation.canonical_bytes:
-            raise ServiceRefused()
-        owner = strict_object(
-            decode(strict_object(proof.control_document).get("canonical_bytes"), 8192)
-        )
-        issued = datetime.fromisoformat(str(owner.get("issued_at")))
-        if not start <= issued <= end:
             raise ServiceRefused()
         if (
             trust_state.eligibility(

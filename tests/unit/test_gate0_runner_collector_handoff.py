@@ -398,7 +398,7 @@ def test_capture_exact_readback_scope_and_digest(
         "approval_request_id": "request",
     }
     packet = {
-        "capture": capture,
+        "capture": {k: v for k, v in capture.items() if k != "capture_digest"},
         "not_before": wall.isoformat(),
         "expires_at": (wall + timedelta(seconds=60)).isoformat(),
     }
@@ -606,7 +606,12 @@ def b_join_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         approval_request_id=identifier,
     )
     packet = dict(
-        capture=capture, not_before=start.isoformat(), expires_at=expiry.isoformat()
+        case_kind="withdrawal_later_use",
+        run_id="2",
+        run_attempt="1",
+        capture={k: v for k, v in capture.items() if k != "capture_digest"},
+        not_before=start.isoformat(),
+        expires_at=expiry.isoformat(),
     )
     monkeypatch.setattr(owner_module, "parse_run_document", lambda _raw: packet)
     readback = dict(
@@ -1107,3 +1112,90 @@ def test_actual_receiver_exit_with_buffered_b_records_and_real_join(
         owner.close()
         for session in (issuer, *sessions):
             session.close()
+
+
+def real_capture_readback_fixture():
+    """Actual packet parser has FIVE selectors; installed readback has SIX."""
+    import base64
+
+    from vendor_cp.deployment.gate0_launch import parse_run_document
+
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    fingerprint = "SHA256:" + base64.b64encode(bytes(32)).decode().rstrip("=")
+    identifier = "00000000-0000-0000-0000-000000000001"
+    selected = dict(
+        window_digest="sha256:" + "1" * 64,
+        plan_id=identifier,
+        plan_digest="sha256:" + "2" * 64,
+        target_id=identifier,
+        approval_request_id=identifier,
+    )
+    roles = {
+        name: dict(
+            key_id=name,
+            public_key_b64=base64.b64encode(bytes(32)).decode(),
+            source_revision="a" * 40,
+            image_digest="sha256:" + "3" * 64,
+            profile_digest="sha256:" + "4" * 64,
+        )
+        for name in ("issuer", "attester")
+    }
+    packet = canonical(
+        dict(
+            schema="Gate0RunIdentity.v1",
+            run_id="2",
+            run_attempt="1",
+            case_kind="withdrawal_later_use",
+            not_before=start.isoformat(),
+            expires_at=(start + timedelta(seconds=60)).isoformat(),
+            capture=selected,
+            roles=roles,
+            controller_ca_fingerprint=fingerprint,
+            management_key_fingerprint=fingerprint,
+        )
+    )
+    parsed = parse_run_document(packet)
+    assert len(parsed["capture"]) == 5 and "capture_digest" not in parsed["capture"]
+    readback = dict(
+        schema="Gate0CaptureInstalled.v1",
+        launch_packet_digest=digest(packet),
+        capture=dict(selected, capture_digest="sha256:" + "5" * 64),
+        effective_end=parsed["expires_at"],
+    )
+    completion = dict(readback=readback, readback_digest=digest(canonical(readback)))
+    return packet, completion
+
+
+def test_actual_packet_selection_and_installed_capture_readback_interoperate():
+    from vendor_cp.deployment.gate0_runner_collector_handoff import (
+        verify_capture_completion,
+    )
+
+    packet, completion = real_capture_readback_fixture()
+    assert verify_capture_completion(packet, completion) == completion
+
+
+@pytest.mark.parametrize(
+    "change", ["scope", "digest", "missing_digest", "extra", "readback_hash"]
+)
+def test_actual_capture_readback_closed_coordinates_and_hashes(change):
+    from vendor_cp.deployment.gate0_runner_collector_handoff import (
+        verify_capture_completion,
+    )
+
+    packet, completion = real_capture_readback_fixture()
+    readback = completion["readback"]
+    if change == "scope":
+        readback["capture"]["plan_digest"] = "sha256:" + "f" * 64
+    elif change == "digest":
+        readback["capture"]["capture_digest"] = "not-a-digest"
+    elif change == "missing_digest":
+        readback["capture"].pop("capture_digest")
+    elif change == "extra":
+        readback["capture"]["committed"] = True
+    if change != "readback_hash":
+        completion["readback_digest"] = digest(canonical(readback))
+    else:
+        completion["readback_digest"] = "sha256:" + "f" * 64
+    with pytest.raises(ProviderRefused):
+        verify_capture_completion(packet, completion)

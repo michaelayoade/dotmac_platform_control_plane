@@ -7,6 +7,7 @@ manufactures that provenance; no operational installation occurs in this module.
 
 from __future__ import annotations
 
+import base64
 import math
 import os
 import re
@@ -20,8 +21,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
 from vendor_cp.approvals.adapter import ApprovalHoldRefusal
 from vendor_cp.deployment.gate0_collection import IssuerOutcome, OutcomeKind
 from vendor_cp.deployment.gate0_composition import AdmissionExpectation
@@ -31,17 +30,17 @@ from vendor_cp.deployment.gate0_launch import (
     parse_run_document,
 )
 from vendor_cp.deployment.gate0_observation import (
-    DOMAIN,
     decode,
     digest,
-    observation_message,
     parse_bundle,
+    verify_observation_signature,
 )
 from vendor_cp.deployment.gate0_role_custody import ProviderRefused
 from vendor_cp.deployment.gate0_runner_handoff import (
     OwnedHandoffIO,
     ReceiverInstallation,
     RootFrameSequence,
+    RootHostBinding,
     decode_root_event,
     decode_terminal,
     encode_case_a_complete,
@@ -57,6 +56,7 @@ from vendor_cp.deployment.gate0_runner_ssh import (
     OwnedAttesterSession,
     OwnedIssuerSession,
 )
+from vendor_cp.deployment.gate0_runtime import AdmittedOperation
 from vendor_cp.deployment.gate0_services import IssuerProcessResult
 from vendor_cp.deployment.rehearsal_issuer_trust_state import (
     RehearsalIssuerTrustState,
@@ -239,6 +239,153 @@ def _mechanics(final: dict[str, Any], sequence: RootFrameSequence) -> None:
             or set(value) != expected
         ):
             raise ProviderRefused()
+
+
+def verify_capture_completion(shared_packet: bytes, value: object) -> dict[str, Any]:
+    """Shared exact capture/readback predicate; no live process or clock."""
+    completion = _fields(value, "readback readback_digest")
+    readback = _fields(
+        completion["readback"], "schema launch_packet_digest capture effective_end"
+    )
+    packet = parse_run_document(shared_packet)
+    coordinates = _fields(
+        readback["capture"],
+        "capture_digest window_digest plan_id plan_digest target_id "
+        "approval_request_id",
+    )
+    if (
+        type(coordinates["capture_digest"]) is not str
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", coordinates["capture_digest"]) is None
+    ):
+        raise ProviderRefused()
+    if (
+        readback["schema"] != "Gate0CaptureInstalled.v1"
+        or readback["launch_packet_digest"] != digest(shared_packet)
+        or {key: value for key, value in coordinates.items() if key != "capture_digest"}
+        != packet["capture"]
+        or completion["readback_digest"] != digest(canonical(readback))
+        or not _instant(packet["not_before"])
+        < _instant(readback["effective_end"])
+        <= _instant(packet["expires_at"])
+    ):
+        raise ProviderRefused()
+    return completion
+
+
+def verify_case_outcome_proofs(
+    case_kind: str,
+    window_digest: str,
+    outcomes: tuple[IssuerOutcome, ...],
+    bundles: tuple[bytes, bytes],
+) -> None:
+    """Shared finite A/B proof mapping, including pre-proof withdrawal refusal."""
+    if (
+        case_kind not in ("consume_replay", "withdrawal_later_use")
+        or type(bundles) is not tuple
+        or len(bundles) != 2
+    ):
+        raise ProviderRefused()
+    expected_kinds = (
+        (
+            OutcomeKind.ISSUE_COMMITTED,
+            OutcomeKind.STANDING,
+            OutcomeKind.CONSUME_COMMITTED,
+            OutcomeKind.STANDING,
+            OutcomeKind.OWNER_REFUSED,
+        )
+        if case_kind == "consume_replay"
+        else (
+            OutcomeKind.ISSUE_COMMITTED,
+            OutcomeKind.STANDING,
+            OutcomeKind.STANDING,
+            OutcomeKind.OWNER_REFUSED,
+        )
+    )
+    expected_operations = (
+        ("issue", "standing", "consume", "standing", "consume")
+        if case_kind == "consume_replay"
+        else ("issue", "standing", "standing", "consume")
+    )
+    if tuple(item.kind for item in outcomes) != expected_kinds:
+        raise ProviderRefused()
+    identities: dict[str, tuple[str, str]] = {}
+    for phase, raw in zip(("issue", "consume"), bundles, strict=True):
+        proof, _ = parse_bundle(strict_object(raw, 128 * 1024))
+        envelope = strict_object(proof.control_document)
+        identities[phase] = (
+            digest(decode(envelope.get("canonical_bytes"), 8192)),
+            digest(raw),
+        )
+    for index, outcome in enumerate(outcomes):
+        if (
+            outcome.ordinal != index + 1
+            or outcome.operation != expected_operations[index]
+            or outcome.window_digest != window_digest
+        ):
+            raise ProviderRefused()
+        actual = outcome.proof_digest, outcome.bundle_digest
+        if case_kind == "withdrawal_later_use" and index == 3:
+            # Authenticated admission can refuse withdrawal BEFORE _proof;
+            # preserve that actual absence, not invented consume provenance.
+            # ApprovalNotHeld after evaluation carries the exact consume pair.
+            if (
+                outcome.owner_namespace != "approvals"
+                or outcome.owner_code != ApprovalHoldRefusal.WITHDRAWN.value
+                or outcome.result_bytes != canonical({})
+                or actual not in ((None, None), identities["consume"])
+            ):
+                raise ProviderRefused()
+        else:
+            # A: issue,issue,consume,consume,consume.
+            # B: issue,issue,issue,then the refusal semantics above.
+            phase = (
+                "issue"
+                if index < (2 if case_kind == "consume_replay" else 3)
+                else "consume"
+            )
+            if actual != identities[phase]:
+                raise ProviderRefused()
+
+
+def verify_issuer_terminal(
+    final: dict[str, Any],
+    shared_packet: bytes,
+    root: RootHostBinding,
+    outcomes: tuple[IssuerOutcome, ...],
+) -> dict[str, Any]:
+    packet = parse_run_document(shared_packet)
+    terminal = _terminal(final, "issuer")
+    expected = dict(
+        schema="Gate0IssuerTerminal.v1",
+        launch_packet_digest=digest(shared_packet),
+        local_packet_digest=root.terms["local_packet_digest"],
+        case_kind=packet["case_kind"],
+        window_digest=packet["capture"]["window_digest"],
+        worker_declared_exit_code=3,
+        transcript_digest=IssuerProcessResult(3, outcomes).transcript_digest,
+        terminal_outcome=outcomes[-1].document(),
+    )
+    if terminal != expected:
+        raise ProviderRefused()
+    return terminal
+
+
+def verify_slot_terminal(
+    final: dict[str, Any],
+    shared_packet: bytes,
+    phase: str,
+    raw: bytes,
+    invocation: str,
+) -> None:
+    if _terminal(final, phase) != dict(
+        schema="Gate0SlotTerminal.v1",
+        launch_packet_digest=digest(shared_packet),
+        slot=phase,
+        outcome="success",
+        bundle_digest=digest(raw),
+        invocation_id=invocation,
+    ):
+        raise ProviderRefused()
 
 
 class OwnedCollectorHandoff:
@@ -500,22 +647,7 @@ class OwnedCollectorHandoff:
             raise
 
     def _capture(self, case: InstalledRunnerCase, value: object) -> dict[str, Any]:
-        completion = _fields(value, "readback readback_digest")
-        readback = _fields(
-            completion["readback"], "schema launch_packet_digest capture effective_end"
-        )
-        packet = parse_run_document(case.projection.shared_packet)
-        if (
-            readback["schema"] != "Gate0CaptureInstalled.v1"
-            or readback["launch_packet_digest"] != digest(case.projection.shared_packet)
-            or readback["capture"] != packet["capture"]
-            or completion["readback_digest"] != digest(canonical(readback))
-            or not _instant(packet["not_before"])
-            < _instant(readback["effective_end"])
-            <= _instant(packet["expires_at"])
-        ):
-            raise ProviderRefused()
-        return completion
+        return verify_capture_completion(case.projection.shared_packet, value)
 
     def _drain_finals(self, case: InstalledRunnerCase) -> None:
         if self._phase_index != 3:
@@ -546,7 +678,7 @@ class OwnedCollectorHandoff:
                     or candidate_host in self._terminals
                 ):
                     raise ProviderRefused()
-                host = cast(str, candidate_host)
+                host = candidate_host
                 sequence = self._sequences[host]
                 if (
                     decode_terminal(
@@ -611,46 +743,27 @@ class OwnedCollectorHandoff:
             != TrustEligibility.ELIGIBLE
         ):
             raise ProviderRefused()
-        Ed25519PublicKey.from_public_bytes(trust.public_key).verify(
-            observation.signature, observation.canonical_bytes
+        start, end, invocation = verify_observation_signature(
+            proof=proof,
+            observation=observation,
+            operation=operation,
+            window_record_digest=expected.window_digest,
+            public_key=trust.public_key,
         )
-        if not observation.canonical_bytes.startswith(DOMAIN):
-            raise ProviderRefused()
-        observed = strict_object(observation.canonical_bytes[len(DOMAIN) :], 8192)
-        start, end = (
-            _instant(observed.get("observed_from")),
-            _instant(observed.get("observed_until")),
-        )
-        if (
-            observed.get("invocation_id") != session.invocation_id
-            or not _instant(case.projection.window.document["not_before"])
-            <= start
-            <= end
-            < _instant(case.projection.window.document["expires_at"])
-            or observation_message(
-                proof=proof,
-                operation=operation,
-                window_record_digest=expected.window_digest,
-                invocation_id=session.invocation_id,
-                observed_from=start,
-                observed_until=end,
-            )
-            != observation.canonical_bytes
-        ):
+        if invocation != session.invocation_id or not _instant(
+            case.projection.window.document["not_before"]
+        ) <= start <= end < _instant(case.projection.window.document["expires_at"]):
             raise ProviderRefused()
         # Core already registered this exact bundle against the existing public
         # proof verifier. Here the retained signed invocation is reauthenticated
         # for its root terminal join, without backdating a fresh registration.
-        terminal = _terminal(strict_object(self._sequences["NS3"].final_bytes()), phase)
-        if terminal != dict(
-            schema="Gate0SlotTerminal.v1",
-            launch_packet_digest=digest(case.projection.shared_packet),
-            slot=phase,
-            outcome="success",
-            bundle_digest=digest(raw),
-            invocation_id=session.invocation_id,
-        ):
-            raise ProviderRefused()
+        verify_slot_terminal(
+            strict_object(self._sequences["NS3"].final_bytes()),
+            case.projection.shared_packet,
+            phase,
+            raw,
+            invocation,
+        )
         return {
             "bundle_digest": digest(raw),
             "invocation_id": session.invocation_id,
@@ -666,69 +779,15 @@ class OwnedCollectorHandoff:
         issue_session: OwnedAttesterSession,
         consume_session: OwnedAttesterSession,
     ) -> None:
-        expected_kinds = (
-            (
-                OutcomeKind.ISSUE_COMMITTED,
-                OutcomeKind.STANDING,
-                OutcomeKind.CONSUME_COMMITTED,
-                OutcomeKind.STANDING,
-                OutcomeKind.OWNER_REFUSED,
-            )
-            if self._case_index == 0
-            else (
-                OutcomeKind.ISSUE_COMMITTED,
-                OutcomeKind.STANDING,
-                OutcomeKind.STANDING,
-                OutcomeKind.OWNER_REFUSED,
-            )
-        )
-        expected_operations = (
-            ("issue", "standing", "consume", "standing", "consume")
-            if self._case_index == 0
-            else ("issue", "standing", "standing", "consume")
-        )
-        if tuple(item.kind for item in outcomes) != expected_kinds:
+        issue, consume = issue_session.bundle, consume_session.bundle
+        if issue is None or consume is None:
             raise ProviderRefused()
-        identities: dict[str, tuple[str, str]] = {}
-        for phase, session in (("issue", issue_session), ("consume", consume_session)):
-            raw = session.bundle
-            if raw is None:
-                raise ProviderRefused()
-            proof, _ = parse_bundle(strict_object(raw, 128 * 1024))
-            envelope = strict_object(proof.control_document)
-            identities[phase] = (
-                digest(decode(envelope.get("canonical_bytes"), 8192)),
-                digest(raw),
-            )
-        for index, outcome in enumerate(outcomes):
-            if (
-                outcome.ordinal != index + 1
-                or outcome.operation != expected_operations[index]
-                or outcome.window_digest != case.projection.window.digest
-            ):
-                raise ProviderRefused()
-            actual = outcome.proof_digest, outcome.bundle_digest
-            if self._case_index == 1 and index == 3:
-                # Authenticated admission can refuse withdrawal BEFORE _proof;
-                # preserve that actual absence, not invented consume provenance.
-                # ApprovalNotHeld after evaluation carries the exact consume pair.
-                if (
-                    outcome.owner_namespace != "approvals"
-                    or outcome.owner_code != ApprovalHoldRefusal.WITHDRAWN.value
-                    or outcome.result_bytes != canonical({})
-                    or actual not in ((None, None), identities["consume"])
-                ):
-                    raise ProviderRefused()
-            else:
-                # A: issue,issue,consume,consume,consume.
-                # B: issue,issue,issue,then the refusal semantics above.
-                phase = (
-                    "issue"
-                    if index < (2 if self._case_index == 0 else 3)
-                    else "consume"
-                )
-                if actual != identities[phase]:
-                    raise ProviderRefused()
+        verify_case_outcome_proofs(
+            case.projection.binding["case_kind"],
+            case.projection.window.digest,
+            outcomes,
+            (issue, consume),
+        )
 
     def _join(
         self,
@@ -768,21 +827,11 @@ class OwnedCollectorHandoff:
         }
         for host, sequence in self._sequences.items():
             _mechanics(finals[host], sequence)
-        terminal = _terminal(finals["IDP3"], "issuer")
         outcomes = issuer.collector.outcomes
         self._join_outcomes(case, outcomes, issue_session, consume_session)
-        expected_terminal = dict(
-            schema="Gate0IssuerTerminal.v1",
-            launch_packet_digest=digest(case.projection.shared_packet),
-            local_packet_digest=case.roots[0].terms["local_packet_digest"],
-            case_kind=case.projection.binding["case_kind"],
-            window_digest=case.projection.window.digest,
-            worker_declared_exit_code=3,
-            transcript_digest=IssuerProcessResult(3, outcomes).transcript_digest,
-            terminal_outcome=outcomes[-1].document(),
+        terminal = verify_issuer_terminal(
+            finals["IDP3"], case.projection.shared_packet, case.roots[0], outcomes
         )
-        if terminal != expected_terminal:
-            raise ProviderRefused()
         capture = self._capture(case, finals["IDP3"]["capture_delivery"])
         if (
             capture != self._capture(case, finals["NS3"]["management_capture"])
@@ -903,3 +952,198 @@ class OwnedCollectorHandoff:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+def verify_retained_root_case(
+    campaign_digest: str,
+    shared_packet: bytes,
+    roots: tuple[RootHostBinding, RootHostBinding],
+    envelopes: tuple[bytes, ...],
+    join: bytes,
+    outcomes: tuple[IssuerOutcome, ...],
+    bundles: tuple[bytes, bytes],
+) -> None:
+    """Replay the SAME immutable root/session predicates, never fake a process.
+
+    JSON cannot reconstruct historical SO_PEERCRED, EOF or actual child waits.
+    Those facts still require the independently pinned qualified producer history.
+    This rechecks its exact retained bytes, not a portable root authentication.
+    """
+    try:
+        if (
+            type(roots) is not tuple
+            or len(roots) != 2
+            or any(type(root) is not RootHostBinding for root in roots)
+            or type(envelopes) is not tuple
+            or len(envelopes) != 7
+            or type(outcomes) is not tuple
+            or not outcomes
+            or any(type(outcome) is not IssuerOutcome for outcome in outcomes)
+        ):
+            raise ProviderRefused()
+        packet = parse_run_document(shared_packet)
+        if (
+            roots[0].terms["host_role"] != "issuer"
+            or roots[1].terms["host_role"] != "attester"
+            or any(
+                root.terms["launch_packet_digest"] != digest(shared_packet)
+                or root.terms["window_digest"] != packet["capture"]["window_digest"]
+                or root.terms["case_kind"] != packet["case_kind"]
+                or _instant(root.terms["not_before"]) != _instant(packet["not_before"])
+                or _instant(root.terms["expires_at"]) != _instant(packet["expires_at"])
+                for root in roots
+            )
+        ):
+            raise ProviderRefused()
+        sequences = {
+            host: RootFrameSequence(root)
+            for host, root in zip(("IDP3", "NS3"), roots, strict=True)
+        }
+        terminals: set[str] = set()
+        phase_index = 0
+        for raw in envelopes:
+            doc = strict_object(raw, 270336)
+            if doc.get("schema") == "Gate0RootHandoff.v1":
+                host, root = decode_root_event(raw, campaign_digest)
+                if host in terminals:
+                    raise ProviderRefused()
+                kind = sequences[host].accept(root)
+                if kind != "final":
+                    if phase_index >= 3 or (host, kind) != _PHASES[phase_index]:
+                        raise ProviderRefused()
+                    phase_index += 1
+                elif phase_index != 3:
+                    raise ProviderRefused()
+            else:
+                host = doc.get("host")
+                if phase_index != 3 or host not in sequences or host in terminals:
+                    raise ProviderRefused()
+                if (
+                    decode_terminal(
+                        raw, campaign_digest, host, sequences[host].final_bytes()
+                    )
+                    != 0
+                ):
+                    raise ProviderRefused()
+                sequences[host].require_complete()
+                terminals.add(host)
+        if phase_index != 3 or terminals != {"IDP3", "NS3"}:
+            raise ProviderRefused()
+        finals = {
+            host: strict_object(sequence.final_bytes())
+            for host, sequence in sequences.items()
+        }
+        for host, sequence in sequences.items():
+            _mechanics(finals[host], sequence)
+        verify_case_outcome_proofs(
+            packet["case_kind"], packet["capture"]["window_digest"], outcomes, bundles
+        )
+        terminal = verify_issuer_terminal(
+            finals["IDP3"], shared_packet, roots[0], outcomes
+        )
+        capture = verify_capture_completion(
+            shared_packet, finals["IDP3"]["capture_delivery"]
+        )
+        if (
+            capture
+            != verify_capture_completion(
+                shared_packet, finals["NS3"]["management_capture"]
+            )
+            or capture
+            != strict_object(sequences["NS3"].records[1])["management_capture"]
+        ):
+            raise ProviderRefused()
+        joined = _fields(
+            strict_object(join, 196608),
+            "campaign_digest case_kind root_final_digests issuer_transcript_digest "
+            "issuer_client_pid issuer_client_returncode issue consume capture",
+        )
+        if (
+            canonical(joined) != join
+            or type(joined["issuer_client_returncode"]) is not int
+            or joined["issuer_client_returncode"] != 3
+        ):
+            raise ProviderRefused()
+        _integer(joined["issuer_client_pid"])
+        observed: list[tuple[datetime, datetime]] = []
+        invocations: set[str] = set()
+        clients = {joined["issuer_client_pid"]}
+        public = base64.b64decode(
+            packet["roles"]["attester"]["public_key_b64"], validate=True
+        )
+        for phase, raw in zip(("issue", "consume"), bundles, strict=True):
+            proof, observation = parse_bundle(strict_object(raw, 128 * 1024))
+            if canonical(strict_object(raw, 128 * 1024)) != raw:
+                raise ProviderRefused()
+            values = asdict(proof.context)
+            operation = AdmittedOperation(
+                **{
+                    key: value
+                    for key, value in values.items()
+                    if key not in {"challenge_digest", "proof_transcript_digest"}
+                }
+            )
+            if (
+                operation.phase != phase
+                or operation.plan_id != packet["capture"]["plan_id"]
+                or operation.plan_digest != packet["capture"]["plan_digest"]
+                or operation.run_id != packet["run_id"]
+                or operation.run_attempt != packet["run_attempt"]
+            ):
+                raise ProviderRefused()
+            start, end, invocation = verify_observation_signature(
+                proof=proof,
+                observation=observation,
+                operation=operation,
+                window_record_digest=packet["capture"]["window_digest"],
+                public_key=public,
+            )
+            if (
+                not _instant(packet["not_before"])
+                <= start
+                <= end
+                < _instant(packet["expires_at"])
+            ):
+                raise ProviderRefused()
+            if invocation in invocations:
+                raise ProviderRefused()
+            invocations.add(invocation)
+            observed.append((start, end))
+            retained = _fields(
+                joined[phase],
+                "bundle_digest invocation_id client_pid client_returncode completed_at",
+            )
+            pid = _integer(retained["client_pid"])
+            if (
+                pid in clients
+                or type(retained["client_returncode"]) is not int
+                or retained["client_returncode"] != 0
+                or _number(retained["completed_at"]) < 0
+                or retained["bundle_digest"] != digest(raw)
+                or retained["invocation_id"] != invocation
+            ):
+                raise ProviderRefused()
+            clients.add(pid)
+            verify_slot_terminal(finals["NS3"], shared_packet, phase, raw, invocation)
+        if (
+            observed[0][1] > observed[1][0]
+            or joined["issue"]["completed_at"] > joined["consume"]["completed_at"]
+        ):
+            raise ProviderRefused()
+        expected_join = dict(
+            campaign_digest=campaign_digest,
+            case_kind=packet["case_kind"],
+            root_final_digests=[
+                digest(sequences[h].final_bytes()) for h in ("IDP3", "NS3")
+            ],
+            issuer_transcript_digest=terminal["transcript_digest"],
+            issuer_client_pid=joined["issuer_client_pid"],
+            issuer_client_returncode=3,
+            issue=joined["issue"],
+            consume=joined["consume"],
+            capture=capture,
+        )
+        if joined != expected_join:
+            raise ProviderRefused()
+    except Exception:
+        raise ProviderRefused() from None
