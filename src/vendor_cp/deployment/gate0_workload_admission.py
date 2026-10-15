@@ -406,17 +406,32 @@ class OwnerWorkloadAdmission(WorkloadAdmission):
         plan_id: UUID,
         authorization_document: bytes | None = None,
     ) -> AdmissionExpectation:
+        from vendor_cp.deployment.gate0_window import (
+            AuthenticatedApprovalWithdrawal,
+            OwnerWindowWithdrawal,
+        )
+
         failed = False
+        denial: OwnerWindowWithdrawal | None = None
         result: AdmissionExpectation | None = None
         try:
             self._open()
             self._attempts += 1
             if self._attempts > 16:
                 raise ProviderRefused()
-            captured = self._reader.read(phase, plan_id, authorization_document)
-            expected, window = captured.expectation, captured.window
-            document = window.document
+            # Verify signature and fixed claims before interpreting owner denial.
             claims = self._claims(token)
+            try:
+                captured = self._reader.read(phase, plan_id, authorization_document)
+            except OwnerWindowWithdrawal as caught:
+                if caught.plan_id != plan_id or caught.phase != phase:
+                    raise ProviderRefused() from None
+                denial = caught
+                expected = None
+                window = caught.window
+            else:
+                expected, window = captured.expectation, captured.window
+            document = window.document
             if (
                 any(
                     claims.get(key) != value
@@ -437,13 +452,22 @@ class OwnerWorkloadAdmission(WorkloadAdmission):
                 document["expires_at"].replace("Z", "+00:00")
             ):
                 raise ProviderRefused()
-            if expected.window_freshness is None:
-                raise ProviderRefused()
-            expected.window_freshness.require_open()
-            result = expected
+            if denial is not None:
+                denial.freshness.require_open()
+            else:
+                if expected is None or expected.window_freshness is None:
+                    raise ProviderRefused()
+                expected.window_freshness.require_open()
+                result = expected
         except Exception:
             failed = True
-        if failed or result is None:
+        if failed:
+            self._transport = None
+            raise ProviderRefused()
+        if denial is not None:
+            self._transport = None
+            raise AuthenticatedApprovalWithdrawal(denial)
+        if result is None:
             self._transport = None
             raise ProviderRefused()
         return result

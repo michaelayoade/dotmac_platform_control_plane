@@ -194,6 +194,64 @@ class ApprovedRequestEvidence:
     approver_refs: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class DecisionIdentityEvidence:
+    decision_id: UUID
+    actor_id: UUID
+    action: str
+    decided_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RequestIdentityEvidence:
+    """Detached sole-owner request identity, including withdrawn requests.
+
+    State remains an owner evaluation. This is no approval grant and contains
+    no fabricated human decision or actor provenance.
+    """
+
+    request_id: UUID
+    subject_type: str
+    subject_id: str
+    content_digest: str
+    policy_code: str
+    policy_version: int
+    state: str
+    completed_at: datetime | None
+    decisions: tuple[DecisionIdentityEvidence, ...]
+
+
+def request_identity_evidence(db: Session, request_id: UUID) -> RequestIdentityEvidence:
+    request = db.get(PlatformApprovalRequest, request_id)
+    if request is None:
+        raise NotFoundError("approval_request_not_found")
+    evaluation = evaluate_platform_approval(db, request_id=request_id)
+    rows = tuple(
+        db.scalars(
+            select(PlatformApprovalDecision)
+            .where(PlatformApprovalDecision.request_id == request_id)
+            .order_by(PlatformApprovalDecision.decided_at, PlatformApprovalDecision.id)
+            .limit(65)
+        )
+    )
+    if len(rows) > 64:
+        raise ConflictError("approval_evidence_budget_exceeded")
+    return RequestIdentityEvidence(
+        request.id,
+        request.subject_type,
+        request.subject_id,
+        request.content_digest,
+        request.policy_code,
+        request.policy_version,
+        str(evaluation.state),
+        request.completed_at,
+        tuple(
+            DecisionIdentityEvidence(row.id, row.actor_id, row.action, row.decided_at)
+            for row in rows
+        ),
+    )
+
+
 # ── Operations ──────────────────────────────────────────────────────────────
 
 
@@ -443,6 +501,8 @@ __all__ = [
     "ApprovalHoldRefusal",
     "ApprovalNotHeld",
     "ApprovedRequestEvidence",
+    "DecisionIdentityEvidence",
+    "RequestIdentityEvidence",
     "HeldPlatformApproval",
     "OpenRequestCommand",
     "PolicyView",
@@ -456,5 +516,6 @@ __all__ = [
     "open_request",
     "publish_policy_version",
     "record_decision",
+    "request_identity_evidence",
     "withdraw_request",
 ]

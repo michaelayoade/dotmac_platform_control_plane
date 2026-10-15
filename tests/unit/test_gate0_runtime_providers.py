@@ -733,6 +733,9 @@ def combined_worker(jwt_case, monkeypatch):
         def _evidence(self, digest):
             return entries[digest]
 
+        def export_registered(self, digest):
+            return entries[digest]
+
     registry = Registry()
     # Exact synthetic current plan; the real composition compares every field.
     plan = SimpleNamespace(
@@ -805,11 +808,23 @@ def combined_worker(jwt_case, monkeypatch):
     monkeypatch.setattr(control, "rehearsal_issuer_standing_for", standing)
     monkeypatch.setattr(composition, "issue_authorization", issued)
     monkeypatch.setattr(composition, "consume_authorization", consumed)
+
+    def synthetic_proof(self, expected):
+        # This provider fixture models retention, not signed proof validation.
+        # Standing must still select an explicitly retained registered identity.
+        phase = expected.operation.phase
+        evidence = "sha256:" + ("a" if phase == "issue" else "b") * 64
+        raw_bundle = canonical({"synthetic_phase": phase})
+        self._bundles[evidence] = raw_bundle
+        self._current_proof_identity = (evidence, services.digest(raw_bundle))
+        return SimpleNamespace(synthetic_phase=phase)
+
+    monkeypatch.setattr(services.IssuerWorker, "_proof", synthetic_proof)
     monkeypatch.setattr(
-        services.IssuerWorker,
-        "_proof",
-        lambda self, expected: SimpleNamespace(
-            synthetic_phase=expected.operation.phase
+        composition.Gate0Composition,
+        "_issue_receipt",
+        lambda self, invocation, expected, committed: replace(
+            committed, issuer_receipt=b"synthetic-owner-receipt"
         ),
     )
     # The real composition registers the synthetic proof through its resolver.

@@ -399,6 +399,22 @@ class ProofRegistrationRefused(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class RegisteredProofExport:
+    """Immutable private evidence readback, with no live verifier capability."""
+
+    evidence_digest: str
+    owner_envelope: bytes
+    owner_bytes: bytes
+    owner_signature: bytes
+    key_id: str
+    algorithm: str
+    context: AttestationContext
+    companion: CompanionAttestation
+    transcript: bytes
+    metadata: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class _RetainedProof:
     owner_envelope: bytes
     owner_bytes: bytes
@@ -548,6 +564,34 @@ class BoundedHarnessVerifier:
             raise ProofRegistrationRefused()
         self._require_open()
         return entry
+
+    def export_registered(self, digest: str) -> RegisteredProofExport:
+        """Export only already registered exact bytes within existing budgets.
+
+        Evidence export deliberately does not refresh trust, extend eligibility
+        or expose registration/leaf verification. Never send this aggregate in
+        a frame; fixed service outcomes refer to collector-held bundle digests.
+        """
+        if type(digest) is not str or _DIGEST.fullmatch(digest) is None:
+            raise ProofRegistrationRefused()
+        with self._lock:
+            entry = self._entries.get(digest)
+        if entry is None:
+            raise ProofRegistrationRefused()
+        return RegisteredProofExport(
+            digest,
+            entry.owner_envelope,
+            entry.owner_bytes,
+            entry.owner_signature,
+            entry.key_id,
+            entry.algorithm,
+            AttestationContext(**asdict(entry.context)),
+            CompanionAttestation(
+                entry.companion.canonical_bytes, entry.companion.signature
+            ),
+            entry.transcript,
+            entry.metadata,
+        )
 
     def _prepare(
         self, proof: ProducedAttestation, expected: AdmittedOperation

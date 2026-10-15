@@ -722,3 +722,218 @@ def test_owner_reader_uses_original_launch_mapping_before_first_read(monkeypatch
             database_io_qualified=True,
             clock_origin=local,
         )  # Original launch duration, not remaining duration, exceeds 300.
+
+
+@pytest.mark.parametrize("change", ["none", "token", "run", "expiry"])
+def test_withdrawal_only_survives_authenticated_exact_original_window(
+    signed_binding, monkeypatch, change
+):
+    from types import SimpleNamespace
+
+    from vendor_cp.deployment.gate0_window import (
+        AuthenticatedApprovalWithdrawal,
+        OwnerWindowWithdrawal,
+    )
+    from vendor_cp.deployment.gate0_workload_admission import OwnerWorkloadAdmission
+
+    binding, *_ = signed_binding
+    expected = binding.expectation
+    denial = OwnerWindowWithdrawal(
+        window=binding.window,
+        plan_id=UUID(expected.operation.plan_id),
+        request_id=expected.approval_request_id,
+        content_digest=expected.operation.plan_digest,
+        phase="consume",
+        freshness=expected.window_freshness,
+    )
+    events = []
+
+    def read(*args):
+        events.append("read")
+        raise denial
+
+    admission = object.__new__(OwnerWorkloadAdmission)
+    admission._attempts = 0
+    admission._transport = object()
+    admission._reader = SimpleNamespace(read=read)
+    monkeypatch.setattr(admission, "_open", lambda: None)
+    claims = dict(binding.window.document["github"])
+    now = int(datetime.now(UTC).timestamp())
+    claims.update(iat=now, nbf=now, exp=now + 30)
+    if change == "run":
+        claims["run_id"] = "999"
+    if change == "expiry":
+        claims["exp"] = now + 301
+
+    def verified(token):
+        events.append("jwt")
+        if change == "token":
+            raise ProviderRefused()
+        return claims
+
+    monkeypatch.setattr(admission, "_claims", verified)
+    if change == "none":
+        with pytest.raises(AuthenticatedApprovalWithdrawal) as caught:
+            admission.admit("synthetic", "consume", denial.plan_id, b"synthetic")
+        assert caught.value.denial is denial
+        assert events == ["jwt", "read"]
+    else:
+        with pytest.raises(ProviderRefused):
+            admission.admit("synthetic", "consume", denial.plan_id, b"synthetic")
+        assert admission._transport is None
+        assert events == (["jwt"] if change == "token" else ["jwt", "read"])
+
+
+@pytest.mark.parametrize("cleanup", ["none", "rollback", "close"])
+def test_owner_withdrawal_read_requires_confirmed_database_cleanup(
+    mutation_case, monkeypatch, cleanup
+):
+    import time
+    from types import SimpleNamespace
+
+    import vendor_cp.approvals.adapter as approvals
+    import vendor_cp.deployment.approval_barrier as barrier
+    from vendor_cp.deployment.gate0_window import (
+        OwnerWindowReader,
+        OwnerWindowWithdrawal,
+    )
+    from vendor_cp.deployment.protected_rehearsal_issuer import (
+        SUBJECT_TYPE,
+        issuer_approval_subject,
+    )
+
+    _, plan, expected, _, document = mutation_case
+    events = []
+
+    class SyntheticOwnerDenial(Exception):
+        code = approvals.ApprovalHoldRefusal.WITHDRAWN
+
+    def withdrawn(*args, **kwargs):
+        raise SyntheticOwnerDenial("sensitive-owner-detail")
+
+    monkeypatch.setattr(approvals, "ApprovalNotHeld", SyntheticOwnerDenial)
+    monkeypatch.setattr(barrier, "held_transition", withdrawn)
+    monkeypatch.setattr(
+        approvals,
+        "request_identity_evidence",
+        lambda db, selected: SimpleNamespace(
+            subject_type=SUBJECT_TYPE,
+            subject_id=issuer_approval_subject(plan),
+            content_digest=plan.plan_digest,
+            policy_code=plan.approval_policy_code,
+            policy_version=plan.approval_policy_version,
+        ),
+    )
+
+    def finish(name):
+        events.append(name)
+        if cleanup == name:
+            raise RuntimeError("sensitive-cleanup-detail")
+
+    db = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
+        execute=lambda *args: None,
+        rollback=lambda: finish("rollback"),
+        close=lambda: finish("close"),
+    )
+    reader = object.__new__(OwnerWindowReader)
+    reader._runtime = SimpleNamespace(platform_session_factory=lambda: db)
+    reader._target_id = expected.target_id
+    reader._origin = time.monotonic()
+    reader._started = datetime.now(UTC)
+    reader._expires = datetime.fromisoformat(
+        document["expires_at"].replace("Z", "+00:00")
+    )
+    reader._deadline = reader._origin + 120
+    reader._freshness = {}
+    if cleanup == "none":
+        with pytest.raises(OwnerWindowWithdrawal) as caught:
+            reader.read("consume", UUID(expected.operation.plan_id), b"synthetic")
+        assert caught.value.request_id == expected.approval_request_id
+        assert caught.value.content_digest == plan.plan_digest
+    else:
+        with pytest.raises(ProviderRefused) as caught:
+            reader.read("consume", UUID(expected.operation.plan_id), b"synthetic")
+        assert type(caught.value) is ProviderRefused
+        assert "sensitive" not in str(caught.value)
+    assert events == ["rollback", "close"]
+
+
+def test_actual_worker_frames_one_typed_terminal_and_cannot_rearm(
+    signed_binding, monkeypatch
+):
+    import socket
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from vendor_cp.deployment import gate0_services as services
+    from vendor_cp.deployment.gate0_collection import IssuerOutcome, OutcomeKind
+    from vendor_cp.deployment.gate0_framing import FramedChannel, ServiceRefused
+    from vendor_cp.deployment.gate0_observation import encode
+    from vendor_cp.deployment.gate0_window import (
+        AuthenticatedApprovalWithdrawal,
+        OwnerWindowWithdrawal,
+    )
+
+    binding, *_ = signed_binding
+    expected = binding.expectation
+    denial = OwnerWindowWithdrawal(
+        window=binding.window,
+        plan_id=UUID(expected.operation.plan_id),
+        request_id=expected.approval_request_id,
+        content_digest=expected.operation.plan_digest,
+        phase="consume",
+        freshness=expected.window_freshness,
+    )
+
+    def consume(*args):
+        raise AuthenticatedApprovalWithdrawal(denial)
+
+    monkeypatch.setattr(
+        services,
+        "assemble_gate0_composition",
+        lambda **kwargs: SimpleNamespace(consume=consume),
+    )
+    worker = services.IssuerWorker(
+        SimpleNamespace(
+            database_qualified=True,
+            actor_ref="synthetic",
+            sessions=lambda: None,
+            require_frozen_window=False,
+            custody=None,
+            admission=None,
+            verifier=SimpleNamespace(_require_open=lambda: None),
+            signer=None,
+            authorization_verifier=None,
+            authorization_ttl=None,
+        )
+    )
+    left, right = socket.socketpair()
+    try:
+        deadline = time.monotonic() + 5
+        client = FramedChannel(left.fileno(), left.fileno(), deadline=deadline)
+        server = FramedChannel(right.fileno(), right.fileno(), deadline=deadline)
+        request = {
+            "schema": "Gate0IssuerSubmission.v1",
+            "operation": "consume",
+            "plan_id": expected.operation.plan_id,
+            "authorization": encode(b"synthetic"),
+            "proof": {},
+            "workload_token": "sensitive-synthetic-token",
+        }
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            serving = pool.submit(worker.run, server)
+            client.send(request)
+            client.send(request)  # Never read after the first terminal refusal.
+            outcome = IssuerOutcome.parse(client.receive())
+            assert outcome.kind is OutcomeKind.OWNER_REFUSED
+            assert outcome.ordinal == 1 and outcome.owner_namespace == "approvals"
+            assert len(worker.outcomes) == 1
+            with pytest.raises(services.ServiceOwnerRefused):
+                serving.result(timeout=5)
+        with pytest.raises(ServiceRefused):
+            worker.run(server)
+    finally:
+        left.close()
+        right.close()

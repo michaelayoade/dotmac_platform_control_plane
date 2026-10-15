@@ -67,6 +67,7 @@ __all__ = [
     "payload_digest",
     "recorded_outcome",
     "outcomes_for_event",
+    "outcomes_for_request",
     "list_unresolved_conflicts",
     "record_outcome",
     "resolve_conflict",
@@ -274,6 +275,24 @@ def recorded_outcome(
         )
     )
     return None if row is None else RecordedOutcome._from_row(row)
+
+
+def outcomes_for_request(
+    db: Session, *, request_id: UUID, withdrawal_ref: str
+) -> tuple[RecordedOutcome, ...]:
+    """Read only the actual durable outcome for an exact withdrawal identity."""
+    if type(request_id) is not UUID or not 0 < len(withdrawal_ref) <= 200:
+        raise ValueError("withdrawal_identity_refused")
+    rows = db.scalars(
+        select(ApprovalWithdrawalOutcome)
+        .where(
+            ApprovalWithdrawalOutcome.approval_request_id == request_id,
+            ApprovalWithdrawalOutcome.withdrawal_ref == withdrawal_ref,
+        )
+        .order_by(ApprovalWithdrawalOutcome.recorded_at)
+        .limit(3)
+    )
+    return tuple(RecordedOutcome._from_row(row) for row in rows)
 
 
 def outcomes_for_event(db: Session, event_id: UUID) -> tuple[RecordedOutcome, ...]:

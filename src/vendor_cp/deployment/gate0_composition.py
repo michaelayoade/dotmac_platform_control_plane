@@ -11,7 +11,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, timedelta
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, cast
@@ -192,6 +192,7 @@ class PhaseResult:
     lease_id: str
     authorization_document: bytes | None = None
     single_use_reference: str | None = None
+    issuer_receipt: bytes | None = None
 
     @property
     def readiness_accepted(self) -> Literal[False]:
@@ -221,6 +222,8 @@ class Gate0Composition:
     def _admit(
         self, phase: Literal["issue", "consume"], plan_id: UUID
     ) -> AdmissionExpectation:
+        from vendor_cp.deployment.gate0_window import AuthenticatedApprovalWithdrawal
+
         if self._admission is None or self._resolver is None:
             raise CompositionRefused()
         failed = False
@@ -247,6 +250,12 @@ class Gate0Composition:
                 raise CompositionRefused()
             self._verifier._require_open()
             return result
+        except AuthenticatedApprovalWithdrawal as caught:
+            if caught.denial.plan_id != plan_id or caught.denial.phase != phase:
+                raise CompositionRefused() from None
+            self._verifier._require_open()
+            caught.denial.freshness.require_open()
+            raise
         except Exception:
             failed = True
         if failed:
@@ -446,7 +455,75 @@ class Gate0Composition:
                 detached.encoded,
             )
 
-        return self._mutate(expected, None, transition)
+        committed = self._mutate(expected, None, transition)
+        return self._issue_receipt(invocation, expected, committed)
+
+    def _issue_receipt(
+        self,
+        invocation: RehearsalIssuerInvocation,
+        expected: AdmissionExpectation,
+        committed: PhaseResult,
+    ) -> PhaseResult:
+        command = invocation.command
+        evidence = invocation.harness_evidence_document
+        # A new read transaction observes the committed owner receipt. A failed
+        # read/cleanup cannot undo issuance and must remain incomplete.
+        from vendor_cp.deployment.issuer_receipts import (
+            ISSUE_AUTHORIZATION,
+            find_receipt,
+            request_fingerprint,
+        )
+
+        fingerprint = request_fingerprint(
+            ISSUE_AUTHORIZATION,
+            {
+                **dict(invocation.to_control_request()),
+                "harness_evidence_digest": "sha256:"
+                + hashlib.sha256(_canonical(evidence)).hexdigest(),
+            },
+        )
+        db: Session | None = None
+        receipt_bytes: bytes | None = None
+        failed = False
+        try:
+            db = self._sessions()
+            receipt = find_receipt(db, command.command_id)
+            if (
+                receipt is None
+                or receipt.verb != ISSUE_AUTHORIZATION
+                or receipt.request_fingerprint != fingerprint
+                or receipt.plan_id != command.plan_id
+                or receipt.approval_request_id != expected.approval_request_id
+                or receipt.control_ref != committed.authorization_id
+            ):
+                raise CompositionIncomplete()
+            receipt_bytes = _canonical(
+                {
+                    "id": str(receipt.id),
+                    "command_id": receipt.command_id,
+                    "verb": receipt.verb,
+                    "request_fingerprint": receipt.request_fingerprint,
+                    "plan_id": str(receipt.plan_id),
+                    "approval_request_id": str(receipt.approval_request_id),
+                    "control_ref": receipt.control_ref,
+                    "recorded_at": receipt.recorded_at.isoformat(),
+                }
+            )
+        except BaseException:
+            failed = True
+        finally:
+            if db is not None:
+                try:
+                    db.rollback()
+                except BaseException:
+                    failed = True
+                try:
+                    db.close()
+                except BaseException:
+                    failed = True
+        if failed or receipt_bytes is None:
+            raise CompositionIncomplete()
+        return replace(committed, issuer_receipt=receipt_bytes)
 
     def consume(self, plan_id: UUID, authorization_document: bytes) -> PhaseResult:
         from dotmac_deployment_control import RehearsalIssuerConsumptionStaged

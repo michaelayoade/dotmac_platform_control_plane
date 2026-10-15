@@ -270,3 +270,295 @@ def test_production_sessions_must_be_the_owner_reader_runtime_factory(
         with pytest.raises(ServiceRefused):
             services.IssuerWorker(startup)
         assert installs == []
+
+
+@pytest.fixture
+def refusal_association_case(monkeypatch):
+    """Synthetic identities isolate exact service attribution, not cryptography."""
+    from datetime import UTC, datetime
+
+    from dotmac_deployment_control import (
+        RehearsalIssuerIssuanceRefusalCode,
+        RehearsalIssuerIssuanceRefusedError,
+    )
+
+    from vendor_cp.deployment.gate0_framing import canonical
+    from vendor_cp.deployment.gate0_runtime import ProofRegistrationRefused
+
+    plan = UUID(int=1)
+    expected = SimpleNamespace(
+        operation=SimpleNamespace(plan_id=str(plan), phase="consume"),
+        window_digest=services.digest(b"synthetic-window"),
+    )
+    owner = b"synthetic-new-owner-proof"
+    new_digest = services.digest(owner)
+    old_digest = services.digest(b"synthetic-old-owner-proof")
+    old_bundle = canonical({"synthetic_bundle": "old"})
+    new_document = {"synthetic_bundle": "new"}
+    new_bundle = canonical(new_document)
+    registered = {old_digest, new_digest}
+    state = {"mode": "before-proof", "registrations": 0, "calls": 0}
+    worker_box = {}
+
+    def exported(selected):
+        if selected not in registered:
+            raise ProofRegistrationRefused()
+        return SimpleNamespace(context=expected.operation)
+
+    def register(produced, operation):
+        state["registrations"] += 1
+        if state["mode"] == "registration-failed":
+            raise ProofRegistrationRefused()
+        if state["mode"] == "registration-interrupted":
+            raise services.ServiceCancelled()
+        registered.add(new_digest)
+        return new_digest
+
+    def admit(*args):
+        if state["mode"] == "before-proof":
+            from vendor_cp.deployment.gate0_window import (
+                AuthenticatedApprovalWithdrawal,
+            )
+
+            raise AuthenticatedApprovalWithdrawal(
+                SimpleNamespace(
+                    window=SimpleNamespace(digest=expected.window_digest),
+                    plan_id=plan,
+                    phase=expected.operation.phase,
+                )
+            )
+        return expected
+
+    verifier = SimpleNamespace(
+        _require_open=lambda: None,
+        export_registered=exported,
+        _register=register,
+        _retained_bytes=0,
+        _key_id="synthetic-attester",
+        _public_key=b"synthetic",
+        _trust=None,
+    )
+
+    def refused():
+        raise RehearsalIssuerIssuanceRefusedError(
+            RehearsalIssuerIssuanceRefusalCode.ENVELOPE_MISMATCH,
+            "sensitive-owner-detail",
+        )
+
+    def mutate(*args):
+        state["calls"] += 1
+        worker = worker_box["worker"]
+        worker._admit(expected.operation.phase, plan)
+        if state["mode"] != "before-proof":
+            worker._proof(expected)
+        refused()
+
+    def standing(authorization, selected):
+        state["calls"] += 1
+        worker_box["worker"]._admit("consume", plan)
+        refused()
+
+    monkeypatch.setattr(
+        services,
+        "assemble_gate0_composition",
+        lambda **kwargs: SimpleNamespace(
+            issue=mutate, consume=mutate, standing=standing
+        ),
+    )
+    monkeypatch.setattr(
+        services,
+        "parse_bundle",
+        lambda document: (
+            SimpleNamespace(
+                control_document=canonical({"canonical_bytes": services.encode(owner)})
+            ),
+            object(),
+        ),
+    )
+    monkeypatch.setattr(services, "verify_observation", lambda **kwargs: None)
+    worker = services.IssuerWorker(
+        SimpleNamespace(
+            database_qualified=True,
+            actor_ref="synthetic-actor",
+            sessions=lambda: None,
+            require_frozen_window=False,
+            custody=None,
+            verifier=verifier,
+            admission=SimpleNamespace(
+                admit=admit,
+                window_record_digest=lambda packet: expected.window_digest,
+            ),
+            signer=None,
+            authorization_verifier=None,
+            authorization_ttl=None,
+            now=lambda: datetime.now(UTC),
+        )
+    )
+    worker_box["worker"] = worker
+    worker._bundles = {old_digest: old_bundle, new_digest: new_bundle}
+    worker._bundle_bytes = len(old_bundle) + len(new_bundle)
+
+    def request(operation="consume", selected=old_digest):
+        value = {
+            "schema": "Gate0IssuerSubmission.v1",
+            "operation": operation,
+            "workload_token": "sensitive-synthetic-token",
+        }
+        if operation == "standing":
+            value.update(
+                authorization=services.encode(b"synthetic-authorization"),
+                evidence_digest=selected,
+            )
+        elif operation == "issue":
+            value.update(
+                plan_id=str(plan), command_id="synthetic-command", proof=new_document
+            )
+        else:
+            value.update(
+                plan_id=str(plan),
+                authorization=services.encode(b"synthetic-authorization"),
+                proof=new_document,
+            )
+        return value
+
+    return SimpleNamespace(
+        worker=worker,
+        state=state,
+        expected=expected,
+        request=request,
+        old_digest=old_digest,
+        new_digest=new_digest,
+        old_bundle=old_bundle,
+        new_bundle=new_bundle,
+        registered=registered,
+    )
+
+
+def assert_terminal_exact(case, request, proof_digest, bundle_digest):
+    from vendor_cp.deployment.gate0_collection import request_identity
+    from vendor_cp.deployment.gate0_framing import canonical
+
+    class CountedChannel(SyntheticManagementChannel):
+        reads = 0
+
+        def receive(self, allow_eof=False):
+            self.reads += 1
+            return super().receive(allow_eof)
+
+    identity = request_identity(request)
+    channel = CountedChannel([request, dict(request)])
+    with pytest.raises(services.ServiceOwnerRefused) as caught:
+        case.worker.run(channel)
+    outcome = caught.value.outcome
+    assert outcome.ordinal == 1 and outcome.request_digest == identity
+    assert (
+        outcome.proof_digest == proof_digest and outcome.bundle_digest == bundle_digest
+    )
+    assert channel.reads == 1 and len(channel.output) == 1
+    assert b"sensitive" not in canonical(channel.output[0])
+    assert case.worker._current_proof_identity is None
+    assert case.worker._request is None
+    with pytest.raises(ServiceRefused):
+        case.worker.run(channel)
+    assert channel.reads == 1
+    return outcome
+
+
+def test_standing_refusal_keeps_selected_earlier_same_phase_proof(
+    refusal_association_case,
+):
+    case = refusal_association_case
+    assert_terminal_exact(
+        case,
+        case.request("standing"),
+        case.old_digest,
+        services.digest(case.old_bundle),
+    )
+    assert case.state["registrations"] == 0
+
+
+@pytest.mark.parametrize("operation", ["issue", "consume"])
+def test_pre_registration_refusal_cannot_acquire_historical_identity(
+    refusal_association_case, operation
+):
+    case = refusal_association_case
+    case.expected.operation.phase = operation
+    # Simulate the previous frame's identity; accepted-frame reset must erase it.
+    case.worker._current_proof_identity = (
+        case.new_digest,
+        services.digest(case.new_bundle),
+    )
+    outcome = assert_terminal_exact(case, case.request(operation), None, None)
+    assert outcome.owner_namespace == "approvals"
+    assert case.state["registrations"] == 0
+
+
+def test_new_registration_refusal_uses_only_current_proof(refusal_association_case):
+    case = refusal_association_case
+    case.state["mode"] = "after-proof"
+    del case.worker._bundles[case.new_digest]
+    case.registered.remove(case.new_digest)
+    assert_terminal_exact(
+        case, case.request(), case.new_digest, services.digest(case.new_bundle)
+    )
+    assert case.state["registrations"] == 1
+
+
+@pytest.mark.parametrize("selection", ["invalid", "unregistered", "missing-bundle"])
+def test_invalid_standing_selection_cannot_borrow_retained_identity(
+    refusal_association_case, selection
+):
+    case = refusal_association_case
+    selected = (
+        "sha256:" + "z" * 64 if selection == "invalid" else services.digest(b"unknown")
+    )
+    if selection == "missing-bundle":
+        selected = case.old_digest
+        del case.worker._bundles[selected]
+    channel = SyntheticManagementChannel([case.request("standing", selected)])
+    with pytest.raises(ValueError):
+        case.worker.run(channel)
+    assert channel.output == [] and case.state["calls"] == 0
+    assert case.worker._current_proof_identity is None
+
+
+def test_exact_replay_retains_exact_current_digest(refusal_association_case):
+    from dotmac_deployment_control import RehearsalIssuerIssuanceRefusalCode
+
+    case = refusal_association_case
+    case.state["mode"] = "after-proof"
+    outcome = assert_terminal_exact(
+        case, case.request(), case.new_digest, services.digest(case.new_bundle)
+    )
+    assert (
+        outcome.owner_code == RehearsalIssuerIssuanceRefusalCode.ENVELOPE_MISMATCH.value
+    )
+    assert case.state["registrations"] == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "registration-failed",
+        "registration-interrupted",
+        "retention-budget",
+        "bundle-conflict",
+    ],
+)
+def test_failed_proof_registration_or_retention_never_sets_current_identity(
+    refusal_association_case, failure
+):
+    case = refusal_association_case
+    case.state["mode"] = failure
+    if failure == "retention-budget":
+        del case.worker._bundles[case.new_digest]
+        case.worker._bundle_bytes = 512 * 1024
+    if failure == "bundle-conflict":
+        case.worker._bundles[case.new_digest] = b"different-exact-bundle"
+    channel = SyntheticManagementChannel([case.request(), case.request()])
+    with pytest.raises((ValueError, services.ServiceCancelled)):
+        case.worker.run(channel)
+    assert channel.output == [] and case.worker._current_proof_identity is None
+    assert next(channel.requests)["operation"] == "consume"
+    with pytest.raises(ServiceRefused):
+        case.worker.run(channel)

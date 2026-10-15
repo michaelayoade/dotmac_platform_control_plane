@@ -56,6 +56,13 @@ class Owner:
 #: an owner declared without a command both fail.
 OWNERS: Final[tuple[Owner, ...]] = (
     Owner(
+        "gate0 collect-e",
+        "vendor_cp.deployment.gate0_collection",
+        "run_installed_collection",
+        True,
+        "private finite A/B collection; protected launch integration pending",
+    ),
+    Owner(
         "gate0 issuer-run",
         "vendor_cp.deployment.gate0_services",
         "run_installed_issuer",

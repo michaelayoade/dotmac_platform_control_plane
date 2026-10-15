@@ -561,6 +561,7 @@ def build_parser() -> _Parser:
     gate0 = groups.add_parser("gate0", help="finite protected service adapters")
     gate0_sub = gate0.add_subparsers(dest="name", parser_class=_Parser)
     _command(gate0_sub, "gate0", "issuer-run", "run one finite issuer window")
+    _command(gate0_sub, "gate0", "collect-e", "collect private finite E evidence")
     _command(
         gate0_sub, "gate0", "attester-session", "serve one fixed SSH proof exchange"
     )
@@ -636,6 +637,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command not in by_command():
         parser.error(f"{command!r} has no declared owner")
+
+    if command == "gate0 collect-e":
+        from vendor_cp.cli.commands import gate0_collect_e
+
+        return gate0_collect_e(args)
 
     if command in {
         "gate0 issuer-run",

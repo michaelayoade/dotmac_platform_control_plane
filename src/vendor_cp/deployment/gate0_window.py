@@ -459,6 +459,43 @@ class WindowClockOrigin:
             raise ProviderRefused()
 
 
+class OwnerWindowWithdrawal(ProviderRefused):
+    """Detached exact owner denial after confirmed read-transaction cleanup.
+
+    This carries no approved binding. Only the fixed JWT admission provider
+    may classify it as an authenticated attempted use.
+    """
+
+    def __init__(
+        self,
+        *,
+        window: FrozenIssuerWindow,
+        plan_id: UUID,
+        request_id: UUID,
+        content_digest: str,
+        phase: Literal["issue", "consume"],
+        freshness: WindowFreshness,
+    ) -> None:
+        ValueError.__init__(self, "gate0_owner_window_withdrawn")
+        self.window, self.plan_id, self.request_id = window, plan_id, request_id
+        self.content_digest, self.phase, self.freshness = (
+            content_digest,
+            phase,
+            freshness,
+        )
+
+
+class AuthenticatedApprovalWithdrawal(ProviderRefused):
+    """Fixed provider verified JWT and exact original denial coordinates.
+
+    Trusted source contract, not an unforgeable Python capability or grant.
+    """
+
+    def __init__(self, denial: OwnerWindowWithdrawal) -> None:
+        ValueError.__init__(self, "gate0_authenticated_approval_withdrawn")
+        self.denial = denial
+
+
 class OwnerWindowReader:
     """Current public Control snapshot plus the existing exact-content hold.
 
@@ -531,6 +568,11 @@ class OwnerWindowReader:
     ) -> ApprovedWindowBinding:
         from dotmac_deployment_control import get_plan, get_target
 
+        from vendor_cp.approvals.adapter import (
+            ApprovalHoldRefusal,
+            ApprovalNotHeld,
+            request_identity_evidence,
+        )
         from vendor_cp.deployment.approval_barrier import held_transition
         from vendor_cp.deployment.protected_rehearsal_issuer import (
             SUBJECT_TYPE,
@@ -548,6 +590,7 @@ class OwnerWindowReader:
         db: Session | None = None
         result: ApprovedWindowBinding | None = None
         window_deadline = 0.0
+        denial: OwnerWindowWithdrawal | None = None
         try:
             db = self._runtime.platform_session_factory()
             if db.get_bind().dialect.name != "postgresql":
@@ -631,14 +674,37 @@ class OwnerWindowReader:
 
             if plan.approval_decision_ref is None or plan.plan_digest is None:
                 raise ProviderRefused()
-            result = held_transition(
-                db,
-                request_id=UUID(plan.approval_decision_ref),
-                subject_type=SUBJECT_TYPE,
-                subject_id=issuer_approval_subject(plan),
-                content_digest=plan.plan_digest,
-                transition=checked,
-            )
+            try:
+                result = held_transition(
+                    db,
+                    request_id=UUID(plan.approval_decision_ref),
+                    subject_type=SUBJECT_TYPE,
+                    subject_id=issuer_approval_subject(plan),
+                    content_digest=plan.plan_digest,
+                    transition=checked,
+                )
+            except ApprovalNotHeld as caught:
+                if caught.code is not ApprovalHoldRefusal.WITHDRAWN:
+                    raise
+                identity = request_identity_evidence(
+                    db, UUID(plan.approval_decision_ref)
+                )
+                if (
+                    identity.subject_type != SUBJECT_TYPE
+                    or identity.subject_id != issuer_approval_subject(plan)
+                    or identity.content_digest != plan.plan_digest
+                    or identity.policy_code != plan.approval_policy_code
+                    or identity.policy_version != plan.approval_policy_version
+                ):
+                    raise ProviderRefused() from None
+                denial = OwnerWindowWithdrawal(
+                    window=window,
+                    plan_id=plan_id,
+                    request_id=UUID(plan.approval_decision_ref),
+                    content_digest=plan.plan_digest,
+                    phase=phase,
+                    freshness=freshness,
+                )
             self._open()
             if time.monotonic() >= window_deadline:
                 raise ProviderRefused()
@@ -647,12 +713,21 @@ class OwnerWindowReader:
         finally:
             if db is not None:
                 try:
+                    # No mutation is made here; explicitly confirm rollback and
+                    # close before any owner denial can become evidence.
+                    db.rollback()
+                except BaseException:
+                    failed = True
+                try:
                     db.close()
-                except Exception:
+                except BaseException:
                     failed = True
         if failed:
             raise ProviderRefused()
         self._open()
+        if denial is not None:
+            denial.freshness.require_open()
+            raise denial
         if result is None or time.monotonic() >= window_deadline:
             raise ProviderRefused()
         return result
