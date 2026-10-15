@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
+from typing import cast
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import (
@@ -197,12 +198,18 @@ class RunnerSshInstallation:
         if (
             not isinstance(certificate, SSHCertificate)
             or certificate.public_bytes() != raw
-            or not isinstance(certificate.public_key(), Ed25519PublicKey)
-            or not isinstance(certificate.signature_key(), Ed25519PublicKey)
             or not hasattr(key, "public_key")
-            or not isinstance(key.public_key(), Ed25519PublicKey)
-            or ssh_public_fingerprint(key.public_key())
-            != ssh_public_fingerprint(certificate.public_key())
+        ):
+            raise ServiceRefused()
+        certificate_key = certificate.public_key()
+        certificate_ca = certificate.signature_key()
+        private_public = key.public_key()
+        if (
+            not isinstance(certificate_key, Ed25519PublicKey)
+            or not isinstance(certificate_ca, Ed25519PublicKey)
+            or not isinstance(private_public, Ed25519PublicKey)
+            or ssh_public_fingerprint(private_public)
+            != ssh_public_fingerprint(certificate_key)
             or not certificate.valid_after
             <= datetime.now(UTC).timestamp()
             < certificate.valid_before
@@ -266,30 +273,38 @@ def _command(installation: RunnerSshInstallation, *, attester: bool) -> list[str
 
 def _cleanup(processes: list[subprocess.Popen[bytes]], deadline: float) -> None:
     """One shared <=2s cleanup tail, including every signing child."""
-    end = min(deadline, monotonic() + 2) if monotonic() < deadline else monotonic() + 2
-    for process in processes:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-    # Kill every remaining group before waiting, so N children cannot multiply
-    # the bounded tail. wait() is always against that same absolute end.
-    for process in processes:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    started = monotonic()
+    end = min(deadline, started + 2) if started < deadline else started + 2
+    _cleanup_until(processes, end)
+
+
+def _cleanup_until(processes: list[subprocess.Popen[bytes]], end: float) -> None:
+    """Internal shared end; attempt every owned resource before refusing."""
     failed = False
+    # Signal all remaining groups before any wait. Reaped fixed-binary children
+    # must not signal an unrelated process group that later reuses their PID.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for process in processes:
+            if process.returncode is not None:
+                continue
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                pass
+            except BaseException:
+                failed = True
     for process in processes:
         try:
             process.wait(timeout=max(0, end - monotonic()))
-        except subprocess.TimeoutExpired:
+        except BaseException:
             # A still-unreaped child is a failure, never completion evidence.
             failed = True
-        finally:
-            for pipe in (process.stdin, process.stdout, process.stderr):
-                if pipe is not None:
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None:
+                try:
                     pipe.close()
+                except BaseException:
+                    failed = True
     if failed:
         raise ServiceRefused()
 
@@ -310,6 +325,7 @@ class _OwnedClient:
         self._processes: list[subprocess.Popen[bytes]] = []
         self._completion: RunnerClientCompletion | None = None
         self._closed = False
+        self._cleanup_failed = False
         try:
             self.certificate = installation.qualify_files()
             self._process = self._spawn(_command(installation, attester=attester))
@@ -371,9 +387,7 @@ class _OwnedClient:
         return self._completion
 
     def close(self) -> None:
-        if not self._closed:
-            self._closed = True
-            _cleanup(self._processes, self.installation.deadline)
+        _close_owned_clients((self,))
 
     def __enter__(self) -> _OwnedClient:
         return self
@@ -408,6 +422,43 @@ class OwnedIssuerSession(_OwnedClient):
             raise
 
 
+def _close_owned_clients(sessions: tuple[_OwnedClient, ...]) -> None:
+    active: list[_OwnedClient] = []
+    processes: list[subprocess.Popen[bytes]] = []
+    failed = False
+    for session in sessions:
+        if session._closed:
+            failed |= session._cleanup_failed
+            continue
+        # Latch every owner before attempting any signal/wait/stream close.
+        # A failed attempt is terminal and never re-arms a PID for another kill.
+        session._closed = True
+        active.append(session)
+        for process in session._processes:
+            if not any(process is retained for retained in processes):
+                processes.append(process)
+    if active:
+        deadline = min(session.installation.deadline for session in active)
+        try:
+            _cleanup(processes, deadline)
+        except BaseException:
+            for session in active:
+                session._cleanup_failed = True
+            failed = True
+    if failed:
+        raise ServiceRefused()
+
+
+def close_owned_sessions(*sessions: OwnedIssuerSession | OwnedAttesterSession) -> None:
+    """Close actual owners with one retained-deadline cleanup budget; no retry."""
+    if any(
+        type(session) not in (OwnedIssuerSession, OwnedAttesterSession)
+        for session in sessions
+    ):
+        raise ServiceRefused()
+    _close_owned_clients(sessions)
+
+
 def validate_challenge(
     frame: object,
     operation: AdmittedOperation,
@@ -432,7 +483,8 @@ def validate_challenge(
         or document["context"] != asdict(operation)
         or document["challenge_id"] != frame["challenge_id"]
         or any(
-            type(document[key]) is not str or _HEX.fullmatch(document[key]) is None
+            type(document[key]) is not str
+            or _HEX.fullmatch(cast(str, document[key])) is None
             for key in ("instance_id", "challenge_id", "nonce")
         )
         or type(document["expires_at"]) is not str
@@ -450,7 +502,7 @@ def validate_challenge(
         or not wall < expiry <= min(expires_at, wall + timedelta(seconds=30))
     ):
         raise ServiceRefused()
-    return raw, document["challenge_id"], expiry
+    return raw, cast(str, document["challenge_id"]), expiry
 
 
 class OwnedAttesterSession(_OwnedClient):
@@ -568,6 +620,8 @@ class OwnedAttesterSession(_OwnedClient):
         authorization: bytes | None = None,
     ) -> bytes:
         try:
+            certificate_key = self.certificate.public_key()
+            certificate_ca = self.certificate.signature_key()
             if (
                 self._used
                 or type(operation) is not AdmittedOperation
@@ -584,10 +638,11 @@ class OwnedAttesterSession(_OwnedClient):
                 )
                 or digest(self.certificate.public_bytes())
                 != operation.certificate_digest
-                or ssh_public_fingerprint(self.certificate.public_key())
+                or not isinstance(certificate_key, Ed25519PublicKey)
+                or not isinstance(certificate_ca, Ed25519PublicKey)
+                or ssh_public_fingerprint(certificate_key)
                 != operation.controller_fingerprint
-                or ssh_public_fingerprint(self.certificate.signature_key())
-                != operation.ca_fingerprint
+                or ssh_public_fingerprint(certificate_ca) != operation.ca_fingerprint
             ):
                 raise ServiceRefused()
             self._used = True

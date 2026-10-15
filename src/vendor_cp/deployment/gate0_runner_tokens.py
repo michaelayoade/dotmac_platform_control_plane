@@ -176,7 +176,10 @@ class InstalledJobTokens:
         ):
             raise ProviderRefused()
         return cls(
-            tuple(c.projection for c in installation.cases), host, path, credential
+            (installation.cases[0].projection, installation.cases[1].projection),
+            host,
+            path,
+            credential,
         )
 
     def next(self, case: RunnerProjectionCase) -> str:

@@ -25,7 +25,8 @@ Collector and receiver UIDs are positive and distinct. The actual real/effective
 UID must match the collector. The executable pin must match Linux
 `/proc/self/exe`. `source_files` has exactly `gate0_runner_installation`,
 `gate0_runner_tokens`, `gate0_runner_ssh`, `gate0_runner_handoff`,
-`gate0_runner_collector_handoff`, and `gate0_collection`: root-protected file
+`gate0_runner_collector_handoff`, `gate0_runner_controller`, and
+`gate0_collection`: root-protected file
 pins for the corresponding installed Python source files alongside the loader. The source revision is 40 lowercase
 hex; the image is a SHA256 digest. Root installation qualification binds these
 installed coordinates to its accepted native receipt; source makes no claim to

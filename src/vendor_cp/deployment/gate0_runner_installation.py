@@ -414,6 +414,7 @@ class InstalledRunnerCollection:
             "gate0_runner_ssh",
             "gate0_runner_handoff",
             "gate0_runner_collector_handoff",
+            "gate0_runner_controller",
             "gate0_collection",
         )
         source_files = _fields(doc["source_files"], " ".join(source_names))
@@ -479,8 +480,9 @@ class InstalledRunnerCollection:
         wall, elapsed = datetime.now(UTC), time.monotonic()
         if type(doc["cases"]) is not list or len(doc["cases"]) != 2:
             raise ProviderRefused()
-        cases = tuple(
-            _case(value, doc["collector_uid"], wall, elapsed) for value in doc["cases"]
+        cases = (
+            _case(doc["cases"][0], doc["collector_uid"], wall, elapsed),
+            _case(doc["cases"][1], doc["collector_uid"], wall, elapsed),
         )
         for case, kind in zip(
             cases, ("consume_replay", "withdrawal_later_use"), strict=True
@@ -522,7 +524,7 @@ class InstalledRunnerCollection:
         from vendor_cp.deployment.gate0_runner_projection import RunnerProjectionClient
 
         # Validates exact HTTPS origin only; no socket/approval/freshness created.
-        RunnerProjectionClient(_text(doc["origin"]), tuple(c.projection for c in cases))
+        RunnerProjectionClient(_text(doc["origin"]), (a.projection, b.projection))
         result = cls(
             doc["campaign_digest"],
             doc["collector_uid"],

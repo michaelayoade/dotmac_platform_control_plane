@@ -259,6 +259,7 @@ def installed_model(window_document, monkeypatch):
         "gate0_runner_ssh",
         "gate0_runner_handoff",
         "gate0_runner_collector_handoff",
+        "gate0_runner_controller",
         "gate0_collection",
     )
     descriptor = {

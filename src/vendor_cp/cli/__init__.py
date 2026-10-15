@@ -562,6 +562,8 @@ def build_parser() -> _Parser:
     gate0_sub = gate0.add_subparsers(dest="name", parser_class=_Parser)
     _command(gate0_sub, "gate0", "issuer-run", "run one finite issuer window")
     _command(gate0_sub, "gate0", "collect-e", "collect private finite E evidence")
+    _command(gate0_sub, "gate0", "handoff-holder", "forward fixed root evidence")
+    _command(gate0_sub, "gate0", "handoff-receiver", "receive fixed root evidence")
     _command(
         gate0_sub, "gate0", "attester-session", "serve one fixed SSH proof exchange"
     )
@@ -642,6 +644,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         from vendor_cp.cli.commands import gate0_collect_e
 
         return gate0_collect_e(args)
+
+    if command in {"gate0 handoff-holder", "gate0 handoff-receiver"}:
+        try:
+            from vendor_cp.deployment import gate0_runner_handoff
+        except Exception:
+            print("GATE0_HANDOFF_REFUSED", file=sys.stderr)
+            return int(ExitCode.REFUSED)
+        if command == "gate0 handoff-holder":
+            return gate0_runner_handoff.run_installed_handoff_holder()
+        return gate0_runner_handoff.run_installed_handoff_receiver()
 
     if command in {
         "gate0 issuer-run",

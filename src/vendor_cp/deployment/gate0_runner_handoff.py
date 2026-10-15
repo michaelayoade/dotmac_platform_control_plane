@@ -1546,3 +1546,27 @@ OwnedHandoffIO = _OwnedIO
 read_protected_handoff = _protected_bytes
 measure_handoff_process = _process
 require_handoff_peer = _require_peer
+
+
+def run_installed_handoff_holder() -> int:
+    """Reserved binary stdout belongs only to the fixed installed holder."""
+    import sys
+
+    try:
+        FixedLaunchHolder.from_installed().run()
+    except Exception:
+        print("GATE0_HANDOFF_REFUSED", file=sys.stderr)
+        return 3
+    return 0
+
+
+def run_installed_handoff_receiver() -> int:
+    """Serve only the receiver's protected descriptor and authenticated stdin."""
+    import sys
+
+    try:
+        InstalledHandoffReceiver.from_installed().run()
+    except Exception:
+        print("GATE0_HANDOFF_REFUSED", file=sys.stderr)
+        return 3
+    return 0

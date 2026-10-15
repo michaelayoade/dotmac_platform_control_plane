@@ -23,6 +23,14 @@ incomplete. Every signing/SSH child belongs to the same owner and cleanup budget
 no retry or new deadline is created. Close cancels process groups and reaps them
 under a common maximum two-second cleanup tail.
 
+`close_owned_sessions(*sessions)` accepts only concrete issuer/attester owners.
+It closes their aggregate children under one shared cleanup end derived from the
+retained installation deadlines, including every signal, wait and stream-close
+attempt after a failure. Owners become closed before cleanup starts; failure is
+sticky and a repeated close refuses without retrying or signalling their PIDs.
+Already reaped children are never signalled. This helper accepts no process,
+deadline, reset or broader process-tree authority from the controller.
+
 SSH uses literal installed IP/source/port/user, explicit identity/certificate,
 two exact pinned Ed25519 known-host aliases, strict host-key checking and a null
 configuration file. The command vector ends at the fixed destination and sends

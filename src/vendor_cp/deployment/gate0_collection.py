@@ -323,11 +323,25 @@ class FramedCaseCollector:
 
 
 def run_installed_collection() -> int:
-    """No caller flag/file may substitute for protected launcher integration."""
+    """Run only the fixed protected installation; never accept caller overrides."""
     import sys
 
-    print("GATE0_COLLECTION_UNAVAILABLE", file=sys.stderr)
-    return 3
+    try:
+        from vendor_cp.deployment.gate0_runner_controller import (
+            InstalledCollectionController,
+        )
+        from vendor_cp.deployment.gate0_runner_installation import (
+            InstalledRunnerCollection,
+        )
+
+        InstalledCollectionController(InstalledRunnerCollection.from_installed()).run()
+    except Exception:
+        # Installation and transport errors may contain credentials or private
+        # coordinates. Their text never crosses the installed CLI boundary.
+        print("GATE0_COLLECTION_UNAVAILABLE", file=sys.stderr)
+        return 3
+    print("GATE0_COLLECTION_COMPLETE")
+    return 0
 
 
 @dataclass(frozen=True, slots=True)

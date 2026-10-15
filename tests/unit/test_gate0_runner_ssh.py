@@ -21,11 +21,13 @@ from vendor_cp.deployment.gate0_framing import FramedChannel, ServiceRefused, ca
 from vendor_cp.deployment.gate0_observation import encode
 from vendor_cp.deployment.gate0_runner_ssh import (
     OwnedAttesterSession,
+    OwnedIssuerSession,
     RunnerFilePin,
     RunnerSshEndpoint,
     RunnerSshInstallation,
     _cleanup,
     _command,
+    close_owned_sessions,
     validate_challenge,
 )
 from vendor_cp.deployment.gate0_runtime import AdmittedOperation
@@ -203,6 +205,7 @@ def owned_fixture(code: str, deadline: float) -> OwnedAttesterSession:
     owner._process = process
     owner._processes = [process]
     owner._closed = False
+    owner._cleanup_failed = False
     owner._completion = None
     owner._bundle = None
     owner._invocation_id = None
@@ -278,6 +281,181 @@ def test_common_cleanup_reaps_all_owned_children_after_deadline() -> None:
     assert monotonic() - started < 2.5
     assert all(child.returncode is not None for child in children)
     assert all(child.stdin.closed and child.stdout.closed for child in children)
+
+
+def test_public_aggregate_cleanup_reaps_actual_owned_children_once() -> None:
+    started = monotonic()
+    owners = [
+        owned_fixture("import time; time.sleep(60)", started - 1) for _ in range(3)
+    ]
+    close_owned_sessions(*owners)
+    assert monotonic() - started < 2.5
+    assert all(owner._closed and not owner._cleanup_failed for owner in owners)
+    assert all(owner._process.returncode is not None for owner in owners)
+    assert all(
+        owner._process.stdin.closed and owner._process.stdout.closed for owner in owners
+    )
+    close_owned_sessions(*owners)
+
+
+@pytest.mark.parametrize("failure", [None, "term", "kill", "wait", "pipe"])
+@pytest.mark.parametrize("original_deadline", [90.0, 100.5])
+def test_aggregate_cleanup_shares_one_end_attempts_all_and_retains_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+    original_deadline: float,
+) -> None:
+    clock = [100.0]
+    events = []
+
+    class Pipe:
+        def __init__(self, label: str) -> None:
+            self.label = label
+
+        def close(self) -> None:
+            events.append(("close", self.label))
+            if failure == "pipe" and self.label == "first-stdin":
+                raise OSError("private fixture detail")
+
+    class Child:
+        def __init__(self, pid: int, label: str) -> None:
+            self.pid = pid
+            self.returncode = None
+            self.stdin = Pipe(label + "-stdin")
+            self.stdout = Pipe(label + "-stdout")
+            self.stderr = Pipe(label + "-stderr")
+
+        def wait(self, *, timeout: float) -> int:
+            events.append(("wait", self.pid, timeout))
+            clock[0] += 0.75
+            if failure == "wait" and self.pid == 101:
+                raise subprocess.TimeoutExpired("fixed-test-child", timeout)
+            self.returncode = -signal.SIGKILL
+            return self.returncode
+
+    children = [Child(101, "first"), Child(102, "second"), Child(103, "third")]
+    owners = []
+    for kind, child in zip(
+        (OwnedIssuerSession, OwnedAttesterSession, OwnedAttesterSession),
+        children,
+        strict=True,
+    ):
+        owner = object.__new__(kind)
+        owner._closed = False
+        owner._cleanup_failed = False
+        owner._processes = [child]
+        owner.installation = SimpleNamespace(deadline=original_deadline)
+        owners.append(owner)
+
+    def signal_child(pid: int, sig: int) -> None:
+        assert all(owner._closed for owner in owners)
+        events.append(("signal", pid, sig))
+        if pid == 101 and (failure, sig) in (
+            ("term", signal.SIGTERM),
+            ("kill", signal.SIGKILL),
+        ):
+            raise PermissionError("private fixture detail")
+
+    monkeypatch.setattr(gate0_runner_ssh, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(gate0_runner_ssh.os, "killpg", signal_child)
+    if failure is None:
+        close_owned_sessions(*owners, owners[0])
+    else:
+        with pytest.raises(ServiceRefused, match="gate0_service_refused"):
+            close_owned_sessions(*owners, owners[0])
+    assert [event for event in events if event[0] == "wait"] == (
+        [("wait", 101, 2.0), ("wait", 102, 1.25), ("wait", 103, 0.5)]
+        if original_deadline < 100.0
+        else [("wait", 101, 0.5), ("wait", 102, 0), ("wait", 103, 0)]
+    )
+    assert len([event for event in events if event[0] == "signal"]) == 6
+    assert len([event for event in events if event[0] == "close"]) == 9
+    assert all(owner._cleanup_failed is (failure is not None) for owner in owners)
+    retained = tuple(events)
+    if failure is None:
+        close_owned_sessions(*owners)
+    else:
+        with pytest.raises(ServiceRefused):
+            close_owned_sessions(*owners)
+    assert tuple(events) == retained  # No PID reuse/retry or fresh cleanup tail.
+
+
+@pytest.mark.parametrize(
+    "invalid", [object(), object.__new__(gate0_runner_ssh._OwnedClient)]
+)
+def test_aggregate_cleanup_rejects_every_wrong_owner_before_acting(
+    monkeypatch: pytest.MonkeyPatch, invalid: object
+) -> None:
+    valid = object.__new__(OwnedIssuerSession)
+    valid._closed = False
+    valid._cleanup_failed = False
+    monkeypatch.setattr(
+        gate0_runner_ssh,
+        "_cleanup",
+        lambda *args: pytest.fail("cleanup began before validating all owners"),
+    )
+    with pytest.raises(ServiceRefused):
+        close_owned_sessions(valid, invalid)
+    assert not valid._closed
+
+
+def test_already_closed_owner_and_reaped_child_never_signal_reused_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    closed = object.__new__(OwnedIssuerSession)
+    closed._closed = True
+    closed._cleanup_failed = False
+    closed._processes = [SimpleNamespace(pid=123, returncode=None)]
+    # A successful measured child may be reaped before its first owner close.
+    reaped = object.__new__(OwnedAttesterSession)
+    reaped._closed = False
+    reaped._cleanup_failed = False
+    reaped.installation = SimpleNamespace(deadline=monotonic() + 5)
+    reaped._processes = [
+        SimpleNamespace(
+            pid=456,
+            returncode=0,
+            stdin=None,
+            stdout=None,
+            stderr=None,
+            wait=lambda *, timeout: calls.append("wait-reaped") or 0,
+        )
+    ]
+    monkeypatch.setattr(
+        gate0_runner_ssh.os,
+        "killpg",
+        lambda *args: pytest.fail("signalled closed/reaped PID"),
+    )
+    close_owned_sessions(closed, reaped)
+    assert calls == ["wait-reaped"]
+    close_owned_sessions(closed, reaped)
+    assert calls == ["wait-reaped"]
+
+
+def test_prior_closed_failure_still_cleans_other_active_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed = object.__new__(OwnedIssuerSession)
+    failed._closed = True
+    failed._cleanup_failed = True
+    active = object.__new__(OwnedAttesterSession)
+    active._closed = False
+    active._cleanup_failed = False
+    active._processes = []
+    active.installation = SimpleNamespace(deadline=123.0)
+    calls = []
+
+    def clean(processes, deadline):
+        assert active._closed
+        calls.append((processes, deadline))
+
+    monkeypatch.setattr(gate0_runner_ssh, "_cleanup", clean)
+    with pytest.raises(ServiceRefused):
+        close_owned_sessions(failed, active)
+    assert calls == [([], 123.0)]
+    assert active._closed and not active._cleanup_failed
+    assert failed._cleanup_failed
 
 
 def test_binary_pin_uses_explicit_large_bound(

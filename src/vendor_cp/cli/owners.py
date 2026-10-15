@@ -60,7 +60,21 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "vendor_cp.deployment.gate0_collection",
         "run_installed_collection",
         True,
-        "private finite A/B collection; protected launch integration pending",
+        "private finite A/B collection from the fixed protected installation",
+    ),
+    Owner(
+        "gate0 handoff-holder",
+        "vendor_cp.deployment.gate0_runner_handoff",
+        "run_installed_handoff_holder",
+        True,
+        "campaign-only Mac holder; fixed authenticated root-evidence forwarding",
+    ),
+    Owner(
+        "gate0 handoff-receiver",
+        "vendor_cp.deployment.gate0_runner_handoff",
+        "run_installed_handoff_receiver",
+        True,
+        "single-use constrained SSH handoff into the actual isolated collector",
     ),
     Owner(
         "gate0 issuer-run",

@@ -1148,7 +1148,7 @@ __all__ = [
 
 
 def gate0_collect_e(args: argparse.Namespace) -> int:
-    """Private collection stays unavailable until protected launch integration."""
+    """Delegate private collection to its fixed protected installation owner."""
     from vendor_cp.deployment.gate0_collection import run_installed_collection
 
     return run_installed_collection()

@@ -1,9 +1,12 @@
 # Private Gate0 E collection
 
-`dotmac-platform gate0 collect-e` is installed but returns unavailable. The
-protected two-case launcher, authenticated SSH-client terminal observation,
-root cleanup export and protected input binding must be integrated before it
-can execute. Source qualification does not close E.
+`dotmac-platform gate0 collect-e` delegates to the fixed protected installation
+and finite two-case controller. Missing or invalid installation inputs return
+unavailable without private diagnostics. The controller composes actual owned
+SSH clients, workload-authenticated projections and the constrained root handoff;
+case B activates only after the completed A join and sent acknowledgement.
+Installed host qualification and the actual protected campaign remain required.
+Successful collection does not close E.
 
 `Gate0CollectedEvidence.v1` is private prepublication evidence. Its fixed fields
 always report `readiness_accepted=false`, with producer, prerequisites, root
