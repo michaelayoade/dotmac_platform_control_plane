@@ -13,7 +13,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from vendor_cp.deployment import gate0_e_github as _mechanics
@@ -78,7 +78,7 @@ def _path(value: object) -> str:
 
 def _list(value: object, minimum: int, maximum: int) -> list[Any]:
     _require(type(value) is list and minimum <= len(value) <= maximum)
-    return value
+    return cast(list[Any], value)
 
 
 def _repo(value: object, key: str) -> dict[str, Any]:
@@ -375,7 +375,9 @@ class InstalledHistoricalSourceReads:
         if "/contents/" in path:
             content = value.get("content")
             _require(type(content) is str and len(content) <= 750000)
-            decoded = base64.b64decode(content.replace("\n", ""), validate=True)
+            decoded = base64.b64decode(
+                cast(str, content).replace("\n", ""), validate=True
+            )
             _require(len(decoded) <= _CAP)
             size = value.get("size")
             _require(type(size) is int and size >= 0)
@@ -443,7 +445,10 @@ class InstalledHistoricalSourceReads:
             for item in _list(value.get("jobs"), 0, 100):
                 item = _obj(item)
                 identifier = _id(item.get("id"))
-                job = {"id": identifier, "run_id": _id(item.get("run_id"))}
+                job: dict[str, Any] = {
+                    "id": identifier,
+                    "run_id": _id(item.get("run_id")),
+                }
                 if "run_attempt" in item:
                     job["run_attempt"] = _id(item["run_attempt"])
                 if identifier in required_ids:
@@ -544,7 +549,7 @@ class InstalledHistoricalSourceReads:
         )
         content = value.get("content")
         _require(type(content) is str and len(content) <= 750000)
-        decoded = base64.b64decode(content.replace("\n", ""), validate=True)
+        decoded = base64.b64decode(cast(str, content).replace("\n", ""), validate=True)
         retained = self._retained[source["retained_pin"]["path"]]
         _require(
             type(value.get("size")) is int and value["size"] == len(decoded) <= _CAP
