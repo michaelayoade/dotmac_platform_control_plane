@@ -218,9 +218,11 @@ still pending human provenance-design adoption. Existing corrected B/C1 owner
 closure decisions remain their own accepted source records; this client neither
 redecides nor manufactures prerequisite acceptance.
 
-`InstalledGhReleaseVerifier.from_installed()` always refuses with
-`ATTESTATION_TRANSPORT_UNQUALIFIED`. No fake official crypto result, custom signer,
-unsigned JSON substitute, or assertion that our transport bounds apply to gh's
-separate HTTP client exists. Actual pinned official gh transport/trust/native
-qualification must be resolved before the separate acceptance owner can rely on
-release attestations. Downloaded release-byte facts alone do not close that gap.
+`InstalledGhReleaseVerifier.from_installed()` delegates lazily to the separately
+reviewed official-tool owner in `gate0_e_release_verification.py`. Missing or
+inconsistent installed qualification still refuses with
+`ATTESTATION_TRANSPORT_UNQUALIFIED`. No fake crypto result, custom signer or
+unsigned JSON substitute is accepted. Actual pinned official gh transport,
+trust and native resource qualification remain unproven. Downloaded release
+facts or source review alone do not close that gap.
+

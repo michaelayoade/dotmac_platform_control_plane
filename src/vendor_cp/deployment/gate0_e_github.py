@@ -27,8 +27,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar, cast
 from urllib.parse import quote, urlsplit
+
+if TYPE_CHECKING:
+    from vendor_cp.deployment.gate0_e_release_verification import (
+        InstalledGhReleaseVerifier as ConcreteGhReleaseVerifier,
+    )
 
 _INSTALLATION = "/run/dotmac-gate0-e/github-read.json"
 _ROOT_BINDING = "/etc/dotmac-gate0-e/github-read-binding.json"
@@ -2199,11 +2204,15 @@ def _unzip(raw: bytes) -> tuple[bytes, bytes]:
 
 
 class InstalledGhReleaseVerifier:
-    """Deliberately unavailable: no qualified official-tool transport yet."""
+    """Compatibility factory for the separately qualified official-tool owner."""
 
     @classmethod
-    def from_installed(cls) -> NoReturn:
-        raise AttestationTransportUnqualified()
+    def from_installed(cls) -> ConcreteGhReleaseVerifier:
+        from vendor_cp.deployment.gate0_e_release_verification import (
+            InstalledGhReleaseVerifier as ConcreteGhReleaseVerifier,
+        )
+
+        return ConcreteGhReleaseVerifier.from_installed()
 
 
 def _prefixed_digest(value: object) -> str:
