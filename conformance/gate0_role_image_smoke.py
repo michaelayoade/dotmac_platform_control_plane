@@ -23,7 +23,7 @@ import psycopg
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from vendor_cp.deployment import gate0_launch
+from vendor_cp.deployment import gate0_bootstrap, gate0_launch, gate0_services
 
 
 def check_daemon_initialization() -> None:
@@ -74,8 +74,13 @@ def check_daemon_initialization() -> None:
 
 def main() -> None:
     assert os.geteuid() == 0
+    # The attester/management import path must not require issuer DB secrets.
+    # Import those actual installed owners, not merely a CLI failure guard.
+    assert "DATABASE_URL" not in os.environ
+    assert "PLATFORM_DATABASE_URL" not in os.environ
     installed = pathlib.Path(sysconfig.get_path("purelib")).resolve()
-    assert pathlib.Path(gate0_launch.__file__).resolve().is_relative_to(installed)
+    for module in (gate0_launch, gate0_bootstrap, gate0_services):
+        assert pathlib.Path(module.__file__).resolve().is_relative_to(installed)
     assert not (gate0_launch.ROOT / "packet.json").exists()
     inventory = json.loads(pathlib.Path("/app/gate0_native_tools.json").read_bytes())
     assert inventory["schema"] == "Gate0NativeTools.v1"
