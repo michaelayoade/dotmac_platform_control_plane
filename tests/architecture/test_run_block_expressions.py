@@ -49,6 +49,7 @@ def test_the_workflow_directory_holds_every_file_the_guard_must_reach() -> None:
     assert names == {
         "ci.yml",
         "engineering-standards.yml",
+        "gate0-native-envelope-qualification.yml",
         "gate0-sshd-conformance.yml",
         "kernel-lock.yml",
         "production-deploy.yml",
