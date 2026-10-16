@@ -61,14 +61,16 @@ def installed_composition(writer_composition):  # noqa: F811
         binding = gh._json(c.gh_files[gh._ROOT_BINDING])
         binding["installation_sha256"] = gh._digest(raw)
         c.gh_files[gh._ROOT_BINDING] = gh._canonical(binding)
+        source = "/repos/dotmac/selected"
+        target = "/repos/" + publication._REPOSITORY
         for (path, binary), value in list(c.wire.items()):
-            path = path.replace(
-                "/repos/dotmac/selected", "/repos/" + publication._REPOSITORY
-            )
+            if path != source and not path.startswith(source + "/"):
+                continue
+            del c.wire[(path, binary)]
             value = copy.deepcopy(value)
             if isinstance(value, dict) and value.get("full_name") == "dotmac/selected":
                 value["full_name"] = publication._REPOSITORY
-            c.wire[(path, binary)] = value
+            c.wire[(target + path[len(source) :], binary)] = value
         result = gh.InstalledGate0GitHubReads.from_installed()
         c.reader_digests[phase] = result.installed_selection_digest
         if phase == "producer":
@@ -82,6 +84,25 @@ def installed_composition(writer_composition):  # noqa: F811
 
     c.reader = reader
     return c
+
+
+def test_fixture_repository_rebinding_keeps_fresh_producer_phase(installed_composition):
+    c = installed_composition
+    collection_reads = c.reader("producer", snapshot_stage="collection")
+    collection = collection_reads.producer_snapshot(
+        gh.ProducerStage.COLLECTION_SNAPSHOT
+    )
+    assert collection_reads.owns_facts(collection)
+    assert collection.status == "in_progress"
+
+    completed_reads = c.reader("producer")
+    completed = completed_reads.producer_snapshot(
+        gh.ProducerStage.PRODUCER_JOB_COMPLETE
+    )
+    assert completed_reads.owns_facts(completed)
+    assert completed.status == "completed"
+    assert completed_reads.selected_job(completed).status == "completed"
+    assert collection.status == "in_progress"
 
 
 class NativeReleaseBoundary:

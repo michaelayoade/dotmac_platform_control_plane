@@ -384,8 +384,15 @@ def test_cleanup_phase_resume_never_rearms_operational_phase(recovery_owner):
     try:
         recovered._phase("retire", recovered._bounds.finalization_end)
         recovered._phase("jit", recovered._bounds.finalization_end)
-        with pytest.raises(FileExistsError):
+        phase = life._LIFECYCLE / "phase-jit"
+        original = phase.stat()
+        original_bytes = phase.read_bytes()
+        with pytest.raises(life.LifecycleRefused):
             recovered._phase("jit", recovered._bounds.finalization_end)
+        after = phase.stat()
+        assert (after.st_dev, after.st_ino) == (original.st_dev, original.st_ino)
+        assert phase.read_bytes() == original_bytes
+        assert recovered._failed is True
     finally:
         recovered.close()
 

@@ -35,7 +35,7 @@ def b_composition(installed_composition, historical_installed, monkeypatch, tmp_
     operational = comp.document["evidence"]["operational"]
     comp.files[operational["path"]] = b"B-PRIVATE-PAYLOAD-MARKER"
     operational["digest"] = holder._sha(comp.files[operational["path"]])
-    comp.reader("producer")
+    comp.reader("producer", snapshot_stage="collection")
     comp.load().prepare(deadline=time.monotonic() + 180)
     transfer, package = comp.staged[-1], comp.packages[-1]
     plaintext = package[4]

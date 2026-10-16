@@ -58,6 +58,7 @@ def final_slots(receipt_composition, monkeypatch):  # noqa: F811
         binding["installation_sha256"] = gh._digest(raw)
         c.gh_files[installation_path] = raw
         c.gh_files[binding_path] = gh._canonical(binding)
+        c.reader_digests[phase] = gh._digest(raw)
         slots[phase] = (installation_path, binding_path)
         return raw
 

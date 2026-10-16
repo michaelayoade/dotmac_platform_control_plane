@@ -1674,6 +1674,7 @@ def test_successful_receipt_boundary_releases_consumed_private_selection(
     c = receipt_composition
     owner = c.load("publish", c.pins)
     public_workflow_digest = owner.selection.source.workflow_digest
+    retained_files = dict(c.files)
     receipt = owner.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
     assert strict_object(receipt)["b_summary_digest"] == writer._sha(c.summary)
     assert canonical(strict_object(receipt)) == receipt
@@ -1681,7 +1682,7 @@ def test_successful_receipt_boundary_releases_consumed_private_selection(
     assert owner.__dict__ == {"_used": True}
     # Only the selected owner's references were detached. Actual retained fixture
     # evidence at the external native boundary is unchanged and remains usable.
-    assert c.files[c.pins["private_collection"]["path"]]
+    assert c.files == retained_files
     with pytest.raises(writer.EWriterRefused) as raised:
         owner.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
     _assert_writer_exception_clean(raised.value, owner)
@@ -1961,8 +1962,8 @@ def test_public_projection_and_completed_producer_match_independent_selection(
         c.document["source"]["workflow_digest"] = "sha256:" + "0" * 64
     else:
         c.document[change] = "sha256:" + "0" * 64
-    installed = c.load("publish", c.pins)
     with pytest.raises(writer.EWriterRefused):
+        installed = c.load("publish", c.pins)
         installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
 
 

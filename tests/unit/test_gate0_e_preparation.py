@@ -255,6 +255,17 @@ def test_explicit_source_bundle_pin_is_prefixed_and_typed(inputs, archive_seam, 
         ("deadline", True),
         ("deadline", 0),
     ],
+    ids=[
+        "empty-prerequisites",
+        "text-prerequisites",
+        "oversized-prerequisites",
+        "oversized-collection",
+        "object-collection",
+        "infinite-deadline",
+        "nan-deadline",
+        "boolean-deadline",
+        "zero-deadline",
+    ],
 )
 def test_input_types_bounds_and_original_deadline(inputs, archive_seam, key, bad):
     inputs[key] = bad
