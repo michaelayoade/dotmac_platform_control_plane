@@ -325,6 +325,8 @@ class ReleasePin:
 
 @dataclass(frozen=True, slots=True)
 class GitHubObservation:
+    """Closed metadata projection identity, or intentionally exact binary bytes."""
+
     endpoint: EndpointCode
     page: int
     status: int
@@ -850,6 +852,43 @@ def _run(value: object, repository: RepositoryPin) -> RunPin:
     return RunPin(**(value | {"repository": repository, "workflow": workflow}))
 
 
+def _environment_rules(
+    value: object, *, installed: bool = False
+) -> list[dict[str, Any]]:
+    """Closed authority-bearing environment semantics, preserving array order."""
+    result = []
+    for item in _array(value, 32):
+        item = _obj(item)
+        kind = item["type"]
+        _require(kind in ("wait_timer", "required_reviewers", "branch_policy"))
+        rule = {"id": _id(item["id"]), "type": kind}
+        if kind == "wait_timer":
+            timer = item["wait_timer"]
+            _require(type(timer) is int and timer >= 0)
+            rule["wait_timer"] = timer
+        elif kind == "required_reviewers":
+            if "prevent_self_review" in item:
+                _require(type(item["prevent_self_review"]) is bool)
+                rule["prevent_self_review"] = item["prevent_self_review"]
+            reviewers = []
+            for reviewer in _array(item["reviewers"], 32):
+                reviewer = _obj(reviewer)
+                _require(reviewer["type"] in ("User", "Team"))
+                reviewers.append(
+                    {
+                        "type": reviewer["type"],
+                        "reviewer": {"id": _id(_obj(reviewer["reviewer"])["id"])},
+                    }
+                )
+            rule["reviewers"] = reviewers
+        result.append(rule)
+    if installed:
+        # The new source/profile requires an explicitly qualified semantic policy;
+        # old raw records and their URL-bearing fields cannot silently migrate.
+        _require(_canonical(result) == _canonical(value))
+    return result
+
+
 def _source_policy(run: RunPin) -> dict[str, Any]:
     w = run.workflow
     policy, _ = _pin_document(
@@ -909,7 +948,9 @@ def _source_policy(run: RunPin) -> dict[str, Any]:
         ]
     )
     _array(policy["branch_policies"], 32)
-    _array(policy["environment_rules"], 32)
+    policy["environment_rules"] = _environment_rules(
+        policy["environment_rules"], installed=True
+    )
     for name in ("projection_sha256", "ciphertext_sha256"):
         if policy[name] is not None:
             _hex(policy[name])
@@ -1161,7 +1202,8 @@ class InstalledGate0GitHubReads:
             self._failed = True
             self._observations.clear()
             self._issued.clear()
-            raise GitHubReadRefused() from None
+        # Discard private operation exception context before emitting refusal.
+        raise GitHubReadRefused()
 
     def _path(
         self,
@@ -1231,6 +1273,147 @@ class InstalledGate0GitHubReads:
             suffix += "?per_page=100&page=" + str(page)
         return root + suffix
 
+    def _metadata_projection(
+        self, code: EndpointCode, value: object, run: RunPin | None
+    ) -> object:
+        """Rebuild only consumed metadata; no arbitrary API object is retained."""
+
+        def fields(item: object, names: str) -> dict[str, Any]:
+            item = _obj(item)
+            selected = {name: item[name] for name in names.split()}
+            _require(
+                all(
+                    type(child) in (str, int, float, bool, type(None))
+                    for child in selected.values()
+                )
+            )
+            return selected
+
+        def identity(item: object, owner: bool = False) -> dict[str, Any]:
+            result = fields(item, "id")
+            if owner:
+                result["owner"] = fields(_obj(item)["owner"], "id")
+            return result
+
+        def asset(item: object) -> dict[str, Any]:
+            result = fields(
+                item, "id name state size digest content_type created_at updated_at"
+            )
+            result["uploader"] = identity(_obj(item)["uploader"])
+            return result
+
+        if code == EndpointCode.REPOSITORY:
+            result = fields(value, "id full_name")
+            result["owner"] = identity(_obj(value)["owner"])
+            return result
+        if code == EndpointCode.WORKFLOW:
+            return fields(value, "id path")
+        if code == EndpointCode.SOURCE:
+            return fields(value, "type path sha encoding size content")
+        if code in (EndpointCode.RUN, EndpointCode.ATTEMPT):
+            result = fields(
+                value,
+                "id run_attempt workflow_id head_sha head_branch event path status "
+                "conclusion display_title",
+            )
+            item = _obj(value)
+            result["repository"] = identity(item["repository"], owner=True)
+            for name in ("head_repository", "actor", "triggering_actor"):
+                result[name] = identity(item[name])
+            return result
+        if code == EndpointCode.JOBS:
+            item = _obj(value)
+            result = fields(item, "total_count")
+            jobs = []
+            for job in _array(item["jobs"], 100):
+                job = _obj(job)
+                selected = fields(
+                    job,
+                    "id run_id head_sha name status conclusion started_at completed_at "
+                    "runner_id runner_name runner_group_id",
+                )
+                if "run_attempt" in job:
+                    selected.update(fields(job, "run_attempt"))
+                selected["steps"] = [
+                    fields(
+                        step, "number name status conclusion started_at completed_at"
+                    )
+                    for step in _array(job["steps"], 128)
+                ]
+                jobs.append(selected)
+            result["jobs"] = jobs
+            return result
+        if code == EndpointCode.REVIEWS:
+            _require(run is not None)
+            reviews = []
+            for review in _array(value, 32):
+                review = _obj(review)
+                environments = [
+                    fields(env, "id name") for env in _array(review["environments"], 32)
+                ]
+                selected = {"environments": environments}
+                if any(
+                    env["id"] == run.workflow.environment_id
+                    or env["name"] == run.workflow.environment_name
+                    for env in environments
+                ):
+                    selected.update(fields(review, "state"))
+                    selected["user"] = identity(review["user"])
+                reviews.append(selected)
+            return reviews
+        if code == EndpointCode.PENDING:
+            return [
+                {"environment": fields(_obj(item)["environment"], "id name")}
+                for item in _array(value, 32)
+            ]
+        if code == EndpointCode.ENVIRONMENT:
+            _require(run is not None)
+            result = fields(value, "id name")
+            result["protection_rules"] = _environment_rules(
+                _obj(value)["protection_rules"]
+            )
+            return result
+        if code == EndpointCode.BRANCHES:
+            result = fields(value, "total_count")
+            result["branch_policies"] = [
+                fields(item, "id name type")
+                for item in _array(_obj(value)["branch_policies"], 100)
+            ]
+            return result
+        if code == EndpointCode.ARTIFACTS:
+            result = fields(value, "total_count")
+            result["artifacts"] = [
+                fields(item, "id name")
+                for item in _array(_obj(value)["artifacts"], 100)
+            ]
+            return result
+        if code == EndpointCode.ARTIFACT:
+            result = fields(
+                value,
+                "id name size_in_bytes expired digest created_at updated_at expires_at",
+            )
+            result["workflow_run"] = fields(
+                _obj(value)["workflow_run"],
+                "id repository_id head_repository_id head_sha head_branch",
+            )
+            return result
+        if code == EndpointCode.RELEASE:
+            result = fields(
+                value, "id tag_name draft immutable created_at published_at"
+            )
+            if self._installation["phase"] == "draft":
+                result.update(fields(value, "target_commitish"))
+            return result
+        if code == EndpointCode.ASSETS:
+            return [asset(item) for item in _array(value, 100)]
+        if code == EndpointCode.ASSET:
+            return asset(value)
+        if code in (EndpointCode.TAG_REF, EndpointCode.TAG):
+            result = fields(value, "ref" if code == EndpointCode.TAG_REF else "sha")
+            result["object"] = fields(_obj(value)["object"], "sha type")
+            return result
+        raise GitHubReadRefused()
+
     def _get(
         self,
         code: EndpointCode,
@@ -1239,37 +1422,54 @@ class InstalledGate0GitHubReads:
         page: int = 0,
         maximum: int = _JSON_CAP,
     ) -> tuple[object, int, int]:
-        binary = code in (EndpointCode.ZIP, EndpointCode.ASSET_BYTES)
-        _require(self._exchanges < 48 and time.monotonic() < self._deadline)
-        # A download may make one additional CDN exchange.
-        self._exchanges += 2 if binary else 1
-        _require(self._exchanges <= 48)
-        token = _protected(_CREDENTIAL, 16384, self._qualification["credential_uid"])
-        _require(all(32 < byte < 127 for byte in token))
-        status, next_page, last_page, raw = _spawn_get(
-            self._path(code, run, identifier, page),
-            token,
-            binary,
-            maximum,
-            self._origins,
-            self._deadline,
-            page,
-        )
         token = b""
-        if not binary:
-            self._metadata += len(raw)
-            _require(self._metadata <= 16 * _JSON_CAP)
-        observation = GitHubObservation(
-            code,
-            page,
-            status,
-            _digest(raw),
-            raw,
-            datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            time.monotonic(),
-        )
-        self._observations.append(observation)
-        return (raw if binary else _json(raw)), next_page, last_page
+        raw = b""
+        try:
+            binary = code in (EndpointCode.ZIP, EndpointCode.ASSET_BYTES)
+            _require(self._exchanges < 48 and time.monotonic() < self._deadline)
+            # A download may make one additional CDN exchange.
+            self._exchanges += 2 if binary else 1
+            _require(self._exchanges <= 48)
+            token = _protected(
+                _CREDENTIAL, 16384, self._qualification["credential_uid"]
+            )
+            _require(all(32 < byte < 127 for byte in token))
+            status, next_page, last_page, raw = _spawn_get(
+                self._path(code, run, identifier, page),
+                token,
+                binary,
+                maximum,
+                self._origins,
+                self._deadline,
+                page,
+            )
+            token = b""
+            if binary:
+                value: object = raw
+                retained = raw
+            else:
+                self._metadata += len(raw)
+                _require(self._metadata <= 16 * _JSON_CAP)
+                value = self._metadata_projection(code, _json(raw), run)
+                retained = _canonical(value)
+                raw = b""
+            observation = GitHubObservation(
+                code,
+                page,
+                status,
+                _digest(retained),
+                retained,
+                datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                time.monotonic(),
+            )
+            self._observations.append(observation)
+            return value, next_page, last_page
+        except Exception:  # noqa: S110 -- discard private exception details
+            pass
+        finally:
+            token = b""
+            raw = b""
+        raise GitHubReadRefused()
 
     def _read(
         self,
@@ -1631,7 +1831,9 @@ class InstalledGate0GitHubReads:
             and environment["name"] == w.environment_name
         )
         rules = _array(environment["protection_rules"], 32)
-        _require(rules == policy["environment_rules"])
+        _require(
+            rules == _environment_rules(policy["environment_rules"], installed=True)
+        )
         branches = self._pages(EndpointCode.BRANCHES, "branch_policies", 32, run)
         branch_facts = sorted(
             (

@@ -51,8 +51,8 @@ Every other selection is null. Each owner has one method attempt for its install
 phase. Any method failure is sticky and invalidates `owns_facts()`. Later phases
 need fresh exact installations, not retry loops. `owns_facts(result)` checks live
 object identity; constructing a DTO, copying it or parsing JSON never restores
-live provenance. Returned immutable DTOs carry private repr-disabled exact
-observations and bytes. They have no acceptance/readiness field.
+live provenance. Returned immutable DTOs carry private repr-disabled closed metadata
+observations and exact selected source/binary bytes. They have no acceptance/readiness field.
 
 The protected-job phase observes an assigned, in-progress job before collection.
 It preserves source, runner, review and policy checks without claiming future
@@ -196,7 +196,7 @@ job-level `run_attempt` property; if additionally present it must be exact integ
 1. Upstream timestamp fields support strict aware RFC3339 with uppercase T/Z,
 whole seconds or 1–6 fractional digits, and explicit `±HH:MM` offsets. Comparisons
 normalize to UTC and preserve all accepted fractional precision; original strings
-and authenticated response bytes remain unchanged. Higher precision is refused,
+remain unchanged in the closed metadata projections. Higher precision is refused,
 not truncated. Naive timestamps, unknown `-00:00`, leap seconds, invalid dates or
 offsets, controls, oversized forms and UTC normalization overflow refuse. This is
 an explicit bounded precision profile; canonical JSON installation encoding does
@@ -212,6 +212,57 @@ selected nonexpired ID/name/source to the sole completed upload step and its tim
 interval, checks API ZIP digest and exact metadata readback. Release reads check
 exact inventory, per-ID metadata, digests/bytes and fresh anchors; published reads
 also require immutable=true and the exact third receipt asset.
+
+## Closed private metadata observations
+
+`GitHubObservation.body` and `response_sha256` retain their existing names for
+consumer compatibility. For JSON endpoints they identify a canonical closed
+metadata projection, not raw response bytes or a raw-body digest. For artifact
+ZIP and release asset-byte endpoints they intentionally retain exact selected
+binary bytes and their digest. Exact decoded selected workflow source bytes
+remain in `SourceFact`. HTTP byte budgets continue to count the original response
+lengths before projection; private raw JSON, unknown objects, HTTP headers and
+response URL fields never enter retained metadata observations. Final refusals
+also discard private transport/parser exception context.
+
+Each endpoint rebuilds only the fields consumed by the existing joins: numeric
+repository/actor/owner identities and repository name; workflow ID/path; selected
+source type/path/blob/encoding/size/content; run/attempt identity, head/event/path,
+status/conclusion and title; full bounded job/step/runner metadata; review
+selected-environment identities/state/reviewer ID; pending environment identities;
+environment identity and closed protection rules; branch-policy IDs/names/types;
+artifact inventory ID/name and selected artifact metadata/workflow-run coordinates;
+release identity/state/times and draft-only exact target; selected asset metadata
+and uploader numeric ID; raw tag ref and tag object SHA/type. Objects are rebuilt
+at every nested level. Irrelevant reviews do not gain new state/user requirements.
+A URL or unknown token-bearing field supplied by GitHub is never a selector and
+is discarded. Malformed unused metadata cannot substitute for a consumed field
+or weaken its checks. Selected source and binary evidence bytes are intentionally
+preserved, including their own content.
+
+Environment rules use fixed semantic projections with array order preserved:
+`wait_timer` retains numeric `id`, `type`, and exact integer `wait_timer`;
+`required_reviewers` retains `id`, `type`, optional exact boolean
+`prevent_self_review`, and ordered `reviewers` with `type` (`User`/`Team`) and
+`reviewer.id`; `branch_policy` retains `id` and `type`. Unknown rule types refuse
+rather than disappear. Nested reviewer URLs, node IDs and other unconsumed API
+metadata are discarded. The independent source policy must contain exactly
+these semantic records: unknown policy fields or URL-bearing old raw rule records
+refuse. Existing source/qualification bindings must qualify this new reader
+source and semantic policy profile; old raw response rule digests are not silently
+accepted. The action-time qualification `protection_rules_sha256` hashes the
+canonical semantic rule array. Timer, reviewer, self-review and rule identity/type
+changes still fail the exact installed-policy comparison and historical digest
+join. `deployment_branch_policy` was not consumed by this reader; the existing
+selected branch-policy endpoint and qualified branch-policy joins remain intact.
+
+These metadata observations remain actual authenticated shared-transport reads
+bound to live reader-owned facts. Projection is a confidentiality repair, not a
+pure caller cast, new owner decision, native qualification result or publication
+authority. Focused source tests inject unknown private query URLs and nested
+secrets into every endpoint, verify stable safe metadata and exact binary bytes,
+and retain required-field and environment-control refusal plants. Tests remain
+provided for separately authorized hosted execution.
 
 ## Public encrypted projection and authority limits
 

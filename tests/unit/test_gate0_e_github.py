@@ -21,6 +21,8 @@ import pytest
 
 from vendor_cp.deployment import gate0_e_github as gh
 
+_TRANSPORT_GET = gh.InstalledGate0GitHubReads._get
+
 
 @pytest.fixture
 def producer(monkeypatch):
@@ -1202,3 +1204,342 @@ def test_published_tag_and_immutable_guards_remain_strict(release_snapshot, muta
     with pytest.raises(gh.GitHubReadRefused):
         owner.published_snapshot()
     assert not owner._issued
+
+
+@pytest.fixture
+def metadata_wire(producer, monkeypatch):
+    """Exercise the production _get owner through its shared transport seam."""
+    owner, responses = producer
+    owner._qualification["credential_uid"] = 0
+    owner._deadline = time.monotonic() + 180
+    wire = {}
+    original_lengths = []
+
+    def bind(code, payload, *, identifier=None, page=0, run=None):
+        path = owner._path(code, run, identifier, page)
+        wire[path] = payload
+        return path
+
+    for code, payload in responses.items():
+        page = 1 if code in (gh.EndpointCode.JOBS, gh.EndpointCode.BRANCHES) else 0
+        bind(code, payload, page=page, run=owner._producer)
+
+    def get(path, token, binary, maximum, origins, deadline, page):
+        assert token == b"test-only-credential"
+        raw = wire[path] if binary else gh._canonical(wire[path])
+        original_lengths.append(len(raw))
+        return 200, 0, 0, raw
+
+    monkeypatch.setattr(gh.InstalledGate0GitHubReads, "_get", _TRANSPORT_GET)
+    monkeypatch.setattr(
+        gh, "_protected", lambda *args, **kwargs: b"test-only-credential"
+    )
+    monkeypatch.setattr(gh, "_spawn_get", get)
+    return owner, wire, bind, original_lengths
+
+
+def _inject_private_metadata(item):
+    if isinstance(item, dict):
+        for child in list(item.values()):
+            _inject_private_metadata(child)
+        item["download_url"] = "https://private.invalid/blob?token=private-query-marker"
+        item["url"] = "https://private.invalid/metadata?token=private-query-marker"
+        item["unknown_secret"] = {"deep": [{"credential": "unknown-secret-marker"}]}
+    elif isinstance(item, list):
+        for child in item:
+            _inject_private_metadata(child)
+
+
+def test_live_producer_projects_private_metadata_and_original_byte_budget(
+    metadata_wire,
+):
+    owner, wire, _, lengths = metadata_wire
+    for item in wire.values():
+        _inject_private_metadata(item)
+    facts = owner.producer_snapshot(gh.ProducerStage.PRODUCER_RUN_COMPLETE)
+    assert owner.owns_facts(facts) and facts.workflow_source.raw_bytes.startswith(
+        b"name:"
+    )
+    assert owner._metadata == sum(lengths)
+    for observation in facts.observations:
+        assert b"private-query-marker" not in observation.body
+        assert b"unknown-secret-marker" not in observation.body
+        assert b"download_url" not in observation.body
+        assert observation.response_sha256 == gh._digest(observation.body)
+        # Canonical observation serialization contains only the closed projection.
+        serialized = gh._canonical(
+            {
+                "sha256": observation.response_sha256,
+                "body": base64.b64encode(observation.body).decode(),
+            }
+        )
+        assert b"private-query-marker" not in base64.b64decode(
+            gh._json(serialized)["body"]
+        )
+    assert facts.review.observation_sha256 == next(
+        obs.response_sha256
+        for obs in facts.observations
+        if obs.endpoint is gh.EndpointCode.REVIEWS
+    )
+
+
+def test_private_projection_failure_has_no_context_or_partial_facts(metadata_wire):
+    owner, wire, _, _ = metadata_wire
+    for item in wire.values():
+        _inject_private_metadata(item)
+    source = next(value for path, value in wire.items() if "/contents/" in path)
+    source["sha"] = "f" * 40
+    with pytest.raises(gh.GitHubReadRefused) as error:
+        owner.producer_snapshot(gh.ProducerStage.PRODUCER_RUN_COMPLETE)
+    assert str(error.value) == "GITHUB_READ_REFUSED" and error.value.__context__ is None
+    assert not owner._issued and not owner._observations
+
+
+@pytest.mark.parametrize("code", list(gh.EndpointCode))
+def test_every_endpoint_retains_only_join_projection_or_exact_binary(
+    metadata_wire, code
+):
+    owner, _, bind, _ = metadata_wire
+    run = owner._producer
+    assets = {
+        "id": 30,
+        "name": "gate0-evidence.pgp",
+        "state": "uploaded",
+        "size": 5,
+        "digest": "sha256:" + "e" * 64,
+        "content_type": "application/octet-stream",
+        "uploader": {"id": 14},
+        "created_at": "2026-10-15T10:00:00Z",
+        "updated_at": "2026-10-15T10:01:00Z",
+    }
+    extras = {
+        gh.EndpointCode.PENDING: [{"environment": {"id": 99, "name": "other"}}],
+        gh.EndpointCode.BRANCHES: {
+            "total_count": 1,
+            "branch_policies": [{"id": 31, "name": "main", "type": "branch"}],
+        },
+        gh.EndpointCode.ARTIFACTS: {
+            "total_count": 1,
+            "artifacts": [{"id": 30, "name": "bundle"}],
+        },
+        gh.EndpointCode.ARTIFACT: {
+            "id": 30,
+            "name": "bundle",
+            "size_in_bytes": 5,
+            "expired": False,
+            "digest": "sha256:" + "e" * 64,
+            "created_at": "2026-10-15T10:00:00Z",
+            "updated_at": "2026-10-15T10:01:00Z",
+            "expires_at": "2027-10-15T10:01:00Z",
+            "workflow_run": {
+                "id": 17,
+                "repository_id": 10,
+                "head_repository_id": 10,
+                "head_sha": "a" * 40,
+                "head_branch": "main",
+            },
+        },
+        gh.EndpointCode.RELEASE: {
+            "id": 22,
+            "tag_name": "selected",
+            "draft": False,
+            "immutable": True,
+            "created_at": "2026-10-15T10:00:00Z",
+            "published_at": "2026-10-15T10:01:00Z",
+            "target_commitish": "main",
+        },
+        gh.EndpointCode.ASSETS: [copy.deepcopy(assets)],
+        gh.EndpointCode.ASSET: assets,
+        gh.EndpointCode.TAG_REF: {
+            "ref": "refs/tags/selected",
+            "object": {"sha": "a" * 40, "type": "commit"},
+        },
+        gh.EndpointCode.TAG: {
+            "sha": "b" * 40,
+            "object": {"sha": "a" * 40, "type": "commit"},
+        },
+        gh.EndpointCode.ZIP: b"exact selected binary",
+        gh.EndpointCode.ASSET_BYTES: b"exact selected binary",
+    }
+    identifier = (
+        "selected"
+        if code is gh.EndpointCode.TAG_REF
+        else "b" * 40
+        if code is gh.EndpointCode.TAG
+        else 30
+    )
+    if code in extras:
+        payload = extras[code]
+    else:
+        path = owner._path(
+            code,
+            run,
+            None,
+            1 if code in (gh.EndpointCode.JOBS, gh.EndpointCode.BRANCHES) else 0,
+        )
+        payload = metadata_wire[1][path]
+    page = (
+        1
+        if code
+        in (
+            gh.EndpointCode.JOBS,
+            gh.EndpointCode.BRANCHES,
+            gh.EndpointCode.ARTIFACTS,
+            gh.EndpointCode.ASSETS,
+        )
+        else 0
+    )
+    path = bind(code, copy.deepcopy(payload), run=run, identifier=identifier, page=page)
+    clean, _, _ = owner._get(code, run, identifier, page)
+    clean_observation = owner._observations[-1]
+    _inject_private_metadata(metadata_wire[1][path])
+    actual, _, _ = owner._get(code, run, identifier, page)
+    observed = owner._observations[-1]
+    assert actual == clean and observed.body == clean_observation.body
+    assert observed.response_sha256 == clean_observation.response_sha256
+    assert (
+        b"private-query-marker" not in observed.body
+        and b"unknown-secret-marker" not in observed.body
+    )
+    if isinstance(payload, bytes):
+        assert observed.body == payload
+    else:
+        assert observed.response_sha256 != gh._digest(
+            gh._canonical(metadata_wire[1][path])
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation", [None, "wait", "reviewer", "prevent", "unknown_type"]
+)
+def test_environment_semantics_project_without_hiding_control_changes(
+    metadata_wire, mutation
+):
+    owner, wire, _, _ = metadata_wire
+    rules = [
+        {"id": 1, "type": "wait_timer", "wait_timer": 0},
+        {
+            "id": 2,
+            "type": "required_reviewers",
+            "prevent_self_review": True,
+            "reviewers": [{"type": "User", "reviewer": {"id": 14}}],
+        },
+        {"id": 3, "type": "branch_policy"},
+    ]
+    owner._policies[17]["environment_rules"] = copy.deepcopy(rules)
+    owner._qualification["action_time"]["17"]["protection_rules_sha256"] = gh._digest(
+        gh._canonical(rules)
+    )
+    environment = next(
+        value
+        for path, value in wire.items()
+        if "/environments/" in path and "deployment-branch-policies" not in path
+    )
+    environment["protection_rules"] = copy.deepcopy(rules)
+    for item in wire.values():
+        _inject_private_metadata(item)
+    if mutation == "wait":
+        environment["protection_rules"][0]["wait_timer"] = 1
+    elif mutation == "reviewer":
+        environment["protection_rules"][1]["reviewers"][0]["reviewer"]["id"] = 99
+    elif mutation == "prevent":
+        environment["protection_rules"][1]["prevent_self_review"] = False
+    elif mutation == "unknown_type":
+        environment["protection_rules"].append({"id": 4, "type": "unknown_authority"})
+    if mutation is not None:
+        with pytest.raises(gh.GitHubReadRefused):
+            owner.producer_snapshot(gh.ProducerStage.PRODUCER_RUN_COMPLETE)
+    else:
+        facts = owner.producer_snapshot(gh.ProducerStage.PRODUCER_RUN_COMPLETE)
+        observation = next(
+            obs
+            for obs in facts.observations
+            if obs.endpoint is gh.EndpointCode.ENVIRONMENT
+        )
+        assert gh._json(observation.body)["protection_rules"] == rules
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        [{"id": True, "type": "wait_timer", "wait_timer": 0}],
+        [{"id": 1, "type": "wait_timer", "wait_timer": True}],
+        [
+            {
+                "id": 1,
+                "type": "required_reviewers",
+                "prevent_self_review": 1,
+                "reviewers": [],
+            }
+        ],
+        [
+            {
+                "id": 1,
+                "type": "required_reviewers",
+                "reviewers": [{"type": "User", "reviewer": {"id": True}}],
+            }
+        ],
+        [{"id": 1, "type": "unknown_authority"}],
+        [
+            {
+                "id": 1,
+                "type": "branch_policy",
+                "url": "https://private.invalid/?token=installed-marker",
+            }
+        ],
+    ],
+)
+def test_qualified_environment_policy_requires_closed_typed_semantics(rules):
+    with pytest.raises(gh.GitHubReadRefused):
+        gh._environment_rules(rules, installed=True)
+
+
+def test_irrelevant_review_metadata_is_not_a_new_required_field(metadata_wire):
+    owner, wire, _, _ = metadata_wire
+    reviews = next(value for path, value in wire.items() if path.endswith("/approvals"))
+    reviews.append(
+        {
+            "environments": [{"id": 99, "name": "other"}],
+            "state": {"malformed_unassigned": "unknown-secret-marker"},
+            "user": {"malformed_unassigned": "unknown-secret-marker"},
+        }
+    )
+    facts = owner.producer_snapshot(gh.ProducerStage.PRODUCER_RUN_COMPLETE)
+    assert facts.review.reviewer_id == 14
+    assert all(b"unknown-secret-marker" not in obs.body for obs in facts.observations)
+
+
+def test_draft_target_is_projected_only_for_draft_phase(metadata_wire):
+    owner, _, bind, _ = metadata_wire
+    payload = {
+        "id": 22,
+        "tag_name": "selected",
+        "draft": True,
+        "immutable": False,
+        "created_at": "2026-10-15T10:00:00Z",
+        "published_at": None,
+        "target_commitish": "a" * 40,
+    }
+    _inject_private_metadata(payload)
+    bind(gh.EndpointCode.RELEASE, payload, identifier=22)
+    owner._installation["phase"] = "draft"
+    draft, _, _ = owner._get(gh.EndpointCode.RELEASE, identifier=22)
+    assert draft["target_commitish"] == "a" * 40
+    owner._installation["phase"] = "published"
+    payload["target_commitish"] = {"malformed_unassigned": "unknown-secret-marker"}
+    published, _, _ = owner._get(gh.EndpointCode.RELEASE, identifier=22)
+    assert "target_commitish" not in published
+    assert b"unknown-secret-marker" not in owner._observations[-1].body
+
+
+def test_wire_error_drops_private_exception_context(metadata_wire, monkeypatch):
+    owner, _, _, _ = metadata_wire
+
+    def fail(*args):
+        raise ValueError("https://private.invalid/?token=private-query-marker")
+
+    monkeypatch.setattr(gh, "_spawn_get", fail)
+    with pytest.raises(gh.GitHubReadRefused) as error:
+        owner.producer_snapshot(gh.ProducerStage.PRODUCER_RUN_COMPLETE)
+    assert str(error.value) == "GITHUB_READ_REFUSED" and error.value.__context__ is None
+    assert not owner._issued and not owner._observations
