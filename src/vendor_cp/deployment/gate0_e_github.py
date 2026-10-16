@@ -1457,12 +1457,17 @@ class InstalledGate0GitHubReads:
         _require(not self._failed)
         return _digest(_canonical(self._installation))
 
-    def selected_job(self, facts: ProducerFacts | PublicationFacts) -> JobFact:
+    def selected_job(
+        self, facts: ProducerFacts | PublicationFacts | VerifiedProducerTransfer
+    ) -> JobFact:
         """Return only this live read's internally selected named workflow job."""
         _require(self.owns_facts(facts))
         if type(facts) is PublicationFacts:
             observed = facts.run
             selected = self._publication
+        elif type(facts) is VerifiedProducerTransfer:
+            observed = facts.producer
+            selected = self._producer
         else:
             _require(type(facts) is ProducerFacts)
             observed = cast(ProducerFacts, facts)

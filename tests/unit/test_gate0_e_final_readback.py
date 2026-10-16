@@ -30,8 +30,8 @@ from vendor_cp.deployment import gate0_e_writer as writer
 def final_slots(receipt_composition, monkeypatch):  # noqa: F811
     """Populate all three protected slots before invoking the argument-free owner.
 
-    Namespaced source-policy/qualification files avoid replacement or phase swaps
-    while readers are live. Installation, native qualification and HTTP checks
+    Canonical run/phase-specific pins avoid replacement or phase swaps while
+    readers are live. Installation, native qualification and HTTP checks
     run in their existing owners. Only native/protected-file seams are synthetic.
     """
     c = receipt_composition
@@ -47,13 +47,17 @@ def final_slots(receipt_composition, monkeypatch):  # noqa: F811
         for role in ("producer", "publication"):
             if doc[role] is not None:
                 pin = doc[role]["workflow"]["source_policy_pin"]
-                path = "/etc/dotmac-gate0-e/unit-" + phase + "-source.json"
-                c.gh_files[path] = c.gh_files[pin["path"]]
-                pin["path"] = path
+                assert pin["path"] == (
+                    "/etc/dotmac-gate0-e/github-read-source-policy-"
+                    + str(doc[role]["run_id"])
+                    + ".json"
+                )
         pin = doc["qualification"]
-        path = "/etc/dotmac-gate0-e/unit-" + phase + "-qualification.json"
-        c.gh_files[path] = c.gh_files[pin["path"]]
-        pin["path"] = path
+        # The installed loader requires this exact phase-specific path. It is
+        # already distinct across the three slots; an arbitrary alias refuses.
+        assert pin["path"] == (
+            "/etc/dotmac-gate0-e/github-read-" + phase + "-qualification.json"
+        )
         raw = gh._canonical(doc)
         binding["installation_sha256"] = gh._digest(raw)
         c.gh_files[installation_path] = raw

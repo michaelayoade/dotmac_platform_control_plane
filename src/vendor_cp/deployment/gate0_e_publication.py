@@ -750,7 +750,7 @@ class InstalledEPublication:
         )
         self._producer(transfer.producer)
         _require(
-            transfer_reads.selected_job(transfer.producer).id
+            transfer_reads.selected_job(transfer).id
             == self._document["producer"]["job_id"]
         )
         _require(transfer.producer.stage == github.ProducerStage.PRODUCER_JOB_COMPLETE)

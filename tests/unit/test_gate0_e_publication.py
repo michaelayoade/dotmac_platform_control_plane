@@ -462,6 +462,22 @@ def transfer_composition(installed_composition):  # noqa: F811
     return c, reads, facts
 
 
+def test_transfer_job_selection_requires_the_owned_outer_transfer(transfer_composition):
+    c, reads, transfer = transfer_composition
+    assert reads.selected_job(transfer).id == c.producer.job_id
+    assert not reads.owns_facts(transfer.producer)
+    for unowned in (transfer.producer, replace(transfer)):
+        with pytest.raises(gh.GitHubReadRefused):
+            reads.selected_job(unowned)
+    foreign_reads = c.reader("producer")
+    with pytest.raises(gh.GitHubReadRefused):
+        foreign_reads.selected_job(transfer)
+    with pytest.raises(gh.GitHubReadRefused):
+        reads.encrypted_transfer()
+    with pytest.raises(gh.GitHubReadRefused):
+        reads.selected_job(transfer)
+
+
 def test_first_create_and_exact_two_byte_readback(transfer_composition, monkeypatch):
     c, reads, transfer = transfer_composition
     p = _publisher(c, monkeypatch, operation="prepare_draft")
