@@ -11,8 +11,7 @@ The suites check source behavior, including refusals and fixed vectors. A
 passing run does not establish native timing, installation, host eligibility,
 tracer behavior, retirement, or qualification. Native boundaries are mocked;
 no private inputs, proof captures, host configuration, or execution selectors
-are included. These files are outside the installed production package. No
-native qualification workflow is added.
+are included. These files are outside the installed production package. Native execution remains separately authorized.
 
 Origins are the frozen activation-source-r3 and reviewed
 native-envelope-adapter-source-r4 candidates. Activation freeze SHA-256:
@@ -40,3 +39,27 @@ Hosted CI is configured with these commands, each in its own process:
 python -m unittest discover -s conformance/gate0_envelope_source/activation -p test_candidate_source.py -v
 python -m unittest discover -s conformance/gate0_envelope_source/native -p 'test_*.py' -v
 ```
+
+The bounded native COMPONENT installer and manual-only
+`gate0-native-envelope-qualification.yml` prepare two public synthetic pre-payload
+cases around unchanged R4. The workflow requires an externally reviewed canonical
+nonsecret `GATE0_NATIVE_EXECUTION_SELECTION_JSON` repository variable and exact
+dispatch SHA-256; absence refuses before root installation. Its closed selection
+binds source/workflow/installer/actions, authenticated fixed host-tool file and
+package-artifact provenance pins, and an exact upstream runc ELF, detached
+signature, immutable public keyring and signer. No operational selector is shipped
+or configured here. A future approved packet must establish those genuine pins
+and authorize fresh hosted root installation, ptrace, namespaces, readonly
+rootfs bind and the existing R4 launch. The fixed root0600 selector is
+`/etc/dotmac-gate0-native-envelope/selection.json`; fresh numeric job metadata is
+read with the built-in token's minimal read-only Actions API access and retained
+in protected invocation evidence, never guessed from a job label. Only the two
+bounded public receipt files are uploaded for 30 days; unknown retirement blocks
+the second fresh-VM job. Raw physical tar/PAX framing and metadata budgets are
+checked before the tar parser; Docker's ordered RootFS layer chain must match
+the authenticated image config. The read-only staging helper requires matching
+closed producer and component observations; fallback receipts remain uploadable
+while blocking continuation. Public fixture observations always keep
+`overall_native_pass:false`, and do not qualify CP payload, timing causality or
+Gate0 acceptance. Installer tests are authored for ordinary mocked discovery;
+source checks and native execution are **UNRUN** in this preparation.

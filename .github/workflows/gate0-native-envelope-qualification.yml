@@ -1,0 +1,93 @@
+name: Gate 0 native component preparation
+
+# Source-only integration. Manual execution requires a separately reviewed
+# operational packet and genuinely populated nonsecret selection variable.
+on:
+  workflow_dispatch:
+    inputs:
+      selection_sha256:
+        description: Exact SHA256 of the canonical externally reviewed selection
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  pre-guard-stop:
+    name: native-pre-guard-stop
+    if: github.event_name == 'workflow_dispatch' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare fixed public component and invoke existing outer once
+        env:
+          GATE0_NATIVE_EXECUTION_SELECTION_JSON: ${{ vars.GATE0_NATIVE_EXECUTION_SELECTION_JSON }}
+          GATE0_NATIVE_SELECTION_SHA256: ${{ inputs.selection_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: /usr/bin/python3.12 -I conformance/gate0_envelope_source/native/installer.py pre-guard-stop
+      - name: Stage only the two bounded public receipts
+        if: always()
+        run: |
+          /usr/bin/python3.12 -I - <<'PY'
+          import runpy
+          try:
+              source = runpy.run_path('conformance/gate0_envelope_source/native/installer.py', run_name='gate0_receipt_validation_only')
+              source['stage_public_receipts']('pre-guard-stop')
+          except Exception:
+              raise SystemExit(125) from None
+          PY
+      - name: Retain public component receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate0-native-pre-guard-stop-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gate0-native-public/producer-receipt.json
+            ${{ runner.temp }}/gate0-native-public/component-observation.json
+          if-no-files-found: error
+          retention-days: 30
+
+  runc-exec-stop:
+    name: native-runc-exec-stop
+    needs: pre-guard-stop
+    if: github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && needs.pre-guard-stop.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare fixed public component and invoke existing outer once
+        env:
+          GATE0_NATIVE_EXECUTION_SELECTION_JSON: ${{ vars.GATE0_NATIVE_EXECUTION_SELECTION_JSON }}
+          GATE0_NATIVE_SELECTION_SHA256: ${{ inputs.selection_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: /usr/bin/python3.12 -I conformance/gate0_envelope_source/native/installer.py runc-exec-stop
+      - name: Stage only the two bounded public receipts
+        if: always()
+        run: |
+          /usr/bin/python3.12 -I - <<'PY'
+          import runpy
+          try:
+              source = runpy.run_path('conformance/gate0_envelope_source/native/installer.py', run_name='gate0_receipt_validation_only')
+              source['stage_public_receipts']('runc-exec-stop')
+          except Exception:
+              raise SystemExit(125) from None
+          PY
+      - name: Retain public component receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate0-native-runc-exec-stop-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gate0-native-public/producer-receipt.json
+            ${{ runner.temp }}/gate0-native-public/component-observation.json
+          if-no-files-found: error
+          retention-days: 30
