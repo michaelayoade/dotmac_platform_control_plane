@@ -56,6 +56,20 @@ class Owner:
 #: an owner declared without a command both fail.
 OWNERS: Final[tuple[Owner, ...]] = (
     Owner(
+        "gate0 collection-check-activation",
+        "vendor_cp.deployment.gate0_collection_activation",
+        "run_installed_collection_check_activation",
+        False,
+        "read-only bounded collection descriptor/image-artifact comparison",
+    ),
+    Owner(
+        "gate0 collection-check-retirement",
+        "vendor_cp.deployment.gate0_collection_activation",
+        "run_installed_collection_check_retirement",
+        False,
+        "read-only original descriptor/image-artifact comparison after expiry",
+    ),
+    Owner(
         "gate0 lifecycle-run",
         "vendor_cp.deployment.gate0_runner_supervisor",
         "run_installed_lifecycle",

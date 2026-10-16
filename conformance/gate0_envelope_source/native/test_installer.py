@@ -1,5 +1,6 @@
 """AUTHORED ONLY: bounded source tests; native boundaries remain mocked."""
 
+import base64
 import copy
 import hashlib
 import io
@@ -176,6 +177,138 @@ class SelectionTests(unittest.TestCase):
     def test_no_arbitrary_case(self):
         with self.assertRaises(i.Refusal):
             i.load_selection("recovery")
+
+
+class RuncKeyringTests(unittest.TestCase):
+    @staticmethod
+    def fixture(sizes=(1915, 1243, 2272)):
+        # Synthetic encoding only: no operational key or selector is supplied.
+        parts = [bytes([value]) * size for value, size in enumerate(sizes, start=1)]
+        blocks = []
+        for part in parts:
+            encoded = base64.b64encode(part)
+            lines = [
+                encoded[start : start + 64] for start in range(0, len(encoded), 64)
+            ]
+            blocks.append(
+                b"-----BEGIN PGP PUBLIC KEY BLOCK-----\nComment: github=test\n\n"
+                + b"\n".join(lines)
+                + b"\n=AAAA\n-----END PGP PUBLIC KEY BLOCK-----\n"
+            )
+        raw = b"".join(blocks)
+        raw += b" " * (8507 - len(raw))
+        return raw, b"".join(parts)
+
+    def install(
+        self,
+        raw,
+        expected_binary,
+        artifact_change=None,
+        derived_hash=None,
+        outer_hash=None,
+    ):
+        chosen = selection()
+        chosen["runc_artifact"].update(
+            keyring_size=8507,
+            keyring_sha256=i.sha(raw),
+        )
+        if artifact_change:
+            chosen["runc_artifact"].update(artifact_change)
+        binary = b"\x7fELF\x02\x01" + b"\0" * 12 + b"\x3e\0"
+        status = b"[GNUPG:] VALIDSIG " + b"A" * 40 + b" source-test\n"
+        with (
+            patch.object(i, "RUNC_KEYRING_SHA", outer_hash or i.sha(raw)),
+            patch.object(
+                i, "RUNC_BINARY_KEYRING_SHA", derived_hash or i.sha(expected_binary)
+            ),
+            patch.object(
+                i,
+                "pin",
+                return_value={
+                    key: chosen["tools"]["gpgv"][key]
+                    for key in ("sha256", "size", "mode")
+                },
+            ),
+            patch.object(i, "download_public", side_effect=[binary, b"signature", raw]),
+            patch.object(i, "mkdir") as mkdir,
+            patch.object(i, "exclusive") as exclusive,
+            patch.object(i, "run", return_value=status) as run,
+        ):
+            try:
+                i.install_selected_runc(chosen)
+            except i.Refusal:
+                mkdir.assert_not_called()
+                exclusive.assert_not_called()
+                run.assert_not_called()
+                return False, exclusive, run
+        return True, exclusive, run
+
+    def test_actual_installer_gpgv_uses_exclusive_derived_binary_keyring(self):
+        raw, binary = self.fixture()
+        success, writes, run = self.install(raw, binary)
+        self.assertTrue(success)
+        path = i.STATE + "/public-tool-preparation/runc-keyring.gpg"
+        writes.assert_any_call(path, binary)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("--keyring") + 1], path)
+        self.assertNotIn(i.STATE + "/public-tool-preparation/runc.keyring", argv)
+        self.assertEqual(writes.call_args.args[0], i.TOOLS["runc"])
+        self.assertEqual(writes.call_args.args[2], 0o755)
+
+    def test_selected_original_digest_and_size_mismatch_refuse_before_writes(self):
+        raw, binary = self.fixture()
+        for change in ({"keyring_size": 8506}, {"keyring_sha256": "0" * 64}):
+            with self.subTest(change=change):
+                self.assertFalse(self.install(raw, binary, change)[0])
+
+    def test_corrupted_original_bytes_refuse_fixed_outer_hash(self):
+        raw, binary = self.fixture()
+        chosen = dict(keyring_size=8507, keyring_sha256=i.sha(raw))
+        with patch.object(i, "RUNC_KEYRING_SHA", i.sha(raw)):
+            with self.assertRaises(i.Refusal):
+                i.normalize_selected_keyring(raw[:-1] + b"!", chosen)
+        self.assertFalse(
+            self.install(
+                raw[:-1] + b"!",
+                binary,
+                {"keyring_sha256": i.sha(raw)},
+                outer_hash=i.sha(raw),
+            )[0]
+        )
+        self.assertFalse(self.install(raw, binary, derived_hash="0" * 64)[0])
+
+    def test_missing_duplicate_and_unknown_armor_refuse_before_writes(self):
+        raw, binary = self.fixture()
+        for damaged in (
+            raw.replace(b"BEGIN PGP PUBLIC", b"BEGIN PGP SECRET", 1),
+            raw.replace(b"END PGP PUBLIC", b"END PGP SECRET", 1),
+            raw.replace(b"Comment: github=test", b"Comment: github=te!t", 1),
+            raw.replace(b"=AAAA", b"=AA!A", 1),
+            raw.replace(b"-----BEGIN", b"-----BEGIN-----BEGIN", 1),
+        ):
+            with self.subTest(damaged=i.sha(damaged)):
+                self.assertFalse(self.install(damaged, binary)[0])
+
+    def test_oversize_truncated_and_empty_keyring_refuse_before_writes(self):
+        raw, binary = self.fixture()
+        for damaged in (raw + b"x", raw[:-1], b""):
+            with self.subTest(size=len(damaged)):
+                self.assertFalse(self.install(damaged, binary)[0])
+
+    def test_malformed_base64_and_wrong_decoded_sizes_refuse_before_writes(self):
+        raw, binary = self.fixture()
+        for damaged in (
+            raw.replace(b"AQEB", b"A===", 1),
+            raw.replace(b"AQEB", b"AQ==", 1),
+        ):
+            with self.subTest(damaged=i.sha(damaged)):
+                self.assertFalse(self.install(damaged, binary)[0])
+
+    def test_decoded_member_size_contract_refuses_even_matching_derived_hash(self):
+        for sizes in ((1914, 1243, 2272), (1915, 1244, 2271)):
+            with self.subTest(sizes=sizes):
+                raw, binary = self.fixture(sizes)
+                self.assertFalse(self.install(raw, binary)[0])
 
 
 class ArchiveTests(unittest.TestCase):

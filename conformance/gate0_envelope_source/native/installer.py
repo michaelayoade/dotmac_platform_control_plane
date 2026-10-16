@@ -6,6 +6,7 @@ approval are separate, external prerequisites. No native PASS is emitted.
 """
 
 import base64
+import binascii
 import ctypes
 import errno
 import hashlib
@@ -1549,6 +1550,57 @@ def download_public(url, expected, size):
     return raw
 
 
+# The selected official listing has one reviewed encoding; no format fallback.
+RUNC_KEYRING_SIZE = 8507
+RUNC_KEYRING_SHA = "9bd9742cb79b215cf5f7f71ea71a51a2a95ab573412d54c2905be072d8fcab7c"
+RUNC_BINARY_KEYRING_SHA = (
+    "cdec7014cf714a452a6da3f7db8dbf24495db8d466e0b6b7d4f9ab7888c65e68"
+)
+
+
+def normalize_selected_keyring(raw, artifact):
+    """Decode only the pinned official listing before any installation writes."""
+    require(
+        type(raw) is bytes
+        and artifact["keyring_size"] == RUNC_KEYRING_SIZE
+        and artifact["keyring_sha256"] == RUNC_KEYRING_SHA
+        and len(raw) == RUNC_KEYRING_SIZE
+        and sha(raw) == RUNC_KEYRING_SHA
+    )
+    begin = b"-----BEGIN PGP PUBLIC KEY BLOCK-----"
+    end = b"-----END PGP PUBLIC KEY BLOCK-----"
+    require(raw.count(begin) == 3 and raw.count(end) == 3)
+    pattern = (
+        rb"(?m)^"
+        + begin
+        + rb"\nComment: github=[A-Za-z0-9]+\n\n([A-Za-z0-9+/=\n]+)\n"
+        + end
+        + rb"$"
+    )
+    blocks = re.findall(pattern, raw)
+    require(len(blocks) == 3)
+    decoded = []
+    for block in blocks:
+        lines = block.splitlines()
+        require(len(lines) > 1 and re.fullmatch(rb"=[A-Za-z0-9+/]{4}", lines[-1]))
+        require(
+            all(
+                re.fullmatch(rb"[A-Za-z0-9+/]{1,64}={0,2}", line) for line in lines[:-1]
+            )
+        )
+        try:
+            decoded.append(base64.b64decode(b"".join(lines[:-1]), validate=True))
+        except binascii.Error:
+            raise Refusal() from None
+    binary = b"".join(decoded)
+    require(
+        list(map(len, decoded)) == [1915, 1243, 2272]
+        and len(binary) == 5430
+        and sha(binary) == RUNC_BINARY_KEYRING_SHA
+    )
+    return binary
+
+
 def install_selected_runc(selection):
     artifact = selection["runc_artifact"]
     actual_verifier = pin(TOOLS["gpgv"])
@@ -1569,12 +1621,13 @@ def install_selected_runc(selection):
         binary[:6] == b"\x7fELF\x02\x01"
         and int.from_bytes(binary[18:20], "little") == 62
     )
+    binary_keyring = normalize_selected_keyring(keyring, artifact)
     work = STATE + "/public-tool-preparation"
     mkdir(work)
     for name, raw in (
         ("runc.amd64", binary),
         ("runc.amd64.asc", signature),
-        ("runc.keyring", keyring),
+        ("runc-keyring.gpg", binary_keyring),
     ):
         exclusive(work + "/" + name, raw)
     mkdir(work + "/gnupg")
@@ -1584,7 +1637,7 @@ def install_selected_runc(selection):
             "--homedir",
             work + "/gnupg",
             "--keyring",
-            work + "/runc.keyring",
+            work + "/runc-keyring.gpg",
             "--status-fd=1",
             work + "/runc.amd64.asc",
             work + "/runc.amd64",

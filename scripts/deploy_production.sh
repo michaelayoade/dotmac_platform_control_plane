@@ -14,9 +14,14 @@ die() {
     exit 1
 }
 
-[[ $# -eq 2 ]] || die "usage: scripts/deploy_production.sh sha256:<digest> <authorization-ref>"
+[[ $# -eq 2 || $# -eq 3 ]] || die "usage: scripts/deploy_production.sh sha256:<digest> <authorization-ref> [--gate0-collection-activate|--gate0-collection-retire]"
 readonly DIGEST="$1"
 readonly AUTHORIZATION_REF="$2"
+readonly GATE0_COLLECTION_OPERATION="${3:-}"
+case "$GATE0_COLLECTION_OPERATION" in
+    ""|--gate0-collection-activate|--gate0-collection-retire) ;;
+    *) die "unknown finite collection operation" ;;
+esac
 [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "image digest is not sha256"
 # Validated ON ARRIVAL, not trusted from the caller, and the allowlist is the
 # injection defence: no quote, no space, no dollar, no backtick can pass, so a
@@ -25,6 +30,21 @@ readonly AUTHORIZATION_REF="$2"
 # layer checks for itself because each layer is separately invokable.
 [[ "$AUTHORIZATION_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
     || die "authorization reference must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\$"
+
+# A finite request must refuse every path override before even opening a lock.
+# This check is also before the cleanup trap: caller-owned paths are not ours.
+if [[ -n "$GATE0_COLLECTION_OPERATION" ]]; then
+    [[ "$COMPOSE_FILE" == "docker-compose.production.yml" \
+        && "$ENV_FILE" == ".env" \
+        && "$HOST_ID_FILE" == "/etc/dotmac-host-id" \
+        && "${LOCK_FILE:-/var/lock/dotmac_dotmac_vendor_control_plane_deploy.lock}" \
+            == "/var/lock/dotmac_dotmac_vendor_control_plane_deploy.lock" ]] \
+        || die "finite collection requires the canonical executor paths"
+fi
+
+# Only this invocation's later mktemp result belongs to its cleanup trap.
+# Never consume an inherited BUNDLE_TMP, including on finite refusal or success.
+BUNDLE_TMP=""
 
 # This script's own cleanup. The wrapper that hands it a registry token traps;
 # this process is the one holding the compose operation and the bundle
@@ -57,11 +77,41 @@ readonly LOCK_FILE="${LOCK_FILE:-/var/lock/dotmac_dotmac_vendor_control_plane_de
 [[ ! -e "$LOCK_FILE" || -f "$LOCK_FILE" ]] \
     || die "deployment lock $LOCK_FILE is not a regular file; refusing"
 exec {LOCK_FD}>>"$LOCK_FILE" || die "cannot open deployment lock $LOCK_FILE"
+if [[ -n "$GATE0_COLLECTION_OPERATION" ]]; then
+    # Standard-library only: this is not the unresolved installed CP binding.
+    # Validate the actual open description before flock or a holder-marker write.
+    /usr/bin/python3 -I - "$LOCK_FD" <<'FINITE_LOCK' \
+        || die "finite collection lock metadata refused"
+import os
+import stat
+import sys
+
+fd = int(sys.argv[1])
+metadata = os.fstat(fd)
+named = os.stat(
+    "/var/lock/dotmac_dotmac_vendor_control_plane_deploy.lock",
+    follow_symlinks=False,
+)
+if (
+    metadata.st_uid != 0
+    or not stat.S_ISREG(metadata.st_mode)
+    or metadata.st_nlink != 1
+    or stat.S_IMODE(metadata.st_mode) & 0o022
+    or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)
+):
+    sys.exit(1)
+FINITE_LOCK
+fi
 flock --nonblock "$LOCK_FD" || die "another deployment holds $LOCK_FILE \
 ($(head -c 200 "$LOCK_FILE" 2>/dev/null || echo 'holder unreadable')). Two \
 concurrent runs each start a backup and each migrate; that is the load-52 \
 incident this lock exists to prevent."
-printf '%s %s\n' "$$" "legacy-freeze ${DIGEST}" >"$LOCK_FILE"
+if [[ -n "$GATE0_COLLECTION_OPERATION" ]]; then
+    # Never reopen/truncate a pathname after checking a different description.
+    printf '%s %s\n' "$$" "finite-collection ${DIGEST}" >&"$LOCK_FD"
+else
+    printf '%s %s\n' "$$" "legacy-freeze ${DIGEST}" >"$LOCK_FILE"
+fi
 
 # ── Where the successor's ADMIT check lands ─────────────────────────────────
 #
@@ -131,6 +181,853 @@ unset csrf_secret
 [[ -f "$HOST_ID_FILE" ]] || die "$HOST_ID_FILE is missing"
 [[ "$(tr -d '\r\n' < "$HOST_ID_FILE")" == "$EXPECTED_HOST_ID" ]] \
     || die "host identity mismatch"
+
+# Explicit same-image collection leaf. The ordinary two-argument deployment
+# continues below unchanged. No reference here certifies operational approval.
+# The inherited descriptor is the SAME canonical lock's open description.
+if [[ -n "$GATE0_COLLECTION_OPERATION" ]]; then
+    /usr/bin/python3 -I - "$LOCK_FD" "$DIGEST" "$GATE0_COLLECTION_OPERATION" <<'FINITE_COLLECTION'
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import math
+import os
+import re
+import select
+import signal
+import stat
+import subprocess
+import sys
+import time
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import cast
+
+_SOURCE = Path("/etc/dotmac-gate0-collection/installation.json")
+_STATE = Path("/var/lib/dotmac-gate0-collection")
+_RUNTIME = Path("/run/dotmac-gate0-collection")
+_LOCK = Path("/var/lock/dotmac_dotmac_vendor_control_plane_deploy.lock")
+_REPOSITORY = "ghcr.io/michaelayoade/dotmac_vendor_control_plane"
+_PROJECT = "dotmac_vendor_control_plane"
+_USER = "10001:10001"
+_BOOTSTRAP = "production-bootstrap"
+_BASE = "docker-compose.production.yml"
+_OVERLAY = "docker-compose.gate0-collection.yml"
+_MAXIMUM = 524288
+
+
+class ProviderRefused(ValueError):
+    pass
+
+
+def canonical(value):
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    ).encode("ascii")
+
+
+def _pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProviderRefused()
+        result[key] = value
+    return result
+
+
+def strict_object(raw, maximum=_MAXIMUM):
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= maximum:
+        raise ProviderRefused()
+    value = json.loads(
+        raw,
+        object_pairs_hook=_pairs,
+        parse_constant=lambda value: (_ for _ in ()).throw(ProviderRefused()),
+    )
+    if type(value) is not dict:
+        raise ProviderRefused()
+    return value
+
+
+def _fields(value, names):
+    if type(value) is not dict or set(value) != names:
+        raise ProviderRefused()
+    return value
+
+
+def _selected(raw):
+    value = _fields(
+        strict_object(raw),
+        {
+            "schema",
+            "source_revision",
+            "image_digest",
+            "profile_digest",
+            "profile_code",
+            "profile_version",
+            "database",
+            "clock_anchor",
+            "cases",
+        },
+    )
+    _require(
+        canonical(value) == raw
+        and value["schema"] == "Gate0CollectionApiInstallation.v1"
+    )
+    _require(
+        type(value["source_revision"]) is str
+        and re.fullmatch(r"[0-9a-f]{40}", value["source_revision"])
+    )
+    _require(
+        type(value["image_digest"]) is str
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", value["image_digest"])
+        and value["image_digest"] == sys.argv[2]
+    )
+    for name in ("profile_code", "profile_version", "profile_digest"):
+        _require(type(value[name]) is str and 0 < len(value[name]) <= 128)
+    return value
+
+
+def _call(arguments, *, environment=None, input_bytes=None, maximum=_MAXIMUM):
+    """Collect with a byte ceiling, a tool timeout and exact child ownership."""
+    process = subprocess.Popen(  # noqa: S603 -- fixed Docker verbs and protected identity data
+        ("docker", *arguments),
+        stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+        env=environment or {"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+    )
+    output = bytearray()
+    deadline = time.monotonic() + 30
+    pending = memoryview(input_bytes or b"")
+    try:
+        os.set_blocking(process.stdout.fileno(), False)
+        if process.stdin is not None:
+            os.set_blocking(process.stdin.fileno(), False)
+        while True:
+            remaining = deadline - time.monotonic()
+            _require(remaining > 0)
+            reads, writes, _ = select.select(
+                [process.stdout],
+                [process.stdin] if process.stdin is not None else [],
+                [],
+                min(remaining, 0.1),
+            )
+            if process.stdin is not None and process.stdin in writes:
+                if pending:
+                    count = os.write(process.stdin.fileno(), pending[:65536])
+                    pending = pending[count:]
+                else:
+                    process.stdin.close()
+                    process.stdin = None
+            if process.stdout in reads:
+                chunk = os.read(
+                    process.stdout.fileno(), min(65536, maximum + 1 - len(output))
+                )
+                if not chunk:
+                    break
+                output.extend(chunk)
+                _require(len(output) <= maximum)
+        _require(process.wait(timeout=max(0.001, deadline - time.monotonic())) == 0)
+        return bytes(output).decode("utf-8").strip()
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        if process.stdin is not None:
+            process.stdin.close()
+        process.stdout.close()
+
+
+def _docker(*arguments, environment=None):
+    return _call(arguments, environment=environment)
+
+
+def _helpers_resolved(state, raw):
+    for operation in ("activation", "retirement"):
+        owned = operation + "-helper-owned.json"
+        complete = operation + "-helper-complete.json"
+        names = os.listdir(state)
+        if any(name.startswith(operation + "-helper") for name in names):
+            _require(owned in names)
+        if owned in names:
+            record, _ = _read(state, owned)
+            ownership = strict_object(record)
+            _require(ownership["installation_digest"] == _hash(raw))
+            _require(complete in os.listdir(state))
+            finished, _ = _read(state, complete)
+            terminal = strict_object(finished)
+            _require(operation + "-helper" not in names)
+            _require(terminal["installation_digest"] == _hash(raw))
+            _require(
+                all(
+                    terminal[key] == ownership[key]
+                    for key in ("operation", "name", "reference")
+                )
+            )
+            _require(
+                type(terminal["container_id"]) is str
+                and re.fullmatch(r"[0-9a-f]{64}", terminal["container_id"])
+            )
+
+
+def _original_open(result, document):
+    """Re-observe the image-derived ORIGINAL wall/monotonic intersection."""
+    clock = _fields(
+        result["original_clock"],
+        {
+            "boot_id",
+            "wall_origin",
+            "monotonic_origin",
+            "a_expires_at",
+            "a_monotonic_end",
+        },
+    )
+    anchor = _fields(
+        document["clock_anchor"], {"boot_id", "wall_origin", "monotonic_origin"}
+    )
+    _require(all(clock[key] == anchor[key] for key in anchor))
+    for key in ("monotonic_origin", "a_monotonic_end"):
+        _require(type(clock[key]) in (int, float) and math.isfinite(clock[key]))
+    wall = datetime.fromisoformat(clock["wall_origin"].replace("Z", "+00:00"))
+    expiry = datetime.fromisoformat(clock["a_expires_at"].replace("Z", "+00:00"))
+    _require(
+        wall.utcoffset().total_seconds() == 0
+        and expiry.utcoffset().total_seconds() == 0
+    )
+    _require(
+        clock["a_monotonic_end"]
+        == clock["monotonic_origin"] + (expiry - wall).total_seconds()
+    )
+    _require(
+        Path("/proc/sys/kernel/random/boot_id").read_text().strip() == clock["boot_id"]
+    )
+    now, elapsed = datetime.now(UTC), time.monotonic()
+    _require(
+        wall <= now < expiry
+        and 0 <= clock["monotonic_origin"] <= elapsed < clock["a_monotonic_end"]
+    )
+    _require(
+        abs((now - wall).total_seconds() - (elapsed - clock["monotonic_origin"])) <= 2
+    )
+
+
+def _validate_image_input(state, raw, document, reference, *, activation):
+    """Persist exact helper ownership before launching; never retry an orphan."""
+    _helpers_resolved(state, raw)
+    operation = "activation" if activation else "retirement"
+    temporary = _STATE / (operation + "-helper")
+    with _directory(temporary, create=True) as directory:
+        _require(not os.listdir(directory))
+        metadata = os.fstat(directory)
+    name = "dotmac-gate0-collection-check-" + uuid.uuid4().hex
+    cidfile = temporary / "cid"
+    _record(
+        state,
+        operation + "-helper-owned.json",
+        raw,
+        operation=operation,
+        name=name,
+        reference=reference,
+        directory=str(temporary),
+        directory_device=metadata.st_dev,
+        directory_inode=metadata.st_ino,
+    )
+    result = None
+    cleanup_complete = False
+    try:
+        try:
+            result = strict_object(
+                _call(
+                    (
+                        "run",
+                        "--name",
+                        name,
+                        "--cidfile",
+                        str(cidfile),
+                        "--label",
+                        "io.dotmac.gate0.collection.input=" + _hash(raw),
+                        "--pull",
+                        "never",
+                        "--user",
+                        _USER,
+                        "--network",
+                        "none",
+                        "--read-only",
+                        "--cap-drop",
+                        "ALL",
+                        "--security-opt",
+                        "no-new-privileges",
+                        "--memory",
+                        "128m",
+                        "--pids-limit",
+                        "64",
+                        "--cpus",
+                        "1",
+                        "--interactive",
+                        "--entrypoint",
+                        "/opt/venv/bin/dotmac-platform",
+                        reference,
+                        "gate0",
+                        "collection-check-" + operation,
+                    ),
+                    input_bytes=raw,
+                    maximum=4096,
+                ).encode(),
+                4096,
+            )
+        finally:
+            # A killed Docker CLI is not evidence that its container retired.
+            # The private cidfile and exact labels/image/name identify only this run.
+            with _directory(temporary) as directory:
+                actual = os.fstat(directory)
+                _require(_identity(actual) == _identity(metadata))
+                cid_raw, _ = _read(directory, "cid")
+                cid = cid_raw.decode("ascii").strip()
+                _require(re.fullmatch(r"[0-9a-f]{64}", cid))
+                observed = strict_object(
+                    _call(
+                        (
+                            "inspect",
+                            "--format",
+                            '{"id":{{json .Id}},"name":{{json .Name}},'
+                            '"image":{{json .Config.Image}},"input":{{json '
+                            "(index .Config.Labels "
+                            '"io.dotmac.gate0.collection.input")}}}',
+                            cid,
+                        ),
+                        maximum=4096,
+                    ).encode(),
+                    4096,
+                )
+                _require(
+                    observed
+                    == {
+                        "id": cid,
+                        "name": "/" + name,
+                        "image": reference,
+                        "input": _hash(raw),
+                    }
+                )
+                _require(_call(("rm", "--force", cid), maximum=4096) == cid)
+                os.unlink("cid", dir_fd=directory)
+                os.fsync(directory)
+                cleanup_complete = True
+            if cleanup_complete:
+                os.rmdir(temporary)
+                _record(
+                    state,
+                    operation + "-helper-complete.json",
+                    raw,
+                    operation=operation,
+                    name=name,
+                    reference=reference,
+                    container_id=cid,
+                )
+    except BaseException:
+        _record(
+            state,
+            operation + "-helper-incomplete.json",
+            raw,
+            operation=operation,
+            name=name,
+        )
+        raise
+    expected = {
+        "schema": "Gate0CollectionInputCheck.v1",
+        "operation": operation,
+        "input_digest": _hash(raw),
+    }
+    expected.update(
+        {
+            key: document[key]
+            for key in (
+                "source_revision",
+                "image_digest",
+                "profile_code",
+                "profile_version",
+                "profile_digest",
+            )
+        }
+    )
+    _require(type(result) is dict and set(result) == set(expected) | {"original_clock"})
+    _require({key: result[key] for key in expected} == expected and cleanup_complete)
+    if activation:
+        _original_open(result, document)
+    else:
+        _require(result["original_clock"] is None)
+    return result
+
+
+def _require(condition: object) -> None:
+    if not condition:
+        raise ProviderRefused()
+
+
+def _hash(raw: bytes) -> str:
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _identity(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+def _metadata(fd: int, *, directory: bool = False) -> os.stat_result:
+    metadata = os.fstat(fd)
+    _require(
+        metadata.st_uid == 0
+        and not stat.S_IMODE(metadata.st_mode) & 0o022
+        and (
+            stat.S_ISDIR(metadata.st_mode)
+            if directory
+            else stat.S_ISREG(metadata.st_mode)
+        )
+        and (directory or metadata.st_nlink == 1)
+    )
+    return metadata
+
+
+@contextmanager
+def _directory(path: Path, *, create: bool = False) -> Iterator[int]:
+    """Hold and check every root-owned directory, without symlink traversal."""
+    _require(path.is_absolute() and ".." not in path.parts)
+    descriptors: list[int] = []
+    bindings: list[tuple[int, str, int]] = []
+    try:
+        fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptors.append(fd)
+        _metadata(fd, directory=True)
+        for index, name in enumerate(path.parts[1:]):
+            if create and index == len(path.parts) - 2:
+                try:
+                    os.mkdir(name, mode=0o700, dir_fd=fd)
+                    os.fsync(fd)
+                except FileExistsError:
+                    pass
+            child = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=fd,
+            )
+            descriptors.append(child)
+            _metadata(child, directory=True)
+            bindings.append((fd, name, child))
+            fd = child
+        _require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700 if create else True)
+        yield fd
+        for parent, name, child in bindings:
+            _require(
+                _identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
+                == _identity(os.fstat(child))
+            )
+    finally:
+        for fd in reversed(descriptors):
+            os.close(fd)
+
+
+def _read(fd: int, name: str) -> tuple[bytes, os.stat_result]:
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+        dir_fd=fd,
+    )
+    try:
+        metadata = _metadata(descriptor)
+        _require(0 < metadata.st_size <= _MAXIMUM)
+        raw = bytearray()
+        while len(raw) <= _MAXIMUM:
+            part = os.read(descriptor, min(65536, _MAXIMUM + 1 - len(raw)))
+            if not part:
+                break
+            raw.extend(part)
+        _require(0 < len(raw) <= _MAXIMUM)
+        _require(
+            _identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+            == _identity(metadata)
+        )
+        return bytes(raw), metadata
+    finally:
+        os.close(descriptor)
+
+
+def _exclusive(
+    fd: int, name: str, raw: bytes, *, runtime: bool = False
+) -> os.stat_result:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+        dir_fd=fd,
+    )
+    try:
+        if runtime:
+            os.fchown(descriptor, 0, 10001)
+            os.fchmod(descriptor, 0o640)
+        remaining = memoryview(raw)
+        while remaining:
+            count = os.write(descriptor, remaining)
+            _require(count > 0)
+            remaining = remaining[count:]
+        os.fsync(descriptor)
+        metadata = _metadata(descriptor)
+        _require(
+            _identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+            == _identity(metadata)
+        )
+        os.fsync(fd)
+        return metadata
+    finally:
+        os.close(descriptor)
+
+
+def _record(fd: int, name: str, raw: bytes, **facts: object) -> None:
+    _exclusive(fd, name, canonical({"installation_digest": _hash(raw), **facts}))
+
+
+@contextmanager
+def _executor_lock() -> Iterator[None]:
+    """Use the executor's inherited open description of the canonical inode."""
+    _require(os.geteuid() == 0)
+    value = sys.argv[1]
+    _require(re.fullmatch(r"[0-9]{1,8}", value))
+    fd = int(value)
+    metadata = _metadata(fd)
+    with _lock_directory() as parent:
+        descriptor = os.open(
+            _LOCK.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=parent,
+        )
+        try:
+            named = _metadata(descriptor)
+            _require(_identity(metadata) == _identity(named))
+        finally:
+            os.close(descriptor)
+        # Same inherited open description: this neither unlocks the parent nor
+        # opens a competing description. Direct CLI calls without it refuse.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+@contextmanager
+def _lock_directory() -> Iterator[int]:
+    """Only the standard root/sticky lock layout permits a writable directory."""
+    with _directory(Path("/var")) as parent:
+        named = os.stat("lock", dir_fd=parent, follow_symlinks=False)
+        _require(named.st_uid == 0)
+        if stat.S_ISLNK(named.st_mode):
+            _require(os.readlink("lock", dir_fd=parent) in ("/run/lock", "../run/lock"))
+            path = Path("/run")
+        else:
+            _require(stat.S_ISDIR(named.st_mode))
+            path = Path("/var")
+        with _directory(path) as ancestor:
+            fd = os.open(
+                "lock",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=ancestor,
+            )
+            try:
+                metadata = os.fstat(fd)
+                _require(metadata.st_uid == 0 and stat.S_ISDIR(metadata.st_mode))
+                _require(
+                    not stat.S_IMODE(metadata.st_mode) & 0o022
+                    or metadata.st_mode & stat.S_ISVTX
+                )
+                yield fd
+                _require(
+                    _identity(os.stat("lock", dir_fd=ancestor, follow_symlinks=False))
+                    == _identity(metadata)
+                )
+            finally:
+                os.close(fd)
+
+
+def _image(document: dict[str, object]) -> tuple[str, str]:
+    reference = _REPOSITORY + "@" + str(document["image_digest"])
+    image = strict_object(
+        _docker(
+            "image",
+            "inspect",
+            "--format",
+            '{"id":{{json .Id}},"digests":{{json .RepoDigests}},'
+            '"source":{{json (index .Config.Labels '
+            '"org.opencontainers.image.revision")}},"user":{{json .Config.User}}}',
+            reference,
+        ).encode()
+    )
+    _require(set(image) == {"id", "digests", "source", "user"})
+    _require(
+        type(image["id"]) is str
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", cast(str, image["id"]))
+    )
+    _require(
+        type(image["digests"]) is list
+        and reference in cast(list[object], image["digests"])
+    )
+    _require(image["source"] == document["source_revision"] and image["user"] == _USER)
+    return reference, cast(str, image["id"])
+
+
+def _app(reference: str, image_id: str) -> dict[str, object]:
+    containers = _docker(
+        "ps",
+        "-aq",
+        "--filter",
+        f"label=com.docker.compose.project={_PROJECT}",
+        "--filter",
+        "label=com.docker.compose.service=app",
+        "--filter",
+        "label=com.docker.compose.container-number=1",
+        "--filter",
+        "label=com.docker.compose.oneoff=False",
+    ).splitlines()
+    _require(len(containers) == 1 and re.fullmatch(r"[0-9a-f]{12,64}", containers[0]))
+    # Project only the profile, never dump Config.Env or database credentials.
+    value = strict_object(
+        _docker(
+            "inspect",
+            "--format",
+            '{"id":{{json .Id}},"image":{{json .Image}},'
+            '"reference":{{json .Config.Image}},"user":{{json .Config.User}},'
+            '"running":{{json .State.Running}},"profiles":[{{range .Config.Env}}'
+            '{{if eq (index (split . "=") 0) "VENDOR_DEPLOYMENT_PROFILE"}}'
+            '{{json .}},{{end}}{{end}}null],"mounts":{{json .Mounts}}}',
+            containers[0],
+        ).encode()
+    )
+    _require(
+        value["image"] == image_id
+        and value["reference"] == reference
+        and value["user"] == _USER
+    )
+    _require(type(value["mounts"]) is list and type(value["profiles"]) is list)
+    return value
+
+
+def _profile(app: dict[str, object], code: object) -> None:
+    _require(app["profiles"] == ["VENDOR_DEPLOYMENT_PROFILE=" + str(code), None])
+
+
+def _mount(app: dict[str, object], *, present: bool) -> None:
+    matching = [
+        m
+        for m in cast(list[dict[str, object]], app["mounts"])
+        if type(m) is dict and str(m.get("Destination", "")).startswith(str(_RUNTIME))
+    ]
+    if present:
+        _require(len(matching) == 1)
+        _require(
+            matching[0].get("Type") == "bind"
+            and matching[0].get("Source") == str(_RUNTIME / "installation.json")
+            and matching[0].get("Destination") == str(_RUNTIME / "installation.json")
+            and matching[0].get("RW") is False
+        )
+    else:
+        _require(not matching)
+
+
+def _recreate(reference: str, profile: object, *, activation: bool) -> None:
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "LC_ALL": "C",
+        "VENDOR_APP_IMAGE": reference,
+        "VENDOR_DB_BOOTSTRAP_PASSWORD": "gate0-compose-parse-only",
+    }
+    command = ["compose", "--env-file", ".env", "-f", _BASE]
+    if activation:
+        environment["VENDOR_GATE0_COLLECTION_PROFILE"] = str(profile)
+        command.extend(("-f", _OVERLAY))
+    command.extend(
+        (
+            "up",
+            "-d",
+            "--no-deps",
+            "--no-build",
+            "--pull",
+            "never",
+            "--force-recreate",
+            "--wait",
+            "app",
+        )
+    )
+    _docker(*command, environment=environment)
+
+
+def _assets() -> None:
+    # The caller is the existing executor in its protected deployment directory.
+    with _directory(Path.cwd()) as directory:
+        for name in (_BASE, _OVERLAY):
+            _read(directory, name)
+        descriptor = os.open(
+            ".env",
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+            dir_fd=directory,
+        )
+        try:
+            _metadata(descriptor)
+        finally:
+            os.close(descriptor)
+    with _directory(Path("/etc")) as directory:
+        host, _ = _read(directory, "dotmac-host-id")
+        _require(host.strip() == b"vendor-cp-prod")
+
+
+def _runtime_binding(state: int, raw: bytes, *, remove: bool = False) -> None:
+    """Missing volatile bytes permit cleanup, never activation or replacement."""
+    binding = None
+    if "runtime-binding.json" in os.listdir(state):
+        binding_raw, _ = _read(state, "runtime-binding.json")
+        binding = _fields(
+            strict_object(binding_raw),
+            {
+                "installation_digest",
+                "device",
+                "inode",
+                "directory_device",
+                "directory_inode",
+            },
+        )
+        _require(binding["installation_digest"] == _hash(raw))
+    try:
+        with _directory(_RUNTIME) as runtime:
+            if binding is None:
+                _require(not os.listdir(runtime))
+                return
+            _require(
+                [os.fstat(runtime).st_dev, os.fstat(runtime).st_ino]
+                == [binding["directory_device"], binding["directory_inode"]]
+            )
+            try:
+                current, metadata = _read(runtime, "installation.json")
+            except FileNotFoundError:
+                return
+            _require(
+                current == raw
+                and [metadata.st_dev, metadata.st_ino]
+                == [binding["device"], binding["inode"]]
+            )
+            if remove:
+                os.unlink("installation.json", dir_fd=runtime)
+                os.fsync(runtime)
+    except FileNotFoundError:
+        # An absent directory cannot supply replacement bytes or rearm clocks.
+        return
+
+
+def _activate() -> None:
+    with _executor_lock():
+        _assets()
+        with _directory(_SOURCE.parent) as source:
+            raw, _ = _read(source, _SOURCE.name)
+        document = _selected(raw)
+        reference, image_id = _image(document)
+        before = _app(reference, image_id)
+        _require(before["running"] is True)
+        _profile(before, _BOOTSTRAP)
+        _mount(before, present=False)
+        with _directory(_STATE, create=True) as state:
+            _require(not os.listdir(state))
+            # Persist exact selection before creating anything in volatile /run.
+            _exclusive(state, "installation.json", raw)
+            _record(state, "activation-attempt.json", raw, app_id=before["id"])
+            try:
+                result = _validate_image_input(
+                    state, raw, document, reference, activation=True
+                )
+                _original_open(result, document)
+                with _directory(_RUNTIME, create=True) as runtime:
+                    _require(not os.listdir(runtime))
+                    metadata = _exclusive(
+                        runtime, "installation.json", raw, runtime=True
+                    )
+                    _record(
+                        state,
+                        "runtime-binding.json",
+                        raw,
+                        device=metadata.st_dev,
+                        inode=metadata.st_ino,
+                        directory_device=os.fstat(runtime).st_dev,
+                        directory_inode=os.fstat(runtime).st_ino,
+                    )
+                    # Recheck the original clock immediately before recreation.
+                    _original_open(result, document)
+                    _recreate(reference, document["profile_code"], activation=True)
+                    after = _app(reference, image_id)
+                    _require(after["running"] is True and after["id"] != before["id"])
+                    _profile(after, document["profile_code"])
+                    _mount(after, present=True)
+                    current, actual = _read(runtime, "installation.json")
+                    _require(
+                        current == raw and _identity(actual) == _identity(metadata)
+                    )
+                    _original_open(result, document)
+                    _record(state, "activation-complete.json", raw, app_id=after["id"])
+            except BaseException:
+                _record(state, "activation-incomplete.json", raw)
+                raise
+
+
+def _retire() -> None:
+    with _executor_lock():
+        _assets()
+        with _directory(_STATE) as state:
+            raw, _ = _read(state, "installation.json")
+            # Retirement does not consult live case clocks, DB qualification or
+            # current source profile acceptance. It restores these SAME bytes'
+            # selected image to bootstrap even after the read interval expires.
+            document = _selected(raw)
+            _require(
+                not any(name.startswith("retirement-") for name in os.listdir(state))
+            )
+            _helpers_resolved(state, raw)
+            reference, image_id = _image(document)
+            before = _app(reference, image_id)
+            _require(
+                before["profiles"]
+                in (
+                    [
+                        "VENDOR_DEPLOYMENT_PROFILE=" + str(document["profile_code"]),
+                        None,
+                    ],
+                    ["VENDOR_DEPLOYMENT_PROFILE=" + _BOOTSTRAP, None],
+                )
+            )
+            _runtime_binding(state, raw)
+            _record(state, "retirement-attempt.json", raw, app_id=before["id"])
+            try:
+                _validate_image_input(state, raw, document, reference, activation=False)
+                _recreate(reference, _BOOTSTRAP, activation=False)
+                after = _app(reference, image_id)
+                _require(after["running"] is True and after["id"] != before["id"])
+                _profile(after, _BOOTSTRAP)
+                _mount(after, present=False)
+                _runtime_binding(state, raw, remove=True)
+                _record(state, "retirement-complete.json", raw, app_id=after["id"])
+            except BaseException:
+                _record(state, "retirement-incomplete.json", raw)
+                raise
+
+
+try:
+    if sys.argv[3] == "--gate0-collection-activate":
+        _activate()
+    elif sys.argv[3] == "--gate0-collection-retire":
+        _retire()
+    else:
+        raise ProviderRefused()
+except BaseException:
+    print("GATE0_COLLECTION_INCOMPLETE", file=sys.stderr)
+    sys.exit(3)
+FINITE_COLLECTION
+    exit "$?"
+fi
 
 # The official image requires a bootstrap password even though that role is
 # not the application migrator. Generate it per deploy, pass it only to the DB

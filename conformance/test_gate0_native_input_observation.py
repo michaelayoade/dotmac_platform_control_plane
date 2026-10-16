@@ -6,9 +6,11 @@ import io
 import json
 import os
 import runpy
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 SOURCE = Path(__file__).parents[1] / ".github/candidate/observe_gate0_native_inputs.py"
@@ -139,11 +141,11 @@ class PublicInputTests(unittest.TestCase):
             self.assertFalse(result["cryptographic_signature_verified"])
             self.assertEqual(result["failure_class"], "public-input-deadline")
         with patch.dict(
-            M["packages"].__globals__,
-            {"command": Mock(side_effect=NameError("never retained"))},
+            M["package_facts"].__globals__,
+            {"query_fact": Mock(side_effect=NameError("never retained"))},
         ):
             with self.assertRaises(NameError):
-                M["packages"](("/usr/bin/gpgv",))
+                M["package_facts"](("/usr/bin/gpgv",), 130)
 
     def test_missing_fixed_file_explicit_and_ambient_environment_filtered(self):
         glob = M["observe_file"].__globals__
@@ -178,7 +180,12 @@ class PublicInputTests(unittest.TestCase):
                 glob,
                 {
                     "metadata": Mock(return_value={"GITHUB_SHA": "a" * 40}),
-                    "observe_file": Mock(return_value=file),
+                    "observe_metadata": Mock(
+                        return_value=(
+                            [file] * len(M["FILES"]),
+                            dict(presence="absent", type=None),
+                        )
+                    ),
                     "observe_signature": Mock(
                         return_value=dict(cryptographic_signature_verified=False)
                     ),
@@ -286,15 +293,15 @@ class InputCorrectionTests(unittest.TestCase):
             + "\n"
         )
 
-        def query(argv):
+        def query(argv, deadline):
             if "--search" in argv:
-                return rows
-            return argv[-1] + "\t3.12.3-1ubuntu0.13\tamd64\n"
+                return "zero", rows
+            return "zero", argv[-1] + "\t3.12.3-1ubuntu0.13\tamd64\n"
 
         with patch.dict(
-            M["packages"].__globals__, {"command": Mock(side_effect=query)}
+            M["package_facts"].__globals__, {"query_fact": Mock(side_effect=query)}
         ):
-            records = M["packages"]((alias,))
+            records, _ = M["package_facts"]((alias,), 130)
         self.assertEqual(
             {item["package"] for item in records}, {"python3.12", "python3.12-minimal"}
         )
@@ -302,22 +309,24 @@ class InputCorrectionTests(unittest.TestCase):
         self.assertTrue(all(item["alias"] == alias for item in records))
 
     def test_diversion_only_unknown_or_overbudget_owner_rows_remain_incomplete(self):
-        alias = "/usr/bin/python3.12"
+        alias = "/usr/bin/gpgv"
         for rows in (
             "local diversion from: " + alias + "\n",
             "unknown owner syntax\n",
             ("pkg: " + alias + "\n") * 13,
             "a, b, c, d, e: " + alias + "\n",
         ):
-            query = Mock(return_value=rows)
+            query = Mock(return_value=("zero", rows))
             with (
                 self.subTest(rows=rows[:30]),
-                patch.dict(M["packages"].__globals__, {"command": query}),
+                patch.dict(M["package_facts"].__globals__, {"query_fact": query}),
             ):
-                records = M["packages"]((alias,))
-            query.assert_called_once_with(["/usr/bin/dpkg-query", "--search", alias])
-            self.assertFalse(any("package" in item for item in records))
-            self.assertEqual(records[0]["failure_class"], "package-incomplete")
+                records, facts = M["package_facts"]((alias,), 130)
+            query.assert_called_once_with(
+                ["/usr/bin/dpkg-query", "--search", alias], 130
+            )
+            self.assertEqual(records, [])
+            self.assertEqual(facts[0]["failure_stage"], "search-shape")
 
     def test_optional_image_release_stays_null_and_required_image_os_still_blocks(self):
         context = dict(
@@ -351,7 +360,12 @@ class InputCorrectionTests(unittest.TestCase):
                     glob,
                     {
                         "metadata": Mock(return_value=values),
-                        "observe_file": Mock(return_value=observed),
+                        "observe_metadata": Mock(
+                            return_value=(
+                                [observed] * len(M["FILES"]),
+                                dict(presence="absent", type=None),
+                            )
+                        ),
                         "observe_signature": Mock(
                             return_value=dict(cryptographic_signature_verified=True)
                         ),
@@ -376,6 +390,318 @@ class InputCorrectionTests(unittest.TestCase):
                 self.assertFalse(record["overall_native_pass"])
                 self.assertFalse(record["production_qualified"])
                 self.assertFalse(record["operational_selector_configured"])
+
+
+class NativePrerequisiteFactsTests(unittest.TestCase):
+    def test_fixed_missing_tools_and_verifier_last(self):
+        self.assertEqual(
+            M["FILES"][-5:],
+            (
+                "/usr/bin/docker",
+                "/usr/sbin/ip",
+                "/usr/bin/mount",
+                "/usr/bin/dpkg-query",
+                "/usr/bin/gpgv",
+            ),
+        )
+        self.assertEqual(len(set(M["FILES"])), 10)
+        for path in M["FILES"]:
+            self.assertIn(path, M["fixed_aliases"](path))
+        self.assertIn("/usr/bin/ip", M["fixed_aliases"]("/usr/sbin/ip"))
+        with self.assertRaises(M["Incomplete"]):
+            M["fixed_aliases"]("/outside-approved-layout/unknown")
+
+    @staticmethod
+    def info(mode):
+        return SimpleNamespace(
+            st_dev=1,
+            st_ino=2,
+            st_mode=mode,
+            st_uid=0,
+            st_gid=0,
+            st_nlink=1,
+            st_size=3,
+            st_mtime_ns=1,
+            st_ctime_ns=1,
+        )
+
+    def test_file_mode_suid_ancestors_and_symlink_facts_are_observed_not_changed(self):
+        glob = M["observe_file"].__globals__
+        path, resolved = "/usr/sbin/ip", "/usr/bin/ip"
+        regular = self.info(stat.S_IFREG | 0o4755)
+
+        def lstat(value):
+            return (
+                self.info(stat.S_IFLNK | 0o777)
+                if value == path
+                else self.info(stat.S_IFDIR | 0o755)
+            )
+
+        with (
+            patch.object(glob["time"], "monotonic", return_value=100),
+            patch.object(glob["os"].path, "realpath", return_value=resolved),
+            patch.object(glob["os"], "lstat", side_effect=lstat),
+            patch.object(glob["os"], "open", return_value=42),
+            patch.object(glob["os"], "fstat", return_value=regular),
+            patch.object(glob["os"], "read", side_effect=[b"abc", b""]),
+            patch.object(glob["os"], "close"),
+            patch.object(glob["os"], "listxattr", return_value=["security.capability"]),
+            patch.dict(glob, {"package_facts": Mock(return_value=([], []))}),
+        ):
+            result = M["observe_file"](path, 130)
+        self.assertEqual(result["status"], "observed-not-authenticated")
+        self.assertEqual(result["mode"], 0o4755)
+        self.assertEqual((result["uid"], result["gid"], result["nlink"]), (0, 0, 1))
+        self.assertTrue(result["lexical"]["symlink"])
+        self.assertEqual(result["capability_presence"], "present")
+        self.assertEqual(
+            {item["path"] for item in result["ancestors"]},
+            {"/", "/usr", "/usr/bin", "/usr/sbin"},
+        )
+        self.assertTrue(
+            all(item["uid"] == item["gid"] == 0 for item in result["ancestors"])
+        )
+
+    def test_outside_alias_refuses_without_reading_or_retaining_unknown_path(self):
+        glob = M["observe_file"].__globals__
+        with (
+            patch.object(glob["os"].path, "realpath", return_value="/private/unknown"),
+            patch.object(glob["os"], "open") as opened,
+            patch.object(glob["os"], "lstat") as measured,
+        ):
+            result = M["observe_file"]("/usr/bin/docker")
+        opened.assert_not_called()
+        measured.assert_not_called()
+        self.assertEqual(result["failure_class"], "unexpected-alias")
+        self.assertNotIn("private", json.dumps(result))
+
+    def test_capabilities_absent_present_and_unknown_never_read_raw_values(self):
+        glob = M["capabilities"].__globals__
+        for value, expected in (
+            ([], "absent"),
+            (["security.capability"], "present"),
+            (OSError("not retained"), "unknown"),
+        ):
+            with patch.object(
+                glob["os"],
+                "listxattr",
+                **(
+                    {"side_effect": value}
+                    if isinstance(value, OSError)
+                    else {"return_value": value}
+                ),
+            ):
+                self.assertEqual(M["capabilities"](42), expected)
+
+    def test_typed_multiarch_multiple_owner_diversion_and_unknown_rows_no_raw_text(
+        self,
+    ):
+        alias = "/usr/bin/python3.12"
+        raw = (
+            "libc6:amd64, python3.12-minimal: " + alias + "\n"
+            "diversion by python3.12-minimal from: " + alias + "\n"
+            "local diversion to: /private/unknown\n"
+            "invalid PRIVATE_ROW_TOKEN\n"
+            "foreign: /private/foreign\n"
+        )
+        result, names = M["search_facts"](raw, alias)
+        self.assertEqual(names, {"libc6:amd64", "python3.12-minimal"})
+        self.assertEqual(result["unknown_rows"], 1)
+        self.assertEqual(result["shape"], "unrecognized-or-unassociated")
+        self.assertEqual(
+            result["rows"][0],
+            dict(
+                type="owner",
+                package="libc6",
+                qualifier="amd64",
+                matched_fixed_path=True,
+            ),
+        )
+        self.assertEqual(result["rows"][-1]["matched_fixed_path"], False)
+        self.assertNotIn("PRIVATE_ROW_TOKEN", json.dumps(result))
+        self.assertNotIn("/private", json.dumps(result))
+        for malformed in ("", "unknown\n" * 13, "x" * 1025):
+            self.assertEqual(
+                M["search_facts"](malformed, alias)[0]["shape"], "bounds-or-empty"
+            )
+
+    def test_query_exit_timeout_budget_encoding_and_bounds_are_typed(self):
+        glob = M["query_fact"].__globals__
+        argv = ["/usr/bin/dpkg-query", "--search", "/usr/bin/docker"]
+        for code, payload, expected in (
+            (0, b"pkg: /usr/bin/docker\n", "zero"),
+            (1, b"", "nonzero"),
+            (0, b"\xff", "encoding"),
+            (0, b"x" * 65537, "bounds"),
+        ):
+
+            def run(command, payload=payload, code=code, **kwargs):
+                kwargs["stdout"].write(payload)
+                self.assertEqual(kwargs["timeout"], 2)
+                self.assertEqual(kwargs["env"], M["ENV"])
+                self.assertIs(kwargs["stderr"], M["subprocess"].DEVNULL)
+                return Mock(returncode=code)
+
+            with (
+                patch.object(glob["time"], "monotonic", return_value=100),
+                patch.object(glob["subprocess"], "run", side_effect=run),
+            ):
+                self.assertEqual(M["query_fact"](argv, 130)[0], expected)
+        for error, expected in (
+            (M["subprocess"].TimeoutExpired(argv, 2), "timeout"),
+            (OSError("not retained"), "unavailable"),
+        ):
+            with (
+                patch.object(glob["time"], "monotonic", return_value=100),
+                patch.object(glob["subprocess"], "run", side_effect=error),
+            ):
+                self.assertEqual(M["query_fact"](argv, 130), (expected, None))
+        with (
+            patch.object(glob["time"], "monotonic", return_value=130),
+            patch.object(glob["subprocess"], "run") as run,
+        ):
+            self.assertEqual(M["query_fact"](argv, 130), ("budget-exhausted", None))
+            run.assert_not_called()
+
+    def test_package_failure_stages_and_python_candidate_are_separate(self):
+        glob = M["package_facts"].__globals__
+        alias = "/usr/bin/python3.12"
+        for exit_class, raw, stage in (
+            ("nonzero", "", "search-exit"),
+            ("zero", "unrecognized\n", "search-shape"),
+            ("timeout", None, "search-exit"),
+        ):
+            query = Mock(
+                side_effect=[
+                    (exit_class, raw),
+                    ("zero", "python3.12-minimal\t3.12.3-1ubuntu0.17\tamd64\n"),
+                ]
+            )
+            with patch.dict(glob, {"query_fact": query}):
+                associated, facts = M["package_facts"]((alias,), 130)
+            self.assertEqual(associated, [])
+            self.assertEqual(facts[0]["failure_stage"], stage)
+            candidate = facts[-1]["candidate_query"]
+            self.assertEqual(candidate["query_kind"], "candidate-only-not-association")
+            self.assertTrue(candidate["architecture_matches_amd64"])
+        for show_exit, show_raw, stage in (
+            ("nonzero", "", "show-exit"),
+            ("zero", "PRIVATE_BAD_ROW\n", "show-shape"),
+            ("timeout", None, "show-exit"),
+        ):
+            with patch.dict(
+                glob,
+                {
+                    "query_fact": Mock(
+                        side_effect=[
+                            ("zero", "docker: /usr/bin/docker\n"),
+                            (show_exit, show_raw),
+                        ]
+                    )
+                },
+            ):
+                associated, facts = M["package_facts"](("/usr/bin/docker",), 130)
+            self.assertEqual(associated, [])
+            self.assertEqual(facts[0]["failure_stage"], stage)
+            self.assertNotIn("PRIVATE_BAD_ROW", json.dumps(facts))
+
+    def test_show_arch_qualifier_and_requested_package_match_facts(self):
+        glob = M["show_fact"].__globals__
+        with patch.dict(
+            glob,
+            {
+                "query_fact": Mock(
+                    return_value=("zero", "libc6:amd64\t2.39-0ubuntu8.9\tamd64\n")
+                )
+            },
+        ):
+            result = M["show_fact"]("libc6:amd64", "owner-association", 130)
+        self.assertEqual(result["qualifier"], "amd64")
+        self.assertTrue(result["requested_package_matches"])
+        with patch.dict(
+            glob,
+            {"query_fact": Mock(return_value=("zero", "foreign:arm64\t1.0\tarm64\n"))},
+        ):
+            result = M["show_fact"]("libc6:amd64", "owner-association", 130)
+        self.assertFalse(result["requested_package_matches"])
+        self.assertFalse(result["architecture_matches_amd64"])
+
+    def test_runc_target_absent_regular_symlink_special_or_unknown_without_open(self):
+        glob = M["runc_target"].__globals__
+        for value, presence, kind in (
+            (FileNotFoundError(), "absent", None),
+            (self.info(stat.S_IFREG | 0o755), "present", "regular"),
+            (self.info(stat.S_IFLNK | 0o777), "present", "symlink"),
+            (self.info(stat.S_IFCHR | 0o600), "present", "special"),
+            (PermissionError(), "unknown", None),
+        ):
+            with (
+                patch.object(
+                    glob["os"],
+                    "lstat",
+                    **(
+                        {"side_effect": value}
+                        if isinstance(value, OSError)
+                        else {"return_value": value}
+                    ),
+                ),
+                patch.object(glob["os"], "open") as opened,
+            ):
+                self.assertEqual(M["runc_target"](), dict(presence=presence, type=kind))
+                opened.assert_not_called()
+
+    def test_original_metadata_budget_never_reanchors_or_calls_remaining_files(self):
+        glob = M["observe_metadata"].__globals__
+        clock = iter([100, 100] + [131] * 10)
+        with (
+            patch.object(glob["time"], "monotonic", side_effect=lambda: next(clock)),
+            patch.object(glob["signal"], "signal"),
+            patch.object(glob["signal"], "setitimer") as timer,
+            patch.dict(
+                glob,
+                {
+                    "observe_file": Mock(return_value=dict(status="observed")),
+                    "runc_target": Mock(),
+                },
+            ),
+        ):
+            files, target = M["observe_metadata"]()
+            glob["observe_file"].assert_called_once_with(M["FILES"][0], 130)
+            glob["runc_target"].assert_not_called()
+        self.assertEqual(len(files), len(M["FILES"]))
+        self.assertEqual([call.args[1] for call in timer.call_args_list], [30, 0])
+        self.assertEqual(target["presence"], "unknown")
+        self.assertTrue(
+            all(item["failure_class"] == "metadata-budget" for item in files[1:])
+        )
+
+    def test_metadata_alarm_retains_partial_files_and_marks_rest_incomplete(self):
+        glob = M["observe_metadata"].__globals__
+        with (
+            patch.object(glob["time"], "monotonic", return_value=100),
+            patch.object(glob["signal"], "signal") as handler,
+            patch.object(glob["signal"], "setitimer") as timer,
+            patch.dict(
+                glob,
+                {
+                    "observe_file": Mock(
+                        side_effect=[
+                            dict(status="observed"),
+                            M["Incomplete"]("metadata-budget"),
+                        ]
+                    )
+                },
+            ),
+        ):
+            files, target = M["observe_metadata"]()
+        self.assertEqual(files[0], dict(status="observed"))
+        self.assertTrue(
+            all(item["failure_class"] == "metadata-budget" for item in files[1:])
+        )
+        self.assertEqual(target["presence"], "unknown")
+        self.assertEqual([call.args[1] for call in timer.call_args_list], [30, 0])
+        with self.assertRaises(M["Incomplete"]):
+            handler.call_args_list[0].args[1](None, None)
 
 
 if __name__ == "__main__":

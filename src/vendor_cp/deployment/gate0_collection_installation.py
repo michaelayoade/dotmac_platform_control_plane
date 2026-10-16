@@ -33,7 +33,10 @@ from vendor_cp.deployment.gate0_role_custody import (
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
-    from vendor_cp.deployment.gate0_collection_projection import CollectionInstallation
+    from vendor_cp.deployment.gate0_collection_projection import (
+        CollectionCase,
+        CollectionInstallation,
+    )
 
 
 class SelectedProfileIdentity(Protocol):
@@ -176,27 +179,10 @@ def _database(value: object) -> DatabaseExpectation:
     return expectation
 
 
-def load_installed_collection(
-    profile: SelectedProfileIdentity,
-) -> CollectionInstallation:
-    """Measure the existing runtime and retain the fixed original clocks."""
-    from uuid import UUID
-
-    from vendor_cp.deployment.gate0_collection_projection import (
-        CollectionCase,
-        CollectionCaseClock,
-        CollectionInstallation,
-        CollectionSelection,
-        validate_collection_cases,
-    )
-    from vendor_cp.deployment.gate0_launch import parse_run_document
-    from vendor_cp.deployment.gate0_window import FrozenIssuerWindow
-    from vendor_cp.relay.runner import authority_database_runtime
-
-    global _PINNED_BYTES
-    raw = _read_installation()
-    if _PINNED_BYTES is not None and _PINNED_BYTES != raw:
-        raise ProviderRefused()
+def installation_document(
+    raw: bytes, profile: SelectedProfileIdentity | None = None
+) -> dict[str, object]:
+    """Inert closed descriptor/image-artifact checks; no runtime qualification."""
     value = _fields(
         strict_object(raw, 524288),
         {
@@ -216,7 +202,7 @@ def load_installed_collection(
         or value["schema"] != "Gate0CollectionApiInstallation.v1"
     ):
         raise ProviderRefused()
-    if (
+    if profile is not None and (
         value["profile_code"] != profile.code
         or value["profile_version"] != profile.version
     ):
@@ -236,6 +222,25 @@ def load_installed_collection(
         or heads["source_revision"] != source
     ):
         raise ProviderRefused()
+    return value
+
+
+def installation_cases(
+    value: dict[str, object],
+) -> tuple[tuple[CollectionCase, CollectionCase], DatabaseExpectation]:
+    """Original same-boot inert A/B parsing shared with the installed reader."""
+    from uuid import UUID
+
+    from vendor_cp.deployment.gate0_collection_projection import (
+        CollectionCase,
+        CollectionCaseClock,
+        CollectionSelection,
+        validate_collection_cases,
+    )
+    from vendor_cp.deployment.gate0_launch import parse_run_document
+    from vendor_cp.deployment.gate0_window import FrozenIssuerWindow
+
+    source = _text(value["source_revision"])
     wall, monotonic = _anchor(value["clock_anchor"])
     cases = value["cases"]
     if type(cases) is not list or len(cases) != 2:
@@ -277,6 +282,22 @@ def load_installed_collection(
         raise ProviderRefused()
     selected_cases = (parsed[0], parsed[1])
     validate_collection_cases(selected_cases)
+    return selected_cases, expectation
+
+
+def load_installed_collection(
+    profile: SelectedProfileIdentity,
+) -> CollectionInstallation:
+    """Measure the existing runtime and retain the fixed original clocks."""
+    from vendor_cp.deployment.gate0_collection_projection import CollectionInstallation
+    from vendor_cp.relay.runner import authority_database_runtime
+
+    global _PINNED_BYTES
+    raw = _read_installation()
+    if _PINNED_BYTES is not None and _PINNED_BYTES != raw:
+        raise ProviderRefused()
+    value = installation_document(raw, profile)
+    selected_cases, expectation = installation_cases(value)
     runtime = authority_database_runtime()
     installed = CollectionInstallation(
         runtime, BoundedJSONTransport(GITHUB_ISSUER), selected_cases

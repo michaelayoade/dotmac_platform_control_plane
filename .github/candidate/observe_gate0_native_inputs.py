@@ -29,6 +29,10 @@ FILES = (
     "/usr/bin/systemd-run",
     "/usr/bin/systemctl",
     "/usr/lib/systemd/systemd",
+    "/usr/bin/docker",
+    "/usr/sbin/ip",
+    "/usr/bin/mount",
+    "/usr/bin/dpkg-query",
     "/usr/bin/gpgv",
 )
 BASE = "https://github.com/opencontainers/runc/releases/download/v1.5.2/runc.amd64"
@@ -55,7 +59,9 @@ CHILD = dict(
     close_fds=True,
 )
 LIMIT = 65536
-STABLE_FIELDS = "st_dev st_ino st_mode st_size st_mtime_ns st_ctime_ns".split()
+STABLE_FIELDS = (
+    "st_dev st_ino st_mode st_uid st_gid st_nlink st_size st_mtime_ns st_ctime_ns"
+).split()
 QUERY = "--showformat=${binary:Package}\\t${Version}\\t${Architecture}\\n"
 
 
@@ -95,78 +101,269 @@ def command(argv, timeout=2):
         return output.read(LIMIT + 1).decode("ascii")
 
 
-def packages(aliases):
-    records = []
-    package_pattern = r"[a-z0-9][a-z0-9+.-]{0,100}(:[a-z0-9]+)?"
-    for alias in sorted(set(aliases)):
-        diverted = False
+def fixed_aliases(path):
+    require(path in FILES, "unexpected-alias")
+    if path.startswith(("/lib/", "/usr/lib/")):
+        suffix = path.split("/lib/", 1)[1]
+        return {"/lib/" + suffix, "/usr/lib/" + suffix}
+    return {
+        prefix + path.rsplit("/", 1)[1]
+        for prefix in ("/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/")
+    }
+
+
+def file_type(mode):
+    if stat.S_ISREG(mode):
+        return "regular"
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    return "special"
+
+
+def stat_facts(info):
+    return dict(
+        uid=info.st_uid,
+        gid=info.st_gid,
+        mode=stat.S_IMODE(info.st_mode),
+        nlink=info.st_nlink,
+        type=file_type(info.st_mode),
+        symlink=stat.S_ISLNK(info.st_mode),
+    )
+
+
+def ancestry(path, resolved):
+    paths = {"/"}
+    for value in (path, resolved):
+        paths.update(str(parent) for parent in Path(value).parents)
+    require(len(paths) <= 12)
+    return [dict(path=value, **stat_facts(os.lstat(value))) for value in sorted(paths)]
+
+
+def capabilities(fd):
+    try:
+        return "present" if "security.capability" in os.listxattr(fd) else "absent"
+    except OSError:
+        return "unknown"
+
+
+def query_fact(argv, deadline):
+    require(argv[0] == "/usr/bin/dpkg-query" and argv[1] in ("--search", "--show"))
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return "budget-exhausted", None
+    with tempfile.TemporaryFile() as output:
+
+        def bounded():
+            resource.setrlimit(resource.RLIMIT_FSIZE, (LIMIT, LIMIT))
+
         try:
-            owners = command(["/usr/bin/dpkg-query", "--search", alias]).splitlines()
-            require(0 < len(owners) <= 12)
-            names = set()
-            for owner in owners:
-                require(len(owner) <= 1024)
-                diversion = re.fullmatch(
-                    r"(?:diversion by " + package_pattern + r"|local diversion) "
-                    r"(?:from|to): /[A-Za-z0-9_./+-]{1,512}",
-                    owner,
-                )
-                if diversion:
-                    diverted = True
-                    continue  # A diversion record is never a file owner.
-                package, separator, owned = owner.partition(": ")
-                require(separator and owned == alias)
-                group = package.split(", ")
-                require(0 < len(group) <= 4)
-                names.update(text(name, package_pattern) for name in group)
-                require(len(names) <= 4)
-            require(names)
-            for package in sorted(names):
-                row = command(["/usr/bin/dpkg-query", "--show", QUERY, package])
-                fields = row.rstrip("\n").split("\t")
-                require(len(fields) == 3 and "\n" not in row.rstrip("\n"))
-                fields = dict(
-                    zip(
-                        ("package", "version", "architecture"),
-                        map(text, fields),
-                        strict=True,
-                    )
-                )
-                records.append(dict(alias=alias, diversion_observed=diverted, **fields))
-        except EXPECTED_ERRORS:
-            records.append(
+            result = subprocess.run(  # noqa: S603
+                argv,
+                stdout=output,
+                timeout=min(2, remaining),
+                preexec_fn=bounded,
+                **CHILD,
+            )
+        except subprocess.TimeoutExpired:
+            return "timeout", None
+        except OSError:
+            return "unavailable", None
+        if time.monotonic() >= deadline:
+            return "budget-exhausted", None
+        if output.tell() > LIMIT:
+            return "bounds", None
+        output.seek(0)
+        try:
+            raw = output.read(LIMIT + 1).decode("ascii")
+        except UnicodeError:
+            return "encoding", None
+        if len(raw) > LIMIT:
+            return "bounds", None
+        return "zero" if result.returncode == 0 else "nonzero", raw
+
+
+PACKAGE = r"[a-z0-9][a-z0-9+.-]{0,100}(?::[a-z0-9]{1,16})?"
+
+
+def search_facts(raw, alias):
+    rows = raw.splitlines()
+    result = dict(shape="valid", rows=[], unknown_rows=0, row_count=len(rows))
+    if not 0 < len(rows) <= 12 or any(len(row) > 1024 for row in rows):
+        result.update(shape="bounds-or-empty", row_count=min(len(rows), 13))
+        return result, set()
+    names = set()
+    for row in rows:
+        diversion = re.fullmatch(
+            r"(?:diversion by (" + PACKAGE + r")|local diversion) "
+            r"(from|to): (/[A-Za-z0-9_./+-]{1,512})",
+            row,
+        )
+        if diversion:
+            base, _, qualifier = (diversion[1] or "").partition(":")
+            result["rows"].append(
                 dict(
-                    alias=alias,
-                    diversion_observed=diverted,
-                    failure_class="package-incomplete",
+                    type="diversion",
+                    package=base or None,
+                    qualifier=qualifier or None,
+                    direction=diversion[2],
+                    matched_fixed_path=diversion[3] == alias,
                 )
             )
-    return records
+            continue
+        group, separator, owned = row.partition(": ")
+        owners = group.split(", ")
+        if (
+            not separator
+            or not 0 < len(owners) <= 4
+            or not all(re.fullmatch(PACKAGE, name) for name in owners)
+        ):
+            result["unknown_rows"] += 1
+            continue
+        for owner in owners:
+            base, _, qualifier = owner.partition(":")
+            result["rows"].append(
+                dict(
+                    type="owner",
+                    package=base,
+                    qualifier=qualifier or None,
+                    matched_fixed_path=owned == alias,
+                )
+            )
+            if owned == alias:
+                names.add(owner)
+    if result["unknown_rows"] or not names or len(names) > 4:
+        result["shape"] = "unrecognized-or-unassociated"
+    return result, names if len(names) <= 4 else set()
 
 
-def observe_file(path):
+def show_fact(package, kind, deadline):
+    exit_class, raw = query_fact(
+        ["/usr/bin/dpkg-query", "--show", QUERY, package], deadline
+    )
+    record = dict(
+        query_kind=kind,
+        requested_package=package,
+        show_exit=exit_class,
+        show_shape="unavailable",
+        failure_stage="show-exit",
+    )
+    if raw is None or exit_class != "zero":
+        return record
+    fields = raw.removesuffix("\n").split("\t")
+    if (
+        len(fields) != 3
+        or "\n" in raw.removesuffix("\n")
+        or not re.fullmatch(PACKAGE, fields[0])
+        or not re.fullmatch(r"[A-Za-z0-9:~+._-]{1,128}", fields[1])
+        or not re.fullmatch(r"[a-z0-9]{1,16}", fields[2])
+    ):
+        record.update(show_shape="unrecognized", failure_stage="show-shape")
+        return record
+    base, _, qualifier = fields[0].partition(":")
+    record.update(
+        show_shape="valid",
+        failure_stage="none",
+        package=base,
+        qualifier=qualifier or None,
+        version=fields[1],
+        architecture=fields[2],
+        architecture_matches_amd64=fields[2] == "amd64",
+        requested_package_matches=(
+            fields[0] == package or (":" not in package and base == package)
+        ),
+    )
+    if not record["requested_package_matches"]:
+        record.update(
+            show_shape="requested-package-mismatch", failure_stage="show-shape"
+        )
+    return record
+
+
+def package_facts(aliases, deadline):
+    records, associated = [], []
+    for alias in sorted(set(aliases)):
+        exit_class, raw = query_fact(
+            ["/usr/bin/dpkg-query", "--search", alias], deadline
+        )
+        record = dict(
+            alias=alias,
+            search_exit=exit_class,
+            search_shape="unavailable",
+            failure_stage="search-exit",
+            shows=[],
+        )
+        if raw is not None:
+            parsed, names = search_facts(raw, alias)
+            record.update(search_shape=parsed.pop("shape"), **parsed)
+            record["failure_stage"] = (
+                "search-exit"
+                if exit_class != "zero"
+                else "search-shape"
+                if record["search_shape"] != "valid"
+                else "none"
+            )
+            if exit_class == "zero":
+                record["shows"] = [
+                    show_fact(name, "owner-association", deadline)
+                    for name in sorted(names)
+                ]
+                for show in record["shows"]:
+                    if show["failure_stage"] != "none":
+                        record["failure_stage"] = show["failure_stage"]
+                    elif (
+                        record["failure_stage"] == "none"
+                        and show["requested_package_matches"]
+                    ):
+                        associated.append(
+                            dict(
+                                alias=alias,
+                                package=show["package"],
+                                version=show["version"],
+                                architecture=show["architecture"],
+                                diversion_observed=any(
+                                    row["type"] == "diversion" for row in record["rows"]
+                                ),
+                            )
+                        )
+        records.append(record)
+    if "/usr/bin/python3.12" in aliases:
+        records.append(
+            dict(
+                candidate_query=show_fact(
+                    "python3.12-minimal", "candidate-only-not-association", deadline
+                )
+            )
+        )
+    return associated, records
+
+
+def observe_file(path, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + 30
     result = dict(
         lexical_path=path, status="incomplete", failure_class="file-incomplete"
     )
     try:
+        require(time.monotonic() < deadline, "metadata-budget")
         resolved = os.path.realpath(path)
-        require(
-            resolved in (path, "/usr/lib/x86_64-linux-gnu/libc.so.6")
-            and (path.endswith("/libc.so.6") or resolved == path),
-            "unexpected-alias",
-        )
+        require(resolved in fixed_aliases(path), "unexpected-alias")
         lexical = os.lstat(path)
+        result.update(lexical=stat_facts(lexical), ancestors=ancestry(path, resolved))
         fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
             before = os.fstat(fd)
             require(stat.S_ISREG(before.st_mode) and 0 < before.st_size <= 64 << 20)
             hasher, received = hashlib.sha256(), 0
             while block := os.read(fd, 65536):
+                require(time.monotonic() < deadline, "metadata-budget")
                 received += len(block)
                 require(received <= before.st_size)
                 hasher.update(block)
             require(received == before.st_size)
             require(stable(before) == stable(os.fstat(fd)))
+            capability = capabilities(fd)
         finally:
             os.close(fd)
         result.update(
@@ -176,15 +373,74 @@ def observe_file(path):
             lexical_symlink=stat.S_ISLNK(lexical.st_mode),
             resolved_differs=resolved != path,
             size=before.st_size,
-            mode=stat.S_IMODE(before.st_mode),
+            **stat_facts(before),
             sha256=hasher.hexdigest(),
-            packages=packages((path, resolved)),
+            capability_presence=capability,
+            packages=[],
+            package_queries=[],
         )
+        associated, facts = package_facts((path, resolved), deadline)
+        result.update(packages=associated, package_queries=facts)
     except FileNotFoundError:
         result["failure_class"] = "file-missing"
-    except EXPECTED_ERRORS:
-        result["failure_class"] = "file-incomplete"
+    except EXPECTED_ERRORS as error:
+        result["failure_class"] = (
+            error.args[0]
+            if isinstance(error, Incomplete)
+            and error.args[0] in ("metadata-budget", "unexpected-alias")
+            else "file-incomplete"
+        )
     return result
+
+
+def runc_target():
+    # Presence/type only; never follow, read, hash, install or replace the target.
+    try:
+        info = os.lstat("/usr/sbin/runc")
+        return dict(presence="present", type=file_type(info.st_mode))
+    except FileNotFoundError:
+        return dict(presence="absent", type=None)
+    except OSError:
+        return dict(presence="unknown", type=None)
+
+
+def observe_metadata():
+    def expired(signum, frame):
+        raise Incomplete("metadata-budget")
+
+    original = signal.signal(signal.SIGALRM, expired)
+    deadline = time.monotonic() + 30
+    signal.setitimer(signal.ITIMER_REAL, 30)
+    files = []
+    try:
+        for path in FILES:
+            if time.monotonic() >= deadline:
+                files.append(
+                    dict(
+                        lexical_path=path,
+                        status="incomplete",
+                        failure_class="metadata-budget",
+                    )
+                )
+            else:
+                files.append(observe_file(path, deadline))
+        target = (
+            runc_target()
+            if time.monotonic() < deadline
+            else dict(presence="unknown", type=None)
+        )
+    except Incomplete:
+        files.extend(
+            dict(
+                lexical_path=path, status="incomplete", failure_class="metadata-budget"
+            )
+            for path in FILES[len(files) :]
+        )
+        target = dict(presence="unknown", type=None)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, original)
+    return files, target
 
 
 def checked_url(url):
@@ -409,7 +665,7 @@ def main():
         production_qualified=False,
         operational_selector_configured=False,
     )
-    record["files"] = [observe_file(path) for path in FILES]
+    record["files"], record["runc_target"] = observe_metadata()
     record["os_release"] = {}
     try:
         with open("/etc/os-release", "rb") as source:
@@ -436,6 +692,10 @@ def main():
     complete = all(
         item["status"] == "observed-not-authenticated"
         and any("package" in package for package in item["packages"])
+        and all(
+            query.get("candidate_query", query)["failure_stage"] == "none"
+            for query in item.get("package_queries", [])
+        )
         for item in record["files"]
     )
     complete = (

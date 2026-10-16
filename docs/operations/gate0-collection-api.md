@@ -5,6 +5,86 @@ The collector, fresh controller keys and actual GitHub OIDC acquisition remain i
 the genuine protected A9 job on its isolated group3 runner. CP retains its one
 kernel-owned database. This API supplies detached owner evidence only.
 
+## Explicit installation and retirement source adapter
+
+The source-only `--gate0-collection-activate` and
+`--gate0-collection-retire` optional third arguments of the existing emergency
+deploy executor run a fixed stdlib-only host branch under that executor's same
+canonical lock. No host CP installation or host PATH-resolved CP CLI is required.
+The selected already-present image supplies only the read-only installed commands
+`dotmac-platform gate0 collection-check-activation` and
+`collection-check-retirement`. The
+ordinary two-argument full deployment retains its existing behavior. These
+mechanisms do not establish operational approval or authorize installing a
+production image, selecting a profile, or beginning A/B. The existing full
+candidate, accepted descriptor, recovery and migration transition must precede
+the finite collection selection. This leaf performs none of those transitions.
+
+The proposed fixed root input is
+`/etc/dotmac-gate0-collection/installation.json`, using the unchanged
+`Gate0CollectionApiInstallation.v1` schema below. Exact bytes are retained once in
+root-private `/var/lib/dotmac-gate0-collection`, alongside exclusive attempt,
+runtime-inode binding and completion or incomplete records. File presence is
+selection data, not acceptance or qualification. No boolean asserts approval.
+Missing volatile files, interrupted attempts, duplicate activation and previous
+retirement cannot permit reinstalling or resetting the original anchor.
+
+Activation checks the exact already-present immutable image reference, source
+revision, image user `10001:10001` and current same-image app before creating the
+mount. It installs the descriptor at the existing fixed `/run` path with
+root ownership, group `10001`, mode `0640`, and a root-private host parent. The
+app-only opt-in Compose overlay supplies the selected accepted source profile and
+a read-only file bind; the container parent must be protected and traversable.
+Actual image identity, UID access, container layout, canonical lock layout and
+runtime/database/native qualification remain operational preflight obligations.
+The only writable canonical lock-directory exception is the root-owned sticky
+standard `/var/lock` layout, including its exact standard `/run/lock` symlink.
+The lock file itself must remain protected, regular and single-linked.
+
+The host retains its lock descriptor; Docker children do not inherit it. Input
+checks run as `10001:10001` in the selected image with network disabled, a
+read-only root, all capabilities dropped, no new privileges, bounded memory/PIDs,
+and no host mount, socket, `.env`, DSN or credential input. The image reads its own
+profile and migration-head artifacts and returns a small closed mechanical JSON
+record binding the exact input digest and selected fields. It does not certify
+its registry digest, approval or database qualification. The host separately
+measures image identity, bounds input/output while collecting, owns the exact
+private-cidfile container, and requires confirmed removal before accepting its
+result. Killing a Docker CLI alone never establishes container retirement.
+The durable operation attempt and helper ownership record precede every helper
+launch. They retain its exact operation, name, image/input binding and private
+directory identity. A missing CID or uncertain removal remains incomplete and
+blocks further helpers in either operation. This adapter does not resolve orphan
+ownership through a new launch; separate reviewed recovery is required.
+
+Activation's read-only result also carries the existing original boot, anchor,
+wall expiry and mapped monotonic expiry. After confirmed helper removal the host
+checks that exact original intersection against its current boot and both clocks,
+before runtime publication, immediately before app recreation, and before marking
+completion. Cleanup delay consumes the original interval. No second helper, new
+relative lifetime or reset origin supplies freshness. Retirement carries no live
+clock prerequisite and remains possible after expiry when prior helper cleanup is
+confirmed.
+
+Both operations recreate only literal `app` with `--no-deps --no-build --pull
+never`, pinning the same image and supplying a process-only nonsecret bootstrap
+interpolation placeholder. They do not edit `.env` or default Compose, pull,
+build, back up, migrate, rotate credentials, or act on relay/DB. Explicit
+retirement works after case expiry without consulting the live collection or DB
+qualifier: it recreates that same image under the existing bootstrap `.env`
+without the collection overlay, verifies the collection mount is absent, then
+removes only the recorded original runtime inode. Durable selection and terminal
+evidence remain. Failure or interruption is incomplete; another activation or
+automatic retry is forbidden. An incomplete retirement requires a separately
+reviewed operational recovery, never a database rewind or inferred success.
+
+There is no CP timer or automatic retirement claim. Expired workload GETs refuse
+before authentication/DB I/O using their existing original clocks, even while the
+profile is mounted. That refusal is not completed profile retirement. Independently
+admin-authenticated surfaces of a prospective profile are not time-limited by
+these GET clocks. Profile version 2 remains a separate unadopted proposal; this
+adapter does not adopt it or assert that version 1 supplies B's future needs.
+
 ## Closed operations
 
 - `GET /platform/vendor/gate0/collection/windows/{window_id}/approval`
