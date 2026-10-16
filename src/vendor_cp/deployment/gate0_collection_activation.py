@@ -40,7 +40,7 @@ def check_collection_input(
     if operation == "activation":
         if type(value["profile_code"]) is not str:
             raise ProviderRefused()
-        profile = deployment_profile(cast(str, value["profile_code"]))
+        profile = deployment_profile(value["profile_code"])
         if (
             not profile.production_accepted
             or profile.laboratory

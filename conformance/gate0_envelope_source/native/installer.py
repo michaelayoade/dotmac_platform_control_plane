@@ -418,7 +418,13 @@ def verify_source_and_tools(selection):
             == (selected["package"] + "\t" + selected["version"] + "\tamd64\n").encode()
         )
         owned = run([TOOLS["dpkg_query"], "--search", path])
-        require(owned == (selected["package"] + ": " + path + "\n").encode())
+        require(
+            owned
+            in (
+                (selected["package"] + ": " + path + "\n").encode(),
+                (selected["package"] + ":amd64: " + path + "\n").encode(),
+            )
+        )
         measured[key] = dict(
             pin=actual,
             package=selected["package"],

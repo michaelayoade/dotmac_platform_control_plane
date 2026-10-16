@@ -179,6 +179,134 @@ class SelectionTests(unittest.TestCase):
             i.load_selection("recovery")
 
 
+class SourceToolOwnershipTests(unittest.TestCase):
+    def verify(self, owned, package=None):
+        chosen = selection()
+        chosen["tools"]["libc"].update(package="libc6", version="2.39-source-test")
+
+        def pins(path):
+            if path == i.INSTALLER:
+                return dict(sha256=chosen["installer_sha256"], mode=0o555)
+            for name, digest in i.R4.items():
+                if path == i.PREFIX + "/" + name:
+                    return dict(sha256=digest, mode=0o555)
+            key = next(key for key, fixed in i.TOOLS.items() if fixed == path)
+            return {
+                field: chosen["tools"][key][field]
+                for field in ("sha256", "size", "mode")
+            }
+
+        def query(argv):
+            self.assertEqual(argv[0], i.TOOLS["dpkg_query"])
+            if argv[1] == "--show":
+                self.assertEqual(
+                    argv[2], "--showformat=${Package}\\t${Version}\\t${Architecture}\\n"
+                )
+                if argv[3] == "libc6" and package is not None:
+                    return package
+                selected = next(
+                    tool
+                    for tool in chosen["tools"].values()
+                    if tool["package"] == argv[3]
+                )
+                return (
+                    selected["package"] + "\t" + selected["version"] + "\tamd64\n"
+                ).encode()
+            self.assertEqual(argv[1], "--search")
+            key = next(key for key, fixed in i.TOOLS.items() if fixed == argv[2])
+            if key == "libc":
+                return owned
+            return (chosen["tools"][key]["package"] + ": " + argv[2] + "\n").encode()
+
+        self.query = Mock(side_effect=query)
+        with (
+            patch.object(i, "pin", side_effect=pins),
+            patch.object(i, "run", self.query),
+            patch.object(
+                i,
+                "read_fixed",
+                return_value=b"\x7fELF\x02\x01" + bytes(12) + b"\x3e\x00",
+            ) as read,
+            patch.object(i.os, "stat", return_value=Mock(st_mode=0o755)),
+            patch.object(
+                i.os, "getxattr", side_effect=OSError(i.errno.ENODATA, "absent")
+            ),
+            patch.object(i, "source_module", side_effect=["adapter", "outer"]),
+        ):
+            result = i.verify_source_and_tools(chosen)
+            read.assert_called_once_with(i.TOOLS["runc"], i.CAPS["file"])
+            return result
+
+    def test_exact_unqualified_and_amd64_qualified_owner_succeed(self):
+        for owner in ("libc6", "libc6:amd64"):
+            with self.subTest(owner=owner):
+                measured, adapter_module, outer_module = self.verify(
+                    (owner + ": " + i.TOOLS["libc"] + "\n").encode()
+                )
+                self.assertEqual(measured["libc"]["package"], "libc6")
+                self.assertEqual(measured["libc"]["version"], "2.39-source-test")
+                self.assertEqual((adapter_module, outer_module), ("adapter", "outer"))
+                self.query.assert_any_call(
+                    [
+                        i.TOOLS["dpkg_query"],
+                        "--show",
+                        "--showformat=${Package}\\t${Version}\\t${Architecture}\\n",
+                        "libc6",
+                    ]
+                )
+
+    def test_owner_refuses_every_other_row_shape(self):
+        path = i.TOOLS["libc"]
+        good = "libc6:amd64: " + path + "\n"
+        for owned in (
+            "libc6:arm64: " + path + "\n",
+            "libc6:i386: " + path + "\n",
+            "other:amd64: " + path + "\n",
+            "other: " + path + "\n",
+            "libc6*:amd64: " + path + "\n",
+            "libc6:amd64: " + path + ".other\n",
+            "libc6:amd64: " + path + "*\n",
+            "libc6:amd64: " + path + "/../libc.so.6\n",
+            good[:-1],
+            good + good,
+            good + "other: " + path + "\n",
+            "diversion by libc6:amd64 from: " + path + "\n" + good,
+            "libc6:amd64, other: " + path + "\n",
+            " " + good,
+            good.replace(": ", ":  "),
+            good.replace(": ", ":\t"),
+            good[:-1] + " \n",
+            good[:-1] + "\r\n",
+            good + "\n",
+            "",
+        ):
+            with self.subTest(owned=owned), self.assertRaises(i.Refusal):
+                self.verify(owned.encode())
+        with self.assertRaises(i.Refusal):
+            self.verify(good)
+
+    def test_owner_never_bypasses_prior_exact_package_version_architecture(self):
+        for owner in ("libc6", "libc6:amd64"):
+            for package in (
+                b"libc6\t2.39-source-test\tarm64\n",
+                b"libc6\t2.39-source-test\ti386\n",
+                b"other\t2.39-source-test\tamd64\n",
+                b"libc6\tother\tamd64\n",
+                b"libc6:amd64\t2.39-source-test\tamd64\n",
+            ):
+                with self.subTest(owner=owner, package=package):
+                    with self.assertRaises(i.Refusal):
+                        self.verify(
+                            (owner + ": " + i.TOOLS["libc"] + "\n").encode(), package
+                        )
+                    self.assertNotIn(
+                        unittest.mock.call(
+                            [i.TOOLS["dpkg_query"], "--search", i.TOOLS["libc"]]
+                        ),
+                        self.query.call_args_list,
+                    )
+
+
 class RuncKeyringTests(unittest.TestCase):
     @staticmethod
     def fixture(sizes=(1915, 1243, 2272)):
