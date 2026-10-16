@@ -209,6 +209,32 @@ RUN DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
 USER 0:0
 ENTRYPOINT ["/opt/venv/bin/dotmac-platform", "gate0", "supervise"]
 
+# Nondefault candidate publisher bytes only. This stage does not qualify a
+# host, Runner.Listener, gh, systemd, credentials, or native launch behavior.
+# Same pinned base, ABI and /opt/venv prefix as builder; no second resolver.
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS gate0-publisher
+
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.revision="$SOURCE_REVISION" \
+      io.dotmac.runtime="gate0-publisher-shape-only"
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    VENDOR_MIGRATION_ROOT=/app
+WORKDIR /app
+RUN /usr/local/bin/python3.12 -m venv --copies /opt/venv
+COPY --from=builder /app/dist /app/dist
+COPY --from=builder /app/distributions.json /app/distributions.json
+COPY --from=builder /app/alembic /app/alembic
+COPY --from=builder /app/alembic.ini /app/alembic.ini
+COPY .github/candidate/prepare_gate0_publisher.py /tmp/prepare_gate0_publisher.py
+RUN --network=none --mount=type=bind,from=builder,source=/opt/venv,target=/mnt/builder-venv \
+    /usr/local/bin/python3.12 -I -B /tmp/prepare_gate0_publisher.py \
+    && rm /tmp/prepare_gate0_publisher.py \
+    && chmod -R go-w /app /opt/venv
+USER 10001:10001
+ENTRYPOINT ["/opt/venv/bin/dotmac-platform"]
+
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 
 ARG SOURCE_REVISION=unknown

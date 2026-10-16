@@ -403,6 +403,48 @@ jobs:
             --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
             --build-arg "SOURCE_REVISION=${GITHUB_SHA}" \
             --tag dotmac-vendor-control-plane:ci .
+      - name: Build and privately measure nonpublishing publisher shape
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          private="$(mktemp -d "$RUNNER_TEMP/gate0-publisher.XXXXXXXX")"
+          production_container=""
+          publisher_container=""
+          cleanup() {
+            if test -n "$production_container"; then docker rm "$production_container" >/dev/null 2>&1 || true; fi
+            if test -n "$publisher_container"; then docker rm "$publisher_container" >/dev/null 2>&1 || true; fi
+            rm -rf -- "$private"
+            docker image rm dotmac-vendor-control-plane:publisher-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          DOCKER_BUILDKIT=1 docker build \
+            --target gate0-publisher \
+            --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
+            --build-arg "SOURCE_REVISION=${GITHUB_SHA}" \
+            --tag dotmac-vendor-control-plane:publisher-ci .
+          # No bind of the checkout, credentials or host runtime into the image.
+          docker run --rm --network none --read-only --user 10001:10001 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --env DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+            --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+            --entrypoint /opt/venv/bin/python3.12 \
+            --interactive dotmac-vendor-control-plane:publisher-ci -I -B - shape \
+            < .github/candidate/inspect_gate0_publisher.py > "$private/shape.json"
+          # Both export subjects are NEVER STARTED. No tar member is extracted.
+          production_container="$(docker create dotmac-vendor-control-plane:ci)"
+          publisher_container="$(docker create dotmac-vendor-control-plane:publisher-ci)"
+          docker export --output "$private/production.tar" "$production_container"
+          docker export --output "$private/publisher.tar" "$publisher_container"
+          python3 -I -B .github/candidate/inspect_gate0_publisher.py inspect \
+            "$private/production.tar" "$private/publisher.tar" \
+            "$private/shape.json" "$private/manifest.json"
+          # Public repository: never upload rootfs, dependency bytes or private
+          # material. The external measurement lives only in private RUNNER_TEMP.
+          # Production retains its actual manifest and installed source owners,
+          # not its wheel: this is not literal production-wheel byte comparison.
+          echo 'Gate0 publisher: runtime_NOT_RETAINED; no artifact acceptance or native qualification'
       - name: Boot-smoke the built bytes
         run: |
           set -euo pipefail

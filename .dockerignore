@@ -6,6 +6,7 @@
 !.github/candidate
 .github/candidate/*
 !.github/candidate/prepare_gate0_native.py
+!.github/candidate/prepare_gate0_publisher.py
 .venv
 .mypy_cache
 .pytest_cache
