@@ -1174,6 +1174,34 @@ class InstalledGate0GitHubReads:
         """Live identity check; DTO construction/JSON never authenticates facts."""
         return not self._failed and any(facts is item for item in self._issued)
 
+    @property
+    def installed_selection_digest(self) -> str:
+        """Hash the canonical selection authenticated by the fixed root binding."""
+        _require(not self._failed)
+        return _digest(_canonical(self._installation))
+
+    def selected_job(self, facts: ProducerFacts | PublicationFacts) -> JobFact:
+        """Return only this live read's internally selected named workflow job."""
+        _require(self.owns_facts(facts))
+        if type(facts) is PublicationFacts:
+            observed = facts.run
+            selected = self._publication
+        else:
+            _require(type(facts) is ProducerFacts)
+            observed = cast(ProducerFacts, facts)
+            selected = self._producer
+        _require(selected is not None)
+        selected = cast(RunPin, selected)
+        _require(
+            observed.run_id == selected.run_id
+            and observed.attempt == selected.attempt
+            and observed.workflow_id == selected.workflow.id
+            and observed.head_sha == selected.head_sha
+        )
+        jobs = [job for job in observed.jobs if job.name == selected.workflow.job_name]
+        _require(len(jobs) == 1)
+        return jobs[0]
+
     def _phase(
         self,
         name: str,

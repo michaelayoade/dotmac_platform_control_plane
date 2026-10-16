@@ -314,3 +314,12 @@ continues to require exactly two assets, and published verification continues to
 require three assets, immutable publication and actual raw/peeled tag bindings.
 Neither new phase performs mutations or supplies evidence of B verification,
 human approval meaning, operational qualification or readiness by itself.
+
+`selected_job(facts)` exposes only the internally installed named workflow job
+from this reader's live-owned producer or publication facts. It accepts no caller
+job name and refuses copied, foreign or invalidated facts. This lets the E writer
+join its independently selected job ID to the same job whose stage and cleanup
+steps were verified, rather than any other successful job in the roster.
+`installed_selection_digest` hashes the canonical installed selection authenticated
+by the reader's existing root/native binding. Publication writers independently
+pin that digest as well as exact run, workflow, source and selected-job coordinates.

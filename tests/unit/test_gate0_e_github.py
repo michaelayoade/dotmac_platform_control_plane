@@ -1617,3 +1617,41 @@ def test_prepublication_draft_does_not_relax_other_inventories(release_snapshot,
     with pytest.raises(gh.GitHubReadRefused):
         owner.draft_with_receipt_snapshot()
     assert not owner._issued
+
+
+def test_selected_job_exposes_only_installed_named_job_with_live_identity(producer):
+    owner, responses = producer
+    other = copy.deepcopy(responses[gh.EndpointCode.JOBS]["jobs"][0])
+    other.update(id=19, name="Other successful job")
+    responses[gh.EndpointCode.JOBS]["jobs"].append(other)
+    responses[gh.EndpointCode.JOBS]["total_count"] = 2
+    owner._policies[17]["mandatory_jobs"].append(other["name"])
+    facts = owner.producer_snapshot(gh.ProducerStage.PRODUCER_RUN_COMPLETE)
+    assert len(facts.jobs) == 2
+    assert owner.selected_job(facts).id == 18
+    assert owner.installed_selection_digest == gh._digest(
+        gh._canonical(owner._installation)
+    )
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.selected_job(replace(facts))
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.producer_snapshot(gh.ProducerStage.PRODUCER_RUN_COMPLETE)
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.selected_job(facts)
+    with pytest.raises(gh.GitHubReadRefused):
+        _ = owner.installed_selection_digest
+
+
+def test_selected_publication_job_is_bound_to_owned_outer_publication_fact(producer):
+    owner, _ = producer
+    owner._publication, owner._producer = owner._producer, None
+    owner._installation["phase"] = "publication_complete"
+    owner._policies[17].update(
+        publication_title="E read", selected_summary_digest="e" * 64
+    )
+    facts = owner.publication_complete_snapshot()
+    assert owner.selected_job(facts).id == 18
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.selected_job(facts.run)
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.selected_job(replace(facts))
