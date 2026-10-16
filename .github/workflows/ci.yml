@@ -43,6 +43,19 @@ jobs:
         run: poetry run ruff format --check .
       - name: Types
         run: poetry run mypy
+      # Separate unittest processes preserve sibling imports and bypass the
+      # conformance pytest database fixtures. These are synthetic/mocked source
+      # checks only; no native installation or qualification is performed.
+      - name: Gate-0 activation envelope source conformance (non-root)
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          python -m unittest discover -s conformance/gate0_envelope_source/activation -p test_candidate_source.py -v
+      - name: Gate-0 native envelope adapter source conformance (non-root)
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          python -m unittest discover -s conformance/gate0_envelope_source/native -p test_adapter.py -v
       - name: Tests (boot + provisioning contract + D1–D5 deny cases)
         timeout-minutes: 15
         run: |

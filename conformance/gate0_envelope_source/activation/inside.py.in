@@ -1,0 +1,21 @@
+#!@@QUALIFIED_PYTHON_PATH@@ -I
+"""UNRENDERED CANDIDATE. PID1 admission precedes our first instruction."""
+import os
+import sys
+
+if len(sys.argv) != 1:
+    raise SystemExit(125)
+# Mandatory reviewed inline fixed public-data/native-readback implementation.
+# Validate original boot/E/S/C; own InvocationID/MainPID and launcher cgroup;
+# protected bundle/config/tool bytes; closed manager properties/dependencies;
+# exact already-armed original timer; protected once claim. Never arm/rearm.
+# Create only the fixed nested payload/dotmac-gate0 root0700 if qualified;
+# leave source-owned worker children absent and payload subtree_control empty.
+# No outside helper may create payload. No credential access or CP decisions.
+@@QUALIFIED_INSIDE_CHECKS_AND_NESTED_CGROUP_SETUP@@
+os.execve('/usr/sbin/runc', [
+    '/usr/sbin/runc', '--root', '/run/dotmac-gate0-runc',
+    'run', '--keep', '--bundle',
+    '/var/lib/dotmac-gate0/@@CAMPAIGN@@/@@CASE@@-@@ROLE@@/bundle',
+    '@@INSTANCE@@',
+], {})

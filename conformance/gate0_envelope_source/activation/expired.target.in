@@ -1,0 +1,4 @@
+[Unit]
+Description=Original finite Gate0 cutoff
+DefaultDependencies=no
+Conflicts=dotmac-gate0-@@INSTANCE@@-ready.target dotmac-gate0-@@INSTANCE@@.service
