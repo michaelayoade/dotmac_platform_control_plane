@@ -219,6 +219,15 @@ def test_ciphertext_rejects_plaintext_extra_recipients_and_wrong_key():
         _ciphertext_packets(pkesk + encrypted, "B" * 40)
 
 
+def test_ciphertext_rejects_aead_even_with_nontruncated_partial_framing():
+    pkesk = b"\xc1\x0a\x03" + bytes.fromhex(FINGERPRINT[-16:]) + b"\x01"
+    # Tag 20 with a complete 512-byte partial chunk and a final 16-byte chunk.
+    # These are framing bytes, not a cryptographically valid AEAD message.
+    aead = b"\xd4\xe9\x01\x09\x02\x06" + b"x" * 508 + b"\x10" + b"y" * 16
+    with pytest.raises(ArchiveRefused, match="archive_ciphertext"):
+        _ciphertext_packets(pkesk + aead, FINGERPRINT)
+
+
 def test_no_profile_constructor_flag_can_authorize_or_export_private_bytes():
     profile = _profile()
     assert "public_key" not in repr(profile)

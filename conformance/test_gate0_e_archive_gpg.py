@@ -153,6 +153,10 @@ def test_actual_synthetic_gpg_encrypt_decrypt_on_qualified_host(tmp_path, monkey
                 "loopback",
                 "--passphrase",
                 "",
+                # Match the existing MDC archive profile. GnuPG 2.4 defaults
+                # advertise AEAD, which the holder contract does not accept.
+                "--default-preference-list",
+                "S9 S8 S7 S2 H10 H9 H8 H11 H2 Z2 Z3 Z1",
                 "--quick-generate-key",
                 "Synthetic E test",
                 "rsa2048",
@@ -193,13 +197,18 @@ def test_actual_synthetic_gpg_encrypt_decrypt_on_qualified_host(tmp_path, monkey
         monkeypatch.setenv("https_proxy", "http://must-not-be-used.invalid:9")
         manifest, files = _inputs()
         result = package_private_collection(manifest, files, profile, deadline=deadline)
-        clear = _run(
+        structure = _packet_structure(result.ciphertext)
+        assert structure["stop"] == "complete"
+        assert [packet["tag"] for packet in structure["packets"]] == [1, 18]
+        clear, status = archive_owner._run_channels(
             base + ["--pinentry-mode", "loopback", "--decrypt"],
             result.ciphertext,
             env,
             deadline,
             16777216,
+            status_channel=True,
         )
+        archive_owner._decrypt_status(status, profile, len(clear))
         assert not leaked.exists()
         assert clear == _pack(manifest, files)
         assert hashlib.sha256(clear).hexdigest() == result.plaintext_sha256
