@@ -611,7 +611,7 @@ class InstalledBArchiveVerifier:
             _require(
                 "sha256:" + run.workflow.sha256 == selection.source.workflow_digest
             )
-            selected_jobs = []
+            selected_jobs: list[Any] = []
             for observation in draft_facts.observations:
                 if observation.endpoint == github.EndpointCode.JOBS:
                     selected_jobs.extend(

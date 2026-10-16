@@ -341,7 +341,7 @@ def _verify_private_e_work(
     )
     _require(archive.inner_manifest == expected_manifest)
     projection = validate_encrypted_e_projection(inputs.projection)
-    for key, expected in dict(
+    for key, projection_expected in dict(
         policy_digest=selection.policy_digest,
         campaign_digest=selection.campaign_digest,
         source_bundle_digest=inputs.source_bundle_digest,
@@ -352,7 +352,7 @@ def _verify_private_e_work(
         ciphertext_bytes=len(inputs.ciphertext),
         producer=inputs.producer.document(),
     ).items():
-        _require(projection[key] == expected)
+        _require(projection[key] == projection_expected)
     return PrivateEVerification(
         verified.collection_digest,
         _sha(inputs.prerequisite_bytes),
@@ -1204,7 +1204,7 @@ class InstalledEWriter:
         target = (
             release.target_commitish
             if type(release) is DraftReleaseFacts
-            else release.peeled_commit
+            else cast(DownloadedReleaseFacts, release).peeled_commit
         )
         _require(target == self.producer.source_revision)
         return canonical(
