@@ -6,6 +6,8 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import stat
 import tarfile
 import tempfile
 import unittest
@@ -100,6 +102,39 @@ class PublisherTarRefusalTests(unittest.TestCase):
             )
         )
 
+    def test_structural_difference_counts_are_bounded(self):
+        counts = INSPECT.bounded_structural_closure_difference_counts(
+            {
+                "planted/private/path": ("file", 0o644, "secret-content-digest"),
+                "mode": ("directory", 0o755),
+                "link": ("symlink", "private-target"),
+                "kind": ("file", 0o644, "a"),
+                "missing": ("directory", 0o755),
+            },
+            {
+                "planted/private/path": ("file", 0o600, "other-secret-digest"),
+                "mode": ("directory", 0o700),
+                "link": ("symlink", "other-private-target"),
+                "kind": ("directory", 0o755),
+                "extra/private": ("file", 0o600, "extra-secret"),
+            },
+        )
+        self.assertEqual(
+            counts,
+            {
+                "missing": 1,
+                "extra": 1,
+                "kind": 1,
+                "mode": 2,
+                "content": 1,
+                "link_target": 1,
+            },
+        )
+        encoded = json.dumps(counts, sort_keys=True)
+        for secret in ("planted", "private", "secret-content", "other-secret"):
+            self.assertNotIn(secret, encoded)
+        self.assertTrue(all(type(value) is int for value in counts.values()))
+
 
 class PublisherPreparationTests(unittest.TestCase):
     def test_manifest_binds_single_wheel_hash_and_refuses_extra_bytes(self):
@@ -134,9 +169,108 @@ class PublisherPreparationTests(unittest.TestCase):
                 (source / name).write_bytes(b"builder")
                 (destination / name).write_bytes(b"fresh")
             (source / "dependency").write_bytes(b"dependency")
-            PREPARE.copy_bin(source, destination)
+            PREPARE.copy_bin(source, destination, os.getuid())
             for name in PREPARE.INTERPRETERS:
                 self.assertEqual((destination / name).read_bytes(), b"fresh")
             (source / "escape").symlink_to("../outside")
             with self.assertRaises(ValueError):
-                PREPARE.copy_bin(source, destination)
+                PREPARE.copy_bin(source, destination, os.getuid())
+
+    def test_copy_environment_mirrors_prefix_and_preserves_fresh_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, destination = root / "source", root / "destination"
+            (source / "bin").mkdir(parents=True)
+            (source / "bin").chmod(0o750)
+            destination.mkdir()
+            (source / "pyvenv.cfg").write_text("builder config")
+            for name in PREPARE.INTERPRETERS:
+                (source / "bin" / name).write_text("builder")
+                (destination / "bin").mkdir(exist_ok=True)
+                (destination / "bin" / name).write_text("fresh interpreter")
+            for name in ("lib", "include", "share"):
+                (source / name).mkdir()
+                payload = source / name / "payload.dat"
+                payload.write_bytes(name.encode())
+                payload.chmod(0o640)
+            (destination / "pyvenv.cfg").write_text("fresh config")
+            (destination / "stale").write_text("remove me")
+            (destination / "include").mkdir()
+            (destination / "include" / "leftover").write_text("remove me")
+
+            PREPARE.copy_environment(source, destination, os.getuid())
+
+            self.assertEqual(stat.S_IMODE((destination / "bin").stat().st_mode), 0o750)
+            self.assertEqual((destination / "pyvenv.cfg").read_text(), "fresh config")
+            self.assertFalse((destination / "stale").exists())
+            self.assertFalse((destination / "include" / "leftover").exists())
+            for name in PREPARE.INTERPRETERS:
+                self.assertEqual(
+                    (destination / "bin" / name).read_text(), "fresh interpreter"
+                )
+            for name in ("lib", "include", "share"):
+                self.assertEqual(
+                    (destination / name / "payload.dat").read_bytes(), name.encode()
+                )
+                self.assertEqual(
+                    stat.S_IMODE((destination / name / "payload.dat").stat().st_mode),
+                    0o640,
+                )
+
+    def test_copy_environment_refuses_unsafe_source_before_destination_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, destination = root / "source", root / "destination"
+            (source / "bin").mkdir(parents=True)
+            destination.mkdir()
+            (source / "share").mkdir()
+            unsafe = source / "share" / "unsafe"
+            unsafe.write_text("unsafe")
+            unsafe.chmod(0o666)
+            sentinel = destination / "sentinel"
+            sentinel.write_text("untouched")
+            with self.assertRaises(ValueError):
+                PREPARE.copy_environment(source, destination, os.getuid())
+            self.assertEqual(sentinel.read_text(), "untouched")
+
+    def test_copy_environment_refuses_special_and_escaping_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, destination = root / "source", root / "destination"
+            (source / "bin").mkdir(parents=True)
+            destination.mkdir()
+            (source / "share").mkdir()
+            (source / "share" / "escape").symlink_to("../../outside")
+            with self.assertRaises(ValueError):
+                PREPARE.copy_environment(source, destination, os.getuid())
+            self.assertEqual(list(destination.iterdir()), [])
+
+            (source / "share" / "escape").unlink()
+            os.mkfifo(source / "share" / "special")
+            with self.assertRaises(ValueError):
+                PREPARE.copy_environment(source, destination, os.getuid())
+            self.assertEqual(list(destination.iterdir()), [])
+
+    def test_copy_environment_allows_only_direct_bin_and_lib64_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, destination = root / "source", root / "destination"
+            (source / "bin").mkdir(parents=True)
+            (source / "lib").mkdir()
+            (source / "bin" / "target").write_text("direct target")
+            (source / "bin" / "direct").symlink_to("target")
+            (source / "lib64").symlink_to("lib")
+            destination.mkdir()
+
+            PREPARE.copy_environment(source, destination, os.getuid())
+
+            self.assertEqual(os.readlink(destination / "bin" / "direct"), "target")
+            self.assertTrue((destination / "lib64").is_symlink())
+            self.assertEqual(os.readlink(destination / "lib64"), "lib")
+
+            (source / "bin" / "chain").symlink_to("direct")
+            sentinel = destination / "sentinel"
+            sentinel.write_text("untouched")
+            with self.assertRaises(ValueError):
+                PREPARE.copy_environment(source, destination, os.getuid())
+            self.assertEqual(sentinel.read_text(), "untouched")

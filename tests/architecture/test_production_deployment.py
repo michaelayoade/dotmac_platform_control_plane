@@ -42,11 +42,42 @@ def _commands(script: str) -> str:
     )
 
 
+def _pinned_python_stages(dockerfile: str) -> dict[str, str]:
+    stage_names: set[str] = set()
+    python_stages: dict[str, str] = {}
+    for line in dockerfile.splitlines():
+        if not re.match(r"^\s*FROM\s+", line, re.I):
+            continue
+        match = re.fullmatch(
+            r"FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+([A-Za-z0-9_.-]+))?\s*",
+            line.strip(),
+            re.I,
+        )
+        assert match is not None, "malformed base stage"
+        base, stage = match.groups()
+        if stage is not None:
+            assert stage.lower() not in stage_names, "duplicate Docker stage name"
+            stage_names.add(stage.lower())
+        image = base.rsplit("/", 1)[-1]
+        image_name = image.split("@", 1)[0].split(":", 1)[0]
+        if image_name.lower() != "python":
+            continue
+        assert stage is not None, "Python base stages must have a stage name"
+        assert re.fullmatch(
+            r"python:3\.12-slim@sha256:[0-9a-f]{64}", base
+        ), "Python stages must use the pinned Python base"
+        python_stages[stage.lower()] = base
+    assert "builder" in python_stages
+    assert "runtime" in python_stages
+    assert len(set(python_stages.values())) == 1
+    return python_stages
+
+
 def test_runtime_image_uses_a_build_secret_and_runs_unprivileged() -> None:
     dockerfile = _text("Dockerfile")
 
     assert dockerfile.startswith("# syntax=docker/dockerfile:")
-    assert dockerfile.count("python:3.12-slim@sha256:") == 2
+    _pinned_python_stages(dockerfile)
     assert "--require-hashes --only-binary=:all:" in dockerfile
     assert ".github/bootstrap/poetry-requirements.txt" in dockerfile
     assert "--mount=type=secret,id=forgejo_token" in dockerfile
@@ -61,6 +92,38 @@ def test_runtime_image_uses_a_build_secret_and_runs_unprivileged() -> None:
     cmd = dockerfile.split("CMD ", 1)[1]
     assert "migrate" not in cmd.lower()
     assert "alembic" not in cmd.lower()
+
+
+def test_python_base_stage_guard_is_sensitive_to_unsupported_references() -> None:
+    pin = "python:3.12-slim@sha256:" + "a" * 64
+    valid = f"  from --platform=linux/amd64 {pin} as builder\nFROM {pin} AS runtime"
+    assert set(_pinned_python_stages(valid)) == {"builder", "runtime"}
+
+    invalid = (
+        f"FROM python@sha256:{'a' * 64} AS builder\nFROM {pin} AS runtime",
+        (
+            f"FROM registry.example/python:3.12-slim@sha256:{'a' * 64} "
+            f"AS builder\nFROM {pin} AS runtime"
+        ),
+        "FROM python:3.12-slim AS builder\nFROM " + pin + " AS runtime",
+        f"FROM {pin} AS builder\nFROM python:3.12-slim@sha256:{'b' * 64} AS runtime",
+        f"FROM {pin} AS builder\nFROM {pin} AS builder\nFROM {pin} AS runtime",
+        f"FROM {pin}\nFROM {pin} AS runtime",
+    )
+    # Keep the required stages valid so ignored extra references cannot fail
+    # merely because the builder or runtime was removed.
+    baseline = f"FROM {pin} AS builder\nFROM {pin} AS runtime"
+    invalid += tuple(
+        f"{baseline}\n{extra}"
+        for extra in (
+            "  FROM python:3.12-slim AS unexpected",
+            f"FROM python@sha256:{'a' * 64} AS unexpected",
+            f"FROM registry.example/python:3.12-slim@sha256:{'a' * 64} AS unexpected",
+        )
+    )
+    for dockerfile in invalid:
+        with pytest.raises(AssertionError):
+            _pinned_python_stages(dockerfile)
 
 
 def test_the_runtime_image_installs_the_wheel_and_carries_no_source_tree() -> None:

@@ -12,6 +12,12 @@ on:
   # `workflow_dispatch` validates a branch HEAD on demand — note it is NOT the
   # synthetic merge with main, so it does not substitute for required PR CI.
   workflow_dispatch:
+    inputs:
+      retention_packet_sha256:
+        description: Exact reviewed runtime retention execution packet SHA-256 (separate owner operational approval required)
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -114,6 +120,8 @@ jobs:
           PY
       - name: Actual synthetic GnuPG archive conformance
         run: poetry run pytest -q conformance/test_gate0_e_archive_gpg.py
+      - name: Actual synthetic publisher runtime GnuPG conformance
+        run: python -m unittest discover -s conformance -p test_gate0_publisher_retention_gpg.py -v
       - name: Retain source-test results and synthetic tool identities
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -392,6 +400,9 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the production runtime without publishing
@@ -404,12 +415,25 @@ jobs:
             --build-arg "SOURCE_REVISION=${GITHUB_SHA}" \
             --tag dotmac-vendor-control-plane:ci .
       - name: Build and privately measure nonpublishing publisher shape
+        timeout-minutes: 20
         env:
           FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RETENTION_PACKET_SHA256: ${{ inputs.retention_packet_sha256 || '' }}
+          RETENTION_PACKET_CONFIGURATION: ${{ vars.GATE0_RETENTION_PACKET_JSON }}
+          RETENTION_CERTIFICATE_CONFIGURATION: ${{ vars.GATE0_RETENTION_CERTIFICATE_BASE64 }}
+          RETENTION_GPG_QUALIFICATION_CONFIGURATION: ${{ vars.GATE0_RETENTION_GPG_QUALIFICATION_JSON }}
         run: |
           set -euo pipefail
           umask 077
           private="$(mktemp -d "$RUNNER_TEMP/gate0-publisher.XXXXXXXX")"
+          python3 -I -B - "$private/packaging-clock.json" <<'PY'
+          import json
+          import sys
+          import time
+          with open(sys.argv[1], "x", encoding="utf-8") as stream:
+              json.dump({"monotonic": time.monotonic(), "wall": time.time()}, stream)
+          PY
           production_container=""
           publisher_container=""
           cleanup() {
@@ -419,6 +443,7 @@ jobs:
             docker image rm dotmac-vendor-control-plane:publisher-ci >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
+          trap 'exit 1' HUP INT TERM
           DOCKER_BUILDKIT=1 docker build \
             --target gate0-publisher \
             --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
@@ -433,18 +458,59 @@ jobs:
             --interactive dotmac-vendor-control-plane:publisher-ci -I -B - shape \
             < .github/candidate/inspect_gate0_publisher.py > "$private/shape.json"
           # Both export subjects are NEVER STARTED. No tar member is extracted.
-          production_container="$(docker create dotmac-vendor-control-plane:ci)"
-          publisher_container="$(docker create dotmac-vendor-control-plane:publisher-ci)"
+          docker image inspect --format '{{.Id}}' dotmac-vendor-control-plane:ci > "$private/production-image-id"
+          docker image inspect --format '{{.Id}}' dotmac-vendor-control-plane:publisher-ci > "$private/publisher-image-id"
+          production_container="$(docker create "$(cat "$private/production-image-id")")"
+          publisher_container="$(docker create "$(cat "$private/publisher-image-id")")"
           docker export --output "$private/production.tar" "$production_container"
           docker export --output "$private/publisher.tar" "$publisher_container"
           python3 -I -B .github/candidate/inspect_gate0_publisher.py inspect \
             "$private/production.tar" "$private/publisher.tar" \
-            "$private/shape.json" "$private/manifest.json"
+            "$private/shape.json" "$private/manifest.json" "$private/files.json"
+          # Print aggregate footprint only; the complete roster remains private.
+          python3 -I -B - "$private/manifest.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              footprint = json.load(stream)["footprint"]
+          print("Gate0 publisher footprint: " + json.dumps(footprint, sort_keys=True))
+          PY
+          if test -n "$RETENTION_PACKET_SHA256"; then
+            # This source does not grant operational approval. The coordinator
+            # dispatches only after Michael reviews the concrete packet/tools.
+            # Exact pinned base inspection is required; BuildKit may not retain it.
+            python3 -I -B .github/candidate/retain_gate0_publisher.py preflight "$private"
+            docker pull python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de >/dev/null 2>&1
+            python3 -I -B .github/candidate/retain_gate0_publisher.py "$private"
+            public="$RUNNER_TEMP/gate0-publisher-retention-public"
+            mkdir -m 700 -- "$public"
+            mv -- "$private/encrypted-runtime-bundle.pgp" "$public/encrypted-runtime-bundle.pgp"
+            mv -- "$private/producer-receipt.json" "$public/producer-receipt.json"
+          fi
           # Public repository: never upload rootfs, dependency bytes or private
           # material. The external measurement lives only in private RUNNER_TEMP.
           # Production retains its actual manifest and installed source owners,
           # not its wheel: this is not literal production-wheel byte comparison.
           echo 'Gate0 publisher: runtime_NOT_RETAINED; no artifact acceptance or native qualification'
+      - name: Retain encrypted publisher runtime transport
+        if: github.event_name == 'workflow_dispatch' && inputs.retention_packet_sha256 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate0-publisher-runtime
+          path: |
+            ${{ runner.temp }}/gate0-publisher-retention-public/encrypted-runtime-bundle.pgp
+            ${{ runner.temp }}/gate0-publisher-retention-public/producer-receipt.json
+          retention-days: 30
+          overwrite: false
+          if-no-files-found: error
+          include-hidden-files: false
+      - name: Remove encrypted transport staging
+        if: always()
+        run: |
+          set -euo pipefail
+          public="$RUNNER_TEMP/gate0-publisher-retention-public"
+          rm -f -- "$public/encrypted-runtime-bundle.pgp" "$public/producer-receipt.json"
+          if test -d "$public"; then rmdir -- "$public"; fi
       - name: Boot-smoke the built bytes
         run: |
           set -euo pipefail

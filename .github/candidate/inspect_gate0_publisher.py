@@ -17,9 +17,15 @@ import sys
 import tarfile
 import zipfile
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 PREFIX = "opt/venv/"
 CP_DIST = "dotmac_vendor_control_plane-"
+MAX_TAR_BYTES = 8 * 1024**3
+MAX_ENTRIES = 250_000
+MAX_FILE_BYTES = 512 * 1024**2
+MAX_PATH_BYTES = 4096
+MAX_FILES_BYTES = 128 * 1024**2
 SOURCE_OWNERS = (
     "vendor_cp/cli/__init__.py",
     "vendor_cp/cli/owners.py",
@@ -41,11 +47,127 @@ def file_digest(path: Path) -> str:
     return value.hexdigest()
 
 
+def private_input(path: Path, maximum: int) -> BinaryIO:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(descriptor)
+        if not (
+            stat.S_ISREG(info.st_mode)
+            and info.st_nlink == 1
+            and info.st_uid == os.getuid()
+            and not info.st_mode & 0o077
+            and 0 < info.st_size <= maximum
+        ):
+            raise ValueError("private input shape")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def stream_digest(stream: BinaryIO, maximum: int = MAX_TAR_BYTES) -> str:
+    position = stream.tell()
+    stream.seek(0)
+    value = hashlib.sha256()
+    size = 0
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        size += len(block)
+        if size > maximum:
+            raise ValueError("rootfs archive budget")
+        value.update(block)
+    stream.seek(position)
+    return value.hexdigest()
+
+
+def private_output(path: Path) -> BinaryIO:
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    return os.fdopen(descriptor, "wb")
+
+
+def bounded_pax_records(raw: bytes) -> None:
+    """Reject sparse extensions before tarfile can interpret sparse maps."""
+    if len(raw) > 16 * 1024:
+        raise ValueError("rootfs extension budget")
+    offset = 0
+    while offset < len(raw):
+        space = raw.find(b" ", offset, min(offset + 7, len(raw)))
+        if space == -1:
+            raise ValueError("rootfs extension framing")
+        encoded_length = raw[offset:space]
+        if not encoded_length.isdigit() or encoded_length.startswith(b"0"):
+            raise ValueError("rootfs extension framing")
+        length = int(encoded_length)
+        end = offset + length
+        if end > len(raw) or end <= space + 3 or raw[end - 1 : end] != b"\n":
+            raise ValueError("rootfs extension framing")
+        key, separator, _ = raw[space + 1 : end - 1].partition(b"=")
+        if not key or not separator or b"\x00" in key or b"\n" in key:
+            raise ValueError("rootfs extension framing")
+        if key.startswith(b"GNU.sparse."):
+            raise ValueError("sparse rootfs member")
+        offset = end
+
+
+def bounded_tar_headers(stream: BinaryIO) -> None:
+    """Bound extension-header reads before tarfile can allocate their bodies."""
+    stream.seek(0, os.SEEK_END)
+    total = stream.tell()
+    if total > MAX_TAR_BYTES or total % 512:
+        raise ValueError("rootfs archive framing")
+    stream.seek(0)
+    headers = 0
+    while stream.tell() < total:
+        header = stream.read(512)
+        if header == bytes(512):
+            if stream.read(512) != bytes(512):
+                raise ValueError("rootfs archive framing")
+            while block := stream.read(1024 * 1024):
+                if any(block):
+                    raise ValueError("rootfs trailing data")
+            stream.seek(0)
+            return
+        headers += 1
+        if headers > MAX_ENTRIES * 2:
+            raise ValueError("rootfs header budget")
+        kind = header[156:157]
+        if kind == b"S":
+            raise ValueError("sparse rootfs member")
+        encoded = header[124:136]
+        if encoded[0] & 0x80:
+            size = int.from_bytes(encoded, "big", signed=True)
+            if encoded[0] == 0x80:
+                size += 1 << 95
+        else:
+            try:
+                size = int(encoded.strip(b"\x00 ") or b"0", 8)
+            except ValueError as error:
+                raise ValueError("rootfs archive framing") from error
+        maximum = (
+            16 * 1024 if kind in {b"x", b"g", b"X", b"L", b"K"} else MAX_FILE_BYTES
+        )
+        padded = ((size + 511) // 512) * 512
+        if not 0 <= size <= maximum or stream.tell() + padded > total:
+            raise ValueError("rootfs header budget")
+        if kind in {b"x", b"g", b"X"}:
+            raw = stream.read(size)
+            if len(raw) != size:
+                raise ValueError("rootfs extension framing")
+            bounded_pax_records(raw)
+            stream.seek(padded - size, os.SEEK_CUR)
+        else:
+            stream.seek(padded, os.SEEK_CUR)
+    raise ValueError("rootfs archive terminator")
+
+
 def member_name(name: str) -> str:
     # Docker export writes relative canonical POSIX paths (directories may end /).
     result = name.removesuffix("/")
     if (
         not result
+        or len(result.encode("utf-8")) > MAX_PATH_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in result)
         or result.startswith("/")
         or "\\" in result
         or any(p in {"", ".", ".."} for p in result.split("/"))
@@ -92,7 +214,11 @@ def inventory(
 ) -> dict[str, tarfile.TarInfo]:
     result: dict[str, tarfile.TarInfo] = {}
     for item in archive:
+        if len(result) >= MAX_ENTRIES or not 0 <= item.size <= MAX_FILE_BYTES:
+            raise ValueError("rootfs budget")
         name = member_name(item.name)
+        if len(item.linkname.encode("utf-8")) > MAX_PATH_BYTES:
+            raise ValueError("rootfs link budget")
         if name in result:
             raise ValueError("duplicate rootfs member")
         if not (item.isfile() or item.isdir() or item.issym() or item.islnk()):
@@ -143,6 +269,78 @@ def inventory(
                 ):
                     raise ValueError("unsafe protected link target")
     return result
+
+
+def member_digest(archive: tarfile.TarFile, item: tarfile.TarInfo) -> str:
+    """Hash a bounded regular member without materialising or extracting it."""
+    if not item.isfile() or not 0 <= item.size <= MAX_FILE_BYTES:
+        raise ValueError("rootfs file budget")
+    stream = archive.extractfile(item)
+    if stream is None:
+        raise ValueError("unreadable rootfs member")
+    value = hashlib.sha256()
+    remaining = item.size
+    with stream:
+        while remaining:
+            block = stream.read(min(remaining, 1024 * 1024))
+            if not block:
+                raise ValueError("truncated rootfs member")
+            value.update(block)
+            remaining -= len(block)
+        if stream.read(1):
+            raise ValueError("rootfs member size")
+    return value.hexdigest()
+
+
+def complete_files(
+    archive: tarfile.TarFile, members: dict[str, tarfile.TarInfo]
+) -> bytes:
+    """Canonical private roster covers every entry, including non-venv paths."""
+    rows = []
+    encoded_bytes = 0
+    for name, item in sorted(members.items()):
+        kind = (
+            "file"
+            if item.isfile()
+            else "directory"
+            if item.isdir()
+            else "symlink"
+            if item.issym()
+            else "hardlink"
+        )
+        row = {
+            "path": name,
+            "type": kind,
+            "mode": item.mode,
+            "uid": item.uid,
+            "gid": item.gid,
+            "size": item.size,
+            "sha256": member_digest(archive, item) if item.isfile() else None,
+            "link_target": item.linkname if item.issym() or item.islnk() else None,
+        }
+        encoded_bytes += (
+            len(
+                json.dumps(
+                    row, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+                ).encode()
+            )
+            + 1
+        )
+        if encoded_bytes > MAX_FILES_BYTES - 1024:
+            raise ValueError("files manifest budget")
+        rows.append(row)
+    raw = (
+        json.dumps(
+            {"schema": "Gate0PublisherFiles.v1", "files": rows},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+        + b"\n"
+    )
+    if len(raw) > MAX_FILES_BYTES:
+        raise ValueError("files manifest budget")
+    return raw
 
 
 def read(
@@ -196,7 +394,7 @@ def closure(
             result[name] = (
                 "file",
                 item.mode & 0o777,
-                digest(read(archive, members, name)),
+                member_digest(archive, item),
             )
         elif item.isdir():
             result[name] = ("directory", item.mode & 0o777)
@@ -207,8 +405,65 @@ def closure(
     return result
 
 
-def inspect(production: Path, publisher: Path, shape: Path, output: Path) -> None:
-    with tarfile.open(production, "r:") as prod, tarfile.open(publisher, "r:") as pub:
+def bounded_structural_closure_difference_counts(
+    expected: dict[str, tuple], actual: dict[str, tuple]
+) -> dict[str, int]:
+    counts = {
+        "missing": len(expected.keys() - actual.keys()),
+        "extra": len(actual.keys() - expected.keys()),
+        "kind": 0,
+        "mode": 0,
+        "content": 0,
+        "link_target": 0,
+    }
+    for name in expected.keys() & actual.keys():
+        left, right = expected[name], actual[name]
+        if left[0] != right[0]:
+            counts["kind"] += 1
+            continue
+        if left[0] == "directory":
+            if left[1] != right[1]:
+                counts["mode"] += 1
+        elif left[0] == "file":
+            if left[1] != right[1]:
+                counts["mode"] += 1
+            if left[2] != right[2]:
+                counts["content"] += 1
+        elif left[0] == "symlink" and left[1] != right[1]:
+            counts["link_target"] += 1
+    return counts
+
+
+def inspect(
+    production: Path,
+    publisher: Path,
+    shape: Path,
+    output: Path,
+    files_output: Path | None = None,
+) -> None:
+    with (
+        private_input(production, MAX_TAR_BYTES) as production_stream,
+        private_input(publisher, MAX_TAR_BYTES) as publisher_stream,
+        private_input(shape, 1024**2) as shape_stream,
+    ):
+        bounded_tar_headers(production_stream)
+        bounded_tar_headers(publisher_stream)
+        _inspect_open_streams(
+            production_stream, publisher_stream, shape_stream, output, files_output
+        )
+
+
+def _inspect_open_streams(
+    production_stream: BinaryIO,
+    publisher_stream: BinaryIO,
+    shape_stream: BinaryIO,
+    output: Path,
+    files_output: Path | None,
+) -> None:
+    with (
+        tarfile.open(fileobj=production_stream, mode="r:") as prod,
+        tarfile.open(fileobj=publisher_stream, mode="r:") as pub,
+    ):
         left = inventory(prod, publisher=False)
         right = inventory(pub, publisher=True)
         manifest = read(pub, right, "app/distributions.json", 1024 * 1024)
@@ -259,44 +514,88 @@ def inspect(production: Path, publisher: Path, shape: Path, output: Path) -> Non
                 raise ValueError("duplicate wheel member")
             for owner in SOURCE_OWNERS:
                 installed = PREFIX + "lib/python3.12/site-packages/" + owner
+                if archive.getinfo(owner).file_size > 1024**2:
+                    raise ValueError("source-owner budget")
                 expected = archive.read(owner)
                 if (
                     read(pub, right, installed) != expected
                     or read(prod, left, installed) != expected
                 ):
                     raise ValueError("installed source-owner bytes differ from wheel")
-        if closure(prod, left) != closure(pub, right):
+        expected_closure = closure(prod, left)
+        actual_closure = closure(pub, right)
+        if expected_closure != actual_closure:
+            print(
+                json.dumps(
+                    bounded_structural_closure_difference_counts(
+                        expected_closure, actual_closure
+                    ),
+                    sort_keys=True,
+                )
+            )
             raise ValueError(
                 "dependency closure differs outside explicit generated exceptions"
             )
-        measured = json.loads(shape.read_bytes())
+        measured = json.loads(shape_stream.read(1024**2 + 1))
         if (
             measured.get("schema") != "Gate0PublisherShape.v1"
             or measured.get("status") != "shape_only"
         ):
             raise ValueError("shape measurement missing")
-        output.write_text(
-            json.dumps(
-                {
-                    "schema": "Gate0PublisherBuild.v1",
-                    "status": "runtime_NOT_RETAINED",
-                    "artifact_acceptance": False,
-                    "native_qualification": False,
-                    "production_wheel_retained": False,
-                    "production_comparison": (
-                        "actual_manifest_and_installed_source_owners"
-                    ),
-                    "distribution_manifest_sha256": digest(manifest),
-                    "publisher_wheel_sha256": digest(wheel),
-                    "production_rootfs_sha256": file_digest(production),
-                    "publisher_rootfs_sha256": file_digest(publisher),
-                    "dependency_closure_entries": len(closure(pub, right)),
-                },
-                sort_keys=True,
+        files = complete_files(pub, right)
+        if files_output is not None:
+            with private_output(files_output) as stream:
+                stream.write(files)
+        with private_output(output) as output_stream:
+            output_stream.write(
+                (
+                    json.dumps(
+                        {
+                            "schema": "Gate0PublisherBuild.v1",
+                            "status": "runtime_NOT_RETAINED",
+                            "artifact_acceptance": False,
+                            "native_qualification": False,
+                            "production_wheel_retained": False,
+                            "production_comparison": (
+                                "actual_manifest_and_installed_source_owners"
+                            ),
+                            "distribution_manifest_sha256": digest(manifest),
+                            "publisher_wheel_sha256": digest(wheel),
+                            "production_rootfs_sha256": stream_digest(
+                                production_stream
+                            ),
+                            "publisher_rootfs_sha256": stream_digest(publisher_stream),
+                            "dependency_closure_entries": len(closure(pub, right)),
+                            "files_manifest_sha256": digest(files),
+                            "footprint": {
+                                "entries": len(right),
+                                "regular_files": sum(
+                                    item.isfile() for item in right.values()
+                                ),
+                                "regular_bytes": sum(
+                                    item.size
+                                    for item in right.values()
+                                    if item.isfile()
+                                ),
+                                "largest_member_bytes": max(
+                                    (item.size for item in right.values()), default=0
+                                ),
+                                "publisher_tar_bytes": os.fstat(
+                                    publisher_stream.fileno()
+                                ).st_size,
+                                "inspection_scratch_bytes": os.fstat(
+                                    production_stream.fileno()
+                                ).st_size
+                                + os.fstat(publisher_stream.fileno()).st_size
+                                + len(files)
+                                + os.fstat(shape_stream.fileno()).st_size,
+                            },
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode()
             )
-            + "\n"
-        )
-        output.chmod(0o600)
 
 
 def shape() -> None:
@@ -381,7 +680,7 @@ def shape() -> None:
 if __name__ == "__main__":
     if sys.argv[1:] == ["shape"]:
         shape()
-    elif len(sys.argv) == 6 and sys.argv[1] == "inspect":
+    elif len(sys.argv) in {6, 7} and sys.argv[1] == "inspect":
         inspect(*(Path(argument) for argument in sys.argv[2:]))
     else:
         raise SystemExit("expected shape or inspect PRODUCTION PUBLISHER SHAPE OUTPUT")
