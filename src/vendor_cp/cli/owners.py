@@ -105,11 +105,32 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "fixed qualified private collection finalization and encrypted staging",
     ),
     Owner(
+        "gate0 prepare-e-draft",
+        "vendor_cp.deployment.gate0_e_publication",
+        "run_installed_prepare_e_draft",
+        True,
+        "fixed qualified draft creation and exact encrypted evidence uploads",
+    ),
+    Owner(
+        "gate0 publish-e",
+        "vendor_cp.deployment.gate0_e_publication",
+        "run_installed_publish_e",
+        True,
+        "fixed adopted B-review receipt and bounded immutable E publication",
+    ),
+    Owner(
         "gate0 verify-e-b-archive",
         "vendor_cp.deployment.gate0_e_b_holder",
         "run_installed_verify_e_b_archive",
         True,
         "fixed qualified B custody verification and private verification record",
+    ),
+    Owner(
+        "gate0 verify-e-published",
+        "vendor_cp.deployment.gate0_e_final_readback",
+        "run_installed_verify_e_published",
+        False,
+        "fixed completed publication, producer and immutable release readback",
     ),
     Owner(
         "gate0 collect-e",

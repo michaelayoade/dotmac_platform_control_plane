@@ -1279,9 +1279,11 @@ class InstalledEWriter:
         publication: PublicationFacts,
     ) -> bytes | _PrivateFailure:
         try:
-            return self._construct_receipt_work(
+            receipt = self._construct_receipt_work(
                 draft_reads, draft, publication_reads, publication
             )
+            self._discard_private_state()
+            return receipt
         except BaseException as error:
             self._discard_private_state()
             return _private_failure(error)

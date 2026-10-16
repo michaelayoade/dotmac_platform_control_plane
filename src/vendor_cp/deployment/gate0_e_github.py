@@ -37,6 +37,34 @@ if TYPE_CHECKING:
 
 _INSTALLATION = "/run/dotmac-gate0-e/github-read.json"
 _ROOT_BINDING = "/etc/dotmac-gate0-e/github-read-binding.json"
+_PRODUCER_COMPLETION_INSTALLATION = (
+    "/run/dotmac-gate0-e/github-read-producer-completion.json"
+)
+_PRODUCER_COMPLETION_ROOT_BINDING = (
+    "/etc/dotmac-gate0-e/github-read-producer-completion-binding.json"
+)
+_PUBLICATION_COMPLETION_INSTALLATION = (
+    "/run/dotmac-gate0-e/github-read-publication-completion.json"
+)
+_PUBLICATION_COMPLETION_ROOT_BINDING = (
+    "/etc/dotmac-gate0-e/github-read-publication-completion-binding.json"
+)
+_PUBLISHED_RELEASE_INSTALLATION = (
+    "/run/dotmac-gate0-e/github-read-published-release.json"
+)
+_PUBLISHED_RELEASE_ROOT_BINDING = (
+    "/etc/dotmac-gate0-e/github-read-published-release-binding.json"
+)
+_DRAFT_RELEASE_INSTALLATION = "/run/dotmac-gate0-e/github-read-draft-release.json"
+_DRAFT_RELEASE_ROOT_BINDING = (
+    "/etc/dotmac-gate0-e/github-read-draft-release-binding.json"
+)
+_PUBLICATION_START_INSTALLATION = (
+    "/run/dotmac-gate0-e/github-read-publication-start.json"
+)
+_PUBLICATION_START_ROOT_BINDING = (
+    "/etc/dotmac-gate0-e/github-read-publication-start-binding.json"
+)
 _CREDENTIAL = "/run/dotmac-gate0-e/github-read-token"
 _CA = "/etc/ssl/certs/ca-certificates.crt"
 _API_VERSION = "2026-03-10"
@@ -520,6 +548,21 @@ def _https(
     maximum: int,
     deadline: float,
 ) -> tuple[int, dict[str, str], bytes]:
+    return _https_core(host, path, token, binary, maximum, deadline)
+
+
+def _https_core(
+    host: str,
+    path: str,
+    token: bytes | None,
+    binary: bool,
+    maximum: int,
+    deadline: float,
+    *,
+    method: str = "GET",
+    request_body: bytes = b"",
+    statuses: tuple[int, ...] = (200, 302),
+) -> tuple[int, dict[str, str], bytes]:
     """Resolve once; connect the exact checked address; SNI is original host."""
     addresses = socket.getaddrinfo(
         host, 443, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP
@@ -542,14 +585,17 @@ def _https(
         with context.wrap_socket(raw, server_hostname=host) as tls:
             wire = _Wire(tls, deadline)
             headers = [
-                "GET " + path + " HTTP/1.1",
+                method + " " + path + " HTTP/1.1",
                 "Host: " + host,
                 "Connection: close",
                 "Accept-Encoding: identity",
                 "User-Agent: dotmac-gate0-e-read/1",
             ]
             if token is not None:
-                _require(host == "api.github.com")
+                _require(
+                    host == "api.github.com"
+                    or (host == "uploads.github.com" and method == "POST")
+                )
                 headers.extend(
                     [
                         "Authorization: Bearer " + token.decode("ascii"),
@@ -564,8 +610,24 @@ def _https(
                 )
             elif binary:
                 headers.append("Accept: application/octet-stream")
+            if method != "GET":
+                _require(time.monotonic() < deadline)
+                headers.extend(
+                    [
+                        "Content-Length: " + str(len(request_body)),
+                        "Content-Type: "
+                        + (
+                            "application/octet-stream"
+                            if host == "uploads.github.com"
+                            and path.endswith("name=gate0-evidence.pgp")
+                            else "application/json"
+                        ),
+                    ]
+                )
             tls.settimeout(max(0.001, deadline - time.monotonic()))
-            tls.sendall(("\r\n".join(headers) + "\r\n\r\n").encode("ascii"))
+            tls.sendall(
+                ("\r\n".join(headers) + "\r\n\r\n").encode("ascii") + request_body
+            )
             status_line = wire.line()
             _require(
                 re.fullmatch(rb"HTTP/1\.[01] [0-9]{3} [\x20-\x7e]*", status_line)
@@ -592,8 +654,8 @@ def _https(
             else:
                 raise GitHubReadRefused()
             _require(fields.get("content-encoding", "identity") == "identity")
-            _require(status in (200, 302))
-            if status == 200:
+            _require(status in statuses)
+            if status != 302:
                 content_type = fields.get("content-type", "").split(";", 1)[0]
                 _require(
                     content_type
@@ -668,11 +730,26 @@ def _http_child(
     origins: tuple[str, ...],
     deadline: float,
     page: int,
+    finite: tuple[str, str, bytes, tuple[int, ...]] | None = None,
 ) -> None:
     try:
-        status, headers, body = _https(
-            "api.github.com", path, token, binary, maximum, deadline
-        )
+        if finite is not None:
+            host, method, request_body, statuses = finite
+            status, headers, body = _https_core(
+                host,
+                path,
+                token,
+                binary,
+                maximum,
+                deadline,
+                method=method,
+                request_body=request_body,
+                statuses=statuses,
+            )
+        else:
+            status, headers, body = _https(
+                "api.github.com", path, token, binary, maximum, deadline
+            )
         next_page, last_page = _pagination(headers.get("link"), path, page)
         if status == 302:
             _require(binary and "location" in headers)
@@ -706,14 +783,32 @@ def _spawn_get(
     phase_deadline: float,
     page: int,
 ) -> tuple[int, int, int, bytes]:
+    return _spawn_core(path, token, binary, maximum, origins, phase_deadline, page)
+
+
+def _spawn_core(
+    path: str,
+    token: bytes,
+    binary: bool,
+    maximum: int,
+    origins: tuple[str, ...],
+    phase_deadline: float,
+    page: int,
+    finite: tuple[str, str, bytes, tuple[int, ...]] | None = None,
+) -> tuple[int, int, int, bytes]:
     """One absolute deadline includes spawn, DNS, network, IPC, EOF and reap."""
-    deadline = min(phase_deadline, time.monotonic() + (45 if binary else 10))
+    deadline = min(
+        phase_deadline,
+        time.monotonic()
+        + (45 if binary or (finite is not None and finite[1] != "GET") else 10),
+    )
     work_deadline = deadline - 1.0
     _require(work_deadline > time.monotonic())
     parent, child = socket.socketpair()
     process = multiprocessing.get_context("spawn").Process(
         target=_http_child,
-        args=(child, path, token, binary, maximum, origins, work_deadline, page),
+        args=(child, path, token, binary, maximum, origins, work_deadline, page)
+        + (() if finite is None else (finite,)),
         daemon=True,
     )
     result = None
@@ -737,7 +832,9 @@ def _spawn_get(
             return bytes(output)
 
         status, next_page, last_page, size = struct.unpack("!IIII", exact(16))
-        _require(status == 200 and size <= maximum)
+        _require(
+            status in ((200,) if finite is None else finite[3]) and size <= maximum
+        )
         body = exact(size)
         remaining = work_deadline - time.monotonic()
         _require(
@@ -763,6 +860,92 @@ def _spawn_get(
             raise GitHubReadRefused()
     _require(result is not None)
     return cast(tuple[int, int, int, bytes], result)
+
+
+def _publication_exchange(
+    operation: str,
+    identifier: int | str | None,
+    token: bytes,
+    payload: bytes,
+    maximum: int,
+    origins: tuple[str, ...],
+    deadline: float,
+    page: int = 0,
+) -> tuple[int, int, int, bytes]:
+    """Private finite execution-repository endpoint set; no caller URL."""
+    prefix = "/repos/dotmac-tech/gate0-issuer-execution"
+    host, method, statuses, binary = "api.github.com", "GET", (200,), False
+    path = prefix
+    _require(
+        type(payload) is bytes
+        and type(maximum) is int
+        and 0 < maximum <= (_CIPHER_CAP if operation == "asset_bytes" else _JSON_CAP)
+    )
+    if operation in ("tag_absence", "release_absence"):
+        tag = _text(identifier, 128)
+        _require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", tag) is not None)
+        path += (
+            "/git/ref/tags/" if operation == "tag_absence" else "/releases/tags/"
+        ) + tag
+        statuses = (200, 404)
+    elif operation == "releases":
+        _require(identifier is None)
+        _require(type(page) is int and 1 <= page <= 4)
+        path += "/releases?per_page=100&page=" + str(page)
+    elif operation == "create":
+        _require(identifier is None and page == 0)
+        value = _closed(
+            _json(payload), "tag_name target_commitish name body draft prerelease"
+        )
+        _require(value["draft"] is True and value["prerelease"] is False)
+        _hex(value["target_commitish"], 40)
+        _text(value["tag_name"], 128)
+        _text(value["name"], 256)
+        _text(value["body"], 8192)
+        _require(_canonical(value) == payload)
+        method, statuses, path = "POST", (201,), prefix + "/releases"
+    elif operation in ("release", "assets", "publish"):
+        path += "/releases/" + str(_id(identifier))
+        if operation == "assets":
+            _require(type(page) is int and 1 <= page <= 4)
+            path += "/assets?per_page=100&page=" + str(page)
+        elif operation == "publish":
+            _require(payload == b'{"draft":false}')
+            method = "PATCH"
+    elif operation in ("upload_ciphertext", "upload_projection", "upload_receipt"):
+        names = {
+            "upload_ciphertext": "gate0-evidence.pgp",
+            "upload_projection": "gate0-evidence-public.json",
+            "upload_receipt": "gate0-readiness-receipt.json",
+        }
+        name = names[operation]
+        _require(0 < len(payload) <= _asset_cap(name))
+        host, method, statuses = "uploads.github.com", "POST", (201,)
+        path += "/releases/" + str(_id(identifier)) + "/assets?name=" + name
+    elif operation in ("asset", "asset_bytes"):
+        path += "/releases/assets/" + str(_id(identifier))
+        binary = operation == "asset_bytes"
+    elif operation == "tag":
+        tag = _text(identifier, 128)
+        _require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", tag) is not None)
+        path += "/git/ref/tags/" + tag
+    elif operation == "tag_object":
+        path += "/git/tags/" + _hex(identifier, 40)
+    else:
+        _require(operation == "repository" and identifier is None)
+    _require(method != "GET" or payload == b"")
+    if binary:
+        return _spawn_get(path, token, True, maximum, origins, deadline, page)
+    return _spawn_core(
+        path,
+        token,
+        False,
+        maximum,
+        (),
+        deadline,
+        page,
+        (host, method, payload, statuses),
+    )
 
 
 def _pin_document(pin: object) -> tuple[dict[str, Any], bytes]:
@@ -1024,8 +1207,79 @@ class InstalledGate0GitHubReads:
 
     @classmethod
     def from_installed(cls) -> InstalledGate0GitHubReads:
+        return cls._from_fixed_installed(_INSTALLATION, _ROOT_BINDING, None)
+
+    @classmethod
+    def from_installed_producer_completion(cls) -> InstalledGate0GitHubReads:
+        return cls._from_fixed_installed(
+            _PRODUCER_COMPLETION_INSTALLATION,
+            _PRODUCER_COMPLETION_ROOT_BINDING,
+            "producer",
+        )
+
+    @classmethod
+    def from_installed_publication_completion(cls) -> InstalledGate0GitHubReads:
+        return cls._from_fixed_installed(
+            _PUBLICATION_COMPLETION_INSTALLATION,
+            _PUBLICATION_COMPLETION_ROOT_BINDING,
+            "publication_complete",
+        )
+
+    @classmethod
+    def from_installed_published_release(cls) -> InstalledGate0GitHubReads:
+        return cls._from_fixed_installed(
+            _PUBLISHED_RELEASE_INSTALLATION,
+            _PUBLISHED_RELEASE_ROOT_BINDING,
+            "published",
+        )
+
+    @classmethod
+    def from_installed_draft_release(cls) -> InstalledGate0GitHubReads:
+        return cls._from_fixed_installed(
+            _DRAFT_RELEASE_INSTALLATION, _DRAFT_RELEASE_ROOT_BINDING, "draft"
+        )
+
+    @classmethod
+    def from_installed_publication_start(cls) -> InstalledGate0GitHubReads:
+        return cls._from_fixed_installed(
+            _PUBLICATION_START_INSTALLATION,
+            _PUBLICATION_START_ROOT_BINDING,
+            "publication",
+        )
+
+    @classmethod
+    def _from_fixed_installed(
+        cls, installation_path: str, binding_path: str, expected_phase: str | None
+    ) -> InstalledGate0GitHubReads:
         try:
-            raw = _protected(_INSTALLATION, _JSON_CAP)
+            _require(
+                (installation_path, binding_path, expected_phase)
+                in (
+                    (_INSTALLATION, _ROOT_BINDING, None),
+                    (_DRAFT_RELEASE_INSTALLATION, _DRAFT_RELEASE_ROOT_BINDING, "draft"),
+                    (
+                        _PUBLICATION_START_INSTALLATION,
+                        _PUBLICATION_START_ROOT_BINDING,
+                        "publication",
+                    ),
+                    (
+                        _PRODUCER_COMPLETION_INSTALLATION,
+                        _PRODUCER_COMPLETION_ROOT_BINDING,
+                        "producer",
+                    ),
+                    (
+                        _PUBLICATION_COMPLETION_INSTALLATION,
+                        _PUBLICATION_COMPLETION_ROOT_BINDING,
+                        "publication_complete",
+                    ),
+                    (
+                        _PUBLISHED_RELEASE_INSTALLATION,
+                        _PUBLISHED_RELEASE_ROOT_BINDING,
+                        "published",
+                    ),
+                )
+            )
+            raw = _protected(installation_path, _JSON_CAP)
             installation = _closed(
                 _json(raw),
                 "schema policy_digest phase repository producer publication "
@@ -1036,7 +1290,7 @@ class InstalledGate0GitHubReads:
                 and installation["schema"] == "Gate0EGitHubReadInstallation.v1"
             )
             _hex(installation["policy_digest"])
-            binding_raw = _protected(_ROOT_BINDING, 65536)
+            binding_raw = _protected(binding_path, 65536)
             binding = _closed(
                 _json(binding_raw),
                 "schema installation_sha256 qualification_sha256 source_sha256 "
@@ -1123,6 +1377,7 @@ class InstalledGate0GitHubReads:
                     continue
                 raise GitHubReadRefused()
             phase = installation["phase"]
+            _require(expected_phase is None or phase == expected_phase)
             _require(
                 phase
                 in (

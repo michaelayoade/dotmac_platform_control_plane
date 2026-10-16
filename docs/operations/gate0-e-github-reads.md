@@ -6,7 +6,7 @@ readiness result. Operational installation, credential provision, native
 qualification and actual GitHub reads remain separately authorized work. The
 focused tests are supplied as source and have not been executed in this preparation.
 
-`InstalledGate0GitHubReads.from_installed()` is the only supported constructor.
+`InstalledGate0GitHubReads.from_installed()` preserves the default installed slot.
 It loads `/run/dotmac-gate0-e/github-read.json` and requires a separate root-owned
 `/etc/dotmac-gate0-e/github-read-binding.json`. The token is read privately from
 `/run/dotmac-gate0-e/github-read-token`; no token or token digest enters output,
@@ -46,6 +46,8 @@ a redirect. No credentials are forwarded to them.
 | draft | producer, release | draft_snapshot() |
 | published | producer, release | published_snapshot() |
 | publication | publication | publication_snapshot() |
+| publication_complete | publication | publication_complete_snapshot() |
+| draft_with_receipt | producer, release | draft_with_receipt_snapshot() |
 
 Every other selection is null. Each owner has one method attempt for its installed
 phase. Any method failure is sticky and invalidates `owns_facts()`. Later phases
@@ -96,7 +98,7 @@ verify the actual raw tag object and peeled selected commit before and after the
 final release/inventory checks. A release's `target_commitish` is never published
 commit proof. Missing tags, a moved raw tag even at the same peeled commit, wrong
 peeled commits, mutable releases or a missing third receipt asset still refuse.
-No absent-tag/404 fallback or new endpoint is introduced. Both draft and published
+The published reader has no absent-tag/404 fallback. Both draft and published
 phases retain their finite one-shot deadlines, byte/metadata checks and fresh
 post-read release/inventory anchors.
 
@@ -323,3 +325,50 @@ steps were verified, rather than any other successful job in the roster.
 `installed_selection_digest` hashes the canonical installed selection authenticated
 by the reader's existing root/native binding. Publication writers independently
 pin that digest as well as exact run, workflow, source and selected-job coordinates.
+
+
+## Independent fixed installed slots
+
+Five argument-free constructors load independent protected installations. Each
+uses all the same canonical selection, source SHA256, runtime UID, native
+receipt, policy, credential and root binding predicates as the default loader;
+the selected phase must additionally equal the fixed phase below. Each instance
+issues its own live facts and retains its own authenticated selection digest.
+There is no caller path, phase selector, field mutation, seal export or runtime
+file swapping. The credential remains the fixed read-only token path above.
+
+| Constructor suffix after `from_installed_` | Slot stem | Exact phase |
+| --- | --- | --- |
+| `producer_completion()` | `producer-completion` | `producer` |
+| `publication_completion()` | `publication-completion` | `publication_complete` |
+| `published_release()` | `published-release` | `published` |
+| `draft_release()` | `draft-release` | `draft` |
+| `publication_start()` | `publication-start` | `publication` |
+
+For each stem, installation is `/run/dotmac-gate0-e/github-read-STEM.json` and
+independent root binding is
+`/etc/dotmac-gate0-e/github-read-STEM-binding.json`. The internal allowlist checks
+both paths and the exact phase before accepting any selection. The default
+`from_installed()` retains its original paths and supported phase semantics.
+Completion adapters request `PRODUCER_RUN_COMPLETE` from the producer slot;
+publication completion uses the same title, summary and review binding as the
+selected publication attempt and requires its completed successful steps.
+
+## Private finite publication transport extraction
+
+The public reader remains GET-only. `_https` and `_spawn_get` retain their original
+argument shapes, accepted GET statuses, binary redirect/token stripping behavior,
+TLS address/SNI checks, framing caps, original absolute deadline and child
+EOF/zero-exit/wait/reap requirements. A private shared core also serves the
+separate concrete publication owner; it is not a public arbitrary request API.
+Its new qualification scope is source-pinned separately from the former GET
+profile. See [the publication owner](gate0-e-publication.md).
+
+The internal publication endpoint builder fixes the repository to
+`dotmac-tech/gate0-issuer-execution`. Only tag-ref absence and exact-tag release
+absence GETs can accept 404. All other GETs require 200. It builds POST create,
+three fixed-name POST upload paths on `uploads.github.com`, and PATCH of the
+actual release ID with only `{"draft":false}`. Mutation responses never follow
+redirects. The publisher accepts no server `upload_url`, arbitrary origin/body,
+delete, replacement, retry or retag operation. Shared transport changes do not
+qualify an installation or prove any live GitHub behavior.

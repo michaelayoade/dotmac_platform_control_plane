@@ -1655,3 +1655,228 @@ def test_selected_publication_job_is_bound_to_owned_outer_publication_fact(produ
         owner.selected_job(facts.run)
     with pytest.raises(gh.GitHubReadRefused):
         owner.selected_job(replace(facts))
+
+
+def test_private_publication_endpoint_set_has_no_url_or_retry_surface(monkeypatch):
+    calls = []
+
+    def core(path, token, binary, maximum, origins, deadline, page, finite=None):
+        calls.append((path, token, binary, origins, page, finite))
+        return finite[3][0], 0, 0, b"{}"
+
+    monkeypatch.setattr(gh, "_spawn_core", core)
+    deadline = time.monotonic() + 10
+    create = gh._canonical(
+        dict(
+            tag_name="gate0-selected",
+            target_commitish="a" * 40,
+            name="Exact",
+            body="Exact body",
+            draft=True,
+            prerelease=False,
+        )
+    )
+    for operation, identifier, payload in (
+        ("create", None, create),
+        ("upload_ciphertext", 23, b"cipher"),
+        ("upload_projection", 23, b"{}"),
+        ("upload_receipt", 23, b"{}"),
+        ("publish", 23, b'{"draft":false}'),
+        ("tag_absence", "gate0-selected", b""),
+        ("release_absence", "gate0-selected", b""),
+        ("repository", None, b""),
+    ):
+        gh._publication_exchange(
+            operation, identifier, b"private-token", payload, 1024, (), deadline
+        )
+    assert [call[5][0] for call in calls[:5]] == [
+        "api.github.com",
+        "uploads.github.com",
+        "uploads.github.com",
+        "uploads.github.com",
+        "api.github.com",
+    ]
+    assert [call[5][1] for call in calls[:5]] == [
+        "POST",
+        "POST",
+        "POST",
+        "POST",
+        "PATCH",
+    ]
+    assert calls[5][5][3] == calls[6][5][3] == (200, 404)
+    assert calls[7][5][3] == (200,)
+    assert all(
+        call[0].startswith("/repos/dotmac-tech/gate0-issuer-execution")
+        for call in calls
+    )
+    for operation, identifier, payload, page in (
+        ("delete", 23, b"", 0),
+        ("publish", 23, b'{"draft":false,"name":"other"}', 0),
+        ("upload_url", "https://evil.invalid", b"cipher", 0),
+        ("upload_ciphertext", True, b"cipher", 0),
+        ("tag_absence", "../other", b"", 0),
+        ("releases", None, b"", 5),
+    ):
+        with pytest.raises(gh.GitHubReadRefused):
+            gh._publication_exchange(
+                operation,
+                identifier,
+                b"private-token",
+                payload,
+                1024,
+                (),
+                deadline,
+                page,
+            )
+    assert len(calls) == 8
+
+
+def _finite_ipc_child(
+    channel, path, token, binary, maximum, origins, deadline, page, finite
+):
+    """Actual spawned process seam for EOF/wait/reap; no network operation."""
+    import os
+
+    try:
+        if token == b"timeout":
+            time.sleep(10)
+        channel.sendall(struct.pack("!IIII", 200, 0, 0, 2) + b"{}")
+        if token == b"extra":
+            channel.sendall(b"extra")
+        channel.shutdown(gh.socket.SHUT_WR)
+        if token == b"nonzero":
+            os._exit(3)
+    finally:
+        channel.close()
+
+
+@pytest.mark.parametrize("mode", [b"valid", b"extra", b"nonzero", b"timeout"])
+def test_finite_shared_process_requires_eof_zero_exit_and_original_reap_deadline(
+    monkeypatch, mode
+):
+    monkeypatch.setattr(gh, "_http_child", _finite_ipc_child)
+    deadline = time.monotonic() + (2 if mode == b"timeout" else 10)
+    if mode == b"valid":
+        assert gh._publication_exchange(
+            "repository", None, mode, b"", 100, (), deadline
+        ) == (200, 0, 0, b"{}")
+    else:
+        with pytest.raises(gh.GitHubReadRefused):
+            gh._publication_exchange("repository", None, mode, b"", 100, (), deadline)
+    assert time.monotonic() <= deadline + 0.5
+
+
+@pytest.mark.parametrize(
+    "status,host,method,payload",
+    [
+        (201, "uploads.github.com", "POST", b"cipher"),
+        (200, "api.github.com", "PATCH", b'{"draft":false}'),
+        (404, "api.github.com", "GET", b""),
+    ],
+)
+def test_finite_tls_sni_checked_address_and_exact_request_bytes(
+    monkeypatch, status, host, method, payload
+):
+    calls = []
+    wire = (
+        f"HTTP/1.1 {status} result\r\nContent-Length: 2\r\n"
+        "Content-Type: application/json\r\n\r\n{}"
+    ).encode()
+
+    class NativeSocket:
+        def __init__(self):
+            self.wire = io.BytesIO(wire)
+
+        def connect(self, address):
+            assert address == ("1.1.1.1", 443)
+
+        def settimeout(self, remaining):
+            assert remaining > 0
+
+        def sendall(self, raw):
+            calls.append(raw)
+
+        def recv(self, count):
+            return self.wire.read(count)
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    class NativeTLS:
+        def __init__(self, protocol):
+            assert protocol == gh.ssl.PROTOCOL_TLS_CLIENT
+
+        def load_verify_locations(self, **kwargs):
+            assert kwargs == {"cafile": gh._CA}
+
+        def wrap_socket(self, raw, server_hostname):
+            assert server_hostname == host
+            assert self.minimum_version == gh.ssl.TLSVersion.TLSv1_2
+            return raw
+
+    monkeypatch.setattr(
+        gh.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (
+                gh.socket.AF_INET,
+                gh.socket.SOCK_STREAM,
+                gh.socket.IPPROTO_TCP,
+                "",
+                ("1.1.1.1", 443),
+            )
+        ],
+    )
+    monkeypatch.setattr(gh.socket, "socket", lambda *args: NativeSocket())
+    monkeypatch.setattr(gh.ssl, "SSLContext", NativeTLS)
+    path = (
+        "/repos/dotmac-tech/gate0-issuer-execution/releases/23/assets"
+        "?name=gate0-evidence.pgp"
+    )
+    result = gh._https_core(
+        host,
+        path,
+        b"synthetic-token",
+        False,
+        100,
+        time.monotonic() + 10,
+        method=method,
+        request_body=payload,
+        statuses=(status,),
+    )
+    assert result[0] == status and result[2] == b"{}"
+    assert calls[0].startswith((method + " " + path + " HTTP/1.1\r\n").encode())
+    assert b"Host: " + host.encode() in calls[0]
+    assert b"Authorization: Bearer synthetic-token\r\n" in calls[0]
+    assert calls[0].endswith(b"\r\n\r\n" + payload)
+    if method != "GET":
+        assert b"Content-Length: " + str(len(payload)).encode() + b"\r\n" in calls[0]
+
+
+def test_finite_mutation_redirect_never_reaches_another_host(monkeypatch):
+    calls = []
+
+    def https(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 302, {"location": "https://evil.invalid/private-token"}, b""
+
+    monkeypatch.setattr(gh, "_https_core", https)
+    channel = SimpleNamespace(close=lambda: None)
+    gh._http_child(
+        channel,
+        "/repos/dotmac-tech/gate0-issuer-execution/releases",
+        b"synthetic-token",
+        False,
+        100,
+        (),
+        time.monotonic() + 10,
+        0,
+        ("api.github.com", "POST", b"{}", (201,)),
+    )
+    assert len(calls) == 1

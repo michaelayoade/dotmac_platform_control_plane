@@ -563,6 +563,9 @@ def build_parser() -> _Parser:
     _command(gate0_sub, "gate0", "issuer-run", "run one finite issuer window")
     _command(gate0_sub, "gate0", "collect-e", "collect private finite E evidence")
     _command(gate0_sub, "gate0", "finalize-e", "prepare encrypted private E evidence")
+    _command(gate0_sub, "gate0", "prepare-e-draft", "prepare selected E draft release")
+    _command(gate0_sub, "gate0", "publish-e", "publish selected reviewed E evidence")
+    _command(gate0_sub, "gate0", "verify-e-published", "verify completed E publication")
     _command(
         gate0_sub,
         "gate0",
@@ -675,8 +678,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command not in by_command():
         parser.error(f"{command!r} has no declared owner")
 
-    if command in {"gate0 finalize-e", "gate0 verify-e-b-archive"}:
+    if command in {
+        "gate0 finalize-e",
+        "gate0 prepare-e-draft",
+        "gate0 publish-e",
+        "gate0 verify-e-b-archive",
+        "gate0 verify-e-published",
+    }:
         try:
+            if command == "gate0 prepare-e-draft":
+                from vendor_cp.deployment.gate0_e_publication import (
+                    run_installed_prepare_e_draft,
+                )
+
+                return run_installed_prepare_e_draft()
+            if command == "gate0 publish-e":
+                from vendor_cp.deployment.gate0_e_publication import (
+                    run_installed_publish_e,
+                )
+
+                return run_installed_publish_e()
+            if command == "gate0 verify-e-published":
+                from vendor_cp.deployment.gate0_e_final_readback import (
+                    run_installed_verify_e_published,
+                )
+
+                return run_installed_verify_e_published()
             if command == "gate0 finalize-e":
                 from vendor_cp.deployment.gate0_e_writer import run_installed_prepare_e
 

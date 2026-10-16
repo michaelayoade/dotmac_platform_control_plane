@@ -1535,3 +1535,22 @@ def test_private_exit_payload_is_not_retained_by_public_stop(private_e, monkeypa
         writer.verify_private_e(packaged, selection, selected)
     assert error.value.code == 1
     _assert_writer_exception_clean(error.value)
+
+
+def test_successful_receipt_boundary_releases_consumed_private_selection(
+    receipt_composition,  # noqa: F811
+):
+    c = receipt_composition
+    owner = c.load("publish", c.pins)
+    public_workflow_digest = owner.selection.source.workflow_digest
+    receipt = owner.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+    assert strict_object(receipt)["b_summary_digest"] == writer._sha(c.summary)
+    assert canonical(strict_object(receipt)) == receipt
+    assert public_workflow_digest == c.selection.source.workflow_digest
+    assert owner.__dict__ == {"_used": True}
+    # Only the selected owner's references were detached. Actual retained fixture
+    # evidence at the external native boundary is unchanged and remains usable.
+    assert c.files[c.pins["private_collection"]["path"]]
+    with pytest.raises(writer.EWriterRefused) as raised:
+        owner.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+    _assert_writer_exception_clean(raised.value, owner)

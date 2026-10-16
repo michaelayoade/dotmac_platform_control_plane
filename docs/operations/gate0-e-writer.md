@@ -237,3 +237,14 @@ receipt plaintext, encryption/private staging and final published readback.
 Deliberately retained internal completed work frames must also have empty locals.
 Stop-signal tests verify cleanup and proper interruption after materialization.
 These tests remain authored source; this repair runs only AST and Ruff checks.
+
+Successful `construct_receipt` now releases the consumed writer's private
+selection/retained-input references before returning the same canonical public
+receipt bytes. The owner retains only `_used=True`; it cannot construct another
+receipt or supply a later verification phase. Later independent verification
+already requires a fresh separately installed writer. Publication captures the
+public selected workflow digest before construction and preserves its exact
+comparison afterwards. This change does not alter receipt/provenance/adoption,
+source or policy checks, erase external retained evidence, access custody, or
+claim memory zeroization. An authored hosted regression checks canonical output,
+consumed state and clean one-shot refusal; local validation remains AST/Ruff only.

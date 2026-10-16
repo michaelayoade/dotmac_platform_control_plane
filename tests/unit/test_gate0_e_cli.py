@@ -9,6 +9,21 @@ from vendor_cp.cli import main
 from vendor_cp.cli.owners import by_command
 
 ENTRIES = (
+    (
+        "prepare-e-draft",
+        "vendor_cp.deployment.gate0_e_publication",
+        "run_installed_prepare_e_draft",
+    ),
+    (
+        "publish-e",
+        "vendor_cp.deployment.gate0_e_publication",
+        "run_installed_publish_e",
+    ),
+    (
+        "verify-e-published",
+        "vendor_cp.deployment.gate0_e_final_readback",
+        "run_installed_verify_e_published",
+    ),
     ("finalize-e", "vendor_cp.deployment.gate0_e_writer", "run_installed_prepare_e"),
     (
         "verify-e-b-archive",
@@ -34,7 +49,11 @@ def test_e_cli_delegates_once_without_inputs_or_output_transformation(
     setattr(module, symbol, selected_owner)
     monkeypatch.setitem(sys.modules, module_name, module)
     owner = by_command()[f"gate0 {command}"]
-    assert (owner.module, owner.symbol, owner.mutates) == (module_name, symbol, True)
+    assert (owner.module, owner.symbol, owner.mutates) == (
+        module_name,
+        symbol,
+        command != "verify-e-published",
+    )
     assert main(["gate0", command]) == status
     assert calls == [symbol]
     streams = capsys.readouterr()
@@ -60,7 +79,17 @@ def test_e_cli_does_not_expose_owner_exception(
 
 @pytest.mark.parametrize("command,module_name,symbol", ENTRIES)
 @pytest.mark.parametrize(
-    "flag", ["--path", "--host", "--credential-file", "--deadline", "--release-id"]
+    "flag",
+    [
+        "--path",
+        "--host",
+        "--credential-file",
+        "--deadline",
+        "--release-id",
+        "--phase",
+        "--client",
+        "--slot",
+    ],
 )
 def test_e_cli_refuses_installed_policy_overrides(
     monkeypatch, command, module_name, symbol, flag
