@@ -143,6 +143,8 @@ def test_postactivation_failure_is_unknown_and_cancellation_is_preserved(
     supervisor._activated = False
     monkeypatch.setattr(launch, "_load_local_packet", lambda: {"host_role": "issuer"})
     client, listener = socket.socketpair()
+    monkeypatch.setattr(launch, "_prepare_network_privileges", lambda: None)
+    monkeypatch.setattr(supervisor, "_measure_network", lambda: None)
     monkeypatch.setattr(supervisor, "_listen_wg", lambda role: listener)
     monkeypatch.setattr(supervisor, "_emit_phase", lambda *args: None)
     monkeypatch.setattr(supervisor, "_accept_wg", lambda *args: client)
@@ -408,6 +410,8 @@ def test_issuer_acceptance_deadline_excludes_bounded_cleanup_tail(
     monkeypatch.setattr(supervisor, "_publish_context", lambda *args, **kwargs: None)
     monkeypatch.setattr(supervisor, "_require_ssh_connection", lambda *args: None)
     closed_listener = SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr(launch, "_prepare_network_privileges", lambda: None)
+    monkeypatch.setattr(supervisor, "_measure_network", lambda: None)
     monkeypatch.setattr(supervisor, "_listen_wg", lambda *args: closed_listener)
     monkeypatch.setattr(supervisor, "_emit_phase", lambda *args: None)
     monkeypatch.setattr(supervisor, "_bind_issuer_export", lambda: closed_listener)
@@ -1635,6 +1639,8 @@ def test_outer_close_failure_preserves_original_run_exception_mapping(
     events = []
     listener = SimpleNamespace(close=lambda: events.append("listener-close"))
     monkeypatch.setattr(launch, "_load_local_packet", lambda: {"host_role": "issuer"})
+    monkeypatch.setattr(launch, "_prepare_network_privileges", lambda: None)
+    monkeypatch.setattr(supervisor, "_measure_network", lambda: None)
     monkeypatch.setattr(supervisor, "_listen_wg", lambda role: listener)
     monkeypatch.setattr(supervisor, "_emit_phase", lambda *args: None)
     monkeypatch.setattr(supervisor, "_accept_wg", lambda *args: object())
@@ -1830,3 +1836,195 @@ def test_normal_daemon255_cannot_replace_missing_post_cleanup_worker_terminal(
         supervisor._require_terminal_success("issuer")
     assert not supervisor._terminals
     assert supervisor.cleanup_document()["outcome"] == "incomplete"
+
+
+@pytest.mark.parametrize("failure", ["capability", "publication"])
+def test_installed_entrypoint_preflight_refusal_cleans_transients_and_exports(
+    tmp_path, monkeypatch, capsys, failure
+):
+    from pathlib import Path
+
+    from vendor_cp.deployment import gate0_services as services
+
+    root = tmp_path / "root"
+    root.mkdir()
+    machine = b"synthetic-machine"
+    digest = "sha256:" + "a" * 64
+    end = datetime.now(UTC) + timedelta(seconds=90)
+    packet = {
+        "host_role": "issuer",
+        "issuer_uid": 1001,
+        "management_uid": 1002,
+        "run_end": end.isoformat(),
+        "shared_run_digest": digest,
+        "capture": {"window_digest": digest},
+        "machine_id_digest": launch._digest(machine),
+        "management_identity": {"public_key_fingerprint": "synthetic-fingerprint"},
+    }
+    terms = {
+        "expires_at": end.isoformat(),
+        "capture": packet["capture"],
+        "management_key_fingerprint": "synthetic-fingerprint",
+        "case_kind": "consume_replay",
+    }
+    monkeypatch.setattr(launch, "ROOT", root)
+    monkeypatch.setattr(launch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(launch, "_load_local_packet", lambda: packet)
+    monkeypatch.setattr(launch, "_local_packet", lambda raw: packet)
+    monkeypatch.setattr(launch, "_run_document", lambda raw: terms)
+    monkeypatch.setattr(
+        launch.RunIdentity,
+        "from_installed",
+        lambda: SimpleNamespace(digest=digest, canonical_bytes=b"synthetic-run"),
+    )
+    monkeypatch.setattr(
+        launch,
+        "_read",
+        lambda path, *args: machine if path.name == "machine-id" else b"packet",
+    )
+    read_text = Path.read_text
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda path, *args, **kwargs: (
+            "1 2 0:1 / " + str(root) + " rw - tmpfs tmpfs rw"
+            if str(path) == "/proc/self/mountinfo"
+            else read_text(path, *args, **kwargs)
+        ),
+    )
+    monkeypatch.setattr(
+        launch, "_protected", lambda path, **kwargs: os.open(path, os.O_RDONLY)
+    )
+    # Execute the actual capability preflight refusal, before any host mutation.
+    monkeypatch.setattr(launch, "_require_initial_process", lambda: None)
+    monkeypatch.setattr(launch, "_cap_last_cap", lambda: 40)
+    monkeypatch.setattr(launch, "_capget", lambda: (0, 0, 0))
+    monkeypatch.setattr(launch, "_process_identity", lambda pid: "synthetic-process")
+    measurement = None
+    if failure == "publication":
+        # Native capability/network reads are synthetic, but execute the actual
+        # preflight owner, measurement parser and publisher up to its file fault.
+        monkeypatch.setattr(launch, "_prepare_network_privileges", lambda: None)
+        monkeypatch.setattr(launch, "_seal_network_privileges", lambda: None)
+        monkeypatch.setattr(launch, "_require_capability_profile", lambda caps: None)
+        monkeypatch.setattr(
+            launch,
+            "SlotExecutionBoundary",
+            lambda name: SimpleNamespace(
+                start_watchdog=lambda deadline: None,
+                terminate_and_confirm_empty=lambda: None,
+                _evidence=None,
+            ),
+        )
+        network = synthetic_local_packet()["network"]
+        measurement = launch.canonical(
+            {
+                **{
+                    key: network[key]
+                    for key in (
+                        "namespace_device",
+                        "namespace_inode",
+                        "interface",
+                        "index",
+                        "bao_address",
+                        "local_address",
+                        "peer_public_key",
+                        "peer_allowed_ip",
+                        "peers",
+                        "nft_ruleset_digest",
+                    )
+                },
+                "packet_digest": digest,
+                "local_packet_digest": launch._digest(b"packet"),
+                "machine_id_digest": packet["machine_id_digest"],
+                "route_digest": digest,
+                "started_at": (end - timedelta(seconds=90)).isoformat(),
+                "monotonic_origin": 100.0,
+                "deadline": 190.0,
+                "expires_at": end.isoformat(),
+                "supervisor_pid": 12345,
+                "supervisor_start": "synthetic-process",
+            }
+        )
+        monkeypatch.setattr(
+            launch.FiniteGate0Supervisor,
+            "_measure_network_scoped",
+            lambda self, boundary: measurement,
+        )
+        open_file = launch.os.open
+
+        def fail_measurement_open(path, *args, **kwargs):
+            if path == root / "network-measurement.json":
+                raise OSError("synthetic-publication-fault")
+            return open_file(path, *args, **kwargs)
+
+        monkeypatch.setattr(launch.os, "open", fail_measurement_open)
+    frames = []
+    monkeypatch.setattr(
+        launch, "_write_public_root_frame", lambda raw, **kwargs: frames.append(raw)
+    )
+    transients = ("context.json", "secrets/issue/wrapping-token")
+    for relative in transients:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"synthetic-transient")
+    assert services.run_installed_supervisor() == 5
+    assert all(not (root / relative).exists() for relative in transients)
+    assert (root / "supervisor-once").exists()
+    document = launch.strict_object((root / "status/launch-cleanup.json").read_bytes())
+    assert document["outcome"] == "incomplete"
+    assert document["network_measurement_digest"] == (
+        None if measurement is None else launch._digest(measurement)
+    )
+    assert not (root / "network-measurement.json").exists()
+    assert document["reason"] == launch.CleanupReason.EXECUTION_INCOMPLETE.value
+    assert set(document["removed"]) == set(
+        launch.FiniteGate0Supervisor._transient_paths()
+    )
+    assert frames == [launch.canonical(document)]
+    assert "synthetic-transient" not in capsys.readouterr().err
+
+
+def test_missing_network_measurement_cannot_qualify_complete_mechanics():
+    from vendor_cp.deployment.gate0_runner_handoff import RootHostBinding
+
+    supervisor = synthetic_cleanup_supervisor()
+    supervisor._cleanup_complete = True
+    supervisor._mechanics_complete = True
+    supervisor._capture_delivery = {}
+    supervisor._terminals = {"issuer": {}}
+    supervisor._boundaries = {
+        name: SimpleNamespace(_evidence=SimpleNamespace(document=lambda: {}))
+        for name in ("preflight", "issuer", "capture_sender")
+    }
+    supervisor._daemon_observations = {
+        "issuer": {
+            "termination": "exited",
+            "daemon_returncode": 0,
+            "completed_elapsed_seconds": 1,
+            "phase_deadline_elapsed_seconds": 2,
+        }
+    }
+    assert supervisor.mechanics_outcome == "complete"
+    supervisor.network_measurement_digest = None
+    document = supervisor.cleanup_document()
+    assert supervisor.mechanics_outcome == "incomplete"
+    binding = {
+        key: document[key]
+        for key in (
+            "host_role",
+            "case_kind",
+            "launch_packet_digest",
+            "local_packet_digest",
+            "window_digest",
+            "machine_id_digest",
+            "network_measurement_digest",
+        )
+    }
+    binding.update(
+        not_before=supervisor.clocks.started_at.isoformat(),
+        expires_at=supervisor.clocks.expires_at.isoformat(),
+    )
+    # The acceptance DTO still requires an actual SHA digest for every field.
+    with pytest.raises(ProviderRefused):
+        RootHostBinding(launch.canonical(binding))

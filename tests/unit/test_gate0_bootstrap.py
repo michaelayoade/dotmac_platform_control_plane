@@ -4,9 +4,16 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from test_gate0_attester import proof_setup as _proof_setup
+from test_gate0_management_delivery import captured as _captured
+from test_gate0_runtime_providers import synthetic_http_only as _synthetic_http_only
 
 from vendor_cp.deployment.gate0_bootstrap import InstallationIdentity, PublicKeyPin
 from vendor_cp.deployment.gate0_role_custody import ProviderRefused
+
+proof_setup = _proof_setup
+captured = _captured
+synthetic_http_only = _synthetic_http_only
 
 
 def test_closed_public_key_pin_and_identity() -> None:
@@ -491,3 +498,119 @@ def test_issuer_selection_mismatch_refuses_before_database_or_custody(monkeypatc
     ):
         raise AssertionError("foreign selection yielded")
     assert touched == []
+
+
+def test_installed_raw_ca_composes_with_actual_session_and_producer(
+    tmp_path, monkeypatch, proof_setup, captured, synthetic_http_only
+):
+    import os
+    import time
+    from types import SimpleNamespace
+
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from test_gate0_runtime_providers import (
+        _SYNTHETIC_TRANSPORTS,
+        SyntheticBao,
+    )
+    from test_gate0_session_observation import SyntheticExchange
+
+    import vendor_cp.deployment.gate0_bootstrap as bootstrap
+    from vendor_cp.deployment.gate0_management_delivery import CaptureSelection
+    from vendor_cp.deployment.gate0_role_custody import (
+        BoundedJSONTransport,
+        CustodyProfile,
+        RoleCustody,
+    )
+    from vendor_cp.deployment.gate0_workload_admission import ApprovedAtStartAdmission
+
+    setup = proof_setup
+    _, _, capture, _ = captured
+    coordinates = capture.coordinates
+    fake = SyntheticBao("attester", bytes(range(32)))
+    installation = synthetic_attester()
+    started_at, monotonic_origin = datetime.now(UTC), time.monotonic()
+    launch_deadline = (
+        monotonic_origin
+        + (installation.identity.expires_at - started_at).total_seconds()
+    )
+    _SYNTHETIC_TRANSPORTS["https://synthetic-bao.invalid"] = fake
+    provider = RoleCustody(
+        role="attester",
+        role_id="synthetic-role-id",
+        key_id="synthetic-key",
+        public_key=fake.public,
+        minimum_versions={"issuer": 7, "attester": 7},
+        transport=BoundedJSONTransport("https://synthetic-bao.invalid"),
+        seed_format="a4-provisional-private-key-b64url",
+        expires_at=installation.identity.expires_at,
+        profile=CustodyProfile.ATTESTER_FINITE_V1,
+        launch_deadline=launch_deadline,
+    )
+    material = provider.bootstrap("synthetic-wrap")
+    raw_ca = setup["ca"].public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    installation = replace(
+        installation,
+        ca_public_key=raw_ca,
+        issuer_key=PublicKeyPin("synthetic-key", fake.public),
+        custody=replace(
+            installation.custody, key=PublicKeyPin("synthetic-key", fake.public)
+        ),
+        capture=CaptureSelection(
+            coordinates.window_digest,
+            coordinates.plan_id,
+            coordinates.plan_digest,
+            coordinates.target_id,
+            coordinates.approval_request_id,
+        ),
+    )
+    capture_path = tmp_path / "capture.json"
+    capture_path.write_bytes(capture.encoded)
+    context = SimpleNamespace(
+        slot_id="issue",
+        worker_uid=installation.worker_uid,
+        required_phase="issue",
+        started_at=started_at,
+        monotonic_origin=monotonic_origin,
+        deadline=launch_deadline,
+        require_run_role_terms=lambda **kwargs: None,
+        capture_coordinates=lambda: coordinates,
+        require_capture_slot=lambda *args: None,
+        open_authenticated_capture=lambda *args: os.open(capture_path, os.O_RDONLY),
+        open_auth_info_directory=lambda: os.open(tmp_path, os.O_RDONLY),
+        require_open=lambda: None,
+    )
+    # Native provenance/custody acquisition and workload admission are independent
+    # boundaries. Keep the actual capture decoder, installed adapter, assembly,
+    # bounded RoleCustody material, AttesterSession and AttesterProofProducer.
+    monkeypatch.setattr(bootstrap, "_installation", lambda *args: None)
+    monkeypatch.setattr(bootstrap, "_custody", lambda *args: (provider, material))
+    monkeypatch.setattr(
+        ApprovedAtStartAdmission,
+        "admit",
+        lambda *args: SimpleNamespace(
+            operation=setup["operation"], authentication_freshness=None
+        ),
+    )
+    monkeypatch.setattr(
+        ApprovedAtStartAdmission,
+        "window_record_digest",
+        lambda *args: coordinates.window_digest,
+    )
+    assert len(installation.ca_public_key) == 32
+    before = installation.document()
+    exchange = SyntheticExchange(setup)
+    with bootstrap.prepare_installed_attester(context, installation) as prepared:
+        session = replace(prepared.session, now=lambda: setup["now"])
+        assert session.ca_public_key.startswith(b"ssh-ed25519 ")
+        session.run(exchange, setup["cert"])
+        assert session.completion is not None
+        assert len(exchange.output) == 2
+        assert provider.profile is CustodyProfile.ATTESTER_FINITE_V1
+        assert provider.deadline <= launch_deadline
+        assert provider._phases == 2  # Actual challenge and complete refreshes.
+        assert provider._token_attempts == provider.profile.token_limit == 8
+        assert provider._http_attempts == provider.profile.http_limit == 11
+    assert installation.document() == before
+    assert len([path for path in fake.paths if path.endswith("/signing-key")]) == 1
+    with pytest.raises(ProviderRefused):
+        material.attester_sign(b"closed-synthetic-provider")

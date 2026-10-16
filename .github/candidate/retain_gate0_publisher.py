@@ -540,7 +540,13 @@ def authenticate_context(packet, environment, repository_root, deadline):
     if (
         len(selected) != 1
         or selected[0]["run_id"] != int(run_id_text)
-        or selected[0]["run_attempt"] != 1
+        or (
+            "run_attempt" in selected[0]
+            and (
+                type(selected[0]["run_attempt"]) is not int
+                or selected[0]["run_attempt"] != 1
+            )
+        )
         or selected[0]["head_sha"] != source["revision"]
         or selected[0]["status"] != "in_progress"
     ):

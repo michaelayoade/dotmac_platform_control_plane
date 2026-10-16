@@ -2080,6 +2080,11 @@ class FiniteGate0Supervisor:
         listeners: list[socket.socket] = []
         failure: BaseException | None = None
         try:
+            # The installed entrypoint owns this fully initialized supervisor
+            # before capability/network preflight can fail. Its fixed close and
+            # incomplete export therefore also cover startup failures.
+            _prepare_network_privileges()
+            self._measure_network()
             if role == "issuer":
                 listener = self._listen_wg("issuer")
                 listeners.append(listener)
@@ -2367,8 +2372,7 @@ class FiniteGate0Supervisor:
         self._cleanup_failure_reason: CleanupReason | None = None
         self._cleanup_completed_at: str | None = None
         self._removed: list[str] = []
-        _prepare_network_privileges()
-        self._measure_network()
+        self.network_measurement_digest: str | None = None
         self.state = LaunchState.AWAITING_CAPTURE
         self._index = 0
         self._boundary: SlotExecutionBoundary | None = None
@@ -3548,6 +3552,7 @@ class FiniteGate0Supervisor:
         )
         complete = (
             self._cleanup_complete
+            and self.network_measurement_digest is not None
             and self._mechanics_complete
             and set(self._boundaries) == expected
             and set(self._terminals) == terminals

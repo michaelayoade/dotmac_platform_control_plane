@@ -345,7 +345,6 @@ class RetentionPacketTests(unittest.TestCase):
             "name": "image",
             "id": 555,
             "run_id": 10,
-            "run_attempt": 1,
             "head_sha": "a" * 40,
             "status": "in_progress",
         }
@@ -362,7 +361,24 @@ class RetentionPacketTests(unittest.TestCase):
             {"total_count": 1, "jobs": [job]},
         ]
         with (
-            patch.object(RETAIN, "api_json", side_effect=responses),
+            patch.object(RETAIN, "api_json", side_effect=responses) as api,
+            patch.object(RETAIN, "run_bounded", return_value=b"a" * 40 + b"\n"),
+        ):
+            producer = RETAIN.authenticate_context(
+                packet, environment, ROOT, float("inf")
+            )
+        self.assertEqual(producer["job_id"], 555)
+        self.assertEqual(producer["attempt"], 1)
+        self.assertEqual(
+            api.call_args.args[0],
+            "/repos/"
+            + RETAIN.REPOSITORY
+            + "/actions/runs/10/attempts/1/jobs?per_page=100",
+        )
+        corroborated = copy.deepcopy(responses)
+        corroborated[3]["jobs"][0]["run_attempt"] = 1
+        with (
+            patch.object(RETAIN, "api_json", side_effect=corroborated),
             patch.object(RETAIN, "run_bounded", return_value=b"a" * 40 + b"\n"),
         ):
             producer = RETAIN.authenticate_context(
@@ -377,9 +393,10 @@ class RetentionPacketTests(unittest.TestCase):
         duplicate_job = copy.deepcopy(responses)
         duplicate_job[3] = {"total_count": 2, "jobs": [job, job]}
         variants.append(duplicate_job)
-        wrong_attempt = copy.deepcopy(responses)
-        wrong_attempt[3]["jobs"][0]["run_attempt"] = 2
-        variants.append(wrong_attempt)
+        for attempt in (2, 0, -1, True, False, 1.0, "1", None):
+            wrong_attempt = copy.deepcopy(responses)
+            wrong_attempt[3]["jobs"][0]["run_attempt"] = attempt
+            variants.append(wrong_attempt)
         for variant in variants:
             with (
                 patch.object(RETAIN, "api_json", side_effect=variant),

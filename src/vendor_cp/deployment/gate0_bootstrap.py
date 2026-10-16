@@ -18,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from dotmac_deployment_control import RehearsalIssuerAuthorizationSignerIdentity
 
 from vendor_cp.deployment.gate0_capture import (
@@ -497,7 +499,11 @@ def prepare_installed_attester(
             session = assemble_attester_session(
                 material=material,
                 admission=admission,
-                ca_public_key=installation.ca_public_key,
+                # Installation pins/fingerprints remain raw Ed25519; the
+                # proof producer consumes the OpenSSH public-key encoding.
+                ca_public_key=Ed25519PublicKey.from_public_bytes(
+                    installation.ca_public_key
+                ).public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH),
                 expires_at=installation.identity.expires_at,
                 custody=custody,
                 required_phase=installation.phase,
