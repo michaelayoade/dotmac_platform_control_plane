@@ -13,7 +13,7 @@ import re
 import stat
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from vendor_cp.deployment.gate0_e_archive import MAX_CIPHERTEXT_BYTES
 from vendor_cp.deployment.gate0_e_preparation import validate_encrypted_e_projection
@@ -191,12 +191,12 @@ def _ticket(
     *,
     deadline: float,
     boot_id: str,
-    campaign_digest: str,
+    campaign_digest: object,
     lifecycle_binding_digest: str,
     courier_uid: int,
     courier_gid: int,
-    profile_digest: str,
-    source_bundle_digest: str,
+    profile_digest: object,
+    source_bundle_digest: object,
 ) -> dict[str, Any]:
     _before(deadline)
     _require(boot_id == _boot() and re.fullmatch(r"[0-9a-f-]{36}", boot_id) is not None)
@@ -427,9 +427,12 @@ def _await_work() -> None:
         )
         _require(ready["ticket_digest"] == _sha(ticket_raw))
         published = ready["published_monotonic"]
-        _require(type(published) in (float, int) and math.isfinite(published))
+        if type(published) is not float and type(published) is not int:
+            raise ETransferRefused()
+        _require(math.isfinite(published))
         _require(0 < published <= time.monotonic() < deadline)
         _require(type(ready["files"]) is dict and set(ready["files"]) == set(_NAMES))
+        files = cast(dict[str, object], ready["files"])
         transfer = _directory(_TRANSFER, mode=0o750, gid=gid)
         try:
             directory_identity = (os.fstat(transfer).st_dev, os.fstat(transfer).st_ino)
@@ -441,7 +444,7 @@ def _await_work() -> None:
                     transfer, name, limit, mode=0o640, gid=gid, deadline=deadline
                 )
                 _require(
-                    ready["files"][name]
+                    files[name]
                     == dict(
                         digest=_sha(retained),
                         size=len(retained),
@@ -449,6 +452,7 @@ def _await_work() -> None:
                     )
                 )
                 raw[name] = retained
+            verified_files = cast(dict[str, dict[str, object]], files)
             _validate_pair(raw, ticket)
             _require(set(os.listdir(transfer)) == set(_NAMES))
             for name in _NAMES:
@@ -456,7 +460,7 @@ def _await_work() -> None:
                     list(
                         _identity(os.stat(name, dir_fd=transfer, follow_symlinks=False))
                     )
-                    == ready["files"][name]["identity"]
+                    == verified_files[name]["identity"]
                 )
             current = os.stat(_TRANSFER, follow_symlinks=False)
             _require(directory_identity == (current.st_dev, current.st_ino))

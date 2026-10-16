@@ -60,6 +60,7 @@ from vendor_cp.deployment.gate0_e_source_references import (
 )
 from vendor_cp.deployment.gate0_framing import canonical, strict_object
 from vendor_cp.deployment.gate0_runner_handoff import RootHostBinding
+from vendor_cp.deployment.gate0_runner_lifecycle import _OriginalBounds
 
 _INSTALLATION = "/run/dotmac-gate0-e/writer.json"
 _BINDING = "/etc/dotmac-gate0-e/writer-binding.json"
@@ -727,6 +728,9 @@ class EPublicSelection:
 class InstalledEWriter:
     """Fixed protected installation. There is no caller-selected loader path."""
 
+    _root_runtime: dict[str, Any]
+    _root_deadline: float
+
     def __init__(
         self,
         seal: object,
@@ -1157,7 +1161,7 @@ class InstalledEWriter:
             doc["a9"], "lifecycle_binding_digest qualification_digest owned_slots"
         )
         _require(a9["lifecycle_binding_digest"] == observed["lifecycle_binding_digest"])
-        original = supervisor._OriginalBounds.parse(observed["original_bounds"])
+        original = _OriginalBounds.parse(observed["original_bounds"])
         _require(
             original.boot_id == observed["boot_id"]
             and math.floor(original.finalization_end * 1000000)
