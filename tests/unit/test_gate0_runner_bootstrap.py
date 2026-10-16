@@ -1116,5 +1116,15 @@ def test_actual_installed_original_clock_keeps_a_stricter_earlier_cutoff(
     qualification["installation_digest"] = owner._digest(canonical(doc))
     n.files[qualification_path] = canonical(qualification)
     actual = owner.BootstrapInstallation.from_installed()
-    assert actual.clock.cutoff == n.end - 5
+    # Map the authoritative wall bound from its original monotonic anchor;
+    # subtracting from an already-added float need not be bit-identical.
+    bounds = doc["original_bounds"]
+    expected = (
+        bounds["monotonic"]
+        + (
+            datetime.fromisoformat(bounds["finalization_ends_at"])
+            - datetime.fromisoformat(bounds["wall"])
+        ).total_seconds()
+    )
+    assert actual.clock.cutoff == expected
     assert actual.clock.cutoff < n.bootstrap.clock.cutoff
