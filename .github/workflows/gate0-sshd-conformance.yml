@@ -22,8 +22,9 @@ jobs:
       - name: Observe fixed public native input candidates (non-root)
         timeout-minutes: 5
         run: |
-          /usr/bin/python3.12 -I -B -m unittest discover -s conformance -p test_gate0_native_input_observation.py -v
+          /usr/bin/python3.12 -I -B -m unittest discover -s conformance -p 'test_gate0_*_observation.py' -v
           /usr/bin/python3.12 -I -B .github/candidate/observe_gate0_native_inputs.py
+          /usr/bin/python3.12 -I -B .github/candidate/observe_gate0_ubuntu_packages.py
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -100,6 +101,7 @@ jobs:
           name: gate0-installed-sshd-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/native-input-observation.json
+            ${{ runner.temp }}/ubuntu-package-observation.json
             ${{ runner.temp }}/gate0-ssh-artifacts/qualified-binaries.json
             ${{ runner.temp }}/gate0-installed-sshd.xml
             ${{ runner.temp }}/gate0-installed-cgroup.xml

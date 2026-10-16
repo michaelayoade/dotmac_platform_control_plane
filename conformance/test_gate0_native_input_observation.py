@@ -1,5 +1,6 @@
 """Mocked standard-library tests only; no native/signature qualification."""
 
+import base64
 import hashlib
 import io
 import json
@@ -99,7 +100,12 @@ class PublicInputTests(unittest.TestCase):
         glob = M["observe_signature"].__globals__
         with (
             patch.dict(
-                glob, {"download": Mock(), "command": Mock(return_value=valid_status())}
+                glob,
+                {
+                    "download": Mock(),
+                    "derive_keyring": Mock(return_value="/mock/runc-keyring.gpg"),
+                    "command": Mock(return_value=valid_status()),
+                },
             ),
             patch.object(glob["signal"], "signal"),
             patch.object(glob["signal"], "setitimer") as timer,
@@ -109,6 +115,10 @@ class PublicInputTests(unittest.TestCase):
             argv = glob["command"].call_args.args[0]
             self.assertEqual(argv[0], "/usr/bin/gpgv")
             self.assertTrue(argv[-1].endswith("/runc.amd64"))
+            self.assertEqual(
+                argv[argv.index("--keyring") + 1], "/mock/runc-keyring.gpg"
+            )
+            self.assertTrue(result["keyring_encoding"]["binary_derivation_observed"])
             self.assertEqual([call.args[1] for call in timer.call_args_list], [60, 0])
 
     def test_expected_download_failure_is_bounded_and_unexpected_bug_surfaces(self):
@@ -197,6 +207,175 @@ class PublicInputTests(unittest.TestCase):
                 [item.name for item in Path(work).iterdir()],
                 ["native-input-observation.json"],
             )
+
+
+class InputCorrectionTests(unittest.TestCase):
+    def armor_fixture(self):
+        chunks = [b"A" * 1915, b"B" * 1243, b"C" * 2272]
+        blocks = []
+        for chunk in chunks:
+            encoded = base64.b64encode(chunk)
+            lines = [
+                encoded[index : index + 64] for index in range(0, len(encoded), 64)
+            ]
+            blocks.append(
+                b"-----BEGIN PGP PUBLIC KEY BLOCK-----\nComment: github=test\n\n"
+                + b"\n".join(lines)
+                + b"\n=AAAA\n-----END PGP PUBLIC KEY BLOCK-----\n"
+            )
+        raw = b"      " + M["SIGNER"].encode() + b"\n" + b"\n".join(blocks)
+        return raw + b" " * (8507 - len(raw)), b"".join(chunks)
+
+    def test_pinned_listing_derives_exact_binary_keyring_exclusively(self):
+        raw, binary = self.armor_fixture()
+        pins = dict(
+            KEYRING_SHA=hashlib.sha256(raw).hexdigest(),
+            KEYRING_BINARY_SHA=hashlib.sha256(binary).hexdigest(),
+        )
+        with (
+            tempfile.TemporaryDirectory() as work,
+            patch.dict(M["derive_keyring"].__globals__, pins),
+        ):
+            (Path(work) / "runc.keyring").write_bytes(raw)
+            derived = M["derive_keyring"](work)
+            self.assertEqual(Path(derived).read_bytes(), binary)
+            self.assertEqual(Path(derived).stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(FileExistsError):
+                M["derive_keyring"](work)
+
+    def test_corrupted_outer_missing_or_malformed_blocks_and_derived_hash_refuse(self):
+        raw, binary = self.armor_fixture()
+        for content, outer, derived in (
+            (
+                raw + b"x",
+                hashlib.sha256(raw).hexdigest(),
+                hashlib.sha256(binary).hexdigest(),
+            ),
+            (
+                raw.replace(b"BEGIN PGP PUBLIC KEY", b"BEGIN PGP PRIVAT KEY", 1),
+                None,
+                None,
+            ),
+            (raw.replace(b"=AAAA", b"=bad!", 1), None, None),
+            (raw, hashlib.sha256(raw).hexdigest(), "0" * 64),
+        ):
+            with self.subTest(size=len(content)), tempfile.TemporaryDirectory() as work:
+                (Path(work) / "runc.keyring").write_bytes(content)
+                pins = dict(
+                    KEYRING_SHA=outer or hashlib.sha256(content).hexdigest(),
+                    KEYRING_BINARY_SHA=derived or hashlib.sha256(binary).hexdigest(),
+                )
+                with (
+                    patch.dict(M["derive_keyring"].__globals__, pins),
+                    self.assertRaises(M["Incomplete"]),
+                ):
+                    M["derive_keyring"](work)
+                self.assertFalse((Path(work) / "runc-keyring.gpg").exists())
+
+    def test_multiple_exact_owners_and_diversions_are_distinct_metadata(self):
+        alias = "/usr/bin/python3.12"
+        rows = (
+            "diversion by python3.12-minimal from: "
+            + alias
+            + "\n"
+            + "diversion by python3.12-minimal to: "
+            + alias
+            + ".distrib\n"
+            + "python3.12, python3.12-minimal: "
+            + alias
+            + "\n"
+        )
+
+        def query(argv):
+            if "--search" in argv:
+                return rows
+            return argv[-1] + "\t3.12.3-1ubuntu0.13\tamd64\n"
+
+        with patch.dict(
+            M["packages"].__globals__, {"command": Mock(side_effect=query)}
+        ):
+            records = M["packages"]((alias,))
+        self.assertEqual(
+            {item["package"] for item in records}, {"python3.12", "python3.12-minimal"}
+        )
+        self.assertTrue(all(item["diversion_observed"] for item in records))
+        self.assertTrue(all(item["alias"] == alias for item in records))
+
+    def test_diversion_only_unknown_or_overbudget_owner_rows_remain_incomplete(self):
+        alias = "/usr/bin/python3.12"
+        for rows in (
+            "local diversion from: " + alias + "\n",
+            "unknown owner syntax\n",
+            ("pkg: " + alias + "\n") * 13,
+            "a, b, c, d, e: " + alias + "\n",
+        ):
+            query = Mock(return_value=rows)
+            with (
+                self.subTest(rows=rows[:30]),
+                patch.dict(M["packages"].__globals__, {"command": query}),
+            ):
+                records = M["packages"]((alias,))
+            query.assert_called_once_with(["/usr/bin/dpkg-query", "--search", alias])
+            self.assertFalse(any("package" in item for item in records))
+            self.assertEqual(records[0]["failure_class"], "package-incomplete")
+
+    def test_optional_image_release_stays_null_and_required_image_os_still_blocks(self):
+        context = dict(
+            ImageVersion="20261012.334.1",
+            ImageOS="ubuntu24",
+            ImageRelease=None,
+            GITHUB_SHA="a" * 40,
+            GITHUB_REPOSITORY="example/project",
+            GITHUB_RUN_ID="123",
+            GITHUB_RUN_ATTEMPT="1",
+            GITHUB_JOB="installed-sshd",
+        )
+        glob = M["main"].__globals__
+        observed = dict(
+            lexical_path="/usr/bin/gpgv",
+            status="observed-not-authenticated",
+            sha256="a" * 64,
+            packages=[dict(package="gpgv")],
+        )
+        for required_missing in (False, True):
+            values = dict(context)
+            if required_missing:
+                values["ImageOS"] = None
+            with (
+                self.subTest(required_missing=required_missing),
+                tempfile.TemporaryDirectory() as work,
+                patch.dict(os.environ, {"RUNNER_TEMP": work}, clear=True),
+                patch.object(glob["os"], "geteuid", return_value=1000),
+                patch.object(glob["sys"], "argv", ["observe_gate0_native_inputs.py"]),
+                patch.dict(
+                    glob,
+                    {
+                        "metadata": Mock(return_value=values),
+                        "observe_file": Mock(return_value=observed),
+                        "observe_signature": Mock(
+                            return_value=dict(cryptographic_signature_verified=True)
+                        ),
+                    },
+                ),
+                patch(
+                    "builtins.open",
+                    return_value=io.BytesIO(
+                        b'ID=ubuntu\nVERSION_ID="24.04"\nUBUNTU_CODENAME=noble\n'
+                    ),
+                ),
+            ):
+                M["main"]()
+                record = json.loads(
+                    (Path(work) / "native-input-observation.json").read_bytes()
+                )
+                self.assertIsNone(record["context"]["ImageRelease"])
+                self.assertEqual(
+                    record["status"],
+                    "incomplete" if required_missing else "candidate-observation-only",
+                )
+                self.assertFalse(record["overall_native_pass"])
+                self.assertFalse(record["production_qualified"])
+                self.assertFalse(record["operational_selector_configured"])
 
 
 if __name__ == "__main__":
