@@ -1132,6 +1132,8 @@ class InstalledGate0GitHubReads:
                     "draft",
                     "published",
                     "publication",
+                    "publication_complete",
+                    "draft_with_receipt",
                 )
             )
             required = {
@@ -1141,6 +1143,8 @@ class InstalledGate0GitHubReads:
                 "draft": (True, False, False, True),
                 "published": (True, False, False, True),
                 "publication": (False, True, False, False),
+                "publication_complete": (False, True, False, False),
+                "draft_with_receipt": (True, False, False, True),
             }[phase]
             _require(
                 tuple(
@@ -1345,6 +1349,7 @@ class InstalledGate0GitHubReads:
             return result
         if code == EndpointCode.REVIEWS:
             _require(run is not None)
+            workflow = cast(RunPin, run).workflow
             reviews = []
             for review in _array(value, 32):
                 review = _obj(review)
@@ -1353,8 +1358,8 @@ class InstalledGate0GitHubReads:
                 ]
                 selected = {"environments": environments}
                 if any(
-                    env["id"] == run.workflow.environment_id
-                    or env["name"] == run.workflow.environment_name
+                    env["id"] == workflow.environment_id
+                    or env["name"] == workflow.environment_name
                     for env in environments
                 ):
                     selected.update(fields(review, "state"))
@@ -1401,7 +1406,7 @@ class InstalledGate0GitHubReads:
             result = fields(
                 value, "id tag_name draft immutable created_at published_at"
             )
-            if self._installation["phase"] == "draft":
+            if self._installation["phase"] in ("draft", "draft_with_receipt"):
                 result.update(fields(value, "target_commitish"))
             return result
         if code == EndpointCode.ASSETS:
@@ -1911,26 +1916,38 @@ class InstalledGate0GitHubReads:
 
         return self._phase("protected_job", 90, observe, deadline=deadline)
 
-    def publication_snapshot(self) -> PublicationFacts:
-        def observe() -> PublicationFacts:
-            run = self._publication
-            if run is None:
-                raise GitHubReadRefused()
-            facts = self._producer_facts(run, ProducerStage.COLLECTION_SNAPSHOT)
-            policy = self._policies[run.run_id]
-            anchor = self._run_anchor(self._read(EndpointCode.RUN, run), run)
-            _require(
-                policy["publication_title"] is not None
-                and anchor["display_title"] == policy["publication_title"]
-            )
-            return PublicationFacts(
-                facts,
-                anchor["display_title"],
-                policy["selected_summary_digest"],
-                facts.review.observation_sha256,
-            )
+    def _publication_facts(self, stage: ProducerStage) -> PublicationFacts:
+        run = self._publication
+        if run is None:
+            raise GitHubReadRefused()
+        facts = self._producer_facts(run, stage)
+        policy = self._policies[run.run_id]
+        anchor = self._run_anchor(self._read(EndpointCode.RUN, run), run)
+        _require(
+            policy["publication_title"] is not None
+            and anchor["display_title"] == policy["publication_title"]
+        )
+        return PublicationFacts(
+            facts,
+            anchor["display_title"],
+            policy["selected_summary_digest"],
+            facts.review.observation_sha256,
+        )
 
-        return self._phase("publication", 90, observe)
+    def publication_snapshot(self) -> PublicationFacts:
+        return self._phase(
+            "publication",
+            90,
+            lambda: self._publication_facts(ProducerStage.COLLECTION_SNAPSHOT),
+        )
+
+    def publication_complete_snapshot(self) -> PublicationFacts:
+        """Verify the separately selected publication run after its actual success."""
+        return self._phase(
+            "publication_complete",
+            90,
+            lambda: self._publication_facts(ProducerStage.PRODUCER_RUN_COMPLETE),
+        )
 
     def _artifact(
         self, run: RunPin, transfer: TransferPin, producer: ProducerFacts
@@ -2056,7 +2073,9 @@ class InstalledGate0GitHubReads:
 
         return self._phase("transfer", 180, observe)
 
-    def _release_pin(self, published: bool) -> ReleasePin:
+    def _release_pin(
+        self, published: bool, *, with_receipt: bool = False
+    ) -> ReleasePin:
         value = _closed(self._release, "release_id tag commit assets")
         _require(
             re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", _text(value["tag"]))
@@ -2071,7 +2090,7 @@ class InstalledGate0GitHubReads:
                 "gate0-evidence-public.json",
                 "gate0-readiness-receipt.json",
             )
-            if published
+            if published or with_receipt
             else ("gate0-evidence.pgp", "gate0-evidence-public.json")
         )
         for asset in _array(value["assets"], 3):
@@ -2193,15 +2212,23 @@ class InstalledGate0GitHubReads:
         return self._tag_binding(pin)[1]
 
     @overload
-    def _release_facts(self, published: Literal[False]) -> DraftReleaseFacts: ...
+    def _release_facts(
+        self, published: Literal[False], *, with_receipt: bool = False
+    ) -> DraftReleaseFacts: ...
 
     @overload
-    def _release_facts(self, published: Literal[True]) -> DownloadedReleaseFacts: ...
+    def _release_facts(
+        self, published: Literal[True], *, with_receipt: bool = False
+    ) -> DownloadedReleaseFacts: ...
 
     def _release_facts(
-        self, published: bool
+        self, published: bool, *, with_receipt: bool = False
     ) -> DraftReleaseFacts | DownloadedReleaseFacts:
-        pin = self._release_pin(published)
+        _require(
+            not with_receipt
+            or (not published and self._installation["phase"] == "draft_with_receipt")
+        )
+        pin = self._release_pin(published, with_receipt=with_receipt)
         run = self._producer
         if run is None:
             raise GitHubReadRefused()
@@ -2336,6 +2363,14 @@ class InstalledGate0GitHubReads:
 
     def draft_snapshot(self) -> DraftReleaseFacts:
         return self._phase("draft", 180, lambda: self._release_facts(False))
+
+    def draft_with_receipt_snapshot(self) -> DraftReleaseFacts:
+        """Read the exact three-asset draft before the sole publish mutation."""
+        return self._phase(
+            "draft_with_receipt",
+            180,
+            lambda: self._release_facts(False, with_receipt=True),
+        )
 
     def published_snapshot(self) -> DownloadedReleaseFacts:
         return self._phase("published", 180, lambda: self._release_facts(True))

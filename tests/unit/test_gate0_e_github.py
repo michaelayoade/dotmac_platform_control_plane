@@ -1543,3 +1543,77 @@ def test_wire_error_drops_private_exception_context(metadata_wire, monkeypatch):
         owner.producer_snapshot(gh.ProducerStage.PRODUCER_RUN_COMPLETE)
     assert str(error.value) == "GITHUB_READ_REFUSED" and error.value.__context__ is None
     assert not owner._issued and not owner._observations
+
+
+def test_publication_completion_uses_successful_whole_run_and_review(producer):
+    owner, responses = producer
+    owner._publication, owner._producer = owner._producer, None
+    owner._installation["phase"] = "publication_complete"
+    owner._policies[17].update(
+        publication_title="E read", selected_summary_digest="e" * 64
+    )
+    facts = owner.publication_complete_snapshot()
+    assert owner.owns_facts(facts)
+    assert facts.run.stage is gh.ProducerStage.PRODUCER_RUN_COMPLETE
+    assert facts.run.conclusion == "success"
+    assert facts.selected_summary_digest == "e" * 64
+    assert facts.review_response_digest == facts.run.review.observation_sha256
+    assert responses[gh.EndpointCode.RUN]["status"] == "completed"
+
+
+@pytest.mark.parametrize("fault", ["run", "step", "title", "review", "phase"])
+def test_publication_completion_refuses_incomplete_or_foreign_evidence(producer, fault):
+    owner, responses = producer
+    owner._publication, owner._producer = owner._producer, None
+    owner._installation["phase"] = "publication_complete"
+    owner._policies[17].update(
+        publication_title="E read", selected_summary_digest="e" * 64
+    )
+    if fault == "run":
+        for code in (gh.EndpointCode.RUN, gh.EndpointCode.ATTEMPT):
+            responses[code].update(status="in_progress", conclusion=None)
+    elif fault == "step":
+        responses[gh.EndpointCode.JOBS]["jobs"][0]["steps"][-1].update(
+            status="completed", conclusion="skipped"
+        )
+    elif fault == "title":
+        owner._policies[17]["publication_title"] = "another digest"
+    elif fault == "review":
+        responses[gh.EndpointCode.REVIEWS][0]["user"]["id"] = 999
+    else:
+        owner._installation["phase"] = "publication"
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.publication_complete_snapshot()
+    assert not owner._issued
+
+
+def test_prepublication_draft_requires_exact_three_assets_without_tag(release_snapshot):
+    configure, responses, _, _, calls, _ = release_snapshot
+    owner = configure(published=True)
+    owner._installation["phase"] = "draft_with_receipt"
+    responses[gh.EndpointCode.RELEASE].update(
+        draft=True, immutable=False, published_at=None
+    )
+    facts = owner.draft_with_receipt_snapshot()
+    assert type(facts) is gh.DraftReleaseFacts and owner.owns_facts(facts)
+    assert facts.draft and len(facts.assets) == 3
+    assert facts.assets[-1].name == "gate0-readiness-receipt.json"
+    assert all(
+        code not in (gh.EndpointCode.TAG_REF, gh.EndpointCode.TAG) for code, _ in calls
+    )
+
+
+@pytest.mark.parametrize("fault", ["missing_receipt", "wrong_phase", "published"])
+def test_prepublication_draft_does_not_relax_other_inventories(release_snapshot, fault):
+    configure, responses, _, _, _, _ = release_snapshot
+    owner = configure(published=fault != "missing_receipt")
+    owner._installation["phase"] = "draft_with_receipt"
+    if fault != "published":
+        responses[gh.EndpointCode.RELEASE].update(
+            draft=True, immutable=False, published_at=None
+        )
+    if fault == "wrong_phase":
+        owner._installation["phase"] = "draft"
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.draft_with_receipt_snapshot()
+    assert not owner._issued

@@ -294,3 +294,23 @@ unsigned JSON substitute is accepted. Actual pinned official gh transport,
 trust and native resource qualification remain unproven. Downloaded release
 facts or source review alone do not close that gap.
 
+
+## Finite completion read phases
+
+The independently installed `publication_complete` phase has the same selected
+publication run and authenticated title/summary/review binding as `publication`,
+but `publication_complete_snapshot()` requires actual whole-run success through
+`PRODUCER_RUN_COMPLETE`, including all selected jobs and steps. It is read only
+after that separate publication workflow finishes; the publishing job cannot
+claim its own future completion. Each phase still needs its own qualified fixed
+installation, and each reader remains single-use.
+
+The independently installed `draft_with_receipt` phase selects exactly the two
+B-reviewed assets plus `gate0-readiness-receipt.json`.
+`draft_with_receipt_snapshot()` reads and checks all three assets before publish,
+using the same exact draft target and pre/post inventory/byte checks. It provides
+`DraftReleaseFacts`, with no Git tag authority. The existing `draft_snapshot()`
+continues to require exactly two assets, and published verification continues to
+require three assets, immutable publication and actual raw/peeled tag bindings.
+Neither new phase performs mutations or supplies evidence of B verification,
+human approval meaning, operational qualification or readiness by itself.
