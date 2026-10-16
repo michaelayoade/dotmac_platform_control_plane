@@ -317,6 +317,9 @@ def test_run_orders_management_barrier_before_capture_and_attester_barrier(monke
     root._cleanup_failed = False
     root._cleanup_failure_reason = None
     events = []
+    # Ordering-only fixture: native preflight has dedicated refusal coverage.
+    monkeypatch.setattr(launch, "_prepare_network_privileges", lambda: None)
+    monkeypatch.setattr(root, "_measure_network", lambda: None)
     monkeypatch.setattr(launch, "_load_local_packet", lambda: {"host_role": "attester"})
     monkeypatch.setattr(
         root,
