@@ -170,6 +170,56 @@ def _number(value: str) -> int:
     return int(value)
 
 
+def _timer_microseconds(value: object) -> str:
+    """Decode systemd v255 FORMAT_TIMESPAN(u, 0), without rounding.
+
+    Only the native timer CLI boundary uses this grammar. Evidence retains its
+    existing decimal-microsecond string representation.
+    """
+    if not isinstance(value, str) or not 1 <= len(value) <= 63:
+        raise ProviderRefused()
+    if value == "0":
+        return "0"
+    units = {
+        "y": 31_557_600_000_000,
+        "month": 2_629_800_000_000,
+        "w": 604_800_000_000,
+        "d": 86_400_000_000,
+        "h": 3_600_000_000,
+        "min": 60_000_000,
+        "s": 1_000_000,
+        "ms": 1_000,
+        "us": 1,
+    }
+    total, previous = 0, 2**64
+    parts = value.split(" ")
+    for index, part in enumerate(parts):
+        match = re.fullmatch(
+            r"([1-9][0-9]*)(?:\.([0-9]+))?(y|month|w|d|h|min|s|ms|us)", part
+        )
+        if match is None:
+            raise ProviderRefused()
+        integer, fraction, unit = match.groups()
+        scale = units[unit]
+        if scale >= previous:
+            raise ProviderRefused()
+        component = int(integer) * scale
+        if fraction is not None:
+            precision = {"s": 6, "ms": 3}.get(unit)
+            if (
+                precision is None
+                or len(fraction) > precision
+                or index != len(parts) - 1
+            ):
+                raise ProviderRefused()
+            component += int(fraction) * 10 ** (precision - len(fraction))
+        total += component
+        if total >= 2**64 - 1:
+            raise ProviderRefused()
+        previous = scale
+    return str(total)
+
+
 def _instant(value: object) -> datetime:
     result = datetime.fromisoformat(_text(value).replace("Z", "+00:00"))
     if result.tzinfo is None or result.utcoffset() != timedelta(0):
@@ -787,6 +837,10 @@ class NativeSystemManager:
             values[key] = value
         if set(values) != set(properties):
             raise ProviderRefused()
+        if "NextElapseUSecMonotonic" in values:
+            values["NextElapseUSecMonotonic"] = _timer_microseconds(
+                values["NextElapseUSecMonotonic"]
+            )
         _require_before(deadline)
         return values
 

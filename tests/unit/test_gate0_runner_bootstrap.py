@@ -100,6 +100,118 @@ def test_original_cutoff_never_moves_with_delayed_manager_start(candidate, monke
 
 
 @pytest.mark.parametrize(
+    "native,expected",
+    [
+        ("0", "0"),
+        ("1min 40s", "100000000"),
+        ("21min 42s", "1302000000"),
+        ("1.000001s", "1000001"),
+        ("1.001ms", "1001"),
+        ("1us", "1"),
+        ("1y 1month 1w 1d 1h 1min 1.000001s", "34882261000001"),
+        ("9007199254740993us", "9007199254740993"),
+        ("18446744073709551614us", "18446744073709551614"),
+    ],
+)
+def test_native_timer_timespan_is_exact_integer_microseconds(native, expected):
+    assert owner._timer_microseconds(native) == expected
+
+
+@pytest.mark.parametrize(
+    "native",
+    [
+        None,
+        100000000,
+        "",
+        "100000000",
+        "infinity",
+        "-1s",
+        "+1s",
+        "1ns",
+        "1.0000001s",
+        "1.0001ms",
+        "1.1us",
+        "1.1min",
+        "1s 1s",
+        "1ms 1s",
+        "1.000001s 1us",
+        "1 s",
+        "1s ",
+        " 1s",
+        "1s  1us",
+        "01s",
+        "0s",
+        "1\ts",
+        "１s",
+        "18446744073709551615us",
+        "18446744073709551616us",
+        "1" * 64 + "us",
+    ],
+)
+def test_native_timer_timespan_refuses_outside_closed_finite_grammar(native):
+    with pytest.raises(ProviderRefused):
+        owner._timer_microseconds(native)
+
+
+@pytest.mark.parametrize("native", ["21min 42s", "21min 42.000001s"])
+def test_arm_reads_actual_cli_timespan_and_refuses_one_microsecond_drift(
+    candidate, monkeypatch, native
+):
+    manager = owner.NativeSystemManager(candidate)
+    calls = []
+    monkeypatch.setattr(owner.time, "monotonic", lambda: 1200.0)
+    monkeypatch.setattr(owner, "_exclusive", lambda *a, **k: None)
+    timer = dict(
+        ActiveState="active",
+        SubState="waiting",
+        NextElapseUSecMonotonic=native,
+        AccuracyUSec="1us",
+        RandomizedDelayUSec="0",
+        WakeSystem="no",
+        Unit=owner._EXPIRED,
+        FragmentPath=str(owner._UNIT_ROOT / owner._TIMER),
+        DropInPaths="",
+    )
+    target = dict(
+        FragmentPath=str(owner._UNIT_ROOT / owner._EXPIRED),
+        DropInPaths="",
+        Conflicts=" ".join((owner._COLLECTOR, owner._BOOTSTRAP)),
+    )
+
+    def call(arguments, deadline):
+        calls.append((arguments, deadline))
+        if arguments[0] != "show":
+            return b""
+        values = timer if arguments[-1] == owner._TIMER else target
+        return "\n".join(f"{k}={v}" for k, v in values.items()).encode("ascii")
+
+    monkeypatch.setattr(manager, "_call", call)
+    if native == "21min 42s":
+        assert manager.arm_original_timer()["NextElapseUSecMonotonic"] == "1302000000"
+    else:
+        with pytest.raises(ProviderRefused):
+            manager.arm_original_timer()
+    assert {deadline for _, deadline in calls} == {1202.0}
+    assert candidate.clock.microseconds == 1302000000
+
+
+def test_manager_query_omits_empty_unit_and_preserves_other_values(
+    candidate, monkeypatch
+):
+    manager = owner.NativeSystemManager(candidate)
+    monkeypatch.setattr(owner.time, "monotonic", lambda: 1200.0)
+    calls = []
+
+    def call(arguments, deadline):
+        calls.append((arguments, deadline))
+        return b"Version=255\n"
+
+    monkeypatch.setattr(manager, "_call", call)
+    assert manager._show("", ("Version",), 1202.0) == {"Version": "255"}
+    assert calls == [(("show", "--all", "--property=Version"), 1202.0)]
+
+
+@pytest.mark.parametrize(
     "field,value",
     [
         ("monotonic", float("nan")),
@@ -111,6 +223,21 @@ def test_original_cutoff_never_moves_with_delayed_manager_start(candidate, monke
 def test_original_clock_refuses_invalid_coordinates(candidate, field, value):
     with pytest.raises(ProviderRefused):
         replace(candidate.clock, **{field: value})
+
+
+def test_timer_cli_normalization_cannot_refresh_expired_budget(candidate, monkeypatch):
+    manager = owner.NativeSystemManager(candidate)
+    values = {key: "" for key in owner._TIMER_PROPERTIES}
+    values["NextElapseUSecMonotonic"] = "21min 42.000001s"
+
+    def call(arguments, deadline):
+        assert deadline == 1202.0
+        monkeypatch.setattr(owner.time, "monotonic", lambda: 1202.0)
+        return "\n".join(f"{k}={v}" for k, v in values.items()).encode("ascii")
+
+    monkeypatch.setattr(manager, "_call", call)
+    with pytest.raises(ProviderRefused):
+        manager._show(owner._TIMER, owner._TIMER_PROPERTIES, 1202.0)
 
 
 def test_fixed_assets_use_manager_owner_and_only_private_loadcredential(candidate):

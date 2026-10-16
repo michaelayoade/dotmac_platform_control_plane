@@ -15,10 +15,12 @@ from pathlib import Path
 from typing import Any, cast
 
 from vendor_cp.deployment.gate0_framing import canonical, strict_object
+from vendor_cp.deployment.gate0_role_custody import ProviderRefused
 from vendor_cp.deployment.gate0_runner_bootstrap import (
     CollectorRetirementFact,
     NativeSystemManager,
     _cleanup_manager_request,
+    _timer_microseconds,
 )
 from vendor_cp.deployment.gate0_runner_handoff import measure_handoff_process
 from vendor_cp.deployment.gate0_runner_lifecycle import (
@@ -348,6 +350,13 @@ class SupervisorManager:
             _require(separator == "=" and key in properties and key not in result)
             result[key] = value
         _require(set(result) == set(properties))
+        if "NextElapseUSecMonotonic" in result:
+            try:
+                result["NextElapseUSecMonotonic"] = _timer_microseconds(
+                    result["NextElapseUSecMonotonic"]
+                )
+            except ProviderRefused:
+                raise LifecycleRefused() from None
         _before(deadline)
         return result
 

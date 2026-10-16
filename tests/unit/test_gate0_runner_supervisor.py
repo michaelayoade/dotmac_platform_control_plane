@@ -96,6 +96,88 @@ def test_original_outer_timer_is_read_back_not_reanchored(installed, monkeypatch
         manager.arm()
 
 
+@pytest.mark.parametrize("native", ["1min 40s", "1min 40.000001s"])
+def test_outer_timer_arm_normalizes_actual_cli_readback_exactly(
+    installed, monkeypatch, native
+):
+    manager = owner.SupervisorManager(installed)
+    calls = []
+    timer = dict(
+        ActiveState="active",
+        SubState="waiting",
+        NextElapseUSecMonotonic=native,
+        AccuracyUSec="1us",
+        RandomizedDelayUSec="0",
+        WakeSystem="no",
+        Unit=owner._EXPIRED,
+        FragmentPath="/run/systemd/system/" + owner._TIMER,
+        DropInPaths="",
+    )
+    target = dict(
+        FragmentPath="/run/systemd/system/" + owner._EXPIRED,
+        DropInPaths="",
+        Conflicts=" ".join((owner._LIFECYCLE, owner._BOOTSTRAP, owner._JIT)),
+    )
+
+    def call(arguments, deadline):
+        calls.append((arguments, deadline))
+        if arguments[0] != "show":
+            return b""
+        values = timer if arguments[-1] == owner._TIMER else target
+        return "\n".join(f"{k}={v}" for k, v in values.items()).encode("ascii")
+
+    monkeypatch.setattr(manager, "_call", call)
+    if native == "1min 40s":
+        manager.arm()
+        assert (
+            manager.show(owner._TIMER, 20.0)["NextElapseUSecMonotonic"] == "100000000"
+        )
+    else:
+        with pytest.raises(LifecycleRefused):
+            manager.arm()
+    assert {deadline for _, deadline in calls} == {20.0}
+    assert installed.bounds.finalization_end == 100.0
+
+
+def test_show_parser_does_not_refresh_expired_budget(installed, monkeypatch):
+    manager = owner.SupervisorManager(installed)
+
+    def call(arguments, deadline):
+        assert deadline == 20.0
+        monkeypatch.setattr(owner.time, "monotonic", lambda: 20.0)
+        return b"Version=255\n"
+
+    monkeypatch.setattr(manager, "_call", call)
+    with pytest.raises(LifecycleRefused):
+        manager.show("", 20.0)
+
+
+@pytest.mark.parametrize("native", ["infinity", "1.0000001s", "1s 1min"])
+def test_show_malformed_native_timer_preserves_lifecycle_refusal(
+    installed, monkeypatch, native
+):
+    manager = owner.SupervisorManager(installed)
+    values = {key: "" for key in owner._TIMER_PROPERTIES}
+    values["NextElapseUSecMonotonic"] = native
+    raw = "\n".join(f"{k}={v}" for k, v in values.items()).encode("ascii")
+    monkeypatch.setattr(manager, "_call", lambda *a: raw)
+    with pytest.raises(LifecycleRefused):
+        manager.show(owner._TIMER, 20.0)
+
+
+def test_manager_show_keeps_empty_unit_out_of_argv(installed, monkeypatch):
+    manager = owner.SupervisorManager(installed)
+    calls = []
+
+    def call(arguments, deadline):
+        calls.append((arguments, deadline))
+        return b"Version=255\n"
+
+    monkeypatch.setattr(manager, "_call", call)
+    assert manager.show("", 20.0) == {"Version": "255"}
+    assert calls == [(("show", "--all", "--property=Version"), 20.0)]
+
+
 @pytest.mark.parametrize("failure", [False, True])
 def test_same_manager_file_retirement_precedes_close_and_manifest(
     installed, monkeypatch, failure
