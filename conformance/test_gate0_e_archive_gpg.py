@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
+from vendor_cp.deployment import gate0_e_archive as archive_owner
 from vendor_cp.deployment.gate0_e_archive import (
     ARCHIVE_NAMES,
     GnuPgToolPins,
@@ -17,6 +19,73 @@ from vendor_cp.deployment.gate0_e_archive import (
     package_private_collection,
     qualify_gnupg_tools,
 )
+
+
+def _packet_structure(raw: bytes) -> dict[str, object]:
+    """Bounded framing diagnostics only; never retain packet-body bytes."""
+    position = 0
+    packets = []
+    summary: dict[str, object] = {"size": len(raw), "packets": packets}
+    while position < len(raw) and len(packets) < 8:
+        start = position
+        header = raw[position]
+        position += 1
+        new_format = bool(header & 64)
+        tag = header & 63 if new_format else (header >> 2) & 15
+        chunks = []
+        packets.append(
+            {"offset": start, "tag": tag, "new_format": new_format, "chunks": chunks}
+        )
+        if not header & 128:
+            summary["stop"] = "invalid_header"
+            return summary
+        for _ in range(64):
+            if position >= len(raw):
+                summary["stop"] = "missing_length"
+                return summary
+            first = raw[position]
+            if new_format:
+                position += 1
+                partial = 224 <= first < 255
+                if first < 192:
+                    length = first
+                elif first < 224:
+                    if position >= len(raw):
+                        summary["stop"] = "short_two_octet_length"
+                        return summary
+                    length = ((first - 192) << 8) + raw[position] + 192
+                    position += 1
+                elif first == 255:
+                    if len(raw) - position < 4:
+                        summary["stop"] = "short_five_octet_length"
+                        return summary
+                    length = int.from_bytes(raw[position : position + 4], "big")
+                    position += 4
+                else:
+                    length = 1 << (first & 31)
+            else:
+                width = (1, 2, 4, 0)[header & 3]
+                if not width or len(raw) - position < width:
+                    summary["stop"] = "unsupported_or_short_old_length"
+                    return summary
+                length = int.from_bytes(raw[position : position + width], "big")
+                position += width
+                partial = False
+            chunks.append({"offset": position, "length": length, "partial": partial})
+            if length > len(raw) - position:
+                summary["stop"] = "body_exceeds_available_bytes"
+                return summary
+            if partial and tag != 18:
+                summary["stop"] = "partial_length_outside_tag18"
+                return summary
+            position += length
+            if not partial:
+                break
+        else:
+            summary["stop"] = "chunk_diagnostic_bound"
+            return summary
+    summary["stop"] = "complete" if position == len(raw) else "packet_diagnostic_bound"
+    return summary
 
 
 def _inputs():
@@ -41,6 +110,20 @@ def test_actual_synthetic_gpg_encrypt_decrypt_on_qualified_host(tmp_path, monkey
     This test has no B key: its ephemeral synthetic secret stays in the isolated
     test home, never the packager. It cannot stand in for independent B custody.
     """
+    original_packets = archive_owner._ciphertext_packets
+
+    def checked_packets(raw, fingerprint):
+        try:
+            original_packets(raw, fingerprint)
+        except archive_owner.ArchiveRefused:
+            print(
+                "SYNTHETIC_GPG_PACKET_STRUCTURE="
+                + json.dumps(_packet_structure(raw), separators=(",", ":")),
+                file=sys.stderr,
+            )
+            raise
+
+    monkeypatch.setattr(archive_owner, "_ciphertext_packets", checked_packets)
     executable = Path(os.environ["GATE0_TEST_QUALIFIED_GPG"])
     digest = os.environ["GATE0_TEST_QUALIFIED_GPG_SHA256"]
     version = os.environ["GATE0_TEST_QUALIFIED_GPG_VERSION"]
