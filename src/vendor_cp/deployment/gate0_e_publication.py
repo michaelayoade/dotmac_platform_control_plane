@@ -162,16 +162,19 @@ class InstalledEPublication:
             "publication_selection_digest "
             "summary_digest credential qualification download_origins",
         )
-        _require(doc["schema"] == "Gate0EPublicationInstallation.v1")
+        _require(doc["schema"] == "Gate0EPublicationInstallation.v2")
         _require(doc["operation"] in ("prepare_draft", "publish"))
+        for name in ("policy_digest", "transfer_selection_digest"):
+            github._hex(doc[name])
         for name in (
-            "policy_digest",
-            "transfer_selection_digest",
             "draft_selection_digest",
             "publication_selection_digest",
             "summary_digest",
         ):
-            github._hex(doc[name])
+            if doc["operation"] == "prepare_draft":
+                _require(doc[name] is None)
+            else:
+                github._hex(doc[name])
         repository = github._repository(doc["repository"])
         _require(repository.owner + "/" + repository.name == _REPOSITORY)
         release = github._closed(

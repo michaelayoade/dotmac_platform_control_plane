@@ -272,7 +272,7 @@ def _publisher(c, monkeypatch, *, operation, draft=None, pub_reads=None, summary
         c.gh_files[gh._INSTALLATION] = default_raw
         c.gh_files[gh._ROOT_BINDING] = default_binding
     doc = dict(
-        schema="Gate0EPublicationInstallation.v1",
+        schema="Gate0EPublicationInstallation.v2",
         operation=operation,
         policy_digest=c.selection.policy_digest[7:],
         repository=dict(
@@ -291,11 +291,13 @@ def _publisher(c, monkeypatch, *, operation, draft=None, pub_reads=None, summary
         ),
         producer=producer,
         transfer_selection_digest=producer_reader.installed_selection_digest,
-        draft_selection_digest="1" * 64,
+        draft_selection_digest=c.draft_reads.installed_selection_digest
+        if operation == "publish"
+        else None,
         publication_selection_digest=pub_reads.installed_selection_digest
-        if pub_reads
-        else "2" * 64,
-        summary_digest=gh._digest(summary),
+        if operation == "publish"
+        else None,
+        summary_digest=gh._digest(summary) if operation == "publish" else None,
         credential=publication._CREDENTIAL,
         download_origins=["download.example.com"],
     )
@@ -478,9 +480,40 @@ def test_transfer_job_selection_requires_the_owned_outer_transfer(transfer_compo
         reads.selected_job(transfer)
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["draft_selection_digest", "publication_selection_digest", "summary_digest"],
+)
+@pytest.mark.parametrize("value", ["a" * 64, "", True, "missing"])
+def test_prepare_draft_refuses_non_null_or_missing_future_inputs(
+    transfer_composition, monkeypatch, field, value
+):
+    c, reads, _ = transfer_composition
+    p = _publisher(c, monkeypatch, operation="prepare_draft")
+
+    def change(doc, qual):
+        if value == "missing":
+            del doc[field]
+        else:
+            doc[field] = value
+
+    with pytest.raises(publication.EPublicationRefused) as raised:
+        p.load(transfer_reads=reads, change=change)
+    _assert_publication_graph_clean(raised.value)
+    assert not p.native.calls
+
+
 def test_first_create_and_exact_two_byte_readback(transfer_composition, monkeypatch):
     c, reads, transfer = transfer_composition
     p = _publisher(c, monkeypatch, operation="prepare_draft")
+    assert all(
+        p.document[field] is None
+        for field in (
+            "draft_selection_digest",
+            "publication_selection_digest",
+            "summary_digest",
+        )
+    )
     installed = p.load(transfer_reads=reads)
     result = installed.prepare_draft_once(reads, transfer)
     assert result.result == "DRAFT_PREPARED" and result.release_id == 22
@@ -589,6 +622,94 @@ def _ready_publish(c, monkeypatch):
         )
         p.native.bytes[asset.id] = asset.raw_bytes
     return p
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["draft_selection_digest", "publication_selection_digest", "summary_digest"],
+)
+@pytest.mark.parametrize("value", [None, "", "g" * 64, "a" * 63, True, "missing"])
+def test_publish_refuses_null_malformed_or_missing_phase_inputs(
+    receipt_composition,  # noqa: F811
+    monkeypatch,
+    field,
+    value,
+):
+    c = receipt_composition
+    p = _ready_publish(c, monkeypatch)
+
+    def change(doc, qual):
+        if value == "missing":
+            del doc[field]
+        else:
+            doc[field] = value
+
+    with pytest.raises(publication.EPublicationRefused) as raised:
+        p.load(draft_reads=c.draft_reads, change=change)
+    _assert_publication_graph_clean(raised.value)
+    assert not p.native.calls
+
+
+@pytest.mark.parametrize("operation", ["prepare_draft", "publish"])
+def test_legacy_publication_installation_schema_refused(
+    request, monkeypatch, operation
+):
+    if operation == "prepare_draft":
+        c, reads, _ = request.getfixturevalue("transfer_composition")
+        p = _publisher(c, monkeypatch, operation=operation)
+        load_inputs = {"transfer_reads": reads}
+    else:
+        c = request.getfixturevalue("receipt_composition")
+        p = _ready_publish(c, monkeypatch)
+        load_inputs = {"draft_reads": c.draft_reads}
+
+    def change(doc, qual):
+        doc["schema"] = "Gate0EPublicationInstallation.v1"
+        if operation == "prepare_draft":
+            # A complete old-style record must refuse, even with hex-shaped
+            # future inputs; v1 is never reinterpreted as v2.
+            for field in (
+                "draft_selection_digest",
+                "publication_selection_digest",
+                "summary_digest",
+            ):
+                doc[field] = "a" * 64
+
+    with pytest.raises(publication.EPublicationRefused) as raised:
+        p.load(**load_inputs, change=change)
+    _assert_publication_graph_clean(raised.value)
+    assert not p.native.calls
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["draft_selection_digest", "publication_selection_digest", "summary_digest"],
+)
+def test_publish_refuses_valid_hex_phase_digest_mismatch(
+    receipt_composition,  # noqa: F811
+    monkeypatch,
+    field,
+):
+    c = receipt_composition
+    p = _ready_publish(c, monkeypatch)
+
+    def change(doc, qual):
+        assert doc[field] != "a" * 64
+        doc[field] = "a" * 64
+
+    owner = p.load(draft_reads=c.draft_reads, change=change)
+    with pytest.raises(publication.EPublicationRefused):
+        owner.publish_once(
+            c.load("publish", c.pins),
+            c.draft_reads,
+            c.draft,
+            c.pub_reads,
+            c.pub_facts,
+            c.summary,
+        )
+    assert not any(
+        op in ("upload_receipt", "publish") for op, _, _, _ in p.native.calls
+    )
 
 
 @pytest.mark.parametrize("uncertain", [None, "upload_receipt", "publish"])

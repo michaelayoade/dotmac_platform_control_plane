@@ -27,7 +27,8 @@ Every path pin is `{path,sha256}` under `/etc/dotmac-gate0-e/`.
 The installation has exactly `schema`, `operation`, `policy_digest`, `repository`,
 `release`, `producer`, `transfer_selection_digest`, `draft_selection_digest`,
 `publication_selection_digest`, `summary_digest`, `credential`, `qualification`,
-`download_origins`. Schema is `Gate0EPublicationInstallation.v1`. Operation is
+`download_origins`. Schema is strictly `Gate0EPublicationInstallation.v2`; v1
+is refused without a fallback or migration interpretation. Operation is
 `prepare_draft` or `publish`. Repository uses the existing repository pin schema
 and must name the fixed execution repository. CDN origins use the same bounded,
 explicit DNS-host selection as the read owner, never IP literals or server URLs.
@@ -39,7 +40,23 @@ Title/body are fixed bounded printable ASCII; author is the qualified writer ID.
 Producer is `{run_id,attempt,workflow_id,job_id,head_sha,workflow_digest,
 source_policy_digest}`; attempt is exactly 1 and head equals target. Reader-selection
 digests bind the independently installed live phase objects, never caller DTOs.
-Summary digest binds exactly the canonical B summary selected by the real writer.
+Policy and transfer-selection digests are mandatory lowercase 64-hex values in
+both operations. For `prepare_draft`, `draft_selection_digest`,
+`publication_selection_digest` and `summary_digest` must all be present and
+exactly JSON null. The first draft precedes the draft reader, publication reader
+and B summary, so preparation neither requires nor permits invented future
+digests. For `publish`, all three fields must be real lowercase 64-hex digests:
+the independently installed draft and publication selections, and exactly the
+canonical B summary selected by the real writer. Missing fields refuse in both
+phases; null never substitutes for publication evidence.
+
+Qualification and root-binding schemas retain their existing semantics. The
+qualification selection digest hashes the v2 installation excluding its
+qualification pin, including its operation and exact phase inputs; the root
+binding hashes the complete installed bytes. Each phase therefore requires its
+own genuine matching qualification and binding. This source schema change does
+not qualify a native runtime or adopt an installation; operational installation
+still requires the external qualified native evidence and fresh human review.
 
 Root binding is `Gate0EPublicationBinding.v1` with `installation_sha256`,
 `qualification_sha256`, `runtime_uid`, `owners`, `native_receipt`. Owners are exact
