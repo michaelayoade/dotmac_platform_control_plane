@@ -1,10 +1,11 @@
 # Gate 0 E finite publication owner
 
 This is source preparation. Nothing here installs credentials, performs custody,
-creates a release, adopts B-review meaning or accepts E. The genuine digest-bound
-B-verification publication-review meaning remains UNADOPTED. Actual qualified
-runtime/source/API evidence and the exact human adoption/review are operational
-inputs, never caller flags or a new approval lifecycle.
+creates a release or accepts E. The public-only B-verification publication-review
+meaning was adopted on 2026-10-16; that design decision does not supply the future
+genuine digest-bound human review. Actual qualified runtime/source/API evidence
+and the exact fresh review are operational inputs, never caller flags or a new
+approval lifecycle.
 
 `InstalledEPublication.from_installed()` loads only
 `/run/dotmac-gate0-e/publication.json` with independent root binding

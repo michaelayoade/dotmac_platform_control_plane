@@ -152,20 +152,23 @@ checked. Cleanup failure suppresses successful and pending results alike.
 ## Profile and qualification boundary
 
 Every existing profile, including `full`, explicitly withholds this new feature;
-their effective route sets remain unchanged. The explicit source candidate
+their effective route sets remain unchanged. The explicit source profile
 `production-gate0-collection-v1` version 1 derives from `production-composed-v1`
 and inventories only the additional `gate0_collection_reads` surface. Its
-`production_accepted=False` means production boot refuses it. A separately reviewed
-source change of that exact flag and an explicit operational profile selection are
-still required before publication. Neither design adoption nor adding the candidate
-claims a deployed profile or permission to publish.
+`production_accepted=True` permits production boot only when this profile is
+explicitly selected. The existing version and two GET routes are unchanged.
+Owner review of this exact source acceptance precedes publication; an accepted
+immutable artifact, qualified installation and explicit operational selection
+remain separate requirements. Source acceptance does not claim deployment,
+A8/A9 qualification, E acceptance or Lane 3 admission.
 
 The new focused source tests cover claim/scope matching, original historical owner
 reads after withdrawal, exact relay/receipt joins, cleanup failures, transaction
 modes, shared JWT behavior, and the real assembled candidate routes/dependency
 graph. They are synthetic component checks, not protected producer ancestry, A9
 custody, live human approval/withdrawal or a full campaign gate. During this source
-preparation only static AST/Ruff checks are authorized; these tests have not run.
+preparation, focused hosted checks must pass on the exact reviewed source; no
+synthetic result establishes an installed measurement.
 The accepted deployment manifest/descriptor remain unchanged. Any prospective
 composition/digest artifact must be generated from the actual pinned candidate in
 its authorized hosted pipeline, rather than presented as an installed measurement.

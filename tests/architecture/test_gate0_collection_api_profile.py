@@ -1,5 +1,7 @@
 """Actual assembled route/profile/auth graph, not production adoption evidence."""
 
+from dataclasses import replace
+
 import pytest
 from dotmac_kernel import create_app
 from dotmac_kernel.platform_auth import (
@@ -22,7 +24,7 @@ from vendor_cp.deployment_profile import (
 PREFIX = "/platform/vendor/gate0/collection/windows/{window_id}"
 
 
-def test_existing_profiles_withhold_and_source_candidate_mounts_exact_reads(
+def test_existing_profiles_withhold_and_explicit_profile_mounts_exact_reads(
     monkeypatch,
 ):
     monkeypatch.setenv("ENVIRONMENT", "development")
@@ -47,16 +49,21 @@ def test_existing_profiles_withhold_and_source_candidate_mounts_exact_reads(
             assert calls.count(require_gate0_collection_workload) == 1
             assert require_platform_admin not in calls
             assert require_platform_web_auth not in calls
+        validate_profile_for_environment(
+            profile, environment="production", provider_mode="fake"
+        )
         with pytest.raises(ProductionProfileRefusedError):
             validate_profile_for_environment(
-                profile, environment="production", provider_mode="fake"
+                replace(profile, production_accepted=False),
+                environment="production",
+                provider_mode="fake",
             )
 
 
-def test_candidate_profile_is_explicit_and_not_an_operational_adoption():
+def test_profile_source_acceptance_is_explicit_not_deployment_evidence():
     profile = deployment_profile(PRODUCTION_GATE0_COLLECTION_V1)
     assert profile.version == "1"
-    assert profile.production_accepted is False
+    assert profile.production_accepted is True
     assert profile.laboratory is False
 
 

@@ -501,8 +501,8 @@ _STANDARD_PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     ),
 )
 
-# Reviewable source candidate only. Production selection still refuses this
-# profile until its separate operational adoption changes production_accepted.
+# Explicit source profile; every pre-existing profile still withholds these reads.
+# Source acceptance remains separate from qualified operational selection.
 _GATE0_BASE = next(p for p in _STANDARD_PROFILES if p.code == PRODUCTION_COMPOSED_V1)
 PRODUCTION_GATE0_COLLECTION_V1: Final[str] = "production-gate0-collection-v1"
 PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
@@ -513,12 +513,13 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
         withheld_surfaces=_GATE0_BASE.withheld_surfaces - {"gate0_collection_reads"},
         surface_inventory=(*_GATE0_BASE.surface_inventory, "gate0_collection_reads"),
         laboratory=False,
-        production_accepted=False,
+        production_accepted=True,
         rationale=(
-            "Source candidate for the protected A9 finite read projections. "
-            "No existing profile publishes this surface. Installed campaign selection, "
-            "origin, database and JWKS bounds and actual profile adoption remain "
-            "unqualified; production acceptance requires a separate reviewed decision."
+            "Explicit source profile for protected A9 finite read projections. "
+            "No pre-existing profile publishes this surface. Qualified installed "
+            "campaign selection, origin, database and JWKS bounds and explicit "
+            "operational selection remain required; source acceptance is neither "
+            "deployment evidence nor Gate 0 acceptance."
         ),
     ),
 )
