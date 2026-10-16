@@ -164,7 +164,7 @@ def package_index(raw):
         require(len(block) <= 65536, "index-stanza-bounds")
         fields = {}
         for line in block.splitlines():
-            require(len(line) <= 8192, "index-line-bounds")
+            require(len(line) <= 16384, "index-line-bounds")
             if line.startswith((" ", "\t")):
                 continue
             key, separator, value = line.partition(": ")
@@ -290,6 +290,8 @@ def main():
         context=context,
         status="incomplete",
         failure_class="package-chain-incomplete",
+        failure_stage=None,
+        candidate_package=None,
         packages=[],
         overall_native_pass=False,
         production_qualified=False,
@@ -309,6 +311,7 @@ def main():
         dict(url=BASE + DIST + "InRelease", size=RELEASE[0], sha256=RELEASE[1]),
         dict(url=BASE + DIST + INDEX, size=INDEX_PIN[0], sha256=INDEX_PIN[1]),
     ]
+    stage, current_package = "bootstrap", None
     previous = signal.signal(signal.SIGALRM, expired)
     deadline = time.monotonic() + 120
     signal.setitimer(signal.ITIMER_REAL, 120)
@@ -318,6 +321,7 @@ def main():
             for path in ("/usr/bin/gpgv", KEYRING, "/usr/bin/dpkg-deb")
         }
         with tempfile.TemporaryDirectory(prefix="gate0-ubuntu-packages-") as work:
+            stage = "release-signature"
             release = fetch(work, "InRelease", DIST + "InRelease", RELEASE, deadline)
             os.mkdir(work + "/gnupg", 0o700)
             status = U["command"](
@@ -333,11 +337,15 @@ def main():
                 timeout=min(10, max(0.001, deadline - time.monotonic())),
             )
             record["release_signature"] = signed_status(status)
+            stage = "release-index"
             release_chain(release.read_bytes())
             index = fetch(work, "Packages.xz", DIST + INDEX, INDEX_PIN, deadline)
+            stage = "package-index"
             package_index(index.read_bytes())
             observed = observed_files(context)
             for candidate in PACKAGES:
+                current_package = candidate["Package"]
+                stage = "package-download"
                 archive = fetch(
                     work,
                     candidate["Package"] + ".deb",
@@ -345,7 +353,9 @@ def main():
                     (int(candidate["Size"]), candidate["SHA256"]),
                     deadline,
                 )
+                stage = "package-data-reader"
                 members = package_members(candidate["Package"], archive, work, deadline)
+                stage = "member-comparison"
                 for member in members:
                     actual = observed.get(member["path"])
                     member["observed_match"] = (
@@ -365,6 +375,16 @@ def main():
                 for package in record["packages"]
                 for member in package["members"]
             )
+            if not matched:
+                record["failure_stage"] = "member-comparison"
+                record["candidate_package"] = next(
+                    package["candidate"]["Package"]
+                    for package in record["packages"]
+                    if any(
+                        member["observed_match"] != "match"
+                        for member in package["members"]
+                    )
+                )
             record["failure_class"] = "none" if matched else "tool-bytes-unmatched"
             record["status"] = (
                 "package-candidate-observation-only" if matched else "incomplete"
@@ -378,6 +398,8 @@ def main():
         lzma.LZMAError,
     ):
         record["failure_class"] = "package-chain-incomplete"
+        record["failure_stage"] = stage
+        record["candidate_package"] = current_package
         record["status"] = "incomplete"
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)

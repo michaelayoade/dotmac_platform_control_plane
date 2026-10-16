@@ -274,6 +274,8 @@ class UbuntuPackageTests(unittest.TestCase):
             self.assertLessEqual(len(raw), 65536)
             result = json.loads(raw)
             self.assertEqual(result["status"], "incomplete")
+            self.assertEqual(result["failure_stage"], "member-comparison")
+            self.assertEqual(result["candidate_package"], "python3.12-minimal")
             python = next(
                 item
                 for item in result["packages"]
@@ -290,6 +292,115 @@ class UbuntuPackageTests(unittest.TestCase):
             ):
                 self.assertIs(result[key], False)
             self.assertEqual([call.args[1] for call in timer.call_args_list], [120, 0])
+
+    def test_legitimate_unrelated_long_index_field_and_16k_line_refusal(self):
+        unrelated = dict(
+            Package="unrelated-public-metadata",
+            Metadata="x" * (11203 - len("Metadata: ")),
+        )
+        M["package_index"](index_bytes(M["PACKAGES"] + [unrelated]))
+        for total in (16384, 16385):
+            unrelated["Metadata"] = "x" * (total - len("Metadata: "))
+            compressed = index_bytes(M["PACKAGES"] + [unrelated])
+            if total == 16384:
+                M["package_index"](compressed)
+            else:
+                with self.assertRaises(M["Incomplete"]):
+                    M["package_index"](compressed)
+
+    def test_closed_failure_stages_preserve_partial_signature_and_no_raw_error(self):
+        glob = M["main"].__globals__
+        context = dict(
+            GITHUB_SHA="a" * 40,
+            GITHUB_REPOSITORY="example/project",
+            GITHUB_RUN_ID="123",
+            GITHUB_RUN_ATTEMPT="1",
+            GITHUB_JOB="installed-sshd",
+        )
+        for failing in (
+            "bootstrap",
+            "release-signature",
+            "release-index",
+            "package-index",
+            "package-download",
+            "package-data-reader",
+            "member-comparison",
+        ):
+
+            def fail(*args, **kwargs):
+                raise KeyError("never-retain-raw-exception-details")
+
+            def fetch(work, name, relative, pin, deadline, failing=failing):
+                if failing == "package-download" and name.endswith(".deb"):
+                    return fail()
+                path = Path(work) / name
+                path.write_bytes(b"mocked public data")
+                return path
+
+            def members(package, archive, work, deadline):
+                return [
+                    dict(path="/" + name, size=4, mode=0o755, sha256="a" * 64)
+                    for name in M["MEMBERS"][package]
+                ]
+
+            broken = Mock()
+            broken.get.side_effect = KeyError("never-retain-raw-exception-details")
+            utilities = dict(
+                M["U"],
+                metadata=Mock(return_value=context),
+                command=Mock(return_value=signed()),
+            )
+            overrides = dict(
+                U=utilities,
+                local_hash=Mock(return_value="a" * 64),
+                fetch=fetch,
+                signed_status=Mock(
+                    return_value=dict(cryptographic_signature_verified=True)
+                ),
+                release_chain=Mock(),
+                package_index=Mock(),
+                package_members=members,
+                observed_files=Mock(return_value={"/usr/bin/gpgv": broken}),
+            )
+            name = {
+                "bootstrap": "local_hash",
+                "release-signature": "signed_status",
+                "release-index": "release_chain",
+                "package-index": "package_index",
+                "package-data-reader": "package_members",
+            }.get(failing)
+            if name:
+                overrides[name] = fail
+            with (
+                self.subTest(stage=failing),
+                tempfile.TemporaryDirectory() as work,
+                patch.dict(os.environ, {"RUNNER_TEMP": work}, clear=True),
+                patch.object(glob["os"], "geteuid", return_value=1000),
+                patch.object(glob["sys"], "argv", ["observe"]),
+                patch.object(glob["signal"], "signal"),
+                patch.object(glob["signal"], "setitimer"),
+                patch.dict(glob, overrides),
+            ):
+                M["main"]()
+                raw = (Path(work) / "ubuntu-package-observation.json").read_bytes()
+                record = json.loads(raw)
+                self.assertEqual(record["failure_stage"], failing)
+                self.assertEqual(
+                    record["candidate_package"],
+                    "gpgv"
+                    if failing
+                    in ("package-download", "package-data-reader", "member-comparison")
+                    else None,
+                )
+                self.assertEqual(
+                    record["release_signature"]["cryptographic_signature_verified"],
+                    failing not in ("bootstrap", "release-signature"),
+                )
+                self.assertFalse(record["overall_native_pass"])
+                self.assertFalse(record["production_qualified"])
+                self.assertFalse(record["operational_selector_configured"])
+                self.assertNotIn(b"never-retain-raw-exception-details", raw)
+                self.assertLessEqual(len(raw), 65536)
 
 
 if __name__ == "__main__":
