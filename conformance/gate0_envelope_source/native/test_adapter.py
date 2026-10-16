@@ -13,7 +13,7 @@ import scratch_helper as h
 
 def fixture(case="pre-guard-stop"):
     record = dict(
-        schema="DotmacNativeEnvelopeFixture.v1",
+        schema="DotmacNativeEnvelopeFixture.v2",
         isolation_scope="disposable-task-vm-only",
         case=case,
         instance="a" * 64,
@@ -78,14 +78,48 @@ def fixture(case="pre-guard-stop"):
     rosters["timer"]["Before"] = [u["expired"]]
     rosters["expired"]["Conflicts"] = [u["ready"], u["service"]]
     rosters["observer"].update(
+        Requisite=[u["observer_ready"]],
         Requires=["system.slice"],
-        After=["system.slice"],
+        After=[u["observer_ready"], "system.slice"],
         Conflicts=[u["observer_expired"]],
     )
+    rosters["observer_ready"].update(
+        Before=[u["observer"]], Conflicts=[u["observer_expired"]]
+    )
     rosters["observer_timer"]["Before"] = [u["observer_expired"]]
-    rosters["observer_expired"]["Conflicts"] = [u["observer"]]
+    rosters["observer_expired"]["Conflicts"] = [u["observer_ready"], u["observer"]]
     record["rosters"] = rosters
     return record
+
+
+def source_bound(p):
+    return dict(
+        invocation="b" * 32,
+        process=dict(
+            pid=123,
+            start=77,
+            ppid=1,
+            exe_device=1,
+            exe_inode=2,
+            cgroup=p["group"] + "/launcher",
+        ),
+    )
+
+
+def live_fixture(record, p, bound, tracer=456):
+    process = dict(bound["process"])
+    if record["case"] == "runc-exec-stop":
+        process.update(exe_device=3, exe_inode=4)
+    return dict(
+        schema="DotmacNativeEnvelopePostSLiveWitness.v1",
+        case=record["case"],
+        before_us=125000000,
+        after_us=125000001,
+        process=process,
+        state="t",
+        tracer_pid=tracer,
+        pidfd_ready=False,
+    )
 
 
 class RunFixture:
@@ -94,7 +128,7 @@ class RunFixture:
     def __init__(self, case):
         self.record = fixture(case)
         self.p = a.paths(self.record)
-        self.bound = dict(invocation="b" * 32, process=dict(pid=123, start=77, ppid=1))
+        self.bound = source_bound(self.p)
         self.observer = dict(invocation="c" * 32, process=dict(pid=456, start=88))
         self.trace = Mock()
         self.trace.old_exec_tid.return_value = 123
@@ -137,6 +171,7 @@ class RunFixture:
         enter("adapter.show", side_effect=show)
         enter("adapter.roster", return_value={})
         enter("adapter.GroupsObserver", return_value=self.observer_group)
+        self.owner = enter("adapter.owner_rendezvous")
         enter("adapter.exclusive")
         enter("adapter.protected", return_value=17)
         enter("adapter.os.open", return_value=18)
@@ -160,6 +195,10 @@ class RunFixture:
         enter("adapter.wait_event", return_value=0)
         self.process = enter(
             "adapter.process_snapshot", return_value=self.bound["process"]
+        )
+        self.live = enter(
+            "adapter.hold_to_post_s_witness",
+            return_value=live_fixture(self.record, self.p, self.bound),
         )
         self.retire = enter(
             "adapter.retirement", return_value={"mocked_source_evidence_only": True}
@@ -212,6 +251,24 @@ class SourceTests(unittest.TestCase):
         with self.assertRaises(a.Incomplete):
             a.validate_record(record)
 
+    def test_missing_or_late_existing_owner_prevents_any_target_launch(self):
+        for failure in (a.Incomplete(), OSError("synthetic absent owner")):
+            with RunFixture("pre-guard-stop") as f:
+                f.owner.side_effect = failure
+                with self.assertRaises((a.Incomplete, OSError)):
+                    a.run(f.record)
+                f.trace_factory.assert_not_called()
+                self.assertFalse(f.client.wait.called)
+        with RunFixture("runc-exec-stop") as f:
+            f.owner.side_effect = a.Incomplete("synthetic late ACK")
+            with (
+                patch("adapter.subprocess.Popen") as launch,
+                self.assertRaises(a.Incomplete),
+            ):
+                a.run(f.record)
+            launch.assert_not_called()
+            f.trace_factory.assert_not_called()
+
     def test_original_bounds_and_budget_tampering(self):
         for changes in (
             {"s_us": 125000001},
@@ -258,9 +315,10 @@ class SourceTests(unittest.TestCase):
                     "target-cutoff-observed-observer-retirement-pending",
                 )
                 self.assertEqual(
-                    f.retire.call_args.args[-1],
+                    f.retire.call_args.args[6],
                     {"before_us": 126000000, "after_us": 126000000},
                 )
+                self.assertEqual(f.retire.call_args.args[7], f.live.return_value)
                 if case == "pre-guard-stop":
                     f.peer.send.assert_not_called()
                 else:
@@ -371,7 +429,7 @@ class SourceTests(unittest.TestCase):
     def test_retirement_attribution_and_stable_identity(self):
         record = fixture()
         p = a.paths(record)
-        bound = {"invocation": "b" * 32, "process": {"pid": 123, "start": 77}}
+        bound = source_bound(p)
         base = dict(
             LoadState="loaded",
             InvocationID="b" * 32,
@@ -416,7 +474,18 @@ class SourceTests(unittest.TestCase):
                 patch("adapter.select.select", return_value=([27], [], [])),
                 patch("adapter.original_gone", return_value=gone),
             ):
-                return a.retirement(record, p, bound, 27, groups, 9, observed)
+                return a.retirement(
+                    record,
+                    p,
+                    bound,
+                    27,
+                    groups,
+                    9,
+                    observed,
+                    live_fixture(record, p, bound),
+                    {"python": (1, 2), "runc": (3, 4)},
+                    456,
+                )
 
         positive = probe()
         self.assertTrue(positive["original_process_disappeared"])
@@ -524,6 +593,223 @@ class SourceTests(unittest.TestCase):
             h.main()
             execute.assert_called_once_with(a.RUNC, a.runc_vector(p), {})
         self.assertEqual(events, ["marker", "release", "close", "guard", "exec"])
+
+
+class PostSLiveWitnessTests(unittest.TestCase):
+    def sample(
+        self,
+        case="pre-guard-stop",
+        clocks=None,
+        readiness=None,
+        state="t",
+        start=77,
+        tracer=456,
+        process_changes=None,
+    ):
+        record = fixture(case)
+        p = a.paths(record)
+        bound = source_bound(p)
+        process = dict(live_fixture(record, p, bound)["process"])
+        process.update(process_changes or {})
+        fields = [state, "1"] + ["0"] * 17 + [str(start)] + ["0"] * 3
+        raw = ("123 (held target) " + " ".join(fields)).encode()
+        # Keep the fixed mocked proc-read selector in the reviewed lambda form.
+        reads = (  # noqa: E731
+            lambda pid, leaf: raw
+            if leaf == "stat"
+            else ("TracerPid:\t" + str(tracer) + "\n").encode()
+        )
+        if clocks is None:
+            clocks = [record["s_us"], record["s_us"] + 1]
+        if readiness is None:
+            readiness = [([], [], []), ([], [], [])]
+        with (
+            patch("adapter.clock", side_effect=clocks),
+            patch("adapter.os.getpid", return_value=456),
+            patch("adapter.process_snapshot", return_value=process),
+            patch("adapter.proc_bytes", side_effect=reads),
+            patch("adapter.select.select", side_effect=readiness),
+            patch("adapter.os.waitpid") as wait,
+        ):
+            result = a.hold_to_post_s_witness(
+                record, p, bound, 27, {"python": (1, 2), "runc": (3, 4)}
+            )
+            wait.assert_not_called()
+            return result
+
+    def test_post_s_live_in_each_held_case_then_sigkill_wait_is_positive(self):
+        for case in ("pre-guard-stop", "runc-exec-stop"):
+            witness = self.sample(case)
+            self.assertEqual(witness["state"], "t")
+            self.assertFalse(witness["pidfd_ready"])
+            self.assertGreaterEqual(witness["before_us"], fixture()["s_us"])
+            with (
+                patch("adapter.clock", side_effect=[125000002, 125000003]),
+                patch("adapter.os.waitpid", return_value=(123, 9)),
+            ):
+                status, observed = a.wait_death(fixture(case), 123)
+                self.assertEqual(status, 9)
+                self.assertGreaterEqual(observed["before_us"], witness["after_us"])
+
+    def test_positive_full_flow_observes_live_after_s_before_waiting_sigkill(self):
+        actual_hold = a.hold_to_post_s_witness
+        fields = ["t", "1"] + ["0"] * 17 + ["77"] + ["0"] * 3
+        raw = ("123 (held target) " + " ".join(fields)).encode()
+        with RunFixture("pre-guard-stop") as f:
+            f.live.side_effect = actual_hold
+            f.process.return_value = f.bound["process"]
+
+            def readiness(readers, *args):
+                return ([], [], []) if readers == [27] else (readers, [], [])
+
+            with (
+                patch("adapter.proc_bytes", return_value=raw),
+                patch("adapter.select.select", side_effect=readiness),
+            ):
+                result = a.run(f.record)
+            witness = f.retire.call_args.args[7]
+            self.assertGreaterEqual(witness["before_us"], f.record["s_us"])
+            self.assertLess(witness["after_us"], f.record["c_us"])
+            self.assertEqual(f.retire.call_args.args[5], 9)
+            self.assertFalse(result["overall_native_pass"])
+            self.assertEqual(
+                f.trace.operation.call_args_list,
+                [
+                    call(a.SEIZE, 0),
+                    call(a.INTERRUPT),
+                    call(a.SETOPTIONS, a.TRACEEXEC | a.EXITKILL),
+                ],
+            )
+
+    def test_hidden_pre_s_death_delayed_post_s_wait_and_pid1_facts_are_incomplete(self):
+        actual_hold = a.hold_to_post_s_witness
+        with RunFixture("pre-guard-stop") as f:
+            f.live.side_effect = actual_hold
+            f.retire.return_value = {
+                "service": {"ExecMainExitTimestampMonotonic": "126000000"},
+                "timer_trigger": {"LastTriggerUSecMonotonic": "2min 5s"},
+            }
+            # pidfd already ready even though userspace wait and PID1 facts are late.
+            with (
+                patch("adapter.os.waitpid", return_value=(123, 9)) as wait,
+                self.assertRaises(a.Incomplete),
+            ):
+                a.run(f.record)
+            wait.assert_not_called()
+            f.retire.assert_not_called()
+
+    def test_pre_s_live_sample_only_never_becomes_post_s_witness(self):
+        with self.assertRaises(a.Incomplete):
+            self.sample(
+                clocks=[124999998, 124999999, 125000002],
+                readiness=[([], [], []), ([], [], []), ([], [], []), ([27], [], [])],
+            )
+        # A bracket that starts before S and ends after it still must sample again.
+        with self.assertRaises(a.Incomplete):
+            self.sample(
+                clocks=[124999999, 125000001, 125000002],
+                readiness=[([], [], []), ([], [], []), ([], [], []), ([27], [], [])],
+            )
+
+    def test_dead_uncertain_stale_zombie_exiting_tracer_or_cross_c_refuses(self):
+        for options in (
+            {"state": "Z"},
+            {"state": "X"},
+            {"state": "T"},
+            {"state": "S"},
+            {"start": 78},
+            {"tracer": 0},
+            {"process_changes": {"start": 78}},
+            {"process_changes": {"ppid": 2}},
+            {"process_changes": {"exe_inode": 99}},
+            {"process_changes": {"pid": 999}},
+            {"readiness": [([27], [], [])]},
+            {"readiness": [([], [], []), ([27], [], [])]},
+            {"clocks": [125000000, 130000000]},
+            {"clocks": [125000002, 125000001]},
+        ):
+            with self.subTest(options=options), self.assertRaises(a.Incomplete):
+                self.sample(**options)
+        with (
+            patch("adapter.clock", return_value=125000001),
+            patch("adapter.select.select", return_value=([], [], [])),
+            patch(
+                "adapter.process_snapshot",
+                side_effect=OSError(errno.ESRCH, "synthetic missing original"),
+            ),
+        ):
+            with self.assertRaises(OSError):
+                a.hold_to_post_s_witness(
+                    fixture(),
+                    a.paths(fixture()),
+                    source_bound(a.paths(fixture())),
+                    27,
+                    {"python": (1, 2), "runc": (3, 4)},
+                )
+
+    def test_retirement_requires_closed_post_s_witness_before_any_pid1_read(self):
+        record = fixture()
+        p = a.paths(record)
+        bound = source_bound(p)
+        identities = {"python": (1, 2), "runc": (3, 4)}
+        good = live_fixture(record, p, bound)
+        for witness in (
+            {},
+            {**good, "before_us": 124999999},
+            {**good, "pidfd_ready": True},
+            {**good, "tracer_pid": 999},
+            {**good, "process": {**good["process"], "start": 78}},
+            {**good, "after_us": 130000000},
+            {**good, "state": "Z"},
+            {**good, "qualified": True},
+        ):
+            with patch("adapter.show") as show, self.assertRaises(a.Incomplete):
+                a.retirement(
+                    record,
+                    p,
+                    bound,
+                    27,
+                    Mock(),
+                    9,
+                    {"before_us": 126000000, "after_us": 126000001},
+                    witness,
+                    identities,
+                    456,
+                )
+            show.assert_not_called()
+        with patch("adapter.show") as show, self.assertRaises(a.Incomplete):
+            a.retirement(
+                record,
+                p,
+                bound,
+                27,
+                Mock(),
+                9,
+                {"before_us": 125000000, "after_us": 125000001},
+                good,
+                identities,
+                456,
+            )
+        show.assert_not_called()
+
+    def test_v1_and_missing_observer_gate_are_refused(self):
+        record = fixture()
+        record["schema"] = "DotmacNativeEnvelopeFixture.v1"
+        with self.assertRaises(a.Incomplete):
+            a.validate_record(record)
+        for change in ("missing", "pulling", "after", "expiry"):
+            record = fixture()
+            u = a.paths(record)["units"]
+            if change == "missing":
+                del record["pins"]["observer_ready"]
+            if change == "pulling":
+                record["rosters"]["observer"]["Requires"].append(u["observer_ready"])
+            if change == "after":
+                record["rosters"]["observer"]["After"] = ["system.slice"]
+            if change == "expiry":
+                record["rosters"]["observer_expired"]["Conflicts"] = [u["observer"]]
+            with self.assertRaises(a.Incomplete):
+                a.validate_record(record)
 
 
 if __name__ == "__main__":

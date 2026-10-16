@@ -5,6 +5,7 @@ External installation/approval is required. This program never issues native
 PASS: its normal result still owes the existing owner's observer retirement.
 """
 
+import array
 import ctypes
 import errno
 import hashlib
@@ -26,6 +27,8 @@ HELPER = "/usr/local/libexec/dotmac-gate0-native-envelope/scratch-helper"
 PYTHON = "/usr/bin/python3.12"
 RUNC = "/usr/sbin/runc"
 LIBC = "/usr/lib/x86_64-linux-gnu/libc.so.6"
+OWNER_ACK = b"DOTMAC_NATIVE_ENVELOPE_OWNER_ACK_V1"
+OWNER_SCHEMA = "DotmacNativeEnvelopeOwnerRendezvous.v1"
 MARKER = b"DOTMAC_NATIVE_ENVELOPE_HELPER_V1"
 RELEASE = b"R"
 DEPS = (
@@ -116,6 +119,7 @@ def paths(record):
         timer=target + "-cutoff.timer",
         expired=target + "-expired.target",
         observer=observer + ".service",
+        observer_ready=observer + "-ready.target",
         observer_timer=observer + "-cutoff.timer",
         observer_expired=observer + "-expired.target",
     )
@@ -131,6 +135,10 @@ def paths(record):
         diagnostic=base + "/diagnostics",
         once=base + "/observer-once",
         netns="/run/netns/" + instance,
+        owner_socket="/run/dm-g0n/" + record["instance"] + "/owner",
+        outer_once=base + "/outer-once",
+        observer_output=base + "/observer-output",
+        observer_diagnostic=base + "/observer-diagnostics",
     )
 
 
@@ -169,7 +177,7 @@ def validate_record(record):
             "rosters",
         ),
     )
-    require(record["schema"] == "DotmacNativeEnvelopeFixture.v1")
+    require(record["schema"] == "DotmacNativeEnvelopeFixture.v2")
     require(record["isolation_scope"] == "disposable-task-vm-only")
     require(record["case"] in ("pre-guard-stop", "runc-exec-stop"))
     require(
@@ -290,8 +298,12 @@ def validate_record(record):
         ("timer", "Before"): {u["expired"]},
         ("expired", "Conflicts"): {u["ready"], u["service"]},
         ("observer", "Conflicts"): {u["observer_expired"]},
+        ("observer", "Requisite"): {u["observer_ready"]},
+        ("observer", "After"): {u["observer_ready"]},
+        ("observer_ready", "Before"): {u["observer"]},
+        ("observer_ready", "Conflicts"): {u["observer_expired"]},
         ("observer_timer", "Before"): {u["observer_expired"]},
-        ("observer_expired", "Conflicts"): {u["observer"]},
+        ("observer_expired", "Conflicts"): {u["observer_ready"], u["observer"]},
     }
     for kind, roster in record["rosters"].items():
         closed(roster, DEPS)
@@ -314,7 +326,16 @@ def validate_record(record):
     require(
         set(record["rosters"]["expired"]["Conflicts"]) == {u["ready"], u["service"]}
     )
-    require(record["rosters"]["observer_expired"]["Conflicts"] == [u["observer"]])
+    require(
+        set(record["rosters"]["observer_expired"]["Conflicts"])
+        == {u["observer_ready"], u["observer"]}
+    )
+    require(
+        record["rosters"]["observer"]["Requisite"] == [u["observer_ready"]]
+        and u["observer_ready"] in record["rosters"]["observer"]["After"]
+    )
+    for key in ("Requires", "Wants", "BindsTo", "Upholds"):
+        require(u["observer_ready"] not in record["rosters"]["observer"][key])
     return p, pin_paths
 
 
@@ -391,7 +412,7 @@ def show(record, unit, keys):
     ]
     if unit:
         vector.append(unit)
-    # Fixed reviewed vector; boundary mocked by source tests.
+    # Fixed systemctl vector; command execution is mocked in source conformance.
     result = subprocess.run(  # noqa: S603
         vector,
         stdin=subprocess.DEVNULL,
@@ -582,6 +603,12 @@ def validate_observer(record, p, identities):
         ),
     )
     roster(record, p, "observer_expired", dict(ActiveState="inactive", SubState="dead"))
+    roster(
+        record,
+        p,
+        "observer_ready",
+        dict(ActiveState="active", SubState="active", StopWhenUnneeded="no"),
+    )
     return dict(invocation=invocation, process=observer)
 
 
@@ -889,6 +916,109 @@ def death_interval(record, observed):
     )
 
 
+def validate_live_witness(record, p, bound, identities, tracer, witness):
+    """Closed post-S observed liveness, never a kernel death/causality stamp."""
+    closed(bound, ("invocation", "process"))
+    require(
+        type(bound["invocation"]) is str
+        and re.fullmatch("[0-9a-f]{32}", bound["invocation"]) is not None
+        and bound["invocation"] != "0" * 32
+    )
+    fields = ("pid", "start", "ppid", "exe_device", "exe_inode", "cgroup")
+    closed(bound["process"], fields)
+    initial = bound["process"]
+    for key in ("pid", "start", "ppid", "exe_device", "exe_inode"):
+        integer(initial[key])
+    require(initial["ppid"] == 1 and initial["cgroup"] == p["group"] + "/launcher")
+    require((initial["exe_device"], initial["exe_inode"]) == identities["python"])
+    closed(
+        witness,
+        (
+            "schema",
+            "case",
+            "before_us",
+            "after_us",
+            "process",
+            "state",
+            "tracer_pid",
+            "pidfd_ready",
+        ),
+    )
+    require(
+        witness["schema"] == "DotmacNativeEnvelopePostSLiveWitness.v1"
+        and witness["case"] == record["case"]
+    )
+    integer(witness["before_us"])
+    integer(witness["after_us"])
+    integer(witness["tracer_pid"])
+    integer(tracer)
+    require(
+        record["s_us"] <= witness["before_us"] <= witness["after_us"] < record["c_us"]
+    )
+    require(
+        witness["state"] == "t"
+        and witness["tracer_pid"] == tracer
+        and witness["pidfd_ready"] is False
+    )
+    closed(witness["process"], fields)
+    process = witness["process"]
+    for key in ("pid", "start", "ppid", "exe_device", "exe_inode"):
+        integer(process[key])
+    for key in ("pid", "start", "ppid", "cgroup"):
+        require(process[key] == initial[key])
+    identity = identities["python" if record["case"] == "pre-guard-stop" else "runc"]
+    require((process["exe_device"], process["exe_inode"]) == identity)
+
+
+def hold_to_post_s_witness(record, p, bound, pidfd, identities):
+    """Never consume a terminal wait until original target is observed alive after S."""
+    pid = bound["process"]["pid"]
+    tracer = os.getpid()
+    helper = record["case"] == "pre-guard-stop"
+    exe, identity, argv = (
+        (PYTHON, identities["python"], [PYTHON, "-I", HELPER])
+        if helper
+        else (RUNC, identities["runc"], runc_vector(p))
+    )
+    while True:
+        before = clock(record)
+        require(not select.select([pidfd], [], [], 0)[0])
+        process = process_snapshot(pid, p["group"] + "/launcher", exe, identity, argv)
+        require(
+            process["pid"] == pid
+            and process["start"] == bound["process"]["start"]
+            and process["ppid"] == 1
+        )
+        raw = proc_bytes(pid, "stat")
+        end = raw.rfind(b")")
+        require(end > 0)
+        fields = raw[end + 2 :].split()
+        require(len(fields) >= 20 and fields[0] == b"t")
+        require(number(fields[19].decode()) == bound["process"]["start"])
+        tracer_identity(pid, tracer)
+        require(not select.select([pidfd], [], [], 0)[0])
+        after = clock(record)
+        require(before <= after < record["c_us"])
+        if before >= record["s_us"]:
+            witness = dict(
+                schema="DotmacNativeEnvelopePostSLiveWitness.v1",
+                case=record["case"],
+                before_us=before,
+                after_us=after,
+                process=process,
+                state="t",
+                tracer_pid=tracer,
+                pidfd_ready=False,
+            )
+            validate_live_witness(record, p, bound, identities, tracer, witness)
+            return witness
+        # A pre-S sample, even one whose after-read crosses S, is not a witness.
+        ready = select.select(
+            [pidfd], [], [], min(0.001, (record["c_us"] - after) / 1_000_000)
+        )[0]
+        require(not ready)
+
+
 def wait_death(record, pid):
     while True:
         before = clock(record)
@@ -904,9 +1034,22 @@ def wait_death(record, pid):
         select.select([], [], [], 0.001)
 
 
-def retirement(record, p, bound, pidfd, groups, death_status, observed_death):
+def retirement(
+    record,
+    p,
+    bound,
+    pidfd,
+    groups,
+    death_status,
+    observed_death,
+    witness,
+    identities,
+    tracer,
+):
     require(os.WIFSIGNALED(death_status) and os.WTERMSIG(death_status) == 9)
     death_interval(record, observed_death)
+    validate_live_witness(record, p, bound, identities, tracer, witness)
+    require(witness["after_us"] <= observed_death["before_us"])
     while True:
         clock(record)
         values = show(
@@ -988,6 +1131,7 @@ def retirement(record, p, bound, pidfd, groups, death_status, observed_death):
         groups=groups.evidence,
         traced_wait_status=death_status,
         wait_observed_interval=observed_death,
+        post_s_live_witness=witness,
         original_process_disappeared=True,
         retained_recursive_populated_zero=True,
     )
@@ -1154,6 +1298,57 @@ def prerequisites(record, p, pin_paths):
     return identities
 
 
+def owner_rendezvous(record, p, observer, groups):
+    """No target can start until the existing installation owner retains identity."""
+    clock(record, True)
+    parent = protected(p["owner_socket"].rsplit("/", 1)[0], True)
+    try:
+        require(stat.S_IMODE(os.fstat(parent).st_mode) == 0o700)
+    finally:
+        os.close(parent)
+    metadata = os.stat(p["owner_socket"], follow_symlinks=False)
+    require(
+        stat.S_ISSOCK(metadata.st_mode)
+        and metadata.st_uid == metadata.st_gid == 0
+        and stat.S_IMODE(metadata.st_mode) == 0o600
+    )
+    packet = dict(
+        schema=OWNER_SCHEMA,
+        instance=record["instance"],
+        boot_id=record["boot_id"],
+        observer=observer,
+    )
+    raw = json.dumps(packet, sort_keys=True, separators=(",", ":")).encode("ascii")
+    require(len(raw) <= 16384)
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET | socket.SOCK_CLOEXEC)
+    try:
+        peer.settimeout(
+            (min(record["e_mono_us"], record["s_us"]) - time.monotonic_ns() // 1000)
+            / 1_000_000
+        )
+        peer.connect(p["owner_socket"])
+        pid, uid, gid = struct.unpack(
+            "3i",
+            peer.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+            ),
+        )
+        require(pid > 0 and uid == gid == 0)
+        rights = array.array("i", [groups.directory, groups.events])
+        require(
+            peer.sendmsg([raw], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights)])
+            == len(raw)
+        )
+        ack, ancillary, flags, _ = peer.recvmsg(
+            len(OWNER_ACK) + 1, socket.CMSG_SPACE(4)
+        )
+        require(ack == OWNER_ACK and not ancillary and flags == 0)
+        clock(record, True)
+    finally:
+        peer.close()
+    clock(record, True)
+
+
 def run(record):
     p, pin_paths = validate_record(record)
     clock(record, True)
@@ -1187,6 +1382,7 @@ def run(record):
     )
     observer_groups = GroupsObserver(p)
     exclusive(p["once"], (p["instance"] + "\n" + record["boot_id"] + "\n").encode())
+    owner_rendezvous(record, p, observer, observer_groups)
     diagnostic_parent, diagnostic_name = p["diagnostic"].rsplit("/", 1)
     directory = protected(diagnostic_parent, True)
     try:
@@ -1206,7 +1402,7 @@ def run(record):
     os.chmod(p["socket"], 0o600)
     server.listen(1)
     clock(record, True)
-    # Fixed reviewed vector; boundary mocked by source tests.
+    # Fixed launch vector; process creation is mocked in source conformance.
     client = subprocess.Popen(  # noqa: S603
         launch_vector(record, p),
         stdin=subprocess.DEVNULL,
@@ -1296,9 +1492,21 @@ def run(record):
         groups.still_only(pid)
         held = "actual-pinned-runc-exec-stop-before-userspace"
     peer.close()
-    # No CONT, release, signal or kill at S. Only PID1 may cause the proof death.
+    # No CONT/release/signal/kill at S. Attribution beyond observation remains owed.
+    witness = hold_to_post_s_witness(record, p, bound, pidfd, identities)
     status, observed_death = wait_death(record, pid)
-    observed = retirement(record, p, bound, pidfd, groups, status, observed_death)
+    observed = retirement(
+        record,
+        p,
+        bound,
+        pidfd,
+        groups,
+        status,
+        observed_death,
+        witness,
+        identities,
+        os.getpid(),
+    )
     os.set_blocking(client.stdout.fileno(), False)
     while True:
         clock(record)

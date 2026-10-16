@@ -1,0 +1,4 @@
+[Unit]
+Description=Original native observer expiry
+DefaultDependencies=no
+Conflicts=@@OBSERVER_READY@@ @@OBSERVER@@

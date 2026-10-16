@@ -103,7 +103,7 @@ def load_selection():
     )
     require(type(record) is dict and set(record) == set(keys))
     require(
-        record["schema"] == "DotmacNativeEnvelopeFixture.v1"
+        record["schema"] == "DotmacNativeEnvelopeFixture.v2"
         and record["isolation_scope"] == "disposable-task-vm-only"
     )
     require(record["case"] in ("pre-guard-stop", "runc-exec-stop"))
@@ -240,7 +240,7 @@ def main():
     require(peer.recv(2) == b"R")
     peer.close()  # Explicit close plus CLOEXEC.
     runtime_guard(record, p, server_pid)
-    # Fixed RUNC vector; exec boundary mocked by source tests.
+    # Fixed pinned runc vector; exec is mocked in source conformance.
     os.execve(  # noqa: S606
         RUNC,
         [
