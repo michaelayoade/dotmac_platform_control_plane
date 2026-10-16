@@ -15,10 +15,12 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from typing import NoReturn
 
 MAX_PRIVATE_BYTES = 16 * 1024 * 1024
 MAX_CIPHERTEXT_BYTES = MAX_PRIVATE_BYTES + 1024 * 1024
@@ -278,28 +280,65 @@ def _run(
     deadline: float,
     limit: int,
 ) -> bytes:
+    """Preserve the original encryption/version/listing API and stdout semantics."""
+    output, _ = _run_channels(argv, data, env, deadline, limit)
+    return output
+
+
+def _run_channels(
+    argv: list[str],
+    data: bytes,
+    env: dict[str, str],
+    deadline: float,
+    limit: int,
+    *,
+    status_channel: bool = False,
+) -> tuple[bytes, bytes]:
     """Own the real child, bounded duplex pipes, group cancellation and reaping."""
     work_deadline = deadline - 1.0
     _deadline(work_deadline)
-    process = subprocess.Popen(  # noqa: S603 -- internal fixed argv, pinned binary
-        argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        env=env,
-        start_new_session=True,
-        close_fds=True,
-    )
+    status_read, status_write = (-1, -1)
+    if status_channel:
+        try:
+            status_read, status_write = os.pipe()
+        except OSError:
+            raise ArchiveRefused("archive_process") from None
+    try:
+        process = subprocess.Popen(  # noqa: S603 -- internal fixed argv
+            argv + (["--status-fd", str(status_write)] if status_channel else []),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+            close_fds=True,
+            pass_fds=(status_write,) if status_channel else (),
+        )
+    except BaseException:
+        for descriptor in (status_read, status_write):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        raise ArchiveRefused("archive_process") from None
+    status_output = bytearray()
     output = bytearray()
     sent = 0
     successful = False
     try:
+        if status_write >= 0:
+            os.close(status_write)
+            status_write = -1
         if process.stdin is None or process.stdout is None:
             raise ArchiveRefused("archive_process")
         with selectors.DefaultSelector() as selector:
             for stream in (process.stdin, process.stdout):
                 os.set_blocking(stream.fileno(), False)
             selector.register(process.stdout, selectors.EVENT_READ)
+            if status_read >= 0:
+                os.set_blocking(status_read, False)
+                selector.register(status_read, selectors.EVENT_READ)
             if data:
                 selector.register(process.stdin, selectors.EVENT_WRITE)
             else:
@@ -320,6 +359,16 @@ def _run(
                         if sent == len(data):
                             selector.unregister(process.stdin)
                             process.stdin.close()
+                    elif key.fileobj == status_read:
+                        chunk = os.read(status_read, 65536)
+                        if not chunk:
+                            selector.unregister(status_read)
+                            os.close(status_read)
+                            status_read = -1
+                        else:
+                            status_output.extend(chunk)
+                            if len(status_output) > 65536:
+                                raise ArchiveRefused("archive_status_bound")
                     else:
                         chunk = os.read(process.stdout.fileno(), 65536)
                         if not chunk:
@@ -339,11 +388,17 @@ def _run(
             if code or sent != len(data):
                 raise ArchiveRefused("archive_process")
             successful = True
-            return bytes(output)
+            return bytes(output), bytes(status_output)
     except (OSError, ValueError, subprocess.SubprocessError):
         raise ArchiveRefused("archive_process") from None
     finally:
         cleanup_failed = False
+        for descriptor in (status_read, status_write):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    cleanup_failed = True
         # returncode is set by wait: never signal a numeric PID/PGID after reap.
         if process.returncode is None:
             try:
@@ -384,6 +439,7 @@ def _run(
                         cleanup_failed = True
         if not successful or cleanup_failed:
             output.clear()
+            status_output.clear()
         if cleanup_failed:
             raise ArchiveRefused("archive_cleanup") from None
 
@@ -651,3 +707,323 @@ def package_private_collection(
         raise
     except (OSError, ValueError, TypeError, IndexError, UnicodeError):
         raise ArchiveRefused("archive_unavailable") from None
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class GpgHolderProfile:
+    """Inert installed custody pins; no key material is copied or imported."""
+
+    public: GpgArchiveProfile
+    homedir: Path
+    runtime_home: Path
+    gpgconf: GnuPgToolPins
+    agent_socket: Path
+    keyring: Path
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DecryptedArchive:
+    plaintext: bytes
+    plaintext_sha256: str
+    status_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PrivateFailure:
+    category: str
+    exit_code: int = 1
+
+
+def _private_failure(error: BaseException) -> _PrivateFailure:
+    category = (
+        "interrupt"
+        if isinstance(error, KeyboardInterrupt)
+        else "exit"
+        if isinstance(error, SystemExit)
+        else "refused"
+    )
+    exit_code = (
+        error.code
+        if isinstance(error, SystemExit)
+        and type(error.code) is int
+        and 0 <= error.code <= 255
+        else 1
+    )
+    _discard_private_failure(error)
+    return _PrivateFailure(category, exit_code)
+
+
+def _raise_private_failure(failure: _PrivateFailure, code: str) -> NoReturn:
+    if failure.category == "interrupt":
+        raise KeyboardInterrupt
+    if failure.category == "exit":
+        raise SystemExit(failure.exit_code)
+    raise ArchiveRefused(code)
+
+
+def _discard_private_failure(error: BaseException) -> None:
+    """Discard nested failure frames and chains; never preserve the exception."""
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        for nested in (current.__cause__, current.__context__):
+            if nested is not None:
+                pending.append(nested)
+        traceback.clear_frames(current.__traceback__)
+        current.__traceback__ = None
+        current.__cause__ = None
+        current.__context__ = None
+
+
+def _decrypt_status_checked(
+    raw: bytes, profile: GpgArchiveProfile, plaintext_size: int
+) -> bool | _PrivateFailure:
+    """Closed GPG2 status grammar for the existing AES256/MDC archive format."""
+    try:
+        if (
+            not raw
+            or len(raw) > 65536
+            or not raw.endswith(b"\n")
+            or any(value != 10 and not 32 <= value <= 126 for value in raw)
+        ):
+            raise ValueError
+        records: dict[str, list[list[str]]] = {}
+        order = []
+        allowed = {
+            "ENC_TO",
+            "KEY_CONSIDERED",
+            "DECRYPTION_KEY",
+            "BEGIN_DECRYPTION",
+            "DECRYPTION_INFO",
+            "PLAINTEXT",
+            "PLAINTEXT_LENGTH",
+            "DECRYPTION_OKAY",
+            "GOODMDC",
+            "END_DECRYPTION",
+        }
+        for line in raw.decode("ascii").splitlines():
+            if not line.startswith("[GNUPG:] ") or len(line) > 2048:
+                raise ValueError
+            fields = line[9:].split(" ")
+            code, args = fields[0], fields[1:]
+            if code not in allowed:
+                raise ValueError
+            records.setdefault(code, []).append(args)
+            order.append(code)
+        for code in allowed - {"KEY_CONSIDERED", "PLAINTEXT_LENGTH"}:
+            if len(records.get(code, [])) != 1:
+                raise ValueError
+        for code in (
+            "BEGIN_DECRYPTION",
+            "DECRYPTION_OKAY",
+            "GOODMDC",
+            "END_DECRYPTION",
+        ):
+            if records[code] != [[]]:
+                raise ValueError
+        key = records["DECRYPTION_KEY"][0]
+        if len(key) != 3 or key[:2] != [
+            profile.encryption_fingerprint,
+            profile.primary_fingerprint,
+        ]:
+            raise ValueError
+        if key[2] not in {"-", "q", "n", "m", "f", "u", "w", "s"}:
+            raise ValueError
+        recipient = records["ENC_TO"][0]
+        if len(recipient) != 3 or recipient[0] != profile.encryption_fingerprint[-16:]:
+            raise ValueError
+        if any(not value.isdigit() for value in recipient[1:]):
+            raise ValueError
+        for args in records.get("KEY_CONSIDERED", []):
+            if len(args) != 2 or args != [profile.primary_fingerprint, "0"]:
+                raise ValueError
+        if len(records.get("KEY_CONSIDERED", [])) > 8:
+            raise ValueError
+        if records["DECRYPTION_INFO"][0] not in (["2", "9"], ["2", "9", "0"]):
+            raise ValueError
+        literal = records["PLAINTEXT"][0]
+        if len(literal) not in (2, 3) or literal[0] != "62" or not literal[1].isdigit():
+            raise ValueError
+        if len(literal) == 3 and literal[2] != "":
+            raise ValueError
+        lengths = records.get("PLAINTEXT_LENGTH", [])
+        if len(lengths) > 1 or (lengths and lengths != [[str(plaintext_size)]]):
+            raise ValueError
+        indices = [
+            order.index(code)
+            for code in (
+                "BEGIN_DECRYPTION",
+                "DECRYPTION_INFO",
+                "PLAINTEXT",
+                "DECRYPTION_OKAY",
+                "GOODMDC",
+                "END_DECRYPTION",
+            )
+        ]
+        if indices != sorted(indices) or order[-1] != "END_DECRYPTION":
+            raise ValueError
+        return True
+    except BaseException as error:
+        return _private_failure(error)
+    finally:
+        raw = b""
+        records = {}
+        fields = args = key = recipient = literal = []
+        line = ""
+
+
+def _decrypt_status(
+    raw: bytes, profile: GpgArchiveProfile, plaintext_size: int
+) -> None:
+    valid = _decrypt_status_checked(raw, profile, plaintext_size)
+    del raw, profile
+    if type(valid) is _PrivateFailure:
+        _raise_private_failure(valid, "archive_decrypt_status")
+
+
+def _decrypt_private_collection_checked(
+    ciphertext: bytes,
+    profile: GpgHolderProfile,
+    *,
+    deadline: float,
+) -> DecryptedArchive | _PrivateFailure:
+    """Use only the existing holder context; plaintext never touches a temp file.
+
+    Current custody/key validity/agent identity is independently qualified by the
+    installed B owner. Human unlock happens there before this fixed operation.
+    No key import/export, key discovery, passphrase transport or agent autostart.
+    """
+    try:
+        _deadline(deadline)
+        if (
+            type(profile) is not GpgHolderProfile
+            or type(profile.public) is not GpgArchiveProfile
+        ):
+            raise ArchiveRefused("archive_profile")
+        public = profile.public
+        if not re.fullmatch(r"gpg \(GnuPG\) 2\.[0-9]+\.[0-9]+", public.version_line):
+            raise ArchiveRefused("archive_profile")
+        _protected_binary(profile.gpgconf)
+        if not re.fullmatch(
+            r"gpgconf \(GnuPG\) 2\.[0-9]+\.[0-9]+", profile.gpgconf.version_line
+        ):
+            raise ArchiveRefused("archive_profile")
+        _protected_binary(
+            GnuPgToolPins(
+                public.executable, public.executable_sha256, public.version_line
+            )
+        )
+        if not all(
+            isinstance(path, Path) and path.is_absolute()
+            for path in (
+                profile.homedir,
+                profile.runtime_home,
+                profile.agent_socket,
+                profile.keyring,
+            )
+        ):
+            raise ArchiveRefused("archive_profile")
+        _public_packets(public.public_key)
+        if _sha(public.public_key) != public.public_key_sha256:
+            raise ArchiveRefused("archive_recipient")
+        if not _FINGERPRINT.fullmatch(
+            public.primary_fingerprint
+        ) or not _FINGERPRINT.fullmatch(public.encryption_fingerprint):
+            raise ArchiveRefused("archive_recipient")
+        if (
+            type(ciphertext) is not bytes
+            or not 0 < len(ciphertext) <= MAX_CIPHERTEXT_BYTES
+        ):
+            raise ArchiveRefused("archive_input_bound")
+        _ciphertext_packets(ciphertext, public.encryption_fingerprint)
+        env = {
+            "GNUPGHOME": str(profile.homedir),
+            "HOME": str(profile.runtime_home),
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        }
+        conf_base = [str(profile.gpgconf.executable), "--homedir", str(profile.homedir)]
+        conf_version = _run(conf_base + ["--version"], b"", env, deadline, 16384)
+        if (
+            not conf_version.splitlines()
+            or conf_version.splitlines()[0].decode("ascii")
+            != profile.gpgconf.version_line
+        ):
+            raise ArchiveRefused("archive_installation")
+        observed_socket = _run(
+            conf_base + ["--list-dirs", "agent-socket"], b"", env, deadline, 4096
+        )
+        if observed_socket != os.fsencode(profile.agent_socket) + b"\n":
+            raise ArchiveRefused("archive_agent_binding")
+        base = [
+            str(public.executable),
+            "--no-options",
+            "--homedir",
+            str(profile.homedir),
+            "--batch",
+            "--no-tty",
+            "--no-autostart",
+            "--no-default-keyring",
+            "--keyring",
+            str(profile.keyring),
+            "--pinentry-mode",
+            "error",
+            "--no-auto-key-locate",
+            "--no-auto-key-retrieve",
+            "--no-auto-key-import",
+            "--no-auto-check-trustdb",
+        ]
+        version = _run(base + ["--version"], b"", env, deadline, 16384)
+        if (
+            not version.splitlines()
+            or version.splitlines()[0].decode("ascii") != public.version_line
+        ):
+            raise ArchiveRefused("archive_installation")
+        listing = _run(
+            base
+            + [
+                "--with-colons",
+                "--with-fingerprint",
+                "--with-subkey-fingerprint",
+                "--list-keys",
+                public.primary_fingerprint,
+            ],
+            b"",
+            env,
+            deadline,
+            MAX_KEY_BYTES,
+        )
+        _key_listing(listing, public)
+        plaintext, status = _run_channels(
+            base + ["--output", "-", "--decrypt"],
+            ciphertext,
+            env,
+            deadline,
+            MAX_PRIVATE_BYTES,
+            status_channel=True,
+        )
+        _decrypt_status(status, public, len(plaintext))
+        _deadline(deadline)
+        return DecryptedArchive(plaintext, _sha(plaintext), _sha(status))
+    except BaseException as error:
+        return _private_failure(error)
+    finally:
+        plaintext = status = listing = version = conf_version = observed_socket = b""
+
+
+def decrypt_private_collection(
+    ciphertext: bytes,
+    profile: GpgHolderProfile,
+    *,
+    deadline: float,
+) -> DecryptedArchive:
+    """Clean public refusal boundary; private helpers never return exceptions."""
+    result = _decrypt_private_collection_checked(ciphertext, profile, deadline=deadline)
+    del ciphertext, profile
+    if isinstance(result, _PrivateFailure):
+        _raise_private_failure(result, "archive_decrypt_unavailable")
+    return result

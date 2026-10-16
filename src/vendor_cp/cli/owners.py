@@ -98,6 +98,20 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "fixed private credential delivery into the existing collection owner",
     ),
     Owner(
+        "gate0 finalize-e",
+        "vendor_cp.deployment.gate0_e_writer",
+        "run_installed_prepare_e",
+        True,
+        "fixed qualified private collection finalization and encrypted staging",
+    ),
+    Owner(
+        "gate0 verify-e-b-archive",
+        "vendor_cp.deployment.gate0_e_b_holder",
+        "run_installed_verify_e_b_archive",
+        True,
+        "fixed qualified B custody verification and private verification record",
+    ),
+    Owner(
         "gate0 collect-e",
         "vendor_cp.deployment.gate0_collection",
         "run_installed_collection",

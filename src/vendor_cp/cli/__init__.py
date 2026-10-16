@@ -562,6 +562,13 @@ def build_parser() -> _Parser:
     gate0_sub = gate0.add_subparsers(dest="name", parser_class=_Parser)
     _command(gate0_sub, "gate0", "issuer-run", "run one finite issuer window")
     _command(gate0_sub, "gate0", "collect-e", "collect private finite E evidence")
+    _command(gate0_sub, "gate0", "finalize-e", "prepare encrypted private E evidence")
+    _command(
+        gate0_sub,
+        "gate0",
+        "verify-e-b-archive",
+        "verify the selected B custody archive",
+    )
     _command(
         gate0_sub, "gate0", "bootstrap-collector", "launch the fixed isolated collector"
     )
@@ -667,6 +674,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command not in by_command():
         parser.error(f"{command!r} has no declared owner")
+
+    if command in {"gate0 finalize-e", "gate0 verify-e-b-archive"}:
+        try:
+            if command == "gate0 finalize-e":
+                from vendor_cp.deployment.gate0_e_writer import run_installed_prepare_e
+
+                return run_installed_prepare_e()
+            from vendor_cp.deployment.gate0_e_b_holder import (
+                run_installed_verify_e_b_archive,
+            )
+
+            return run_installed_verify_e_b_archive()
+        except Exception:
+            print("GATE0_E_UNAVAILABLE", file=sys.stderr)
+            return 3
 
     if command == "gate0 collect-e":
         from vendor_cp.cli.commands import gate0_collect_e

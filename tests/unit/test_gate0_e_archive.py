@@ -432,3 +432,232 @@ def test_tool_pair_rejects_missing_or_unprotected_pins_without_executing(monkeyp
     )
     with pytest.raises(ArchiveRefused):
         qualify_gnupg_tools(good_shape, bad_conf, deadline=time.monotonic() + 5)
+
+
+def _decrypt_status_fixture(size=7):
+    return (
+        f"[GNUPG:] ENC_TO {FINGERPRINT[-16:]} 1 0\n"
+        f"[GNUPG:] KEY_CONSIDERED {FINGERPRINT} 0\n"
+        f"[GNUPG:] DECRYPTION_KEY {FINGERPRINT} {FINGERPRINT} u\n"
+        "[GNUPG:] BEGIN_DECRYPTION\n[GNUPG:] DECRYPTION_INFO 2 9 0\n"
+        "[GNUPG:] PLAINTEXT 62 0 \n"
+        f"[GNUPG:] PLAINTEXT_LENGTH {size}\n"
+        "[GNUPG:] DECRYPTION_OKAY\n[GNUPG:] GOODMDC\n[GNUPG:] END_DECRYPTION\n"
+    ).encode()
+
+
+def test_decrypt_status_requires_selected_recipient_and_integrity_completion():
+    from vendor_cp.deployment.gate0_e_archive import _decrypt_status
+
+    _decrypt_status(_decrypt_status_fixture(), _profile(), 7)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda raw: b"",
+        lambda raw: raw.replace(b"GOODMDC", b"BADMDC"),
+        lambda raw: raw.replace(b"[GNUPG:] DECRYPTION_OKAY\n", b""),
+        lambda raw: raw.replace(b"[GNUPG:] END_DECRYPTION\n", b""),
+        lambda raw: raw.replace(b"DECRYPTION_INFO 2 9 0", b"DECRYPTION_INFO 0 9 0"),
+        lambda raw: raw.replace(b"PLAINTEXT_LENGTH 7", b"PLAINTEXT_LENGTH 8"),
+        lambda raw: raw.replace(
+            b"DECRYPTION_KEY " + b"A" * 40, b"DECRYPTION_KEY " + b"B" * 40
+        ),
+        lambda raw: raw + b"[GNUPG:] ERROR PRIVATE-DIAGNOSTIC\n",
+        lambda raw: raw.replace(b"GOODMDC\n", b"GOODMDC\n[GNUPG:] GOODMDC\n"),
+        lambda raw: raw.replace(b"\n", b"\r\n"),
+    ],
+)
+def test_decrypt_status_zero_exit_cannot_replace_complete_status(mutation):
+    from vendor_cp.deployment.gate0_e_archive import _decrypt_status
+
+    with pytest.raises(ArchiveRefused, match="archive_decrypt_status") as error:
+        _decrypt_status(mutation(_decrypt_status_fixture()), _profile(), 7)
+    assert "PRIVATE" not in str(error.value)
+
+
+def test_separate_status_pipe_and_plaintext_eof_with_actual_child():
+    from vendor_cp.deployment.gate0_e_archive import _run_channels
+
+    script = """
+import os, sys
+fd = int(sys.argv[sys.argv.index('--status-fd') + 1])
+raw = sys.stdin.buffer.read()
+os.write(fd, b'[GNUPG:] DECRYPTION_OKAY\\n')
+sys.stdout.buffer.write(raw[::-1]); sys.stdout.buffer.flush()
+os.close(fd)
+"""
+    plaintext, status = _run_channels(
+        [sys.executable, "-I", "-c", script],
+        b"private-input",
+        {},
+        time.monotonic() + 3,
+        4096,
+        status_channel=True,
+    )
+    assert plaintext == b"tupni-etavirp"
+    assert status == b"[GNUPG:] DECRYPTION_OKAY\n"
+
+
+@pytest.mark.parametrize(
+    "fault", ["status_bound", "plaintext_bound", "nonzero", "status_eof_deadline"]
+)
+def test_actual_status_child_failure_is_closed_and_bounded(fault):
+    from vendor_cp.deployment.gate0_e_archive import _run_channels
+
+    scripts = {
+        "status_bound": "os.write(fd, b'S' * 70000)",
+        "plaintext_bound": (
+            "sys.stdout.buffer.write(b'P' * 70000); sys.stdout.buffer.flush()"
+        ),
+        "nonzero": "os.write(fd, b'PRIVATE-STATUS'); sys.exit(7)",
+        "status_eof_deadline": "sys.stdout.close(); time.sleep(20)",
+    }
+    script = (
+        "import os,sys,time\nfd=int(sys.argv[sys.argv.index('--status-fd')+1])\n"
+        + scripts[fault]
+    )
+    started = time.monotonic()
+    with pytest.raises(ArchiveRefused) as error:
+        _run_channels(
+            [sys.executable, "-I", "-c", script],
+            b"",
+            {},
+            started + 2,
+            4096,
+            status_channel=True,
+        )
+    assert time.monotonic() - started < 4
+    assert "PRIVATE" not in str(error.value)
+
+
+def test_status_parent_close_fault_still_cancels_and_reaps_actual_child(monkeypatch):
+    from vendor_cp.deployment.gate0_e_archive import _run_channels
+
+    real_pipe, real_close, real_popen = os.pipe, os.close, subprocess.Popen
+    status_pair = []
+    children = []
+    failed = []
+
+    def pipe():
+        pair = real_pipe()
+        if not status_pair:
+            status_pair.extend(pair)
+        return pair
+
+    def close(fd):
+        if status_pair and fd == status_pair[1] and children and not failed:
+            failed.append(fd)
+            raise OSError("PRIVATE close diagnostic")
+        return real_close(fd)
+
+    def spawn(*args, **kwargs):
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(os, "pipe", pipe)
+    monkeypatch.setattr(os, "close", close)
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    with pytest.raises(ArchiveRefused) as error:
+        _run_channels(
+            [sys.executable, "-I", "-c", "import time; time.sleep(20)"],
+            b"",
+            {},
+            time.monotonic() + 3,
+            4096,
+            status_channel=True,
+        )
+    assert failed and children and children[0].returncode is not None
+    assert "PRIVATE" not in str(error.value)
+
+
+def _decrypt_native_seams(monkeypatch, *, interrupt=False, valid=False):
+    from vendor_cp.deployment import gate0_e_archive as owner
+
+    public = replace(_profile(), public_key_sha256=hashlib.sha256(b"").hexdigest())
+    profile = owner.GpgHolderProfile(
+        public,
+        Path("/fixture/home/.gnupg"),
+        Path("/fixture/home"),
+        owner.GnuPgToolPins(
+            Path("/fixture/gpgconf"), "0" * 64, "gpgconf (GnuPG) 2.4.7"
+        ),
+        Path("/fixture/home/.gnupg/S.gpg-agent"),
+        Path("/fixture/home/.gnupg/pubring.kbx"),
+    )
+    monkeypatch.setattr(owner, "_protected_binary", lambda pins: None)
+    monkeypatch.setattr(owner, "_public_packets", lambda raw: None)
+    monkeypatch.setattr(owner, "_ciphertext_packets", lambda raw, fingerprint: None)
+
+    def run(argv, data, env, deadline, limit):
+        if "--list-dirs" in argv:
+            return os.fsencode(profile.agent_socket) + b"\n"
+        if "--list-keys" in argv:
+            return _listing()
+        version = (
+            profile.gpgconf.version_line
+            if argv[0] == str(profile.gpgconf.executable)
+            else public.version_line
+        )
+        return version.encode() + b"\n"
+
+    monkeypatch.setattr(owner, "_run", run)
+
+    def channels(*args, **kwargs):
+        plaintext = b"ARCHIVE-PRIVATE-PLAINTEXT-MARKER"
+        status = b"[GNUPG:] ERROR ARCHIVE-PRIVATE-STATUS-MARKER\n"
+        if interrupt:
+            raise KeyboardInterrupt(plaintext + status)
+        return plaintext, _decrypt_status_fixture(len(plaintext)) if valid else status
+
+    monkeypatch.setattr(owner, "_run_channels", channels)
+    return profile
+
+
+def _archive_private_trace(error):
+    from vendor_cp.deployment import gate0_e_archive as owner
+
+    assert error.__context__ is None and error.__cause__ is None
+    values = []
+    tb = error.__traceback__
+    while tb:
+        if tb.tb_frame.f_code.co_filename == owner.__file__:
+            values.extend(repr(value) for value in tb.tb_frame.f_locals.values())
+        tb = tb.tb_next
+    return "\n".join(values)
+
+
+def test_decrypt_checked_native_unit_boundary_has_success(monkeypatch):
+    from vendor_cp.deployment.gate0_e_archive import decrypt_private_collection
+
+    profile = _decrypt_native_seams(monkeypatch, valid=True)
+    result = decrypt_private_collection(
+        b"fixture-ciphertext", profile, deadline=time.monotonic() + 10
+    )
+    assert result.plaintext_sha256 == hashlib.sha256(result.plaintext).hexdigest()
+    assert result.plaintext == b"ARCHIVE-PRIVATE-PLAINTEXT-MARKER"
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_decrypt_failure_detaches_private_context_and_frames(monkeypatch, interrupt):
+    from vendor_cp.deployment.gate0_e_archive import decrypt_private_collection
+
+    profile = _decrypt_native_seams(monkeypatch, interrupt=interrupt)
+    with pytest.raises(KeyboardInterrupt if interrupt else ArchiveRefused) as caught:
+        decrypt_private_collection(
+            b"fixture-ciphertext", profile, deadline=time.monotonic() + 10
+        )
+    assert "ARCHIVE-PRIVATE" not in _archive_private_trace(caught.value)
+    assert "ARCHIVE-PRIVATE" not in str(caught.value)
+
+
+def test_status_parser_refusal_retains_no_raw_status_context():
+    from vendor_cp.deployment.gate0_e_archive import _decrypt_status
+
+    with pytest.raises(ArchiveRefused) as caught:
+        _decrypt_status(
+            b"[GNUPG:] ERROR ARCHIVE-PRIVATE-STATUS-MARKER\n", _profile(), 7
+        )
+    assert "ARCHIVE-PRIVATE" not in _archive_private_trace(caught.value)
