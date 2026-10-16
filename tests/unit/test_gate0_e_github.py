@@ -223,7 +223,7 @@ def test_success_is_live_owner_fact_and_single_attempt(producer):
     ],
 )
 def test_selected_identity_and_source_refusal(producer, endpoint, key, value):
-    owner, responses = producer
+    owner, responses = _live_collection(producer)
     responses[endpoint][key] = value
     with pytest.raises(gh.GitHubReadRefused, match="^GITHUB_READ_REFUSED$"):
         owner.producer_snapshot(gh.ProducerStage.COLLECTION_SNAPSHOT)
@@ -243,7 +243,7 @@ def test_selected_identity_and_source_refusal(producer, endpoint, key, value):
     ],
 )
 def test_steps_reviews_and_historical_qualification(producer, mutation):
-    owner, responses = producer
+    owner, responses = _live_collection(producer)
     job = responses[gh.EndpointCode.JOBS]["jobs"][0]
     if mutation == "skipped":
         job["steps"][0]["conclusion"] = "skipped"
@@ -268,7 +268,7 @@ def test_steps_reviews_and_historical_qualification(producer, mutation):
 
 
 def test_collection_stage_does_not_invent_future_success(producer):
-    owner, responses = producer
+    owner, responses = _live_collection(producer)
     for endpoint in (gh.EndpointCode.RUN, gh.EndpointCode.ATTEMPT):
         responses[endpoint].update(status="in_progress", conclusion=None)
     job = responses[gh.EndpointCode.JOBS]["jobs"][0]
@@ -374,6 +374,16 @@ def test_protected_job_snapshot_rejects_already_completed_job(producer):
     owner._installation["phase"] = "protected_job"
     with pytest.raises(gh.GitHubReadRefused):
         owner.protected_job_snapshot(deadline=time.monotonic() + 5)
+
+
+def _live_collection(producer):
+    owner, responses = producer
+    for endpoint in (gh.EndpointCode.RUN, gh.EndpointCode.ATTEMPT):
+        responses[endpoint].update(status="in_progress", conclusion=None)
+    job = responses[gh.EndpointCode.JOBS]["jobs"][0]
+    job.update(status="in_progress", conclusion=None, completed_at=None)
+    job["steps"][1].update(status="in_progress", conclusion=None, completed_at=None)
+    return owner, responses
 
 
 def test_producer_stage_cannot_bypass_provisioning_deadline(producer):
@@ -871,7 +881,7 @@ def test_documented_attempt_jobs_shape_needs_no_job_attempt(producer):
 
 
 def test_attempt_anchor_still_refuses_rerun_without_job_attempt(producer):
-    owner, responses = producer
+    owner, responses = _live_collection(producer)
     responses[gh.EndpointCode.ATTEMPT]["run_attempt"] = 2
     with pytest.raises(gh.GitHubReadRefused):
         owner.producer_snapshot(gh.ProducerStage.COLLECTION_SNAPSHOT)
@@ -879,7 +889,7 @@ def test_attempt_anchor_still_refuses_rerun_without_job_attempt(producer):
 
 @pytest.mark.parametrize("value", [2, True, "1", None])
 def test_optional_job_attempt_cannot_contradict_selected_attempt(producer, value):
-    owner, responses = producer
+    owner, responses = _live_collection(producer)
     responses[gh.EndpointCode.JOBS]["jobs"][0]["run_attempt"] = value
     with pytest.raises(gh.GitHubReadRefused):
         owner.producer_snapshot(gh.ProducerStage.COLLECTION_SNAPSHOT)
@@ -1880,3 +1890,159 @@ def test_finite_mutation_redirect_never_reaches_another_host(monkeypatch):
         ("api.github.com", "POST", b"{}", (201,)),
     )
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("job_status", "completed"),
+        ("job_conclusion", "success"),
+        ("job_completed_at", "2026-10-15T10:05:00Z"),
+        ("run_status", "completed"),
+        ("run_conclusion", "success"),
+    ],
+)
+def test_collection_snapshot_requires_actual_live_job_and_run(producer, field, value):
+    owner, responses = _live_collection(producer)
+    if field.startswith("job_"):
+        responses[gh.EndpointCode.JOBS]["jobs"][0][field[4:]] = value
+    else:
+        for code in (gh.EndpointCode.RUN, gh.EndpointCode.ATTEMPT):
+            responses[code][field[4:]] = value
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.producer_snapshot(gh.ProducerStage.COLLECTION_SNAPSHOT)
+    assert not owner._issued
+
+
+def test_collection_snapshot_clamps_original_deadline_and_never_reanchors(producer):
+    owner, _ = _live_collection(producer)
+    end = time.monotonic() + 4
+    facts = owner.producer_snapshot(gh.ProducerStage.COLLECTION_SNAPSHOT, deadline=end)
+    assert owner._deadline == end and owner.owns_facts(facts)
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.producer_snapshot(
+            gh.ProducerStage.COLLECTION_SNAPSHOT, deadline=end + 180
+        )
+
+
+@pytest.mark.parametrize("end", [float("nan"), float("inf"), -1, True])
+def test_collection_snapshot_refuses_invalid_original_deadline(producer, end):
+    owner, _ = _live_collection(producer)
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.producer_snapshot(gh.ProducerStage.COLLECTION_SNAPSHOT, deadline=end)
+
+
+def test_current_wait_step_cannot_be_a_completed_collection_prerequisite(producer):
+    owner, _ = _live_collection(producer)
+    workflow = owner._producer.workflow
+    owner._producer = replace(
+        owner._producer,
+        workflow=replace(
+            workflow,
+            required_steps=(
+                workflow.required_steps[0],
+                replace(
+                    workflow.required_steps[1],
+                    required_stage=gh.ProducerStage.COLLECTION_SNAPSHOT,
+                ),
+            ),
+        ),
+    )
+    with pytest.raises(gh.GitHubReadRefused):
+        owner.producer_snapshot(gh.ProducerStage.COLLECTION_SNAPSHOT)
+
+
+_NATIVE_PROTECTED_READER = gh._protected
+
+
+@pytest.mark.parametrize(
+    "private,mode,uid,failure",
+    [
+        (False, 0o644, 0, None),
+        (True, 0o600, 0, None),
+        (True, 0o644, 0, "mode"),
+        (False, 0o646, 0, "mode"),
+        (False, 0o644, 9, "owner"),
+        (False, 0o644, 0, "ancestor"),
+        (False, 0o644, 0, "symlink"),
+    ],
+)
+def test_existing_protected_walk_public_metadata_keeps_owner_write_nofollow_policy(
+    monkeypatch, private, mode, uid, failure
+):
+    import os
+    import stat
+
+    path = "/etc/dotmac-gate0-e/github-read-producer-qualification.json"
+    descriptors, offsets = {}, {}
+    raw = b"closed-public-metadata"
+
+    def opened(name, flags, *, dir_fd=None):
+        full = name if dir_fd is None else descriptors[dir_fd].rstrip("/") + "/" + name
+        if full != "/":
+            assert flags & os.O_NOFOLLOW
+        if failure == "symlink" and full == path:
+            raise OSError("synthetic no-follow refusal")
+        descriptor = len(offsets) + 100
+        descriptors[descriptor], offsets[descriptor] = full, 0
+        return descriptor
+
+    def inspected(descriptor):
+        full = descriptors[descriptor]
+        leaf = full == path
+        selected_mode = (stat.S_IFREG | mode) if leaf else (stat.S_IFDIR | 0o755)
+        if failure == "ancestor" and full == "/etc":
+            selected_mode = stat.S_IFDIR | 0o777
+        return SimpleNamespace(
+            st_uid=uid if leaf else 0,
+            st_mode=selected_mode,
+            st_size=len(raw) if leaf else 0,
+        )
+
+    def read(descriptor, maximum):
+        start = offsets[descriptor]
+        offsets[descriptor] += maximum
+        return raw[start : start + maximum]
+
+    monkeypatch.setattr(gh.os, "open", opened)
+    monkeypatch.setattr(gh.os, "fstat", inspected)
+    monkeypatch.setattr(gh.os, "read", read)
+    monkeypatch.setattr(gh.os, "close", lambda descriptor: descriptors.pop(descriptor))
+    if failure:
+        with pytest.raises((gh.GitHubReadRefused, OSError)):
+            _NATIVE_PROTECTED_READER(path, 100, private=private)
+    else:
+        assert _NATIVE_PROTECTED_READER(path, 100, private=private) == raw
+    assert not descriptors
+    # This is a native-boundary policy unit test, not a nonroot OS access proof.
+
+
+def test_reader_transport_credential_remains_exact_uid_and_private(
+    metadata_wire, monkeypatch
+):
+    owner, _, _, _ = metadata_wire
+    calls = []
+
+    def credential(path, maximum, *args, **kwargs):
+        calls.append((path, maximum, args, kwargs))
+        assert path == gh._CREDENTIAL and args == (0,)
+        assert kwargs.get("private", True) is True
+        return b"test-only-credential"
+
+    monkeypatch.setattr(gh, "_protected", credential)
+    owner._get(gh.EndpointCode.REPOSITORY)
+    assert calls
+
+
+def test_public_metadata_pin_cannot_open_arbitrary_private_path(monkeypatch):
+    calls = []
+    monkeypatch.setattr(gh, "_protected", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(gh.GitHubReadRefused):
+        gh._pin_document(
+            {
+                "path": "/etc/dotmac-gate0-e/source-references/dossier",
+                "digest": "a" * 64,
+            },
+            "/etc/dotmac-gate0-e/github-read-producer-native.json",
+        )
+    assert not calls

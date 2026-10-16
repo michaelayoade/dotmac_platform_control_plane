@@ -18,6 +18,7 @@ from test_gate0_e_finalization import complete_retained_collection  # noqa: F401
 from test_gate0_e_github import _TRANSPORT_GET
 from test_gate0_e_github import producer as github_producer  # noqa: F401
 from test_gate0_e_preparation import inputs  # noqa: F401
+from test_gate0_e_source_references import install_public_metadata
 from test_gate0_e_source_references import (
     installed as historical_installed,  # noqa: F401
 )
@@ -345,8 +346,10 @@ def test_foreign_or_unqualified_adoption_provenance_cannot_authorize_receipt(
     packaged, selection, private_inputs = private_e
     contract = canonical(
         dict(
-            schema="Gate0EPublicationReviewContract.v1",
-            meaning="digest_bound_b_verification_publication_review",
+            schema="Gate0EPublicationReviewContract.v2",
+            meaning=writer._PUBLIC_REVIEW_MEANING,
+            proposal_digest=writer._PUBLIC_PROPOSAL,
+            adoption_digest=writer._PUBLIC_ADOPTION,
         )
     )
     decision = b"opaque-exact-human-decision-fixture-not-an-adoption"
@@ -361,7 +364,7 @@ def test_foreign_or_unqualified_adoption_provenance_cannot_authorize_receipt(
     provenance[change] = 9 if change == "reviewer_id" else "sha256:" + "6" * 64
     summary = canonical(
         dict(
-            schema="Gate0EBArchiveVerification.v1",
+            schema="Gate0EBArchiveVerification.v2",
             repository_id=private_inputs.producer.repository_id,
             release_id=1,
             ciphertext_asset_id=2,
@@ -376,6 +379,9 @@ def test_foreign_or_unqualified_adoption_provenance_cannot_authorize_receipt(
             private_verification_record_digest="sha256:" + "1" * 64,
             holder_source_digest="sha256:" + "2" * 64,
             holder_profile_digest="sha256:" + "3" * 64,
+            private_prerequisite_digest="sha256:" + "a" * 64,
+            source_reference_digest="sha256:" + "b" * 64,
+            operational_evidence_digest="sha256:" + "c" * 64,
             result="private_archive_and_proofs_verified",
         )
     )
@@ -395,8 +401,20 @@ def test_foreign_or_unqualified_adoption_provenance_cannot_authorize_receipt(
         producer=private_inputs.producer.document(),
         qualification=pins["qualification"],
         publication={**pins, "reviewer_id": 7},
+        holder_source_digest="sha256:" + "2" * 64,
+        holder_profile_digest="sha256:" + "3" * 64,
     )
-    installed = writer.InstalledEWriter(writer._SEAL, document, retained, selection)
+    installed = writer.InstalledEWriter(
+        writer._SEAL,
+        document,
+        retained,
+        writer.EPublicSelection(
+            selection.policy_digest,
+            selection.campaign_digest,
+            selection.source,
+            selection.environment,
+        ),
+    )
     # Failure must precede use of any publication DTO or release evidence.
     with pytest.raises(writer.EWriterRefused):
         installed._receipt_document(None, None)
@@ -487,6 +505,7 @@ def installed_composition(
     )
     producer = inputs["producer"]
     files, gh_files, wire, staged, packages = {}, {}, {}, [], []
+    reader_digests = {}
 
     def pin(name, raw):
         path = writer._RETAINED + name
@@ -554,6 +573,10 @@ def installed_composition(
     h_facts = h_owner.verify(deadline=time.monotonic() + 180)
     assert h_owner.owns_facts(h_facts)
     historical_pin = pin("historical.json", h_facts.reference_bytes)
+    public_coordinates = install_public_metadata(h_selection, h_files)
+    assert canonical(
+        {k: v for k, v in public_coordinates.items() if k != "schema"}
+    ) == writer._source_coordinates(h_facts.reference_bytes)
 
     export = copy.deepcopy(a9_export)
     export["campaign"] = selection.campaign_digest
@@ -646,6 +669,100 @@ def installed_composition(
     )
 
     def load_writer(operation="prepare", publication=None):
+        if operation != "prepare":
+            # Public installation has no private selection, archive pins or root
+            # bindings. Native boundaries remain synthetic source-unit evidence.
+            public_owners = {
+                key: owner_digests[key]
+                for key in (
+                    "writer",
+                    "proof",
+                    "archive",
+                    "handoff",
+                    "historical",
+                    "github",
+                    "release",
+                    "preparation",
+                    "framing",
+                )
+            }
+            slots = dict(
+                release="sha256:"
+                + reader_digests["draft" if operation == "publish" else "published"],
+                publication=publication["reader_selection_digest"],
+                producer="sha256:" + reader_digests["producer"],
+            )
+            public_native = pin(
+                "public/native.json",
+                canonical(
+                    dict(
+                        schema="Gate0EPublicWriterNativeReview.v1",
+                        method_scope=writer._PUBLIC_SCOPE,
+                        owner_digests=public_owners,
+                        reader_slots=slots,
+                        qualification_measurements_digest="1" * 64,
+                        runtime_identity_digest="2" * 64,
+                        reviewer_record_digest="3" * 64,
+                    )
+                ),
+            )
+            public_pins = copy.deepcopy(publication)
+            for key in ("summary", "contract", "decision", "provenance", "projection"):
+                raw = files[publication[key]["path"]]
+                if key == "provenance":
+                    provenance = strict_object(raw)
+                    provenance["native_receipt_digest"] = public_native["digest"]
+                    raw = canonical(provenance)
+                public_pins[key] = pin("public/" + key + ".json", raw)
+            public_doc = dict(
+                schema="Gate0EPublicWriterInstallation.v1",
+                operation=operation,
+                **{
+                    key: document[key]
+                    for key in (
+                        "policy_digest",
+                        "campaign_digest",
+                        "source_bundle_digest",
+                        "source",
+                        "environment",
+                        "producer",
+                    )
+                },
+                historical_reference=pin(
+                    "public/historical.json", canonical(public_coordinates)
+                ),
+                holder_source_digest="sha256:" + "5" * 64,
+                holder_profile_digest="sha256:" + "6" * 64,
+                reader_slots=slots,
+                publication=public_pins,
+            )
+            qualification = dict(
+                schema="Gate0EPublicWriterQualification.v1",
+                method_scope=writer._PUBLIC_SCOPE,
+                selection_digest=writer._sha(canonical(public_doc)),
+                policy_digest=selection.policy_digest,
+                runtime_uid=123,
+                owner_digests=public_owners,
+                native_receipt=public_native,
+                decision_provenance=public_pins["provenance"],
+                reader_slots=slots,
+            )
+            public_doc["qualification"] = pin(
+                "public/qualification.json", canonical(qualification)
+            )
+            raw = canonical(public_doc)
+            files[writer._INSTALLATION] = raw
+            files[writer._BINDING] = canonical(
+                dict(
+                    schema="Gate0EPublicWriterBinding.v1",
+                    installation_digest=writer._sha(raw),
+                    qualification_digest=public_doc["qualification"]["digest"],
+                    runtime_uid=123,
+                    owners=public_owners,
+                    native_receipt=public_native,
+                )
+            )
+            return writer.InstalledEWriter.from_installed()
         document["operation"], document["publication"] = operation, publication
         qualified = {
             key: value for key, value in document.items() if key != "qualification"
@@ -676,7 +793,7 @@ def installed_composition(
 
     def gpin(name, value):
         raw = value if isinstance(value, bytes) else canonical(value)
-        path = "/etc/dotmac-gate0-e/unit-" + name
+        path = "/etc/dotmac-gate0-e/" + name
         gh_files[path] = raw
         return {"path": path, "digest": gh._digest(raw)}
 
@@ -691,6 +808,7 @@ def installed_composition(
         release_files=None,
         title=None,
         summary_digest=None,
+        snapshot_stage=None,
     ):
         publication = phase in ("publication", "publication_complete")
         run_id = (
@@ -720,7 +838,12 @@ def installed_composition(
         ).hexdigest()
         steps = [
             {"number": 1, "name": "Collect", "required_stage": "COLLECTION_SNAPSHOT"},
-            {"number": 2, "name": "Upload", "required_stage": "PRODUCER_JOB_COMPLETE"},
+            {
+                "number": 2,
+                "name": "Wait transfer",
+                "required_stage": "PRODUCER_JOB_COMPLETE",
+            },
+            {"number": 3, "name": "Upload", "required_stage": "PRODUCER_JOB_COMPLETE"},
         ]
         policy = dict(
             schema="Gate0EGitHubSourcePolicy.v1",
@@ -733,7 +856,7 @@ def installed_composition(
             required_steps=steps,
             action_source_pins=["actions/checkout@" + "b" * 40],
             mandatory_jobs=["E job", "Support"],
-            sole_artifact_step=2,
+            sole_artifact_step=3,
             publication_title=title,
             selected_summary_digest=summary_digest,
             projection_sha256=None,
@@ -744,7 +867,7 @@ def installed_composition(
             campaign_digest=selection.campaign_digest,
             source_bundle_digest=inputs["source_bundle_digest"],
         )
-        source_pin = gpin("source.json", policy)
+        source_pin = gpin(f"github-read-source-policy-{run_id}.json", policy)
         workflow = dict(
             id=workflow_id,
             path=".github/workflows/e.yml",
@@ -803,7 +926,7 @@ def installed_composition(
             download_origins=["download.example.com"],
             credential=gh._CREDENTIAL,
         )
-        native_pin = gpin("native.json", native_raw)
+        native_pin = gpin(f"github-read-{phase}-native.json", native_raw)
         action = dict(
             run_id=run_id,
             head_sha=head,
@@ -843,7 +966,9 @@ def installed_composition(
             if phase == "published"
             else None,
         )
-        installation["qualification"] = gpin("qualification.json", qualification)
+        installation["qualification"] = gpin(
+            f"github-read-{phase}-qualification.json", qualification
+        )
         raw = canonical(installation)
         gh_files[gh._INSTALLATION] = raw
         gh_files[gh._ROOT_BINDING] = canonical(
@@ -885,6 +1010,20 @@ def installed_composition(
         )
         job = responses[gh.EndpointCode.JOBS]["jobs"][0]
         job.update(id=job_id, run_id=run_id, head_sha=head)
+        upload = copy.deepcopy(job["steps"][1])
+        job["steps"][1]["name"] = "Wait transfer"
+        upload.update(number=3, name="Upload")
+        job["steps"].append(upload)
+        if phase == "publication" or snapshot_stage == "collection":
+            for code in (gh.EndpointCode.RUN, gh.EndpointCode.ATTEMPT):
+                responses[code].update(status="in_progress", conclusion=None)
+            job.update(status="in_progress", conclusion=None, completed_at=None)
+            job["steps"][1].update(
+                status="in_progress", conclusion=None, completed_at=None
+            )
+            job["steps"][2].update(
+                status="queued", conclusion=None, started_at=None, completed_at=None
+            )
         support = copy.deepcopy(job)
         support.update(id=job_id + 1, name="Support")
         responses[gh.EndpointCode.JOBS] = dict(total_count=2, jobs=[job, support])
@@ -950,6 +1089,10 @@ def installed_composition(
                         object=dict(type="commit", sha=producer.source_revision),
                     )
                 )
+        reader_digests[phase] = result.installed_selection_digest
+        if phase == "producer":
+            gh_files[gh._PRODUCER_COMPLETION_INSTALLATION] = gh_files[gh._INSTALLATION]
+            gh_files[gh._PRODUCER_COMPLETION_ROOT_BINDING] = gh_files[gh._ROOT_BINDING]
         return result
 
     def protected(path, maximum, *args, **kwargs):
@@ -989,7 +1132,7 @@ def installed_composition(
     monkeypatch.setattr(gh, "_spawn_get", spawn)
     monkeypatch.setattr(writer, "_protected", protected)
     monkeypatch.setattr(preparation, "package_private_collection", package)
-    monkeypatch.setattr(writer, "_stage", lambda value: staged.append(value))
+    monkeypatch.setattr(writer, "_stage", lambda value, **kwargs: staged.append(value))
     return SimpleNamespace(
         selection=selection,
         producer=producer,
@@ -1003,8 +1146,11 @@ def installed_composition(
         provenance_pin=provenance_pin,
         native=native,
         historical_reference=h_facts.reference_bytes,
+        public_coordinates=public_coordinates,
+        historical_files=h_files,
         gh_files=gh_files,
         wire=wire,
+        reader_digests=reader_digests,
     )
 
 
@@ -1012,7 +1158,9 @@ def test_positive_installed_loader_prepare_encrypts_and_stages_exact_bytes(
     installed_composition,
 ):
     c = installed_composition
-    c.reader("producer")  # Install real protected reader selection and wire responses.
+    c.reader(
+        "producer", snapshot_stage="collection"
+    )  # Install real protected reader selection and wire responses.
     installed = c.load()
     deadline = time.monotonic() + 180
     installed.prepare(deadline=deadline)
@@ -1044,7 +1192,7 @@ def test_prepare_joins_independent_workflow_and_exact_selected_job(
     installed_composition, change
 ):
     c = installed_composition
-    c.reader("producer")
+    c.reader("producer", snapshot_stage="collection")
     if change == "workflow":
         c.document["source"]["workflow_digest"] = writer._sha(
             b"independent other workflow"
@@ -1060,12 +1208,13 @@ def test_prepare_joins_independent_workflow_and_exact_selected_job(
 @pytest.fixture
 def receipt_composition(installed_composition):
     c = installed_composition
-    c.reader("producer")
+    c.reader("producer", snapshot_stage="collection")
     c.load().prepare(deadline=time.monotonic() + 180)
     manifest, payloads, _, _, plaintext = c.packages[0]
+    c.reader("producer")
     summary = canonical(
         dict(
-            schema="Gate0EBArchiveVerification.v1",
+            schema="Gate0EBArchiveVerification.v2",
             repository_id=c.producer.repository_id,
             release_id=22,
             ciphertext_asset_id=30,
@@ -1080,13 +1229,29 @@ def receipt_composition(installed_composition):
             private_verification_record_digest="sha256:" + "4" * 64,
             holder_source_digest="sha256:" + "5" * 64,
             holder_profile_digest="sha256:" + "6" * 64,
+            private_prerequisite_digest=writer._sha(payloads["prerequisites.json"]),
+            source_reference_digest=strict_object(payloads["prerequisites.json"])[
+                "historical_reference_digest"
+            ],
+            operational_evidence_digest=writer._sha(
+                canonical(
+                    {
+                        name: item["digest"]
+                        for name, item in strict_object(payloads["prerequisites.json"])[
+                            "evidence"
+                        ].items()
+                    }
+                )
+            ),
             result="private_archive_and_proofs_verified",
         )
     )
     contract = canonical(
         dict(
-            schema="Gate0EPublicationReviewContract.v1",
-            meaning="digest_bound_b_verification_publication_review",
+            schema="Gate0EPublicationReviewContract.v2",
+            meaning=writer._PUBLIC_REVIEW_MEANING,
+            proposal_digest=writer._PUBLIC_PROPOSAL,
+            adoption_digest=writer._PUBLIC_ADOPTION,
         )
     )
     decision = b"SOURCE-UNIT-ONLY decision bytes; not operational adoption"
@@ -1128,10 +1293,6 @@ def receipt_composition(installed_composition):
         environment_id=13,
         display_title=title,
         projection=c.pin("projection.json", c.staged[0]["gate0-evidence-public.json"]),
-        private_prerequisites=c.pin(
-            "prerequisites.json", payloads["prerequisites.json"]
-        ),
-        private_collection=c.pin("collection.json", payloads["collection.json"]),
         run=dict(
             repository_id=pub_facts.run.repository_id,
             owner_id=pub_facts.run.owner_id,
@@ -1309,7 +1470,7 @@ def test_prepare_normalizes_only_local_historical_names(installed_composition, c
     c.document["historical_reference"] = c.pin(
         "other-host-historical.json", canonical(selected)
     )
-    c.reader("producer")
+    c.reader("producer", snapshot_stage="collection")
     installed = c.load()
     if change == "host_paths":
         installed.prepare(deadline=time.monotonic() + 180)
@@ -1412,57 +1573,28 @@ def test_pure_private_verifier_late_failure_detaches_materialized_archive(
     assert base64.b64encode(_PRIVATE_MARKER) in selected.plaintext
 
 
-def test_receipt_late_private_digest_failure_discards_owner_and_frames(
+def test_receipt_late_projection_failure_discards_owner_and_frames(
     receipt_composition, monkeypatch
 ):
     c = receipt_composition
-    summary = strict_object(c.summary)
-    summary["private_receipt_digest"] = "sha256:" + "0" * 64
-    summary_raw = canonical(summary)
     pins = copy.deepcopy(c.pins)
-    pins["summary"] = c.pin("late-summary.json", summary_raw)
-    title = (
-        f"Gate0 E publication summary {writer._sha(summary_raw)[7:]} "
-        f"draft 22 producer {c.producer.run_id}"
-    )
-    pub_reads = c.reader(
-        "publication", title=title, summary_digest=writer._sha(summary_raw)[7:]
-    )
-    publication = pub_reads.publication_snapshot()
-    pins["display_title"] = title
-    pins["reader_selection_digest"] = "sha256:" + pub_reads.installed_selection_digest
+    pins["projection"] = c.pin("wrong-projection.json", b"changed-public-projection")
     installed = c.load("publish", pins)
-    materialized = []
-    private_frames = []
-    actual_pack = archive._pack
-
-    def pack(manifest, payloads):
-        caller = sys._getframe(1)
-        if caller.f_code.co_filename == writer.__file__:
-            private_frames.append(caller)
-        plaintext = actual_pack(manifest, payloads)
-        assert base64.b64encode(_PRIVATE_MARKER) in plaintext
-        materialized.append(True)
-        return plaintext
-
-    monkeypatch.setattr(archive, "_pack", pack)
     with pytest.raises(writer.EWriterRefused) as error:
-        installed.construct_receipt(c.draft_reads, c.draft, pub_reads, publication)
-    assert materialized and all(materialized)
+        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
     _assert_writer_exception_clean(error.value, installed)
-    assert private_frames and all(frame.f_locals == {} for frame in private_frames)
 
 
 def test_prepare_private_staging_failure_detaches_owner_and_nested_causes(
     installed_composition, monkeypatch
 ):
     c = installed_composition
-    c.reader("producer")
+    c.reader("producer", snapshot_stage="collection")
     installed = c.load()
     reached = []
     private_frames = []
 
-    def stage(files):
+    def stage(files, *, deadline):
         private_frames.append(sys._getframe(1))
         reached.append(set(files))
         try:
@@ -1494,24 +1626,23 @@ def test_installed_loader_late_private_pin_failure_has_clean_traceback(
 @pytest.mark.parametrize(
     "kind", [KeyboardInterrupt, CancelledError, GeneratorExit, SystemExit]
 )
-def test_cancellation_after_private_receipt_materialization_stops_and_scrubs(
+def test_cancellation_during_public_projection_stops_and_scrubs(
     receipt_composition, monkeypatch, kind
 ):
     c = receipt_composition
     installed = c.load("publish", c.pins)
-    actual_verify = writer.verify_private_e
+    actual_validate = writer.validate_encrypted_e_projection
     reached = []
 
-    def interrupt(archive_input, selection, selected):
-        result = actual_verify(archive_input, selection, selected)
-        assert result.result == "private_archive_and_proofs_verified"
-        assert base64.b64encode(_PRIVATE_MARKER) in selected.plaintext
+    def interrupt(raw):
+        result = actual_validate(raw)
+        assert result["result"] == "encrypted_evidence"
         reached.append(True)
         if kind is SystemExit:
             raise SystemExit(7)
         raise kind(_PRIVATE_MARKER)
 
-    monkeypatch.setattr(writer, "verify_private_e", interrupt)
+    monkeypatch.setattr(writer, "validate_encrypted_e_projection", interrupt)
     with pytest.raises(kind) as error:
         installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
     assert reached == [True]
@@ -1554,3 +1685,482 @@ def test_successful_receipt_boundary_releases_consumed_private_selection(
     with pytest.raises(writer.EWriterRefused) as raised:
         owner.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
     _assert_writer_exception_clean(raised.value, owner)
+
+
+@pytest.mark.parametrize("operation", ["publish", "verify_published"])
+def test_public_installed_loader_and_receipt_never_open_private_inputs(
+    receipt_composition, monkeypatch, operation
+):
+    c = receipt_composition
+    if operation == "verify_published":
+        c.reader("published", release_files=c.staged[0])
+    protected = writer._protected
+    reads = []
+    source_paths = {
+        str(Path(module.__file__).absolute())
+        for module in (
+            writer,
+            writer.proof_owner,
+            writer.archive_owner,
+            writer.handoff_owner,
+            writer.historical_owner,
+            writer.github_owner,
+            writer.release_owner,
+            writer.preparation_owner,
+            writer.framing_owner,
+        )
+    }
+    allowed = (
+        {writer._INSTALLATION, writer._BINDING}
+        | source_paths
+        | {
+            writer._RETAINED + "public/" + name + ".json"
+            for name in (
+                "qualification",
+                "native",
+                "historical",
+                "summary",
+                "contract",
+                "decision",
+                "provenance",
+                "projection",
+            )
+        }
+    )
+
+    def public_only(path, *args, **kwargs):
+        assert path in allowed, "publication attempted a private input read"
+        reads.append(path)
+        return protected(path, *args, **kwargs)
+
+    def private_forbidden(*args, **kwargs):
+        pytest.fail("public execution invoked a private proof owner")
+
+    monkeypatch.setattr(writer, "_protected", public_only)
+    monkeypatch.setattr(writer, "ESelection", private_forbidden)
+    monkeypatch.setattr(writer, "RootHostBinding", private_forbidden)
+    monkeypatch.setattr(writer, "verify_private_e", private_forbidden)
+    monkeypatch.setattr(writer, "verify_retained_collection", private_forbidden)
+    installed = c.load(operation, c.pins)
+    assert type(installed.selection) is writer.EPublicSelection
+    assert set(installed._document).isdisjoint(
+        {"cases", "a9", "gpg", "evidence", "coverage"}
+    )
+    assert set(installed._document["publication"]).isdisjoint(
+        {"private_collection", "private_prerequisites"}
+    )
+    # The same public receipt builder is used by whole-run final readback.
+    raw = (
+        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+        if operation == "publish"
+        else installed._receipt_document(c.draft, c.pub_facts)
+    )
+    receipt = strict_object(raw)
+    archived = strict_object(c.packages[0][1]["prerequisites.json"])
+    assert receipt["private_prerequisite_digest"] == writer._sha(
+        c.packages[0][1]["prerequisites.json"]
+    )
+    assert receipt["source_reference_digest"] == archived["historical_reference_digest"]
+    assert receipt["operational_evidence_digest"] == writer._sha(
+        canonical({name: item["digest"] for name, item in archived["evidence"].items()})
+    )
+    assert reads and all(path in allowed for path in reads)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "v1",
+        "extra",
+        "missing",
+        "bad_digest",
+        "bad_type",
+        "holder_source",
+        "holder_profile",
+        "producer",
+        "policy",
+        "asset",
+        "private_prerequisite_missing",
+        "source_reference_missing",
+        "operational_evidence_missing",
+    ],
+)
+def test_public_receipt_requires_exact_authenticated_b_v2(receipt_composition, change):
+    c = receipt_composition
+    summary = strict_object(c.summary)
+    if change == "v1":
+        summary["schema"] = "Gate0EBArchiveVerification.v1"
+    elif change == "extra":
+        summary["unreviewed"] = True
+    elif change == "missing":
+        del summary["private_receipt_digest"]
+    elif change.endswith("_missing"):
+        del summary[change.removesuffix("_missing") + "_digest"]
+    elif change == "bad_digest":
+        summary["operational_evidence_digest"] = "a" * 64
+    elif change == "bad_type":
+        summary["source_reference_digest"] = 42
+    elif change == "producer":
+        summary["producer"]["job_id"] += 1
+    elif change == "asset":
+        summary["ciphertext_asset_id"] += 1
+    else:
+        summary[change + "_digest"] = "sha256:" + "0" * 64
+    pins = copy.deepcopy(c.pins)
+    pins["summary"] = c.pin("changed-summary.json", canonical(summary))
+    installed = c.load("publish", pins)
+    with pytest.raises(writer.EWriterRefused):
+        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+
+
+@pytest.mark.parametrize(
+    "change", ["legacy_contract", "meaning", "proposal", "adoption", "decision"]
+)
+def test_public_review_requires_adopted_exact_contract_and_native_decision(
+    receipt_composition, change
+):
+    c = receipt_composition
+    pins = copy.deepcopy(c.pins)
+    if change == "decision":
+        pins["decision"] = c.pin("foreign-decision.json", b"different decision")
+    else:
+        contract = strict_object(c.files[pins["contract"]["path"]])
+        if change == "legacy_contract":
+            contract = dict(
+                schema="Gate0EPublicationReviewContract.v1",
+                meaning="digest_bound_b_verification_publication_review",
+            )
+        elif change == "meaning":
+            contract["meaning"] = "ordinary Environment approval"
+        else:
+            contract[change + "_digest"] = "sha256:" + "0" * 64
+        raw = canonical(contract)
+        pins["contract"] = c.pin("foreign-contract.json", raw)
+        # Even coherently authenticated source-unit provenance cannot turn a
+        # foreign meaning into the adopted trust contract.
+        provenance = strict_object(c.files[pins["provenance"]["path"]])
+        provenance["contract_digest"] = writer._sha(raw)
+        pins["provenance"] = c.pin("foreign-provenance.json", canonical(provenance))
+    installed = c.load("publish", pins)
+    with pytest.raises(writer.EWriterRefused):
+        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+
+
+def test_public_readback_refuses_before_whole_publication_completes(
+    receipt_composition, monkeypatch
+):
+    c = receipt_composition
+    receipt = c.load("publish", c.pins).construct_receipt(
+        c.draft_reads, c.draft, c.pub_reads, c.pub_facts
+    )
+    producer_reads = c.reader("producer")
+    producer = producer_reads.producer_snapshot(
+        writer.ProducerStage.PRODUCER_RUN_COMPLETE
+    )
+    release_reads = c.reader(
+        "published",
+        release_files={**c.staged[0], "gate0-readiness-receipt.json": receipt},
+    )
+    release = release_reads.published_snapshot()
+    installed = c.load("verify_published", c.pins)
+
+    def official_forbidden(*args, **kwargs):
+        pytest.fail("official verifier reached before publication completion")
+
+    monkeypatch.setattr(
+        writer.InstalledGhReleaseVerifier, "from_installed", official_forbidden
+    )
+    with pytest.raises(writer.EWriterRefused):
+        installed.verify_published(
+            release_reads, release, c.pub_reads, c.pub_facts, producer_reads, producer
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "private_top_level",
+        "private_publication",
+        "private_path",
+        "legacy_schema",
+        "native_scope",
+        "native_digest",
+        "qualification",
+        "runtime_uid",
+        "source_bytes",
+    ],
+)
+def test_public_installed_selection_cannot_expand_private_or_native_scope(
+    receipt_composition, monkeypatch, change
+):
+    c = receipt_composition
+    c.load("publish", c.pins)
+    doc = strict_object(c.files[writer._INSTALLATION])
+    binding = strict_object(c.files[writer._BINDING])
+    if change == "private_top_level":
+        doc["cases"] = c.document["cases"]
+    elif change == "private_publication":
+        doc["publication"]["private_collection"] = c.pin(
+            "forbidden-collection", b"must not open"
+        )
+    elif change == "private_path":
+        doc["publication"]["summary"] = c.pin("forbidden-private-summary", c.summary)
+    elif change == "legacy_schema":
+        doc = copy.deepcopy(c.document)
+        doc["operation"] = "publish"
+    elif change == "native_scope":
+        pin = binding["native_receipt"]
+        native = strict_object(c.files[pin["path"]])
+        native["method_scope"] = "private-preparation"
+        c.files[pin["path"]] = canonical(native)
+    elif change == "native_digest":
+        binding["native_receipt"]["digest"] = "sha256:" + "0" * 64
+    elif change == "qualification":
+        c.files[doc["qualification"]["path"]] += b" "
+    elif change == "runtime_uid":
+        binding["runtime_uid"] += 1
+    else:
+        c.files[str(Path(writer.historical_owner.__file__).absolute())] += (
+            b"changed owner"
+        )
+    raw = canonical(doc)
+    c.files[writer._INSTALLATION] = raw
+    binding["installation_digest"] = writer._sha(raw)
+    c.files[writer._BINDING] = canonical(binding)
+    protected = writer._protected
+    opened = []
+
+    def no_private(path, *args, **kwargs):
+        assert "forbidden-" not in path
+        opened.append(path)
+        return protected(path, *args, **kwargs)
+
+    monkeypatch.setattr(writer, "_protected", no_private)
+    with pytest.raises(writer.EWriterRefused):
+        writer.InstalledEWriter.from_installed()
+    assert opened and not any("forbidden-" in path for path in opened)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "campaign_digest",
+        "source_bundle_digest",
+        "policy_digest",
+        "producer_job",
+        "workflow_bytes",
+    ],
+)
+def test_public_projection_and_completed_producer_match_independent_selection(
+    receipt_composition, change
+):
+    c = receipt_composition
+    if change == "producer_job":
+        c.document["producer"]["job_id"] += 1
+    elif change == "workflow_bytes":
+        c.document["source"]["workflow_digest"] = "sha256:" + "0" * 64
+    else:
+        c.document[change] = "sha256:" + "0" * 64
+    installed = c.load("publish", c.pins)
+    with pytest.raises(writer.EWriterRefused):
+        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+
+
+def test_public_receipt_digest_matches_full_private_verified_digest_projection(
+    receipt_composition,
+):
+    c = receipt_composition
+    manifest, payloads, _, _, plaintext = c.packages[0]
+    selected = writer.EPrivateInputs(
+        c.producer,
+        c.document["source_bundle_digest"],
+        payloads["prerequisites.json"],
+        c.staged[0]["gate0-evidence-public.json"],
+        plaintext,
+        c.staged[0]["gate0-evidence.pgp"],
+    )
+    private = writer.verify_private_e(
+        archive.unpack_private_archive(plaintext), c.selection, selected
+    )
+    raw = c.load("publish", c.pins).construct_receipt(
+        c.draft_reads, c.draft, c.pub_reads, c.pub_facts
+    )
+    receipt = strict_object(raw)
+    assert set(receipt) == {
+        "schema",
+        "policy_digest",
+        "campaign_digest",
+        "source_bundle_digest",
+        "collection_digest",
+        "private_prerequisite_digest",
+        "producer",
+        "source_reference_digest",
+        "operational_evidence_digest",
+        "b_summary_digest",
+        "b_holder_profile_digest",
+        "b_verification_record_digest",
+        "publication",
+        "draft",
+        "result",
+    }
+    prerequisites = strict_object(payloads["prerequisites.json"])
+    expected = {
+        **receipt,
+        "private_prerequisite_digest": private.prerequisite_digest,
+        "source_reference_digest": writer._sha(
+            base64.b64decode(prerequisites["historical_reference"], validate=True)
+        ),
+        "operational_evidence_digest": writer._sha(
+            canonical(
+                {
+                    name: item["digest"]
+                    for name, item in prerequisites["evidence"].items()
+                }
+            )
+        ),
+    }
+    assert writer._sha(raw) == writer._sha(canonical(expected))
+    assert private.manifest_digest == writer._sha(manifest)
+
+
+@pytest.mark.parametrize("operation", ["prepare", "publish"])
+def test_writer_public_dispatch_preserves_private_prepare_reread(
+    receipt_composition, monkeypatch, operation
+):
+    c = receipt_composition
+    protected = writer._protected
+    calls = []
+
+    def classified(path, *args, **kwargs):
+        private = kwargs.get("private", True)
+        calls.append((path, private))
+        if operation == "publish" and (
+            path in (writer._INSTALLATION, writer._BINDING)
+            or path.startswith(writer._RETAINED + "public/")
+        ):
+            assert private is False
+        return protected(path, *args, **kwargs)
+
+    monkeypatch.setattr(writer, "_protected", classified)
+    c.load(operation, c.pins if operation == "publish" else None)
+    installation_reads = [
+        private for path, private in calls if path == writer._INSTALLATION
+    ]
+    assert installation_reads == ([False, True] if operation == "prepare" else [False])
+    if operation == "prepare":
+        assert (writer._BINDING, True) in calls
+        assert any(
+            path.startswith(writer._RETAINED) and private for path, private in calls
+        )
+
+
+def test_readable_private_prepare_configuration_still_refuses(
+    installed_composition, monkeypatch
+):
+    c = installed_composition
+    c.load()
+    protected = writer._protected
+    calls = []
+
+    def private_leaf_policy(path, *args, **kwargs):
+        private = kwargs.get("private", True)
+        calls.append((path, private))
+        if path == writer._INSTALLATION and private:
+            raise writer.EWriterRefused()
+        return protected(path, *args, **kwargs)
+
+    monkeypatch.setattr(writer, "_protected", private_leaf_policy)
+    with pytest.raises(writer.EWriterRefused):
+        writer.InstalledEWriter.from_installed()
+    assert calls == [(writer._INSTALLATION, False), (writer._INSTALLATION, True)]
+
+
+def test_writer_public_historical_mode_uses_only_closed_public_slots(
+    receipt_composition, monkeypatch
+):
+    c = receipt_composition
+    historical = writer.historical_owner
+    native = historical._protected
+    allowed = {
+        historical._PUBLIC_INSTALLATION,
+        historical._PUBLIC_BINDING,
+        historical._PUBLIC_QUALIFICATION,
+        historical._PUBLIC_NATIVE,
+        historical._CREDENTIAL,
+        historical.__file__,
+        historical._mechanics.__file__,
+    }
+    opened = []
+
+    def public_only(path, *args, **kwargs):
+        assert path in allowed, "writer attempted private historical access"
+        opened.append(path)
+        return native(path, *args, **kwargs)
+
+    monkeypatch.setattr(historical, "_protected", public_only)
+    raw = c.load("publish", c.pins).construct_receipt(
+        c.draft_reads, c.draft, c.pub_reads, c.pub_facts
+    )
+    receipt = strict_object(raw)
+    summary = strict_object(c.summary)
+    assert receipt["source_reference_digest"] == summary["source_reference_digest"]
+    assert receipt["source_reference_digest"] != writer._sha(
+        canonical(c.public_coordinates)
+    )
+    assert (
+        historical._PUBLIC_INSTALLATION in opened and historical._CREDENTIAL in opened
+    )
+    assert (
+        historical._INSTALLATION not in opened
+        and historical._QUALIFICATION not in opened
+    )
+
+
+@pytest.mark.parametrize(
+    "change", ["full_wrapper", "retained_pin", "body", "observations"]
+)
+def test_public_writer_historical_slot_rejects_private_forms_before_use(
+    receipt_composition, change
+):
+    c = receipt_composition
+    if change == "full_wrapper":
+        value = strict_object(c.historical_reference)
+        c.public_coordinates.clear()
+        c.public_coordinates.update(value)
+    elif change == "retained_pin":
+        c.public_coordinates["decisions"]["rulings"]["retained_pin"] = {
+            "path": "/private/dossier",
+            "sha256": "a" * 64,
+        }
+    else:
+        c.public_coordinates[change] = _PRIVATE_MARKER.decode()
+    with pytest.raises(writer.EWriterRefused):
+        c.load("publish", c.pins)
+
+
+def test_installed_three_asset_draft_loader_is_reachable(installed_composition):
+    from vendor_cp.deployment import gate0_e_github as gh
+
+    c = installed_composition
+    c.reader("producer", snapshot_stage="collection")
+    c.load().prepare(deadline=time.monotonic() + 180)
+    release_files = {
+        **c.staged[0],
+        "gate0-readiness-receipt.json": b"{}",
+    }
+    reads = c.reader("draft_with_receipt", release_files=release_files)
+    facts = reads.draft_with_receipt_snapshot()
+    assert type(facts) is gh.DraftReleaseFacts and reads.owns_facts(facts)
+    assert reads._installation["phase"] == "draft_with_receipt"
+    assert facts.draft and len(facts.assets) == 3
+    assert {asset.name for asset in facts.assets} == set(release_files)
+
+
+@pytest.mark.parametrize("phase", ["draft_with_receipt ", "unknown"])
+def test_installed_draft_phase_is_not_normalized_or_generalized(
+    installed_composition, phase
+):
+    from vendor_cp.deployment import gate0_e_github as gh
+
+    with pytest.raises(gh.GitHubReadRefused):
+        installed_composition.reader(phase, release_files={})

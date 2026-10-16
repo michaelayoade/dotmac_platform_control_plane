@@ -11,6 +11,7 @@ import hashlib
 import math
 import os
 import re
+import stat
 import time
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -49,6 +50,14 @@ _DECISIONS = {
         1,
     ),
 }
+
+_PUBLIC_INSTALLATION = "/run/dotmac-gate0-e/source-references-public.json"
+_PUBLIC_QUALIFICATION = (
+    "/run/dotmac-gate0-e/source-references-public-qualification.json"
+)
+_PUBLIC_BINDING = "/etc/dotmac-gate0-e/source-references-public-binding.json"
+_PUBLIC_NATIVE = "/etc/dotmac-gate0-e/source-references/public/native.json"
+_PUBLIC_SCOPE = "public-historical-source-coordinates.v1"
 
 
 class HistoricalReferencesRefused(ValueError):
@@ -89,6 +98,43 @@ def _repo(value: object, key: str) -> dict[str, Any]:
     return repo
 
 
+def _private_retained(path: str, runtime_uid: int) -> bytes:
+    """Read one qualified actor's exact0600 leaf under root-owned ancestry."""
+    _require(type(runtime_uid) is int and runtime_uid >= 0)
+    _require(path.startswith(_RETAINED))
+    _require(all(part not in ("", ".", "..") for part in path[1:].split("/")))
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        parts = path[1:].split("/")
+        for index, part in enumerate(parts):
+            leaf = index == len(parts) - 1
+            new = os.open(
+                part,
+                os.O_RDONLY
+                | os.O_NOFOLLOW
+                | os.O_NONBLOCK
+                | (0 if leaf else os.O_DIRECTORY),
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = new
+            info = os.fstat(descriptor)
+            _require(info.st_uid == (runtime_uid if leaf else 0))
+            _require(not info.st_mode & 0o022)
+            if leaf:
+                _require(
+                    stat.S_ISREG(info.st_mode)
+                    and stat.S_IMODE(info.st_mode) == 0o600
+                    and 0 < info.st_size <= _CAP
+                )
+                raw = os.read(descriptor, _CAP + 1)
+                _require(len(raw) == info.st_size and not os.read(descriptor, 1))
+                return raw
+        raise HistoricalReferencesRefused()
+    finally:
+        os.close(descriptor)
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class HistoricalSourceFacts:
     reference_bytes: bytes = field(repr=False)
@@ -124,6 +170,129 @@ class HistoricalSourceFacts:
             object.__setattr__(self, key, value)
 
 
+def validate_public_coordinates(raw: bytes) -> dict[str, Any]:
+    """Closed coordinate selection; hashes confer no native decision provenance."""
+    _require(type(raw) is bytes and 0 < len(raw) <= _CAP)
+    value = _closed(_json(raw), "schema policy_digest repositories decisions packets")
+    _require(_canonical(value) == raw)
+    _require(value["schema"] == "Gate0EHistoricalSourceCoordinates.v1")
+    _hex(value["policy_digest"])
+    repositories = _closed(value["repositories"], "cp starter")
+    for key in _REPOSITORIES:
+        _repo(repositories[key], key)
+
+    def source(item: dict[str, Any]) -> None:
+        _hex(item["revision"], 40)
+        _hex(item["blob_sha"], 40)
+        _path(item["path"])
+        _require(_hex(item["sha256"]) == _hex(item["retained_sha256"]))
+
+    decisions = _closed(value["decisions"], "a7 a6 rulings source_completion")
+    for key, pr in (("a7", 197), ("a6", 199)):
+        item = _closed(
+            decisions[key],
+            "repository pr revision path blob_sha sha256 retained_sha256",
+        )
+        _require(
+            item["repository"] == "cp"
+            and type(item["pr"]) is int
+            and item["pr"] == pr
+            and item["path"] == _ADR
+        )
+        source(item)
+    for key, (slug, version) in _DECISIONS.items():
+        item = _closed(decisions[key], "system slug version retained_sha256")
+        _require(
+            item["system"] == "dotmac_knowledge"
+            and item["slug"] == slug
+            and type(item["version"]) is int
+            and item["version"] == version
+        )
+        _hex(item["retained_sha256"])
+    seen: set[str] = set()
+    for item in _list(value["packets"], 4, 16):
+        packet = _closed(item, "id repository pr merge_sha pr_head_sha sources runs")
+        key = _text(packet["id"])
+        _require(key not in seen)
+        seen.add(key)
+        fixed = {
+            "b": ("cp", 200),
+            "c1_foundation": ("starter", 753),
+            "c1_cp": ("cp", 201),
+            "c1_dependencies": ("cp", 204),
+        }
+        _id(packet["pr"])
+        _require(
+            (packet["repository"], packet["pr"]) == fixed.get(key)
+            or (
+                re.fullmatch(r"c2_[0-9]+", key) is not None
+                and packet["repository"] == "cp"
+                and key == "c2_" + str(packet["pr"])
+                and packet["pr"] in _CP_PRS
+            )
+        )
+        _hex(packet["merge_sha"], 40)
+        _hex(packet["pr_head_sha"], 40)
+        for item in _list(packet["sources"], 1, 16):
+            selected = _closed(item, "revision path blob_sha sha256 retained_sha256")
+            _require(
+                selected["revision"] in (packet["merge_sha"], packet["pr_head_sha"])
+            )
+            source(selected)
+        run_ids: set[int] = set()
+        for item in _list(packet["runs"], 1, 4):
+            run = _closed(
+                item,
+                "run_id attempt workflow_id workflow_path event tested_sha "
+                "required_jobs",
+            )
+            for name in ("run_id", "attempt", "workflow_id"):
+                _id(run[name])
+            _require(run["run_id"] not in run_ids)
+            run_ids.add(run["run_id"])
+            _require(_path(run["workflow_path"]).startswith(".github/workflows/"))
+            _text(run["event"], 100)
+            _require(run["tested_sha"] == packet["pr_head_sha"])
+            ids: set[int] = set()
+            for item in _list(run["required_jobs"], 1, 32):
+                job = _closed(item, "id name")
+                _id(job["id"])
+                _text(job["name"], 512)
+                _require(job["id"] not in ids)
+                ids.add(job["id"])
+    _require({"b", "c1_foundation", "c1_cp", "c1_dependencies"} <= seen)
+    return value
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PublicHistoricalSourceFacts:
+    coordinates_bytes: bytes = field(repr=False)
+    coordinates_sha256: str
+    installation_sha256: str
+    qualification_sha256: str
+    source_policy_digest: str
+    result: str = "public_historical_source_coordinates_verified"
+
+    def __init__(
+        self,
+        seal: object,
+        coordinates: bytes,
+        installation: bytes,
+        qualification: bytes,
+        policy: str,
+    ) -> None:
+        _require(seal is _SEAL)
+        for key, value in (
+            ("coordinates_bytes", coordinates),
+            ("coordinates_sha256", _digest(coordinates)),
+            ("installation_sha256", _digest(installation)),
+            ("qualification_sha256", _digest(qualification)),
+            ("source_policy_digest", policy),
+            ("result", "public_historical_source_coordinates_verified"),
+        ):
+            object.__setattr__(self, key, value)
+
+
 class InstalledHistoricalSourceReads:
     """No caller-selected installation, credential, endpoint or transport."""
 
@@ -142,6 +311,7 @@ class InstalledHistoricalSourceReads:
         self._installation_raw = installation_raw
         self._qualification_raw = qualification_raw
         self._retained = retained
+        self._public = False
         self._used = False
         self._failed = False
         self._issued: list[object] = []
@@ -151,9 +321,133 @@ class InstalledHistoricalSourceReads:
         self._deadline = 0.0
 
     @classmethod
+    def from_installed_public(cls) -> InstalledHistoricalSourceReads:
+        from vendor_cp.deployment.gate0_e_writer import (
+            _private_failure,
+            _raise_private_failure,
+        )
+
+        result = None
+        failure = None
+        try:
+            result = cls._load_public()
+        except BaseException as error:
+            failure = _private_failure(error)
+        if failure is not None:
+            if failure.category != "refused":
+                _raise_private_failure(failure)
+            raise HistoricalReferencesRefused()
+        if result is None:
+            raise HistoricalReferencesRefused()
+        return result
+
+    @classmethod
+    def _load_public(cls) -> InstalledHistoricalSourceReads:
+        raw = _protected(_PUBLIC_INSTALLATION, 256 * 1024, private=False)
+        selected = _closed(_json(raw), "schema coordinates credential qualification")
+        _require(
+            _canonical(selected) == raw
+            and selected["schema"] == "Gate0EPublicHistoricalSourceSelection.v1"
+        )
+        coordinates = validate_public_coordinates(_canonical(selected["coordinates"]))
+        _require(selected["credential"] == _CREDENTIAL)
+        binding_raw = _protected(_PUBLIC_BINDING, 64 * 1024, private=False)
+        binding = _closed(
+            _json(binding_raw),
+            "schema installation_sha256 qualification_sha256 reader_source_sha256 "
+            "github_mechanics_sha256 native_receipt_pin runtime_uid",
+        )
+        _require(
+            _canonical(binding) == binding_raw
+            and binding["schema"] == "Gate0EPublicHistoricalSourceBinding.v1"
+        )
+        _require(_hex(binding["installation_sha256"]) == _digest(raw))
+        uid = binding["runtime_uid"]
+        _require(type(uid) is int and uid >= 0 and os.getuid() == os.geteuid() == uid)
+        for path, key in (
+            (os.path.abspath(__file__), "reader_source_sha256"),
+            (os.path.abspath(_mechanics.__file__), "github_mechanics_sha256"),
+        ):
+            _require(
+                _digest(_protected(path, _CAP, private=False)) == _hex(binding[key])
+            )
+        pin = _closed(selected["qualification"], "path sha256")
+        _require(pin["path"] == _PUBLIC_QUALIFICATION)
+        qual_raw = _protected(_PUBLIC_QUALIFICATION, 64 * 1024, private=False)
+        _require(
+            _digest(qual_raw)
+            == _hex(pin["sha256"])
+            == _hex(binding["qualification_sha256"])
+        )
+        qual = _closed(
+            _json(qual_raw),
+            "schema selection_sha256 policy_digest runtime_uid credential_uid "
+            "api_version repositories permissions native_receipt_pin "
+            "decision_provenance_digest method_scope",
+        )
+        _require(
+            _canonical(qual) == qual_raw
+            and qual["schema"] == "Gate0EPublicHistoricalSourceQualification.v1"
+        )
+        _require(
+            _hex(qual["selection_sha256"])
+            == _digest(
+                _canonical({k: v for k, v in selected.items() if k != "qualification"})
+            )
+        )
+        _require(
+            _hex(qual["policy_digest"]) == coordinates["policy_digest"]
+            and type(qual["runtime_uid"]) is int
+            and qual["runtime_uid"] == uid
+        )
+        _require(
+            type(qual["credential_uid"]) is int and qual["credential_uid"] in (0, uid)
+        )
+        _require(
+            qual["api_version"] == _API_VERSION
+            and qual["repositories"] == coordinates["repositories"]
+        )
+        _require(
+            qual["permissions"]
+            == {
+                "metadata": "read",
+                "actions": "read",
+                "contents": "read",
+                "pull_requests": "read",
+            }
+        )
+        _require(qual["method_scope"] == _PUBLIC_SCOPE)
+        _hex(qual["decision_provenance_digest"])
+        native_pin = _closed(binding["native_receipt_pin"], "path sha256")
+        _require(
+            native_pin == qual["native_receipt_pin"]
+            and native_pin["path"] == _PUBLIC_NATIVE
+        )
+        native_raw = _protected(_PUBLIC_NATIVE, 64 * 1024, private=False)
+        _require(_digest(native_raw) == _hex(native_pin["sha256"]))
+        native = _closed(
+            _json(native_raw),
+            "schema qualification_measurements_digest runtime_identity_digest "
+            "reviewer_record_digest",
+        )
+        _require(
+            _canonical(native) == native_raw
+            and native["schema"] == "Gate0ENativeReviewReceipt.v1"
+        )
+        for key in (
+            "qualification_measurements_digest",
+            "runtime_identity_digest",
+            "reviewer_record_digest",
+        ):
+            _hex(native[key])
+        result = cls(_SEAL, coordinates, qual, raw, qual_raw, {})
+        result._public = True
+        return result
+
+    @classmethod
     def from_installed(cls) -> InstalledHistoricalSourceReads:
         try:
-            raw = _protected(_INSTALLATION, 256 * 1024)
+            raw = _protected(_INSTALLATION, 256 * 1024, private=False)
             selection = _closed(
                 _json(raw),
                 "schema policy_digest repositories decisions packets credential "
@@ -163,7 +457,7 @@ class InstalledHistoricalSourceReads:
             _require(selection["schema"] == "Gate0EHistoricalSourceSelection.v1")
             _hex(selection["policy_digest"])
             _require(selection["credential"] == _CREDENTIAL)
-            binding_raw = _protected(_BINDING, 64 * 1024)
+            binding_raw = _protected(_BINDING, 64 * 1024, private=False)
             binding = _closed(
                 _json(binding_raw),
                 "schema installation_sha256 qualification_sha256 reader_source_sha256 "
@@ -183,23 +477,9 @@ class InstalledHistoricalSourceReads:
                 _require(
                     _digest(_protected(path, _CAP, private=False)) == _hex(binding[key])
                 )
-            retained: dict[str, bytes] = {}
-
-            def pin(value: object) -> bytes:
-                record = _closed(value, "path sha256")
-                path = _text(record["path"], 1024)
-                _require(path.startswith(_RETAINED))
-                _require(all(p not in ("", ".", "..") for p in path[1:].split("/")))
-                if path not in retained:
-                    retained[path] = _protected(path, _CAP)
-                result = retained[path]
-                _require(_digest(result) == _hex(record["sha256"]))
-                _require(sum(map(len, retained.values())) <= 4 * _CAP)
-                return result
-
             qualification_pin = _closed(selection["qualification"], "path sha256")
             _require(qualification_pin["path"] == _QUALIFICATION)
-            qual_raw = _protected(_QUALIFICATION, 64 * 1024)
+            qual_raw = _protected(_QUALIFICATION, 64 * 1024, private=False)
             _require(_digest(qual_raw) == _hex(qualification_pin["sha256"]))
             qual = _closed(
                 _json(qual_raw),
@@ -239,8 +519,30 @@ class InstalledHistoricalSourceReads:
                 }
             )
             _require(qual["native_receipt_pin"] == binding["native_receipt_pin"])
+            # Derive private ownership only after the root-pinned qualification
+            # and actual real/effective UID agree. Credential ownership is separate.
+            private_uid = qual["runtime_uid"]
+            retained: dict[str, bytes] = {}
+
+            def pin(value: object) -> bytes:
+                record = _closed(value, "path sha256")
+                path = _text(record["path"], 1024)
+                _require(path != native_path)
+                if path not in retained:
+                    retained[path] = _private_retained(path, private_uid)
+                result = retained[path]
+                _require(_digest(result) == _hex(record["sha256"]))
+                _require(sum(map(len, retained.values())) <= 4 * _CAP)
+                return result
+
+            native_pin = _closed(binding["native_receipt_pin"], "path sha256")
+            native_path = _text(native_pin["path"], 1024)
+            _require(native_path.startswith(_RETAINED))
+            _require(all(p not in ("", ".", "..") for p in native_path[1:].split("/")))
+            native_raw = _protected(native_path, _CAP, private=False)
+            _require(_digest(native_raw) == _hex(native_pin["sha256"]))
             receipt = _closed(
-                _json(pin(binding["native_receipt_pin"])),
+                _json(native_raw),
                 "schema qualification_measurements_digest runtime_identity_digest "
                 "reviewer_record_digest",
             )
@@ -251,6 +553,7 @@ class InstalledHistoricalSourceReads:
                 "reviewer_record_digest",
             ):
                 _hex(receipt[key])
+            retained[native_path] = native_raw
             pin(qual["decision_provenance_pin"])
             decisions = _closed(
                 selection["decisions"], "a7 a6 rulings source_completion"
@@ -383,6 +686,27 @@ class InstalledHistoricalSourceReads:
             _require(type(size) is int and size >= 0)
             truncated = value.get("truncated", False)
             _require(type(truncated) is bool)
+            if self._public:
+                blob = hashlib.sha1(  # noqa: S324 -- Git object identity
+                    b"blob " + str(len(decoded)).encode() + b"\0" + decoded
+                ).hexdigest()  # noqa: S324 -- Git object identity
+                _require(
+                    value.get("type") == "file"
+                    and value.get("encoding") == "base64"
+                    and size == len(decoded)
+                    and truncated is False
+                    and value.get("sha") == blob
+                )
+                return {
+                    "type": "file",
+                    "path": _path(value.get("path")),
+                    "sha": blob,
+                    "encoding": "base64",
+                    "size": size,
+                    "truncated": False,
+                    "computed_sha256": _digest(decoded),
+                    "computed_blob_sha": blob,
+                }
             return {
                 "type": _text(value.get("type")),
                 "path": _path(value.get("path")),
@@ -547,6 +871,14 @@ class InstalledHistoricalSourceReads:
             value.get("sha") == source["blob_sha"]
             and value.get("truncated", False) is False
         )
+        if self._public:
+            _require(
+                value.get("computed_sha256")
+                == source["sha256"]
+                == source["retained_sha256"]
+                and value.get("computed_blob_sha") == source["blob_sha"]
+            )
+            return
         content = value.get("content")
         _require(type(content) is str and len(content) <= 750000)
         decoded = base64.b64decode(cast(str, content).replace("\n", ""), validate=True)
@@ -631,10 +963,83 @@ class InstalledHistoricalSourceReads:
                 and job.get("conclusion") == "success"
             )
 
+    def _verify_coordinates(self) -> None:
+        repos = self._installation["repositories"]
+        roots = {k: "/repos/" + v["owner"] + "/" + v["name"] for k, v in repos.items()}
+        for key, repo in repos.items():
+            value, _, _ = self._get(roots[key])
+            self._identity(value, repo)
+        decisions = self._installation["decisions"]
+        for key in ("a7", "a6"):
+            decision = decisions[key]
+            self._pr(
+                roots["cp"], repos["cp"], decision["pr"], decision["revision"], None
+            )
+            self._source(roots["cp"], decision)
+        for packet in self._installation["packets"]:
+            key = packet["repository"]
+            root, repo = roots[key], repos[key]
+            self._pr(
+                root, repo, packet["pr"], packet["merge_sha"], packet["pr_head_sha"]
+            )
+            for source in packet["sources"]:
+                self._source(root, source)
+            for run in packet["runs"]:
+                self._run(root, repo, run)
+
+    def verify_public(self, *, deadline: float) -> PublicHistoricalSourceFacts:
+        from vendor_cp.deployment.gate0_e_writer import (
+            _private_failure,
+            _raise_private_failure,
+        )
+
+        result = None
+        failure = None
+        try:
+            result = self._verify_public_work(deadline=deadline)
+        except BaseException as error:
+            self._failed = True
+            self._issued.clear()
+            self._cache.clear()
+            self._responses.clear()
+            failure = _private_failure(error)
+        finally:
+            del self, deadline
+        if failure is not None:
+            if failure.category != "refused":
+                _raise_private_failure(failure)
+            raise HistoricalReferencesRefused()
+        if result is None:
+            raise HistoricalReferencesRefused()
+        return result
+
+    def _verify_public_work(self, *, deadline: float) -> PublicHistoricalSourceFacts:
+        now = time.monotonic()
+        _require(self._public and not self._used and not self._failed)
+        self._used = True
+        _require(
+            type(deadline) in (int, float)
+            and math.isfinite(deadline)
+            and deadline > now
+        )
+        self._deadline = min(deadline, now + 180)
+        self._verify_coordinates()
+        coordinates = _canonical(self._installation)
+        _require(time.monotonic() < self._deadline)
+        facts = PublicHistoricalSourceFacts(
+            _SEAL,
+            coordinates,
+            self._installation_raw,
+            self._qualification_raw,
+            self._installation["policy_digest"],
+        )
+        self._issued.append(facts)
+        return facts
+
     def verify(self, *, deadline: float) -> HistoricalSourceFacts:
         try:
             now = time.monotonic()
-            _require(not self._used and not self._failed)
+            _require(not self._public and not self._used and not self._failed)
             self._used = True
             _require(
                 type(deadline) in (int, float)
@@ -642,30 +1047,8 @@ class InstalledHistoricalSourceReads:
                 and deadline > now
             )
             self._deadline = min(deadline, now + 180)
-            repos = self._installation["repositories"]
-            roots = {
-                k: "/repos/" + v["owner"] + "/" + v["name"] for k, v in repos.items()
-            }
-            for key, repo in repos.items():
-                value, _, _ = self._get(roots[key])
-                self._identity(value, repo)
+            self._verify_coordinates()
             decisions = self._installation["decisions"]
-            for key in ("a7", "a6"):
-                decision = decisions[key]
-                self._pr(
-                    roots["cp"], repos["cp"], decision["pr"], decision["revision"], None
-                )
-                self._source(roots["cp"], decision)
-            for packet in self._installation["packets"]:
-                key = packet["repository"]
-                root, repo = roots[key], repos[key]
-                self._pr(
-                    root, repo, packet["pr"], packet["merge_sha"], packet["pr_head_sha"]
-                )
-                for source in packet["sources"]:
-                    self._source(root, source)
-                for run in packet["runs"]:
-                    self._run(root, repo, run)
             records = tuple(
                 (
                     key,

@@ -14,7 +14,7 @@ import stat
 import subprocess
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -199,6 +199,7 @@ class OriginalCutoff:
     monotonic: float
     a_start: datetime
     b_end: datetime
+    authoritative_end: float | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -210,11 +211,21 @@ class OriginalCutoff:
             or self.monotonic < 0
             or self.a_start >= self.b_end
             or self.wall >= self.b_end
+            or (
+                self.authoritative_end is not None
+                and (
+                    type(self.authoritative_end) not in (int, float)
+                    or not math.isfinite(self.authoritative_end)
+                    or self.authoritative_end <= self.monotonic
+                )
+            )
         ):
             raise ProviderRefused()
 
     @property
     def cutoff(self) -> float:
+        if self.authoritative_end is not None:
+            return self.authoritative_end
         return self.monotonic + (self.b_end - self.wall).total_seconds() + 2
 
     @property
@@ -226,6 +237,61 @@ class OriginalCutoff:
         if not math.isfinite(trigger) or trigger < 0:
             raise ProviderRefused()
         return min(trigger + _CLEANUP_SECONDS, self.cutoff + _CLEANUP_SECONDS)
+
+
+def _installed_original_clock(
+    collection: Pin,
+    windows: list[WindowDocument],
+    campaign: str,
+    uid: int,
+    lifecycle_binding: str,
+) -> tuple[OriginalCutoff, bytes]:
+    """Actual installed mode uses the existing qualified immutable clock owner."""
+    from vendor_cp.deployment import gate0_runner_lifecycle as lifecycle
+
+    owner = lifecycle.InstalledA9Lifecycle.from_installed()
+    try:
+        cases = owner._collection_cases()
+        doc, bounds = owner._doc, owner._bounds
+        if (
+            doc["campaign_digest"] != campaign
+            or doc["lifecycle_binding_digest"] != lifecycle_binding
+            or doc["collector_uid"] != uid
+            or tuple(canonical(case[1]) for case in cases)
+            != tuple(canonical(window) for window in windows)
+            or lifecycle._hash(lifecycle._protected(lifecycle._COLLECTION))
+            != collection.digest
+            or bounds.finalization
+            > _instant(windows[1]["expires_at"]) + timedelta(seconds=2)
+        ):
+            raise ProviderRefused()
+        _require_before(bounds.finalization_end)
+        clock = OriginalCutoff(
+            bounds.wall,
+            bounds.elapsed,
+            _instant(windows[0]["not_before"]),
+            _instant(windows[1]["expires_at"]),
+            authoritative_end=bounds.finalization_end,
+        )
+        projection = canonical(
+            dict(
+                schema="Gate0A9OriginalClockBinding.v1",
+                method_scope="immutable-original-bounds-clock.v1",
+                lifecycle_binding_digest=doc["lifecycle_binding_digest"],
+                campaign_digest=campaign,
+                boot_id=bounds.boot_id,
+                collector_uid=uid,
+                original_bounds_digest=lifecycle._hash(
+                    canonical(doc["original_bounds"])
+                ),
+                original_end_microseconds=clock.microseconds,
+                collection_digest=collection.digest,
+                window_digests=[_digest(canonical(window)) for window in windows],
+            )
+        )
+        return clock, projection
+    finally:
+        owner.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +435,7 @@ class BootstrapInstallation:
     native: Pin
     source_revision: str
     clock: OriginalCutoff
+    original_clock: bytes | None = field(default=None, repr=False)
 
     @classmethod
     def from_installed(cls) -> BootstrapInstallation:
@@ -377,14 +444,15 @@ class BootstrapInstallation:
         raw = read_protected_handoff(_INSTALLATION, 0)
         doc = _fields(
             strict_object(raw),
-            "schema campaign_digest collection_installation collector_binary "
+            "schema campaign_digest lifecycle_binding_digest collection_installation "
+            "collector_binary "
             "collector_gid collector_groups socket_gid receiver_template qualification "
             "native_receipt source_revision source_files unit_assets manager_client "
             "manager_binary",
         )
         if (
             canonical(doc) != raw
-            or doc["schema"] != "Gate0CollectorBootstrapInstallation.v1"
+            or doc["schema"] != "Gate0CollectorBootstrapInstallation.v2"
         ):
             raise ProviderRefused()
         campaign = _text(doc["campaign_digest"])
@@ -462,7 +530,8 @@ class BootstrapInstallation:
         for value in job.values():
             _text(value)
         sources = _fields(
-            doc["source_files"], "gate0_runner_bootstrap gate0_runner_credential"
+            doc["source_files"],
+            "gate0_runner_bootstrap gate0_runner_credential gate0_runner_lifecycle",
         )
         for name, value in sources.items():
             _pin(
@@ -473,11 +542,8 @@ class BootstrapInstallation:
         revision = _text(doc["source_revision"])
         if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
             raise ProviderRefused()
-        clock = OriginalCutoff(
-            datetime.now(UTC),
-            time.monotonic(),
-            _instant(windows[0]["not_before"]),
-            _instant(windows[1]["expires_at"]),
+        clock, original_clock = _installed_original_clock(
+            collection, windows, campaign, uid, _text(doc["lifecycle_binding_digest"])
         )
         return cls(
             raw,
@@ -502,6 +568,7 @@ class BootstrapInstallation:
             _pin(doc["native_receipt"]),
             revision,
             clock,
+            original_clock,
         )
 
     def render(self) -> tuple[bytes, ...]:
@@ -737,7 +804,8 @@ class NativeSystemManager:
         )
         document = strict_object(installed.document)
         expected = dict(
-            schema="Gate0A9BootstrapQualification.v1",
+            schema="Gate0A9BootstrapQualification.v2",
+            clock_owner_scope="immutable-original-bounds-clock.v1",
             campaign_digest=installed.campaign,
             installation_digest=_digest(
                 canonical({k: v for k, v in document.items() if k != "qualification"})
@@ -790,7 +858,15 @@ class NativeSystemManager:
         rendered = installed.render()
         if read_protected_handoff(_UNIT_ROOT / _BOOTSTRAP, 0) != rendered[0]:
             raise ProviderRefused()
-        return canonical(dict(manager_identity=identity, bootstrap=bootstrap))
+        if installed.original_clock is None:
+            raise ProviderRefused()
+        return canonical(
+            dict(
+                manager_identity=identity,
+                bootstrap=bootstrap,
+                original_clock=strict_object(installed.original_clock),
+            )
+        )
 
     def arm_original_timer(self) -> dict[str, str]:
         installed = self.installation

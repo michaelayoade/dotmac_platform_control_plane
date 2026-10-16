@@ -30,7 +30,13 @@ before any publication mutation. These two commands mutate GitHub only under
 their separately reviewed operational authorization and native installation.
 Uncertain mutations retain incomplete state; neither command retries or clobbers.
 
-All five leaves have one declared owner and preserve its return status and public
+`dotmac-platform gate0 await-e-transfer` delegates without arguments to the
+read-only transfer owner. It waits within the original root-issued deadline and
+verifies the exact root-owned encrypted/public pair before emitting
+`E_TRANSFER_READY`. It accepts no path or lifetime override and grants no root
+access to the job. The producer uploads only the two literal qualified paths.
+
+All six leaves have one declared owner and preserve its return status and public
 output bytes. Unexpected owner failures return status 3 with only
 `GATE0_E_UNAVAILABLE` on stderr. Operational authorization, actual installation,
 human custody presence and native qualification remain separate requirements.

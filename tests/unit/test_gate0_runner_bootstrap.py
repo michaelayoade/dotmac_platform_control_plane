@@ -6,6 +6,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_gate0_e_root_finalization import (
+    a9_export,  # noqa: F401
+    complete_retained_collection,  # noqa: F401
+    github_producer,  # noqa: F401
+    historical_installed,  # noqa: F401
+    inputs,  # noqa: F401
+    installed_composition,  # noqa: F401
+    window_document,  # noqa: F401
+)
+from test_gate0_e_root_finalization import (
+    original_native as root_original_native,  # noqa: F401
+)
 
 from vendor_cp.deployment import gate0_runner_bootstrap as owner
 from vendor_cp.deployment.gate0_framing import canonical
@@ -891,3 +903,91 @@ def test_bound_manager_cannot_rebind_or_replace_retirement_fact(
         manager.close()
     with pytest.raises(ProviderRefused):
         manager.bind_actual_collector({}, 1012.0)
+
+
+def test_actual_installed_bootstrap_uses_original_clock_without_wall_resampling(
+    root_original_native,  # noqa: F811
+    monkeypatch,  # noqa: F811
+):
+    n = root_original_native
+
+    class NoFreshClock(datetime):
+        @classmethod
+        def now(cls, *args, **kwargs):
+            raise AssertionError(
+                "installed bootstrap must not recalibrate original clock"
+            )
+
+    monkeypatch.setattr(owner, "datetime", NoFreshClock)
+    now = owner.time.monotonic()
+    monkeypatch.setattr(owner.time, "monotonic", lambda: now + 5)
+    actual = owner.BootstrapInstallation.from_installed()
+    assert actual.clock.cutoff == n.end
+    assert actual.clock.microseconds == n.end_us
+    assert actual.clock.authoritative_end == n.end
+    assert actual.original_clock == n.bootstrap.original_clock
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["boot", "campaign", "uid", "binding", "windows", "later_than_b", "expired"],
+)
+def test_actual_installed_original_clock_scope_refusals(
+    root_original_native,  # noqa: F811
+    monkeypatch,
+    failure,
+):
+    from vendor_cp.deployment import gate0_runner_lifecycle as lifecycle
+    from vendor_cp.deployment.gate0_framing import strict_object
+
+    n = root_original_native
+    doc = strict_object(n.files[str(lifecycle._INSTALLATION)])
+    if failure == "boot":
+        monkeypatch.setattr(
+            lifecycle, "_proc", lambda *args: b"00000000-0000-0000-0000-000000000002\n"
+        )
+    elif failure == "campaign":
+        doc["campaign_digest"] = "sha256:" + "0" * 64
+    elif failure == "uid":
+        doc["collector_uid"] = 999
+    elif failure == "binding":
+        doc["lifecycle_binding_digest"] = "sha256:" + "0" * 64
+    elif failure == "windows":
+        bdoc = strict_object(n.files[str(owner._INSTALLATION)])
+        bdoc["collection_installation"]["digest"] = "sha256:" + "0" * 64
+        n.files[str(owner._INSTALLATION)] = canonical(bdoc)
+    elif failure == "later_than_b":
+        doc["original_bounds"]["finalization_ends_at"] = (
+            n.c.selection.cases[1].end + timedelta(seconds=3)
+        ).isoformat()
+    else:
+        monkeypatch.setattr(owner.time, "monotonic", lambda: n.end)
+    n.files[str(lifecycle._INSTALLATION)] = canonical(doc)
+    qualification_path = str(lifecycle._ROOT / "lifecycle-qualification.json")
+    qualification = strict_object(n.files[qualification_path])
+    qualification["installation_digest"] = owner._digest(canonical(doc))
+    n.files[qualification_path] = canonical(qualification)
+    with pytest.raises((ProviderRefused, lifecycle.LifecycleRefused)):
+        owner.BootstrapInstallation.from_installed()
+    assert not n.c.packages
+
+
+def test_actual_installed_original_clock_keeps_a_stricter_earlier_cutoff(
+    root_original_native,  # noqa: F811
+):  # noqa: F811
+    from vendor_cp.deployment import gate0_runner_lifecycle as lifecycle
+    from vendor_cp.deployment.gate0_framing import strict_object
+
+    n = root_original_native
+    doc = strict_object(n.files[str(lifecycle._INSTALLATION)])
+    doc["original_bounds"]["finalization_ends_at"] = (
+        n.c.selection.cases[1].end - timedelta(seconds=3)
+    ).isoformat()
+    n.files[str(lifecycle._INSTALLATION)] = canonical(doc)
+    qualification_path = str(lifecycle._ROOT / "lifecycle-qualification.json")
+    qualification = strict_object(n.files[qualification_path])
+    qualification["installation_digest"] = owner._digest(canonical(doc))
+    n.files[qualification_path] = canonical(qualification)
+    actual = owner.BootstrapInstallation.from_installed()
+    assert actual.clock.cutoff == n.end - 5
+    assert actual.clock.cutoff < n.bootstrap.clock.cutoff

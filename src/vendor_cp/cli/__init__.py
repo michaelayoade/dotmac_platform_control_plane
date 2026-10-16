@@ -563,8 +563,17 @@ def build_parser() -> _Parser:
     _command(gate0_sub, "gate0", "issuer-run", "run one finite issuer window")
     _command(gate0_sub, "gate0", "collect-e", "collect private finite E evidence")
     _command(gate0_sub, "gate0", "finalize-e", "prepare encrypted private E evidence")
+    _command(
+        gate0_sub, "gate0", "await-e-transfer", "verify original encrypted transfer"
+    )
     _command(gate0_sub, "gate0", "prepare-e-draft", "prepare selected E draft release")
     _command(gate0_sub, "gate0", "publish-e", "publish selected reviewed E evidence")
+    _command(
+        gate0_sub,
+        "gate0",
+        "public-jit-runner-credential",
+        "exec selected public JIT runner",
+    )
     _command(gate0_sub, "gate0", "verify-e-published", "verify completed E publication")
     _command(
         gate0_sub,
@@ -680,12 +689,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command in {
         "gate0 finalize-e",
+        "gate0 await-e-transfer",
         "gate0 prepare-e-draft",
         "gate0 publish-e",
         "gate0 verify-e-b-archive",
         "gate0 verify-e-published",
     }:
         try:
+            if command == "gate0 await-e-transfer":
+                from vendor_cp.deployment.gate0_e_transfer import (
+                    run_installed_await_e_transfer,
+                )
+
+                return run_installed_await_e_transfer()
             if command == "gate0 prepare-e-draft":
                 from vendor_cp.deployment.gate0_e_publication import (
                     run_installed_prepare_e_draft,
@@ -715,6 +731,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_installed_verify_e_b_archive()
         except Exception:
             print("GATE0_E_UNAVAILABLE", file=sys.stderr)
+            return 3
+
+    if command == "gate0 public-jit-runner-credential":
+        try:
+            from vendor_cp.deployment.gate0_runner_lifecycle_courier import (
+                run_installed_public_jit_runner,
+            )
+
+            return run_installed_public_jit_runner()
+        except Exception:
             return 3
 
     if command == "gate0 collect-e":

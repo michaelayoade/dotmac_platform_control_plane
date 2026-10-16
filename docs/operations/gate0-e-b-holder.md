@@ -3,7 +3,7 @@
 The concrete B owner verifies the selected two-asset draft on the existing Mac
 custody boundary. It does not accept E or publish a release. Its private record
 stays at that boundary and its public result is the closed hash-only
-`Gate0EBArchiveVerification.v1` summary expected by the sole writer.
+`Gate0EBArchiveVerification.v2` summary for the adopted public-only publication contract.
 
 These installation paths are **source conventions**, not measured or created
 host configuration:
@@ -130,18 +130,33 @@ mode0600 digest-named file in the preinstalled mode0700 `verified` directory.
 The directory is held through a full no-follow traversal. No plaintext archive
 or private key is written to a temporary file.
 
-The public summary contains only the sole writer's closed schema:
+The public summary retains the existing closed fields:
 repository/release/two asset IDs, original producer coordinates,
 ciphertext/plaintext/manifest/private-receipt/projection/policy hashes,
 private-verification-record hash, holder-source/profile hashes and the fixed
-result `private_archive_and_proofs_verified`. All digests use `sha256:` prefixes.
+result `private_archive_and_proofs_verified`. Version 2 adds exactly
+`private_prerequisite_digest`, `source_reference_digest` and
+`operational_evidence_digest`. After successful full private verification, B
+hashes the actual archived `prerequisites.json` bytes, the exact decoded
+`historical_reference` bytes in that document, and canonical
+`{evidence_name: evidence_digest}` from its verified evidence mapping. The fresh
+Mac reader's qualification wrapper is compared by source coordinates but its
+hash never substitutes for the archived reference hash. The retained private
+record binds the same three digest values, while its existing
+`historical_reference_digest` continues to identify the fresh reader bytes.
+No caller summary dictionary supplies these values. Publication's closed v2
+parser must refuse old versions and missing or extra fields. All digests use
+`sha256:` prefixes.
 The installed entry writes the exact canonical summary bytes to stdout without
 adding bytes that would change its selected digest.
 
-The summary is unsigned and cannot authenticate itself. Michael's proposed
-digest-bound publication-review meaning remains UNADOPTED. Actual adoption and
-the exact publication run's genuine human review are separate required evidence
-for the sole writer; this B result supplies no readiness/publication authority.
+The summary is unsigned and cannot authenticate itself. Michael adopted the
+public-only publication boundary and exact digest-bound human-review meaning on
+2026-10-16 (proposal SHA256
+`7a70090ef3a174ec0983f3a5e0abd9d80145ad3978d9498d639225db30504ba1`).
+That design adoption does not establish the exact publication run's genuine
+human review or native qualification. The sole writer still requires those
+separate facts; this B result supplies no readiness/publication authority.
 
 ## Validation, integration and rollback
 

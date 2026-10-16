@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import math
 import os
 import re
 import stat
@@ -15,6 +16,7 @@ import time
 import traceback
 from asyncio import CancelledError
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -568,6 +570,160 @@ def _verify_a9_export_work(
     return files["collection.json"]
 
 
+_ROOT_STATIC = "/etc/dotmac-gate0-e/root-static-profile.json"
+_ROOT_STATIC_BINDING = "/etc/dotmac-gate0-e/root-static-binding.json"
+_ROOT_COMPLETION = "/run/dotmac-gate0-collector/bootstrap-observation.json"
+_ROOT_SCOPE = "original-root-static-profile-export-encryption.v1"
+_ROOT_DYNAMIC_FIELDS = ("manifest", "files", "completion", "bootstrap_invocation_id")
+
+
+def _load_root_static_profile() -> (
+    tuple[dict[str, Any], dict[str, Any], dict[str, Any]]
+):
+    """Real fixed root qualification; dynamic observations cannot select policy."""
+    _require(os.getuid() == os.geteuid() == os.getgid() == os.getegid() == 0)
+    raw = _protected(_ROOT_STATIC, _CAP)
+    profile = _object(
+        raw, "schema writer collector_uid courier_uid courier_gid qualification"
+    )
+    _require(profile["schema"] == "Gate0ERootStaticProfile.v1")
+    binding = _object(
+        _protected(_ROOT_STATIC_BINDING, 65536),
+        "schema profile_digest qualification_digest runtime_uid owners native_receipt",
+    )
+    _require(
+        binding["schema"] == "Gate0ERootStaticBinding.v1"
+        and binding["profile_digest"] == _sha(raw)
+        and type(binding["runtime_uid"]) is int
+        and binding["runtime_uid"] == 0
+    )
+    names = {
+        "writer": __file__,
+        "proof": proof_owner.__file__,
+        "archive": archive_owner.__file__,
+        "preparation": preparation_owner.__file__,
+        "historical": historical_owner.__file__,
+        "github": github_owner.__file__,
+        "release": release_owner.__file__,
+        "handoff": handoff_owner.__file__,
+        "framing": framing_owner.__file__,
+    }
+    for key, name in (
+        ("supervisor", "gate0_runner_supervisor.py"),
+        ("root_finalization", "gate0_e_root_finalization.py"),
+        ("transfer", "gate0_e_transfer.py"),
+        ("bootstrap", "gate0_runner_bootstrap.py"),
+        ("lifecycle", "gate0_runner_lifecycle.py"),
+    ):
+        names[key] = str(Path(__file__).with_name(name))
+    _require(type(binding["owners"]) is dict and set(binding["owners"]) == set(names))
+    for key, path in names.items():
+        _require(
+            binding["owners"][key]
+            == _sha(_protected(os.path.abspath(path), _CAP, private=False))
+        )
+
+    def pin(value: object) -> bytes:
+        item = _fields(value, "path digest")
+        _require(type(item["path"]) is str and item["path"].startswith(_RETAINED))
+        data = _protected(item["path"], _CAP)
+        _require(_sha(data) == _hash(item["digest"]))
+        return data
+
+    qual_raw = pin(profile["qualification"])
+    _require(_sha(qual_raw) == binding["qualification_digest"])
+    qual = _object(
+        qual_raw,
+        "schema static_profile_digest policy_digest runtime_uid owner_digests "
+        "native_receipt decision_provenance method_scope dynamic_fields",
+    )
+    _require(
+        qual["schema"] == "Gate0ERootStaticQualification.v1"
+        and qual["static_profile_digest"]
+        == _sha(canonical({k: v for k, v in profile.items() if k != "qualification"}))
+        and qual["policy_digest"] == profile["writer"]["policy_digest"]
+        and type(qual["runtime_uid"]) is int
+        and qual["runtime_uid"] == 0
+        and qual["owner_digests"] == binding["owners"]
+        and qual["native_receipt"] == binding["native_receipt"]
+        and qual["method_scope"] == _ROOT_SCOPE
+        and qual["dynamic_fields"] == list(_ROOT_DYNAMIC_FIELDS)
+    )
+    native = _object(
+        pin(binding["native_receipt"]),
+        "schema method_scope owner_digests "
+        "qualification_measurements_digest runtime_identity_digest "
+        "reviewer_record_digest",
+    )
+    _require(
+        native["schema"] == "Gate0ERootFinalizationNativeReview.v1"
+        and native["method_scope"] == _ROOT_SCOPE
+        and native["owner_digests"] == binding["owners"]
+    )
+    for key in (
+        "qualification_measurements_digest",
+        "runtime_identity_digest",
+        "reviewer_record_digest",
+    ):
+        github_owner._hex(native[key])
+    pin(qual["decision_provenance"])
+    doc = _fields(
+        profile["writer"],
+        "schema operation policy_digest campaign_digest source_bundle_digest "
+        "source cases withdrawal_reference environment producer historical_reference "
+        "evidence coverage a9 gpg publication",
+    )
+    _require(
+        doc["schema"] == "Gate0EWriterInstallation.v1"
+        and doc["operation"] == "prepare"
+        and doc["publication"] is None
+    )
+    _fields(doc["a9"], "lifecycle_binding_digest qualification_digest owned_slots")
+    for key in ("collector_uid", "courier_uid", "courier_gid"):
+        _require(type(profile[key]) is int and profile[key] > 0)
+    _require(profile["collector_uid"] != profile["courier_uid"])
+    return profile, qual, binding
+
+
+_PUBLIC_SCOPE = "public-evidence-publication-readback.v1"
+_PUBLIC_PROPOSAL = (
+    "sha256:7a70090ef3a174ec0983f3a5e0abd9d80145ad3978d9498d639225db30504ba1"
+)
+_PUBLIC_ADOPTION = (
+    "sha256:58b02290fa3f1dc72811be314c99040d6f9187148103e6c4c08a03e97709bd9c"
+)
+_PUBLIC_REVIEW_MEANING = (
+    "I have observed the actual qualified B custody holder's full decryption and "
+    "private archive/proof verification for the exact displayed summary digest, "
+    "draft release and producer coordinates. I attest the provenance of that exact "
+    "closed B verification summary, including its digest projection of the verified "
+    "private prerequisites, archived source reference and operational evidence. "
+    "I authorize the separately selected publication attempt to rely on this B "
+    "verification for private evidence predicates, independently verify the public "
+    "producer/source/policy/review/release bindings, and publish only the exact "
+    "B-verified ciphertext and its matching public projection plus the CP-generated "
+    "readiness receipt. This review does not authorize a plaintext transfer, "
+    "private-key transfer, additional signer, extended A9 lifetime, changed evidence, "
+    "or a different publication attempt."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EPublicSelection:
+    """Qualified public pins only; never a private retained-proof selection."""
+
+    policy_digest: str
+    campaign_digest: str
+    source: ESourcePins
+    environment: str
+
+    def __post_init__(self) -> None:
+        _hash(self.policy_digest)
+        _hash(self.campaign_digest)
+        _require(type(self.source) is ESourcePins)
+        _require(type(self.environment) is str and 0 < len(self.environment) <= 128)
+
+
 class InstalledEWriter:
     """Fixed protected installation. There is no caller-selected loader path."""
 
@@ -576,7 +732,7 @@ class InstalledEWriter:
         seal: object,
         document: dict[str, Any],
         retained: dict[str, bytes],
-        selection: ESelection,
+        selection: ESelection | EPublicSelection,
     ) -> None:
         _require(seal is _SEAL)
         self._document, self._retained, self.selection = document, retained, selection
@@ -599,16 +755,23 @@ class InstalledEWriter:
 
     @classmethod
     def _from_installed_work(cls) -> InstalledEWriter:
-        raw = _protected(_INSTALLATION, _CAP)
-        doc = _object(
-            raw,
+        raw = _protected(_INSTALLATION, _CAP, private=False)
+        doc = _object(raw)
+        if doc.get("schema") == "Gate0EPublicWriterInstallation.v1":
+            return cls._load_public_document(raw, doc)
+        # Dispatch reads public metadata; private preparation must independently
+        # satisfy its original root-private leaf policy before parsing/using it.
+        private_raw = _protected(_INSTALLATION, _CAP)
+        _require(private_raw == raw)
+        _fields(
+            doc,
             "schema operation policy_digest campaign_digest "
             "source_bundle_digest source cases withdrawal_reference environment "
             "producer historical_reference evidence coverage a9 gpg "
             "qualification publication",
         )
         _require(doc["schema"] == "Gate0EWriterInstallation.v1")
-        _require(doc["operation"] in ("prepare", "publish", "verify_published"))
+        _require(doc["operation"] == "prepare")
         binding = _object(
             _protected(_BINDING, 65536),
             "schema installation_digest qualification_digest runtime_uid owners "
@@ -622,6 +785,160 @@ class InstalledEWriter:
             type(binding["runtime_uid"]) is int
             and os.getuid() == os.geteuid() == binding["runtime_uid"]
         )
+        return cls._load_document(doc, binding)
+
+    @classmethod
+    def _load_public_document(cls, raw: bytes, doc: dict[str, Any]) -> InstalledEWriter:
+        """Independent fixed installation; no private loader or proof-file access."""
+        _fields(
+            doc,
+            "schema operation policy_digest campaign_digest source_bundle_digest "
+            "source environment producer historical_reference holder_source_digest "
+            "holder_profile_digest reader_slots qualification publication",
+        )
+        _require(doc["operation"] in ("publish", "verify_published"))
+        binding = _object(
+            _protected(_BINDING, 65536, private=False),
+            "schema installation_digest qualification_digest runtime_uid "
+            "owners native_receipt",
+        )
+        _require(
+            binding["schema"] == "Gate0EPublicWriterBinding.v1"
+            and binding["installation_digest"] == _sha(raw)
+            and type(binding["runtime_uid"]) is int
+            and binding["runtime_uid"] >= 0
+            and os.getuid() == os.geteuid() == binding["runtime_uid"]
+        )
+        owners = {
+            "writer": __file__,
+            "proof": proof_owner.__file__,
+            "archive": archive_owner.__file__,
+            "handoff": handoff_owner.__file__,
+            "historical": historical_owner.__file__,
+            "github": github_owner.__file__,
+            "release": release_owner.__file__,
+            "preparation": preparation_owner.__file__,
+            "framing": framing_owner.__file__,
+        }
+        _require(
+            type(binding["owners"]) is dict and set(binding["owners"]) == set(owners)
+        )
+        for key, path in owners.items():
+            _require(
+                binding["owners"][key]
+                == _sha(_protected(os.path.abspath(path), _CAP, private=False))
+            )
+        pins = _fields(
+            doc["publication"],
+            "summary contract decision provenance reviewer_id environment_id "
+            "display_title projection run reader_selection_digest",
+        )
+        # Each purpose has one immutable public slot. A qualified document cannot
+        # redirect a slot into the producer's private retained namespace.
+        selected = {
+            "qualification": doc["qualification"],
+            "native": binding["native_receipt"],
+            "historical": doc["historical_reference"],
+            **{
+                key: pins[key]
+                for key in (
+                    "summary",
+                    "contract",
+                    "decision",
+                    "provenance",
+                    "projection",
+                )
+            },
+        }
+        retained = {}
+        for name, value in selected.items():
+            item = _fields(value, "path digest")
+            _require(item["path"] == _RETAINED + "public/" + name + ".json")
+            data = _protected(item["path"], _CAP, private=False)
+            _require(_sha(data) == _hash(item["digest"]))
+            retained[item["path"]] = data
+        _require(sum(map(len, retained.values())) <= 4 * _CAP)
+        historical_owner.validate_public_coordinates(
+            retained[doc["historical_reference"]["path"]]
+        )
+        qual = _object(
+            retained[doc["qualification"]["path"]],
+            "schema method_scope selection_digest policy_digest runtime_uid "
+            "owner_digests "
+            "native_receipt decision_provenance reader_slots",
+        )
+        _require(
+            qual["schema"] == "Gate0EPublicWriterQualification.v1"
+            and qual["method_scope"] == _PUBLIC_SCOPE
+            and _sha(retained[doc["qualification"]["path"]])
+            == binding["qualification_digest"]
+            and qual["selection_digest"]
+            == _sha(canonical({k: v for k, v in doc.items() if k != "qualification"}))
+            and qual["policy_digest"] == doc["policy_digest"]
+            and type(qual["runtime_uid"]) is int
+            and qual["runtime_uid"] == binding["runtime_uid"]
+            and qual["owner_digests"] == binding["owners"]
+            and qual["native_receipt"] == binding["native_receipt"]
+            and qual["decision_provenance"] == pins["provenance"]
+            and qual["reader_slots"] == doc["reader_slots"]
+        )
+        slots = _fields(doc["reader_slots"], "release publication producer")
+        for digest in slots.values():
+            _hash(digest)
+        _require(slots["publication"] == _hash(pins["reader_selection_digest"]))
+        native = _object(
+            retained[binding["native_receipt"]["path"]],
+            "schema method_scope owner_digests reader_slots "
+            "qualification_measurements_digest "
+            "runtime_identity_digest reviewer_record_digest",
+        )
+        _require(
+            native["schema"] == "Gate0EPublicWriterNativeReview.v1"
+            and native["method_scope"] == _PUBLIC_SCOPE
+            and native["owner_digests"] == binding["owners"]
+            and native["reader_slots"] == slots
+        )
+        for key in (
+            "qualification_measurements_digest",
+            "runtime_identity_digest",
+            "reviewer_record_digest",
+        ):
+            github_owner._hex(native[key])
+        for key in (
+            "source_bundle_digest",
+            "holder_source_digest",
+            "holder_profile_digest",
+        ):
+            _hash(doc[key])
+        selection = EPublicSelection(
+            doc["policy_digest"],
+            doc["campaign_digest"],
+            ESourcePins(**doc["source"]),
+            doc["environment"],
+        )
+        producer = EProducerCoordinates(**doc["producer"])
+        _require(producer.source_revision == selection.source.workflow_revision)
+        run = _fields(
+            pins["run"],
+            "repository_id owner_id workflow_id run_id attempt job_id "
+            "source_revision workflow_digest",
+        )
+        EProducerCoordinates(**{k: v for k, v in run.items() if k != "workflow_digest"})
+        _hash(run["workflow_digest"])
+        _require(run["attempt"] == 1 and run["run_id"] != producer.run_id)
+        for key in ("reviewer_id", "environment_id"):
+            _require(type(pins[key]) is int and pins[key] > 0)
+        return cls(_SEAL, doc, retained, selection)
+
+    @classmethod
+    def _load_document(
+        cls,
+        doc: dict[str, Any],
+        binding: dict[str, Any],
+        *,
+        root_context: dict[str, Any] | None = None,
+    ) -> InstalledEWriter:
+        _require(doc["operation"] == "prepare" and doc["publication"] is None)
         owners = {
             "writer": __file__,
             "proof": proof_owner.__file__,
@@ -644,54 +961,74 @@ class InstalledEWriter:
         def pin(value: object) -> bytes:
             item = _fields(value, "path digest")
             path = item["path"]
-            _require(type(path) is str and path.startswith(_RETAINED))
+            _require(
+                type(path) is str
+                and (
+                    path.startswith(_RETAINED)
+                    or (root_context is not None and path == _ROOT_COMPLETION)
+                )
+            )
             _require(all(part not in ("", ".", "..") for part in path[1:].split("/")))
             if path not in retained:
-                retained[path] = _protected(path, _CAP)
+                if root_context is not None and path == _ROOT_COMPLETION:
+                    retained[path] = root_context["observed"]["retained"][
+                        "bootstrap-observation.json"
+                    ]
+                else:
+                    retained[path] = _protected(path, _CAP)
             _require(_sha(retained[path]) == _hash(item["digest"]))
             _require(sum(map(len, retained.values())) <= 4 * _CAP)
             return retained[path]
 
-        qual_raw = pin(doc["qualification"])
-        _require(_sha(qual_raw) == binding["qualification_digest"])
-        qual = _object(
-            qual_raw,
-            "schema selection_digest policy_digest runtime_uid owner_digests "
-            "native_receipt decision_provenance",
-        )
-        _require(qual["schema"] == "Gate0EWriterQualification.v1")
-        _require(
-            qual["selection_digest"]
-            == _sha(
-                canonical(
-                    {key: value for key, value in doc.items() if key != "qualification"}
+        if root_context is None:
+            qual_raw = pin(doc["qualification"])
+            _require(_sha(qual_raw) == binding["qualification_digest"])
+            qual = _object(
+                qual_raw,
+                "schema selection_digest policy_digest runtime_uid owner_digests "
+                "native_receipt decision_provenance",
+            )
+            _require(qual["schema"] == "Gate0EWriterQualification.v1")
+            _require(
+                qual["selection_digest"]
+                == _sha(
+                    canonical(
+                        {
+                            key: value
+                            for key, value in doc.items()
+                            if key != "qualification"
+                        }
+                    )
                 )
             )
-        )
-        _require(
-            qual["policy_digest"] == doc["policy_digest"]
-            and qual["runtime_uid"] == binding["runtime_uid"]
-        )
-        _require(
-            qual["owner_digests"] == binding["owners"]
-            and qual["native_receipt"] == binding["native_receipt"]
-        )
-        native = _object(
-            pin(binding["native_receipt"]),
-            "schema qualification_measurements_digest runtime_identity_digest "
-            "reviewer_record_digest",
-        )
-        _require(native["schema"] == "Gate0ENativeReviewReceipt.v1")
-        for key in (
-            "qualification_measurements_digest",
-            "runtime_identity_digest",
-            "reviewer_record_digest",
-        ):
             _require(
-                type(native[key]) is str
-                and re.fullmatch(r"[0-9a-f]{64}", native[key]) is not None
+                qual["policy_digest"] == doc["policy_digest"]
+                and qual["runtime_uid"] == binding["runtime_uid"]
             )
-        pin(qual["decision_provenance"])
+            _require(
+                qual["owner_digests"] == binding["owners"]
+                and qual["native_receipt"] == binding["native_receipt"]
+            )
+            native = _object(
+                pin(binding["native_receipt"]),
+                "schema qualification_measurements_digest runtime_identity_digest "
+                "reviewer_record_digest",
+            )
+            _require(native["schema"] == "Gate0ENativeReviewReceipt.v1")
+            for key in (
+                "qualification_measurements_digest",
+                "runtime_identity_digest",
+                "reviewer_record_digest",
+            ):
+                _require(
+                    type(native[key]) is str
+                    and re.fullmatch(r"[0-9a-f]{64}", native[key]) is not None
+                )
+            pin(qual["decision_provenance"])
+
+        else:
+            qual = root_context["qualification"]
+            pin(qual["decision_provenance"])
 
         def trust(value: object) -> EPublicTrust:
             item = _fields(
@@ -780,46 +1117,151 @@ class InstalledEWriter:
             "public_key_sha256 primary_fingerprint encryption_fingerprint",
         )
         pin(gpg["public_key"])
-        if doc["operation"] == "prepare":
-            _require(doc["publication"] is None)
-        else:
-            publication = _fields(
-                doc["publication"],
-                "summary contract decision provenance reviewer_id "
-                "environment_id display_title projection "
-                "private_prerequisites private_collection "
-                "run reader_selection_digest",
+        result = cls(_SEAL, doc, retained, selection)
+        if root_context is not None:
+            result._root_runtime = root_context["observed"]
+            result._root_deadline = root_context["deadline"]
+        return result
+
+    @classmethod
+    def from_original_root_export(cls) -> InstalledEWriter:
+        """Argument-free qualified static profile plus actual original-root facts."""
+        result = cls._from_original_checked()
+        del cls
+        if isinstance(result, _PrivateFailure):
+            _raise_private_failure(result)
+        return result
+
+    @classmethod
+    def _from_original_checked(cls) -> InstalledEWriter | _PrivateFailure:
+        try:
+            return cls._from_original_work()
+        except BaseException as error:
+            return _private_failure(error)
+        finally:
+            del cls
+
+    @classmethod
+    def _from_original_work(cls) -> InstalledEWriter:
+        from vendor_cp.deployment import gate0_runner_supervisor as supervisor
+
+        profile, qualification, binding = _load_root_static_profile()
+        observed = supervisor._observe_original_e_export()
+        _require(observed["schema"] == "Gate0ERootObservedExport.v1")
+        doc = _object(canonical(profile["writer"]))
+        for field_name in ("campaign_digest",):
+            _require(doc[field_name] == observed[field_name])
+        for field_name in ("collector_uid", "courier_uid", "courier_gid"):
+            _require(profile[field_name] == observed[field_name])
+        a9 = _fields(
+            doc["a9"], "lifecycle_binding_digest qualification_digest owned_slots"
+        )
+        _require(a9["lifecycle_binding_digest"] == observed["lifecycle_binding_digest"])
+        original = supervisor._OriginalBounds.parse(observed["original_bounds"])
+        _require(
+            original.boot_id == observed["boot_id"]
+            and math.floor(original.finalization_end * 1000000)
+            == observed["original_end_microseconds"]
+        )
+        raw = observed["retained"]
+        completion = _object(raw["bootstrap-observation.json"])
+        owned = _object(raw["owned-files-retirement.json"])
+        _require(
+            owned["boot_id"] == observed["boot_id"]
+            and owned["original_deadline_microseconds"]
+            == observed["original_end_microseconds"]
+        )
+        _require(
+            completion["original_cutoff_microseconds"]
+            == observed["original_end_microseconds"]
+        )
+        _require(
+            completion["timer"]["NextElapseUSecMonotonic"]
+            == str(observed["original_end_microseconds"])
+        )
+        clock = _fields(
+            completion["bootstrap_manager_observation"]["original_clock"],
+            "schema method_scope lifecycle_binding_digest campaign_digest boot_id "
+            "collector_uid original_bounds_digest original_end_microseconds "
+            "collection_digest window_digests",
+        )
+        _require(
+            clock["schema"] == "Gate0A9OriginalClockBinding.v1"
+            and clock["method_scope"] == "immutable-original-bounds-clock.v1"
+            and clock["lifecycle_binding_digest"]
+            == observed["lifecycle_binding_digest"]
+            and clock["campaign_digest"] == observed["campaign_digest"]
+            and clock["boot_id"] == observed["boot_id"]
+            and clock["collector_uid"] == observed["collector_uid"]
+            and clock["collection_digest"] == observed["collection_installation_digest"]
+            and clock["original_bounds_digest"]
+            == _sha(canonical(observed["original_bounds"]))
+            and clock["original_end_microseconds"]
+            == observed["original_end_microseconds"]
+        )
+        a9.update(
+            manifest=dict(
+                path=_EXPORT + "manifest.json", digest=_sha(raw["manifest.json"])
+            ),
+            files={
+                name: dict(path=_EXPORT + name, digest=_sha(raw[name]))
+                for name in (
+                    "collection.json",
+                    "collector-retirement.json",
+                    "owned-files-retirement.json",
+                )
+            },
+            completion=dict(
+                path=_ROOT_COMPLETION, digest=_sha(raw["bootstrap-observation.json"])
+            ),
+            bootstrap_invocation_id=observed["bootstrap_invocation_id"],
+        )
+        verify_a9_export(
+            raw["manifest.json"],
+            {name: raw[name] for name in a9["files"]},
+            raw["bootstrap-observation.json"],
+            campaign=doc["campaign_digest"],
+            lifecycle_binding=a9["lifecycle_binding_digest"],
+            bootstrap_invocation=a9["bootstrap_invocation_id"],
+            qualification_digest=a9["qualification_digest"],
+            owned_slots=tuple(a9["owned_slots"]),
+        )
+        doc["qualification"] = profile["qualification"]
+        base_owners = {
+            key: value
+            for key, value in binding["owners"].items()
+            if key
+            not in (
+                "supervisor",
+                "root_finalization",
+                "transfer",
+                "bootstrap",
+                "lifecycle",
             )
-            for key in (
-                "summary",
-                "contract",
-                "decision",
-                "provenance",
-                "projection",
-                "private_prerequisites",
-                "private_collection",
-            ):
-                pin(publication[key])
-            selected_run = _fields(
-                publication["run"],
-                "repository_id owner_id workflow_id run_id attempt job_id "
-                "source_revision workflow_digest",
-            )
-            EProducerCoordinates(
-                **{
-                    key: value
-                    for key, value in selected_run.items()
-                    if key != "workflow_digest"
-                }
-            )
-            _hash(selected_run["workflow_digest"])
-            _hash(publication["reader_selection_digest"])
-            _require(publication["provenance"] == qual["decision_provenance"])
-            for key in ("reviewer_id", "environment_id"):
-                _require(type(publication[key]) is int and publication[key] > 0)
-            # These exact bytes are selected by actual native qualification;
-            # neither this document nor an accepted boolean authenticates them.
-        return cls(_SEAL, doc, retained, selection)
+        }
+        result = cls._load_document(
+            doc,
+            {"owners": base_owners},
+            root_context=dict(
+                observed=observed,
+                deadline=original.finalization_end,
+                qualification=qualification,
+            ),
+        )
+        _require(type(result.selection) is ESelection)
+        private_selection = cast(ESelection, result.selection)
+        _require(
+            clock["window_digests"]
+            == [
+                _sha(canonical(case.window.document))
+                for case in private_selection.cases
+            ]
+        )
+        _require(
+            original.finalization
+            <= private_selection.cases[1].end + timedelta(seconds=2)
+        )
+        return result
 
     def _discard_private_state(self) -> None:
         """Invalidate this consumed owner and detach all private installed inputs."""
@@ -910,8 +1352,15 @@ class InstalledEWriter:
     def _prepare_work(self, *, deadline: float) -> None:
         _require(not self._used and self._document["operation"] == "prepare")
         self._used = True
+        _require(type(self.selection) is ESelection)
+        private_selection = cast(ESelection, self.selection)
+        _require(type(deadline) in (int, float) and math.isfinite(deadline))
+        deadline = min(
+            deadline, time.monotonic() + 180, getattr(self, "_root_deadline", deadline)
+        )
         _require(time.monotonic() < deadline)
         doc, a9 = self._document, self._document["a9"]
+        self._check_original_export(deadline)
 
         def export_pin(value: dict[str, Any]) -> bytes:
             raw = _protected(value["path"], _CAP, private=False)
@@ -925,7 +1374,7 @@ class InstalledEWriter:
             manifest,
             files,
             completion,
-            campaign=self.selection.campaign_digest,
+            campaign=private_selection.campaign_digest,
             lifecycle_binding=a9["lifecycle_binding_digest"],
             bootstrap_invocation=a9["bootstrap_invocation_id"],
             qualification_digest=a9["qualification_digest"],
@@ -940,7 +1389,9 @@ class InstalledEWriter:
             == _source_coordinates(self._selected(doc["historical_reference"]))
         )
         reads = InstalledGate0GitHubReads.from_installed()
-        producer = reads.producer_snapshot(ProducerStage.COLLECTION_SNAPSHOT)
+        producer = reads.producer_snapshot(
+            ProducerStage.COLLECTION_SNAPSHOT, deadline=deadline
+        )
         self._producer_join(reads, producer, ProducerStage.COLLECTION_SNAPSHOT)
         prerequisites = canonical(
             dict(
@@ -977,7 +1428,7 @@ class InstalledEWriter:
         profile["executable"] = Path(profile["executable"])
         encrypted = prepare_encrypted_e(
             collection,
-            self.selection,
+            private_selection,
             self.producer,
             doc["source_bundle_digest"],
             prerequisites,
@@ -985,19 +1436,31 @@ class InstalledEWriter:
             deadline=deadline,
         )
         _require(time.monotonic() < deadline)
+        self._check_original_export(deadline)
         _stage(
             {
                 "gate0-evidence.pgp": encrypted.ciphertext,
                 "gate0-evidence-public.json": encrypted.projection,
-            }
+            },
+            deadline=deadline,
         )
+
+    def _check_original_export(self, deadline: float) -> None:
+        if not hasattr(self, "_root_runtime"):
+            return
+        from vendor_cp.deployment import gate0_runner_supervisor as supervisor
+
+        for name, expected in self._root_runtime["files"].items():
+            raw, identity = supervisor._read_original_e_input(name, deadline)
+            _require(identity == expected and _sha(raw) == expected["digest"])
 
     def _receipt_document(
         self,
         release: DraftReleaseFacts | DownloadedReleaseFacts,
         publication: PublicationFacts,
     ) -> bytes:
-        """Private implementation shared by prepublication and final readback."""
+        """Rebuild public receipt; private predicates belong to authenticated B."""
+        _require(type(self.selection) is EPublicSelection)
         doc, pins = self._document, self._document["publication"]
         _require(pins is not None)
         summary_raw = self._selected(pins["summary"])
@@ -1007,9 +1470,10 @@ class InstalledEWriter:
             "projection_asset_id producer "
             "ciphertext_digest plaintext_digest manifest_digest private_receipt_digest "
             "projection_digest policy_digest private_verification_record_digest "
-            "holder_source_digest holder_profile_digest result",
+            "holder_source_digest holder_profile_digest private_prerequisite_digest "
+            "source_reference_digest operational_evidence_digest result",
         )
-        _require(summary["schema"] == "Gate0EBArchiveVerification.v1")
+        _require(summary["schema"] == "Gate0EBArchiveVerification.v2")
         _require(summary["result"] == "private_archive_and_proofs_verified")
         _require(type(summary["producer"]) is dict)
         EProducerCoordinates(**summary["producer"])
@@ -1033,8 +1497,13 @@ class InstalledEWriter:
             "private_verification_record_digest",
             "holder_source_digest",
             "holder_profile_digest",
+            "private_prerequisite_digest",
+            "source_reference_digest",
+            "operational_evidence_digest",
         ):
             _hash(summary[key])
+        _require(summary["holder_source_digest"] == doc["holder_source_digest"])
+        _require(summary["holder_profile_digest"] == doc["holder_profile_digest"])
         provenance = _object(
             self._selected(pins["provenance"]),
             "schema contract_digest decision_digest reviewer_id native_receipt_digest",
@@ -1054,12 +1523,17 @@ class InstalledEWriter:
             provenance["native_receipt_digest"]
             == qualification["native_receipt"]["digest"]
         )
-        contract = _object(self._selected(pins["contract"]), "schema meaning")
+        contract = _object(
+            self._selected(pins["contract"]),
+            "schema meaning proposal_digest adoption_digest",
+        )
         _require(
             contract
             == dict(
-                schema="Gate0EPublicationReviewContract.v1",
-                meaning="digest_bound_b_verification_publication_review",
+                schema="Gate0EPublicationReviewContract.v2",
+                meaning=_PUBLIC_REVIEW_MEANING,
+                proposal_digest=_PUBLIC_PROPOSAL,
+                adoption_digest=_PUBLIC_ADOPTION,
             )
         )
         # These bytes only describe a source candidate. Actual provenance is
@@ -1121,86 +1595,16 @@ class InstalledEWriter:
             inner_manifest_digest=summary["manifest_digest"],
         ).items():
             _require(projection[key] == expected)
-        prerequisites_raw = self._selected(pins["private_prerequisites"])
-        prerequisites = _object(
-            prerequisites_raw,
-            "schema policy_digest campaign_digest source_bundle_digest "
-            "historical_reference historical_reference_digest evidence coverage a9",
-        )
-        _require(prerequisites["schema"] == "Gate0EPrivatePrerequisites.v1")
-        _require(prerequisites["coverage"] == doc["coverage"])
-        _require(set(prerequisites["evidence"]) == set(doc["evidence"]))
-        for name, pin in doc["evidence"].items():
-            actual = self._selected(pin)
-            _require(
-                prerequisites["evidence"][name]
-                == dict(
-                    digest=_sha(actual),
-                    bytes_base64=base64.b64encode(actual).decode("ascii"),
-                )
-            )
-        historical_raw = _decode(prerequisites["historical_reference"])
-        _require(prerequisites["historical_reference_digest"] == _sha(historical_raw))
+        historical = InstalledHistoricalSourceReads.from_installed_public()
+        facts = historical.verify_public(deadline=time.monotonic() + 180)
         _require(
-            _source_coordinates(historical_raw)
-            == _source_coordinates(self._selected(doc["historical_reference"]))
+            type(facts) is historical_owner.PublicHistoricalSourceFacts
+            and historical.owns_facts(facts)
         )
-        for key in ("policy_digest", "campaign_digest", "source_bundle_digest"):
-            _require(prerequisites[key] == doc[key])
-        collection_raw = self._selected(pins["private_collection"])
-        verified = verify_retained_collection(collection_raw, self.selection)
-        producer_raw = canonical(
-            dict(
-                schema="Gate0EProducerSelection.v1",
-                producer=self.producer.document(),
-                source_bundle_digest=doc["source_bundle_digest"],
-            )
-        )
-        inner_receipt = canonical(
-            dict(
-                schema="Gate0ERetainedCollectionReceipt.v1",
-                policy_digest=verified.policy_digest,
-                collection_digest=verified.collection_digest,
-                bundle_digests=list(verified.bundle_digests),
-                root_record_digests=list(verified.root_record_digests),
-                join_digests=list(verified.join_digests),
-                result="retained_bytes_verified",
-            )
-        )
-        payloads = {
-            "collection.json": collection_raw,
-            "producer.json": producer_raw,
-            "prerequisites.json": prerequisites_raw,
-            "receipt.json": inner_receipt,
-        }
-        manifest = canonical(
-            dict(
-                schema="Gate0EArchiveManifest.v1",
-                files={
-                    name: dict(
-                        length=len(payloads[name]), sha256=_sha(payloads[name])[7:]
-                    )
-                    for name in ARCHIVE_NAMES
-                },
-            )
-        )
-        # Deterministic existing archive owner, no alternate tar/envelope.
-        plaintext = archive_owner._pack(manifest, payloads)
-        private_result = verify_private_e(
-            archive_owner.unpack_private_archive(plaintext),
-            self.selection,
-            EPrivateInputs(
-                self.producer,
-                doc["source_bundle_digest"],
-                prerequisites_raw,
-                projection_raw,
-                plaintext,
-                assets["gate0-evidence.pgp"].raw_bytes,
-            ),
-        )
-        _require(private_result.receipt_digest == summary["private_receipt_digest"])
-        _require(private_result.manifest_digest == summary["manifest_digest"])
-        _require(private_result.plaintext_digest == summary["plaintext_digest"])
+        _require("sha256:" + facts.source_policy_digest == doc["policy_digest"])
+        _require(facts.coordinates_bytes == self._selected(doc["historical_reference"]))
+        # Archived source-reference bytes were authenticated at B. A fresh host's
+        # public wrapper is intentionally not substituted for the archived hash.
         target = (
             release.target_commitish
             if type(release) is DraftReleaseFacts
@@ -1214,14 +1618,10 @@ class InstalledEWriter:
                 campaign_digest=self.selection.campaign_digest,
                 source_bundle_digest=doc["source_bundle_digest"],
                 collection_digest=projection["collection_digest"],
-                private_prerequisite_digest=_sha(prerequisites_raw),
+                private_prerequisite_digest=summary["private_prerequisite_digest"],
                 producer=self.producer.document(),
-                source_reference_digest=_sha(historical_raw),
-                operational_evidence_digest=_sha(
-                    canonical(
-                        {name: pin["digest"] for name, pin in doc["evidence"].items()}
-                    )
-                ),
+                source_reference_digest=summary["source_reference_digest"],
+                operational_evidence_digest=summary["operational_evidence_digest"],
                 b_summary_digest=_sha(summary_raw),
                 b_holder_profile_digest=summary["holder_profile_digest"],
                 b_verification_record_digest=summary[
@@ -1305,7 +1705,21 @@ class InstalledEWriter:
             and type(draft) is DraftReleaseFacts
         )
         _require(draft_reads.owns_facts(draft) and draft.draft is True)
+        _require(
+            "sha256:" + draft_reads.installed_selection_digest
+            == self._document["reader_slots"]["release"]
+        )
         _require(len(draft.assets) == 2)
+        producer_reads = InstalledGate0GitHubReads.from_installed_producer_completion()
+        _require(
+            "sha256:" + producer_reads.installed_selection_digest
+            == self._document["reader_slots"]["producer"]
+        )
+        producer = producer_reads.producer_snapshot(ProducerStage.PRODUCER_RUN_COMPLETE)
+        self._producer_join(
+            producer_reads, producer, ProducerStage.PRODUCER_RUN_COMPLETE
+        )
+        _require(producer.status == "completed" and producer.conclusion == "success")
         _require(
             type(publication_reads) is InstalledGate0GitHubReads
             and type(publication) is PublicationFacts
@@ -1354,7 +1768,7 @@ class InstalledEWriter:
         producer: ProducerFacts,
     ) -> PublishedEVerification | _PrivateFailure:
         try:
-            return self._verify_published_work(
+            result = self._verify_published_work(
                 release_reads,
                 release,
                 publication_reads,
@@ -1362,6 +1776,8 @@ class InstalledEWriter:
                 producer_reads,
                 producer,
             )
+            self._discard_private_state()
+            return result
         except BaseException as error:
             self._discard_private_state()
             return _private_failure(error)
@@ -1406,6 +1822,14 @@ class InstalledEWriter:
         _require(
             publication.run.status == "completed"
             and publication.run.conclusion == "success"
+        )
+        _require(
+            "sha256:" + release_reads.installed_selection_digest
+            == self._document["reader_slots"]["release"]
+        )
+        _require(
+            "sha256:" + producer_reads.installed_selection_digest
+            == self._document["reader_slots"]["producer"]
         )
         self._producer_join(
             producer_reads, producer, ProducerStage.PRODUCER_RUN_COMPLETE
@@ -1471,11 +1895,22 @@ class PublishedEVerification:
     gh_command_digests: tuple[str, ...]
 
 
-def _stage(files: dict[str, bytes]) -> None:
+def _stage(files: dict[str, bytes], *, deadline: float | None = None) -> None:
     """Create-only fixed private outputs; retain partial attempt on any failure."""
+
+    def before() -> None:
+        if deadline is not None:
+            _require(
+                type(deadline) in (int, float)
+                and math.isfinite(deadline)
+                and time.monotonic() < deadline
+            )
+
+    before()
     descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in _STAGING.strip("/").split("/"):
+            before()
             new = os.open(
                 part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor
             )
@@ -1486,6 +1921,7 @@ def _stage(files: dict[str, bytes]) -> None:
         _require(stat.S_IMODE(os.fstat(descriptor).st_mode) == 0o700)
         _require(not os.listdir(descriptor))
         for name, raw in files.items():
+            before()
             fd = os.open(
                 name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -1495,15 +1931,21 @@ def _stage(files: dict[str, bytes]) -> None:
             try:
                 view = memoryview(raw)
                 while view:
+                    before()
                     written = os.write(fd, view)
                     _require(written > 0)
                     view = view[written:]
+                before()
                 os.fsync(fd)
+                before()
             finally:
                 os.close(fd)
+        before()
         os.fsync(descriptor)
+        before()
     finally:
         os.close(descriptor)
+    before()
 
 
 def run_installed_prepare_e() -> int:

@@ -69,7 +69,16 @@ def installed_composition(writer_composition):  # noqa: F811
             if isinstance(value, dict) and value.get("full_name") == "dotmac/selected":
                 value["full_name"] = publication._REPOSITORY
             c.wire[(path, binary)] = value
-        return gh.InstalledGate0GitHubReads.from_installed()
+        result = gh.InstalledGate0GitHubReads.from_installed()
+        c.reader_digests[phase] = result.installed_selection_digest
+        if phase == "producer":
+            c.gh_files[gh._PRODUCER_COMPLETION_INSTALLATION] = c.gh_files[
+                gh._INSTALLATION
+            ]
+            c.gh_files[gh._PRODUCER_COMPLETION_ROOT_BINDING] = c.gh_files[
+                gh._ROOT_BINDING
+            ]
+        return result
 
     c.reader = reader
     return c
@@ -221,7 +230,7 @@ def _publisher(c, monkeypatch, *, operation, draft=None, pub_reads=None, summary
 
     def pin(name, value):
         raw = gh._canonical(value)
-        path = "/etc/dotmac-gate0-e/publication-unit-" + name
+        path = "/etc/dotmac-gate0-e/publication-" + name + ".json"
         files[path] = raw
         return {"path": path, "sha256": gh._digest(raw)}
 
@@ -365,7 +374,7 @@ def _publisher(c, monkeypatch, *, operation, draft=None, pub_reads=None, summary
 @pytest.fixture
 def transfer_composition(installed_composition):  # noqa: F811
     c = installed_composition
-    c.reader("producer")
+    c.reader("producer", snapshot_stage="collection")
     c.load().prepare(deadline=time.monotonic() + 180)
     c.reader("producer")
     doc = gh._json(c.gh_files[gh._INSTALLATION])
@@ -408,10 +417,23 @@ def transfer_composition(installed_composition):  # noqa: F811
         )
     ] = dict(total_count=1, artifacts=[artifact])
     c.wire[(prefix + "/actions/artifacts/40/zip", True)] = archive_bytes
+    qual = gh._json(c.gh_files[doc["qualification"]["path"]])
+    native_path = "/etc/dotmac-gate0-e/github-read-transfer-native.json"
+    c.gh_files[native_path] = c.gh_files[qual["native_receipt_pin"]["path"]]
+    native_pin = {"path": native_path, "digest": gh._digest(c.gh_files[native_path])}
+    qual["native_receipt_pin"] = native_pin
+    qual_path = "/etc/dotmac-gate0-e/github-read-transfer-qualification.json"
+    c.gh_files[qual_path] = gh._canonical(qual)
+    doc["qualification"] = {
+        "path": qual_path,
+        "digest": gh._digest(c.gh_files[qual_path]),
+    }
     raw = gh._canonical(doc)
     c.gh_files[gh._INSTALLATION] = raw
     binding = gh._json(c.gh_files[gh._ROOT_BINDING])
     binding["installation_sha256"] = gh._digest(raw)
+    binding["qualification_sha256"] = doc["qualification"]["digest"]
+    binding["native_receipt_pin"] = native_pin
     c.gh_files[gh._ROOT_BINDING] = gh._canonical(binding)
     reads = gh.InstalledGate0GitHubReads.from_installed()
     facts = reads.encrypted_transfer()
@@ -1083,7 +1105,7 @@ def test_publication_loader_uses_actual_protected_metadata_checks(
         if failure == "installation_owner" and path == publication._INSTALLATION:
             uid = 999
         elif failure == "binding_mode" and path == publication._BINDING:
-            mode = stat.S_IFREG | 0o644
+            mode = stat.S_IFREG | 0o646
         elif failure == "source_owner" and path == source_path:
             uid = 999
         elif failure == "writable_ancestor" and path == "/run":
@@ -1127,3 +1149,46 @@ def test_publication_credential_file_refusal_precedes_mutation_and_scrubs_error(
         publisher.prepare_draft_once(reads, transfer)
     _assert_publication_graph_clean(raised.value, publisher=publisher)
     assert not p.native.calls
+
+
+def test_publication_exact_public_metadata_and_private_credential_options(
+    transfer_composition, monkeypatch
+):
+    c, reads, transfer = transfer_composition
+    p = _publisher(c, monkeypatch, operation="prepare_draft")
+    p.load(transfer_reads=reads)
+    native = gh._protected
+    calls = []
+    allowed = {
+        publication._INSTALLATION,
+        publication._BINDING,
+        "/etc/dotmac-gate0-e/publication-qualification.json",
+        "/etc/dotmac-gate0-e/publication-native.json",
+    }
+
+    def classified(path, *args, **kwargs):
+        if path in allowed:
+            assert kwargs.get("private", True) is False
+        if path == publication._CREDENTIAL:
+            assert kwargs.get("private", True) is True and args[-1] == 0
+        calls.append(path)
+        return native(path, *args, **kwargs)
+
+    monkeypatch.setattr(gh, "_protected", classified)
+    publisher = publication.InstalledEPublication.from_installed()
+    publisher.prepare_draft_once(reads, transfer)
+    assert allowed <= set(calls) and publication._CREDENTIAL in calls
+
+
+def test_publication_public_pin_refuses_private_history_before_open(monkeypatch):
+    opened = []
+    monkeypatch.setattr(gh, "_protected", lambda *args, **kwargs: opened.append(args))
+    with pytest.raises(publication.EPublicationRefused):
+        publication._pin(
+            {
+                "path": "/etc/dotmac-gate0-e/source-references/dossier",
+                "sha256": "a" * 64,
+            },
+            "/etc/dotmac-gate0-e/publication-native.json",
+        )
+    assert not opened

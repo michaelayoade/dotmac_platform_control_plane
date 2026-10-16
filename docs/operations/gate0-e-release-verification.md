@@ -43,7 +43,7 @@ Fixed `/etc/dotmac-gate0-e/release-verifier-binding.json` has exactly:
 `credential_uid`, `reader_binding_sha256`, `runtime_image_digest`.
 Runtime UID must be nonzero and equal real/effective UID; credential UID is that
 UID or root. `source_sha256` pins this wrapper's actual installed bytes.
-`reader_binding_sha256` pins `/etc/dotmac-gate0-e/github-read-binding.json`.
+`reader_binding_sha256` pins `/etc/dotmac-gate0-e/github-read-published-release-binding.json`.
 The runtime image identity is an externally installed native trust input, not a
 claim independently measured by a Python JSON parser.
 
@@ -182,3 +182,29 @@ within the fixed reserve. A native failure requires reporting failure or an
 explicit reviewed policy revision; it cannot silently increase limits. No host,
 release verification, credential ceremony, publication or E acceptance is
 performed by this source preparation.
+
+
+## Public metadata and exact final reader slot
+
+Initial load and runtime rechecks use `private=False` only for root-owned
+nonwritable public installation/binding metadata, qualified source/binary/
+interpreter/CA bytes and closed digest projections. Qualification is fixed at
+`/etc/dotmac-gate0-e/release-verifier-qualification.json`; native projection is
+`/etc/dotmac-gate0-e/release-verifier-native.json`. Private credentials and detailed
+native measurement bodies retain their private restrictions.
+
+Both initial qualification and `_reader_profile` read exactly
+`/etc/dotmac-gate0-e/github-read-published-release-binding.json`.
+`reader_binding_sha256` now means this actual published-release slot, matching the
+final adapter's separate `from_installed_published_release()` owner. Default,
+transfer or draft binding aliases do not qualify. Exact live reader installation/
+qualification/source identity and official gh release/all-asset verification
+remain mandatory.
+
+The positive Linux runtime UID remains nonzero. Normal public leaves are root0644
+with root0755 ancestry; source work does not alter an actual host. Repin wrapper/
+reader source hashes, root bindings, qualification and native evidence for the
+new access semantics and exact `reader_binding_sha256` meaning. Old measurements
+cannot establish that qualification. Actual nonroot OS access/private credential
+isolation and official native execution proof remain outstanding; mocked unit
+boundaries and source checks are not acceptance.

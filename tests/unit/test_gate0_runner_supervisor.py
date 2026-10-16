@@ -151,12 +151,15 @@ def test_same_manager_file_retirement_precedes_close_and_manifest(
         classmethod(lambda cls: Recovered()),
     )
     published = []
-    monkeypatch.setattr(owner, "_export_directory", lambda gid, deadline: None)
+    monkeypatch.setattr(
+        owner, "_export_directory", lambda gid, deadline: owner._require(gid == 0)
+    )
     monkeypatch.setattr(
         owner,
         "_publish",
-        lambda path, raw, gid, deadline, **kw: published.append(
-            (path.name, raw, deadline)
+        lambda path, raw, gid, deadline, **kw: (
+            owner._require(gid == 0 and kw["mode"] == 0o600),
+            published.append((path.name, raw, deadline)),
         ),
     )
     monkeypatch.setattr(
@@ -208,16 +211,20 @@ def test_export_create_only_and_actual_fifo_refusal(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(owner.os, "fchown", lambda *args: None)
     path = export / "collection.json"
-    owner._publish(path, b"actual-byte-fixture", 0, owner.time.monotonic() + 5)
+    owner._publish(
+        path, b"actual-byte-fixture", 0, owner.time.monotonic() + 5, mode=0o600
+    )
     before = path.stat()
     with pytest.raises(FileExistsError):
-        owner._publish(path, b"other", 0, owner.time.monotonic() + 5)
+        owner._publish(path, b"other", 0, owner.time.monotonic() + 5, mode=0o600)
     assert path.read_bytes() == b"actual-byte-fixture"
     assert path.stat().st_ino == before.st_ino
     other = export / "failure.json"
     os.mkfifo(other, 0o600)
     with pytest.raises(FileExistsError):
-        owner._publish(other, b"never-overwrites-fifo", 0, owner.time.monotonic() + 5)
+        owner._publish(
+            other, b"never-overwrites-fifo", 0, owner.time.monotonic() + 5, mode=0o600
+        )
     assert other.stat().st_mode & 0o170000 == 0o010000
 
 
@@ -228,7 +235,7 @@ def test_expired_export_never_creates_or_deletes(monkeypatch, tmp_path):
     path = export / "manifest.json"
     path.write_bytes(b"foreign")
     with pytest.raises(LifecycleRefused):
-        owner._publish(path, b"new", 0, owner.time.monotonic() - 1)
+        owner._publish(path, b"new", 0, owner.time.monotonic() - 1, mode=0o600)
     assert path.read_bytes() == b"foreign"
     assert [p.name for p in export.iterdir()] == ["manifest.json"]
 
@@ -501,6 +508,11 @@ def test_orchestration_failed_or_late_outer_delivery_never_starts_jit(
             owner._before(deadline)
         raise LifecycleRefused()
 
+    from vendor_cp.deployment import gate0_e_root_finalization
+
+    monkeypatch.setattr(
+        gate0_e_root_finalization, "initialize_original_export", lambda: None
+    )
     monkeypatch.setattr(owner, "_read_outer_credential", refuse)
     assert owner.run_installed_lifecycle() == 3
     assert events == ["timer", "lock", "keys", "certificates", "close", "unlock"]
@@ -566,7 +578,9 @@ def test_publication_expiry_never_starts_rollback_work(monkeypatch, tmp_path, tr
     monkeypatch.setattr(owner.os, "stat", inspect)
     monkeypatch.setattr(owner.os, "unlink", unlink)
     with pytest.raises(LifecycleRefused):
-        owner._publish(export / "manifest.json", b"uncertain-documentary-bytes", 0, end)
+        owner._publish(
+            export / "manifest.json", b"uncertain-documentary-bytes", 0, end, mode=0o600
+        )
     assert all(start < deadline for _, start, deadline in operations)
     assert sum(name == "directory" for name, _, _ in operations) == 1
     assert (export / "manifest.json").read_bytes() == b"uncertain-documentary-bytes"
@@ -602,7 +616,7 @@ def test_in_bound_rollback_removes_only_exact_owned_final(
 
     monkeypatch.setattr(owner.os, "fsync", sync)
     with pytest.raises(OSError):
-        owner._publish(path, b"owned", 0, owner.time.monotonic() + 5)
+        owner._publish(path, b"owned", 0, owner.time.monotonic() + 5, mode=0o600)
     if replacement:
         assert path.read_bytes() == b"foreign-replacement"
         assert (export / "retained-owned").read_bytes() == b"owned"
@@ -658,6 +672,104 @@ def test_uncertain_parent_close_preserves_documentary_inode(monkeypatch, tmp_pat
             b"retained-uncertain",
             0,
             owner.time.monotonic() + 5,
+            mode=0o600,
         )
     assert len(opens) == 1
     assert (export / "manifest.json").read_bytes() == b"retained-uncertain"
+
+
+def test_private_export_helper_refuses_courier_readable_mode_before_open(monkeypatch):
+    touched = []
+    monkeypatch.setattr(
+        owner, "_publication_parent", lambda *args: touched.append(args)
+    )
+    with pytest.raises(LifecycleRefused):
+        owner._publish(
+            owner._EXPORT / "collection.json",
+            b"PRIVATE",
+            1003,
+            owner.time.monotonic() + 5,
+            mode=0o640,
+        )
+    assert not touched
+
+
+@pytest.mark.parametrize("failure", ["mode", "uid", "gid", "inode", "late"])
+def test_original_e_private_descriptor_refuses_metadata_and_time_races(
+    monkeypatch, tmp_path, failure
+):
+    import stat
+
+    export = tmp_path / "private-export"
+    export.mkdir(mode=0o700)
+    path = export / "collection.json"
+    path.write_bytes(b"PRIVATE-COLLECTION")
+    path.chmod(0o600)
+    real_fstat, real_stat = os.fstat, os.stat
+    now = [10.0]
+    monkeypatch.setattr(owner, "_EXPORT", export)
+    monkeypatch.setattr(
+        owner,
+        "_directory",
+        lambda *a, **kw: os.open(export, os.O_RDONLY | os.O_DIRECTORY),
+    )
+    monkeypatch.setattr(owner.time, "monotonic", lambda: now[0])
+
+    def metadata(fd):
+        actual = real_fstat(fd)
+        values = {
+            name: getattr(actual, name)
+            for name in (
+                "st_dev",
+                "st_ino",
+                "st_size",
+                "st_nlink",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+        }
+        values.update(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o600)
+        if failure == "mode":
+            values["st_mode"] = stat.S_IFREG | 0o640
+        elif failure == "uid":
+            values["st_uid"] = 1002
+        elif failure == "gid":
+            values["st_gid"] = 1003
+        return SimpleNamespace(**values)
+
+    monkeypatch.setattr(owner.os, "fstat", metadata)
+
+    def current(*args, **kwargs):
+        actual = real_stat(*args, **kwargs)
+        if failure == "late":
+            now[0] = 20.0
+        return SimpleNamespace(
+            st_dev=actual.st_dev, st_ino=actual.st_ino + int(failure == "inode")
+        )
+
+    monkeypatch.setattr(owner.os, "stat", current)
+    with pytest.raises(LifecycleRefused):
+        owner._read_original_e_input("collection.json", 20.0)
+    assert path.read_bytes() == b"PRIVATE-COLLECTION"
+
+
+def test_failed_bootstrap_is_refused_before_any_root_finalizer(installed, monkeypatch):
+    from vendor_cp.deployment import gate0_e_root_finalization
+
+    calls = []
+    monkeypatch.setattr(
+        gate0_e_root_finalization,
+        "prepare_original_export",
+        lambda: calls.append("finalizer"),
+    )
+    failure = dict(
+        ActiveState="failed",
+        SubState="failed",
+        MainPID="0",
+        Result="exit-code",
+        ExecMainCode="1",
+        ExecMainStatus="1",
+    )
+    with pytest.raises(LifecycleRefused):
+        owner.prepare_original_e_export(installed, failure)
+    assert not calls

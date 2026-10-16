@@ -8,7 +8,7 @@ bytes. Foundation candidate allocation, ExecutionGrant and Lane 3 admission are
 later operations and are not preparation inputs. Existing B/C1 decisions remain
 selected historical evidence.
 
-The only installed entry provided here is `run_installed_prepare_e()`. The CLI
+The default installed entry is `run_installed_prepare_e()`. The CLI
 adapter belongs to the coordinator. It loads `/run/dotmac-gate0-e/writer.json`
 and the independent `/etc/dotmac-gate0-e/writer-binding.json`. Both are protected
 root-owned, canonical, bounded JSON read through the existing no-follow owner.
@@ -85,24 +85,60 @@ not create a draft, upload, publish or return acceptance. The closed B summary
 schema is specified in `_receipt_document`; hashes are `sha256:` prefixed and
 producer uses the existing `EProducerCoordinates.document()` shape.
 
-The publication installation selects exact original collection/prerequisite/
-projection bytes plus summary, contract, Michael decision and authenticated
-provenance bytes. The original deterministic private archive is recomputed with
-the existing archive owner and pure verifier; B's exact inner receipt, manifest
-and plaintext digests must match. This binds the final receipt's independently
-computed prerequisite/source/operational hashes without expanding B's summary.
-The receipt omits its own digest, future asset ID and future attestation.
+Publication/readback use the distinct closed
+`Gate0EPublicWriterInstallation.v1` selection and
+`Gate0EPublicWriterBinding.v1`, at the existing fixed writer paths.
+`Gate0EWriterInstallation.v1` accepts preparation only; there is no private-loader
+fallback for publication. Public mode constructs `EPublicSelection`, containing
+only policy/campaign, public source pins and Environment. It contains no
+`ESelection`, root bindings, collection, prerequisites, operational payloads,
+GPG/custody keys or private proof pins.
 
-The source-candidate provenance format is
-`Gate0EPublicationDecisionProvenance.v1`, with exact contract/decision/native
-receipt digests and reviewer ID. The contract is the closed
-`Gate0EPublicationReviewContract.v1` meaning
-`digest_bound_b_verification_publication_review`. These records are bounded
-references selected by the actual independent native qualification owner;
-neither a boolean nor the literal meaning authenticates Michael's decision.
-The generic protected Environment approval and existing Mac root-handoff
-adoption are insufficient. Michael has **not adopted** this B provenance meaning,
-so no genuine operational provenance pin exists in this source handoff.
+The independently qualified public selection pins the exact summary/projection,
+closed public historical coordinates, holder source/profile expectations, source bundle,
+producer coordinates, publication attempt and reader selection digests. Each
+public retained purpose has one fixed slot under
+`/etc/dotmac-gate0-e/writer/public/`: `qualification.json`, `native.json`,
+`historical.json`, `summary.json`, `contract.json`, `decision.json`,
+`provenance.json` and `projection.json`. Caller-selected paths are refused.
+The source/native owner hashes and runtime UID remain authenticated by the fixed
+protected binding. `Gate0EPublicWriterQualification.v1` and
+`Gate0EPublicWriterNativeReview.v1` both require method scope
+`public-evidence-publication-readback.v1`, matching source owners and exact reader
+slots. Generated metadata cannot supply native qualification.
+
+Only the exact closed `Gate0EBArchiveVerification.v2` summary is accepted. B owns
+full decryption/private proof verification and derives its additional
+`private_prerequisite_digest`, `source_reference_digest` and
+`operational_evidence_digest` inside that successful verification. Publication
+compares the genuinely selected holder source/profile, summary asset IDs/digests,
+producer and policy to the actual public draft and projection. It obtains actual
+completed producer facts from the separate fixed producer-completion reader and
+checks exact workflow bytes/revision and job. It independently checks fresh live-owned public historical facts through
+`from_installed_public()` / `verify_public()`. The exact coordinate bytes must
+equal its fixed `historical.json` slot, validated as
+`Gate0EHistoricalSourceCoordinates.v1`. Full private wrappers and retained pins
+refuse without fallback. The archived source digest
+comes from B; a fresh host-specific historical wrapper cannot replace it.
+The unchanged closed receipt uses those three B-authenticated digests, the exact
+public projection and public producer/review/release facts. Public execution does
+not rerun private proof parsing. The receipt omits its own digest, future asset ID
+and future attestation.
+
+`Gate0EPublicationDecisionProvenance.v1` binds exact contract/decision/native
+receipt digests and reviewer ID. The closed
+`Gate0EPublicationReviewContract.v2` requires the exact adopted human-review
+meaning from the 2026-10-16 evidence-boundary decision, proposal digest
+`sha256:7a70090ef3a174ec0983f3a5e0abd9d80145ad3978d9498d639225db30504ba1`
+and adoption digest
+`sha256:58b02290fa3f1dc72811be314c99040d6f9187148103e6c4c08a03e97709bd9c`.
+This meaning attests actual qualified B verification for the displayed summary,
+draft and producer, and authorizes public-only reliance for the selected attempt.
+It grants no plaintext/key transfer or extended A9 lifetime. The independent
+native installation authority must authenticate genuine decision provenance;
+matching JSON and a generic Environment approval cannot recreate that history.
+The design is adopted; actual executor/native qualification, B custody, fresh
+exact-run human review and publication remain separately required operations.
 
 The exact displayed title is:
 
@@ -199,8 +235,9 @@ exact observed source bytes and bind its selected revision.
 
 All fixtures are explicitly source-unit inputs. Their selected native/provenance
 records and ciphertext do not establish real native success or Michael's
-publication decision. The B publication-review meaning remains **unadopted**;
-genuine independent qualification/provenance remains mandatory for installation.
+publication decision. The public-only publication and exact B review meaning
+are adopted; genuine independent qualification/provenance and a fresh exact-run
+human review remain mandatory before operational publication.
 These compositions are authored for hosted execution and were not executed in
 this repair. Local validation remains AST parsing and Ruff 0.6.9 only.
 
@@ -232,13 +269,14 @@ A bounded helper outcome is private control flow, not acceptance evidence.
 
 Hosted source tests plant a private payload marker and inspect emitted exception
 `__context__`, `__cause__`, this module's traceback locals and failed owner state.
-Late failures follow actual unpack/proof/receipt/manifest checks, reconstructed
-receipt plaintext, encryption/private staging and final published readback.
+Late failures follow actual unpack/proof/receipt/manifest checks in private
+verification/preparation, public projection/receipt checks during publication,
+encryption/private staging and final published readback.
 Deliberately retained internal completed work frames must also have empty locals.
 Stop-signal tests verify cleanup and proper interruption after materialization.
 These tests remain authored source; this repair runs only AST and Ruff checks.
 
-Successful `construct_receipt` now releases the consumed writer's private
+Successful `construct_receipt` releases the consumed writer's public
 selection/retained-input references before returning the same canonical public
 receipt bytes. The owner retains only `_used=True`; it cannot construct another
 receipt or supply a later verification phase. Later independent verification
@@ -248,3 +286,73 @@ comparison afterwards. This change does not alter receipt/provenance/adoption,
 source or policy checks, erase external retained evidence, access custody, or
 claim memory zeroization. An authored hosted regression checks canonical output,
 consumed state and clean one-shot refusal; local validation remains AST/Ruff only.
+
+
+## Existing-root preparation amendment
+
+`InstalledEWriter.from_original_root_export()` is an argument-free root-only
+factory for the original supervisor. It loads fixed
+`/etc/dotmac-gate0-e/root-static-profile.json` and
+`/etc/dotmac-gate0-e/root-static-binding.json`. The closed
+`Gate0ERootStaticProfile.v1`, `Gate0ERootStaticBinding.v1`,
+`Gate0ERootStaticQualification.v1` and
+`Gate0ERootFinalizationNativeReview.v1` records independently bind the static
+writer policy, trust, retained evidence, recipient, decision provenance, actual
+UIDs and source owners. Qualification explicitly selects method scope
+`original-root-static-profile-export-encryption.v1`. The owner roster additionally
+pins supervisor, root finalization, transfer, bootstrap and lifecycle source.
+These are proposed installation formats requiring genuine external qualification.
+
+Only `manifest`, `files`, `completion` and `bootstrap_invocation_id` are derived
+at runtime from the existing supervisor's fixed protected original export. No
+caller supplies those fields. The factory observes actual successful bootstrap
+manager identity, original collector installation, private export bytes and file
+identities, original boot/campaign/bounds, owned-file retirement and exact retained
+timer cutoff. It verifies the bootstrap's immutable-original-clock projection and
+exact selected A/B windows. Static inputs cannot be replaced by runtime fields.
+The default installed document and publication/readback paths retain their
+existing checks.
+
+The root preparation deadline is the minimum of the existing 180-second cap and
+the actual original absolute end. That same cap reaches historical verification,
+the producer snapshot, encryption and create-only staging writes. Original export
+identity and bytes are rechecked before use and output. No new finalization tail
+is granted. Root staging remains root-only; the separate fixed transfer owner
+exposes only the exact ciphertext/public-projection pair. See
+[the root assembly contract](gate0-e-root-finalization.md).
+
+
+## Public-only source regression coverage
+
+Installed fixtures select the public schema and native scope through actual
+loaders, using synthetic protected-file/native/HTTP boundaries. Private-read
+sentinels cover both publication and readback receipt construction; private
+selection construction and proof verification are forbidden there. B summary
+v1, unknown/missing v2 fields, bad digest/type, foreign holder/source/profile,
+producer/policy/assets, old/changed review contract and decision provenance refuse.
+Public receipt digest fields are compared against the preparation fixture's
+actual archived prerequisites/source/evidence digests. Whole-run publication
+completion, separate producer/release slots and the official verifier remain
+required for final readback. Local validation is AST/hash/JSON and Ruff 0.6.9;
+these repository tests require the hosted lane and are not native acceptance.
+
+
+## Public metadata access and native requalification
+
+Shared `/run/dotmac-gate0-e/writer.json` is first read through
+`private=False` for schema dispatch. Preparation rereads exactly the same bytes
+through `private=True` before any private preparation use; its binding, private
+qualification, retained evidence and root-static path retain private checks.
+Public mode alone reads its root binding and eight closed fixed public metadata
+slots with `private=False`. The historical slot is exclusively the new closed
+coordinate document, with no opaque private body. Root ownership, nonwritability,
+no-follow ancestry, bounded regular files and actual selected UID remain required.
+Normally public leaves are root0644 under root0755 ancestry, while credentials
+and private inputs remain0600. Source work changes no host permissions.
+
+All changed source hashes, bindings and native evidence must be requalified for
+these access semantics. Existing public publication scope and review contract
+retain their meaning. Genuine Linux nonzero-UID open/read/write-denial and private
+credential/input isolation proof remains an explicit native prerequisite; mocked
+UID/fstat tests prove only source policy calls. The separate B full-private
+historical access issue is not fixed by public publisher composition.

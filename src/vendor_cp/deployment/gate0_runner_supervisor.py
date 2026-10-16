@@ -620,6 +620,8 @@ def _publish(
     }
     allowed.update(_EXPORT / name for name in _EXPORT_NAMES)
     _require(path in allowed and 0 < len(raw) <= 8 * 1024 * 1024)
+    if path.parent == _EXPORT:
+        _require(gid == 0 and mode == 0o600)
     _before(deadline)
     parent = _publication_parent(path.parent, deadline)
     fd = -1
@@ -708,16 +710,17 @@ def _publish(
 
 
 def _export_directory(gid: int, deadline: float) -> None:
+    _require(gid == 0)
     parent = _directory(_ROOT)
     try:
         _before(deadline)
         try:
-            os.mkdir("export", 0o750, dir_fd=parent)
+            os.mkdir("export", 0o700, dir_fd=parent)
             os.chown("export", 0, gid, dir_fd=parent, follow_symlinks=False)
             os.fsync(parent)
         except FileExistsError:
             pass
-        fd = _directory(_EXPORT, gid=gid, mode=0o750)
+        fd = _directory(_EXPORT, gid=gid, mode=0o700)
         os.close(fd)
         _before(deadline)
     finally:
@@ -765,7 +768,7 @@ def _failure(installed: SupervisorInstallation, reason: str, deadline: float) ->
         }
     )
     _before(deadline)
-    gid = installed.lifecycle["courier_gid"]
+    gid = 0
     _export_directory(gid, deadline)
     _publish(
         _EXPORT / "failure.json",
@@ -782,6 +785,7 @@ def _failure(installed: SupervisorInstallation, reason: str, deadline: float) ->
         ),
         gid,
         deadline,
+        mode=0o600,
     )
 
 
@@ -821,14 +825,14 @@ def retire_and_export_collector(
         result.get("schema") == "Gate0A9OwnedFilesRetirement.v1"
         and result.get("result") == "owned_files_retired"
     )
-    gid = installed.lifecycle["courier_gid"]
+    gid = 0
     _export_directory(gid, end)
     files = {
         "collector-retirement.json": fact.observation,
         "owned-files-retirement.json": raw,
     }
     for name, data in files.items():
-        _publish(_EXPORT / name, data, gid, end)
+        _publish(_EXPORT / name, data, gid, end, mode=0o600)
     if not success or not complete or not fact.normal:
         _failure(
             installed,
@@ -838,7 +842,9 @@ def retire_and_export_collector(
         raise LifecycleRefused()
     _require(manager.owns_retirement(fact))
     files["collection.json"] = _collection_bytes(manager.installation.uid, end)
-    _publish(_EXPORT / "collection.json", files["collection.json"], gid, end)
+    _publish(
+        _EXPORT / "collection.json", files["collection.json"], gid, end, mode=0o600
+    )
     observer = SupervisorManager(installed)
     bootstrap = observer.show(_BOOTSTRAP, end)
     _require(
@@ -859,7 +865,7 @@ def retire_and_export_collector(
             result="retained_bytes_exported",
         )
     )
-    _publish(_EXPORT / "manifest.json", manifest, gid, end)
+    _publish(_EXPORT / "manifest.json", manifest, gid, end, mode=0o600)
     _before(end)
 
 
@@ -932,6 +938,153 @@ def _retire_jit(installed: SupervisorInstallation) -> None:
             lock.close()
 
 
+def _read_original_e_input(name: str, deadline: float) -> tuple[bytes, dict[str, Any]]:
+    """Code-fixed original owner files, stable protected descriptors and identity."""
+    _require(
+        name
+        in (
+            "collection.json",
+            "collector-retirement.json",
+            "owned-files-retirement.json",
+            "manifest.json",
+            "bootstrap-observation.json",
+        )
+    )
+    parent_path = _ROOT if name == "bootstrap-observation.json" else _EXPORT
+    parent = _directory(
+        parent_path, **({} if parent_path == _ROOT else {"gid": 0, "mode": 0o700})
+    )
+    fd = -1
+    try:
+        _before(deadline)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        before = os.fstat(fd)
+        _require(
+            stat.S_ISREG(before.st_mode)
+            and before.st_uid == before.st_gid == 0
+            and stat.S_IMODE(before.st_mode) == 0o600
+            and 0 < before.st_size <= 8 * 1024 * 1024
+        )
+        if name == "bootstrap-observation.json":
+            # The actual bootstrap owner commits by linking its retained pending
+            # file. Both exact names must be the same root-private inode.
+            _require(before.st_nlink == 2)
+            pending = os.stat(
+                "bootstrap-observation.pending", dir_fd=parent, follow_symlinks=False
+            )
+            _require((pending.st_dev, pending.st_ino) == (before.st_dev, before.st_ino))
+        else:
+            _require(before.st_nlink == 1)
+        _before(deadline)
+        raw = os.pread(fd, before.st_size + 1, 0)
+        _before(deadline)
+        _require(len(raw) == before.st_size and not os.pread(fd, 1, len(raw)))
+        fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_uid",
+            "st_gid",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        _require(
+            tuple(getattr(before, k) for k in fields)
+            == tuple(getattr(os.fstat(fd), k) for k in fields)
+        )
+        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        _require((current.st_dev, current.st_ino) == (before.st_dev, before.st_ino))
+        _before(deadline)
+        return raw, dict(
+            device=before.st_dev, inode=before.st_ino, bytes=len(raw), digest=_hash(raw)
+        )
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        os.close(parent)
+
+
+def _observe_original_e_export() -> dict[str, Any]:
+    """Only this qualified root owner derives original runtime export bindings."""
+    installed = SupervisorInstallation.load()
+    manager = SupervisorManager(installed)
+    lifecycle = manager.qualify()
+    end = installed.bounds.finalization_end
+    bootstrap = manager.show(_BOOTSTRAP, end)
+    _require(
+        bootstrap["ActiveState"] == "inactive"
+        and bootstrap["SubState"] == "dead"
+        and bootstrap["MainPID"] == "0"
+        and bootstrap["Result"] == "success"
+        and bootstrap["ExecMainCode"] == "1"
+        and bootstrap["ExecMainStatus"] == "0"
+        and re.fullmatch(r"[0-9a-f]{32}", bootstrap["InvocationID"]) is not None
+    )
+    collection_raw = _protected(_ROOT / "installation.json", 8 * 1024 * 1024)
+    collection = strict_object(collection_raw)
+    _require(
+        collection["schema"] == "Gate0RunnerCollectionInstallation.v1"
+        and collection["campaign_digest"] == installed.lifecycle["campaign_digest"]
+        and type(collection["collector_uid"]) is int
+        and collection["collector_uid"] == installed.lifecycle["collector_uid"]
+    )
+    raw, identities = {}, {}
+    for name in (
+        "collection.json",
+        "collector-retirement.json",
+        "owned-files-retirement.json",
+        "manifest.json",
+        "bootstrap-observation.json",
+    ):
+        raw[name], identities[name] = _read_original_e_input(name, end)
+    _require(manager.show(_BOOTSTRAP, end) == bootstrap)
+    _require(manager.show(_LIFECYCLE, end) == lifecycle)
+    _before(end)
+    return dict(
+        schema="Gate0ERootObservedExport.v1",
+        boot_id=installed.bounds.boot_id,
+        original_bounds=installed.lifecycle["original_bounds"],
+        original_end_microseconds=math.floor(end * 1000000),
+        lifecycle_binding_digest=installed.lifecycle["lifecycle_binding_digest"],
+        campaign_digest=installed.lifecycle["campaign_digest"],
+        collector_uid=installed.lifecycle["collector_uid"],
+        courier_uid=installed.lifecycle["courier_uid"],
+        courier_gid=installed.lifecycle["courier_gid"],
+        supervisor_invocation_id=lifecycle["InvocationID"],
+        bootstrap_invocation_id=bootstrap["InvocationID"],
+        supervisor_installation_digest=_hash(canonical(installed.document)),
+        supervisor_qualification_digest=installed.document["qualification_digest"],
+        collection_installation_digest=_hash(collection_raw),
+        files=identities,
+        retained=raw,
+    )
+
+
+def prepare_original_e_export(
+    installed: SupervisorInstallation, bootstrap_exit: dict[str, str]
+) -> None:
+    """Finite transform after this same bootstrap invocation, before JIT wait."""
+    _before(installed.bounds.finalization_end)
+    _require(
+        bootstrap_exit["ActiveState"] == "inactive"
+        and bootstrap_exit["SubState"] == "dead"
+        and bootstrap_exit["MainPID"] == "0"
+        and bootstrap_exit["Result"] == "success"
+        and bootstrap_exit["ExecMainCode"] == "1"
+        and bootstrap_exit["ExecMainStatus"] == "0"
+    )
+    _require(
+        SupervisorManager(installed).show(_BOOTSTRAP, installed.bounds.finalization_end)
+        == bootstrap_exit
+    )
+    from vendor_cp.deployment.gate0_e_root_finalization import prepare_original_export
+
+    prepare_original_export()
+    _before(installed.bounds.finalization_end)
+
+
 def run_installed_lifecycle() -> int:
     """Argument-free fixed outer entry; original deadlines stay armed on failure."""
     installed: SupervisorInstallation | None = None
@@ -971,6 +1124,11 @@ def run_installed_lifecycle() -> int:
         )
         _delivery(installed)
         lifecycle.install_controller_certificates()
+        from vendor_cp.deployment.gate0_e_root_finalization import (
+            initialize_original_export,
+        )
+
+        initialize_original_export()
         credential = _read_outer_credential(installed.bounds.provisioning_end)
         lifecycle._install_original_jit_config(credential)
         credential = b""
@@ -1029,6 +1187,12 @@ def run_installed_lifecycle() -> int:
         bootstrap_exit = manager.wait_inactive(
             _BOOTSTRAP, bootstrap["InvocationID"], end
         )
+        _require(
+            bootstrap_exit["Result"] == "success"
+            and bootstrap_exit["ExecMainCode"] == "1"
+            and bootstrap_exit["ExecMainStatus"] == "0"
+        )
+        prepare_original_e_export(installed, bootstrap_exit)
         jit_exit = manager.wait_inactive(_JIT, jit_invocation, end)
         _retire_jit(installed)
         for values in (bootstrap_exit, jit_exit):

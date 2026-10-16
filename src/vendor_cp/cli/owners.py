@@ -105,11 +105,25 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "fixed qualified private collection finalization and encrypted staging",
     ),
     Owner(
+        "gate0 await-e-transfer",
+        "vendor_cp.deployment.gate0_e_transfer",
+        "run_installed_await_e_transfer",
+        False,
+        "fixed original-bound root-issued encrypted-only transfer readback",
+    ),
+    Owner(
         "gate0 prepare-e-draft",
         "vendor_cp.deployment.gate0_e_publication",
         "run_installed_prepare_e_draft",
         True,
         "fixed qualified draft creation and exact encrypted evidence uploads",
+    ),
+    Owner(
+        "gate0 public-jit-runner-credential",
+        "vendor_cp.deployment.gate0_runner_lifecycle_courier",
+        "run_installed_public_jit_runner",
+        True,
+        "fixed separately qualified public single-job JIT exec",
     ),
     Owner(
         "gate0 publish-e",

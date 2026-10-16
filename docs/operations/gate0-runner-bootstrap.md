@@ -9,15 +9,15 @@ commands delegate to the installed bootstrap and credential owners.
 
 The argument-free `run_installed_bootstrap()` loads only root-protected
 `/run/dotmac-gate0-collector/bootstrap.json`. Its closed
-`Gate0CollectorBootstrapInstallation.v1` fields are `schema`, `campaign_digest`,
-`collection_installation`, `collector_binary`, `collector_gid`,
+`Gate0CollectorBootstrapInstallation.v2` fields are `schema`, `campaign_digest`,
+`lifecycle_binding_digest`, `collection_installation`, `collector_binary`, `collector_gid`,
 `collector_groups`, `socket_gid`, `receiver_template`, `qualification`,
 `native_receipt`, `source_revision`, `source_files`, `unit_assets`,
 `manager_client`, and `manager_binary`. File pins are exactly `{path,digest}`;
 all files and their ancestry must be root-owned and immutable to other users.
 `manager_client` is fixed `/usr/bin/systemctl`; `manager_binary` must match the
-actual PID1 executable. `source_files` contains exactly this bootstrap and the
-new fixed credential adapter. `unit_assets` contains the four fixed `.in`
+actual PID1 executable. `source_files` contains exactly this bootstrap, the fixed credential adapter
+and `gate0_runner_lifecycle`. `unit_assets` contains the four fixed `.in`
 templates in `deploy/gate0-a9`, keyed by their exact unit names. Source revision
 is a 40-character lowercase commit. Numeric groups are explicitly selected and
 observed; `collector_groups` must include the exclusive socket group. An empty
@@ -31,9 +31,10 @@ existing `Gate0ReceiverInstallation.v1` shape except for `collector`; the source
 publishes the actual observed UID/PID/start without changing root-frame/ACK
 schemas.
 
-`Gate0A9BootstrapQualification.v1` is a NEW candidate input format, with exactly
+`Gate0A9BootstrapQualification.v2` is a NEW candidate input format, with exactly
 `schema`, `campaign_digest`, `installation_digest`, `source_revision`,
-`source_files`, `unit_assets`, `manager_identity`, and `native_receipt_digest`.
+`source_files`, `unit_assets`, `manager_identity`, `native_receipt_digest`,
+and `clock_owner_scope`. The latter must be `immutable-original-bounds-clock.v1`.
 The installation digest excludes only the qualification pin. Manager identity
 contains the actual PID1 executable digest, manager Version, kernel release and
 boot ID. Qualification must equal the computed installed pins, actual manager
@@ -166,3 +167,27 @@ Unit tests use synthetic manager observations for source predicates and do not
 establish actual systemd/kernel behavior. The bootstrap and CLI integration have
 passed independent source review. Native qualification, design adoption and
 installed execution approval remain separate and unproven.
+
+
+## Immutable original clock amendment
+
+The installed v2 branch loads the existing qualified fixed lifecycle installation
+and its original bounds before starting the bootstrap. It joins actual boot,
+campaign, collector UID, lifecycle binding and exact selected A/B windows to the
+pinned collection installation. Original UTC finalization must be no later than
+selected B expiry plus two seconds. The timer uses the earlier authoritative
+`original_bounds.finalization_end`; the installed loader does not resample wall
+and monotonic clocks to reconstruct that end. There is no installed v1 fallback.
+The pure `OriginalCutoff` DTO retains its independent-clock behavior for existing
+source callers; it does not authorize an installed clock.
+
+The manager completion includes a closed `Gate0A9OriginalClockBinding.v1`
+projection of those actual joins, the original bounds digest, exact selected
+window digests and floor(end × 1,000,000). The retained timer cutoff, owned-file
+retirement, root writer and transfer ticket use that same original end. Waiting
+for JIT completion and original secret retirement still occur within it.
+
+This changes the external installation/native qualification contract. Genuine
+v2 source and native qualification are required before execution; these source
+records neither generate that qualification nor authorize a campaign. Tests for
+shifted wall clocks, earlier ends and mismatched scope are authored, not executed.

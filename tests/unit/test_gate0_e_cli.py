@@ -10,6 +10,11 @@ from vendor_cp.cli.owners import by_command
 
 ENTRIES = (
     (
+        "await-e-transfer",
+        "vendor_cp.deployment.gate0_e_transfer",
+        "run_installed_await_e_transfer",
+    ),
+    (
         "prepare-e-draft",
         "vendor_cp.deployment.gate0_e_publication",
         "run_installed_prepare_e_draft",
@@ -52,7 +57,7 @@ def test_e_cli_delegates_once_without_inputs_or_output_transformation(
     assert (owner.module, owner.symbol, owner.mutates) == (
         module_name,
         symbol,
-        command != "verify-e-published",
+        command not in {"verify-e-published", "await-e-transfer"},
     )
     assert main(["gate0", command]) == status
     assert calls == [symbol]
@@ -102,3 +107,52 @@ def test_e_cli_refuses_installed_policy_overrides(
         main(["gate0", command, flag, "synthetic-override"])
     assert refused.value.code == 2
     assert not calls
+
+
+@pytest.mark.parametrize("status", [0, 3])
+def test_public_jit_cli_is_one_argument_free_owner(monkeypatch, capsys, status):
+    module_name = "vendor_cp.deployment.gate0_runner_lifecycle_courier"
+    module = ModuleType(module_name)
+    calls = []
+    module.run_installed_public_jit_runner = lambda: calls.append(()) or status
+    monkeypatch.setitem(sys.modules, module_name, module)
+    owner = by_command()["gate0 public-jit-runner-credential"]
+    assert (owner.module, owner.symbol, owner.mutates) == (
+        module_name,
+        "run_installed_public_jit_runner",
+        True,
+    )
+    assert main(["gate0", "public-jit-runner-credential"]) == status
+    assert calls == [()]
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["unexpected"],
+        ["--path", "/synthetic/profile"],
+        ["--uid", "123"],
+        ["--deadline", "60"],
+        ["--credential-file", "/synthetic/secret"],
+        ["--command", "other"],
+        ["--mode", "publish"],
+    ],
+)
+def test_public_jit_cli_rejects_all_extra_inputs(extra):
+    with pytest.raises(SystemExit) as caught:
+        main(["gate0", "public-jit-runner-credential", *extra])
+    assert caught.value.code == 2
+
+
+def test_public_jit_cli_sanitizes_unexpected_owner_failure(monkeypatch, capsys):
+    module_name = "vendor_cp.deployment.gate0_runner_lifecycle_courier"
+    module = ModuleType(module_name)
+
+    def failure():
+        raise ValueError("synthetic-private-launch-detail")
+
+    module.run_installed_public_jit_runner = failure
+    monkeypatch.setitem(sys.modules, module_name, module)
+    assert main(["gate0", "public-jit-runner-credential"]) == 3
+    assert capsys.readouterr() == ("", "")

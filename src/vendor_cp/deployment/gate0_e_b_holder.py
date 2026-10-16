@@ -694,7 +694,9 @@ class InstalledBArchiveVerifier:
                 writer._source_coordinates(source_facts.reference_bytes)
                 == writer._source_coordinates(self._pin("historical_reference"))
             )
-            prerequisites = _object(self._pin("prerequisite"))
+            prerequisites_raw = private.proof_files["prerequisites.json"]
+            _require(_sha(prerequisites_raw) == result.prerequisite_digest)
+            prerequisites = _object(prerequisites_raw)
             archived_reference = writer._decode(prerequisites["historical_reference"])
             _require(
                 writer._source_coordinates(archived_reference)
@@ -705,6 +707,16 @@ class InstalledBArchiveVerifier:
                 == self._document["historical_installation"]["digest"]
             )
             _require(time.monotonic() < deadline and reads.owns_facts(draft_facts))
+            private_prerequisite_digest = _sha(prerequisites_raw)
+            source_reference_digest = _sha(archived_reference)
+            operational_evidence_digest = _sha(
+                canonical(
+                    {
+                        name: evidence["digest"]
+                        for name, evidence in prerequisites["evidence"].items()
+                    }
+                )
+            )
             record = canonical(
                 dict(
                     schema="Gate0EBPrivateArchiveVerification.v1",
@@ -725,6 +737,9 @@ class InstalledBArchiveVerifier:
                     manifest_digest=result.manifest_digest,
                     private_receipt_digest=result.receipt_digest,
                     prerequisite_digest=result.prerequisite_digest,
+                    private_prerequisite_digest=private_prerequisite_digest,
+                    source_reference_digest=source_reference_digest,
+                    operational_evidence_digest=operational_evidence_digest,
                     projection_digest=result.projection_digest,
                     collection_digest=result.collection_digest,
                     holder_source_digest=_sha(_root_read(os.path.abspath(__file__))),
@@ -742,7 +757,7 @@ class InstalledBArchiveVerifier:
             _require(time.monotonic() < deadline)
             summary = canonical(
                 dict(
-                    schema="Gate0EBArchiveVerification.v1",
+                    schema="Gate0EBArchiveVerification.v2",
                     repository_id=draft_facts.repository_id,
                     release_id=draft_facts.release_id,
                     ciphertext_asset_id=assets["gate0-evidence.pgp"].id,
@@ -754,6 +769,9 @@ class InstalledBArchiveVerifier:
                     private_receipt_digest=result.receipt_digest,
                     projection_digest=result.projection_digest,
                     policy_digest=selection.policy_digest,
+                    private_prerequisite_digest=private_prerequisite_digest,
+                    source_reference_digest=source_reference_digest,
+                    operational_evidence_digest=operational_evidence_digest,
                     private_verification_record_digest=record_digest,
                     holder_source_digest=_sha(_root_read(os.path.abspath(__file__))),
                     holder_profile_digest=self._profile_digest,
@@ -766,6 +784,7 @@ class InstalledBArchiveVerifier:
         finally:
             decrypted = private = result = source_facts = historical_reads = None
             record = summary = archived_reference = ciphertext = projection = b""
+            prerequisites_raw = b""
             prerequisites = public = {}
             assets = {}
             selection = profile = None

@@ -388,3 +388,75 @@ Listener-close and recovery-descriptor-close errors remain sticky. Each owned
 listener/descriptor close is isolated so its error cannot skip unrelated known
 slots. File retirement still attempts all independently safe originals and
 returns the failure document when any close or durable observation is uncertain.
+
+## Separate public E JIT exec candidate
+
+`dotmac-platform gate0 public-jit-runner-credential` delegates without arguments
+to `run_installed_public_jit_runner()` in the existing courier owner. This source
+candidate launches one selected public draft or publication job. No host, UID,
+original interval, registration or credential delivery arrangement is selected
+or qualified by this implementation. Its tests are source fixtures; actual
+nonroot Linux permissions, official supplier runner behavior and native manager
+qualification remain pending.
+
+The independently installed root-owned, runtime-readable, nonwritable records
+are `/run/dotmac-gate0-e/public-jit.json` and
+`/etc/dotmac-gate0-e/public-jit-{qualification,binding,native}.json`.
+The closed selection pins an exact attempt1 execution, operation, positive
+UID/GID with empty supplementary groups, original same-boot clock calibration,
+CLI/interpreter and source hashes. The source map contains exactly
+`gate0_runner_lifecycle`, `gate0_runner_lifecycle_courier`, `gate0_framing`,
+`cli_init`, `cli_owners`; paths derive from the imported installed modules.
+Lifecycle pins use `sha256:` plus 64 lowercase hex characters. The existing
+`Gate0ENativeReviewReceipt.v1` digest projection retains its three bare 64-hex
+fields; the binding hashes its full canonical bytes. No private dossier,
+credential or credential digest belongs in these public records.
+
+The leaf checks the original absolute monotonic end derived once from selected
+`monotonic + (ends_at - wall)`, and also checks current UTC expiry. Delayed launch
+consumes that original interval; backward wall movement cannot extend it. It
+checks the literal public unit cgroup, root-owned unit source bytes, actual
+interpreter and exact CLI command, then uses the existing qualified runner mount
+class. The public credential is read only from
+`/run/credentials/dotmac-gate0-e-public-jit.service/jit-config`, on a read-only
+mount, as a one-link runtime-owned regular file of mode0400. Inherited runner
+input, GitHub job/token and known OIDC/runtime token environment refuses launch.
+The fixed Runner.Listener is checked as an ELF and hashed through the same FD
+used for exec; its inode must match the immutable supplier. Its four-element
+vector is `Runner.Listener`, `run`, `--startuptype`, `service`. The child has only
+`PATH`, `LC_ALL`, fixed `HOME`, and `ACTIONS_RUNNER_INPUT_JITCONFIG`; no credential
+appears in argv or output. Failure returns3; control interruption is sanitized
+and propagated after local descriptor/buffer detachment. Exec emits no receipt.
+Public refusal cleanup attempts each known descriptor close once, even when an
+earlier close fails. It never retries an uncertain descriptor number. Ordinary
+read/exec/close failures return3; the first observed control interruption category
+survives later cleanup failures and is rethrown with sanitized state. Credential
+and child-environment references are detached on refusal. This public branch
+repairs an inherited credential close-loop weakness without changing the A9
+branch's existing close/error behavior. A close attempt does not prove native
+closure, crash-safe cleanup or immutable credential erasure.
+
+The external root operator must qualify the actual finite transient manager
+unit, effective properties/drop-in absence, immutable supplier/runtime closure,
+no capabilities/delegation, UID/GID/groups, read-only mounts and secret-safe
+diagnostics. Checking unit source bytes does not establish loaded properties.
+The manager must independently enforce the *same original absolute stop* after
+exec, kill its whole cgroup on every termination path and observe descendants
+reaped. A fresh duration starting at delayed launch cannot extend that stop.
+The off-host runner administrator must supply and qualify genuine one-job
+registration for the exact approved job and observe retirement of its exact
+runner ID, removing it if needed. The credential owner removes original and
+mounted projections and decoded ephemeral state. The leaf cannot prove these
+facts, erase immutable strings, register/retire a runner or clean up after a
+successful exec.
+
+The fixed runner/home paths may be reused only in an independently qualified
+isolated execution context dedicated to this attempt. Never concurrently share
+UID, writable state or credential mounts with A9 or another public attempt.
+Draft and publication have separately selected executions and fresh credentials;
+reuse follows observed teardown. Workflow jobs invoke only fixed `prepare-e-draft`
+or `publish-e` steps after genuinely obtaining their assigned runner job; they
+do not invoke this launch leaf or install its profile. Existing GitHub read
+owners still enforce fresh source/job/group/Environment/reviewer facts; final
+readback follows success of the whole publication run. This candidate supplies
+no controller, registrar, supervisor, new service or acceptance authority.

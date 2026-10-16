@@ -7,12 +7,13 @@ up here. A failed attempt is consumed and can only reconcile by bounded reads.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 from vendor_cp.deployment import gate0_e_github as github
 from vendor_cp.deployment import gate0_e_writer as writer_owner
@@ -75,11 +76,11 @@ def _document(raw: bytes, fields: str) -> dict[str, Any]:
     return value
 
 
-def _pin(value: object) -> tuple[dict[str, Any], bytes]:
+def _pin(value: object, expected_path: str) -> tuple[dict[str, Any], bytes]:
     pin = github._closed(value, "path sha256")
     path = pin["path"]
-    _require(type(path) is str and path.startswith("/etc/dotmac-gate0-e/"))
-    raw = github._protected(path, github._JSON_CAP)
+    _require(type(path) is str and path == expected_path)
+    raw = github._protected(path, github._JSON_CAP, private=False)
     _require(github._digest(raw) == github._hex(pin["sha256"]))
     value = github._obj(github._json(raw))
     _require(github._canonical(value) == raw)
@@ -153,7 +154,7 @@ class InstalledEPublication:
 
     @classmethod
     def _load(cls) -> InstalledEPublication:
-        raw = github._protected(_INSTALLATION, github._JSON_CAP)
+        raw = github._protected(_INSTALLATION, github._JSON_CAP, private=False)
         doc = _document(
             raw,
             "schema operation policy_digest repository release producer "
@@ -199,7 +200,7 @@ class InstalledEPublication:
         github._hex(producer["workflow_digest"])
         github._hex(producer["source_policy_digest"])
         binding = _document(
-            github._protected(_BINDING, 65536),
+            github._protected(_BINDING, 65536, private=False),
             "schema installation_sha256 qualification_sha256 runtime_uid owners "
             "native_receipt",
         )
@@ -226,7 +227,9 @@ class InstalledEPublication:
                     )
                 )
             )
-        qual, qual_raw = _pin(doc["qualification"])
+        qual, qual_raw = _pin(
+            doc["qualification"], "/etc/dotmac-gate0-e/publication-qualification.json"
+        )
         qual = github._closed(
             qual,
             "schema selection_digest policy_digest runtime_uid credential_uid "
@@ -251,7 +254,9 @@ class InstalledEPublication:
             and qual["owners"] == binding["owners"]
         )
         _require(qual["native_receipt"] == binding["native_receipt"])
-        native, _ = _pin(binding["native_receipt"])
+        native, _ = _pin(
+            binding["native_receipt"], "/etc/dotmac-gate0-e/publication-native.json"
+        )
         native = github._closed(
             native,
             "schema method_scope owner_digests qualification_measurements_digest "
@@ -330,7 +335,7 @@ class InstalledEPublication:
                 and host not in ("api.github.com", "uploads.github.com")
             )
             try:
-                github.ipaddress.ip_address(host)
+                ipaddress.ip_address(host)
             except ValueError:
                 continue
             raise EPublicationRefused()
@@ -673,7 +678,7 @@ class InstalledEPublication:
             _require(checked is None or checked == observed)
         _require(not self._pages("assets", observed["id"]))
         self._tag_absent()
-        return observed["id"]
+        return cast(int, observed["id"])
 
     def _upload(
         self,
@@ -979,7 +984,7 @@ def _run_publish_work() -> None:
         )
         publication = publication_reads.publication_snapshot()
         summary = github._protected(
-            "/run/dotmac-gate0-e/b-archive-verification.json", 65536
+            "/run/dotmac-gate0-e/b-archive-verification.json", 65536, private=False
         )
         publisher.publish_once(
             writer, draft_reads, draft, publication_reads, publication, summary

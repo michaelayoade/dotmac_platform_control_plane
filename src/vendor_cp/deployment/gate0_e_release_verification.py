@@ -222,6 +222,8 @@ def _join(
 
 _INSTALLATION = "/run/dotmac-gate0-e/release-verifier.json"
 _BINDING = "/etc/dotmac-gate0-e/release-verifier-binding.json"
+_QUALIFICATION = "/etc/dotmac-gate0-e/release-verifier-qualification.json"
+_NATIVE = "/etc/dotmac-gate0-e/release-verifier-native.json"
 _CREDENTIAL = "/run/dotmac-gate0-e/github-read-token"
 _WORK = "/run/dotmac-gate0-e/gh-work"
 _CA = "/etc/ssl/certs/ca-certificates.crt"
@@ -403,7 +405,7 @@ class InstalledGhReleaseVerifier:
 
         try:
             _require(sys.platform == "linux")
-            raw = _protected(_INSTALLATION, _JSON_CAP)
+            raw = _protected(_INSTALLATION, _JSON_CAP, private=False)
             installation = _object(
                 _json(raw), "schema repository release gh interpreter qualification"
             )
@@ -412,7 +414,7 @@ class InstalledGhReleaseVerifier:
                 and installation["schema"] == "Gate0EGhReleaseInstallation.v1"
             )
             _selection(installation)
-            binding_raw = _protected(_BINDING, _JSON_CAP)
+            binding_raw = _protected(_BINDING, _JSON_CAP, private=False)
             binding = _object(
                 _json(binding_raw),
                 "schema installation_sha256 qualification_sha256 native_receipt "
@@ -437,6 +439,10 @@ class InstalledGhReleaseVerifier:
             _require(
                 _sha(_protected(os.path.abspath(__file__), _JSON_CAP, private=False))
                 == binding["source_sha256"]
+            )
+            _require(
+                _object(installation["qualification"], "path sha256")["path"]
+                == _QUALIFICATION
             )
             _, qualification_raw = _pin(installation["qualification"])
             qualification = _object(
@@ -489,6 +495,9 @@ class InstalledGhReleaseVerifier:
             )
             _require(qualification["kernel"] == platform.release())
             _require(qualification["boot_id"] == _boot_id())
+            _require(
+                _object(binding["native_receipt"], "path sha256")["path"] == _NATIVE
+            )
             _, receipt_raw = _pin(binding["native_receipt"])
             receipt = _object(
                 _json(receipt_raw),
@@ -505,7 +514,9 @@ class InstalledGhReleaseVerifier:
                     re.fullmatch(r"[a-f0-9]{64}", _text(receipt[name])) is not None
                 )
             reader_binding = _protected(
-                "/etc/dotmac-gate0-e/github-read-binding.json", _JSON_CAP
+                "/etc/dotmac-gate0-e/github-read-published-release-binding.json",
+                _JSON_CAP,
+                private=False,
             )
             _require(_sha(reader_binding) == binding["reader_binding_sha256"])
             _require(
@@ -559,8 +570,13 @@ class InstalledGhReleaseVerifier:
         _require(0 < storage.f_files <= _POLICY["filesystem_inodes"])
 
     def _runtime_profile(self) -> None:
-        _require(_protected(_INSTALLATION, _JSON_CAP) == _canonical(self._installation))
-        _require(_sha(_protected(_BINDING, _JSON_CAP)) == self._binding_digest)
+        _require(
+            _protected(_INSTALLATION, _JSON_CAP, private=False)
+            == _canonical(self._installation)
+        )
+        _require(
+            _sha(_protected(_BINDING, _JSON_CAP, private=False)) == self._binding_digest
+        )
         binary, raw = _pin(self._installation["gh"], 128 * _JSON_CAP)
         _require(binary == self._binary and _sha(raw) == self._binary_digest)
         _require(
@@ -569,7 +585,11 @@ class InstalledGhReleaseVerifier:
         )
 
     def _reader_profile(self, reads: InstalledGate0GitHubReads) -> None:
-        raw = _protected("/etc/dotmac-gate0-e/github-read-binding.json", _JSON_CAP)
+        raw = _protected(
+            "/etc/dotmac-gate0-e/github-read-published-release-binding.json",
+            _JSON_CAP,
+            private=False,
+        )
         _require(_sha(raw) == self._qualification["reader_binding_sha256"])
         binding = _object(_json(raw))
         _require(

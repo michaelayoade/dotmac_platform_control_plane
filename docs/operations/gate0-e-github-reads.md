@@ -283,9 +283,11 @@ private URLs, identities, timestamps or free error text are allowed in this publ
 projection. A later finalizer owns writing it from actual verified inputs.
 
 `PublicationFacts` observes an exact digest-bound title and this run's review.
-Interpreting that review as the actor's assertion that B verified exact bytes is
-still pending human provenance-design adoption. Existing corrected B/C1 owner
-closure decisions remain their own accepted source records; this client neither
+The owner adopted the public-only B-verification review meaning on 2026-10-16.
+Its use still requires genuine native adoption provenance, actual B private
+verification and a fresh review of the exact summary and selected run. Source
+adoption alone proves none of those runtime events. Existing corrected B/C1
+closure decisions retain their accepted source records; this client neither
 redecides nor manufactures prerequisite acceptance.
 
 `InstalledGhReleaseVerifier.from_installed()` delegates lazily to the separately
@@ -372,3 +374,43 @@ actual release ID with only `{"draft":false}`. Mutation responses never follow
 redirects. The publisher accepts no server `upload_url`, arbitrary origin/body,
 delete, replacement, retry or retag operation. Shared transport changes do not
 qualify an installation or prove any live GitHub behavior.
+
+
+## Live producer stage and original deadline
+
+`producer_snapshot(stage, deadline=...)` accepts an optional absolute monotonic
+cap. It only clamps the existing 90-second producer phase; it cannot extend it.
+`PROTECTED_JOB_STARTED` and `COLLECTION_SNAPSHOT` require the selected job and
+run to be in progress with null conclusion, and the job to have null completion
+time. Publication-start observations use the same live collection predicate.
+Completed producer jobs cannot substitute for this live stage.
+
+The selected required-step roster enforces completed collection predecessors.
+The currently waiting transfer and future upload steps belong to producer-job
+completion, not collection prerequisites. Declaring the current waiting step a
+collection prerequisite refuses; stage checks are not relaxed to accommodate a
+completed fixture. Existing completed-publication and published-release checks,
+GET transport and installed qualification requirements remain in force.
+
+
+## Public metadata leaf access
+
+Each existing fixed installation/root-binding slot is nonsecret public metadata
+read with the existing `private=False` no-follow/root-nonwritable checks. Metadata
+pins no longer accept an arbitrary file below `/etc/dotmac-gate0-e/`.
+For each closed phase (`protected_job`, `producer`, `publication`,
+`publication_complete`, `transfer`, `draft`, `draft_with_receipt`, `published`), qualification and native
+projection paths are exactly `/etc/dotmac-gate0-e/github-read-<phase>-qualification.json`
+and `/etc/dotmac-gate0-e/github-read-<phase>-native.json`. Source policy is exactly
+`/etc/dotmac-gate0-e/github-read-source-policy-<selected-run-ID>.json`.
+All retain their existing exact closed qualification/native/source-policy schemas
+and independently qualified hash/source/UID joins. Private historical records and
+detailed native measurement bodies are not permitted in these slots.
+
+Normal public metadata leaves are root0644 under traversable root0755 ancestry,
+with every root ownership/nonwrite/no-follow/size check preserved. The helper's
+private default is unchanged; `github-read-token` remains private0600 for its exact
+selected credential UID. No source change installs files or changes host modes.
+Requalification must repin source hashes, exact metadata paths/bindings and actual
+access scope. Native Linux nonroot read and forbidden-write/private-path proof
+remains required; source fixtures and mocked stat/UID are not that proof.

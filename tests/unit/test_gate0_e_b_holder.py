@@ -39,6 +39,23 @@ def b_composition(installed_composition, historical_installed, monkeypatch, tmp_
     comp.load().prepare(deadline=time.monotonic() + 180)
     transfer, package = comp.staged[-1], comp.packages[-1]
     plaintext = package[4]
+    # The fresh Mac reader has its own qualification wrapper. Preserve the
+    # historical source coordinates while making its exact bytes different
+    # from the reference already archived by the producer.
+    h = holder.historical
+    h_files = historical_installed[1]
+    h_selection = strict_object(h_files[h._INSTALLATION])
+    h_qualification = strict_object(h_files[h._QUALIFICATION])
+    dossier = h_qualification["decision_provenance_pin"]
+    h_files[dossier["path"]] = b"independent Mac qualified owner dossier"
+    dossier["sha256"] = holder._sha(h_files[dossier["path"]])[7:]
+    h_files[h._QUALIFICATION] = canonical(h_qualification)
+    h_selection["qualification"]["sha256"] = holder._sha(h_files[h._QUALIFICATION])[7:]
+    h_files[h._INSTALLATION] = canonical(h_selection)
+    h_binding = strict_object(h_files[h._BINDING])
+    h_binding["qualification_sha256"] = holder._sha(h_files[h._QUALIFICATION])[7:]
+    h_binding["installation_sha256"] = holder._sha(h_files[h._INSTALLATION])[7:]
+    h_files[h._BINDING] = canonical(h_binding)
     reads = comp.reader("draft", release_files=transfer)
     facts = reads.draft_snapshot()
     assert type(reads) is holder.github.InstalledGate0GitHubReads
@@ -280,6 +297,15 @@ def test_positive_fixed_mac_loader_and_complete_live_owned_draft(b_composition):
         fixture.reads, fixture.facts, deadline=time.monotonic() + 180
     )
     summary = strict_object(result.summary)
+    assert set(summary) == set(
+        "schema repository_id release_id ciphertext_asset_id projection_asset_id "
+        "producer ciphertext_digest plaintext_digest manifest_digest "
+        "private_receipt_digest projection_digest policy_digest "
+        "private_verification_record_digest holder_source_digest "
+        "holder_profile_digest result private_prerequisite_digest "
+        "source_reference_digest operational_evidence_digest".split()
+    )
+    assert summary["schema"] == "Gate0EBArchiveVerification.v2"
     assert summary["result"] == "private_archive_and_proofs_verified"
     assert summary["producer"] == fixture.comp.producer.document()
     assert result.summary_digest == holder._sha(result.summary)
@@ -289,9 +315,80 @@ def test_positive_fixed_mac_loader_and_complete_live_owned_draft(b_composition):
         and holder._sha(records[0].read_bytes()) == result.private_record_digest
     )
     assert stat.S_IMODE(records[0].stat().st_mode) == 0o600
+    archive = holder.archive.unpack_private_archive(fixture.plaintext)
+    prerequisites_raw = archive.proof_files["prerequisites.json"]
+    prerequisites = strict_object(prerequisites_raw)
+    archived_reference = base64.b64decode(prerequisites["historical_reference"])
+    expected = dict(
+        private_prerequisite_digest=holder._sha(prerequisites_raw),
+        source_reference_digest=holder._sha(archived_reference),
+        operational_evidence_digest=holder._sha(
+            canonical(
+                {
+                    name: evidence["digest"]
+                    for name, evidence in prerequisites["evidence"].items()
+                }
+            )
+        ),
+    )
+    record = strict_object(records[0].read_bytes())
+    for key, digest in expected.items():
+        assert summary[key] == record[key] == digest
+    assert record["prerequisite_digest"] == summary["private_prerequisite_digest"]
+    assert record["historical_reference_digest"] != summary["source_reference_digest"]
     assert fixture.decrypted_calls and not installed._selected
     assert installed._selection is None and installed._profile is None
     assert b"B-PRIVATE-PAYLOAD-MARKER" not in result.summary
+
+
+@pytest.mark.parametrize("change", ["coverage", "evidence", "source", "campaign"])
+def test_summary_requires_full_private_verification(b_composition, monkeypatch, change):
+    fixture = b_composition
+    original = holder.archive.unpack_private_archive(fixture.plaintext)
+    files = dict(original.proof_files)
+    prerequisites = strict_object(files["prerequisites.json"])
+    if change == "coverage":
+        prerequisites["coverage"].pop(next(iter(prerequisites["coverage"])))
+    elif change == "evidence":
+        prerequisites["evidence"][next(iter(prerequisites["evidence"]))]["digest"] = (
+            "sha256:" + "0" * 64
+        )
+    elif change == "source":
+        prerequisites["historical_reference_digest"] = "sha256:" + "0" * 64
+    else:
+        prerequisites["campaign_digest"] = "sha256:" + "0" * 64
+    files["prerequisites.json"] = canonical(prerequisites)
+    # Rebind through the genuine installed loader, so the private validator
+    # reaches the altered predicate rather than only detecting a stale pin.
+    prerequisite_pin = fixture.document["prerequisite"]
+    fixture.files[prerequisite_pin["path"]] = files["prerequisites.json"]
+    prerequisite_pin["digest"] = holder._sha(files["prerequisites.json"])
+    fixture.qualify()
+    installed = fixture.load()
+    manifest = canonical(
+        dict(
+            schema="Gate0EArchiveManifest.v1",
+            files={
+                name: dict(length=len(raw), sha256=holder._sha(raw)[7:])
+                for name, raw in files.items()
+            },
+        )
+    )
+    plaintext = holder.archive._pack(manifest, files)
+
+    def decrypt(ciphertext, profile, *, deadline):
+        assert ciphertext and profile and time.monotonic() < deadline
+        return holder.archive.DecryptedArchive(
+            plaintext, holder._sha(plaintext)[7:], "5" * 64
+        )
+
+    monkeypatch.setattr(holder.archive, "decrypt_private_collection", decrypt)
+    with pytest.raises(holder.BHolderRefused):
+        installed.verify_draft(
+            fixture.reads, fixture.facts, deadline=time.monotonic() + 180
+        )
+    assert not list(fixture.verified.glob("*.json"))
+    assert installed._selection is None and not installed._selected
 
 
 @pytest.mark.parametrize("owner", ["proof", "handoff", "framing"])

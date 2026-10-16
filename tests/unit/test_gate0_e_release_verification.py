@@ -491,7 +491,7 @@ def installed_documents(monkeypatch, facts):
         return {"path": path, "sha256": verifier._sha(raw)}
 
     native = pin(
-        "/etc/native.json",
+        verifier._NATIVE,
         verifier._canonical(
             {
                 "schema": "Gate0ENativeReviewReceipt.v1",
@@ -525,7 +525,10 @@ def installed_documents(monkeypatch, facts):
         "interpreter": interpreter,
     }
     source = pin(os.path.abspath(verifier.__file__), b"pinned-wrapper")
-    reader = pin("/etc/dotmac-gate0-e/github-read-binding.json", b"reader-binding")
+    reader = pin(
+        "/etc/dotmac-gate0-e/github-read-published-release-binding.json",
+        b"reader-binding",
+    )
     ca = pin(verifier._CA, b"ca-bundle")
     qualification = {
         "schema": "Gate0EGhReleaseNativeQualification.v1",
@@ -547,7 +550,7 @@ def installed_documents(monkeypatch, facts):
         "network_profile": "github-release-tuf-ca-isolated-cache-v1",
         "native_receipt": native,
     }
-    qual_pin = pin("/etc/qualified.json", verifier._canonical(qualification))
+    qual_pin = pin(verifier._QUALIFICATION, verifier._canonical(qualification))
     installation["qualification"] = qual_pin
     files[verifier._INSTALLATION] = verifier._canonical(installation)
     binding = {
@@ -593,9 +596,9 @@ def test_changed_installed_inputs_refuse(installed_documents, mutation):
     if mutation == "binary":
         files["/opt/pinned/gh"] = b"different"
     elif mutation == "missing_native":
-        del files["/etc/native.json"]
+        del files[verifier._NATIVE]
     elif mutation == "qualification_bytes":
-        files["/etc/qualified.json"] += b" "
+        files[verifier._QUALIFICATION] += b" "
     else:
         parsed = json.loads(files[verifier._INSTALLATION])
         parsed["accepted"] = True
@@ -765,3 +768,46 @@ def test_actual_fifo_cleanup_keeps_original_deadline_and_evidence(
     assert len(list(tmp_path.iterdir())) == 1  # refusal retains the owned private work
     with pytest.raises(reads_owner.AttestationTransportUnqualified):
         adapter.verify_published(owner, facts)
+
+
+def test_official_initial_and_runtime_metadata_use_public_published_slot(
+    installed_documents, monkeypatch
+):
+    files, _ = installed_documents
+    native = verifier._protected
+    calls = []
+
+    def protected(path, *args, **kwargs):
+        calls.append((path, kwargs.get("private", True)))
+        assert path != "/etc/dotmac-gate0-e/github-read-binding.json"
+        assert kwargs.get("private", True) is False
+        return native(path, *args, **kwargs)
+
+    monkeypatch.setattr(verifier, "_protected", protected)
+    adapter = verifier.InstalledGhReleaseVerifier.from_installed()
+    adapter._runtime_profile()
+    published = "/etc/dotmac-gate0-e/github-read-published-release-binding.json"
+    assert (published, False) in calls
+    assert calls.count((verifier._INSTALLATION, False)) == 2
+    assert calls.count((verifier._BINDING, False)) == 2
+    assert "/etc/dotmac-gate0-e/github-read-binding.json" not in files
+
+
+def test_official_reader_recheck_never_uses_default_binding(monkeypatch):
+    calls = []
+
+    def missing_published(path, *args, **kwargs):
+        calls.append((path, kwargs.get("private", True)))
+        if path == "/etc/dotmac-gate0-e/github-read-binding.json":
+            pytest.fail("default binding used as an alias")
+        raise FileNotFoundError
+
+    monkeypatch.setattr(verifier, "_protected", missing_published)
+    adapter = verifier.InstalledGhReleaseVerifier(
+        verifier._SEAL, {}, {}, "/fixed/gh", "1" * 64, "2" * 64
+    )
+    with pytest.raises(FileNotFoundError):
+        adapter._reader_profile(None)
+    assert calls == [
+        ("/etc/dotmac-gate0-e/github-read-published-release-binding.json", False)
+    ]

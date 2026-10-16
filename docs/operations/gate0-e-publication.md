@@ -185,13 +185,19 @@ if an earlier phase fails. This is reference detachment, not memory zeroization
 or alteration of caller-owned evidence, credentials or keys. Caught exception
 traceback, cause and context metadata is intentionally detached.
 
-The sole writer now detaches its consumed private selection immediately after a
+The sole writer detaches its consumed public selection immediately after a
 successful canonical receipt construction, retaining only its one-shot used
 state. The publisher captures the public selected workflow digest before that
 call and performs the same exact digest comparison afterwards. Receipt,
 provenance, adoption, source and policy checks retain their order and meaning.
-A later publisher readback failure therefore cannot expose the writer's retained
-collection/prerequisite bytes through its input owner.
+The writer's public installation contains no collection/prerequisite bytes or
+root-host bindings. Publication relies on the authenticated B v2 full private
+verification and independently verifies public predicates, source coordinates,
+completed producer and protected review. Its native method scope is
+`public-evidence-publication-readback.v1`; the private preparation installation
+cannot act as a publisher. The adopted review meaning is enforced through the
+exact v2 contract, proposal/adoption digests and independently qualified native
+decision provenance. This source change selects no executor or credentials.
 
 Authored hosted-only privacy regressions inspect recursive emitted exception
 chains/groups, owned traceback locals, separately captured completed owned frames
@@ -200,3 +206,23 @@ metadata, early and late preparation refusal, credential/receipt/post-PATCH
 interruption and cancellation, actual publisher root/source/native/reviewer
 binding tampering, and no-follow/ownership/mode/ancestry failures at the native
 protected-file seam. These tests have not been executed locally.
+
+
+## Public metadata access
+
+The fixed publication installation/root binding, exact
+`/etc/dotmac-gate0-e/publication-qualification.json` and
+`/etc/dotmac-gate0-e/publication-native.json` closed digest projections, and fixed
+`/run/dotmac-gate0-e/b-archive-verification.json` public summary use existing
+`private=False` checks. Arbitrary private pin paths refuse before opening.
+Detailed native measurement bodies, full historical wrappers and private proof
+inputs are absent. The selected publication token remains private0600 with exact
+credential UID; root/nonwrite/no-follow checks and the helper's default remain.
+
+Root0644 public leaves with root0755 ancestry are the normal native arrangement,
+not an observed installation. Repin changed source/path hashes and independently
+requalify the actual nonzero UID/access scope. Existing method scope and human
+review meaning remain unchanged. The writer now uses only the existing historical
+owner's distinct qualified public coordinate mode, retaining B's archived digest.
+Actual nonroot filesystem proof and the separate B private historical access
+obligation remain outstanding.

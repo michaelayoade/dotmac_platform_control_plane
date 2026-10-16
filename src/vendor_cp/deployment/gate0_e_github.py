@@ -874,7 +874,8 @@ def _publication_exchange(
 ) -> tuple[int, int, int, bytes]:
     """Private finite execution-repository endpoint set; no caller URL."""
     prefix = "/repos/dotmac-tech/gate0-issuer-execution"
-    host, method, statuses, binary = "api.github.com", "GET", (200,), False
+    host, method, binary = "api.github.com", "GET", False
+    statuses: tuple[int, ...] = (200,)
     path = prefix
     _require(
         type(payload) is bytes
@@ -948,11 +949,11 @@ def _publication_exchange(
     )
 
 
-def _pin_document(pin: object) -> tuple[dict[str, Any], bytes]:
+def _pin_document(pin: object, expected_path: str) -> tuple[dict[str, Any], bytes]:
     pin = _closed(pin, "path digest")
     path, digest = _text(pin["path"]), _hex(pin["digest"])
-    _require(path.startswith("/etc/dotmac-gate0-e/") and path not in (_ROOT_BINDING,))
-    raw = _protected(path, _JSON_CAP)
+    _require(path == expected_path)
+    raw = _protected(path, _JSON_CAP, private=False)
     value = _obj(_json(raw))
     _require(_digest(raw) == digest and _canonical(value) == raw)
     return value, raw
@@ -1075,7 +1076,8 @@ def _environment_rules(
 def _source_policy(run: RunPin) -> dict[str, Any]:
     w = run.workflow
     policy, _ = _pin_document(
-        dict(zip(("path", "digest"), w.source_policy_pin, strict=True))
+        dict(zip(("path", "digest"), w.source_policy_pin, strict=True)),
+        f"/etc/dotmac-gate0-e/github-read-source-policy-{run.run_id}.json",
     )
     policy = _closed(
         policy,
@@ -1279,7 +1281,7 @@ class InstalledGate0GitHubReads:
                     ),
                 )
             )
-            raw = _protected(installation_path, _JSON_CAP)
+            raw = _protected(installation_path, _JSON_CAP, private=False)
             installation = _closed(
                 _json(raw),
                 "schema policy_digest phase repository producer publication "
@@ -1290,7 +1292,7 @@ class InstalledGate0GitHubReads:
                 and installation["schema"] == "Gate0EGitHubReadInstallation.v1"
             )
             _hex(installation["policy_digest"])
-            binding_raw = _protected(binding_path, 65536)
+            binding_raw = _protected(binding_path, 65536, private=False)
             binding = _closed(
                 _json(binding_raw),
                 "schema installation_sha256 qualification_sha256 source_sha256 "
@@ -1310,7 +1312,24 @@ class InstalledGate0GitHubReads:
                 _digest(_protected(os.path.abspath(__file__), _JSON_CAP, private=False))
                 == _hex(binding["source_sha256"])
             )
-            qualification, qual_raw = _pin_document(installation["qualification"])
+            public_phase = installation["phase"]
+            _require(
+                public_phase
+                in (
+                    "protected_job",
+                    "producer",
+                    "publication",
+                    "publication_complete",
+                    "transfer",
+                    "draft",
+                    "draft_with_receipt",
+                    "published",
+                )
+            )
+            qualification, qual_raw = _pin_document(
+                installation["qualification"],
+                f"/etc/dotmac-gate0-e/github-read-{public_phase}-qualification.json",
+            )
             qualification = _closed(
                 qualification,
                 "schema installation_policy_digest native_receipt_pin api_version "
@@ -1329,7 +1348,10 @@ class InstalledGate0GitHubReads:
                 qualification["native_receipt_pin"] == binding["native_receipt_pin"]
             )
             # An external native-review record is required, never synthesized here.
-            receipt, _ = _pin_document(binding["native_receipt_pin"])
+            receipt, _ = _pin_document(
+                binding["native_receipt_pin"],
+                f"/etc/dotmac-gate0-e/github-read-{public_phase}-native.json",
+            )
             receipt = _closed(
                 receipt,
                 "schema qualification_measurements_digest runtime_identity_digest "
@@ -2050,7 +2072,10 @@ class InstalledGate0GitHubReads:
                 _require(_instant(job.started_at) <= _instant(fact.started_at))
                 if job.completed_at is not None:
                     _require(_instant(fact.completed_at) <= _instant(job.completed_at))
-        if stage == ProducerStage.PROTECTED_JOB_STARTED:
+        if stage in (
+            ProducerStage.PROTECTED_JOB_STARTED,
+            ProducerStage.COLLECTION_SNAPSHOT,
+        ):
             _require(
                 job.status == "in_progress"
                 and job.conclusion is None
@@ -2174,7 +2199,9 @@ class InstalledGate0GitHubReads:
             tuple(self._observations),
         )
 
-    def producer_snapshot(self, stage: ProducerStage) -> ProducerFacts:
+    def producer_snapshot(
+        self, stage: ProducerStage, *, deadline: float | None = None
+    ) -> ProducerFacts:
         def observe() -> ProducerFacts:
             _require(stage != ProducerStage.PROTECTED_JOB_STARTED)
             run = self._producer
@@ -2182,7 +2209,7 @@ class InstalledGate0GitHubReads:
                 raise GitHubReadRefused()
             return self._producer_facts(run, stage)
 
-        return self._phase("producer", 90, observe)
+        return self._phase("producer", 90, observe, deadline=deadline)
 
     def protected_job_snapshot(self, *, deadline: float) -> ProducerFacts:
         """Observe the assigned protected job before collection, without future success.
