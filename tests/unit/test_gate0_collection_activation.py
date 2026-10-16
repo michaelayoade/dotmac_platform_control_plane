@@ -23,7 +23,6 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-import yaml
 from test_gate0_collection_api import case as _case
 from test_gate0_window import window_document as _window_document
 
@@ -274,30 +273,31 @@ def installed(tmp_path, monkeypatch, descriptor):
 
 
 def test_overlay_only_overrides_app_and_missing_file_cannot_be_created():
-    overlay = yaml.safe_load((ROOT / "docker-compose.gate0-collection.yml").read_text())
-    assert set(overlay) == {"services"}
-    assert set(overlay["services"]) == {"app"}
-    app = overlay["services"]["app"]
-    assert set(app) == {"environment", "volumes"}
-    assert app["environment"] == {
-        "VENDOR_DEPLOYMENT_PROFILE": "${VENDOR_GATE0_COLLECTION_PROFILE:?Set the "
-        "exact accepted collection profile "
-        "from the protected selection}"
-    }
-    assert app["volumes"] == [
-        {
-            "type": "bind",
-            "source": "/run/dotmac-gate0-collection/installation.json",
-            "target": "/run/dotmac-gate0-collection/installation.json",
-            "read_only": True,
-            "bind": {"create_host_path": False},
-        }
-    ]
-    base = yaml.safe_load((ROOT / "docker-compose.production.yml").read_text())
-    assert "VENDOR_DEPLOYMENT_PROFILE" not in base["services"]["app"]["environment"]
-    assert all(
-        "gate0-collection" not in str(v) for v in base["services"]["app"]["volumes"]
+    # This deliberately closed source guard accepts no extra YAML fields,
+    # aliases or alternate layout; Compose interpretation remains its owner.
+    overlay = (ROOT / "docker-compose.gate0-collection.yml").read_text()
+    meaningful = "\n".join(
+        line
+        for line in overlay.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
     )
+    assert meaningful == (
+        "services:\n"
+        "  app:\n"
+        "    environment:\n"
+        "      VENDOR_DEPLOYMENT_PROFILE: ${VENDOR_GATE0_COLLECTION_PROFILE:?Set the "
+        "exact accepted collection profile from the protected selection}\n"
+        "    volumes:\n"
+        "      - type: bind\n"
+        "        source: /run/dotmac-gate0-collection/installation.json\n"
+        "        target: /run/dotmac-gate0-collection/installation.json\n"
+        "        read_only: true\n"
+        "        bind:\n"
+        "          create_host_path: false"
+    )
+    base = (ROOT / "docker-compose.production.yml").read_text()
+    assert "VENDOR_DEPLOYMENT_PROFILE" not in base
+    assert "gate0-collection" not in base
 
 
 def test_install_once_exact_original_bytes_runtime_group_and_terminal_retirement(
