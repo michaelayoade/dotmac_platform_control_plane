@@ -45,7 +45,17 @@ jobs:
         run: poetry run mypy
       - name: Tests (boot + provisioning contract + D1–D5 deny cases)
         timeout-minutes: 15
-        run: poetry run pytest -q --junitxml="$RUNNER_TEMP/cp-source-tests.xml" -o junit_family=xunit1 -o faulthandler_timeout=60
+        run: |
+          umask 077
+          set -o noclobber
+          # Leave 15 seconds after timeout escalation within the step budget.
+          # This budget guard does not qualify cleanup of escaped descendants.
+          if timeout --signal=INT --kill-after=15s 870s poetry run pytest -q --junitxml="$RUNNER_TEMP/cp-source-tests.xml" -o junit_family=xunit1 -o faulthandler_timeout=60 > "$RUNNER_TEMP/cp-source-tests.log" 2>&1; then
+            status=0
+          else
+            status=$?
+          fi
+          exit "$status"
       - name: Measure trusted hosted GnuPG package fixtures
         # Synthetic mechanism qualification only. These identities do not pin
         # production tools, the B recipient, or any protected E installation.
@@ -98,6 +108,7 @@ jobs:
           name: cp-source-tests-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/cp-source-tests.xml
+            ${{ runner.temp }}/cp-source-tests.log
             ${{ runner.temp }}/cp-gpg-tool-identities.json
           if-no-files-found: error
           retention-days: 30
