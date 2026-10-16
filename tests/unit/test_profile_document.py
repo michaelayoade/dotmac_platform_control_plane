@@ -20,6 +20,7 @@ from vendor_cp.deployment.profile import (
     CONCERN_SPECS,
     ConcernSpec,
     ProfileBuildRefusal,
+    build_deployment_profile_declarations,
     build_profile_document,
     profile_digest,
     render,
@@ -426,3 +427,77 @@ def test_an_unbound_slot_cannot_satisfy_a_concern(
         source_revision=REVISION, dist_dir=dist_dir, lock_path=LOCK
     )
     assert not set(document["concerns"]) & DELIBERATELY_UNBOUND  # type: ignore[arg-type]
+
+
+def test_deployment_declarations_project_every_owner_profile_without_boot(monkeypatch):
+    from vendor_cp import assembly
+
+    def refuse_boot(*args, **kwargs):
+        pytest.fail("build-time declaration export reached boot configuration")
+
+    for name in (
+        "build_spec",
+        "build_spec_with_profile",
+        "install_runtime_licence_signers",
+        "validate_runtime_configuration",
+        "validate_profile_for_environment",
+        "load_deployment_profile",
+    ):
+        monkeypatch.setattr(assembly, name, refuse_boot)
+    monkeypatch.setattr(assembly.os, "getenv", refuse_boot)
+    foundation_bytes = b'{"source_revision":"' + REVISION.encode() + b'"}\n'
+    document = build_deployment_profile_declarations(
+        source_revision=REVISION, foundation_profile_bytes=foundation_bytes
+    )
+    assert document == {
+        "schema": "DotmacDeploymentProfileDeclarations.v1",
+        "source_revision": REVISION,
+        "foundation_profile_digest": "sha256:"
+        + hashlib.sha256(foundation_bytes).hexdigest(),
+        "profiles": [
+            {
+                "code": profile.code,
+                "version": profile.version,
+                "production_accepted": profile.production_accepted,
+                "laboratory": profile.laboratory,
+                "surface_inventory": sorted(profile.surface_inventory),
+                "withheld_surfaces": sorted(profile.withheld_surfaces),
+            }
+            for profile in sorted(assembly.PROFILES, key=lambda profile: profile.code)
+        ],
+    }
+    assert (
+        build_deployment_profile_declarations(
+            source_revision=REVISION, foundation_profile_bytes=foundation_bytes
+        )
+        == document
+    )
+
+
+def test_deployment_declarations_preserve_owner_admission_refusal(monkeypatch):
+    from types import SimpleNamespace
+
+    from vendor_cp import assembly
+    from vendor_cp.deployment_profile import SurfaceAdmissionError
+
+    monkeypatch.setattr(
+        assembly,
+        "COMPOSED_MANIFESTS",
+        (
+            *assembly.COMPOSED_MANIFESTS,
+            SimpleNamespace(name="uninventoried-surface", routers=(object(),)),
+        ),
+    )
+    with pytest.raises(SurfaceAdmissionError):
+        build_deployment_profile_declarations(
+            source_revision=REVISION,
+            foundation_profile_bytes=json.dumps({"source_revision": REVISION}).encode(),
+        )
+
+
+def test_deployment_declarations_refuse_foundation_source_mismatch():
+    with pytest.raises(ProfileBuildRefusal):
+        build_deployment_profile_declarations(
+            source_revision=REVISION,
+            foundation_profile_bytes=json.dumps({"source_revision": "a" * 40}).encode(),
+        )

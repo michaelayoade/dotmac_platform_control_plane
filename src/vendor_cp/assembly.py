@@ -31,6 +31,7 @@ from vendor_cp.deployment.gate0_collection_api import (
     feature as gate0_collection_reads_feature,
 )
 from vendor_cp.deployment_profile import (
+    PROFILES,
     VendorDeploymentProfile,
     admit_surfaces,
     load_deployment_profile,
@@ -152,6 +153,24 @@ COMPOSED_MANIFESTS: tuple[FeatureManifest | ModuleManifest, ...] = (
     *STATEFUL_MODULES,
     *VENDOR_SURFACES,
 )
+
+
+def export_deployment_profile_declarations() -> list[dict[str, object]]:
+    """Build-time projection of every admitted declaration; never boot an app."""
+    rows: list[dict[str, object]] = []
+    for profile in sorted(PROFILES, key=lambda profile: profile.code):
+        admit_surfaces(profile, COMPOSED_MANIFESTS)
+        rows.append(
+            {
+                "code": profile.code,
+                "version": profile.version,
+                "production_accepted": profile.production_accepted,
+                "laboratory": profile.laboratory,
+                "surface_inventory": sorted(profile.surface_inventory),
+                "withheld_surfaces": sorted(profile.withheld_surfaces),
+            }
+        )
+    return rows
 
 
 def build_spec_with_profile(

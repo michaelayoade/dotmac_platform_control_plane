@@ -45,7 +45,15 @@ The host retains its lock descriptor; Docker children do not inherit it. Input
 checks run as `10001:10001` in the selected image with network disabled, a
 read-only root, all capabilities dropped, no new privileges, bounded memory/PIDs,
 and no host mount, socket, `.env`, DSN or credential input. The image reads its own
-profile and migration-head artifacts and returns a small closed mechanical JSON
+Foundation profile and migration-head artifacts. Activation also reads the fixed,
+bounded `/app/deployment_profile_declarations.json` sibling, produced at build time
+by the existing composition owner from every admitted registry declaration. It
+requires the sibling's exact source revision and raw Foundation-file digest, and
+an exact accepted, non-laboratory code/version exposing collection reads. The
+checker imports no assembly, profile registry, configured runtime or signer;
+retirement does not require this sibling. These data comparisons rely on the
+host's separately measured immutable-image/source binding. The image returns a
+small closed mechanical JSON
 record binding the exact input digest and selected fields. It does not certify
 its registry digest, approval or database qualification. The host separately
 measures image identity, bounds input/output while collecting, owns the exact

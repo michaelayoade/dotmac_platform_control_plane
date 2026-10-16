@@ -10,6 +10,7 @@ import base64
 import copy
 import fcntl
 import hashlib
+import io
 import os
 import shutil
 import stat
@@ -79,6 +80,25 @@ def host_leaf():
     leaf.sys = SimpleNamespace(
         argv=["host", "0", "sha256:" + "b" * 64, "--gate0-collection-activate"]
     )
+
+
+def _declarations_document():
+    return {
+        "schema": "DotmacDeploymentProfileDeclarations.v1",
+        "source_revision": "a" * 40,
+        "foundation_profile_digest": "sha256:"
+        + hashlib.sha256(canonical({"source_revision": "a" * 40})).hexdigest(),
+        "profiles": [
+            {
+                "code": PRODUCTION_GATE0_COLLECTION_V1,
+                "version": "1",
+                "production_accepted": True,
+                "laboratory": False,
+                "surface_inventory": ["gate0_collection_reads"],
+                "withheld_surfaces": [],
+            }
+        ],
+    }
 
 
 @pytest.fixture
@@ -173,6 +193,16 @@ def descriptor(case, monkeypatch):
             if str(path)
             in ("/app/application_foundation_profile.json", "/app/migration_heads.json")
             else original_bytes(path)
+        ),
+    )
+    original_open = Path.open
+    monkeypatch.setattr(
+        Path,
+        "open",
+        lambda path, *args, **kwargs: (
+            io.BytesIO(canonical(_declarations_document()))
+            if str(path) == "/app/deployment_profile_declarations.json"
+            else original_open(path, *args, **kwargs)
         ),
     )
     return document
@@ -952,6 +982,172 @@ def test_image_validator_is_inert_closed_and_binds_exact_input(descriptor, monke
     assert strict_object(retirement)["operation"] == "retirement"
     with pytest.raises(ProviderRefused):
         checker.check_collection_input(canonical(descriptor), "activation")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing",
+        "oversize",
+        "malformed",
+        "extra",
+        "schema",
+        "source",
+        "digest",
+        "duplicate",
+        "duplicate_key",
+        "duplicate_surface",
+        "boolean",
+        "version",
+        "code",
+        "unaccepted",
+        "laboratory",
+        "withheld",
+        "uninventoried",
+        "row_extra",
+        "profiles_type",
+        "surface_type",
+        "empty_code",
+    ],
+)
+def test_image_validator_refuses_declaration_artifact(descriptor, monkeypatch, failure):
+    document = _declarations_document()
+    row = document["profiles"][0]
+    if failure in ("schema", "source", "digest"):
+        key = {
+            "schema": "schema",
+            "source": "source_revision",
+            "digest": "foundation_profile_digest",
+        }[failure]
+        document[key] = "wrong"
+    elif failure == "extra":
+        document["extra"] = True
+    elif failure == "duplicate":
+        document["profiles"].append(copy.deepcopy(row))
+    elif failure == "duplicate_surface":
+        row["surface_inventory"] *= 2
+    elif failure == "boolean":
+        row["production_accepted"] = 1
+    elif failure in ("code", "version"):
+        row[failure] = "different"
+    elif failure == "unaccepted":
+        row["production_accepted"] = False
+    elif failure == "laboratory":
+        row["laboratory"] = True
+    elif failure == "withheld":
+        row["surface_inventory"] = []
+        row["withheld_surfaces"] = ["gate0_collection_reads"]
+    elif failure == "uninventoried":
+        row["surface_inventory"] = []
+    elif failure == "row_extra":
+        row["extra"] = True
+    elif failure == "profiles_type":
+        document["profiles"] = {}
+    elif failure == "surface_type":
+        row["surface_inventory"] = "gate0_collection_reads"
+    elif failure == "empty_code":
+        row["code"] = ""
+    artifact = canonical(document)
+    if failure == "oversize":
+        artifact = b" " * 524289
+    elif failure == "malformed":
+        artifact = b"{"
+    elif failure == "duplicate_key":
+        artifact = artifact.replace(b'{"code":', b'{"code":"duplicate","code":', 1)
+
+    def open_artifact(path, *args, **kwargs):
+        assert str(path) == "/app/deployment_profile_declarations.json"
+        if failure == "missing":
+            raise FileNotFoundError()
+        return io.BytesIO(artifact)
+
+    monkeypatch.setattr(Path, "open", open_artifact)
+    with pytest.raises(ProviderRefused):
+        checker.check_collection_input(canonical(descriptor), "activation")
+
+
+def test_retirement_does_not_read_declaration_artifact(descriptor, monkeypatch):
+    def refuse_artifact(*args, **kwargs):
+        pytest.fail("retirement read profile declarations")
+
+    monkeypatch.setattr(Path, "open", refuse_artifact)
+    descriptor.update(profile_code="retired-profile", profile_version="retired-version")
+    checker.check_collection_input(canonical(descriptor), "retirement")
+
+
+def test_activation_declaration_read_has_a_fixed_byte_budget(descriptor, monkeypatch):
+    reads = []
+
+    class BoundedArtifact(io.BytesIO):
+        def read(self, size=-1):
+            reads.append(size)
+            return super().read(size)
+
+    monkeypatch.setattr(
+        Path,
+        "open",
+        lambda *args, **kwargs: BoundedArtifact(canonical(_declarations_document())),
+    )
+    checker.check_collection_input(canonical(descriptor), "activation")
+    assert reads == [524289]
+
+
+def test_consumer_import_and_data_reader_are_inert_in_fresh_process(descriptor):
+    script = r"""
+import importlib.abc
+import io
+import json
+import socket
+import sys
+from pathlib import Path
+
+
+class RefuseRuntime(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        blocked = (
+            "vendor_cp.assembly", "vendor_cp.config", "vendor_cp.deployment_profile",
+            "vendor_cp.deployment.profile", "vendor_cp.main",
+            "vendor_cp.licensing.signing_adapter", "dotmac_kernel.db",
+            "dotmac_kernel.session_runtime", "dotmac_kernel.app_factory",
+            "vendor_cp.relay.runner",
+        )
+        if any(fullname == name or fullname.startswith(name + ".") for name in blocked):
+            raise AssertionError("consumer imported runtime owner: " + fullname)
+
+
+sys.meta_path.insert(0, RefuseRuntime())
+sys.path.insert(0, sys.argv[1])
+
+
+def refuse_network(*args, **kwargs):
+    raise AssertionError("consumer attempted network I/O")
+
+
+socket.socket.connect = refuse_network
+socket.socket.connect_ex = refuse_network
+socket.create_connection = refuse_network
+checker = importlib.import_module("vendor_cp.deployment.gate0_collection_activation")
+canonical = checker.canonical
+inputs = json.loads(sys.stdin.buffer.read())
+value = inputs["descriptor"]
+Path.open = lambda *args, **kwargs: io.BytesIO(canonical(inputs["declarations"]))
+checker._require_collection_profile(value)
+checker.installation_document = lambda raw: value
+Path.open = refuse_network
+checker.check_collection_input(canonical(value), "retirement")
+"""
+    environment = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    # Source-only subprocess: installed-image identity remains a separate obligation.
+    result = subprocess.run(  # noqa: S603 -- fixed hosted source-check script, synthetic stdin, no host operations
+        [sys.executable, "-c", script, str(ROOT / "src")],
+        input=canonical(
+            {"descriptor": descriptor, "declarations": _declarations_document()}
+        ),
+        capture_output=True,
+        env=environment,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr.decode()
 
 
 @pytest.mark.parametrize("change", ["source", "profile_digest", "oversize"])

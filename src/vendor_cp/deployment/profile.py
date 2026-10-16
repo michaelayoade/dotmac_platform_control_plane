@@ -112,6 +112,7 @@ __all__ = [
     "CONCERN_SPECS",
     "ConcernSpec",
     "ProfileBuildRefusal",
+    "build_deployment_profile_declarations",
     "build_profile_document",
     "main",
     "profile_digest",
@@ -562,6 +563,25 @@ def build_profile_document(
     return document
 
 
+def build_deployment_profile_declarations(
+    *, source_revision: str, foundation_profile_bytes: bytes
+) -> dict[str, object]:
+    """Build-only sibling, projected by the existing composition owner."""
+    from vendor_cp.assembly import export_deployment_profile_declarations
+
+    revision = _require_peeled(source_revision)
+    foundation = json.loads(foundation_profile_bytes)
+    if foundation["source_revision"] != revision:
+        raise ProfileBuildRefusal("foundation profile source revision differs")
+    return {
+        "schema": "DotmacDeploymentProfileDeclarations.v1",
+        "source_revision": revision,
+        "foundation_profile_digest": "sha256:"
+        + hashlib.sha256(foundation_profile_bytes).hexdigest(),
+        "profiles": export_deployment_profile_declarations(),
+    }
+
+
 def render(document: Mapping[str, object]) -> str:
     """The bytes that travel in the image. Stable, sorted, newline-terminated."""
     return (
@@ -578,6 +598,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dist-dir", required=True, type=Path)
     parser.add_argument("--lock", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--declarations-output", required=True, type=Path)
     args = parser.parse_args(argv)
 
     try:
@@ -590,7 +611,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"profile build refused: {refusal}", file=sys.stderr)
         return 1
 
-    args.output.write_text(render(document), encoding="utf-8")
+    foundation_bytes = render(document).encode("utf-8")
+    declarations = build_deployment_profile_declarations(
+        source_revision=args.source_revision,
+        foundation_profile_bytes=foundation_bytes,
+    )
+    args.output.write_bytes(foundation_bytes)
+    args.declarations_output.write_text(render(declarations), encoding="utf-8")
     bound = sorted(dict(document["concerns"]))  # type: ignore[call-overload]
     unbound = sorted(dict(document["unbound_concerns"]))  # type: ignore[call-overload]
     print(

@@ -686,8 +686,10 @@ def _exclusive(
         os.close(descriptor)
 
 
-def _record(fd: int, name: str, raw: bytes, **facts: object) -> None:
-    _exclusive(fd, name, canonical({"installation_digest": _hash(raw), **facts}))
+def _record(fd: int, record_filename: str, raw: bytes, **facts: object) -> None:
+    _exclusive(
+        fd, record_filename, canonical({"installation_digest": _hash(raw), **facts})
+    )
 
 
 @contextmanager

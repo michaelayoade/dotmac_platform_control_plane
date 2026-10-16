@@ -112,7 +112,8 @@ RUN DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
         --source-revision "$SOURCE_REVISION" \
         --dist-dir /app/dist \
         --lock /app/poetry.lock \
-        --output /app/application_foundation_profile.json
+        --output /app/application_foundation_profile.json \
+        --declarations-output /app/deployment_profile_declarations.json
 
 # The migration lineage travels as data (see the runtime stage's own COPY of
 # it below), and the builder stage otherwise never sees it — `image_heads`
@@ -197,6 +198,7 @@ RUN DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
     python -m vendor_cp.deployment.profile \
         --source-revision "$SOURCE_REVISION" --dist-dir /app/dist \
         --lock /app/poetry.lock --output /app/application_foundation_profile.json \
+        --declarations-output /app/deployment_profile_declarations.json \
     && VENDOR_MIGRATION_ROOT=/app python -m vendor_cp.deployment.image_heads \
         --emit --source-revision "$SOURCE_REVISION" \
         --output /app/migration_heads.json \
@@ -274,6 +276,8 @@ COPY --from=builder --chown=10001:10001 /app/distributions.json ./distributions.
 # DOCUMENT_ABSENT against every real image — which was the honest answer.
 COPY --from=builder --chown=10001:10001 /app/application_foundation_profile.json \
      ./application_foundation_profile.json
+COPY --from=builder --chown=10001:10001 /app/deployment_profile_declarations.json \
+     ./deployment_profile_declarations.json
 # The composed effective migration heads THIS image's lineages produce,
 # frozen at build time (D16 PR 1). PR 2's deploy-time check extracts this file
 # from a pulled image before anything is running, so it has to be a document

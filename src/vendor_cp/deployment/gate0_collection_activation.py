@@ -11,17 +11,89 @@ import hashlib
 import sys
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import BinaryIO, Literal, cast
 
 from vendor_cp.deployment.gate0_collection_installation import (
     installation_cases,
     installation_document,
 )
-from vendor_cp.deployment.gate0_framing import canonical
+from vendor_cp.deployment.gate0_framing import canonical, strict_object
 from vendor_cp.deployment.gate0_role_custody import ProviderRefused
-from vendor_cp.deployment_profile import deployment_profile
 
 _MAXIMUM = 524288
+
+
+def _require_collection_profile(value: dict[str, object]) -> None:
+    """Read only the fixed build artifact; the host owns immutable-image binding."""
+    try:
+        with Path("/app/deployment_profile_declarations.json").open("rb") as stream:
+            document = strict_object(stream.read(_MAXIMUM + 1), _MAXIMUM)
+        if (
+            set(document)
+            != {"schema", "source_revision", "foundation_profile_digest", "profiles"}
+            or document["schema"] != "DotmacDeploymentProfileDeclarations.v1"
+            or document["source_revision"] != value["source_revision"]
+            or document["foundation_profile_digest"] != value["profile_digest"]
+        ):
+            raise ProviderRefused()
+        rows = document["profiles"]
+        if type(rows) is not list or not 0 < len(rows) <= 128:
+            raise ProviderRefused()
+        seen: set[str] = set()
+        selected: dict[str, object] | None = None
+        for row in rows:
+            if type(row) is not dict or set(row) != {
+                "code",
+                "version",
+                "production_accepted",
+                "laboratory",
+                "surface_inventory",
+                "withheld_surfaces",
+            }:
+                raise ProviderRefused()
+            for name in ("code", "version"):
+                if type(row[name]) is not str or not 0 < len(row[name]) <= 128:
+                    raise ProviderRefused()
+            if row["code"] in seen:
+                raise ProviderRefused()
+            seen.add(row["code"])
+            if any(
+                type(row[name]) is not bool
+                for name in ("production_accepted", "laboratory")
+            ):
+                raise ProviderRefused()
+            for name in ("surface_inventory", "withheld_surfaces"):
+                surfaces = row[name]
+                if (
+                    type(surfaces) is not list
+                    or len(surfaces) > 128
+                    or any(
+                        type(item) is not str or not 0 < len(item) <= 128
+                        for item in surfaces
+                    )
+                    or surfaces != sorted(set(surfaces))
+                ):
+                    raise ProviderRefused()
+            if set(row["surface_inventory"]) & set(row["withheld_surfaces"]):
+                raise ProviderRefused()
+            if (
+                row["code"] == value["profile_code"]
+                and row["version"] == value["profile_version"]
+            ):
+                selected = row
+        if (
+            selected is None
+            or selected["production_accepted"] is not True
+            or selected["laboratory"] is not False
+            or "gate0_collection_reads"
+            not in cast(list[str], selected["surface_inventory"])
+            or "gate0_collection_reads"
+            in cast(list[str], selected["withheld_surfaces"])
+        ):
+            raise ProviderRefused()
+    except Exception:
+        raise ProviderRefused() from None
 
 
 def check_collection_input(
@@ -38,17 +110,7 @@ def check_collection_input(
         raise ProviderRefused()
     original_clock: dict[str, object] | None = None
     if operation == "activation":
-        if type(value["profile_code"]) is not str:
-            raise ProviderRefused()
-        profile = deployment_profile(value["profile_code"])
-        if (
-            not profile.production_accepted
-            or profile.laboratory
-            or profile.version != value["profile_version"]
-            or "gate0_collection_reads" not in profile.surface_inventory
-            or "gate0_collection_reads" in profile.withheld_surfaces
-        ):
-            raise ProviderRefused()
+        _require_collection_profile(value)
         cases, _ = installation_cases(value)
         anchor = cast(dict[str, object], value["clock_anchor"])
         original_clock = {
