@@ -573,7 +573,7 @@ class FailureDiagnosticTests(unittest.TestCase):
         alias = G["INTERPRETER"] + " => " + LOADER + " (0xabcdef)"
         cases = [
             (alias, "absolute-mapping", True, False),
-            (alias.replace(" => ", "\t=>\t"), "absolute-mapping", True, True),
+            (alias.replace(" => ", "  => "), "absolute-mapping", True, True),
             (
                 "/UNKNOWN_PRIVATE_LEFT => /UNKNOWN_PRIVATE_RIGHT (0x123)",
                 "absolute-mapping",
