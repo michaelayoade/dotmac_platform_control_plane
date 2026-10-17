@@ -1,6 +1,7 @@
 """Hosted public ELF loader resolution; never live encryption or qualification."""
 
 import hashlib
+import json
 import os
 import platform
 import posixpath
@@ -51,10 +52,117 @@ STABLE = (
 M = None
 MEASUREMENT_BYTES = None
 TEMP = None
+PHASES = frozenset(
+    {
+        "bootstrap",
+        "source",
+        "prior",
+        "os",
+        "target",
+        "interpreter",
+        "loader-state",
+        "dependency",
+        "package",
+        "final-check",
+        "publication",
+        "publication-cleanup",
+        "descriptor-cleanup",
+        "unknown",
+    }
+)
+EXCEPTION_KINDS = frozenset(
+    {
+        "Incomplete",
+        "RetentionRefused",
+        "ValueError",
+        "TypeError",
+        "KeyError",
+        "IndexError",
+        "UnicodeDecodeError",
+        "FileNotFoundError",
+        "PermissionError",
+        "FileExistsError",
+        "TimeoutError",
+        "OSError",
+        "error",
+    }
+)
+DIAGNOSTIC = {"phase": "bootstrap", "work_failure": None}
 
 
 class Incomplete(ValueError):
     pass
+
+
+def failure_metadata(error):
+    """Allowlisted labels and line integers only; no error/frame body values."""
+    kind = type(error).__name__
+    owners = {
+        str(SOURCE): "observer",
+        str(SOURCES["measurement_sha256"]): "measurement-owner",
+        str(SOURCES["primitives_sha256"]): "retention-owner",
+    }
+    frames = []
+    trace = error.__traceback__
+    scanned = 0
+    while trace is not None and scanned < 64:
+        owner = owners.get(trace.tb_frame.f_code.co_filename)
+        if owner is not None and len(frames) < 8:
+            frames.append({"owner": owner, "line": trace.tb_lineno})
+        trace = trace.tb_next
+        scanned += 1
+    return {
+        "kind": kind if kind in EXCEPTION_KINDS else "other",
+        "frames": frames,
+        "trace_truncated": trace is not None,
+    }
+
+
+def remember_failure(error):
+    if DIAGNOSTIC["work_failure"] is None:
+        DIAGNOSTIC["work_failure"] = (DIAGNOSTIC["phase"], error)
+
+
+def failure_diagnostic(error):
+    # Bounded cause AND context traversal keeps a work refusal visible when a
+    # finally/rollback error replaces it, including suppressed exception context.
+    # This function performs no file, command, source or clock reads.
+    pending = [(error, "raised", None)]
+    seen, chain = set(), []
+    while pending and len(chain) < 4:
+        current, relation, parent = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        index = len(chain)
+        chain.append(
+            dict(parent=parent, relation=relation, **failure_metadata(current))
+        )
+        for relation, next_error in (
+            ("cause", current.__cause__),
+            ("context", current.__context__),
+        ):
+            if next_error is not None and id(next_error) not in seen:
+                pending.append((next_error, relation, index))
+    phase = DIAGNOSTIC["phase"]
+    remembered = DIAGNOSTIC["work_failure"]
+    work = None
+    if remembered is not None:
+        work_phase, work_error = remembered
+        work = dict(
+            phase=work_phase if work_phase in PHASES else "unknown",
+            **failure_metadata(work_error),
+        )
+    return "GATE0_PUBLIC_GPG_LOADER_OBSERVATION_INCOMPLETE " + json.dumps(
+        dict(
+            phase=phase if phase in PHASES else "unknown",
+            work_failure=work,
+            exception_chain=chain,
+            chain_truncated=bool(pending),
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def require(value):
@@ -387,6 +495,7 @@ def github_record(context):
 
 
 def observe(deadline, files):
+    DIAGNOSTIC["phase"] = "source"
     require(platform.system() == "Linux" and platform.machine() == "x86_64")
     initial = snapshots(deadline)
     # The source roster must name the exact owner bytes executed during
@@ -395,6 +504,7 @@ def observe(deadline, files):
     M.load_primitives(initial["primitives_sha256"])
     context = M.context()
     github = github_record(context)
+    DIAGNOSTIC["phase"] = "prior"
     prior_raw = M.read_regular(
         TEMP / "cp-gpg-native-measurements.json", 65536, deadline
     )
@@ -413,6 +523,7 @@ def observe(deadline, files):
         ("primitives_sha256", "primitives_sha256"),
     ):
         require(prior["source"][old] == digest(initial[new]))
+    DIAGNOSTIC["phase"] = "os"
     os_facts = M.operating_system(deadline)
     require(os_facts == {"id": "ubuntu", "version_id": "24.04"})
     require(command(["/usr/bin/dpkg", "--print-architecture"], deadline) == b"amd64\n")
@@ -420,9 +531,11 @@ def observe(deadline, files):
     require(
         prior["operating_system"] == os_facts and set(prior["tools"]) == set(TARGETS)
     )
+    DIAGNOSTIC["phase"] = "loader-state"
     no_preload()
     target_rows = {}
     for name, path in TARGETS.items():
+        DIAGNOSTIC["phase"] = "target"
         row, raw = files.capture(path)
         require(
             prior["tools"][name]["path"] == path
@@ -432,13 +545,16 @@ def observe(deadline, files):
             M.command(name + "_version", deadline).decode("ascii").splitlines()[0]
             == prior["tools"][name]["version_line"]
         )
+        DIAGNOSTIC["phase"] = "interpreter"
         require(elf_interpreter(raw) == INTERPRETER)
         target_rows[name] = row
+    DIAGNOSTIC["phase"] = "interpreter"
     loader, loader_raw = files.capture(INTERPRETER, library=True, loader=True)
     require(
         loader_raw[:7] == b"\x7fELF\x02\x01\x01"
         and struct.unpack_from("<H", loader_raw, 18)[0] == 62
     )
+    DIAGNOSTIC["phase"] = "loader-state"
     cache_path = Path("/etc/ld.so.cache")
     try:
         cache_path.lstat()
@@ -449,6 +565,7 @@ def observe(deadline, files):
         cache = dict(path=str(cache_path), present=True, file=cache_row)
     targets = {}
     for name, path in TARGETS.items():
+        DIAGNOSTIC["phase"] = "dependency"
         argv = [loader["canonical_path"], "--list", path]
         wall_start, start = datetime.now(UTC).isoformat(), time.monotonic()
         raw = command(argv, deadline)
@@ -483,6 +600,7 @@ def observe(deadline, files):
     package_rows = [
         row for _, _, row in files.held.values() if row is not cache.get("file")
     ]
+    DIAGNOSTIC["phase"] = "package"
     packages = package_owners(package_rows, deadline)
     for name in TARGETS:
         matches = [p for p in packages if target_rows[name]["id"] in p["file_ids"]]
@@ -493,6 +611,7 @@ def observe(deadline, files):
         )
 
     def verify():
+        DIAGNOSTIC["phase"] = "final-check"
         before(deadline)
         no_preload()
         if not cache["present"]:
@@ -580,9 +699,11 @@ def observe(deadline, files):
 
 
 def publish(record, verify, deadline):
+    DIAGNOSTIC["phase"] = "publication"
     raw = M.P["canonical_json"](record, 262144)
     sidecar = (digest(raw) + "\n").encode("ascii")
     verify()
+    DIAGNOSTIC["phase"] = "publication"
     parent = os.open(TEMP, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     owned, descriptors = {}, set()
     names = (*OUTPUT_NAMES, *(name + ".pending" for name in OUTPUT_NAMES))
@@ -618,6 +739,7 @@ def publish(record, verify, deadline):
             descriptors.remove(fd)
         os.fsync(parent)
         verify()
+        DIAGNOSTIC["phase"] = "publication"
         for name in OUTPUT_NAMES:
             before(deadline)
             os.link(
@@ -648,7 +770,9 @@ def publish(record, verify, deadline):
         )
         verify()
         before(deadline)
-    except BaseException:
+    except BaseException as error:
+        remember_failure(error)
+        DIAGNOSTIC["phase"] = "publication-cleanup"
         failed = False
         for fd in descriptors:
             try:
@@ -677,6 +801,7 @@ def publish(record, verify, deadline):
 
 def main():
     global TEMP
+    DIAGNOSTIC.update(phase="bootstrap", work_failure=None)
     require(len(sys.argv) == 1 and os.geteuid() != 0)
     TEMP = Path(os.environ["RUNNER_TEMP"])
     require(TEMP.is_absolute() and ".." not in TEMP.parts)
@@ -697,12 +822,16 @@ def main():
     try:
         record, verify = observe(deadline, files)
         publish(record, verify, deadline)
+    except BaseException as error:
+        remember_failure(error)
+        raise
     finally:
+        DIAGNOSTIC["phase"] = "descriptor-cleanup"
         files.close()
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        raise SystemExit("GATE0_PUBLIC_GPG_LOADER_OBSERVATION_INCOMPLETE") from None
+    except Exception as error:
+        raise SystemExit(failure_diagnostic(error)) from None

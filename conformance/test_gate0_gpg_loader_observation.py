@@ -535,6 +535,140 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual(list(Path(directory).iterdir()), [])
 
 
+class FailureDiagnosticTests(unittest.TestCase):
+    def decode(self, error):
+        prefix = "GATE0_PUBLIC_GPG_LOADER_OBSERVATION_INCOMPLETE "
+        text = N["failure_diagnostic"](error)
+        self.assertTrue(text.startswith(prefix))
+        self.assertLess(len(text), 8192)
+        record = json.loads(text.removeprefix(prefix))
+        self.assertIn(record["phase"], G["PHASES"])
+        for item in record["exception_chain"]:
+            self.assertIn(item["kind"], G["EXCEPTION_KINDS"] | {"other"})
+            self.assertIn(item["relation"], {"raised", "cause", "context"})
+            self.assertLessEqual(len(item["frames"]), 8)
+            for frame in item["frames"]:
+                self.assertEqual(set(frame), {"owner", "line"})
+                self.assertIn(
+                    frame["owner"], {"observer", "measurement-owner", "retention-owner"}
+                )
+                self.assertIs(type(frame["line"]), int)
+                self.assertGreater(frame["line"], 0)
+        return text, record
+
+    def test_redaction_closed_grammar_and_no_post_failure_io(self):
+        class PoisonedError(ValueError):
+            def __str__(self):
+                raise AssertionError("exception string accessed")
+
+            def __repr__(self):
+                raise AssertionError("exception repr accessed")
+
+        private_marker = "NEVER_REPORT_PRIVATE_VALUE_OR_PATH"
+        error = PoisonedError(private_marker)
+        with (
+            patch.dict(
+                G, {"DIAGNOSTIC": {"phase": private_marker, "work_failure": None}}
+            ),
+            patch.object(os, "open", side_effect=AssertionError("IO after failure")),
+            patch.object(os, "read", side_effect=AssertionError("IO after failure")),
+            patch.object(
+                Path, "read_bytes", side_effect=AssertionError("IO after failure")
+            ),
+            patch.object(M, "RUN", side_effect=AssertionError("command after failure")),
+            patch.object(
+                time, "monotonic", side_effect=AssertionError("clock after failure")
+            ),
+        ):
+            text, record = self.decode(error)
+        self.assertNotIn(private_marker, text)
+        self.assertEqual(record["phase"], "unknown")
+        self.assertEqual(record["exception_chain"][0]["kind"], "other")
+
+    def test_fixed_owner_lines_and_original_failure_survive_cleanup_override(self):
+        with patch.dict(G, {"DIAGNOSTIC": {"phase": "target", "work_failure": None}}):
+            try:
+                N["require"](False)
+            except G["Incomplete"] as error:
+                original = error
+                N["remember_failure"](error)
+            G["DIAGNOSTIC"]["phase"] = "descriptor-cleanup"
+            try:
+                try:
+                    raise original
+                except G["Incomplete"]:
+                    raise OSError("NEVER_REPORT_CLEANUP_ERROR_VALUE") from None
+            except OSError as error:
+                text, record = self.decode(error)
+        self.assertNotIn("NEVER_REPORT_CLEANUP_ERROR_VALUE", text)
+        self.assertEqual(record["work_failure"]["phase"], "target")
+        self.assertTrue(
+            any(
+                frame["owner"] == "observer"
+                for frame in record["work_failure"]["frames"]
+            )
+        )
+        self.assertEqual(
+            {item["kind"] for item in record["exception_chain"]},
+            {"OSError", "Incomplete"},
+        )
+
+    def test_bounded_cycle_detected_cause_and_context(self):
+        errors = [ValueError("NEVER_REPORT_CHAIN_VALUE") for _ in range(10)]
+        for index in range(9):
+            errors[index].__cause__ = errors[index + 1]
+            errors[index].__context__ = errors[index + 1]
+        errors[-1].__context__ = errors[0]
+        with patch.dict(G, {"DIAGNOSTIC": {"phase": "package", "work_failure": None}}):
+            text, record = self.decode(errors[0])
+        self.assertEqual(len(record["exception_chain"]), 4)
+        self.assertTrue(record["chain_truncated"])
+        self.assertNotIn("NEVER_REPORT_CHAIN_VALUE", text)
+        error = ValueError()
+        error.__cause__ = error
+        with patch.dict(
+            G, {"DIAGNOSTIC": {"phase": "bootstrap", "work_failure": None}}
+        ):
+            _, record = self.decode(error)
+        self.assertEqual(len(record["exception_chain"]), 1)
+        self.assertFalse(record["chain_truncated"])
+
+    def test_actual_publication_remembers_primary_before_cleanup_refusal(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(
+                G,
+                {
+                    "TEMP": Path(directory),
+                    "DIAGNOSTIC": {"phase": "publication", "work_failure": None},
+                },
+            ),
+        ):
+            with (
+                patch.object(
+                    os, "link", side_effect=ValueError("NEVER_REPORT_WORK_VALUE")
+                ),
+                patch.object(
+                    os, "unlink", side_effect=OSError("NEVER_REPORT_CLEANUP_VALUE")
+                ),
+            ):
+                try:
+                    N["publish"](
+                        {"synthetic": True}, lambda: None, time.monotonic() + 10
+                    )
+                except G["Incomplete"] as error:
+                    text, record = self.decode(error)
+                else:
+                    self.fail("publication unexpectedly succeeded")
+            self.assertEqual(record["phase"], "publication-cleanup")
+            self.assertEqual(record["work_failure"]["kind"], "ValueError")
+            self.assertEqual(record["work_failure"]["phase"], "publication")
+            self.assertNotIn("NEVER_REPORT", text)
+            self.assertTrue(
+                all(not (Path(directory) / name).exists() for name in G["OUTPUT_NAMES"])
+            )
+
+
 class SourceBoundaryTests(unittest.TestCase):
     def test_existing_crypto_measurement_and_acceptors_unchanged(self):
         pins = {
