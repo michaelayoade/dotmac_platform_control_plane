@@ -217,3 +217,114 @@ def test_both_cleanup_paths_use_role_pinned_owner_and_preserve_unknown_identity(
     assert ordinary_final.index(
         "retention.role_export_cleanup(private)"
     ) < ordinary_final.index("shutil.rmtree(private)")
+
+
+def _diagnostic_checker():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "role_export_diagnostic_canary", ROOT / "conformance/check_gate0_role_export.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_failure_diagnostic_redacts_arbitrary_messages_and_bounds_cycles():
+    import json
+
+    checker = _diagnostic_checker()
+    private = ValueError("SYNTHETIC_PRIVATE_VALUE/private/member")
+    other = RuntimeError("SYNTHETIC_PRIVATE_VALUE/private/cleanup")
+    private.__context__ = other
+    other.__context__ = private
+    chain = checker._failure_chain(private)
+    assert len(chain) == 2
+    encoded = json.dumps(chain)
+    assert "SYNTHETIC_PRIVATE_VALUE" not in encoded
+    assert "/private/" not in encoded
+    assert chain[0]["predicate"] == "unclassified"
+    assert (
+        checker._failure_metadata(ValueError("protected native link"))["predicate"]
+        == "protected_native_link"
+    )
+    assert (
+        checker._failure_metadata(type("PrivateExceptionName", (Exception,), {})())[
+            "exception_kind"
+        ]
+        == "other"
+    )
+    current = ValueError("synthetic")
+    for _ in range(8):
+        next_error = ValueError("synthetic")
+        next_error.__cause__ = current
+        current = next_error
+    assert len(checker._failure_chain(current)) == 4
+
+
+def test_failure_chain_preserves_work_and_masking_cleanup_without_private_values(
+    monkeypatch,
+):
+    import json
+
+    checker = _diagnostic_checker()
+    monkeypatch.setenv("GITHUB_ACTIONS", "false")
+    try:
+        checker.check("SYNTHETIC_PRIVATE_VALUE", "SYNTHETIC_PRIVATE_VALUE")
+    except ValueError as primary:
+        checker._DIAGNOSTIC["work_failure"] = {
+            "phase": "rootfs_subject_join",
+            **checker._failure_metadata(primary),
+        }
+        checker._DIAGNOSTIC["phase"] = "owned_container_cleanup"
+        checker._DIAGNOSTIC["cleanup_outcome"] = "unconfirmed"
+        try:
+            raise RuntimeError("SYNTHETIC_PRIVATE_VALUE/cleanup") from primary
+        except RuntimeError as cleanup:
+            report = checker._failure_report(cleanup)
+    else:
+        raise AssertionError("synthetic hosted refusal did not occur")
+    assert report["cleanup_outcome"] == "unconfirmed"
+    assert report["work_failure"]["phase"] == "rootfs_subject_join"
+    assert len(report["exception_chain"]) == 2
+    locations = report["exception_chain"][1]["source_locations"]
+    assert locations and all(location["owner"] == "checker" for location in locations)
+    assert all(
+        type(location["line"]) is int and location["line"] > 0 for location in locations
+    )
+    encoded = json.dumps(report)
+    assert "SYNTHETIC_PRIVATE_VALUE" not in encoded
+    assert "check_gate0_role_export.py" not in encoded
+    assert str(ROOT) not in encoded
+
+
+def test_failure_diagnostics_do_no_io_and_keep_failure_cleanup_deadlines():
+    checker = (ROOT / "conformance/check_gate0_role_export.py").read_text()
+    tree = ast.parse(checker)
+    names = {"_failure_metadata", "_failure_chain", "_failure_report"}
+    for function in tree.body:
+        if isinstance(function, ast.FunctionDef) and function.name in names:
+            for node in ast.walk(function):
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name):
+                        assert node.func.id not in {"open", "str", "repr"}
+                    if isinstance(node.func, ast.Attribute):
+                        assert node.func.attr not in {
+                            "open",
+                            "read",
+                            "read_bytes",
+                            "read_text",
+                            "resolve",
+                            "extractfile",
+                        }
+    assert "range(64)" in checker and "range(4)" in checker
+    assert '"work_failure"' in checker and '"exception_chain"' in checker
+    assert '"cleanup_outcome"] = "unconfirmed"' in checker
+    assert '"cleanup_outcome"] = "confirmed"' in checker
+    assert "started + 280" in checker
+    assert "role_export_cleanup(private)" in checker
+    assert (
+        'raise SystemExit("role export source conformance refused") from None'
+        in checker
+    )

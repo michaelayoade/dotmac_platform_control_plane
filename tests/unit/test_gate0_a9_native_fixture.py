@@ -49,13 +49,47 @@ class NamesOnly(MutableMapping):
         self.names.remove(key)
 
 
+class SubjectEnvironment:
+    """Trap subject value reads without replacing the reporter's environment."""
+
+    def __init__(self, environment):
+        self.environ = environment
+
+    def getenv(self, key, default=None):
+        return self.environ.get(key, default)
+
+    def __getattr__(self, name):
+        if name in {"environb", "getenvb"}:
+            raise AssertionError("byte environment access forbidden")
+        return getattr(os, name)
+
+
+@pytest.mark.parametrize("subject", [fixture, courier, life])
+def test_strict_environment_is_local_to_subject(monkeypatch, subject):
+    original_environment = os.environ
+    environment = NamesOnly(["SYNTHETIC_PRIVATE_VALUE"])
+    monkeypatch.setattr(subject, "os", SubjectEnvironment(environment))
+    process_environment_unchanged = os.environ is original_environment
+    subject_environment_is_strict = subject.os.environ is environment
+    assert process_environment_unchanged and subject_environment_is_strict
+    # The reporter may query this public formatting flag even on a failure.
+    os.getenv("PY_COLORS")
+    with pytest.raises(AssertionError, match="value access forbidden"):
+        subject.os.environ.get("SYNTHETIC_PRIVATE_VALUE")
+    with pytest.raises(AssertionError, match="value access forbidden"):
+        subject.os.getenv("SYNTHETIC_PRIVATE_VALUE")
+    with pytest.raises(AssertionError, match="byte environment access forbidden"):
+        subject.os.getenvb(b"SYNTHETIC_PRIVATE_VALUE")
+    assert environment.reads == 2
+
+
 @pytest.mark.parametrize("present", [False, True])
 def test_probe_only_iterates_names(monkeypatch, capsys, present):
     env = NamesOnly(
         ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
         + (["ACTIONS_ID_TOKEN_REQUEST_URL"] if present else [])
     )
-    monkeypatch.setattr(os, "environ", env)
+    monkeypatch.setattr(fixture, "os", SubjectEnvironment(env))
     assert fixture.run_installed_url_presence_probe() == (3 if present else 0)
     assert env.reads == 0
     assert capsys.readouterr().out == "Gate0A9UrlPresence.v1 " + (
@@ -65,7 +99,7 @@ def test_probe_only_iterates_names(monkeypatch, capsys, present):
 
 def test_probe_unavailable_has_fixed_output_and_no_reads(monkeypatch, capsys):
     env = NamesOnly([], broken=True)
-    monkeypatch.setattr(os, "environ", env)
+    monkeypatch.setattr(fixture, "os", SubjectEnvironment(env))
     assert fixture.run_installed_url_presence_probe() == 4
     assert env.reads == 0
     assert capsys.readouterr().out == "Gate0A9UrlPresence.v1 unavailable\n"
@@ -592,7 +626,7 @@ def test_real_courier_refuses_observer_close_without_token_getter(monkeypatch):
         lambda: ({}, {}, SimpleNamespace(provisioning_end=time.monotonic() + 10)),
     )
     monkeypatch.setattr(courier.socket, "socket", lambda *_: channel)
-    monkeypatch.setattr(os, "environ", env)
+    monkeypatch.setattr(courier, "os", SubjectEnvironment(env))
     assert courier.run_installed_job_courier() == 3
     assert env.token_reads == 0 and env.deleted
     assert len(sent) == 1 and b"Gate0A9BrokerMetadata.v1" in sent[0]
@@ -1043,7 +1077,7 @@ def test_real_production_supplier_policy_rejects_actual_fixture_inventory(
     monkeypatch.setattr(life, "_protected", protected)
     monkeypatch.setattr(life, "_closed", observed_closed)
     environment = NamesOnly(["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
-    monkeypatch.setattr(os, "environ", environment)
+    monkeypatch.setattr(life, "os", SubjectEnvironment(environment))
     context = SimpleNamespace(
         lifecycle=SimpleNamespace(_doc=lifecycle),
         selection=dict(native_receipt_digest=life._hash(inventory_bytes)),
