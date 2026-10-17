@@ -592,6 +592,32 @@ def test_prelaunch_lifecycle_courier_real_binder_and_final_loaders(
             return
         assert result == [0] and state["token_reads"] == 1
         assert (tmp_path / "oidc-request-token").read_bytes() == b"synthetic-token"
+        original_readback = loader.InstalledRunnerCollection._load
+
+        def diagnosed_readback() -> loader.InstalledRunnerCollection:
+            try:
+                return original_readback()
+            except Exception as error:
+                trace = error.__traceback__
+                line = 0
+                load_line = 0
+                while trace is not None:
+                    line = trace.tb_lineno
+                    if trace.tb_frame.f_code.co_name == "_load":
+                        load_line = trace.tb_lineno
+                    trace = trace.tb_next
+                # Class and line only: never exception text, values, or locals.
+                pytest.fail(
+                    f"installed_fixture_readback:{type(error).__name__}:"
+                    f"load_line={load_line}:line={line}",
+                    pytrace=False,
+                )
+
+        monkeypatch.setattr(
+            loader.InstalledRunnerCollection,
+            "_load",
+            staticmethod(diagnosed_readback),
+        )
         loaded = loader.InstalledRunnerCollection.from_installed()
         assert loaded.broker.path == "/opaque/supplier"
         monkeypatch.setattr(
