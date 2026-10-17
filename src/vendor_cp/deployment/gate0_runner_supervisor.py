@@ -25,6 +25,7 @@ from vendor_cp.deployment.gate0_runner_bootstrap import (
 from vendor_cp.deployment.gate0_runner_handoff import measure_handoff_process
 from vendor_cp.deployment.gate0_runner_lifecycle import (
     InstalledA9Lifecycle,
+    InstalledJitBinding,
     LifecycleRefused,
     NativeJitInvocation,
     _before,
@@ -33,6 +34,7 @@ from vendor_cp.deployment.gate0_runner_lifecycle import (
     _directory,
     _hash,
     _OriginalBounds,
+    _prelaunch,
     _proc,
     _protected,
     _read_fd,
@@ -586,7 +588,7 @@ def _read_outer_credential(deadline: float) -> bytes:
 
 def _publication_parent(path: Path, deadline: float) -> int:
     """Two fixed documentary parents; guard each filesystem step, including rollback."""
-    _require(path in (_EXPORT, _ROOT / "lifecycle"))
+    _require(path in (_EXPORT, _ROOT / "lifecycle", _ROOT))
     _before(deadline)
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -626,6 +628,13 @@ def _publish(
     allowed = {
         _ROOT / "lifecycle/public-keys.json",
         _ROOT / "lifecycle/jit-retirement.json",
+        _ROOT / "a9-prelaunch.json",
+        _ROOT / "job-broker-binding.json",
+        _ROOT / "collection-qualification.json",
+        _ROOT / "bootstrap-qualification.json",
+        _ROOT / "installation.json",
+        _ROOT / "bootstrap.json",
+        _ROOT / "job-broker-binding-complete.json",
     }
     allowed.update(_EXPORT / name for name in _EXPORT_NAMES)
     _require(path in allowed and 0 < len(raw) <= 8 * 1024 * 1024)
@@ -898,16 +907,15 @@ def _delivery(installed: SupervisorInstallation) -> None:
             time.sleep(min(0.01, max(0, end - time.monotonic())))
     doc = _closed(
         strict_object(raw),
-        "schema lifecycle_binding_digest campaign_digest "
-        "collection_installation_digest bootstrap_installation_digest "
+        "schema lifecycle_binding_digest campaign_digest prelaunch_digest "
         "ca_digest certificate_a_digest certificate_b_digest",
     )
-    _require(canonical(doc) == raw and doc["schema"] == "Gate0A9LifecycleDelivery.v1")
+    _require(canonical(doc) == raw and doc["schema"] == "Gate0A9LifecycleDelivery.v2")
     for name in ("lifecycle_binding_digest", "campaign_digest"):
         _require(doc[name] == installed.lifecycle[name])
+    prelaunch_raw, _, _ = _prelaunch(installed.lifecycle)
+    _require(doc["prelaunch_digest"] == _hash(prelaunch_raw))
     for key, path in (
-        ("collection_installation_digest", _ROOT / "installation.json"),
-        ("bootstrap_installation_digest", _ROOT / "bootstrap.json"),
         ("ca_digest", _ROOT / "lifecycle/ca.pub"),
         ("certificate_a_digest", _ROOT / "lifecycle/cert-a.pub"),
         ("certificate_b_digest", _ROOT / "lifecycle/cert-b.pub"),
@@ -915,6 +923,220 @@ def _delivery(installed: SupervisorInstallation) -> None:
         _require(_hash(_protected(path, mode=0o600)) == _digest(doc[key]))
         _before(end)
     _require(doc["ca_digest"] == installed.lifecycle["ca_digest"])
+
+
+def _bind_actual_job_installation(
+    lifecycle: InstalledA9Lifecycle,
+    binding: InstalledJitBinding,
+    report: dict[str, Any],
+) -> None:
+    """Fixed root publisher; no caller paths, qualification fabrication or callbacks."""
+    _require(type(lifecycle) is InstalledA9Lifecycle and not lifecycle._failed)
+    jit = lifecycle._jit
+    _require(
+        type(jit) is NativeJitInvocation
+        and jit.lifecycle is lifecycle
+        and type(binding) is InstalledJitBinding
+        and jit.owns_binding(binding)
+    )
+    end = lifecycle._bounds.provisioning_end
+    _before(end)
+    installed = SupervisorInstallation.load()
+    _require(installed.lifecycle == lifecycle._doc)
+    SupervisorManager(installed).qualify()
+    jit._qualify_installed()
+    prelaunch_raw, prelaunch, inputs = _prelaunch(lifecycle._doc)
+    from vendor_cp.deployment.gate0_runner_installation import (
+        _a9_inputs,
+        _a9_join,
+    )
+    from vendor_cp.deployment.gate0_runner_tokens import _supplier_coordinates
+
+    checked, public_inputs = _a9_inputs(prelaunch_raw)
+    _require(checked == prelaunch and public_inputs == inputs)
+    policy = jit._supplier_policy()
+    _closed(report, "schema url")
+    _require(report["schema"] == "Gate0A9BrokerMetadata.v1")
+    origin, path, query = _supplier_coordinates(report["url"], policy["origins"])
+    # Root custody is the existing static native trust boundary. Runtime never
+    # emits a native receipt or promotes a dynamic URL to native qualification.
+    for role in ("collection", "bootstrap"):
+        static = strict_object(inputs[role + "_native_qualification"])
+        native = _closed(static["native_receipt"], "path digest")
+        _pinned(native)
+        runtime = static["runtime_identity"]
+        _require(runtime == jit._static_runtime_identity())
+        if role == "bootstrap":
+            _require(
+                static["native_receipt"]
+                == strict_object(inputs["bootstrap_template"])["native_receipt"]
+            )
+    jit.refresh_protected_job(binding)
+    _require(jit.owns_binding(binding) and jit._peer_chain is not None)
+    facts, selection = binding.facts, jit.selection
+    _require(
+        policy["profile"]["workflow_source_digest"]
+        == "sha256:" + facts.workflow_source.bytes_sha256
+    )
+    job = next(job for job in facts.jobs if job.id == selection["job_id"])
+    selected = dict(
+        repository_id=facts.repository_id,
+        owner_id=facts.owner_id,
+        run_id=facts.run_id,
+        attempt=facts.attempt,
+        workflow_id=facts.workflow_id,
+        source_revision=facts.head_sha,
+        environment_id=facts.environment_id,
+        job_id=job.id,
+        job_name=job.name,
+        runner_id=job.runner_id,
+        runner_name=job.runner_name,
+        runner_group_id=job.runner_group_id,
+    )
+    observation = _hash(
+        canonical(
+            dict(
+                selected_job_coordinates=selected,
+                workflow_source_digest=facts.workflow_source.bytes_sha256,
+                review=dict(
+                    state=facts.review.state,
+                    reviewer_id=facts.review.reviewer_id,
+                    environment_ids=list(facts.review.environment_ids),
+                    observation_sha256=facts.review.observation_sha256,
+                ),
+                policy_observation_digests=list(facts.policy_observation_digests),
+                observations=[
+                    dict(
+                        endpoint=o.endpoint.value,
+                        page=o.page,
+                        status=o.status,
+                        response_sha256=o.response_sha256,
+                        observed_at_utc=o.observed_at_utc,
+                        observed_monotonic=o.observed_monotonic,
+                    )
+                    for o in facts.observations
+                ],
+            )
+        )
+    )
+    broker_binding = dict(
+        schema="Gate0A9JobBrokerBinding.v1",
+        lifecycle_binding_digest=prelaunch["lifecycle_binding_digest"],
+        campaign_digest=prelaunch["campaign_digest"],
+        prelaunch_digest=_hash(prelaunch_raw),
+        broker_policy_digest=_hash(inputs["broker_policy"]),
+        static_native_qualification_digests={
+            r: _hash(inputs[r + "_native_qualification"])
+            for r in ("collection", "bootstrap")
+        },
+        boot_id=lifecycle._bounds.boot_id,
+        jit_invocation_id=jit.invocation,
+        selected_job_coordinates=selected,
+        github_observation_digest=observation,
+        courier_pid=jit._peer_chain[0][0],
+        courier_start=jit._peer_chain[0][2],
+        origin=origin,
+        path=path,
+        query=query,
+        original_provisioning_end=end,
+    )
+    binding_raw = canonical(broker_binding)
+    binding_pin = dict(
+        path=str(_ROOT / "job-broker-binding.json"), digest=_hash(binding_raw)
+    )
+    prelaunch_pin = dict(
+        path=str(_ROOT / "a9-prelaunch.json"), digest=_hash(prelaunch_raw)
+    )
+    collection = strict_object(inputs["collection_template"])
+    bootstrap = strict_object(inputs["bootstrap_template"])
+    _require(
+        collection["schema"] == "Gate0RunnerCollectionTemplate.v1"
+        and bootstrap["schema"] == "Gate0CollectorBootstrapTemplate.v1"
+    )
+    for doc in (collection, bootstrap):
+        _require(
+            "qualification" not in doc
+            and "job_broker_binding" not in doc
+            and doc["campaign_digest"] == prelaunch["campaign_digest"]
+        )
+        doc.update(
+            prelaunch=prelaunch_pin,
+            job_broker_binding=binding_pin,
+            binding_marker=str(_ROOT / "job-broker-binding-complete.json"),
+        )
+    _require("broker" not in collection and "collection_installation" not in bootstrap)
+    collection.update(
+        schema="Gate0RunnerCollectionInstallation.v2",
+        broker=dict(origin=origin, path=path, query=query, qualification=binding_pin),
+    )
+    originals = collection["job"]
+    _require(
+        originals["repository_id"] == str(facts.repository_id)
+        and originals["run_id"] == str(facts.run_id)
+        and originals["run_attempt"] == str(facts.attempt)
+        and originals["runner_name"] == job.runner_name
+        and originals["runner_group_id"] == str(job.runner_group_id)
+        and originals["workflow_sha"] == facts.head_sha
+    )
+    outputs: list[tuple[Path, bytes]] = [
+        (_ROOT / "a9-prelaunch.json", prelaunch_raw),
+        (_ROOT / "job-broker-binding.json", binding_raw),
+    ]
+
+    def qualified(role: str, doc: dict[str, Any]) -> bytes:
+        qualification = canonical(
+            dict(
+                schema="Gate0A9DerivedInstallationQualification.v1",
+                role=role,
+                template_digest=_hash(inputs[role + "_template"]),
+                static_native_qualification_digest=_hash(
+                    inputs[role + "_native_qualification"]
+                ),
+                job_broker_binding_digest=_hash(binding_raw),
+                installation_digest=_hash(canonical(doc)),
+            )
+        )
+        name = _ROOT / (role + "-qualification.json")
+        doc["qualification"] = dict(path=str(name), digest=_hash(qualification))
+        outputs.append((name, qualification))
+        return canonical(doc)
+
+    collection_raw = qualified("collection", collection)
+    bootstrap.update(
+        schema="Gate0CollectorBootstrapInstallation.v3",
+        collection_installation=dict(
+            path=str(_ROOT / "installation.json"), digest=_hash(collection_raw)
+        ),
+    )
+    bootstrap_raw = qualified("bootstrap", bootstrap)
+    outputs.extend(
+        (
+            (_ROOT / "installation.json", collection_raw),
+            (_ROOT / "bootstrap.json", bootstrap_raw),
+        )
+    )
+    marker_raw = canonical(
+        dict(
+            schema="Gate0A9JobBrokerBindingComplete.v1",
+            prelaunch_digest=_hash(prelaunch_raw),
+            collection_digest=_hash(collection_raw),
+            bootstrap_digest=_hash(bootstrap_raw),
+            binding_digest=_hash(binding_raw),
+        )
+    )
+    outputs.append((_ROOT / "job-broker-binding-complete.json", marker_raw))
+    # No final file exists before this once-only same-job bind, including marker.
+    for output, _ in outputs:
+        _before(end)
+        _require(
+            not os.path.lexists(output)
+            and not os.path.lexists(str(output) + ".pending")
+        )
+    for output, content in outputs:
+        _publish(output, content, lifecycle._doc["collector_gid"], end)
+    _a9_join(collection_raw, "collection")
+    _a9_join(bootstrap_raw, "bootstrap")
+    _before(end)
 
 
 def _retire_jit(installed: SupervisorInstallation) -> None:
@@ -1033,8 +1255,11 @@ def _observe_original_e_export() -> dict[str, Any]:
     )
     collection_raw = _protected(_ROOT / "installation.json", 8 * 1024 * 1024)
     collection = strict_object(collection_raw)
+    from vendor_cp.deployment.gate0_runner_installation import _a9_join
+
+    _a9_join(collection_raw, "collection")
     _require(
-        collection["schema"] == "Gate0RunnerCollectionInstallation.v1"
+        collection["schema"] == "Gate0RunnerCollectionInstallation.v2"
         and collection["campaign_digest"] == installed.lifecycle["campaign_digest"]
         and type(collection["collector_uid"]) is int
         and collection["collector_uid"] == installed.lifecycle["collector_uid"]

@@ -7,13 +7,17 @@ acceptance. No host/service/credential installation has been performed. The
 argument-free `gate0 bootstrap-collector` and `gate0 collect-e-credential` CLI
 commands delegate to the installed bootstrap and credential owners.
 
+The [same-job broker contract](gate0-a9-same-job-broker.md) governs the final
+prelaunch/static/dynamic/marker joins; older final schemas refuse.
+
 The argument-free `run_installed_bootstrap()` loads only root-protected
 `/run/dotmac-gate0-collector/bootstrap.json`. Its closed
-`Gate0CollectorBootstrapInstallation.v2` fields are `schema`, `campaign_digest`,
+`Gate0CollectorBootstrapInstallation.v3` fields are `schema`, `campaign_digest`,
 `lifecycle_binding_digest`, `collection_installation`, `collector_binary`, `collector_gid`,
 `collector_groups`, `socket_gid`, `receiver_template`, `qualification`,
 `native_receipt`, `source_revision`, `source_files`, `unit_assets`,
-`manager_client`, and `manager_binary`. File pins are exactly `{path,digest}`;
+`manager_client`, `manager_binary`, `prelaunch`, `job_broker_binding`, and
+`binding_marker`. File pins are exactly `{path,digest}`;
 all files and their ancestry must be root-owned and immutable to other users.
 `manager_client` is fixed `/usr/bin/systemctl`; `manager_binary` must match the
 actual PID1 executable. `source_files` contains exactly this bootstrap, the fixed credential adapter
@@ -31,18 +35,15 @@ existing `Gate0ReceiverInstallation.v1` shape except for `collector`; the source
 publishes the actual observed UID/PID/start without changing root-frame/ACK
 schemas.
 
-`Gate0A9BootstrapQualification.v2` is a NEW candidate input format, with exactly
-`schema`, `campaign_digest`, `installation_digest`, `source_revision`,
-`source_files`, `unit_assets`, `manager_identity`, `native_receipt_digest`,
-and `clock_owner_scope`. The latter must be `immutable-original-bounds-clock.v1`.
-The installation digest excludes only the qualification pin. Manager identity
-contains the actual PID1 executable digest, manager Version, kernel release and
-boot ID. Qualification must equal the computed installed pins, actual manager
-measurements and exact native receipt hash. Missing or mismatched qualification
-refuses before collector launch. Root-protected JSON alone does not establish
-native proof: the accepted external installation packet must supply actual
-qualified native evidence and its provenance. This schema is a source proposal,
-not a new acceptance ledger or an accepted flag.
+Final qualification uses `Gate0A9DerivedInstallationQualification.v1`, joined to
+the independently pinned `Gate0A9StaticNativeQualification.v1` bootstrap role.
+The static runtime identity contains actual PID1 executable digest, Version,
+kernel release and boot ID; runtime compares these with the live manager.
+The final descriptor digest excludes only its derived qualification pin.
+The derived join is not native proof. The accepted external installation packet
+must supply actual root-reviewed native evidence and its provenance, including
+the supplier no-rewrite chain. Missing or mismatched records refuse before launch.
+See the same-job contract for the exact closed schemas and acyclic digests.
 
 The system manager owns collector cgroups, descendant termination and reaping.
 The only unit names are `dotmac-gate0-a9-bootstrap.service`,

@@ -244,7 +244,17 @@ def original_native(installed_composition, historical_installed, monkeypatch):  
         manager_client=systemctl,
         manager_binary=manager,
     )
+    from gate0_a9_fixtures import synthetic_a9_join
+
+    synthetic_a9_join(
+        collection, bdoc, files, pin, binding_digest=ldoc["lifecycle_binding_digest"]
+    )
     files[str(bootstrap._INSTALLATION)] = canonical(bdoc)
+    from vendor_cp.deployment import gate0_runner_installation as collection_loader
+
+    monkeypatch.setattr(
+        collection_loader, "_protected_read", lambda path, **kw: files[str(path)]
+    )
     source = pin(Path(supervisor.__file__), Path(supervisor.__file__).read_bytes())
     sdoc = dict(
         schema="Gate0A9SupervisorInstallation.v1",

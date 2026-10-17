@@ -95,12 +95,6 @@ def run_installed_job_courier() -> int:
     try:
         _, _, bounds = _installed_public_selection()
         _before(bounds.provisioning_end)
-        original = os.environ.pop(_TOKEN_ENV, None)
-        _require(type(original) is str)
-        original = cast(str, original)
-        token = original.encode("ascii")
-        _require(0 < len(token) <= 32768 and all(32 < byte < 127 for byte in token))
-        original = None
         channel = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         channel.settimeout(max(0.001, bounds.provisioning_end - time.monotonic()))
         _socket_before(channel, bounds.provisioning_end)
@@ -109,6 +103,32 @@ def run_installed_job_courier() -> int:
             "3i", channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         )
         _require(uid == 0)
+        from vendor_cp.deployment.gate0_runner_lifecycle import (
+            _METADATA_READY,
+            _SECRET_READY,
+            _courier_frame,
+        )
+
+        _require(
+            _courier_frame(channel, bounds.provisioning_end, 128) == _METADATA_READY
+        )
+        actual = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+        _require(
+            type(actual) is str
+            and 0 < len(actual) <= 16384
+            and all(32 < ord(c) < 127 for c in actual)
+        )
+        report = canonical(dict(schema="Gate0A9BrokerMetadata.v1", url=actual))
+        _socket_before(channel, bounds.provisioning_end)
+        _require(channel.send(report) == len(report))
+        _require(_courier_frame(channel, bounds.provisioning_end, 128) == _SECRET_READY)
+        original = os.environ.pop(_TOKEN_ENV, None)
+        _require(type(original) is str)
+        original = cast(str, original)
+        token = original.encode("ascii")
+        _require(0 < len(token) <= 32768 and all(32 < byte < 127 for byte in token))
+        original = None
+
         _socket_before(channel, bounds.provisioning_end)
         _require(channel.send(token) == len(token))
         token = b""
@@ -134,7 +154,10 @@ def run_installed_job_courier() -> int:
     except Exception:
         return 3
     finally:
-        os.environ.pop(_TOKEN_ENV, None)
+        try:
+            del os.environ[_TOKEN_ENV]
+        except KeyError:
+            pass
         original, token = None, b""
         if channel is not None:
             channel.close()

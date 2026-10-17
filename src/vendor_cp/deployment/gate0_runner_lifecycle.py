@@ -69,6 +69,9 @@ _KEYGEN = Path("/usr/bin/ssh-keygen")
 _COLLECTION = _ROOT / "installation.json"
 _SEAL = object()
 _MARKER = b"Gate0A9LifecycleMarker.v1\n"
+_PRELAUNCH = _LIFECYCLE / "prelaunch.json"
+_METADATA_READY = b"Gate0A9MetadataReady.v1\n"
+_SECRET_READY = b"Gate0A9SecretReady.v1\n"
 
 
 class LifecycleRefused(ValueError):
@@ -211,6 +214,61 @@ def _protected(path: Path, maximum: int = 65536, *, mode: int | None = None) -> 
             os.close(fd)
     finally:
         os.close(parent)
+
+
+_PRELAUNCH_FIELDS = (
+    "schema lifecycle_binding_digest campaign_digest collection_template "
+    "bootstrap_template broker_policy collection_native_qualification "
+    "bootstrap_native_qualification"
+)
+
+
+def _prelaunch_selection_digest(document: JSONRecord) -> str:
+    # Explicit domain; qualification pins are checked separately in full prelaunch.
+    return _hash(
+        canonical(
+            dict(
+                schema="Gate0A9PrelaunchStaticSelection.v1",
+                selection={
+                    k: v
+                    for k, v in document.items()
+                    if k
+                    not in (
+                        "collection_native_qualification",
+                        "bootstrap_native_qualification",
+                    )
+                },
+            )
+        )
+    )
+
+
+def _prelaunch(lifecycle: JSONRecord) -> tuple[bytes, JSONRecord, dict[str, bytes]]:
+    raw = _protected(_PRELAUNCH, mode=0o600)
+    document = _closed(strict_object(raw), _PRELAUNCH_FIELDS)
+    _require(
+        canonical(document) == raw
+        and document["schema"] == "Gate0A9PrelaunchSelection.v1"
+    )
+    for name in ("lifecycle_binding_digest", "campaign_digest"):
+        _require(document[name] == lifecycle[name])
+    inputs = {}
+    for name in (
+        "collection_template",
+        "bootstrap_template",
+        "broker_policy",
+        "collection_native_qualification",
+        "bootstrap_native_qualification",
+    ):
+        pin = _closed(document[name], "path digest")
+        path = Path(pin["path"])
+        _require(path == _ROOT / (name.replace("_", "-") + ".json"))
+        content = _protected(path)
+        _require(_hash(content) == _digest(pin["digest"]))
+        parsed = strict_object(content)
+        _require(canonical(parsed) == content)
+        inputs[name] = content
+    return raw, document, inputs
 
 
 def _marker(path: Path) -> None:
@@ -1491,11 +1549,10 @@ class InstalledA9Lifecycle:
     def _collection_cases(
         self,
     ) -> list[tuple[JSONRecord, WindowDocument, AdmittedOperation]]:
-        raw = _protected(_COLLECTION)
-        document = strict_object(raw)
+        _, _, inputs = _prelaunch(self._doc)
+        document = strict_object(inputs["collection_template"])
         _require(
-            canonical(document) == raw
-            and document["schema"] == "Gate0RunnerCollectionInstallation.v1"
+            document["schema"] == "Gate0RunnerCollectionTemplate.v1"
             and document["campaign_digest"] == self._doc["campaign_digest"]
             and type(document["collector_uid"]) is int
             and document["collector_uid"] == self._doc["collector_uid"]
@@ -1650,7 +1707,11 @@ class InstalledA9Lifecycle:
                 self._create_file(cert_slot, raw, 0, self._doc["collector_gid"], 0o640)
             self._event(
                 "certificates",
-                {"collection_installation_digest": _hash(_protected(_COLLECTION))},
+                {
+                    "collection_template_digest": _hash(
+                        _prelaunch(self._doc)[2]["collection_template"]
+                    )
+                },
                 self._bounds.provisioning_end,
             )
         except Exception:
@@ -1842,6 +1903,25 @@ class InstalledA9Lifecycle:
             binding = self._jit.bind_protected_job()
             identity = self._jit.require_courier_peer(peer, binding)
             _socket_before(peer, self._bounds.provisioning_end)
+            peer.sendall(_METADATA_READY)
+            metadata = _courier_frame(peer, self._bounds.provisioning_end, 17408)
+            report = _closed(strict_object(metadata), "schema url")
+            _require(
+                canonical(report) == metadata
+                and report["schema"] == "Gate0A9BrokerMetadata.v1"
+            )
+            _require(self._jit.require_courier_peer(peer, binding) == identity)
+            from vendor_cp.deployment.gate0_runner_supervisor import (
+                _bind_actual_job_installation,
+            )
+
+            _bind_actual_job_installation(self, binding, report)
+            self._jit.refresh_protected_job(binding)
+            _require(self._jit.require_courier_peer(peer, binding) == identity)
+            _socket_before(peer, self._bounds.provisioning_end)
+            peer.sendall(_SECRET_READY)
+
+            _socket_before(peer, self._bounds.provisioning_end)
             data, ancillary, flags, _ = peer.recvmsg(
                 32768, socket.CMSG_SPACE(16 * struct.calcsize("i"))
             )
@@ -1862,6 +1942,7 @@ class InstalledA9Lifecycle:
                 and not ancillary
                 and not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
             )
+            self._jit.refresh_protected_job(binding)
             _require(self._jit.require_courier_peer(peer, binding) == identity)
             self._create_file(FileSlot.OIDC_SOURCE, data, 0, 0, 0o600)
             data = b""
@@ -2042,6 +2123,21 @@ def _close_received_descriptors(ancillary: list[tuple[int, int, bytes]]) -> None
                 os.close(fd)
 
 
+def _courier_frame(channel: socket.socket, deadline: float, maximum: int) -> bytes:
+    _socket_before(channel, deadline)
+    data, ancillary, flags, _ = channel.recvmsg(
+        maximum, socket.CMSG_SPACE(16 * struct.calcsize("i"))
+    )
+    _close_received_descriptors(ancillary)
+    _require(
+        not ancillary
+        and not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+        and 0 < len(data) <= maximum
+    )
+    _before(deadline)
+    return data
+
+
 _JIT_UNIT = "dotmac-gate0-a9-jit.service"
 _JIT_GROUP = "/system.slice/" + _JIT_UNIT
 _RUNNER = Path("/run/dotmac-gate0-jit/runner/bin/Runner.Listener")
@@ -2127,6 +2223,8 @@ class NativeJitInvocation:
         self.start: str | None = None
         self._events, self._pidfd = -1, -1
         self._binding: InstalledJitBinding | None = None
+        self._peer_chain: tuple[tuple[int, int, str, bytes], ...] | None = None
+        self._chain_pidfds: dict[int, tuple[str, int]] = {}
         self._retirement: _JitRetirement | None = None
         self._started, self._closed = False, False
         self._close_failed = False
@@ -2202,7 +2300,15 @@ class NativeJitInvocation:
         )
         raw = _protected(_ROOT / "lifecycle-native.json", mode=0o600)
         _require(_hash(raw) == self.selection["native_receipt_digest"])
-        native = strict_object(raw)
+        native = _closed(
+            strict_object(raw),
+            "schema boot_id kernel_release runner_tree_digest systemd_version "
+            "supplier_observation supplier_review",
+        )
+        _require(
+            canonical(native) == raw and native["schema"] == "Gate0A9LifecycleNative.v2"
+        )
+        self._supplier_policy()
         _require(
             native["boot_id"] == self.bounds.boot_id
             and native["kernel_release"] == os.uname().release
@@ -2220,6 +2326,389 @@ class NativeJitInvocation:
             self.lifecycle._doc["courier_uid"],
         )
         _before(deadline)
+
+    def _supplier_policy(self) -> JSONRecord:
+        """Existing root-native custody, never a newly invented signature authority."""
+        from vendor_cp.deployment.gate0_runner_tokens import (
+            _SUPPLIER_AMENDMENT,
+            _SUPPLIER_METHOD,
+            _SUPPLIER_SOURCE,
+        )
+
+        _, prelaunch, inputs = _prelaunch(self.lifecycle._doc)
+        policy = _closed(
+            strict_object(inputs["broker_policy"]),
+            "schema method amendment_digest supplier_commit origins profile",
+        )
+        _require(
+            policy["schema"] == "Gate0A9BrokerPolicy.v1"
+            and policy["method"] == _SUPPLIER_METHOD
+            and policy["amendment_digest"] == _SUPPLIER_AMENDMENT
+            and policy["supplier_commit"] == _SUPPLIER_SOURCE
+        )
+        profile = _closed(
+            policy["profile"],
+            "worker_binary shell_binary script_template script_directory "
+            "workflow_source_digest worker_pipe_handle_format",
+        )
+        _require(profile["worker_pipe_handle_format"] == "unix-decimal-fd.v1")
+        for name in ("worker_binary", "shell_binary", "script_template"):
+            pin = _closed(profile[name], "path digest")
+            path = Path(pin["path"])
+            _require(
+                path.is_absolute()
+                and ".." not in path.parts
+                and _hash(_protected(path, 32 * 1024 * 1024)) == _digest(pin["digest"])
+            )
+        _require(
+            profile["worker_binary"]["path"]
+            == "/opt/dotmac-gate0-jit/bin/Runner.Worker"
+            and profile["shell_binary"]["path"] == "/usr/bin/bash"
+        )
+        directory = Path(profile["script_directory"])
+        _require(
+            directory.is_absolute()
+            and ".." not in directory.parts
+            and directory.is_relative_to(Path("/run/dotmac-gate0-jit"))
+        )
+        _digest(profile["workflow_source_digest"])
+        native_raw = _protected(_ROOT / "lifecycle-native.json", mode=0o600)
+        _require(_hash(native_raw) == self.selection["native_receipt_digest"])
+        native = _closed(
+            strict_object(native_raw),
+            "schema boot_id kernel_release runner_tree_digest systemd_version "
+            "supplier_observation supplier_review",
+        )
+        _require(
+            canonical(native) == native_raw
+            and native["schema"] == "Gate0A9LifecycleNative.v2"
+        )
+        records = {}
+        for name in ("supplier_observation", "supplier_review"):
+            pin = _closed(native[name], "path digest")
+            path = Path(pin["path"])
+            _require(path == _ROOT / (name.replace("_", "-") + ".json"))
+            content = _protected(path, mode=0o600)
+            _require(_hash(content) == _digest(pin["digest"]))
+            records[name] = _closed(
+                strict_object(content),
+                "schema method amendment_digest supplier_commit "
+                "prelaunch_selection_digest "
+                "broker_policy_digest profile_digest workflow_source_digest evidence",
+            )
+            _require(canonical(records[name]) == content)
+        observation, review = (
+            records["supplier_observation"],
+            records["supplier_review"],
+        )
+        for name, record in records.items():
+            _require(
+                record["schema"]
+                == (
+                    "Gate0A9SupplierNativeObservation.v1"
+                    if name == "supplier_observation"
+                    else "Gate0A9SupplierNativeReview.v1"
+                )
+            )
+            for key, expected in (
+                ("method", _SUPPLIER_METHOD),
+                ("amendment_digest", _SUPPLIER_AMENDMENT),
+                ("supplier_commit", _SUPPLIER_SOURCE),
+                ("prelaunch_selection_digest", _prelaunch_selection_digest(prelaunch)),
+                ("broker_policy_digest", _hash(inputs["broker_policy"])),
+                ("profile_digest", _hash(canonical(profile))),
+                ("workflow_source_digest", profile["workflow_source_digest"]),
+            ):
+                _require(record[key] == expected)
+        evidence_names = (
+            "listener_clean_inheritance worker_clean_inheritance "
+            "all_workflow_environment_scopes "
+            "startup_hooks preceding_writes missing_supplier_injection shell_survival "
+            "executed_script_identity worker_pipe_handles metadata_first_ipc"
+        )
+        evidence = _closed(observation["evidence"], evidence_names)
+        # Actual external native observation artifacts are mandatory pins, not
+        # qualified:true/asserted capability values produced from expectations.
+        for pin_value in evidence.values():
+            pin = _closed(pin_value, "path digest")
+            path = Path(pin["path"])
+            _require(path.is_absolute() and ".." not in path.parts)
+            _require(_hash(_protected(path, 8 * 1024 * 1024)) == _digest(pin["digest"]))
+        reviewed = _closed(
+            review["evidence"], "supplier_observation_digest reviewed_evidence"
+        )
+        _require(
+            reviewed["supplier_observation_digest"]
+            == native["supplier_observation"]["digest"]
+            and reviewed["reviewed_evidence"]
+            == {k: v["digest"] for k, v in evidence.items()}
+        )
+        _before(self.bounds.provisioning_end)
+        return policy
+
+    def _static_runtime_identity(self) -> JSONRecord:
+        native_raw = _protected(_ROOT / "lifecycle-native.json", mode=0o600)
+        native = strict_object(native_raw)
+        return dict(
+            boot_id=self.bounds.boot_id,
+            kernel_release=os.uname().release,
+            runner_tree_digest=self.selection["runner_tree_digest"],
+            manager_identity=dict(
+                executable_digest=self.selection["manager"]["digest"],
+                version=native["systemd_version"],
+                kernel_release=os.uname().release,
+                boot_id=self.bounds.boot_id,
+            ),
+            lifecycle_source_digest=self.lifecycle._doc["source_files"][
+                "gate0_runner_lifecycle"
+            ],
+            supervisor_source_digest=_hash(
+                _protected(
+                    Path(__file__).with_name("gate0_runner_supervisor.py"), 1024 * 1024
+                )
+            ),
+            interpreter_digest=self.selection["interpreter"]["digest"],
+            lifecycle_native_digest=_hash(native_raw),
+            supplier_observation_digest=native["supplier_observation"]["digest"],
+            supplier_review_digest=native["supplier_review"]["digest"],
+        )
+
+    def _retain_chain_process(self, pid: int, start: str) -> None:
+        _require(self._started and not self._closed and hasattr(os, "pidfd_open"))
+        existing = self._chain_pidfds.get(pid)
+        if existing is not None:
+            _require(
+                existing[0] == start and not select.select([existing[1]], [], [], 0)[0]
+            )
+            return
+        _require(len(self._chain_pidfds) < 3)
+        fd = os.pidfd_open(pid, 0)
+        try:
+            _require(
+                measure_handoff_process(pid)[2] == start
+                and not select.select([fd], [], [], 0)[0]
+            )
+            self._chain_pidfds[pid] = (start, fd)
+            fd = -1
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except BaseException:
+                    self._close_failed = True
+                    raise LifecycleRefused() from None
+
+    def _measure_supplier_chain(
+        self, peer_pid: int
+    ) -> tuple[tuple[int, int, str, bytes], ...]:
+        original = set(self._chain_pidfds)
+        try:
+            return self._measure_supplier_chain_once(peer_pid)
+        except BaseException:
+            # Partial first measurement relinquishes only descriptors acquired
+            # by that measurement. Refresh never discards prior retained proof.
+            owned = [
+                self._chain_pidfds.pop(pid)[1]
+                for pid in set(self._chain_pidfds) - original
+            ]
+            for fd in owned:
+                try:
+                    os.close(fd)
+                except BaseException:
+                    self._close_failed = True
+            if self._close_failed:
+                raise LifecycleRefused() from None
+            raise
+
+    def _measure_supplier_chain_once(
+        self, peer_pid: int
+    ) -> tuple[tuple[int, int, str, bytes], ...]:
+        """Finite live ancestry. Native exclusion evidence owns rewrite resistance.
+
+        Re-reading path/argv is a current measurement, not proof of which bytes
+        executed earlier; actual executed-script/native shell-survival evidence
+        is separately required by the fixed root-native owner.
+        """
+        policy = self._supplier_policy()
+        profile = policy["profile"]
+        uid = self.lifecycle._doc["courier_uid"]
+        current = peer_pid
+        measured = []
+        script_identity = None
+        for index in range(4):
+            _before(self.bounds.provisioning_end)
+            parent, actual_uid, start = measure_handoff_process(current)
+            _require(actual_uid == uid)
+            command = _proc(Path(f"/proc/{current}/cmdline"), 16384)
+            args = command.split(b"\0")
+            _require(args[-1] == b"" and all(args[:-1]))
+            expected_executable = (
+                self.selection["interpreter"]["path"]
+                if index == 0
+                else profile["shell_binary"]["path"]
+                if index == 1
+                else str(_RUNNER_ROOT / "bin/Runner.Worker")
+                if index == 2
+                else self.selection["runner_binary"]["path"]
+            )
+            _require(os.readlink(f"/proc/{current}/exe") == expected_executable)
+            executable_pin = (
+                self.selection["interpreter"]
+                if index == 0
+                else profile["shell_binary"]
+                if index == 1
+                else profile["worker_binary"]
+                if index == 2
+                else self.selection["runner_binary"]
+            )
+            executable_fd = os.open(f"/proc/{current}/exe", os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                actual_file = os.fstat(executable_fd)
+                expected_file = os.stat(executable_pin["path"], follow_symlinks=False)
+                _require(
+                    (actual_file.st_dev, actual_file.st_ino)
+                    == (expected_file.st_dev, expected_file.st_ino)
+                    and _hash(_read_fd(executable_fd, 32 * 1024 * 1024, uid=0))
+                    == executable_pin["digest"]
+                )
+            finally:
+                os.close(executable_fd)
+            status = _proc(Path(f"/proc/{current}/status"))
+            groups = [
+                line.split()[1:]
+                for line in status.splitlines()
+                if line.startswith(b"Groups:")
+            ]
+            uids = [
+                line.split()[1:]
+                for line in status.splitlines()
+                if line.startswith(b"Uid:")
+            ]
+            gids = [
+                line.split()[1:]
+                for line in status.splitlines()
+                if line.startswith(b"Gid:")
+            ]
+            _require(
+                len(groups) == len(uids) == len(gids) == 1
+                and {int(v) for v in groups[0]} == set(self.selection["groups"])
+                and {int(v) for v in uids[0]} == {uid}
+                and {int(v) for v in gids[0]} == {self.lifecycle._doc["courier_gid"]}
+                and _proc(Path(f"/proc/{current}/cgroup"))
+                == ("0::" + _JIT_GROUP + "\n").encode()
+            )
+            if index == 1:
+                _require(
+                    args[:-2]
+                    == [
+                        b"/bin/bash",
+                        b"--noprofile",
+                        b"--norc",
+                        b"-p",
+                        b"-e",
+                        b"-o",
+                        b"pipefail",
+                    ]
+                )
+                script = Path(args[-2].decode("ascii"))
+                _require(
+                    script.parent == Path(profile["script_directory"])
+                    and str(script) == args[-2].decode("ascii")
+                    and ".." not in script.parts
+                    and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}\.sh", script.name)
+                    is not None
+                )
+                script_identity = self._measure_script(
+                    script, profile["script_template"]["digest"]
+                )
+            elif index == 2:
+                _require(
+                    len(args) == 5
+                    and args[0] == str(_RUNNER_ROOT / "bin/Runner.Worker").encode()
+                    and args[1] == b"spawnclient"
+                    and args[2] != args[3]
+                )
+                for handle in args[2:4]:
+                    _require(
+                        re.fullmatch(rb"[1-9][0-9]{0,9}", handle) is not None
+                        and 2 < int(handle) <= 2147483647
+                    )
+                    target = os.readlink(f"/proc/{current}/fd/{int(handle)}")
+                    _require(re.fullmatch(r"pipe:\[[0-9]+\]", target) is not None)
+            elif index == 3:
+                _require(
+                    (current, start) == (self.pid, self.start)
+                    and args
+                    == [
+                        str(_RUNNER).encode(),
+                        b"run",
+                        b"--startuptype",
+                        b"service",
+                        b"",
+                    ]
+                )
+            _require(measure_handoff_process(current) == (parent, uid, start))
+            if index < 3:
+                self._retain_chain_process(current, start)
+            measured.append((current, parent, start, command))
+            current = parent
+        for pid, parent, start, command in measured:
+            _require(
+                measure_handoff_process(pid) == (parent, uid, start)
+                and _proc(Path(f"/proc/{pid}/cmdline"), 16384) == command
+            )
+        _require(script_identity is not None)
+        actual_script = Path(measured[1][3].split(b"\0")[-2].decode("ascii"))
+        _require(
+            self._measure_script(actual_script, profile["script_template"]["digest"])
+            == script_identity
+        )
+        self._require_current()
+        return tuple(measured)
+
+    def _measure_script(self, path: Path, digest: str) -> tuple[int, ...]:
+        # Generated script directories are job-owned; walk held no-follow FDs
+        # below the code-fixed job root, permitting only root/the isolated UID.
+        root = Path("/run/dotmac-gate0-jit")
+        _require(path.is_relative_to(root))
+        parent = _directory(root)
+        fd = -1
+        try:
+            for part in path.relative_to(root).parts[:-1]:
+                child = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=parent,
+                )
+                os.close(parent)
+                parent = child
+                info = os.fstat(parent)
+                _require(
+                    info.st_uid in (0, self.lifecycle._doc["courier_uid"])
+                    and not info.st_mode & 0o022
+                )
+            fd = os.open(
+                path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+            )
+            info = os.fstat(fd)
+            _require(
+                info.st_uid == self.lifecycle._doc["courier_uid"]
+                and info.st_nlink == 1
+                and not info.st_mode & 0o022
+            )
+            raw = _read_fd(fd, 65536, uid=self.lifecycle._doc["courier_uid"])
+            _require(
+                _hash(raw) == _digest(digest)
+                and _stable(os.fstat(fd)) == _stable(info)
+                and _stable(os.stat(path.name, dir_fd=parent, follow_symlinks=False))
+                == _stable(info)
+            )
+            _before(self.bounds.provisioning_end)
+            return _stable(info)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            os.close(parent)
 
     def _call(self, arguments: tuple[str, ...], original: float) -> bytes:
         show = ("show", "--all", "--property=" + ",".join(_JIT_PROPERTIES), _JIT_UNIT)
@@ -2530,8 +3019,7 @@ class NativeJitInvocation:
         )
         _require(not select.select([self._pidfd], [], [], 0)[0])
 
-    def bind_protected_job(self) -> InstalledJitBinding:
-        _require(self._binding is None)
+    def _current_protected_job(self) -> tuple[InstalledGate0GitHubReads, ProducerFacts]:
         self._require_current()
         from vendor_cp.deployment.gate0_e_github import InstalledGate0GitHubReads
 
@@ -2569,8 +3057,24 @@ class NativeJitInvocation:
             and facts.review.environment_ids == (s["environment_id"],)
         )
         self._require_current()
+        return reader, facts
+
+    def bind_protected_job(self) -> InstalledJitBinding:
+        _require(self._binding is None)
+        reader, facts = self._current_protected_job()
         self._binding = InstalledJitBinding(_SEAL, self, reader, facts)
         return self._binding
+
+    def refresh_protected_job(self, binding: InstalledJitBinding) -> None:
+        _require(
+            self.owns_binding(binding)
+            and binding.invocation == self.invocation
+            and (binding.pid, binding.start) == (self.pid, self.start)
+        )
+        reader, facts = self._current_protected_job()
+        # Selection is fixed; a fresh snapshot may only replace observation custody.
+        _require(facts.workflow_source == binding.facts.workflow_source)
+        binding.reader, binding.facts = reader, facts
 
     def owns_binding(self, binding: object) -> bool:
         return (
@@ -2635,6 +3139,11 @@ class NativeJitInvocation:
         members = _proc(Path("/sys/fs/cgroup" + _JIT_GROUP + "/cgroup.procs"))
         _require(str(pid).encode() in members.splitlines())
         _require(measure_handoff_process(pid) == (parent_pid, uid, start))
+        chain = self._measure_supplier_chain(pid)
+        if self._peer_chain is None:
+            self._peer_chain = chain
+        else:
+            _require(chain == self._peer_chain)
         self._require_current()
         return pid, start
 
@@ -2765,7 +3274,12 @@ class NativeJitInvocation:
         if self._closed:
             _require(not getattr(self, "_close_failed", False))
             return
-        descriptors = self._events, self._pidfd
+        descriptors = (
+            self._events,
+            self._pidfd,
+            *(value[1] for value in getattr(self, "_chain_pidfds", {}).values()),
+        )
+        self._chain_pidfds = {}
         self._events = self._pidfd = -1
         self._closed = True
         self._retirement = None

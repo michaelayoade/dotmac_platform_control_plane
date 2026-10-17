@@ -476,32 +476,11 @@ def installed_model(window_document, monkeypatch):
         descriptor["cases"].append(case)
 
     def seal():
-        accepted = dict(
-            schema="Gate0RunnerCollectionQualification.v1",
-            campaign_digest=descriptor["campaign_digest"],
-            collector_uid=descriptor["collector_uid"],
-            receiver_uid=descriptor["receiver_uid"],
-            job=descriptor["job"],
-            source_revision=descriptor["source_revision"],
-            image_digest=descriptor["image_digest"],
-            executable_digest=descriptor["executable"]["digest"],
-            installation_digest=loader._hash(
-                canonical({k: v for k, v in descriptor.items() if k != "qualification"})
-            ),
-            holder_qualification_digest=descriptor["holder_qualification"]["digest"],
-            receiver_qualification_digest=descriptor["receiver_qualification"][
-                "digest"
-            ],
-            broker={k: descriptor["broker"][k] for k in ("origin", "path", "query")},
-            native_receipt_digest="sha256:" + "8" * 64,
+        from gate0_a9_fixtures import synthetic_a9_join
+
+        synthetic_a9_join(
+            descriptor, dict(campaign_digest=descriptor["campaign_digest"]), files, pin
         )
-        accepted["broker"]["qualification_digest"] = descriptor["broker"][
-            "qualification"
-        ]["digest"]
-        descriptor["qualification"] = pin(
-            root + "/native-qualification", canonical(accepted)
-        )
-        files[loader._INSTALLATION] = canonical(descriptor)
 
     seal()
     env = {
@@ -608,13 +587,10 @@ def test_complete_descriptor_rejects_individual_qualification_and_case_swaps(
         model.seal()
     elif change.startswith("native-"):
         receipt = strict_object(model.files[doc["qualification"]["path"]])
-        receipt["job"]["runner_name"] = (
-            "other-job"
-            if change == "native-qualification"
-            else receipt["job"]["runner_name"]
-        )
-        if change == "native-receipt-malformed":
-            receipt["native_receipt_digest"] = "not-a-receipt"
+        if change == "native-qualification":
+            receipt["template_digest"] = "sha256:" + "f" * 64
+        else:
+            receipt["static_native_qualification_digest"] = "not-a-receipt"
         doc["qualification"] = model.pin(
             doc["qualification"]["path"], canonical(receipt)
         )

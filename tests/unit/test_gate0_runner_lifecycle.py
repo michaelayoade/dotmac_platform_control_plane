@@ -514,6 +514,10 @@ def peer_native(monkeypatch, change=None):
     }
     native.owns_binding = lambda binding: True
     native._require_current = lambda: None
+    native._peer_chain = None
+    # This fixture isolates the original courier peer-body OS checks; the new
+    # supplier ancestry/native proof boundary has independent coverage.
+    native._measure_supplier_chain = lambda pid: ((pid, 11, "77", b"native"),)
     measurements = iter(
         [
             (11, 4001, "77"),
@@ -632,6 +636,7 @@ def test_authoritative_collection_installation_serves_both_readers(
         life._SEAL,
         {
             "campaign_digest": descriptor["campaign_digest"],
+            "lifecycle_binding_digest": "sha256:" + "c" * 64,
             "collector_uid": descriptor["collector_uid"],
             "repository_id": int(descriptor["job"]["repository_id"]),
             "run_id": int(descriptor["job"]["run_id"]),

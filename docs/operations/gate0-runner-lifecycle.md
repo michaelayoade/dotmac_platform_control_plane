@@ -248,7 +248,9 @@ source_files pins exactly these two new modules; hashes are SHA256-prefixed.
 original_bounds has boot_id,wall,monotonic,provisioning_ends_at,finalization_ends_at.
 Root lifecycle-qualification.json binds actual installation_digest and
 native_receipt_digest; lifecycle-native.json is the externally reviewed native
-record, including boot_id,kernel_release,systemd_version,runner_tree_digest.
+record. The [same-job broker contract](gate0-a9-same-job-broker.md) requires its
+closed v2 schema and actual supplier observation/review artifact pins alongside
+boot_id,kernel_release,systemd_version,runner_tree_digest.
 Matching these files is not proof that their native measurements occurred.
 
 launcher is exactly the addendum's Gate0A9JitLauncherSelection.v1: schema,

@@ -97,12 +97,14 @@ creates its own original JIT configuration and receives original job OIDC.
 secret hash is exported.
 
 Delivery waits only until original `provisioning_end` for root0600
-`lifecycle/delivery.json`. Its exact `Gate0A9LifecycleDelivery.v1` fields are
-`schema,lifecycle_binding_digest,campaign_digest,collection_installation_digest,
-bootstrap_installation_digest,ca_digest,certificate_a_digest,certificate_b_digest`.
-It binds actual fixed collection/bootstrap installation and CA/certificate
-bytes. The trusted installer writes the inputs first and marker last. Wrong,
-changed, missing or late inputs refuse; the marker is not native qualification.
+`lifecycle/delivery.json`. Its exact `Gate0A9LifecycleDelivery.v2` fields are
+`schema,lifecycle_binding_digest,campaign_digest,prelaunch_digest,ca_digest,
+certificate_a_digest,certificate_b_digest`. It binds the protected prelaunch
+selection and CA/certificate bytes before JIT. The trusted installer writes
+these inputs first and the delivery marker last. Final collection/bootstrap
+files are created later by the private same-job binder after metadata receipt;
+see [the same-job contract](gate0-a9-same-job-broker.md). Wrong, changed, missing
+or late inputs refuse; delivery is not native qualification.
 
 Original encoded JIT configuration comes only from systemd credential
 `/run/credentials/dotmac-gate0-a9-lifecycle.service/jit-config-delivery`, at most

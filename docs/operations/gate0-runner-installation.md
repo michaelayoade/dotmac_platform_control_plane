@@ -15,11 +15,12 @@ origin. Native qualification must establish the actual immutable installed
 interpreter, loaded modules and image for the dedicated launch; self-consistent
 root JSON or an environment variable cannot discharge that obligation.
 
-The closed `Gate0RunnerCollectionInstallation.v1` descriptor contains exactly
+The closed `Gate0RunnerCollectionInstallation.v2` descriptor contains exactly
 `schema`, `campaign_digest`, `collector_uid`, `receiver_uid`, `origin`, `broker`,
 `job`, `source_revision`, `image_digest`, `executable`, `source_files`,
 `qualification`, `holder_qualification`, `receiver_qualification`, `cases`,
-`withdrawal_reference`, `output_directory`, and `marker`.
+`withdrawal_reference`, `output_directory`, `marker`, `prelaunch`,
+`job_broker_binding`, and `binding_marker`.
 
 Collector and receiver UIDs are positive and distinct. The actual real/effective
 UID must match the collector. The executable pin must match Linux
@@ -77,15 +78,15 @@ The two inert projections share one original wall/monotonic sample; their
 independent not-before/deadline values never move. `case.ssh` is also deferred
 until its case is open. No B token, approval, verifier, or socket opens at load.
 
-`broker` contains exactly `origin`, `path`, `query`, `qualification`. Its pinned
-qualification is independent of CP projections and Lane3. The actual job's
-`ACTIONS_ID_TOKEN_REQUEST_URL` must equal the exact HTTPS origin/path/query;
-there are no host wildcards, path prefixes or caller-selected request fields.
-Decoded query names are checked before reading/retaining the actual request
-credential. Every preexisting audience spelling (including percent encoding and
-case variants), duplicate decoded name, malformed escape, control, double escape
-or ambiguous separator is refused. Validation preserves the installed original
-query bytes; it never normalizes the outbound original coordinates.
+`broker` contains exactly `origin`, `path`, `query`, `qualification`. Root's
+same-job binder freezes actual supplier URL bytes after the metadata handshake;
+`qualification` pins the dynamic binding and does not assert native acceptance.
+The installed job URL must equal the bound origin/path/query. Root separately
+pins finite exact HTTPS origins and the adopted opaque supplier provenance
+method. See [the same-job contract](gate0-a9-same-job-broker.md) for the mandatory
+native evidence, ancestry, schemas and acyclic joins. There are no wildcard hosts,
+path-prefix grants or invented mappings to REST job IDs. Query ambiguity/audience
+checks run before the request token is read. Original URL bytes are preserved.
 `InstalledJobTokens.from_installed()` privately binds the actual request token.
 Each `next(case.projection)` makes one owned spawned GET, appending only audience
 `urn:dotmac:gate0:rehearsal-issuer`. Request/read/EOF/child completion share

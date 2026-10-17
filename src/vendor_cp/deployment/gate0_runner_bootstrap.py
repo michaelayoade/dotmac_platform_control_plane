@@ -498,11 +498,19 @@ class BootstrapInstallation:
             "collector_binary "
             "collector_gid collector_groups socket_gid receiver_template qualification "
             "native_receipt source_revision source_files unit_assets manager_client "
-            "manager_binary",
+            "manager_binary prelaunch job_broker_binding binding_marker",
         )
         if (
             canonical(doc) != raw
-            or doc["schema"] != "Gate0CollectorBootstrapInstallation.v2"
+            or doc["schema"] != "Gate0CollectorBootstrapInstallation.v3"
+        ):
+            raise ProviderRefused()
+        from vendor_cp.deployment.gate0_runner_installation import _a9_join
+
+        binding, static_qualification = _a9_join(raw, "bootstrap")
+        if (
+            binding["lifecycle_binding_digest"] != doc["lifecycle_binding_digest"]
+            or static_qualification["native_receipt"] != doc["native_receipt"]
         ):
             raise ProviderRefused()
         campaign = _text(doc["campaign_digest"])
@@ -513,7 +521,7 @@ class BootstrapInstallation:
         )
         original = strict_object(collection.raw)
         if (
-            original.get("schema") != "Gate0RunnerCollectionInstallation.v1"
+            original.get("schema") != "Gate0RunnerCollectionInstallation.v2"
             or original.get("campaign_digest") != campaign
         ):
             raise ProviderRefused()
@@ -630,13 +638,16 @@ class BootstrapInstallation:
             for env, key in _JOB_FIELDS.items()
         )
         broker = _fields(collection["broker"], "origin path query qualification")
-        environment.append(
-            "Environment=ACTIONS_ID_TOKEN_REQUEST_URL="
-            + _text(broker["origin"])
+        bound_url = (
+            _text(broker["origin"])
             + _text(broker["path"])
             + "?"
-            + _text(broker["query"]).replace("%", "%%")
+            + _text(broker["query"])
         )
+        # Quote one complete systemd assignment and escape specifiers across
+        # BOTH opaque path and query. Single quotes are valid supplier bytes.
+        escaped = bound_url.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+        environment.append('Environment="ACTIONS_ID_TOKEN_REQUEST_URL=' + escaped + '"')
         substitutions = {
             "@BINARY@": self.binary.path,
             "@UID@": str(self.uid),
@@ -857,22 +868,12 @@ class NativeSystemManager:
             .strip(),
         )
         document = strict_object(installed.document)
-        expected = dict(
-            schema="Gate0A9BootstrapQualification.v2",
-            clock_owner_scope="immutable-original-bounds-clock.v1",
-            campaign_digest=installed.campaign,
-            installation_digest=_digest(
-                canonical({k: v for k, v in document.items() if k != "qualification"})
-            ),
-            source_revision=installed.source_revision,
-            source_files=strict_object(installed.sources),
-            unit_assets=document["unit_assets"],
-            manager_identity=identity,
-            native_receipt_digest=installed.native.digest,
-        )
+        from vendor_cp.deployment.gate0_runner_installation import _a9_join
+
+        _, static_qualification = _a9_join(installed.document, "bootstrap")
         if (
-            strict_object(installed.qualification) != expected
-            or canonical(expected) != installed.qualification
+            static_qualification["runtime_identity"]["manager_identity"] != identity
+            or static_qualification["native_receipt"] != document["native_receipt"]
         ):
             raise ProviderRefused()
         bootstrap = self._show(_BOOTSTRAP, _BOOTSTRAP_PROPERTIES, time.monotonic() + 2)

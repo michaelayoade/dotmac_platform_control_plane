@@ -17,6 +17,9 @@ from vendor_cp.deployment import gate0_runner_lifecycle_courier as courier
 
 @pytest.fixture
 def selected(monkeypatch):
+    monkeypatch.setenv(
+        "ACTIONS_ID_TOKEN_REQUEST_URL", "https://broker.example/opaque?key=value"
+    )
     launcher = {"runner_binary": {"digest": "sha256:" + "a" * 64}}
     bounds = SimpleNamespace(provisioning_end=time.monotonic() + 10)
     monkeypatch.setattr(
@@ -28,6 +31,7 @@ def selected(monkeypatch):
 class CourierSocket:
     def __init__(self, *, uid=0, response=b"\x01", flags=0):
         self.uid, self.response, self.flags = uid, response, flags
+        self.frames = 0
         self.sent, self.closed, self.connected, self.timeout = [], False, None, None
 
     def settimeout(self, timeout):
@@ -47,7 +51,15 @@ class CourierSocket:
         assert how == socket.SHUT_WR
 
     def recvmsg(self, size, ancillary):
-        return self.response, [], self.flags, None
+        self.frames += 1
+        value = (
+            life._METADATA_READY
+            if self.frames == 1
+            else life._SECRET_READY
+            if self.frames == 2
+            else self.response
+        )
+        return value, [], self.flags, None
 
     def recv(self, count):
         return b""
@@ -66,7 +78,8 @@ def test_original_environment_token_is_one_private_packet_and_then_cleared(
     monkeypatch.setattr(courier.socket, "socket", lambda *args: channel)
     assert courier.run_installed_job_courier() == 0
     assert channel.connected == str(life._SOCKET)
-    assert channel.sent == [b"private-original-request-token"]
+    assert channel.sent[-1] == b"private-original-request-token"
+    assert len(channel.sent) == 2
     assert channel.closed and channel.timeout > 0
     assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in os.environ
 
@@ -81,7 +94,7 @@ def test_invalid_credential_never_sent_and_never_reflected(
     monkeypatch.setenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN", bad)
     monkeypatch.setattr(courier.socket, "socket", lambda *args: channel)
     assert courier.run_installed_job_courier() == 3
-    assert channel.sent == []
+    assert len(channel.sent) == 1  # URL metadata only; invalid secret never sent.
     assert capsys.readouterr() == ("", "")
     assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in os.environ
 
@@ -438,7 +451,18 @@ def public_profile(monkeypatch):
     )
 
 
-def test_public_actual_closed_loader_uses_only_fixed_public_records(public_profile):
+def test_public_actual_closed_loader_uses_only_fixed_public_records(
+    public_profile, monkeypatch
+):
+    def a9_dependency(*_, **__):
+        pytest.fail("public JIT consumed A9 prelaunch/native supplier authority")
+
+    monkeypatch.setattr(life, "_prelaunch", a9_dependency)
+    monkeypatch.setattr(life.NativeJitInvocation, "_qualify_installed", a9_dependency)
+    monkeypatch.setattr(life.NativeJitInvocation, "_supplier_policy", a9_dependency)
+    monkeypatch.setattr(
+        life.NativeJitInvocation, "_measure_supplier_chain", a9_dependency
+    )
     selection, deadline, ends = courier._installed_public_jit_selection()
     assert selection == public_profile.selection
     assert deadline == 160.0  # delayed launch leaves 40, never a fresh 60 seconds
@@ -607,6 +631,12 @@ def test_public_exec_uses_verified_fd_and_detaches_on_failure(
     public_profile, monkeypatch, failure, close_failure, capsys
 ):
     # Actual loader remains active; only OS mount/exec boundaries are synthetic.
+    def a9_dependency(*_, **__):
+        pytest.fail("public exec consumed A9 supplier/token authority")
+
+    monkeypatch.setattr(life, "_prelaunch", a9_dependency)
+    monkeypatch.setattr(life.NativeJitInvocation, "_qualify_installed", a9_dependency)
+    monkeypatch.setattr(life.NativeJitInvocation, "_supplier_policy", a9_dependency)
     for key in tuple(os.environ):
         if key.startswith(("GITHUB_", "ACTIONS_RUNNER_INPUT_")) or key in {
             "GH_TOKEN",

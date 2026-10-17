@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import math
 import os
 import re
 import stat
@@ -158,6 +159,259 @@ def _document(raw: bytes, fields: str) -> dict[str, Any]:
     if canonical(result) != raw:
         raise ProviderRefused()
     return result
+
+
+_A9_ROOT = "/run/dotmac-gate0-collector"
+_A9_PRELAUNCH_FIELDS = (
+    "schema lifecycle_binding_digest campaign_digest collection_template "
+    "bootstrap_template broker_policy collection_native_qualification "
+    "bootstrap_native_qualification"
+)
+_A9_BINDING_FIELDS = (
+    "schema lifecycle_binding_digest campaign_digest prelaunch_digest "
+    "broker_policy_digest "
+    "static_native_qualification_digests boot_id jit_invocation_id "
+    "selected_job_coordinates "
+    "github_observation_digest courier_pid courier_start origin path "
+    "query original_provisioning_end"
+)
+_A9_STATIC_FIELDS = (
+    "schema role lifecycle_binding_digest campaign_digest prelaunch_selection_digest "
+    "template_digest broker_policy_digest runtime_identity native_receipt"
+)
+
+
+def _a9_static_selection_digest(prelaunch: dict[str, Any]) -> str:
+    return _hash(
+        canonical(
+            dict(
+                schema="Gate0A9PrelaunchStaticSelection.v1",
+                selection={
+                    k: v
+                    for k, v in prelaunch.items()
+                    if k
+                    not in (
+                        "collection_native_qualification",
+                        "bootstrap_native_qualification",
+                    )
+                },
+            )
+        )
+    )
+
+
+def _a9_inputs(prelaunch_raw: bytes) -> tuple[dict[str, Any], dict[str, bytes]]:
+    prelaunch = _document(prelaunch_raw, _A9_PRELAUNCH_FIELDS)
+    if prelaunch["schema"] != "Gate0A9PrelaunchSelection.v1":
+        raise ProviderRefused()
+    for name in ("lifecycle_binding_digest", "campaign_digest"):
+        _digest(prelaunch[name])
+    inputs = {}
+    for name in (
+        "collection_template",
+        "bootstrap_template",
+        "broker_policy",
+        "collection_native_qualification",
+        "bootstrap_native_qualification",
+    ):
+        pin, raw = _read_pin(prelaunch[name])
+        if pin.path != _A9_ROOT + "/" + name.replace("_", "-") + ".json":
+            raise ProviderRefused()
+        if canonical(strict_object(raw)) != raw:
+            raise ProviderRefused()
+        inputs[name] = raw
+    from vendor_cp.deployment.gate0_runner_tokens import (
+        _SUPPLIER_AMENDMENT,
+        _SUPPLIER_METHOD,
+        _SUPPLIER_SOURCE,
+    )
+
+    policy = _document(
+        inputs["broker_policy"],
+        "schema method amendment_digest supplier_commit origins profile",
+    )
+    if (
+        policy["schema"] != "Gate0A9BrokerPolicy.v1"
+        or policy["method"] != _SUPPLIER_METHOD
+        or policy["amendment_digest"] != _SUPPLIER_AMENDMENT
+        or policy["supplier_commit"] != _SUPPLIER_SOURCE
+    ):
+        raise ProviderRefused()
+    for role in ("collection", "bootstrap"):
+        qualification = _document(
+            inputs[role + "_native_qualification"], _A9_STATIC_FIELDS
+        )
+        if (
+            qualification["schema"] != "Gate0A9StaticNativeQualification.v1"
+            or qualification["role"] != role
+            or qualification["prelaunch_selection_digest"]
+            != _a9_static_selection_digest(prelaunch)
+            or qualification["template_digest"] != _hash(inputs[role + "_template"])
+            or qualification["broker_policy_digest"] != _hash(inputs["broker_policy"])
+            or any(
+                qualification[k] != prelaunch[k]
+                for k in ("campaign_digest", "lifecycle_binding_digest")
+            )
+        ):
+            raise ProviderRefused()
+        _fields(qualification["native_receipt"], "path digest")
+        _digest(qualification["native_receipt"]["digest"])
+    return prelaunch, inputs
+
+
+def _a9_join(raw: bytes, role: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Join prelaunch, static qualification, dynamic binding and last marker.
+
+    Derived qualifications describe publication joins, never native acceptance.
+    No old schema is accepted by this loader.
+    """
+    document = strict_object(raw)
+    expected_schema = {
+        "collection": "Gate0RunnerCollectionInstallation.v2",
+        "bootstrap": "Gate0CollectorBootstrapInstallation.v3",
+    }[role]
+    if canonical(document) != raw or document.get("schema") != expected_schema:
+        raise ProviderRefused()
+    prelaunch_pin, prelaunch_raw = _read_pin(document["prelaunch"])
+    if prelaunch_pin.path != _A9_ROOT + "/a9-prelaunch.json":
+        raise ProviderRefused()
+    prelaunch, inputs = _a9_inputs(prelaunch_raw)
+    binding_pin, binding_raw = _read_pin(document["job_broker_binding"])
+    if binding_pin.path != _A9_ROOT + "/job-broker-binding.json":
+        raise ProviderRefused()
+    binding = _document(binding_raw, _A9_BINDING_FIELDS)
+    static_digests = {
+        r: _hash(inputs[r + "_native_qualification"])
+        for r in ("collection", "bootstrap")
+    }
+    if (
+        binding["schema"] != "Gate0A9JobBrokerBinding.v1"
+        or binding["prelaunch_digest"] != _hash(prelaunch_raw)
+        or binding["broker_policy_digest"] != _hash(inputs["broker_policy"])
+        or binding["static_native_qualification_digests"] != static_digests
+        or any(
+            binding[k] != prelaunch[k] or document[k] != prelaunch[k]
+            for k in ("campaign_digest",)
+        )
+        or binding["lifecycle_binding_digest"] != prelaunch["lifecycle_binding_digest"]
+        or document["binding_marker"] != _A9_ROOT + "/job-broker-binding-complete.json"
+    ):
+        raise ProviderRefused()
+    policy = strict_object(inputs["broker_policy"])
+    from vendor_cp.deployment.gate0_runner_tokens import _supplier_coordinates
+
+    if _supplier_coordinates(
+        binding["origin"] + binding["path"] + "?" + binding["query"], policy["origins"]
+    ) != (binding["origin"], binding["path"], binding["query"]):
+        raise ProviderRefused()
+    _digest(binding["github_observation_digest"])
+    if (
+        type(binding["courier_pid"]) is not int
+        or binding["courier_pid"] <= 0
+        or type(binding["courier_start"]) is not str
+        or not binding["courier_start"].isdigit()
+        or type(binding["boot_id"]) is not str
+        or re.fullmatch(r"[0-9a-f-]{36}", binding["boot_id"]) is None
+        or re.fullmatch(r"[0-9a-f]{32}", binding["jit_invocation_id"]) is None
+        or type(binding["original_provisioning_end"]) not in (int, float)
+        or not math.isfinite(binding["original_provisioning_end"])
+        or binding["original_provisioning_end"] <= 0
+    ):
+        raise ProviderRefused()
+    selected = _fields(
+        binding["selected_job_coordinates"],
+        "repository_id owner_id run_id attempt workflow_id "
+        "source_revision environment_id "
+        "job_id job_name runner_id runner_name runner_group_id",
+    )
+    for key in (
+        "repository_id",
+        "owner_id",
+        "run_id",
+        "attempt",
+        "workflow_id",
+        "environment_id",
+        "job_id",
+        "runner_id",
+        "runner_group_id",
+    ):
+        if type(selected[key]) is not int or selected[key] <= 0:
+            raise ProviderRefused()
+    if (
+        selected["attempt"] != 1
+        or re.fullmatch(r"[0-9a-f]{40}", selected["source_revision"]) is None
+    ):
+        raise ProviderRefused()
+    _text(selected["job_name"])
+    _text(selected["runner_name"])
+    marker = _document(
+        _protected_read(document["binding_marker"]),
+        "schema prelaunch_digest collection_digest bootstrap_digest binding_digest",
+    )
+    if (
+        marker["schema"] != "Gate0A9JobBrokerBindingComplete.v1"
+        or marker["prelaunch_digest"] != _hash(prelaunch_raw)
+        or marker["binding_digest"] != _hash(binding_raw)
+        or marker[role + "_digest"] != _hash(raw)
+    ):
+        raise ProviderRefused()
+    # Check BOTH installed descriptors against the committed fixed marker.
+    for other, filename in (
+        ("collection", "installation.json"),
+        ("bootstrap", "bootstrap.json"),
+    ):
+        if marker[other + "_digest"] != _hash(
+            _protected_read(_A9_ROOT + "/" + filename)
+        ):
+            raise ProviderRefused()
+    qualification_pin, qualification_raw = _read_pin(document["qualification"])
+    if qualification_pin.path != _A9_ROOT + "/" + role + "-qualification.json":
+        raise ProviderRefused()
+    expected = dict(
+        schema="Gate0A9DerivedInstallationQualification.v1",
+        role=role,
+        template_digest=_hash(inputs[role + "_template"]),
+        static_native_qualification_digest=static_digests[role],
+        job_broker_binding_digest=_hash(binding_raw),
+        installation_digest=_hash(
+            canonical({k: v for k, v in document.items() if k != "qualification"})
+        ),
+    )
+    if _document(qualification_raw, " ".join(expected)) != expected:
+        raise ProviderRefused()
+    template = strict_object(inputs[role + "_template"])
+    reconstructed = {
+        k: v
+        for k, v in document.items()
+        if k
+        not in (
+            "qualification",
+            "prelaunch",
+            "job_broker_binding",
+            "binding_marker",
+            "broker" if role == "collection" else "collection_installation",
+        )
+    }
+    reconstructed["schema"] = {
+        "collection": "Gate0RunnerCollectionTemplate.v1",
+        "bootstrap": "Gate0CollectorBootstrapTemplate.v1",
+    }[role]
+    if reconstructed != template:
+        raise ProviderRefused()
+    if role == "collection":
+        broker = _fields(document["broker"], "origin path query qualification")
+        if (
+            any(broker[k] != binding[k] for k in ("origin", "path", "query"))
+            or broker["qualification"] != document["job_broker_binding"]
+        ):
+            raise ProviderRefused()
+    else:
+        if document["collection_installation"] != {
+            "path": _A9_ROOT + "/installation.json",
+            "digest": marker["collection_digest"],
+        }:
+            raise ProviderRefused()
+    return binding, strict_object(inputs[role + "_native_qualification"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,10 +656,11 @@ class InstalledRunnerCollection:
             "schema campaign_digest collector_uid receiver_uid origin broker job "
             "source_revision image_digest executable source_files qualification "
             "holder_qualification receiver_qualification cases "
-            "withdrawal_reference output_directory marker",
+            "withdrawal_reference output_directory marker prelaunch "
+            "job_broker_binding binding_marker",
         )
         if (
-            doc["schema"] != "Gate0RunnerCollectionInstallation.v1"
+            doc["schema"] != "Gate0RunnerCollectionInstallation.v2"
             or any(
                 type(doc[k]) is not int or doc[k] <= 0
                 for k in ("collector_uid", "receiver_uid")
@@ -451,39 +706,16 @@ class InstalledRunnerCollection:
         )
         for value in job.values():
             _text(value)
-        accepted = _document(
-            qualification,
-            "schema campaign_digest collector_uid receiver_uid job "
-            "source_revision image_digest executable_digest installation_digest "
-            "holder_qualification_digest receiver_qualification_digest broker "
-            "native_receipt_digest",
-        )
-        expected = dict(
-            schema="Gate0RunnerCollectionQualification.v1",
-            campaign_digest=_digest(doc["campaign_digest"]),
-            collector_uid=doc["collector_uid"],
-            receiver_uid=doc["receiver_uid"],
-            job=job,
-            source_revision=doc["source_revision"],
-            image_digest=doc["image_digest"],
-            executable_digest="sha256:" + executable.sha256,
-            installation_digest=_hash(
-                canonical(
-                    {key: value for key, value in doc.items() if key != "qualification"}
-                )
-            ),
-            holder_qualification_digest=_hash(holder),
-            receiver_qualification_digest=_hash(receiver),
-            broker=dict(
-                origin=broker.origin,
-                path=broker.path,
-                query=broker.query,
-                qualification_digest=broker.qualification_digest,
-            ),
-            native_receipt_digest=_digest(accepted["native_receipt_digest"]),
-        )
+        binding, _ = _a9_join(raw, "collection")
+        selected = binding["selected_job_coordinates"]
         if (
-            accepted != expected
+            selected["repository_id"] != int(job["repository_id"])
+            or selected["owner_id"] != int(job["repository_owner_id"])
+            or selected["source_revision"] != job["workflow_sha"]
+            or selected["run_id"] != int(job["run_id"])
+            or selected["attempt"] != int(job["run_attempt"])
+            or selected["runner_name"] != job["runner_name"]
+            or selected["runner_group_id"] != int(job["runner_group_id"])
             or doc["output_directory"] != _ROOT + "/session/evidence"
             or doc["marker"] != _ROOT + "/session/claimed"
         ):

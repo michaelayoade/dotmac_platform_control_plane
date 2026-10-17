@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
 from typing import cast
-from urllib.parse import quote, unquote_plus, urlsplit
+from urllib.parse import quote, unquote, unquote_plus, urlsplit
 
 from vendor_cp.deployment.gate0_framing import strict_object
 from vendor_cp.deployment.gate0_role_custody import ProviderRefused, _spawn_request
@@ -55,6 +55,72 @@ def _query_keys(query: str) -> None:
         if not name or name == "audience" or name in seen:
             raise ProviderRefused()
         seen.add(name)
+
+
+_SUPPLIER_METHOD = "github-actions-system-vss-opaque-url.v1"
+_SUPPLIER_SOURCE = "197ca027b90de199464dee3bb9ff198a1db60967"
+_SUPPLIER_AMENDMENT = (
+    "sha256:8517a5298e5b44de23c3fbda182008cd4889fb1c5e7e0f2efc439afae173c587"
+)
+
+
+def _supplier_coordinates(actual: str, origins: object) -> tuple[str, str, str]:
+    """Root authorizes origins; qualified supplier supplies opaque URL bytes.
+
+    This is transport restriction, never a REST job/plan identity mapping.
+    Caller must first authenticate the native supplier-to-courier chain.
+    """
+    if type(origins) is not list or not 0 < len(origins) <= 16:
+        raise ProviderRefused()
+    allowed = set()
+    for value in origins:
+        if type(value) is not str:
+            raise ProviderRefused()
+        origin = urlsplit(value)
+        if (
+            origin.scheme != "https"
+            or not origin.hostname
+            or origin.netloc != origin.hostname
+            or _HOST.fullmatch(origin.hostname) is None
+            or origin.path
+            or origin.query
+            or origin.fragment
+            or value != "https://" + origin.hostname
+            or value in allowed
+        ):
+            raise ProviderRefused()
+        allowed.add(value)
+    if (
+        type(actual) is not str
+        or not 0 < len(actual) <= 16384
+        or any(ord(c) <= 32 or ord(c) >= 127 or c in '\\"<>^`{|}' for c in actual)
+    ):
+        raise ProviderRefused()
+    parsed = urlsplit(actual)
+    origin = "https://" + parsed.netloc
+    if (
+        parsed.scheme != "https"
+        or origin not in allowed
+        or parsed.fragment
+        or not parsed.path.startswith("/")
+        or parsed.path.startswith("//")
+        or actual != origin + parsed.path + "?" + parsed.query
+    ):
+        raise ProviderRefused()
+    if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
+        raise ProviderRefused()
+    try:
+        decoded = unquote(parsed.path, encoding="utf-8", errors="strict")
+    except UnicodeError:
+        raise ProviderRefused() from None
+    if (
+        any(ord(c) <= 32 or ord(c) >= 127 or c in "%?#;\\" for c in decoded)
+        or any(part in (".", "..") for part in decoded.split("/"))
+        or re.search(r"%(?:2[fF]|5[cC])", parsed.path)
+    ):
+        raise ProviderRefused()
+    _query_keys(parsed.query)
+    return origin, parsed.path, parsed.query
 
 
 @dataclass(frozen=True, slots=True)
