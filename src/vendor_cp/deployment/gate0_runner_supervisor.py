@@ -939,6 +939,7 @@ def _bind_actual_job_installation(
         and type(binding) is InstalledJitBinding
         and jit.owns_binding(binding)
     )
+    jit = cast(NativeJitInvocation, jit)
     end = lifecycle._bounds.provisioning_end
     _before(end)
     installed = SupervisorInstallation.load()
@@ -1033,8 +1034,12 @@ def _bind_actual_job_installation(
         jit_invocation_id=jit.invocation,
         selected_job_coordinates=selected,
         github_observation_digest=observation,
-        courier_pid=jit._peer_chain[0][0],
-        courier_start=jit._peer_chain[0][2],
+        courier_pid=cast(tuple[tuple[int, int, str, bytes], ...], jit._peer_chain)[0][
+            0
+        ],
+        courier_start=cast(tuple[tuple[int, int, str, bytes], ...], jit._peer_chain)[0][
+            2
+        ],
         origin=origin,
         path=path,
         query=query,
@@ -1069,7 +1074,7 @@ def _bind_actual_job_installation(
         schema="Gate0RunnerCollectionInstallation.v2",
         broker=dict(origin=origin, path=path, query=query, qualification=binding_pin),
     )
-    originals = collection["job"]
+    originals = cast(dict[str, object], collection["job"])
     _require(
         originals["repository_id"] == str(facts.repository_id)
         and originals["run_id"] == str(facts.run_id)

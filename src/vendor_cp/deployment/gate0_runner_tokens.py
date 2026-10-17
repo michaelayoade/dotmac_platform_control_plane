@@ -76,16 +76,16 @@ def _supplier_coordinates(actual: str, origins: object) -> tuple[str, str, str]:
     for value in origins:
         if type(value) is not str:
             raise ProviderRefused()
-        origin = urlsplit(value)
+        parsed_origin = urlsplit(value)
         if (
-            origin.scheme != "https"
-            or not origin.hostname
-            or origin.netloc != origin.hostname
-            or _HOST.fullmatch(origin.hostname) is None
-            or origin.path
-            or origin.query
-            or origin.fragment
-            or value != "https://" + origin.hostname
+            parsed_origin.scheme != "https"
+            or not parsed_origin.hostname
+            or parsed_origin.netloc != parsed_origin.hostname
+            or _HOST.fullmatch(parsed_origin.hostname) is None
+            or parsed_origin.path
+            or parsed_origin.query
+            or parsed_origin.fragment
+            or value != "https://" + parsed_origin.hostname
             or value in allowed
         ):
             raise ProviderRefused()

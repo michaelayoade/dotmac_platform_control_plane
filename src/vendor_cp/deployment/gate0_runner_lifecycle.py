@@ -2710,8 +2710,12 @@ class NativeJitInvocation:
             ),
             interpreter_digest=self.selection["interpreter"]["digest"],
             lifecycle_native_digest=_hash(native_raw),
-            supplier_observation_digest=native["supplier_observation"]["digest"],
-            supplier_review_digest=native["supplier_review"]["digest"],
+            supplier_observation_digest=cast(
+                dict[str, object], native["supplier_observation"]
+            )["digest"],
+            supplier_review_digest=cast(dict[str, object], native["supplier_review"])[
+                "digest"
+            ],
         )
 
     def _retain_chain_process(self, pid: int, start: str) -> None:
