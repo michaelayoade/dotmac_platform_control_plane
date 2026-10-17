@@ -1737,6 +1737,65 @@ ROLE_CONFIG_DIAGNOSTIC_FIELDS = frozenset(
 )
 
 
+# Only the twelve observed saved-omitted/inspect-added defaults are equivalent.
+# Moby v28.5.1 api/server/router/image/inspect_response.go, legacyConfigFields
+# v1.49 (lines16-34), injects these exact typed values. No reverse omission,
+# other field, empty collection, or nondefault value is admitted by this rule.
+ROLE_INSPECT_ADDED_DEFAULTS = MappingProxyType(
+    {
+        "AttachStderr": False,
+        "AttachStdin": False,
+        "AttachStdout": False,
+        "Cmd": None,
+        "Domainname": "",
+        "Hostname": "",
+        "Image": "",
+        "OnBuild": None,
+        "OpenStdin": False,
+        "StdinOnce": False,
+        "Tty": False,
+        "Volumes": None,
+    }
+)
+
+
+def _role_config_value_equal(saved, inspected):
+    """Deep exact JSON types: Python's False==0 is not config equivalence."""
+    if type(saved) is not type(inspected):
+        return False
+    if isinstance(saved, dict):
+        return saved.keys() == inspected.keys() and all(
+            _role_config_value_equal(saved[key], inspected[key]) for key in saved
+        )
+    if isinstance(saved, list):
+        return len(saved) == len(inspected) and all(
+            _role_config_value_equal(left, right)
+            for left, right in zip(saved, inspected, strict=True)
+        )
+    return saved == inspected
+
+
+def role_config_matches(saved, inspected):
+    """Directional representation join; raw config bytes remain SHA256-pinned."""
+    if (
+        type(saved) is not dict
+        or type(inspected) is not dict
+        or saved.keys() - inspected.keys()
+    ):
+        return False
+    added = inspected.keys() - saved.keys()
+    if added - ROLE_INSPECT_ADDED_DEFAULTS.keys():
+        return False
+    if any(
+        not _role_config_value_equal(inspected[key], ROLE_INSPECT_ADDED_DEFAULTS[key])
+        for key in added
+    ):
+        return False
+    return all(
+        _role_config_value_equal(value, inspected[key]) for key, value in saved.items()
+    )
+
+
 def role_config_difference(saved, inspected):
     """Finite field-name/count metadata only, never values or unknown key names."""
     if not isinstance(saved, dict) or not isinstance(inspected, dict):
@@ -1756,7 +1815,7 @@ def role_config_difference(saved, inspected):
         "different": sorted(
             key
             for key in saved.keys() & inspected.keys() & allowed
-            if saved[key] != inspected[key]
+            if not _role_config_value_equal(saved[key], inspected[key])
         ),
         "unknown_saved_count": len(saved.keys() - allowed),
         "unknown_inspected_count": len(inspected.keys() - allowed),
@@ -1850,7 +1909,7 @@ def role_export_image_subject(private, revision, inspector, deadline):
             document = parse_json(config, MAX_METADATA_BYTES)
             if document["rootfs"]["diff_ids"] != role["rootfs_diff_ids"]:
                 raise RetentionRefused("role saved-config rootfs mismatch")
-            if document["config"] != image["Config"]:
+            if not role_config_matches(document["config"], image["Config"]):
                 error = RetentionRefused("role saved-config fields differ")
                 error.role_config_difference = role_config_difference(
                     document["config"], image["Config"]

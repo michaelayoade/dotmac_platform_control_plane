@@ -1189,6 +1189,28 @@ class RoleRetentionOrchestrationTests(unittest.TestCase):
             RETAIN.role_image_subject(self.private, self.packet, INSPECT, float("inf"))
         self.assert_no_completed_pair()
 
+    def test_actual_twelve_inspect_defaults_preserve_full_config_identity_join(self):
+        self.image["Config"] = {
+            **self.image["Config"],
+            **RETAIN.ROLE_INSPECT_ADDED_DEFAULTS,
+        }
+        self.write("role-image.json", json.dumps([self.image]).encode())
+        self.inspect_then_package()
+        build = json.loads((self.private / "build.json").read_bytes())
+        self.assertEqual(build["images"]["role"]["image_id"], self.image_id)
+        self.assertEqual(
+            build["images"]["role"]["config_sha256"],
+            hashlib.sha256(self.config_raw).hexdigest(),
+        )
+        self.assertEqual(
+            build["images"]["role"]["rootfs_diff_ids"],
+            [self.base_layer, self.role_layer],
+        )
+        self.assertEqual(
+            (self.private / "encrypted-runtime-bundle.pgp").read_bytes(),
+            self.cipher_bytes,
+        )
+
     def test_config_shape_refusal_reports_only_finite_field_names(self):
         # This OCI-vs-inspect representation remains refused until the actual
         # hosted field difference supports a reviewed exact semantic policy.
@@ -1597,6 +1619,108 @@ class RoleConfigStructuralDiagnosticTests(unittest.TestCase):
         )
         self.assertEqual(metadata["predicate"], "saved_config_ordered_diff_ids")
         self.assertIsNone(metadata["config_field_difference"])
+
+
+class RoleObservedConfigDefaultEquivalenceTests(unittest.TestCase):
+    def test_only_observed_twelve_directional_typed_defaults_match(self):
+        common = {
+            "User": "0:0",
+            "Entrypoint": ["/opt/venv/bin/dotmac-platform", "gate0", "supervise"],
+            "Env": ["VIRTUAL_ENV=/opt/venv"],
+            "Labels": {"io.dotmac.runtime": "gate0-finite-role"},
+        }
+        expected = {
+            "AttachStderr": False,
+            "AttachStdin": False,
+            "AttachStdout": False,
+            "Cmd": None,
+            "Domainname": "",
+            "Hostname": "",
+            "Image": "",
+            "OnBuild": None,
+            "OpenStdin": False,
+            "StdinOnce": False,
+            "Tty": False,
+            "Volumes": None,
+        }
+        self.assertEqual(dict(RETAIN.ROLE_INSPECT_ADDED_DEFAULTS), expected)
+        self.assertTrue(RETAIN.role_config_matches(common, {**common, **expected}))
+        for field, default in expected.items():
+            with self.subTest(field=field):
+                self.assertTrue(
+                    RETAIN.role_config_matches(common, {**common, field: default})
+                )
+                self.assertFalse(
+                    RETAIN.role_config_matches({**common, field: default}, common)
+                )
+                self.assertTrue(
+                    RETAIN.role_config_matches(
+                        {**common, field: default}, {**common, field: default}
+                    )
+                )
+            for wrong in (
+                False,
+                True,
+                0,
+                1,
+                None,
+                "",
+                "nonempty",
+                [],
+                {},
+                ["nonempty"],
+                {"nonempty": "value"},
+            ):
+                if type(wrong) is type(default) and wrong == default:
+                    continue
+                with self.subTest(field=field, wrong_type=type(wrong).__name__):
+                    self.assertFalse(
+                        RETAIN.role_config_matches(common, {**common, field: wrong})
+                    )
+                    self.assertFalse(
+                        RETAIN.role_config_matches(
+                            {**common, field: default}, {**common, field: wrong}
+                        )
+                    )
+
+    def test_unobserved_unknown_common_and_nested_changes_remain_strict(self):
+        common = {
+            "User": "0:0",
+            "Entrypoint": ["fixed"],
+            "Labels": {"nested": False},
+            "Healthcheck": {"Retries": 0},
+        }
+        for extra in (
+            {"ExposedPorts": None},
+            {"Env": None},
+            {"LabelsUnknown": None},
+            {"private-unknown": ""},
+        ):
+            self.assertFalse(RETAIN.role_config_matches(common, {**common, **extra}))
+        for changed in (
+            {"User": "10031:10031"},
+            {"Entrypoint": ["changed"]},
+            {"Labels": {"nested": 0}},
+            {"Healthcheck": {"Retries": False}},
+            {"Healthcheck": {"Retries": 0.0}},
+        ):
+            self.assertFalse(RETAIN.role_config_matches(common, {**common, **changed}))
+        self.assertFalse(
+            RETAIN.role_config_matches({**common, "private-unknown": None}, common)
+        )
+        self.assertFalse(RETAIN.role_config_matches(None, common))
+        self.assertFalse(RETAIN.role_config_matches(common, None))
+        self.assertTrue(
+            RETAIN.role_config_matches(
+                {**common, "unknown-common": [False]},
+                {**common, "unknown-common": [False]},
+            )
+        )
+        self.assertFalse(
+            RETAIN.role_config_matches(
+                {**common, "unknown-common": [False]}, {**common, "unknown-common": [0]}
+            )
+        )
 
 
 if __name__ == "__main__":
