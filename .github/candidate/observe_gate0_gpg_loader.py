@@ -87,7 +87,18 @@ EXCEPTION_KINDS = frozenset(
         "error",
     }
 )
-DIAGNOSTIC = {"phase": "bootstrap", "work_failure": None}
+LOADER_ROW_SHAPES = frozenset(
+    {
+        "blank",
+        "not-found",
+        "absolute-mapping",
+        "soname-mapping",
+        "direct-absolute",
+        "vdso",
+        "other",
+    }
+)
+DIAGNOSTIC = {"phase": "bootstrap", "work_failure": None, "loader_row": None}
 
 
 class Incomplete(ValueError):
@@ -146,6 +157,19 @@ def failure_diagnostic(error):
                 pending.append((next_error, relation, index))
     phase = DIAGNOSTIC["phase"]
     remembered = DIAGNOSTIC["work_failure"]
+    row = DIAGNOSTIC.get("loader_row")
+    loader_row = None
+    if type(row) is dict:
+        shape = row.get("shape")
+        loader_row = dict(
+            shape=shape
+            if type(shape) is str and shape in LOADER_ROW_SHAPES
+            else "other",
+            validated_interpreter_alias_mapping=(
+                row.get("validated_interpreter_alias_mapping") is True
+            ),
+            known_row_spacing_variant=row.get("known_row_spacing_variant") is True,
+        )
     work = None
     if remembered is not None:
         work_phase, work_error = remembered
@@ -159,6 +183,7 @@ def failure_diagnostic(error):
             work_failure=work,
             exception_chain=chain,
             chain_truncated=bool(pending),
+            loader_row=loader_row,
         ),
         sort_keys=True,
         separators=(",", ":"),
@@ -272,7 +297,43 @@ def resolve_library(path, *, loader=False):
             return current, edges
 
 
+def rejected_loader_row(line, loader):
+    """Classify in-memory syntax only; never retain the rejected row or values."""
+    normalized = re.sub(r"[ \t]+", " ", line)
+    alias_pattern = (
+        re.escape(INTERPRETER) + r" => " + re.escape(loader) + r" \(0x[0-9a-f]+\)"
+    )
+    alias = re.fullmatch(alias_pattern, normalized) is not None
+    soname_pattern = r"([A-Za-z0-9_.+-]{1,128}) => (/[^ ]+) \(0x[0-9a-f]+\)"
+    direct_pattern = r"(/[^ ]+) \(0x[0-9a-f]+\)"
+    vdso_pattern = r"linux-vdso\.so\.1 \(0x[0-9a-f]+\)"
+    if not normalized:
+        shape = "blank"
+    elif re.fullmatch(r"[^ ]+ => not found", normalized):
+        shape = "not-found"
+    elif re.fullmatch(r"/[^ ]+ => /[^ ]+ \(0x[0-9a-f]+\)", normalized):
+        shape = "absolute-mapping"
+    elif re.fullmatch(soname_pattern, normalized):
+        shape = "soname-mapping"
+    elif re.fullmatch(direct_pattern, normalized):
+        shape = "direct-absolute"
+    elif normalized.startswith("linux-vdso.so.1"):
+        shape = "vdso"
+    else:
+        shape = "other"
+    known = alias or any(
+        re.fullmatch(pattern, normalized) is not None
+        for pattern in (soname_pattern, direct_pattern, vdso_pattern)
+    )
+    return dict(
+        shape=shape,
+        validated_interpreter_alias_mapping=alias,
+        known_row_spacing_variant=line != normalized and known,
+    )
+
+
 def parse_loader(raw, loader):
+    DIAGNOSTIC["loader_row"] = None
     require(type(raw) is bytes and 0 < len(raw) <= 16384 and raw.endswith(b"\n"))
     result, names, paths = [], set(), set()
     for line in raw.decode("ascii").splitlines():
@@ -294,6 +355,7 @@ def parse_loader(raw, loader):
             require(path in (INTERPRETER, loader))
             name, kind = "interpreter", "interpreter"
         else:
+            DIAGNOSTIC["loader_row"] = rejected_loader_row(line, loader)
             raise Incomplete("public-loader-observation-incomplete")
         require(name not in names and (path is None or path not in paths))
         names.add(name)
@@ -801,7 +863,7 @@ def publish(record, verify, deadline):
 
 def main():
     global TEMP
-    DIAGNOSTIC.update(phase="bootstrap", work_failure=None)
+    DIAGNOSTIC.update(phase="bootstrap", work_failure=None, loader_row=None)
     require(len(sys.argv) == 1 and os.geteuid() != 0)
     TEMP = Path(os.environ["RUNNER_TEMP"])
     require(TEMP.is_absolute() and ".." not in TEMP.parts)

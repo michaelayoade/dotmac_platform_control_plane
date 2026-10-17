@@ -543,6 +543,19 @@ class FailureDiagnosticTests(unittest.TestCase):
         self.assertLess(len(text), 8192)
         record = json.loads(text.removeprefix(prefix))
         self.assertIn(record["phase"], G["PHASES"])
+        if record["loader_row"] is not None:
+            row = record["loader_row"]
+            self.assertEqual(
+                set(row),
+                {
+                    "shape",
+                    "validated_interpreter_alias_mapping",
+                    "known_row_spacing_variant",
+                },
+            )
+            self.assertIn(row["shape"], G["LOADER_ROW_SHAPES"])
+            self.assertIs(type(row["validated_interpreter_alias_mapping"]), bool)
+            self.assertIs(type(row["known_row_spacing_variant"]), bool)
         for item in record["exception_chain"]:
             self.assertIn(item["kind"], G["EXCEPTION_KINDS"] | {"other"})
             self.assertIn(item["relation"], {"raised", "cause", "context"})
@@ -555,6 +568,87 @@ class FailureDiagnosticTests(unittest.TestCase):
                 self.assertIs(type(frame["line"]), int)
                 self.assertGreater(frame["line"], 0)
         return text, record
+
+    def test_rejected_loader_row_shapes_redact_values_without_accepting(self):
+        alias = G["INTERPRETER"] + " => " + LOADER + " (0xabcdef)"
+        cases = [
+            (alias, "absolute-mapping", True, False),
+            (alias.replace(" => ", "\t=>\t"), "absolute-mapping", True, True),
+            (
+                "/UNKNOWN_PRIVATE_LEFT => /UNKNOWN_PRIVATE_RIGHT (0x123)",
+                "absolute-mapping",
+                False,
+                False,
+            ),
+            ("libc.so.6\t=>\t" + LISTED + "\t(0x123)", "soname-mapping", False, True),
+            (G["INTERPRETER"] + "\t(0x123)", "direct-absolute", False, True),
+            ("linux-vdso.so.1\t(0x123)", "vdso", False, True),
+            ("UNKNOWN_PRIVATE_SONAME => not found", "not-found", False, False),
+            ("", "blank", False, False),
+            ("UNKNOWN_PRIVATE_ROW", "other", False, False),
+        ]
+        for line, shape, alias_matches, spacing in cases:
+            with (
+                self.subTest(shape=shape, spacing=spacing),
+                patch.dict(
+                    G,
+                    {
+                        "DIAGNOSTIC": {
+                            "phase": "dependency",
+                            "work_failure": None,
+                            "loader_row": None,
+                        },
+                    },
+                ),
+            ):
+                raw = OUTPUT + (line + "\n").encode()
+                try:
+                    N["parse_loader"](raw, LOADER)
+                except G["Incomplete"] as error:
+                    text, record = self.decode(error)
+                else:
+                    self.fail("diagnostic classification accepted a rejected row")
+                self.assertEqual(
+                    record["loader_row"],
+                    dict(
+                        shape=shape,
+                        validated_interpreter_alias_mapping=alias_matches,
+                        known_row_spacing_variant=spacing,
+                    ),
+                )
+                for forbidden in (
+                    "UNKNOWN_PRIVATE",
+                    "0x",
+                    LOADER,
+                    LISTED,
+                    G["INTERPRETER"],
+                ):
+                    self.assertNotIn(forbidden, text)
+        # Diagnostic input itself cannot introduce arbitrary shape/value output.
+        with patch.dict(
+            G,
+            {
+                "DIAGNOSTIC": {
+                    "phase": "dependency",
+                    "work_failure": None,
+                    "loader_row": {
+                        "shape": "UNKNOWN_PRIVATE_SHAPE",
+                        "validated_interpreter_alias_mapping": "UNKNOWN_PRIVATE_BOOL",
+                        "known_row_spacing_variant": 1,
+                    },
+                }
+            },
+        ):
+            text, record = self.decode(ValueError("UNKNOWN_PRIVATE_ERROR"))
+        self.assertEqual(
+            record["loader_row"],
+            dict(
+                shape="other",
+                validated_interpreter_alias_mapping=False,
+                known_row_spacing_variant=False,
+            ),
+        )
+        self.assertNotIn("UNKNOWN_PRIVATE", text)
 
     def test_redaction_closed_grammar_and_no_post_failure_io(self):
         class PoisonedError(ValueError):
