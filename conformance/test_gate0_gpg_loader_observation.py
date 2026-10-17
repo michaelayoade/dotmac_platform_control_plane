@@ -449,6 +449,35 @@ class CompositionTests(unittest.TestCase):
             self.assertEqual(interpreter[0]["listed_path"], G["INTERPRETER"])
             self.assertEqual(interpreter[0]["file_id"], record["loader"]["file_id"])
 
+    def test_diversion_composition_rechecks_response_and_refuses_drift(self):
+        for drift in (False, True):
+            self.setUp()
+            reads = 0
+
+            def provider(argv, deadline, drift=drift):
+                nonlocal reads
+                raw = self.provider(argv, deadline)
+                if argv[1] == "--search" and argv[-1] == "*" + LISTED:
+                    reads += 1
+                    raw = ("\n".join(PairedDiversionTests().lines()) + "\n").encode()
+                    if drift and reads > 1:
+                        raw += b"\n"
+                return raw
+
+            if drift:
+                with self.assertRaises(G["Incomplete"]):
+                    self.run_observe(provider=provider)
+            else:
+                record = self.run_observe(provider=provider)
+                declarations = [
+                    d
+                    for p in record["packages"]
+                    for d in p.get("declared_diversions", [])
+                ]
+                self.assertEqual(len(declarations), 1)
+                self.assertFalse(declarations[0]["destination_bytes_measured"])
+                self.assertGreaterEqual(reads, 3)
+
     def test_bootstrap_owner_swap_refuses_before_primitives_or_commands(self):
         # Bootstrap executed A, while the initial roster and potential prior
         # pair name B. The actual orchestration must refuse before using A.
@@ -512,6 +541,106 @@ class CompositionTests(unittest.TestCase):
 
             with self.subTest(fault=fault), self.assertRaises(G["Incomplete"]):
                 self.run_observe(provider=provider)
+
+
+class PairedDiversionTests(unittest.TestCase):
+    def row(self):
+        return dict(
+            id="synthetic-held",
+            canonical_path=CANONICAL,
+            listed_paths=[LISTED, CANONICAL],
+        )
+
+    def lines(self, owned=CANONICAL, source=LISTED):
+        return [
+            "diversion by libc6 from: " + source,
+            "diversion by libc6 to: " + source + ".usr-is-merged",
+            "libc6:amd64: " + owned,
+        ]
+
+    def test_complete_pair_accepts_same_held_coordinates_and_orders(self):
+        for owned in (LISTED, CANONICAL):
+            lines = self.lines(owned=owned)
+            for ordered in (lines, lines[::-1], [lines[2], lines[0], lines[1]]):
+                owner, declaration = N["parse_declared_diversion"](ordered, self.row())
+                self.assertEqual(owner, "libc6:amd64")
+                self.assertEqual(declaration["ownership_path"], owned)
+                self.assertEqual(declaration["from_path"], LISTED)
+                self.assertEqual(declaration["to_path"], LISTED + ".usr-is-merged")
+                self.assertEqual(declaration["file_id"], "synthetic-held")
+                self.assertTrue(declaration["declared_metadata_only"])
+                self.assertFalse(declaration["destination_bytes_measured"])
+
+    def test_incomplete_local_unknown_wrong_identity_or_suffix_refuses(self):
+        lines = self.lines()
+        variants = [
+            lines[:2],
+            lines + [lines[0]],
+            [lines[0], lines[0], lines[2]],
+            [lines[0], lines[1], "UNKNOWN_PRIVATE_ROW"],
+            [line.replace("diversion by libc6", "local diversion") for line in lines],
+            [lines[0], lines[1].replace("libc6 to", "other-package to"), lines[2]],
+            [
+                line.replace("diversion by libc6", "diversion by other-package")
+                for line in lines
+            ],
+            [line.replace("libc6", "libc6:arm64") for line in lines],
+            [
+                lines[0],
+                lines[1].replace(".usr-is-merged", ".arbitrary-suffix"),
+                lines[2],
+            ],
+            [
+                lines[0],
+                lines[1].replace(".usr-is-merged", ".usr-is-merged/escape"),
+                lines[2],
+            ],
+            self.lines(source="/lib/uncaptured"),
+            self.lines(owned="/lib/uncaptured"),
+        ]
+        for candidate in variants:
+            with (
+                self.subTest(candidate_hash=N["digest"]("\n".join(candidate).encode())),
+                self.assertRaises(G["Incomplete"]),
+            ):
+                N["parse_declared_diversion"](candidate, self.row())
+        # A synthesized merged-/usr alias alone is not a captured identity.
+        row = dict(id="synthetic-held", canonical_path=CANONICAL, listed_paths=[])
+        with self.assertRaises(G["Incomplete"]):
+            N["parse_declared_diversion"](self.lines(), row)
+
+    def test_architecture_metadata_and_query_recheck_are_required(self):
+        query = ("\n".join(self.lines()) + "\n").encode()
+        calls = []
+
+        def provider(argv, deadline, architecture="amd64"):
+            calls.append((argv, deadline))
+            if argv[1] == "--search":
+                return query
+            if argv[1] == "--show":
+                return ("libc6\t1\t" + architecture + "\n").encode()
+            if argv[1] == "--verify":
+                return b""
+            raise AssertionError(argv)
+
+        deadline = time.monotonic() + 10
+        checks = []
+        with patch.dict(G, {"command": provider}):
+            packages = N["package_owners"]([self.row()], deadline, checks)
+            N["verify_ownership_queries"](checks, deadline)
+        declaration = packages[0]["declared_diversions"][0]
+        self.assertEqual(declaration["query_stdout_sha256"], N["digest"](query))
+        self.assertEqual(declaration["query_stdout_bytes"], len(query))
+        self.assertEqual(checks, [("*" + LISTED, query)])
+        self.assertTrue(all(end == deadline for _, end in calls))
+        with patch.dict(G, {"command": lambda argv, end: provider(argv, end, "all")}):
+            with self.assertRaises(G["Incomplete"]):
+                N["package_owners"]([self.row()], deadline, [])
+        with patch.dict(G, {"command": lambda *_: query + b"\n"}):
+            with self.assertRaises(G["Incomplete"]):
+                N["verify_ownership_queries"](checks, deadline)
+        with self.assertRaises(G["Incomplete"]):
+            N["verify_ownership_queries"](checks, time.monotonic() - 1)
 
 
 class PublicationTests(unittest.TestCase):
@@ -658,7 +787,7 @@ class FailureDiagnosticTests(unittest.TestCase):
             },
         ):
             try:
-                N["package_owners"]([row], time.monotonic() + 5)
+                N["package_owners"]([row], time.monotonic() + 5, [])
             except G["Incomplete"] as error:
                 text, record = self.decode(error)
             else:
@@ -763,22 +892,26 @@ class FailureDiagnosticTests(unittest.TestCase):
                     ),
                 ):
                     try:
-                        N["package_owners"]([row], time.monotonic() + 5)
+                        N["package_owners"]([row], time.monotonic() + 5, [])
                     except G["Incomplete"] as error:
                         text, record = self.decode(error)
                     else:
                         self.fail(
                             "diagnostic classification accepted a refused package row"
                         )
-                    self.assertEqual(
-                        record["package_row"],
-                        dict(
-                            shape=shape,
-                            file_category=category,
-                            grammar_matched=matched,
-                            exact_alias_matched=False,
-                        ),
-                    )
+                    if shape.startswith("diversion-"):
+                        self.assertIsNone(record["package_row"])
+                        self.assertEqual(record["package_query"]["rows"], 1)
+                    else:
+                        self.assertEqual(
+                            record["package_row"],
+                            dict(
+                                shape=shape,
+                                file_category=category,
+                                grammar_matched=matched,
+                                exact_alias_matched=False,
+                            ),
+                        )
                     for forbidden in ("private-owner", "UNKNOWN_PRIVATE", canonical):
                         self.assertNotIn(forbidden, text)
         with patch.dict(

@@ -659,7 +659,60 @@ def package_query_summary(lines, aliases):
     return counts
 
 
-def package_owners(rows, deadline):
+def parse_declared_diversion(lines, row):
+    """One protective diversion joined to this held file, not destination bytes."""
+    require(len(lines) == 3)
+    ownership = None
+    directions = {}
+    for line in lines:
+        owner = re.fullmatch(
+            r"([a-z0-9][a-z0-9+.-]{0,127}(?::amd64)?)\: (/[^\n]+)", line
+        )
+        diversion = re.fullmatch(
+            r"diversion by ([a-z0-9][a-z0-9+.-]{0,127}(?::amd64)?)"
+            r" (from|to): (/[^\n]+)",
+            line,
+        )
+        if owner is not None:
+            require(ownership is None)
+            ownership = owner.groups()
+        elif diversion is not None:
+            declarer, direction, path = diversion.groups()
+            require(direction not in directions)
+            directions[direction] = (declarer, path)
+        else:
+            raise Incomplete("public-loader-observation-incomplete")
+    require(ownership is not None and set(directions) == {"from", "to"})
+    owner, owned_path = ownership
+    declarer, from_path = directions["from"]
+    to_declarer, to_path = directions["to"]
+    captured = set(row["listed_paths"]) | {row["canonical_path"]}
+    require(owned_path in captured and from_path in captured)
+    require(declarer == to_declarer and declarer.split(":")[0] == owner.split(":")[0])
+    # Fixed protective suffix in Debian sane-backends 1.3.1-3 preinst/postinst
+    # (sources.debian.org); no arbitrary diversion destination is admitted.
+    require(to_path == from_path + ".usr-is-merged")
+    return owner, dict(
+        file_id=row["id"],
+        declaring_package=declarer,
+        ownership_package=owner,
+        ownership_path=owned_path,
+        from_path=from_path,
+        to_path=to_path,
+        declared_metadata_only=True,
+        destination_bytes_measured=False,
+    )
+
+
+def verify_ownership_queries(checks, deadline):
+    for pattern, expected in checks:
+        before(deadline)
+        require(
+            command(["/usr/bin/dpkg-query", "--search", pattern], deadline) == expected
+        )
+
+
+def package_owners(rows, deadline, query_checks):
     DIAGNOSTIC["package_row"] = None
     DIAGNOSTIC["package_query"] = None
     packages = {}
@@ -680,24 +733,33 @@ def package_owners(rows, deadline):
         pattern = row["canonical_path"]
         if pattern.startswith("/usr/lib/"):
             pattern = "*" + pattern.removeprefix("/usr")
-        lines = (
-            command(["/usr/bin/dpkg-query", "--search", pattern], deadline)
-            .decode("ascii")
-            .splitlines()
-        )
-        for line in lines:
-            match = re.fullmatch(
-                r"([a-z0-9][a-z0-9+.-]{0,127}(?::amd64)?)\: (/[^\n]+)", line
-            )
-            if match is None or match.group(2) not in aliases:
-                DIAGNOSTIC["package_row"] = rejected_package_row(
-                    line, match, aliases, row
-                )
+        query_raw = command(["/usr/bin/dpkg-query", "--search", pattern], deadline)
+        lines = query_raw.decode("ascii").splitlines()
+        declared_diversion = None
+        if any(
+            line.startswith(("diversion by ", "local diversion ")) for line in lines
+        ):
+            try:
+                require(query_raw.endswith(b"\n"))
+                owner, declared_diversion = parse_declared_diversion(lines, row)
+            except Incomplete:
                 DIAGNOSTIC["package_query"] = package_query_summary(lines, aliases)
-            require(match is not None and match.group(2) in aliases)
-            owners.add(match.group(1))
-        require(len(owners) == 1)
-        owner = owners.pop()
+                raise
+        else:
+            # Ordinary ownership retains its existing grammar and alias joins.
+            for line in lines:
+                match = re.fullmatch(
+                    r"([a-z0-9][a-z0-9+.-]{0,127}(?::amd64)?)\: (/[^\n]+)", line
+                )
+                if match is None or match.group(2) not in aliases:
+                    DIAGNOSTIC["package_row"] = rejected_package_row(
+                        line, match, aliases, row
+                    )
+                    DIAGNOSTIC["package_query"] = package_query_summary(lines, aliases)
+                require(match is not None and match.group(2) in aliases)
+                owners.add(match.group(1))
+            require(len(owners) == 1)
+            owner = owners.pop()
         require(len(packages) < 32 or owner in packages)
         if owner not in packages:
             raw = command(
@@ -727,6 +789,16 @@ def package_owners(rows, deadline):
                 ),
             )
         packages[owner]["file_ids"].append(row["id"])
+        if declared_diversion is not None:
+            require(packages[owner]["architecture"] == "amd64")
+            declared_diversion.update(
+                query_stdout_sha256=digest(query_raw),
+                query_stdout_bytes=len(query_raw),
+            )
+            packages[owner].setdefault("declared_diversions", []).append(
+                declared_diversion
+            )
+            query_checks.append((pattern, query_raw))
         row["package_names"] = [owner]
     return [packages[key] for key in sorted(packages)]
 
@@ -851,7 +923,8 @@ def observe(deadline, files):
         row for _, _, row in files.held.values() if row is not cache.get("file")
     ]
     DIAGNOSTIC["phase"] = "package"
-    packages = package_owners(package_rows, deadline)
+    query_checks = []
+    packages = package_owners(package_rows, deadline, query_checks)
     for name in TARGETS:
         matches = [p for p in packages if target_rows[name]["id"] in p["file_ids"]]
         require(len(matches) == 1)
@@ -872,6 +945,7 @@ def observe(deadline, files):
             else:
                 raise Incomplete("public-loader-observation-incomplete")
         files.verify()
+        verify_ownership_queries(query_checks, deadline)
         for package in packages:
             expected = (
                 "\t".join(package[key] for key in ("name", "version", "architecture"))
