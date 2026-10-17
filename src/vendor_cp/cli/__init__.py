@@ -572,6 +572,18 @@ def build_parser() -> _Parser:
         "collection-check-retirement",
         "check original collection retirement input",
     )
+    _command(
+        gate0_sub,
+        "gate0",
+        "native-metadata-observe",
+        "observe one isolated metadata-only native fixture",
+    )
+    _command(
+        gate0_sub,
+        "gate0",
+        "native-url-presence",
+        "inspect only the fixed job URL environment name",
+    )
     _command(gate0_sub, "gate0", "issuer-run", "run one finite issuer window")
     _command(gate0_sub, "gate0", "collect-e", "collect private finite E evidence")
     _command(gate0_sub, "gate0", "finalize-e", "prepare encrypted private E evidence")
@@ -761,6 +773,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception:
             print("GATE0_E_UNAVAILABLE", file=sys.stderr)
             return 3
+
+    if command in {"gate0 native-metadata-observe", "gate0 native-url-presence"}:
+        try:
+            from vendor_cp.deployment.gate0_a9_native_fixture import (
+                run_installed_metadata_observer,
+                run_installed_url_presence_probe,
+            )
+
+            if command == "gate0 native-metadata-observe":
+                return run_installed_metadata_observer()
+            return run_installed_url_presence_probe()
+        except Exception:
+            return 4
 
     if command == "gate0 public-jit-runner-credential":
         try:

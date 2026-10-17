@@ -1,0 +1,3 @@
+@INSTALLED_DOTMAC_PLATFORM@ gate0 native-url-presence
+@INSTALLED_DOTMAC_PLATFORM@ gate0 courier-original-oidc
+builtin exit

@@ -932,7 +932,7 @@ def test_actual_supplier_ancestry_is_finite_pinned_and_remeasured(
         script_reads.append(1)
         return (1, len(script_reads)) if mutation == "script-identity" else (1, 2)
 
-    native._measure_script = script
+    monkeypatch.setattr(life, "_measure_generated_script", script)
     alive_read, alive_write = os.pipe()
     created = []
 

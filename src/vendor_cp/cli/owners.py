@@ -56,6 +56,20 @@ class Owner:
 #: an owner declared without a command both fail.
 OWNERS: Final[tuple[Owner, ...]] = (
     Owner(
+        "gate0 native-metadata-observe",
+        "vendor_cp.deployment.gate0_a9_native_fixture",
+        "run_installed_metadata_observer",
+        True,
+        "one fixed isolated metadata-only raw native observation; no qualification",
+    ),
+    Owner(
+        "gate0 native-url-presence",
+        "vendor_cp.deployment.gate0_a9_native_fixture",
+        "run_installed_url_presence_probe",
+        False,
+        "fixed environment-name presence probe without URL or token value access",
+    ),
+    Owner(
         "gate0 collection-check-activation",
         "vendor_cp.deployment.gate0_collection_activation",
         "run_installed_collection_check_activation",

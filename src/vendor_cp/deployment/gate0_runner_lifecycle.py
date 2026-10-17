@@ -17,6 +17,7 @@ import stat
 import struct
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -2211,6 +2212,246 @@ class _JitRetirement:
         return dict(self._document)
 
 
+def _measure_generated_script(
+    path: Path, digest: str, courier_uid: int, deadline: float
+) -> tuple[int, ...]:
+    """Current file measurement only; no native or historical execution proof."""
+    # Generated script directories are job-owned; walk held no-follow FDs
+    # below the code-fixed job root, permitting only root/the isolated UID.
+    root = Path("/run/dotmac-gate0-jit")
+    _require(path.is_relative_to(root))
+    parent = _directory(root)
+    fd = -1
+    try:
+        for part in path.relative_to(root).parts[:-1]:
+            child = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent,
+            )
+            os.close(parent)
+            parent = child
+            info = os.fstat(parent)
+            _require(info.st_uid in (0, courier_uid) and not info.st_mode & 0o022)
+        fd = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+        )
+        info = os.fstat(fd)
+        _require(
+            info.st_uid == courier_uid
+            and info.st_nlink == 1
+            and not info.st_mode & 0o022
+        )
+        raw = _read_fd(fd, 65536, uid=courier_uid)
+        _require(
+            _hash(raw) == _digest(digest)
+            and _stable(os.fstat(fd)) == _stable(info)
+            and _stable(os.stat(path.name, dir_fd=parent, follow_symlinks=False))
+            == _stable(info)
+        )
+        _before(deadline)
+        return _stable(info)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        os.close(parent)
+
+
+def _measure_supplier_chain_readonly(
+    peer_pid: int,
+    selection: JSONRecord,
+    profile: JSONRecord,
+    uid: int,
+    courier_gid: int,
+    expected_cgroup: str,
+    listener_pid: int,
+    listener_start: str,
+    deadline: float,
+    retain_process: Callable[[int, str], None],
+) -> tuple[tuple[int, int, str, bytes], ...]:
+    """Finite current measurements; caller retains qualification authority."""
+    current = peer_pid
+    measured = []
+    script_identity = None
+    for index in range(4):
+        _before(deadline)
+        parent, actual_uid, start = measure_handoff_process(current)
+        _require(actual_uid == uid)
+        command = _proc(Path(f"/proc/{current}/cmdline"), 16384)
+        args = command.split(b"\0")
+        _require(args[-1] == b"" and all(args[:-1]))
+        expected_executable = (
+            selection["interpreter"]["path"]
+            if index == 0
+            else profile["shell_binary"]["path"]
+            if index == 1
+            else str(_RUNNER_ROOT / "bin/Runner.Worker")
+            if index == 2
+            else selection["runner_binary"]["path"]
+        )
+        _require(os.readlink(f"/proc/{current}/exe") == expected_executable)
+        executable_pin = (
+            selection["interpreter"]
+            if index == 0
+            else profile["shell_binary"]
+            if index == 1
+            else profile["worker_binary"]
+            if index == 2
+            else selection["runner_binary"]
+        )
+        executable_fd = os.open(f"/proc/{current}/exe", os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            actual_file = os.fstat(executable_fd)
+            expected_file = os.stat(executable_pin["path"], follow_symlinks=False)
+            _require(
+                (actual_file.st_dev, actual_file.st_ino)
+                == (expected_file.st_dev, expected_file.st_ino)
+                and _hash(_read_fd(executable_fd, 32 * 1024 * 1024, uid=0))
+                == executable_pin["digest"]
+            )
+        finally:
+            os.close(executable_fd)
+        status = _proc(Path(f"/proc/{current}/status"))
+        groups = [
+            line.split()[1:]
+            for line in status.splitlines()
+            if line.startswith(b"Groups:")
+        ]
+        uids = [
+            line.split()[1:] for line in status.splitlines() if line.startswith(b"Uid:")
+        ]
+        gids = [
+            line.split()[1:] for line in status.splitlines() if line.startswith(b"Gid:")
+        ]
+        _require(
+            len(groups) == len(uids) == len(gids) == 1
+            and {int(v) for v in groups[0]} == set(selection["groups"])
+            and {int(v) for v in uids[0]} == {uid}
+            and {int(v) for v in gids[0]} == {courier_gid}
+            and _proc(Path(f"/proc/{current}/cgroup"))
+            == ("0::" + expected_cgroup + "\n").encode()
+        )
+        if index == 1:
+            _require(
+                args[:-2]
+                == [
+                    b"/bin/bash",
+                    b"--noprofile",
+                    b"--norc",
+                    b"-p",
+                    b"-e",
+                    b"-o",
+                    b"pipefail",
+                ]
+            )
+            script = Path(args[-2].decode("ascii"))
+            _require(
+                script.parent == Path(profile["script_directory"])
+                and str(script) == args[-2].decode("ascii")
+                and ".." not in script.parts
+                and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}\.sh", script.name) is not None
+            )
+            script_identity = _measure_generated_script(
+                script, profile["script_template"]["digest"], uid, deadline
+            )
+        elif index == 2:
+            _require(
+                len(args) == 5
+                and args[0] == str(_RUNNER_ROOT / "bin/Runner.Worker").encode()
+                and args[1] == b"spawnclient"
+                and args[2] != args[3]
+            )
+            for handle in args[2:4]:
+                _require(
+                    re.fullmatch(rb"[1-9][0-9]{0,9}", handle) is not None
+                    and 2 < int(handle) <= 2147483647
+                )
+                target = os.readlink(f"/proc/{current}/fd/{int(handle)}")
+                _require(re.fullmatch(r"pipe:\[[0-9]+\]", target) is not None)
+        elif index == 3:
+            _require(
+                (current, start) == (listener_pid, listener_start)
+                and args
+                == [
+                    str(_RUNNER).encode(),
+                    b"run",
+                    b"--startuptype",
+                    b"service",
+                    b"",
+                ]
+            )
+        _require(measure_handoff_process(current) == (parent, uid, start))
+        if index < 3:
+            retain_process(current, start)
+        measured.append((current, parent, start, command))
+        current = parent
+    for pid, parent, start, command in measured:
+        _require(
+            measure_handoff_process(pid) == (parent, uid, start)
+            and _proc(Path(f"/proc/{pid}/cmdline"), 16384) == command
+        )
+    _require(script_identity is not None)
+    actual_script = Path(measured[1][3].split(b"\0")[-2].decode("ascii"))
+    _require(
+        _measure_generated_script(
+            actual_script, profile["script_template"]["digest"], uid, deadline
+        )
+        == script_identity
+    )
+    return tuple(measured)
+
+
+def _measure_courier_identity_readonly(
+    peer: socket.socket,
+    selection: JSONRecord,
+    courier_uid: int,
+    courier_gid: int,
+    expected_cgroup: str,
+) -> tuple[int, int, str]:
+    """Measure fixed courier identity; never accepts a production binding."""
+    pid, uid, gid = struct.unpack(
+        "3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+    )
+    _require(uid == courier_uid and gid == courier_gid)
+    parent_pid, measured_uid, start = measure_handoff_process(pid)
+    _require(
+        measured_uid == uid
+        and os.readlink(f"/proc/{pid}/exe") == selection["interpreter"]["path"]
+    )
+    command = _proc(Path(f"/proc/{pid}/cmdline"), 8192).split(b"\0")
+    cli_bytes = _protected(Path(selection["cli"]["path"]), 32 * 1024 * 1024)
+    _require(_hash(cli_bytes) == selection["cli"]["digest"])
+    first = cli_bytes.split(b"\n", 1)[0]
+    _require(first.startswith(b"#!") and len(first) <= 4096)
+    shebang = first[2:].strip().split(b" ")
+    _require(
+        len(shebang) in (1, 2)
+        and shebang[0].startswith(b"/")
+        and (len(shebang) == 1 or shebang[1] == b"-I")
+    )
+    expected = shebang + [
+        selection["cli"]["path"].encode(),
+        b"gate0",
+        b"courier-original-oidc",
+        b"",
+    ]
+    _require(command == expected)
+    status = _proc(Path(f"/proc/{pid}/status"))
+    groups = [
+        line.split()[1:] for line in status.splitlines() if line.startswith(b"Groups:")
+    ]
+    _require(
+        len(groups) == 1 and {int(v) for v in groups[0]} == set(selection["groups"])
+    )
+    _require(
+        _proc(Path(f"/proc/{pid}/cgroup")) == ("0::" + expected_cgroup + "\n").encode()
+    )
+    members = _proc(Path("/sys/fs/cgroup" + expected_cgroup + "/cgroup.procs"))
+    _require(str(pid).encode() in members.splitlines())
+    _require(measure_handoff_process(pid) == (parent_pid, uid, start))
+    return pid, parent_pid, start
+
+
 class NativeJitInvocation:
     """Finite systemd adapter for one literal JIT unit; no callable factory seam."""
 
@@ -2523,192 +2764,29 @@ class NativeJitInvocation:
     def _measure_supplier_chain_once(
         self, peer_pid: int
     ) -> tuple[tuple[int, int, str, bytes], ...]:
-        """Finite live ancestry. Native exclusion evidence owns rewrite resistance.
-
-        Re-reading path/argv is a current measurement, not proof of which bytes
-        executed earlier; actual executed-script/native shell-survival evidence
-        is separately required by the fixed root-native owner.
-        """
         policy = self._supplier_policy()
-        profile = policy["profile"]
-        uid = self.lifecycle._doc["courier_uid"]
-        current = peer_pid
-        measured = []
-        script_identity = None
-        for index in range(4):
-            _before(self.bounds.provisioning_end)
-            parent, actual_uid, start = measure_handoff_process(current)
-            _require(actual_uid == uid)
-            command = _proc(Path(f"/proc/{current}/cmdline"), 16384)
-            args = command.split(b"\0")
-            _require(args[-1] == b"" and all(args[:-1]))
-            expected_executable = (
-                self.selection["interpreter"]["path"]
-                if index == 0
-                else profile["shell_binary"]["path"]
-                if index == 1
-                else str(_RUNNER_ROOT / "bin/Runner.Worker")
-                if index == 2
-                else self.selection["runner_binary"]["path"]
-            )
-            _require(os.readlink(f"/proc/{current}/exe") == expected_executable)
-            executable_pin = (
-                self.selection["interpreter"]
-                if index == 0
-                else profile["shell_binary"]
-                if index == 1
-                else profile["worker_binary"]
-                if index == 2
-                else self.selection["runner_binary"]
-            )
-            executable_fd = os.open(f"/proc/{current}/exe", os.O_RDONLY | os.O_NONBLOCK)
-            try:
-                actual_file = os.fstat(executable_fd)
-                expected_file = os.stat(executable_pin["path"], follow_symlinks=False)
-                _require(
-                    (actual_file.st_dev, actual_file.st_ino)
-                    == (expected_file.st_dev, expected_file.st_ino)
-                    and _hash(_read_fd(executable_fd, 32 * 1024 * 1024, uid=0))
-                    == executable_pin["digest"]
-                )
-            finally:
-                os.close(executable_fd)
-            status = _proc(Path(f"/proc/{current}/status"))
-            groups = [
-                line.split()[1:]
-                for line in status.splitlines()
-                if line.startswith(b"Groups:")
-            ]
-            uids = [
-                line.split()[1:]
-                for line in status.splitlines()
-                if line.startswith(b"Uid:")
-            ]
-            gids = [
-                line.split()[1:]
-                for line in status.splitlines()
-                if line.startswith(b"Gid:")
-            ]
-            _require(
-                len(groups) == len(uids) == len(gids) == 1
-                and {int(v) for v in groups[0]} == set(self.selection["groups"])
-                and {int(v) for v in uids[0]} == {uid}
-                and {int(v) for v in gids[0]} == {self.lifecycle._doc["courier_gid"]}
-                and _proc(Path(f"/proc/{current}/cgroup"))
-                == ("0::" + _JIT_GROUP + "\n").encode()
-            )
-            if index == 1:
-                _require(
-                    args[:-2]
-                    == [
-                        b"/bin/bash",
-                        b"--noprofile",
-                        b"--norc",
-                        b"-p",
-                        b"-e",
-                        b"-o",
-                        b"pipefail",
-                    ]
-                )
-                script = Path(args[-2].decode("ascii"))
-                _require(
-                    script.parent == Path(profile["script_directory"])
-                    and str(script) == args[-2].decode("ascii")
-                    and ".." not in script.parts
-                    and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}\.sh", script.name)
-                    is not None
-                )
-                script_identity = self._measure_script(
-                    script, profile["script_template"]["digest"]
-                )
-            elif index == 2:
-                _require(
-                    len(args) == 5
-                    and args[0] == str(_RUNNER_ROOT / "bin/Runner.Worker").encode()
-                    and args[1] == b"spawnclient"
-                    and args[2] != args[3]
-                )
-                for handle in args[2:4]:
-                    _require(
-                        re.fullmatch(rb"[1-9][0-9]{0,9}", handle) is not None
-                        and 2 < int(handle) <= 2147483647
-                    )
-                    target = os.readlink(f"/proc/{current}/fd/{int(handle)}")
-                    _require(re.fullmatch(r"pipe:\[[0-9]+\]", target) is not None)
-            elif index == 3:
-                _require(
-                    (current, start) == (self.pid, self.start)
-                    and args
-                    == [
-                        str(_RUNNER).encode(),
-                        b"run",
-                        b"--startuptype",
-                        b"service",
-                        b"",
-                    ]
-                )
-            _require(measure_handoff_process(current) == (parent, uid, start))
-            if index < 3:
-                self._retain_chain_process(current, start)
-            measured.append((current, parent, start, command))
-            current = parent
-        for pid, parent, start, command in measured:
-            _require(
-                measure_handoff_process(pid) == (parent, uid, start)
-                and _proc(Path(f"/proc/{pid}/cmdline"), 16384) == command
-            )
-        _require(script_identity is not None)
-        actual_script = Path(measured[1][3].split(b"\0")[-2].decode("ascii"))
-        _require(
-            self._measure_script(actual_script, profile["script_template"]["digest"])
-            == script_identity
+        measured = _measure_supplier_chain_readonly(
+            peer_pid,
+            self.selection,
+            policy["profile"],
+            self.lifecycle._doc["courier_uid"],
+            self.lifecycle._doc["courier_gid"],
+            _JIT_GROUP,
+            cast(int, self.pid),
+            cast(str, self.start),
+            self.bounds.provisioning_end,
+            self._retain_chain_process,
         )
         self._require_current()
-        return tuple(measured)
+        return measured
 
     def _measure_script(self, path: Path, digest: str) -> tuple[int, ...]:
-        # Generated script directories are job-owned; walk held no-follow FDs
-        # below the code-fixed job root, permitting only root/the isolated UID.
-        root = Path("/run/dotmac-gate0-jit")
-        _require(path.is_relative_to(root))
-        parent = _directory(root)
-        fd = -1
-        try:
-            for part in path.relative_to(root).parts[:-1]:
-                child = os.open(
-                    part,
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                    dir_fd=parent,
-                )
-                os.close(parent)
-                parent = child
-                info = os.fstat(parent)
-                _require(
-                    info.st_uid in (0, self.lifecycle._doc["courier_uid"])
-                    and not info.st_mode & 0o022
-                )
-            fd = os.open(
-                path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
-            )
-            info = os.fstat(fd)
-            _require(
-                info.st_uid == self.lifecycle._doc["courier_uid"]
-                and info.st_nlink == 1
-                and not info.st_mode & 0o022
-            )
-            raw = _read_fd(fd, 65536, uid=self.lifecycle._doc["courier_uid"])
-            _require(
-                _hash(raw) == _digest(digest)
-                and _stable(os.fstat(fd)) == _stable(info)
-                and _stable(os.stat(path.name, dir_fd=parent, follow_symlinks=False))
-                == _stable(info)
-            )
-            _before(self.bounds.provisioning_end)
-            return _stable(info)
-        finally:
-            if fd >= 0:
-                os.close(fd)
-            os.close(parent)
+        return _measure_generated_script(
+            path,
+            digest,
+            self.lifecycle._doc["courier_uid"],
+            self.bounds.provisioning_end,
+        )
 
     def _call(self, arguments: tuple[str, ...], original: float) -> bytes:
         show = ("show", "--all", "--property=" + ",".join(_JIT_PROPERTIES), _JIT_UNIT)
@@ -3093,52 +3171,13 @@ class NativeJitInvocation:
             and (peer.type & socket.SOCK_SEQPACKET) != 0
         )
         self._require_current()
-        pid, uid, gid = struct.unpack(
-            "3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+        pid, _, start = _measure_courier_identity_readonly(
+            peer,
+            self.selection,
+            self.lifecycle._doc["courier_uid"],
+            self.lifecycle._doc["courier_gid"],
+            _JIT_GROUP,
         )
-        _require(
-            uid == self.lifecycle._doc["courier_uid"]
-            and gid == self.lifecycle._doc["courier_gid"]
-        )
-        parent_pid, measured_uid, start = measure_handoff_process(pid)
-        _require(
-            measured_uid == uid
-            and os.readlink(f"/proc/{pid}/exe") == self.selection["interpreter"]["path"]
-        )
-        command = _proc(Path(f"/proc/{pid}/cmdline"), 8192).split(b"\0")
-        cli_bytes = _protected(Path(self.selection["cli"]["path"]), 32 * 1024 * 1024)
-        _require(_hash(cli_bytes) == self.selection["cli"]["digest"])
-        first = cli_bytes.split(b"\n", 1)[0]
-        _require(first.startswith(b"#!") and len(first) <= 4096)
-        shebang = first[2:].strip().split(b" ")
-        _require(
-            len(shebang) in (1, 2)
-            and shebang[0].startswith(b"/")
-            and (len(shebang) == 1 or shebang[1] == b"-I")
-        )
-        expected = shebang + [
-            self.selection["cli"]["path"].encode(),
-            b"gate0",
-            b"courier-original-oidc",
-            b"",
-        ]
-        _require(command == expected)
-        status = _proc(Path(f"/proc/{pid}/status"))
-        groups = [
-            line.split()[1:]
-            for line in status.splitlines()
-            if line.startswith(b"Groups:")
-        ]
-        _require(
-            len(groups) == 1
-            and {int(v) for v in groups[0]} == set(self.selection["groups"])
-        )
-        _require(
-            _proc(Path(f"/proc/{pid}/cgroup")) == ("0::" + _JIT_GROUP + "\n").encode()
-        )
-        members = _proc(Path("/sys/fs/cgroup" + _JIT_GROUP + "/cgroup.procs"))
-        _require(str(pid).encode() in members.splitlines())
-        _require(measure_handoff_process(pid) == (parent_pid, uid, start))
         chain = self._measure_supplier_chain(pid)
         if self._peer_chain is None:
             self._peer_chain = chain
