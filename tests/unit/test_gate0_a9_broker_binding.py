@@ -337,6 +337,11 @@ def test_prelaunch_lifecycle_courier_real_binder_and_final_loaders(
         return tmp_path / path.relative_to(root) if path.is_relative_to(root) else path
 
     def read(path, *_, **__):
+        path = Path(path)
+        # Declared synthetic host pins must not collide with runner binaries.
+        # Mapped A9 files still read their actual per-test temporary bytes first.
+        if not path.is_relative_to(root) and str(path) in inputs:
+            return inputs[str(path)]
         target = mapped(path)
         return target.read_bytes() if target.is_file() else inputs[str(path)]
 
