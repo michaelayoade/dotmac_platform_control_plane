@@ -1088,3 +1088,250 @@ def test_recovery_descriptor_close_error_does_not_abort_other_slot(
         assert not (path / "b.key").exists()
     finally:
         recovered.close()
+
+
+def test_jit_close_error_reuse_attempts_both_once_and_refuses_lifecycle_completion(
+    tmp_path, monkeypatch
+):
+    paths = [tmp_path / name for name in ("events", "pidfd", "journal", "replacement")]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    events, pidfd, journal = (os.open(path, os.O_RDONLY) for path in paths[:3])
+    native = object.__new__(life.NativeJitInvocation)
+    native._events, native._pidfd = events, pidfd
+    native._closed = native._close_failed = False
+    native._retirement = object()
+    old_retirement = native._retirement
+    lifecycle = object.__new__(life.InstalledA9Lifecycle)
+    lifecycle._owned, lifecycle._listener, lifecycle._jit = {}, None, native
+    lifecycle._journal = SimpleNamespace(fd=journal)
+    lifecycle._failed = False
+    failures, closes, replacement = [], [], []
+    actual_close, actual_open = os.close, os.open
+
+    def fail():
+        lifecycle._failed = True
+        failures.append(True)
+
+    def close_then_error(fd):
+        closes.append(fd)
+        actual_close(fd)
+        if fd == events and not replacement:
+            replacement.append(actual_open(paths[3], os.O_RDONLY))
+            assert replacement[0] == events
+            raise OSError("PRIVATE-UNCERTAIN-CLOSE")
+
+    monkeypatch.setattr(lifecycle, "_persist_failure_marker", fail)
+    monkeypatch.setattr(life.os, "close", close_then_error)
+    try:
+        with pytest.raises(life.LifecycleRefused, match="^gate0_a9_lifecycle_refused$"):
+            lifecycle.close()
+        assert closes == [events, pidfd, journal]
+        assert native._closed and native._close_failed
+        assert native._events == native._pidfd == -1
+        assert native._retirement is None and not native.owns_retirement(old_retirement)
+        assert lifecycle._failed and failures and lifecycle._journal is None
+        with pytest.raises(life.LifecycleRefused):
+            native.close()
+        with pytest.raises(life.LifecycleRefused):
+            lifecycle.close()
+        assert closes == [events, pidfd, journal]
+        assert os.pread(replacement[0], 32, 0) == b"replacement"
+    finally:
+        if replacement:
+            actual_close(replacement[0])
+        for fd in (events, pidfd, journal):
+            if fd not in closes:
+                actual_close(fd)
+
+
+@pytest.mark.parametrize("fault", ["poll", "signal", "wait"])
+def test_manager_cleanup_fault_still_attempts_wait_stdout_and_original_end(
+    tmp_path, monkeypatch, fault
+):
+    output = tmp_path / "output"
+    output.write_bytes(b"bounded")
+    stream = output.open("rb")
+    calls, end_checks = [], []
+    clock = [100.0]
+
+    class Stdout:
+        def fileno(self):
+            return stream.fileno()
+
+        def close(self):
+            calls.append("stdout-close")
+            stream.close()
+
+    class Process:
+        pid = 123
+        stdout = Stdout()
+
+        def poll(self):
+            calls.append("poll")
+            if fault == "poll":
+                raise OSError("PRIVATE-POLL-FAILURE")
+            return None
+
+        def wait(self, timeout):
+            calls.append(("wait", timeout))
+            assert timeout == 0.5  # Original caller end, never reset after failure.
+            if fault == "wait":
+                raise TimeoutError("PRIVATE-WAIT-FAILURE")
+            return 0
+
+    def signal_group(pid, sig):
+        calls.append("signal")
+        if fault == "signal":
+            raise OSError("PRIVATE-SIGNAL-FAILURE")
+
+    actual_before = life._before
+
+    def before(end):
+        end_checks.append(end)
+        actual_before(end)
+
+    # Enter cleanup through a real failed work phase, before any work wait/reap.
+    monkeypatch.setattr(life.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(life.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(
+        life.os, "set_blocking", lambda *args: (_ for _ in ()).throw(OSError())
+    )
+    monkeypatch.setattr(life.os, "killpg", signal_group)
+    monkeypatch.setattr(life, "_before", before)
+    native = object.__new__(life.NativeJitInvocation)
+    native.selection = {"systemctl": {"path": "/usr/bin/systemctl"}}
+    try:
+        with pytest.raises(life.LifecycleRefused, match="^gate0_a9_lifecycle_refused$"):
+            native._call(("stop", "--no-block", life._JIT_UNIT), 100.5)
+        assert calls == (
+            ["poll", ("wait", 0.5), "stdout-close"]
+            if fault == "poll"
+            else ["poll", "signal", ("wait", 0.5), "stdout-close"]
+        )
+        assert end_checks[-1] == 100.5
+        assert stream.closed
+    finally:
+        stream.close()
+
+
+def test_manager_successfully_reaped_process_is_never_signalled_during_cleanup(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "stdout"
+    path.write_bytes(b"bounded-result")
+    stream = path.open("rb")
+    waits, signals = [], []
+
+    class Process:
+        pid = 123
+        stdout = stream
+        returncode = None
+
+        def wait(self, timeout):
+            waits.append(timeout)
+            self.returncode = 0
+            return 0
+
+        def poll(self):
+            assert self.returncode == 0
+            return self.returncode
+
+    monkeypatch.setattr(life.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(life.os, "killpg", lambda *args: signals.append(args))
+    native = object.__new__(life.NativeJitInvocation)
+    native.selection = {"systemctl": {"path": "/usr/bin/systemctl"}}
+    try:
+        assert (
+            native._call(("stop", "--no-block", life._JIT_UNIT), time.monotonic() + 1)
+            == b"bounded-result"
+        )
+        assert len(waits) == 2 and not signals and stream.closed
+    finally:
+        stream.close()
+
+
+@pytest.mark.parametrize("target_resource", ["owned", "journal"])
+@pytest.mark.parametrize("error_type", [OSError, KeyboardInterrupt])
+def test_lifecycle_all_resources_detached_before_uncertain_close_with_real_fd_reuse(
+    tmp_path, monkeypatch, target_resource, error_type
+):
+    lifecycle = life.InstalledA9Lifecycle(life._SEAL, {}, bounds())
+    original_end = lifecycle._bounds.finalization_end
+    paths = [
+        tmp_path / name
+        for name in (
+            "file-a",
+            "parent-a",
+            "file-b",
+            "parent-b",
+            "journal",
+            "replacement",
+        )
+    ]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    fds = [os.open(path, os.O_RDONLY) for path in paths[:5]]
+    lifecycle._owned = {
+        life.FileSlot.A_KEY: SimpleNamespace(file_fd=fds[0], parent_fd=fds[1]),
+        life.FileSlot.B_KEY: SimpleNamespace(file_fd=fds[2], parent_fd=fds[3]),
+    }
+    lifecycle._journal = SimpleNamespace(fd=fds[4])
+    attempts = []
+    lifecycle._listener = SimpleNamespace(close=lambda: attempts.append("listener"))
+    lifecycle._jit = SimpleNamespace(close=lambda: attempts.append("jit"))
+    target = fds[0] if target_resource == "owned" else fds[4]
+    actual_close, actual_open, actual_dup2 = os.close, os.open, os.dup2
+    replacement = []
+    monkeypatch.setattr(life, "_LIFECYCLE", tmp_path)
+    monkeypatch.setattr(
+        life,
+        "_directory",
+        lambda path, **kwargs: actual_open(path, os.O_RDONLY | os.O_DIRECTORY),
+    )
+
+    def close_then_error(fd):
+        # Observe the full detached set even on the FIRST native close call.
+        assert lifecycle._owned == {}
+        assert lifecycle._listener is lifecycle._jit is lifecycle._journal is None
+        assert lifecycle._close_started and lifecycle._journal_unavailable
+        attempts.append(fd)
+        actual_close(fd)
+        if fd == target and not replacement:
+            reused = actual_open(paths[5], os.O_RDONLY)
+            if reused != target:
+                actual_dup2(reused, target)
+                actual_close(reused)
+            replacement.append(target)
+            raise error_type("PRIVATE-UNCERTAIN-LIFECYCLE-CLOSE")
+
+    monkeypatch.setattr(life.os, "close", close_then_error)
+    try:
+        with pytest.raises(
+            life.LifecycleRefused, match="^gate0_a9_lifecycle_refused$"
+        ) as raised:
+            lifecycle.close()
+        assert "PRIVATE-UNCERTAIN-LIFECYCLE-CLOSE" not in str(raised.value)
+        assert attempts[:7] == [*fds[:4], "listener", "jit", fds[4]]
+        assert lifecycle._close_failed and lifecycle._failed
+        assert (tmp_path / "failed").read_bytes() == life._MARKER
+        assert lifecycle._bounds.finalization_end == original_end
+        completed_attempts = list(attempts)
+        for _ in range(2):
+            with pytest.raises(life.LifecycleRefused):
+                lifecycle.close()
+        assert attempts == completed_attempts  # No FD retry, even after reuse.
+        assert os.pread(replacement[0], 32, 0) == b"replacement"
+        with pytest.raises(life.LifecycleRefused):
+            lifecycle._phase("retire", original_end)
+        with pytest.raises(life.LifecycleRefused):
+            lifecycle._open_journal(fresh=False)
+        with pytest.raises(life.LifecycleRefused):
+            lifecycle._capture(life.FileSlot.A_KEY)
+        assert attempts == completed_attempts
+    finally:
+        if replacement:
+            actual_close(replacement[0])
+        for fd in fds:
+            if fd not in attempts:
+                actual_close(fd)

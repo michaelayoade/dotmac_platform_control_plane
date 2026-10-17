@@ -491,6 +491,7 @@ class InstalledA9Lifecycle:
         self._listener: socket.socket | None = None
         self._keys: tuple[PublicKeySelection, PublicKeySelection] | None = None
         self._failed = False
+        self._close_started = self._close_failed = False
         self._journal_unavailable = False
         self._stages: dict[str, tuple[int, int]] = {}
         self._unknown_intents: set[str] = set()
@@ -603,6 +604,7 @@ class InstalledA9Lifecycle:
             os.close(root)
 
     def _open_journal(self, *, fresh: bool) -> None:
+        _require(not getattr(self, "_close_started", False))
         self._ensure_directories()
         parent = _directory(_LIFECYCLE, mode=0o700)
         claim = -1
@@ -675,6 +677,13 @@ class InstalledA9Lifecycle:
         self._failed = True
         if self._journal is None:
             return
+        self._persist_failure_marker()
+
+    def _persist_failure_marker(self) -> None:
+        """Fixed original-bounded marker; never uses a journal descriptor.
+
+        Close may use this only after detaching a journal it already owned.
+        """
         fd, parent = -1, -1
         try:
             _before(self._bounds.finalization_end)
@@ -700,10 +709,11 @@ class InstalledA9Lifecycle:
                 if descriptor >= 0:
                     try:
                         os.close(descriptor)
-                    except OSError:
+                    except BaseException:
                         self._unknown_intents.add("failure_persistence")
 
     def _phase(self, name: str, deadline: float) -> None:
+        _require(not getattr(self, "_close_started", False))
         _before(deadline)
         _require(not self._failed or name == "retire")
         if self._journal is None:
@@ -745,6 +755,7 @@ class InstalledA9Lifecycle:
     def _capture(
         self, slot: FileSlot, *, allow_empty: bool = False
     ) -> OwnedLifecycleFile:
+        _require(not getattr(self, "_close_started", False))
         parent_path, name = _ROSTER[slot]
         parent = _directory(parent_path)
         fd = -1
@@ -1976,30 +1987,46 @@ class InstalledA9Lifecycle:
         return canonical(fact.document())
 
     def close(self) -> None:
-        failed = False
-        for owned in self._owned.values():
-            for fd in (owned.file_fd, owned.parent_fd):
-                try:
-                    os.close(fd)
-                except OSError:
-                    failed = True
-        self._owned.clear()
-        for handle in (self._listener, self._jit):
+        if getattr(self, "_close_started", False):
+            _require(not self._close_failed)
+            return
+        self._close_started = True
+        self._close_failed = False
+        owned, self._owned = tuple(self._owned.values()), {}
+        handles = self._listener, self._jit
+        self._listener = self._jit = None
+        journal, self._journal = self._journal, None
+        self._journal_unavailable = True
+        # Detach the complete ownership set before a fallible native call.
+        descriptors = dict.fromkeys(
+            fd for item in owned for fd in (item.file_fd, item.parent_fd)
+        )
+        for fd in descriptors:
+            try:
+                os.close(fd)
+            except BaseException:
+                self._close_failed = True
+        for handle in handles:
             if handle is not None:
                 try:
                     handle.close()
-                except OSError:
-                    failed = True
-        if failed:
-            self._fail()  # persist while journal FD still open
-        if self._journal is not None:
+                except BaseException:
+                    self._close_failed = True
+        if journal is not None and journal.fd not in descriptors:
             try:
-                os.close(self._journal.fd)
-            except OSError:
-                self._fail()
-                failed = True
-            self._journal = None
-        _require(not failed)
+                os.close(journal.fd)
+            except BaseException:
+                self._close_failed = True
+        if self._close_failed:
+            self._failed = True
+            # Existing owned-journal provenance permits the same fixed marker
+            # write. It cannot authorize a stale FD or extend original bounds.
+            if journal is not None:
+                try:
+                    self._persist_failure_marker()
+                except BaseException:
+                    self._unknown_intents.add("failure_persistence")
+        _require(not self._close_failed)
 
 
 def _close_received_descriptors(ancillary: list[tuple[int, int, bytes]]) -> None:
@@ -2102,6 +2129,7 @@ class NativeJitInvocation:
         self._binding: InstalledJitBinding | None = None
         self._retirement: _JitRetirement | None = None
         self._started, self._closed = False, False
+        self._close_failed = False
 
     @staticmethod
     def _selection(value: object) -> JSONRecord:
@@ -2237,12 +2265,28 @@ class NativeJitInvocation:
         except BaseException:
             failed = True
         finally:
+            running = False
             try:
-                if process.poll() is None:
+                running = process.poll() is None
+            except BaseException:
+                failed = True
+            # Only a successful unreaped-state observation permits signalling.
+            # An unknown state must not target a PID which may have been reaped.
+            if running:
+                try:
                     os.killpg(process.pid, signal.SIGKILL)
+                except BaseException:
+                    failed = True
+            try:
                 process.wait(timeout=max(0, deadline - time.monotonic()))
+            except BaseException:
+                failed = True
+            try:
                 if process.stdout is not None:
                     process.stdout.close()
+            except BaseException:
+                failed = True
+            try:
                 _before(deadline)
             except BaseException:
                 failed = True
@@ -2718,11 +2762,20 @@ class NativeJitInvocation:
         )
 
     def close(self) -> None:
-        for fd in (self._events, self._pidfd):
-            if fd >= 0:
-                os.close(fd)
+        if self._closed:
+            _require(not getattr(self, "_close_failed", False))
+            return
+        descriptors = self._events, self._pidfd
         self._events = self._pidfd = -1
         self._closed = True
+        self._retirement = None
+        for fd in dict.fromkeys(descriptors):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except BaseException:
+                    self._close_failed = True
+        _require(not getattr(self, "_close_failed", False))
 
 
 def _qualify_runner_mounts(binary_digest: str, owner_uid: int) -> None:
