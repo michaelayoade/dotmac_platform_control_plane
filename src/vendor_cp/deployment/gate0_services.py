@@ -800,6 +800,7 @@ def run_installed_issuer() -> int:
 def run_installed_attester() -> int:
     """One claimed installed slot; parent accepts only its terminal success."""
     execution_started = False
+    preparation_entry_pending = False
     try:
         from vendor_cp.deployment.gate0_bootstrap import (
             load_attester_installation,
@@ -809,7 +810,11 @@ def run_installed_attester() -> int:
 
         context = InstalledLaunchContext.from_installed()
         installation = load_attester_installation(context)
-        with prepare_installed_attester(context, installation) as prepared:
+        preparation = prepare_installed_attester(context, installation)
+        # Entry may acquire resources and fail during cleanup before yielding.
+        preparation_entry_pending = True
+        with preparation as prepared:
+            preparation_entry_pending = False
             execution_started = True
             result = attester_session(
                 prepared.session, prepared.reader, deadline=prepared.deadline
@@ -833,7 +838,7 @@ def run_installed_attester() -> int:
         print("GATE0_SERVICE_CANCELLED", file=sys.stderr)
         return 5
     except Exception:
-        if execution_started:
+        if preparation_entry_pending or execution_started:
             print("GATE0_SERVICE_INCOMPLETE", file=sys.stderr)
             return 5
         print("TRUSTED_SSHD_BINDING_UNCONFIGURED", file=sys.stderr)

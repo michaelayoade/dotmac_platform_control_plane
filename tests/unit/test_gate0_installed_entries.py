@@ -14,6 +14,7 @@ from uuid import UUID
 
 import pytest
 from test_gate0_attester import proof_setup as _proof_setup
+from test_gate0_management_delivery import captured as _captured
 from test_gate0_session_observation import SyntheticExchange
 from test_gate0_session_observation import session as _session
 
@@ -32,6 +33,7 @@ from vendor_cp.deployment.gate0_role_custody import (
 )
 
 proof_setup = _proof_setup
+captured = _captured
 
 
 @pytest.fixture
@@ -709,3 +711,164 @@ def test_installed_issuer_post_entry_refusal_with_confirmed_close_stays_refused(
     assert "serve" not in events and not state.terminal_written
     assert stdio.stderr.getvalue() == "DATABASE_BINDING_UNQUALIFIED\n"
     assert stdio.stdout.getvalue() == ""
+
+
+@pytest.mark.parametrize("cleanup_failure", [None, "directory", "custody", "capture"])
+def test_actual_attester_pre_yield_refusal_is_incomplete_after_resource_acquisition(
+    monkeypatch, tmp_path, entry_stdio, captured, cleanup_failure
+):
+    """Run the actual preparation owner through all three resource finalizers."""
+    import os
+    from dataclasses import replace
+
+    from test_gate0_bootstrap import synthetic_attester
+
+    from vendor_cp.deployment.gate0_management_delivery import CaptureSelection
+
+    _, _, capture, _ = captured
+    coordinates = capture.coordinates
+    installation = replace(
+        synthetic_attester(),
+        capture=CaptureSelection(
+            coordinates.window_digest,
+            coordinates.plan_id,
+            coordinates.plan_digest,
+            coordinates.target_id,
+            coordinates.approval_request_id,
+        ),
+    )
+    capture_path = tmp_path / "capture.json"
+    capture_path.write_bytes(capture.encoded)
+    events, descriptors, owned = [], {}, set()
+    started_at, origin = datetime.now(UTC), monotonic()
+    deadline = origin + (installation.identity.expires_at - started_at).total_seconds()
+
+    def acquire(name, path):
+        fd = os.open(path, os.O_RDONLY)
+        descriptors[name] = fd
+        owned.add(fd)
+        events.append("open-" + name)
+        return fd
+
+    def close_descriptor(fd):
+        name = next(name for name, value in descriptors.items() if value == fd)
+        events.append("close-" + name)
+        if cleanup_failure == name:
+            raise RuntimeError("synthetic-sensitive-descriptor-cleanup")
+        os.close(fd)
+        owned.remove(fd)
+
+    def close_custody():
+        events.append("close-custody")
+        if cleanup_failure == "custody":
+            raise RuntimeError("synthetic-sensitive-custody-cleanup")
+
+    def refuse_before_yield():
+        events.append("refuse-before-yield")
+        raise ProviderRefused()
+
+    context = SimpleNamespace(
+        slot_id=installation.slot_id,
+        worker_uid=installation.worker_uid,
+        required_phase=installation.phase,
+        started_at=started_at,
+        monotonic_origin=origin,
+        deadline=deadline,
+        require_run_role_terms=lambda **kwargs: None,
+        capture_coordinates=lambda: coordinates,
+        require_capture_slot=lambda *args: None,
+        open_authenticated_capture=lambda *args: acquire("capture", capture_path),
+        open_auth_info_directory=lambda: acquire("directory", tmp_path),
+        require_open=refuse_before_yield,
+        finish_slot=lambda *args, **kwargs: pytest.fail("pre-yield terminal published"),
+    )
+
+    def acquire_custody(*args):
+        events.append("open-custody")
+        return SimpleNamespace(deadline=deadline, close=close_custody), SimpleNamespace(
+            issuer_trust=object()
+        )
+
+    # Native installation provenance, custody acquisition and session assembly
+    # are synthetic boundaries. Keep the real generator, capture decoder, clock
+    # mapping, approved-at-start admission construction and cleanup ordering.
+    monkeypatch.setattr(
+        launch.InstalledLaunchContext,
+        "from_installed",
+        classmethod(lambda cls: context),
+    )
+    monkeypatch.setattr(
+        bootstrap, "load_attester_installation", lambda selected: installation
+    )
+    monkeypatch.setattr(bootstrap, "_installation", lambda *args: None)
+    monkeypatch.setattr(bootstrap, "_custody", acquire_custody)
+    monkeypatch.setattr(
+        bootstrap,
+        "assemble_attester_session",
+        lambda **kwargs: events.append("assemble-session") or object(),
+    )
+    monkeypatch.setattr(
+        bootstrap, "os", SimpleNamespace(read=os.read, close=close_descriptor)
+    )
+    monkeypatch.setattr(
+        services,
+        "attester_session",
+        lambda *args, **kwargs: pytest.fail("pre-yield refusal reached serving"),
+    )
+    try:
+        assert services.run_installed_attester() == 5
+        assert events == [
+            "open-capture",
+            "open-custody",
+            "assemble-session",
+            "open-directory",
+            "refuse-before-yield",
+            "close-directory",
+            "close-custody",
+            "close-capture",
+        ]
+        assert owned == (
+            {descriptors[cleanup_failure]}
+            if cleanup_failure in ("directory", "capture")
+            else set()
+        )
+        assert entry_stdio.stderr.getvalue() == "GATE0_SERVICE_INCOMPLETE\n"
+        assert entry_stdio.stdout.getvalue() == ""
+    finally:
+        for fd in owned:
+            os.close(fd)
+
+
+@pytest.mark.parametrize("failure", ["context", "installation"])
+def test_attester_refusal_before_preparation_keeps_safe_refusal(
+    monkeypatch, entry_stdio, failure
+):
+    events = []
+
+    def load_context():
+        events.append("context")
+        if failure == "context":
+            raise ProviderRefused()
+        return object()
+
+    def load_installation(context):
+        events.append("installation")
+        raise ProviderRefused()
+
+    monkeypatch.setattr(
+        launch.InstalledLaunchContext,
+        "from_installed",
+        classmethod(lambda cls: load_context()),
+    )
+    monkeypatch.setattr(bootstrap, "load_attester_installation", load_installation)
+    monkeypatch.setattr(
+        bootstrap,
+        "prepare_installed_attester",
+        lambda *args: pytest.fail("pre-resource refusal reached preparation"),
+    )
+    assert services.run_installed_attester() == 3
+    assert events == ["context"] + (
+        ["installation"] if failure == "installation" else []
+    )
+    assert entry_stdio.stderr.getvalue() == "TRUSTED_SSHD_BINDING_UNCONFIGURED\n"
+    assert entry_stdio.stdout.getvalue() == ""
