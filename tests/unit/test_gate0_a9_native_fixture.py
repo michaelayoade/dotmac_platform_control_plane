@@ -9,6 +9,7 @@ import socket
 import sysconfig
 import time
 from collections.abc import MutableMapping
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ import pytest
 from vendor_cp.deployment import gate0_a9_native_fixture as fixture
 from vendor_cp.deployment import gate0_runner_lifecycle as life
 from vendor_cp.deployment import gate0_runner_lifecycle_courier as courier
-from vendor_cp.deployment.gate0_framing import canonical
+from vendor_cp.deployment.gate0_framing import ServiceRefused, canonical
 from vendor_cp.deployment.gate0_role_custody import ProviderRefused
 
 
@@ -664,6 +665,23 @@ def test_actual_retained_descriptor_requires_unique_readonly_matching_script(
             os.lseek(fd, len(raw) + 1, os.SEEK_SET)
         if mutation == "duplicate":
             duplicate = os.dup(fd)
+
+        class SubjectDescriptors:
+            # A real supplier has a separate fd table. Enumerating this test's
+            # own pid would let observer opens reuse its closed scandir fd.
+            @contextmanager
+            def scandir(self, directory):
+                assert directory == f"/proc/{os.getpid()}/fd"
+                yield iter(
+                    SimpleNamespace(name=str(number))
+                    for number in (fd, duplicate)
+                    if number >= 0
+                )
+
+            def __getattr__(self, name):
+                return getattr(os, name)
+
+        monkeypatch.setattr(fixture, "os", SubjectDescriptors())
         identity = life._stable(os.fstat(fd))
         monkeypatch.setattr(fixture, "_measure_generated_script", lambda *_: identity)
         monkeypatch.setattr(
@@ -961,7 +979,11 @@ def test_actual_observer_protocol_publication_and_failure_cleanup(
             assert activity.count(life._METADATA_READY) == 1
         else:
             expected_error = (
-                TimeoutError if failure == "exit-timeout" else life.LifecycleRefused
+                TimeoutError
+                if failure == "exit-timeout"
+                else ServiceRefused
+                if failure == "metadata"
+                else life.LifecycleRefused
             )
             with pytest.raises(expected_error):
                 fixture._observe(

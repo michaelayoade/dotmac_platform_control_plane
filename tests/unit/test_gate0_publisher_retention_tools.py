@@ -1189,6 +1189,19 @@ class RoleRetentionOrchestrationTests(unittest.TestCase):
             RETAIN.role_image_subject(self.private, self.packet, INSPECT, float("inf"))
         self.assert_no_completed_pair()
 
+    def test_config_shape_refusal_reports_only_finite_field_names(self):
+        # This OCI-vs-inspect representation remains refused until the actual
+        # hosted field difference supports a reviewed exact semantic policy.
+        self.image["Config"] = {**self.image["Config"], "ExposedPorts": None}
+        self.write("role-image.json", json.dumps([self.image]).encode())
+        with self.assertRaises(RETAIN.RetentionRefused) as failure:
+            RETAIN.role_image_subject(self.private, self.packet, INSPECT, float("inf"))
+        self.assertEqual(failure.exception.args, ("role saved-config fields differ",))
+        difference = failure.exception.role_config_difference
+        self.assertEqual(difference["only_in_inspected"], ["ExposedPorts"])
+        self.assertEqual(difference["different"], [])
+        self.assert_no_completed_pair()
+
     def test_postinspection_export_byte_change_refuses_before_encryption(self):
         RETAIN.role_inspection(self.private)
         # A valid same-shaped tar with changed ordinary non-subject bytes defeats
@@ -1513,6 +1526,77 @@ class RoleExportCleanupOwnershipTests(unittest.TestCase):
         self.assertEqual(self.removals, [])
         self.assertTrue((self.private / "export-container-id").is_file())
         self.assertTrue(self.private.is_dir())
+
+
+class RoleConfigStructuralDiagnosticTests(unittest.TestCase):
+    def checker(self):
+        spec = importlib.util.spec_from_file_location(
+            "role_config_diagnostic_checker",
+            ROOT / "conformance/check_gate0_role_export.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_differences_never_render_values_or_unknown_field_names(self):
+        checker = self.checker()
+        self.assertEqual(
+            checker._CONFIG_DIAGNOSTIC_FIELDS, RETAIN.ROLE_CONFIG_DIAGNOSTIC_FIELDS
+        )
+        difference = RETAIN.role_config_difference(
+            {
+                "Env": ["SYNTHETIC_PRIVATE_VALUE"],
+                "private-field-name": "SYNTHETIC_PRIVATE_VALUE",
+                "Cmd": [],
+            },
+            {
+                "Env": ["changed-private-value"],
+                "private-other-field": "private-other-value",
+                "ExposedPorts": None,
+            },
+        )
+        self.assertEqual(difference["only_in_saved"], ["Cmd"])
+        self.assertEqual(difference["only_in_inspected"], ["ExposedPorts"])
+        self.assertEqual(difference["different"], ["Env"])
+        self.assertEqual(
+            (difference["unknown_saved_count"], difference["unknown_inspected_count"]),
+            (1, 1),
+        )
+        error = RETAIN.RetentionRefused("role saved-config fields differ")
+        error.role_config_difference = difference
+        metadata = checker._failure_metadata(error)
+        self.assertEqual(metadata["predicate"], "saved_config_field_equality")
+        self.assertEqual(metadata["config_field_difference"], difference)
+        encoded = json.dumps(metadata)
+        for private in (
+            "SYNTHETIC_PRIVATE_VALUE",
+            "changed-private-value",
+            "private-field-name",
+            "private-other-field",
+            "private-other-value",
+        ):
+            self.assertNotIn(private, encoded)
+        error.role_config_difference = {
+            **difference,
+            "different": ["private-field-name"],
+        }
+        self.assertIsNone(checker._failure_metadata(error)["config_field_difference"])
+        error.role_config_difference = {**difference, "unknown_saved_count": True}
+        self.assertIsNone(checker._failure_metadata(error)["config_field_difference"])
+        error.role_config_difference = {**difference, "extra": "private-value"}
+        self.assertIsNone(checker._failure_metadata(error)["config_field_difference"])
+
+    def test_type_and_rootfs_predicates_stay_finite(self):
+        checker = self.checker()
+        difference = RETAIN.role_config_difference(None, {})
+        self.assertIs(difference["type_mismatch"], True)
+        self.assertEqual(difference["only_in_saved"], [])
+        metadata = checker._failure_metadata(
+            RETAIN.RetentionRefused("role saved-config rootfs mismatch")
+        )
+        self.assertEqual(metadata["predicate"], "saved_config_ordered_diff_ids")
+        self.assertIsNone(metadata["config_field_difference"])
 
 
 if __name__ == "__main__":

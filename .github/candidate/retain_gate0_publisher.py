@@ -1704,6 +1704,65 @@ def role_base_identity(raw):
     return result
 
 
+# Fixed Docker/OCI config field vocabulary for diagnostics only. Unknown keys
+# are counted and never emitted. This is not an acceptance/normalization policy.
+ROLE_CONFIG_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "Hostname",
+        "Domainname",
+        "User",
+        "AttachStdin",
+        "AttachStdout",
+        "AttachStderr",
+        "ExposedPorts",
+        "Tty",
+        "OpenStdin",
+        "StdinOnce",
+        "Env",
+        "Cmd",
+        "Healthcheck",
+        "ArgsEscaped",
+        "Image",
+        "Volumes",
+        "WorkingDir",
+        "Entrypoint",
+        "NetworkDisabled",
+        "MacAddress",
+        "OnBuild",
+        "Labels",
+        "StopSignal",
+        "StopTimeout",
+        "Shell",
+    }
+)
+
+
+def role_config_difference(saved, inspected):
+    """Finite field-name/count metadata only, never values or unknown key names."""
+    if not isinstance(saved, dict) or not isinstance(inspected, dict):
+        return {
+            "type_mismatch": True,
+            "only_in_saved": [],
+            "only_in_inspected": [],
+            "different": [],
+            "unknown_saved_count": 0,
+            "unknown_inspected_count": 0,
+        }
+    allowed = ROLE_CONFIG_DIAGNOSTIC_FIELDS
+    return {
+        "type_mismatch": False,
+        "only_in_saved": sorted((saved.keys() - inspected.keys()) & allowed),
+        "only_in_inspected": sorted((inspected.keys() - saved.keys()) & allowed),
+        "different": sorted(
+            key
+            for key in saved.keys() & inspected.keys() & allowed
+            if saved[key] != inspected[key]
+        ),
+        "unknown_saved_count": len(saved.keys() - allowed),
+        "unknown_inspected_count": len(inspected.keys() - allowed),
+    }
+
+
 def role_export_image_subject(private, revision, inspector, deadline):
     identity = (
         read_owned_regular(private / "role-image-id", 128, private=True)
@@ -1789,11 +1848,14 @@ def role_export_image_subject(private, revision, inspector, deadline):
             if hashlib.sha256(config).hexdigest() != identity[7:]:
                 raise RetentionRefused("runtime retention refused")
             document = parse_json(config, MAX_METADATA_BYTES)
-            if (
-                document["rootfs"]["diff_ids"] != role["rootfs_diff_ids"]
-                or document["config"] != image["Config"]
-            ):
-                raise RetentionRefused("runtime retention refused")
+            if document["rootfs"]["diff_ids"] != role["rootfs_diff_ids"]:
+                raise RetentionRefused("role saved-config rootfs mismatch")
+            if document["config"] != image["Config"]:
+                error = RetentionRefused("role saved-config fields differ")
+                error.role_config_difference = role_config_difference(
+                    document["config"], image["Config"]
+                )
+                raise error
             role["config_sha256"] = hashlib.sha256(config).hexdigest()
             role["config_bytes"] = len(config)
     return {"base": base, "role": role}

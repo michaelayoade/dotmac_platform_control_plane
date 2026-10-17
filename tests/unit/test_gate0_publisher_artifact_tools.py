@@ -553,9 +553,16 @@ def subject_archive(raw_files):
         for parent in PurePosixPath(name).parents
         if str(parent) != "."
     }
-    directories.update(
+    homes = {
         "var/empty/dotmac-gate0/" + role
         for role in ("issuer", "attester", "management", "capture-sender")
+    }
+    directories.update(homes)
+    directories.update(
+        str(parent)
+        for name in homes
+        for parent in PurePosixPath(name).parents
+        if str(parent) != "."
     )
     with tarfile.open(fileobj=stream, mode="w") as output:
         for name in sorted(directories):
@@ -574,6 +581,16 @@ def subject_archive(raw_files):
 
 
 class RoleSubjectJoinTests(unittest.TestCase):
+    def test_synthetic_role_homes_include_real_root_owned_ancestors(self):
+        _, files = synthetic_role_subject()
+        with subject_archive(files) as archive:
+            members = INSPECT.role_inventory(archive)
+            for name in ("var", "var/empty", "var/empty/dotmac-gate0"):
+                entry = members[name]
+                self.assertTrue(entry.isdir())
+                self.assertEqual((entry.uid, entry.gid), (0, 0))
+                self.assertFalse(entry.mode & 0o022)
+
     def test_actual_role_shaped_tar_joins_and_missing_or_changed_subject_refusals(self):
         source, files = synthetic_role_subject()
         with subject_archive(files) as archive:

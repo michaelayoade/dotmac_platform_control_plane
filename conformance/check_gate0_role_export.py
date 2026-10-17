@@ -50,6 +50,8 @@ _EXCEPTION_KINDS = frozenset(
 )
 _REFUSAL_PREDICATES = {
     "runtime retention refused": "retention_structural_refusal",
+    "role saved-config rootfs mismatch": "saved_config_ordered_diff_ids",
+    "role saved-config fields differ": "saved_config_field_equality",
     "private input shape": "private_input_shape",
     "rootfs archive framing": "rootfs_archive_framing",
     "rootfs archive terminator": "rootfs_archive_terminator",
@@ -87,6 +89,73 @@ _REFUSAL_PREDICATES = {
 }
 
 
+_CONFIG_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "Hostname",
+        "Domainname",
+        "User",
+        "AttachStdin",
+        "AttachStdout",
+        "AttachStderr",
+        "ExposedPorts",
+        "Tty",
+        "OpenStdin",
+        "StdinOnce",
+        "Env",
+        "Cmd",
+        "Healthcheck",
+        "ArgsEscaped",
+        "Image",
+        "Volumes",
+        "WorkingDir",
+        "Entrypoint",
+        "NetworkDisabled",
+        "MacAddress",
+        "OnBuild",
+        "Labels",
+        "StopSignal",
+        "StopTimeout",
+        "Shell",
+    }
+)
+
+
+def _config_diagnostic(error):
+    value = getattr(error, "role_config_difference", None)
+    keys = {
+        "type_mismatch",
+        "only_in_saved",
+        "only_in_inspected",
+        "different",
+        "unknown_saved_count",
+        "unknown_inspected_count",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != keys
+        or type(value["type_mismatch"]) is not bool
+    ):
+        return None
+    for key in ("only_in_saved", "only_in_inspected", "different"):
+        rows = value[key]
+        if (
+            not isinstance(rows, list)
+            or len(rows) > len(_CONFIG_DIAGNOSTIC_FIELDS)
+            or any(
+                type(row) is not str or row not in _CONFIG_DIAGNOSTIC_FIELDS
+                for row in rows
+            )
+            or len(rows) != len(set(rows))
+        ):
+            return None
+    if any(
+        type(value[key]) is not int or not 0 <= value[key] <= 65536
+        for key in ("unknown_saved_count", "unknown_inspected_count")
+    ):
+        return None
+    return value
+
+
 def _failure_metadata(error):
     kind = type(error).__name__
     # Look up exact reviewed literal messages; never render arbitrary arguments.
@@ -107,6 +176,7 @@ def _failure_metadata(error):
         "exception_kind": kind if kind in _EXCEPTION_KINDS else "other",
         "predicate": predicate,
         "source_locations": locations,
+        "config_field_difference": _config_diagnostic(error),
     }
 
 
