@@ -313,6 +313,8 @@ class CompositionTests(unittest.TestCase):
                 listed_paths=[],
                 symlink_edges=[],
                 sha256=N["digest"](elf()),
+                dev=1,
+                inode=len(self.rows) + 1,
                 package_names=[],
                 stable_before_after=True,
             )
@@ -457,6 +459,10 @@ class CompositionTests(unittest.TestCase):
             def provider(argv, deadline, drift=drift):
                 nonlocal reads
                 raw = self.provider(argv, deadline)
+                if "--list" in argv:
+                    # Loader listed only the canonical library coordinate;
+                    # the later finite /lib alias must be genuinely captured.
+                    raw = raw.replace(LISTED.encode(), CANONICAL.encode())
                 if argv[1] == "--search" and argv[-1] == "*" + LISTED:
                     reads += 1
                     raw = ("\n".join(PairedDiversionTests().lines()) + "\n").encode()
@@ -476,6 +482,7 @@ class CompositionTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(declarations), 1)
                 self.assertFalse(declarations[0]["destination_bytes_measured"])
+                self.assertIn(LISTED, self.rows[CANONICAL]["listed_paths"])
                 self.assertGreaterEqual(reads, 3)
 
     def test_bootstrap_owner_swap_refuses_before_primitives_or_commands(self):
@@ -544,6 +551,84 @@ class CompositionTests(unittest.TestCase):
 
 
 class PairedDiversionTests(unittest.TestCase):
+    def test_missing_finite_alias_capture_proves_same_held_identity(self):
+        for owned in (CANONICAL, LISTED):
+            row = dict(
+                id="held",
+                canonical_path=CANONICAL,
+                listed_paths=[CANONICAL],
+                sha256="a" * 64,
+                dev=1,
+                inode=2,
+            )
+            calls = []
+
+            def capture(path, original, calls=calls, row=row):
+                calls.append(path)
+                self.assertIs(original, row)
+                self.assertEqual(path, LISTED)
+                original["listed_paths"].append(path)
+                return original
+
+            owner, declaration = N["parse_declared_diversion"](
+                self.lines(owned=owned), row, {LISTED, CANONICAL}, capture
+            )
+            self.assertEqual(owner, "libc6:amd64")
+            self.assertEqual(calls, [LISTED])
+            self.assertEqual(declaration["file_id"], "held")
+            self.assertEqual(declaration["ownership_path"], owned)
+            self.assertFalse(declaration["destination_bytes_measured"])
+
+    def test_pair_faults_precede_capture_and_different_files_or_capture_failure_refuse(
+        self,
+    ):
+        row = dict(
+            id="held",
+            canonical_path=CANONICAL,
+            listed_paths=[CANONICAL],
+            sha256="a" * 64,
+            dev=1,
+            inode=2,
+        )
+        lines = self.lines()
+        variants = [
+            lines[:2],
+            lines + [lines[0]],
+            [lines[0], lines[1].replace(".usr-is-merged", ".wrong-suffix"), lines[2]],
+            [
+                line.replace("diversion by libc6", "diversion by wrong-package")
+                for line in lines
+            ],
+            self.lines(source="/UNKNOWN_PRIVATE_ESCAPE"),
+            self.lines(owned="/UNKNOWN_PRIVATE_ESCAPE"),
+        ]
+        for candidate in variants:
+            calls = []
+            with (
+                self.subTest(candidate_hash=N["digest"]("\n".join(candidate).encode())),
+                self.assertRaises(G["Incomplete"]),
+            ):
+                N["parse_declared_diversion"](
+                    candidate,
+                    row,
+                    {LISTED, CANONICAL},
+                    lambda path, original, calls=calls: calls.append(path),
+                )
+            self.assertEqual(calls, [])
+        for key in ("id", "canonical_path", "sha256", "dev", "inode"):
+
+            def changed(path, original, key=key):
+                return dict(original, **{key: "different", "listed_paths": [path]})
+
+            with self.subTest(key=key), self.assertRaises(G["Incomplete"]):
+                N["parse_declared_diversion"](lines, row, {LISTED, CANONICAL}, changed)
+
+        def failed(*_):
+            raise G["Incomplete"]("synthetic capture failure")
+
+        with self.assertRaises(G["Incomplete"]):
+            N["parse_declared_diversion"](lines, row, {LISTED, CANONICAL}, failed)
+
     def row(self):
         return dict(
             id="synthetic-held",
@@ -562,7 +647,9 @@ class PairedDiversionTests(unittest.TestCase):
         for owned in (LISTED, CANONICAL):
             lines = self.lines(owned=owned)
             for ordered in (lines, lines[::-1], [lines[2], lines[0], lines[1]]):
-                owner, declaration = N["parse_declared_diversion"](ordered, self.row())
+                owner, declaration = N["parse_declared_diversion"](
+                    ordered, self.row(), {LISTED, CANONICAL}, None
+                )
                 self.assertEqual(owner, "libc6:amd64")
                 self.assertEqual(declaration["ownership_path"], owned)
                 self.assertEqual(declaration["from_path"], LISTED)
@@ -603,11 +690,13 @@ class PairedDiversionTests(unittest.TestCase):
                 self.subTest(candidate_hash=N["digest"]("\n".join(candidate).encode())),
                 self.assertRaises(G["Incomplete"]),
             ):
-                N["parse_declared_diversion"](candidate, self.row())
+                N["parse_declared_diversion"](
+                    candidate, self.row(), {LISTED, CANONICAL}, None
+                )
         # A synthesized merged-/usr alias alone is not a captured identity.
         row = dict(id="synthetic-held", canonical_path=CANONICAL, listed_paths=[])
         with self.assertRaises(G["Incomplete"]):
-            N["parse_declared_diversion"](self.lines(), row)
+            N["parse_declared_diversion"](self.lines(), row, {LISTED, CANONICAL}, None)
 
     def test_architecture_metadata_and_query_recheck_are_required(self):
         query = ("\n".join(self.lines()) + "\n").encode()
@@ -626,7 +715,7 @@ class PairedDiversionTests(unittest.TestCase):
         deadline = time.monotonic() + 10
         checks = []
         with patch.dict(G, {"command": provider}):
-            packages = N["package_owners"]([self.row()], deadline, checks)
+            packages = N["package_owners"]([self.row()], deadline, checks, None)
             N["verify_ownership_queries"](checks, deadline)
         declaration = packages[0]["declared_diversions"][0]
         self.assertEqual(declaration["query_stdout_sha256"], N["digest"](query))
@@ -635,7 +724,7 @@ class PairedDiversionTests(unittest.TestCase):
         self.assertTrue(all(end == deadline for _, end in calls))
         with patch.dict(G, {"command": lambda argv, end: provider(argv, end, "all")}):
             with self.assertRaises(G["Incomplete"]):
-                N["package_owners"]([self.row()], deadline, [])
+                N["package_owners"]([self.row()], deadline, [], None)
         with patch.dict(G, {"command": lambda *_: query + b"\n"}):
             with self.assertRaises(G["Incomplete"]):
                 N["verify_ownership_queries"](checks, deadline)
@@ -787,7 +876,7 @@ class FailureDiagnosticTests(unittest.TestCase):
             },
         ):
             try:
-                N["package_owners"]([row], time.monotonic() + 5, [])
+                N["package_owners"]([row], time.monotonic() + 5, [], None)
             except G["Incomplete"] as error:
                 text, record = self.decode(error)
             else:
@@ -892,7 +981,7 @@ class FailureDiagnosticTests(unittest.TestCase):
                     ),
                 ):
                     try:
-                        N["package_owners"]([row], time.monotonic() + 5, [])
+                        N["package_owners"]([row], time.monotonic() + 5, [], None)
                     except G["Incomplete"] as error:
                         text, record = self.decode(error)
                     else:

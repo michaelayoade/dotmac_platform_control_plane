@@ -659,7 +659,7 @@ def package_query_summary(lines, aliases):
     return counts
 
 
-def parse_declared_diversion(lines, row):
+def parse_declared_diversion(lines, row, aliases, capture_alias):
     """One protective diversion joined to this held file, not destination bytes."""
     require(len(lines) == 3)
     ownership = None
@@ -687,11 +687,25 @@ def parse_declared_diversion(lines, row):
     declarer, from_path = directions["from"]
     to_declarer, to_path = directions["to"]
     captured = set(row["listed_paths"]) | {row["canonical_path"]}
-    require(owned_path in captured and from_path in captured)
+    require(owned_path in aliases and from_path in aliases)
     require(declarer == to_declarer and declarer.split(":")[0] == owner.split(":")[0])
     # Fixed protective suffix in Debian sane-backends 1.3.1-3 preinst/postinst
     # (sources.debian.org); no arbitrary diversion destination is admitted.
     require(to_path == from_path + ".usr-is-merged")
+    # A finite synthesized alias is a candidate, never identity evidence.
+    # Validate the whole pair before any new protected file observation.
+    for path in sorted({owned_path, from_path} - captured):
+        require(callable(capture_alias))
+        joined = capture_alias(path, row)
+        require(
+            type(joined) is dict
+            and all(
+                joined.get(key) == row[key]
+                for key in ("id", "canonical_path", "sha256", "dev", "inode")
+            )
+            and path in joined["listed_paths"]
+            and path in row["listed_paths"]
+        )
     return owner, dict(
         file_id=row["id"],
         declaring_package=declarer,
@@ -712,7 +726,7 @@ def verify_ownership_queries(checks, deadline):
         )
 
 
-def package_owners(rows, deadline, query_checks):
+def package_owners(rows, deadline, query_checks, capture_alias):
     DIAGNOSTIC["package_row"] = None
     DIAGNOSTIC["package_query"] = None
     packages = {}
@@ -741,7 +755,9 @@ def package_owners(rows, deadline, query_checks):
         ):
             try:
                 require(query_raw.endswith(b"\n"))
-                owner, declared_diversion = parse_declared_diversion(lines, row)
+                owner, declared_diversion = parse_declared_diversion(
+                    lines, row, aliases, capture_alias
+                )
             except Incomplete:
                 DIAGNOSTIC["package_query"] = package_query_summary(lines, aliases)
                 raise
@@ -924,7 +940,14 @@ def observe(deadline, files):
     ]
     DIAGNOSTIC["phase"] = "package"
     query_checks = []
-    packages = package_owners(package_rows, deadline, query_checks)
+
+    def capture_alias(path, row):
+        observed, _ = files.capture(
+            path, library=True, loader=row["canonical_path"] in LOADERS
+        )
+        return observed
+
+    packages = package_owners(package_rows, deadline, query_checks, capture_alias)
     for name in TARGETS:
         matches = [p for p in packages if target_rows[name]["id"] in p["file_ids"]]
         require(len(matches) == 1)
