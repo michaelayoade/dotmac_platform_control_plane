@@ -217,6 +217,12 @@ def test_fixed_loader_derives_future_b_and_same_runtime_from_measured_qualificat
         assert measured == []
         assert runtime_calls == []
         return
+    document["profile_version"] = "1"
+    with pytest.raises(ProviderRefused):
+        loader.load_installed_collection(profile)
+    assert measured == []
+    assert runtime_calls == []
+    document["profile_version"] = profile.version
     first = loader.load_installed_collection(profile)
     second = loader.load_installed_collection(profile)
     assert first.runtime is second.runtime is runtime

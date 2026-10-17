@@ -90,8 +90,9 @@ There is no CP timer or automatic retirement claim. Expired workload GETs refuse
 before authentication/DB I/O using their existing original clocks, even while the
 profile is mounted. That refusal is not completed profile retirement. Independently
 admin-authenticated surfaces of a prospective profile are not time-limited by
-these GET clocks. Profile version 2 remains a separate unadopted proposal; this
-adapter does not adopt it or assert that version 1 supplies B's future needs.
+these GET clocks. Profile version 2's separately declared administrative
+surfaces require their own authenticated calls and explicit operational selection;
+these GET handlers neither expose nor authorize them.
 
 ## Closed operations
 
@@ -241,11 +242,32 @@ checked. Cleanup failure suppresses successful and pending results alike.
 
 Every existing profile, including `full`, explicitly withholds this new feature;
 their effective route sets remain unchanged. The explicit source profile
-`production-gate0-collection-v1` version 1 derives from `production-composed-v1`
-and inventories only the additional `gate0_collection_reads` surface. Its
-`production_accepted=True` permits production boot only when this profile is
-explicitly selected. The existing version and two GET routes are unchanged.
-Owner review of this exact source acceptance precedes publication; an accepted
+`production-gate0-collection-v1` version 2 derives from `production-composed-v1`
+and inventories the additional `gate0_collection_reads` and `vendor_approvals`
+surfaces. The profile code and environment selection stay unchanged; the separate
+version field records the effective surface change required by AGENTS rule 11.
+Version 1 withheld the existing authenticated human withdrawal path needed after
+consumption in case B. Version 2 admits the existing approval adapter manifest:
+`POST /platform/vendor/approvals/policies`,
+`POST /platform/vendor/approvals/decisions`,
+`POST /platform/vendor/approvals/requests/{request_id}/withdraw`, and
+`GET /platform/vendor/approvals/requests/{request_id}`. All four retain the kernel
+platform-admin bearer guard and existing Approvals owner through the typed adapter.
+This is admission of that whole existing surface, not a withdrawal-only grant.
+The two collection GET routes retain their separate workload authentication owner.
+No pre-existing profile, persistence owner, migration or authentication changes.
+
+Its `production_accepted=True` permits production boot only when this profile is
+explicitly selected. Source acceptance does not authorize operational selection
+or deployment.
+The installation remains `Gate0CollectionApiInstallation.v1`; its `profile_code`
+stays `production-gate0-collection-v1` and `profile_version` must be `"2"`.
+The existing loader compares both against the selected profile and refuses a
+version 1 installation. Candidate source, image and embedded profile digest pins
+must come from the actual rebuilt and accepted artifact; old pins cannot be
+relabelled as version 2 evidence. Existing frozen campaign bindings must remain
+consistent with that artifact and their original windows.
+Owner review of this exact source amendment precedes publication; an accepted
 immutable artifact, qualified installation and explicit operational selection
 remain separate requirements. Source acceptance does not claim deployment,
 A8/A9 qualification, E acceptance or Lane 3 admission.

@@ -509,14 +509,25 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     *_STANDARD_PROFILES,
     VendorDeploymentProfile(
         code=PRODUCTION_GATE0_COLLECTION_V1,
-        version="1",
-        withheld_surfaces=_GATE0_BASE.withheld_surfaces - {"gate0_collection_reads"},
-        surface_inventory=(*_GATE0_BASE.surface_inventory, "gate0_collection_reads"),
+        version="2",
+        withheld_surfaces=_GATE0_BASE.withheld_surfaces
+        - {"gate0_collection_reads", "vendor_approvals"},
+        surface_inventory=(
+            *_GATE0_BASE.surface_inventory,
+            "gate0_collection_reads",
+            "vendor_approvals",
+        ),
         laboratory=False,
         production_accepted=True,
         rationale=(
             "Explicit source profile for protected A9 finite read projections. "
-            "No pre-existing profile publishes this surface. Qualified installed "
+            "Version 2 retains the existing vendor_approvals surface so the "
+            "authenticated platform operator can withdraw after consumption. "
+            "The surface also publishes its existing policy, decision and request "
+            "read routes; all retain their existing owner and authentication. "
+            "The profile code remains stable; its version identifies this "
+            "effective surface change. No pre-existing profile publishes the "
+            "collection reads. Qualified installed "
             "campaign selection, origin, database and JWKS bounds and explicit "
             "operational selection remain required; source acceptance is neither "
             "deployment evidence nor Gate 0 acceptance."
