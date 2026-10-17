@@ -258,7 +258,7 @@ class _ScriptDescriptor:
         self.digest, self.uid, self.deadline = digest, uid, deadline
         _before(deadline)
         expected = _measure_generated_script(path, digest, uid, deadline)
-        names = []
+        names: list[str] = []
         with os.scandir(f"/proc/{pid}/fd") as entries:
             for entry in entries:
                 _require(
