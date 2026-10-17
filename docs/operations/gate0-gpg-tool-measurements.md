@@ -60,3 +60,50 @@ qualification/reviewer record and explicitly authorize any later operational
 step. This helper emits no qualification or reviewer record and configures no
 `GATE0_RETENTION_*` selector. Source tests are synthetic; no native acceptance
 is inferred from them.
+
+## Separate ELF loader resolution observation
+
+The same non-root `check` job also emits a separate
+`DotmacGpgLoaderDependencyObservation.v1` pair:
+`cp-gpg-loader-observation.json` and its bare-SHA256 newline sidecar. Its own
+30-day artifact uploads only after the observer succeeds. Existing measurement
+and actual synthetic encryption steps keep their behavior and schemas. The
+`check` runner is pinned to `ubuntu-24.04`, matching the role retention job's OS
+coordinate; this selects an OS family and does not pin immutable runner bytes.
+
+The zero-argument observer joins the previous measurement's exact source,
+workflow, run, attempt and tool bytes to the two fixed `/usr/bin/gpg` and
+`/usr/bin/gpgconf` executables. It parses bounded ELF64 little-endian x86_64
+program headers, requires the native Ubuntu interpreter coordinate, and uses
+that inspected loader's `--list` with a clean fixed environment. It records
+normalized dependency bindings without addresses or raw loader output. The
+vDSO is explicitly kernel-provided and has no invented file or package hash.
+
+Protected finite merged-/usr aliases resolve to held regular-file descriptors.
+The manifest records their paths, alias edges, inode metadata and stable byte
+hashes. Each target, interpreter and resolved library requires an unambiguous
+owning-package join and unchanged local `dpkg --verify` results. The generated
+`/etc/ld.so.cache` is recorded separately as stable bytes or explicit absence;
+it receives no fabricated package owner. `/etc/ld.so.preload` must be absent,
+and its contents are never read. The observer rechecks held identities/bytes,
+source snapshots and the previous pair through atomic publication. Its shared
+60-second deadline includes ten-second command caps and five seconds reserved
+for the existing subprocess primitive's failure cleanup. Limits, unsupported
+metadata or drift refuse without widening the observation.
+
+This is point-in-time loader dependency resolution. Libraries are discovered
+from `--list` and hashed afterward; they are not claimed to have been observed
+before discovery or mapped by an encryption process. There is no coverage of
+live encryption mappings, `dlopen`, plugins, NSS, conditional modules, spawned
+helpers or gpg-agent history, and no complete runtime closure claim. Source/run
+adjacency and matching tool bytes relate this evidence to the existing native
+encryption tests without proving uninterrupted historical runtime identity.
+
+The loader trust basis is the existing hosted Ubuntu bootstrap. Its self-hash
+and package database checks are observations, not independent package
+authentication. Separately approved native archive-signature verification and
+exact signed-index/package/executable joins remain separate evidence steps.
+This observer performs no download, installation, recipient/certificate read,
+qualification, reviewer approval, retention execution or owner adoption. Source
+review and actual hosted results remain required; mocked tests alone establish
+no native acceptance.
