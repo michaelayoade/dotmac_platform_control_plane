@@ -466,10 +466,14 @@ def test_every_test_job_runs_on_a_github_hosted_runner() -> None:
     workflow = _text(".github/workflows/ci.yml")
 
     assert "self-hosted" not in workflow
-    # Four since `kernel-pin` joined: check, postgres, image, kernel-pin.
-    # A count, and therefore two-directional — a job that stops being
-    # hosted fails here as loudly as one that is added.
-    assert workflow.count("runs-on: ubuntu-latest") == 4
+    # Four hosted jobs: check, postgres, image, kernel-pin. The tool-evidence
+    # check stays on the same Ubuntu class as the role-retention producer.
+    # Exact counts also refuse added jobs or unreviewed runner labels.
+    assert workflow.count("runs-on:") == 4
+    assert workflow.count("runs-on: ubuntu-latest") == 3
+    assert workflow.count("runs-on: ubuntu-24.04") == 1
+    check = workflow.split("  check:\n", 1)[1].split("\n    steps:", 1)[0]
+    assert re.search(r"^    runs-on: ubuntu-24\.04$", check, re.MULTILINE)
     assert "DOCKER_BUILDKIT=1 docker build" in workflow
     assert "from vendor_cp.main import app" in workflow
     assert "postgresql+psycopg://app_admin@localhost:5439/vendor_cp_test" in workflow
