@@ -362,11 +362,11 @@ class VendorDeploymentProfile:
         return feature_name not in self.withheld_surfaces
 
 
-PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
+_STANDARD_PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     VendorDeploymentProfile(
         code=FULL,
         version="5",
-        withheld_surfaces=frozenset(),
+        withheld_surfaces=frozenset({"gate0_collection_reads"}),
         surface_inventory=(
             "accounts",
             "allocations",
@@ -383,21 +383,28 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
         laboratory=True,
         production_accepted=False,
         rationale=(
-            "Development, CI and the migration rehearsals compose every surface "
+            "Development, CI and the migration rehearsals compose established surfaces "
             "so the tests exercise what the code actually offers. That includes "
             "the fake provisioning laboratory, which is why this profile is "
             "declared a laboratory and can never be production-accepted. "
             "Version 4 includes the deployment-control browser surface and "
             "readiness surface, which every profile publishes or explicitly "
             "withholds. Version 5 adds the withdrawal-conflict resolution "
-            "surface."
+            "surface. The new Gate0 collection reads remain withheld pending their "
+            "separate candidate profile and installation review."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_BOOTSTRAP,
         version="6",
         withheld_surfaces=frozenset(
-            {"deployment_control", "licence_delivery", "offers", "provisioning"}
+            {
+                "deployment_control",
+                "licence_delivery",
+                "offers",
+                "provisioning",
+                "gate0_collection_reads",
+            }
         ),
         surface_inventory=(
             "accounts",
@@ -437,6 +444,7 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
         version="5",
         withheld_surfaces=frozenset(
             {
+                "gate0_collection_reads",
                 "accounts",
                 "contracts",
                 "deployment_control",
@@ -489,6 +497,40 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "readiness red by design, so a conflict arising after the switch to "
             "this profile must have an authenticated, append-only resolution "
             "path here, or readiness stays red with no way to clear it."
+        ),
+    ),
+)
+
+# Explicit source profile; every pre-existing profile still withholds these reads.
+# Source acceptance remains separate from qualified operational selection.
+_GATE0_BASE = next(p for p in _STANDARD_PROFILES if p.code == PRODUCTION_COMPOSED_V1)
+PRODUCTION_GATE0_COLLECTION_V1: Final[str] = "production-gate0-collection-v1"
+PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
+    *_STANDARD_PROFILES,
+    VendorDeploymentProfile(
+        code=PRODUCTION_GATE0_COLLECTION_V1,
+        version="2",
+        withheld_surfaces=_GATE0_BASE.withheld_surfaces
+        - {"gate0_collection_reads", "vendor_approvals"},
+        surface_inventory=(
+            *_GATE0_BASE.surface_inventory,
+            "gate0_collection_reads",
+            "vendor_approvals",
+        ),
+        laboratory=False,
+        production_accepted=True,
+        rationale=(
+            "Explicit source profile for protected A9 finite read projections. "
+            "Version 2 retains the existing vendor_approvals surface so the "
+            "authenticated platform operator can withdraw after consumption. "
+            "The surface also publishes its existing policy, decision and request "
+            "read routes; all retain their existing owner and authentication. "
+            "The profile code remains stable; its version identifies this "
+            "effective surface change. No pre-existing profile publishes the "
+            "collection reads. Qualified installed "
+            "campaign selection, origin, database and JWKS bounds and explicit "
+            "operational selection remain required; source acceptance is neither "
+            "deployment evidence nor Gate 0 acceptance."
         ),
     ),
 )
@@ -642,6 +684,7 @@ __all__ = [
     "PRODUCTION_BOOTSTRAP",
     "PRODUCTION_COMPOSED_V1",
     "PRODUCTION_ENVIRONMENT",
+    "PRODUCTION_GATE0_COLLECTION_V1",
     "PROFILES",
     "PROFILE_ENV_VAR",
     "PROVISIONING_SURFACE",

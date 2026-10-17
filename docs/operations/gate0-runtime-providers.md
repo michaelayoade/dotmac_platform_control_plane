@@ -220,3 +220,24 @@ claim records, checked JSON leaf projections and published owner view/crypto
 interfaces. Local verification is limited to AST and pinned Ruff; required
 hosted strict mypy and synthetic/owner/sshd tests must pass before source
 acceptance. No local test, project import, mypy or build result is claimed.
+
+
+## WG transport consumes sealed launch measurement
+
+The fixed non-root transport no longer executes privileged `wg` queries. Root's
+finite preflight measures the entire closed peer-/32 inventory, selected Bao
+peer, source route and nft rules; after all privileged helpers/guardian are
+reaped, root irreversibly seals its capability profile before publishing the
+protected measurement/context. Every request loads the concrete installed
+context again, binds measurement/endpoint/original deadline/supervisor facts,
+and retains direct actual namespace/interface and socket device/source/peer
+readbacks before sending any secret. No request or JSON flag supplies authority.
+
+This relies on measured-at-launch plus enforced network immutability, not live
+per-request netlink remeasurement. Signing workers and transport spawn require
+E=P=I=A=0, NNP1 and inherited bounding K=0x400e3; K is not an effective grant.
+Native fresh `SO_BINDTODEVICE`, pinned sshd UID changes, source/route isolation
+and whole-boundary cleanup must pass the hosted/native qualification. A denied
+socket operation refuses; no capability fallback, automatic network repair,
+new broker or public HTTP path is added. See the finite launch operations for
+exact fixed P0/K profiles and the deliberately partial native proof boundary.

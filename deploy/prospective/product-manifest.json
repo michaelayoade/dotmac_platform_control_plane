@@ -52,6 +52,10 @@
       "version": "0.1.0a6"
     },
     {
+      "code": "gate0_collection_reads",
+      "source": "assembly"
+    },
+    {
       "code": "licence_delivery",
       "source": "assembly"
     },

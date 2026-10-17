@@ -34,6 +34,19 @@ class TrustStateSnapshot:
     trusted_key_ids: Mapping[str, str]
     revoked_key_ids: frozenset[str]
 
+    def eligibility(
+        self, *, key_id: str, public_key_fingerprint: str
+    ) -> TrustEligibility:
+        """Detached public standing; neither current freshness nor authority."""
+        if key_id in self.revoked_key_ids:
+            return TrustEligibility.REVOKED
+        expected = self.trusted_key_ids.get(key_id)
+        if expected is None:
+            return TrustEligibility.UNKNOWN_KEY
+        if expected != public_key_fingerprint:
+            return TrustEligibility.FINGERPRINT_MISMATCH
+        return TrustEligibility.ELIGIBLE
+
 
 def _nonblank(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip()) and value == value.strip()
@@ -67,6 +80,20 @@ def _parse_record(record: object) -> TrustStateSnapshot:
         trusted_key_ids=MappingProxyType(dict(trusted)),
         revoked_key_ids=frozenset(revoked),
     )
+
+
+def parse_trust_snapshot(record: object, *, minimum_version: int) -> TrustStateSnapshot:
+    """Parse an original public record against its independently supplied floor.
+
+    This detached value creates no reader, refresh, clock or current admission.
+    The caller must authenticate the original record and floor provenance.
+    """
+    if type(minimum_version) is not int or minimum_version < 1:
+        raise TrustStateInstallError("invalid public trust-state floor")
+    snapshot = _parse_record(record)
+    if snapshot.version < minimum_version:
+        raise TrustStateInstallError("trust-state version below durable floor")
+    return snapshot
 
 
 class RehearsalIssuerTrustState:
@@ -154,11 +181,6 @@ class RehearsalIssuerTrustState:
             snapshot = self._snapshot
             if not self._available or snapshot is None:
                 return TrustEligibility.UNAVAILABLE
-            if key_id in snapshot.revoked_key_ids:
-                return TrustEligibility.REVOKED
-            expected = snapshot.trusted_key_ids.get(key_id)
-            if expected is None:
-                return TrustEligibility.UNKNOWN_KEY
-            if expected != public_key_fingerprint:
-                return TrustEligibility.FINGERPRINT_MISMATCH
-            return TrustEligibility.ELIGIBLE
+            return snapshot.eligibility(
+                key_id=key_id, public_key_fingerprint=public_key_fingerprint
+            )

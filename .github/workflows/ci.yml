@@ -12,6 +12,12 @@ on:
   # `workflow_dispatch` validates a branch HEAD on demand — note it is NOT the
   # synthetic merge with main, so it does not substitute for required PR CI.
   workflow_dispatch:
+    inputs:
+      retention_packet_sha256:
+        description: Exact reviewed runtime retention execution packet SHA-256 (separate owner operational approval required)
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -43,14 +49,105 @@ jobs:
         run: poetry run ruff format --check .
       - name: Types
         run: poetry run mypy
+      # Separate unittest processes preserve sibling imports and bypass the
+      # conformance pytest database fixtures. These are synthetic/mocked source
+      # checks only; no native installation or qualification is performed.
+      - name: Gate-0 activation envelope source conformance (non-root)
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          python -m unittest discover -s conformance/gate0_envelope_source/activation -p test_candidate_source.py -v
+      - name: Gate-0 native envelope adapter source conformance (non-root)
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          python -m unittest discover -s conformance/gate0_envelope_source/native -p 'test_*.py' -v
       - name: Tests (boot + provisioning contract + D1–D5 deny cases)
-        run: poetry run pytest -q --junitxml="$RUNNER_TEMP/cp-source-tests.xml" -o junit_family=xunit1
+        timeout-minutes: 15
+        run: |
+          umask 077
+          set -o noclobber
+          # Leave 15 seconds after timeout escalation within the step budget.
+          # This budget guard does not qualify cleanup of escaped descendants.
+          if timeout --signal=INT --kill-after=15s 870s poetry run pytest -q --junitxml="$RUNNER_TEMP/cp-source-tests.xml" -o junit_family=xunit1 -o faulthandler_timeout=60 > "$RUNNER_TEMP/cp-source-tests.log" 2>&1; then
+            status=0
+          else
+            status=$?
+          fi
+          exit "$status"
+      - name: Measure trusted hosted GnuPG package fixtures
+        # Synthetic mechanism qualification only. These identities do not pin
+        # production tools, the B recipient, or any protected E installation.
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+          try:
+              verified = subprocess.run(
+                  ["/usr/bin/dpkg", "--verify", "gpg", "gpgconf"],
+                  check=True, capture_output=True, env=environment, timeout=10,
+              )
+              if verified.stdout:
+                  raise ValueError()
+              identities = {}
+              for name in ("gpg", "gpgconf"):
+                  path = Path("/usr/bin") / name
+                  version = subprocess.run(
+                      [str(path), "--no-options", "--version"]
+                      if name == "gpg" else [str(path), "--version"],
+                      check=True, capture_output=True, env=environment, timeout=5,
+                  ).stdout.decode("ascii").splitlines()[0]
+                  if re.fullmatch(re.escape(name) + r" \(GnuPG\) 2\.[0-9]+\.[0-9]+", version) is None:
+                      raise ValueError()
+                  prefix = "GATE0_TEST_QUALIFIED_" + name.upper()
+                  identities[prefix] = str(path)
+                  identities[prefix + "_SHA256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                  identities[prefix + "_VERSION"] = version
+              with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+                  for key, value in identities.items():
+                      output.write(key + "=" + value + "\n")
+              record = Path(os.environ["RUNNER_TEMP"]) / "cp-gpg-tool-identities.json"
+              record.write_text(json.dumps(identities, sort_keys=True) + "\n")
+              record.chmod(0o600)
+          except Exception:
+              raise SystemExit("GATE0_SYNTHETIC_GPG_QUALIFICATION_REFUSED") from None
+          PY
+      - name: Measure public hosted GnuPG native metadata
+        id: public-gpg-measurements
+        # Public measurements only; no native qualification or reviewer record.
+        timeout-minutes: 2
+        run: python .github/candidate/measure_gate0_gpg_tools.py
+      - name: Gate-0 public GnuPG measurement source conformance
+        run: python -m unittest discover -s conformance -p test_gate0_gpg_tool_measurements.py -v
+      - name: Actual synthetic GnuPG archive conformance
+        run: poetry run pytest -q conformance/test_gate0_e_archive_gpg.py
+      - name: Actual synthetic publisher runtime GnuPG conformance
+        run: python -m unittest discover -s conformance -p test_gate0_publisher_retention_gpg.py -v
+      - name: Retain complete public GnuPG measurement pair
+        if: ${{ always() && steps.public-gpg-measurements.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cp-gpg-native-measurements-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cp-gpg-native-measurements.json
+            ${{ runner.temp }}/cp-gpg-native-measurements.sha256
+          if-no-files-found: error
+          retention-days: 30
       - name: Retain source-test results and synthetic tool identities
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cp-source-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/cp-source-tests.xml
+          path: |
+            ${{ runner.temp }}/cp-source-tests.xml
+            ${{ runner.temp }}/cp-source-tests.log
+            ${{ runner.temp }}/cp-gpg-tool-identities.json
           if-no-files-found: error
           retention-days: 30
       # Gate the temporary, read-only D16 tool against the actual immutable
@@ -320,6 +417,9 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the production runtime without publishing
@@ -331,6 +431,103 @@ jobs:
             --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
             --build-arg "SOURCE_REVISION=${GITHUB_SHA}" \
             --tag dotmac-vendor-control-plane:ci .
+      - name: Build and privately measure nonpublishing publisher shape
+        timeout-minutes: 20
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RETENTION_PACKET_SHA256: ${{ inputs.retention_packet_sha256 || '' }}
+          RETENTION_PACKET_CONFIGURATION: ${{ vars.GATE0_RETENTION_PACKET_JSON }}
+          RETENTION_CERTIFICATE_CONFIGURATION: ${{ vars.GATE0_RETENTION_CERTIFICATE_BASE64 }}
+          RETENTION_GPG_QUALIFICATION_CONFIGURATION: ${{ vars.GATE0_RETENTION_GPG_QUALIFICATION_JSON }}
+        run: |
+          set -euo pipefail
+          umask 077
+          private="$(mktemp -d "$RUNNER_TEMP/gate0-publisher.XXXXXXXX")"
+          python3 -I -B - "$private/packaging-clock.json" <<'PY'
+          import json
+          import sys
+          import time
+          with open(sys.argv[1], "x", encoding="utf-8") as stream:
+              json.dump({"monotonic": time.monotonic(), "wall": time.time()}, stream)
+          PY
+          production_container=""
+          publisher_container=""
+          cleanup() {
+            if test -n "$production_container"; then docker rm "$production_container" >/dev/null 2>&1 || true; fi
+            if test -n "$publisher_container"; then docker rm "$publisher_container" >/dev/null 2>&1 || true; fi
+            rm -rf -- "$private"
+            docker image rm dotmac-vendor-control-plane:publisher-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          trap 'exit 1' HUP INT TERM
+          DOCKER_BUILDKIT=1 docker build \
+            --target gate0-publisher \
+            --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
+            --build-arg "SOURCE_REVISION=${GITHUB_SHA}" \
+            --tag dotmac-vendor-control-plane:publisher-ci .
+          # No bind of the checkout, credentials or host runtime into the image.
+          docker run --rm --network none --read-only --user 10001:10001 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --env DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+            --env PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+            --entrypoint /opt/venv/bin/python3.12 \
+            --interactive dotmac-vendor-control-plane:publisher-ci -I -B - shape \
+            < .github/candidate/inspect_gate0_publisher.py > "$private/shape.json"
+          # Both export subjects are NEVER STARTED. No tar member is extracted.
+          docker image inspect --format '{{.Id}}' dotmac-vendor-control-plane:ci > "$private/production-image-id"
+          docker image inspect --format '{{.Id}}' dotmac-vendor-control-plane:publisher-ci > "$private/publisher-image-id"
+          production_container="$(docker create "$(cat "$private/production-image-id")")"
+          publisher_container="$(docker create "$(cat "$private/publisher-image-id")")"
+          docker export --output "$private/production.tar" "$production_container"
+          docker export --output "$private/publisher.tar" "$publisher_container"
+          python3 -I -B .github/candidate/inspect_gate0_publisher.py inspect \
+            "$private/production.tar" "$private/publisher.tar" \
+            "$private/shape.json" "$private/manifest.json" "$private/files.json"
+          # Print aggregate footprint only; the complete roster remains private.
+          python3 -I -B - "$private/manifest.json" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              footprint = json.load(stream)["footprint"]
+          print("Gate0 publisher footprint: " + json.dumps(footprint, sort_keys=True))
+          PY
+          if test -n "$RETENTION_PACKET_SHA256"; then
+            # This source does not grant operational approval. The coordinator
+            # dispatches only after Michael reviews the concrete packet/tools.
+            # Exact pinned base inspection is required; BuildKit may not retain it.
+            python3 -I -B .github/candidate/retain_gate0_publisher.py preflight "$private"
+            docker pull python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de >/dev/null 2>&1
+            python3 -I -B .github/candidate/retain_gate0_publisher.py "$private"
+            public="$RUNNER_TEMP/gate0-publisher-retention-public"
+            mkdir -m 700 -- "$public"
+            mv -- "$private/encrypted-runtime-bundle.pgp" "$public/encrypted-runtime-bundle.pgp"
+            mv -- "$private/producer-receipt.json" "$public/producer-receipt.json"
+          fi
+          # Public repository: never upload rootfs, dependency bytes or private
+          # material. The external measurement lives only in private RUNNER_TEMP.
+          # Production retains its actual manifest and installed source owners,
+          # not its wheel: this is not literal production-wheel byte comparison.
+          echo 'Gate0 publisher: runtime_NOT_RETAINED; no artifact acceptance or native qualification'
+      - name: Retain encrypted publisher runtime transport
+        if: github.event_name == 'workflow_dispatch' && inputs.retention_packet_sha256 != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate0-publisher-runtime
+          path: |
+            ${{ runner.temp }}/gate0-publisher-retention-public/encrypted-runtime-bundle.pgp
+            ${{ runner.temp }}/gate0-publisher-retention-public/producer-receipt.json
+          retention-days: 30
+          overwrite: false
+          if-no-files-found: error
+          include-hidden-files: false
+      - name: Remove encrypted transport staging
+        if: always()
+        run: |
+          set -euo pipefail
+          public="$RUNNER_TEMP/gate0-publisher-retention-public"
+          rm -f -- "$public/encrypted-runtime-bundle.pgp" "$public/producer-receipt.json"
+          if test -d "$public"; then rmdir -- "$public"; fi
       - name: Boot-smoke the built bytes
         run: |
           set -euo pipefail
@@ -357,6 +554,14 @@ jobs:
       # The dummy DSNs are so the kernel can BUILD its engine at import; the
       # container has no network at all, so nothing connects. Every command run
       # here is a documented help or safe diagnostic path.
+      - name: Gate-0 installed synthetic native fixture conformance
+        # Reuse the built installed runtime; no checkout mount or host credential.
+        # Synthetic bash/seqpacket mechanics, never official-runner qualification.
+        timeout-minutes: 3
+        run: |
+          docker run --rm -i --cap-add SYS_PTRACE --network none --user 0:0 --entrypoint python \
+            dotmac-vendor-control-plane:ci -I -B - \
+            < conformance/test_gate0_a9_native_fixture.py
       - name: Clean-install acceptance — no repository root, nothing from a checkout
         run: |
           set -euo pipefail

@@ -192,3 +192,49 @@ def test_every_named_disposition_is_one_of_the_six_ruled_values() -> None:
 def test_a_resolution_outside_the_two_is_refused_by_construction() -> None:
     with pytest.raises(ValueError):
         WithdrawalResolution("approved")
+
+
+@pytest.mark.parametrize("limit", [None, 1, 2, 3])
+def test_event_outcome_limit_is_applied_to_owner_select_before_materialization(limit):
+    from vendor_cp.relay.withdrawal_outcomes import outcomes_for_event
+
+    event_id = uuid4()
+    statements = []
+
+    class QuerySpy:
+        def scalars(self, statement):
+            statements.append(statement)
+            return ()
+
+    assert outcomes_for_event(QuerySpy(), event_id, limit=limit) == ()
+    assert len(statements) == 1
+    statement = statements[0]
+    sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+    assert statement.compile().params["event_id_1"] == event_id
+    assert ("LIMIT" not in sql) if limit is None else (f"LIMIT {limit}" in sql)
+    where = str(statement.whereclause)
+    assert "event_id" in where
+    assert "approval_request_id" not in where and "withdrawal_ref" not in where
+
+
+@pytest.mark.parametrize("limit", [True, False, 1.0, "3", 0, -1, 4, 1000000, [], {}])
+def test_event_outcome_limit_refuses_coercion_and_unbounded_values_before_query(limit):
+    from vendor_cp.relay.withdrawal_outcomes import outcomes_for_event
+
+    class NeverQuery:
+        def scalars(self, statement):
+            pytest.fail("invalid limit reached database")
+
+    with pytest.raises(ValueError, match="withdrawal_outcome_limit_refused"):
+        outcomes_for_event(NeverQuery(), uuid4(), limit=limit)
+
+
+def test_event_outcome_legacy_default_keeps_unlimited_select():
+    from vendor_cp.relay.withdrawal_outcomes import outcomes_for_event
+
+    class QuerySpy:
+        def scalars(self, statement):
+            assert "LIMIT" not in str(statement.compile())
+            return ()
+
+    assert outcomes_for_event(QuerySpy(), uuid4()) == ()

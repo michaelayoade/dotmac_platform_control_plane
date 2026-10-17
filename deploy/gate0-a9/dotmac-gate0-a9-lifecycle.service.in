@@ -1,0 +1,24 @@
+[Unit]
+Description=Finite Gate0 A9 root lifecycle candidate
+Conflicts=dotmac-gate0-a9-lifecycle-expired.target
+[Service]
+Type=exec
+ExitType=main
+ExecStart=@BINARY@ gate0 lifecycle-run
+ExecStopPost=@BINARY@ gate0 lifecycle-retire-jit
+User=0
+Group=0
+Restart=no
+RemainAfterExit=no
+KillMode=control-group
+KillSignal=SIGKILL
+FinalKillSignal=SIGKILL
+SendSIGKILL=yes
+Delegate=no
+NoNewPrivileges=yes
+AmbientCapabilities=
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_SETGID CAP_SETUID CAP_SYS_PTRACE
+LoadCredential=jit-config-delivery:/run/dotmac-gate0-provisioner/encoded-jit-config
+StandardInput=null
+StandardOutput=null
+StandardError=null

@@ -897,8 +897,84 @@ print(wheels[0])
 ')" || fail "the candidate carries no single-wheel distribution record to expect against"
 
 SCRIPT="
+import hashlib
 import json
-from vendor_cp.deployment.profile_readback import ExpectedArtifact, verify_embedded_profile
+import subprocess
+import sys
+from pathlib import Path
+
+from vendor_cp.assembly import export_deployment_profile_declarations
+from vendor_cp.deployment.profile_readback import (
+    ExpectedArtifact,
+    verify_embedded_profile,
+)
+
+foundation_bytes = Path('/app/application_foundation_profile.json').read_bytes()
+declarations = json.loads(
+    Path('/app/deployment_profile_declarations.json').read_bytes()
+)
+expected_declarations = {
+    'schema': 'DotmacDeploymentProfileDeclarations.v1',
+    'source_revision': '${CANDIDATE_SOURCE_REVISION}',
+    'foundation_profile_digest': 'sha256:'
+    + hashlib.sha256(foundation_bytes).hexdigest(),
+    'profiles': export_deployment_profile_declarations(),
+}
+if declarations != expected_declarations:
+    raise RuntimeError('installed deployment declarations differ from their owner')
+selected = [row for row in declarations['profiles']
+            if row['production_accepted'] is True and row['laboratory'] is False
+            and 'gate0_collection_reads' in row['surface_inventory']
+            and 'gate0_collection_reads' not in row['withheld_surfaces']]
+if len(selected) != 1:
+    raise RuntimeError('expected exactly one accepted collection surface declaration')
+consumer_script = '''
+import importlib.abc
+import json
+import socket
+import sys
+
+
+class RefuseRuntime(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        blocked = (
+            'vendor_cp.assembly', 'vendor_cp.config', 'vendor_cp.deployment_profile',
+            'vendor_cp.deployment.profile', 'vendor_cp.main',
+            'vendor_cp.licensing.signing_adapter', 'dotmac_kernel.db',
+            'dotmac_kernel.session_runtime', 'dotmac_kernel.app_factory',
+            'vendor_cp.relay.runner',
+        )
+        if any(fullname == name or fullname.startswith(name + '.') for name in blocked):
+            raise AssertionError('consumer imported runtime owner: ' + fullname)
+
+
+sys.meta_path.insert(0, RefuseRuntime())
+
+
+def refuse_network(*args, **kwargs):
+    raise AssertionError('consumer attempted network I/O')
+
+
+socket.socket.connect = refuse_network
+socket.socket.connect_ex = refuse_network
+socket.create_connection = refuse_network
+checker = importlib.import_module('vendor_cp.deployment.gate0_collection_activation')
+checker._require_collection_profile(json.loads(sys.stdin.buffer.read()))
+'''
+consumer_value = {
+    'source_revision': declarations['source_revision'],
+    'profile_digest': declarations['foundation_profile_digest'],
+    'profile_code': selected[0]['code'],
+    'profile_version': selected[0]['version'],
+}
+consumer_environment = {
+    'PATH': '/usr/bin:/bin',
+    'LANG': 'C.UTF-8',
+}
+subprocess.run(  # noqa: S603 -- fixed installed-image checker and bound artifact data
+               [sys.executable, '-c', consumer_script],
+               input=json.dumps(consumer_value).encode(),
+               env=consumer_environment, check=True, timeout=30)
 
 outcome = verify_embedded_profile(
     ExpectedArtifact(

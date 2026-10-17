@@ -112,7 +112,8 @@ RUN DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
         --source-revision "$SOURCE_REVISION" \
         --dist-dir /app/dist \
         --lock /app/poetry.lock \
-        --output /app/application_foundation_profile.json
+        --output /app/application_foundation_profile.json \
+        --declarations-output /app/deployment_profile_declarations.json
 
 # The migration lineage travels as data (see the runtime stage's own COPY of
 # it below), and the builder stage otherwise never sees it — `image_heads`
@@ -132,6 +133,111 @@ RUN VENDOR_MIGRATION_ROOT=/app python -m vendor_cp.deployment.image_heads \
         --emit \
         --source-revision "$SOURCE_REVISION" \
         --output /app/migration_heads.json
+
+# Ubuntu matches the qualified 9.6 SSH artifact's libc ABI. The application
+# runtime below remains the default target; role builds select gate0-role.
+FROM ubuntu:24.04@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b AS gate0-role
+
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/michaelayoade/dotmac_platform_control_plane" \
+      org.opencontainers.image.revision="$SOURCE_REVISION" \
+      io.dotmac.runtime="gate0-finite-role"
+
+ENV POETRY_HOME=/opt/poetry \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/opt/poetry/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       ca-certificates python3 python3-venv iproute2 nftables wireguard-tools \
+       libffi8 libsqlite3-0 libbz2-1.0 liblzma5 libexpat1 libreadline8t64 \
+       libncursesw6 libuuid1 zlib1g
+COPY conformance/openssh-ubuntu-artifacts.json /opt/openssh-ubuntu-artifacts.json
+COPY .github/candidate/prepare_gate0_native.py /opt/prepare_gate0_native.py
+RUN python3 -I -B /opt/prepare_gate0_native.py \
+    && rm -rf /opt/gate0-native-build /opt/prepare_gate0_native.py \
+       /opt/openssh-ubuntu-artifacts.json /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /var/empty/dotmac-gate0 \
+    && useradd --system --no-create-home --shell /usr/sbin/nologin \
+         --home-dir /run/sshd sshd \
+    && for record in issuer:10031 attester:10032 management:10033 capture-sender:10034; do \
+         name="${record%:*}"; uid="${record#*:}"; \
+         useradd --no-create-home --uid "$uid" --password x --shell /bin/sh \
+           --home-dir "/var/empty/dotmac-gate0/$name" "gate0-$name"; \
+         mkdir -p "/var/empty/dotmac-gate0/$name"; \
+         chmod 555 "/var/empty/dotmac-gate0/$name"; \
+       done
+# A Debian interpreter cannot be copied onto Ubuntu's older OpenSSL ABI.
+# Create this environment on the role's native Python, install the SAME locked
+# dependency artifacts, and install the exact application wheel built once by
+# the shared builder. No movable/cross-distribution virtual environment is used.
+COPY .github/bootstrap/poetry-requirements.txt /opt/poetry-requirements.txt
+RUN /usr/bin/python3 -m venv "$POETRY_HOME" \
+    && "$POETRY_HOME/bin/pip" install --no-cache-dir --disable-pip-version-check \
+       --require-hashes --only-binary=:all: \
+       --requirement /opt/poetry-requirements.txt \
+    && /usr/bin/python3 -m venv "$VIRTUAL_ENV" \
+    && poetry config virtualenvs.create false
+COPY pyproject.toml poetry.lock README.md ./
+RUN --mount=type=secret,id=forgejo_token \
+    POETRY_HTTP_BASIC_FORGEJO_USERNAME=ci-reader \
+    POETRY_HTTP_BASIC_FORGEJO_PASSWORD="$(cat /run/secrets/forgejo_token)" \
+    poetry install --only main --no-root --no-interaction --no-ansi
+COPY --from=builder /app/dist /app/dist
+RUN "$VIRTUAL_ENV/bin/pip" install --no-cache-dir --no-deps --no-index /app/dist/*.whl
+COPY --from=builder /app/distributions.json /app/distributions.json
+COPY --from=builder /app/alembic /app/alembic
+COPY --from=builder /app/alembic.ini /app/alembic.ini
+# Measure claims from this installed role environment, rather than inheriting
+# the application image's runtime-specific profile and lineage readback.
+RUN DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
+    PLATFORM_DATABASE_URL=postgresql+psycopg://platform_api@127.0.0.1:5432/vendor_cp \
+    python -m vendor_cp.deployment.profile \
+        --source-revision "$SOURCE_REVISION" --dist-dir /app/dist \
+        --lock /app/poetry.lock --output /app/application_foundation_profile.json \
+        --declarations-output /app/deployment_profile_declarations.json \
+    && VENDOR_MIGRATION_ROOT=/app python -m vendor_cp.deployment.image_heads \
+        --emit --source-revision "$SOURCE_REVISION" \
+        --output /app/migration_heads.json \
+    && chmod 444 /app/*json \
+    && /opt/venv/bin/dotmac-platform --version \
+    && /usr/bin/ssh -V \
+    && rm -rf /root/.cache/pip /root/.cache/pypoetry \
+    && if [ -d /root/.cache ]; then rmdir /root/.cache; fi
+
+# Root supervises the declared delegated cgroup; signing workers use fixed
+# unprivileged UIDs. No key, launch packet, Docker socket or auto-start fallback.
+USER 0:0
+ENTRYPOINT ["/opt/venv/bin/dotmac-platform", "gate0", "supervise"]
+
+# Nondefault candidate publisher bytes only. This stage does not qualify a
+# host, Runner.Listener, gh, systemd, credentials, or native launch behavior.
+# Same pinned base, ABI and /opt/venv prefix as builder; no second resolver.
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS gate0-publisher
+
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.revision="$SOURCE_REVISION" \
+      io.dotmac.runtime="gate0-publisher-shape-only"
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    VENDOR_MIGRATION_ROOT=/app
+WORKDIR /app
+RUN /usr/local/bin/python3.12 -m venv --copies /opt/venv
+COPY --from=builder /app/dist /app/dist
+COPY --from=builder /app/distributions.json /app/distributions.json
+COPY --from=builder /app/alembic /app/alembic
+COPY --from=builder /app/alembic.ini /app/alembic.ini
+COPY .github/candidate/prepare_gate0_publisher.py /tmp/prepare_gate0_publisher.py
+RUN --network=none --mount=type=bind,from=builder,source=/opt/venv,target=/mnt/builder-venv \
+    /usr/local/bin/python3.12 -I -B /tmp/prepare_gate0_publisher.py \
+    && rm /tmp/prepare_gate0_publisher.py \
+    && chmod -R go-w /app /opt/venv
+USER 10001:10001
+ENTRYPOINT ["/opt/venv/bin/dotmac-platform"]
 
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 
@@ -172,6 +278,8 @@ COPY --from=builder --chown=10001:10001 /app/distributions.json ./distributions.
 # DOCUMENT_ABSENT against every real image — which was the honest answer.
 COPY --from=builder --chown=10001:10001 /app/application_foundation_profile.json \
      ./application_foundation_profile.json
+COPY --from=builder --chown=10001:10001 /app/deployment_profile_declarations.json \
+     ./deployment_profile_declarations.json
 # The composed effective migration heads THIS image's lineages produce,
 # frozen at build time (D16 PR 1). PR 2's deploy-time check extracts this file
 # from a pulled image before anything is running, so it has to be a document

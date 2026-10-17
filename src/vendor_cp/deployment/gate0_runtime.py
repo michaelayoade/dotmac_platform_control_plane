@@ -3,7 +3,8 @@
 No private keys, authority ledger, owner-schema extension or transport default.
 A configured, independently authorized attester must first validate SSH key
 possession, certificate/CA and provenance before signing the CP companion.
-This consumer authenticates that attestation; it does not perform SSH proof.
+Live consumption authenticates that attestation. Historical verification also
+rechecks the retained public SSH proof without granting current authority.
 Installing this adapter alone does not complete E or authorize a protected run.
 """
 
@@ -28,10 +29,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from vendor_cp.deployment.rehearsal_issuer_trust_state import (
     RehearsalIssuerTrustState,
     TrustEligibility,
+    TrustStateSnapshot,
+    parse_trust_snapshot,
 )
 
 if TYPE_CHECKING:
     from vendor_cp.deployment.gate0_attester import ProducedAttestation
+    from vendor_cp.deployment.gate0_observation import SignedSessionObservation
+    from vendor_cp.deployment.gate0_window import FrozenIssuerWindow
 
 _DOMAIN = b"dotmac.cp.gate0.companion.v1\x00"
 _PURPOSE = "deployment_rehearsal_harness_evidence"
@@ -225,6 +230,79 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _verify_harness_owner(
+    *,
+    public_key: bytes,
+    context: AttestationContext,
+    canonical_bytes: bytes,
+    signature: bytes,
+) -> bool:
+    """Shared immutable signed owner/context predicate."""
+    public = Ed25519PublicKey.from_public_bytes(public_key)
+    # Owner separately validates canonical form, timestamps, standing and ledger.
+    public.verify(signature, canonical_bytes)
+    document = json.loads(canonical_bytes, object_pairs_hook=_unique_object)
+    if not isinstance(document, dict) or set(document) != _OWNER_KEYS:
+        return False
+    if (
+        document["schema"] != "dotmac.deployment_control.rehearsal_harness_evidence"
+        or type(document["version"]) is not int
+        or document["version"] != 1
+        or document["environment"] != "rehearsal"
+        or document["lease_id"] != context.lease_id
+        or document["controller_fingerprint"] != context.controller_fingerprint
+        or document["target_ref"] != context.target_ref
+    ):
+        return False
+    return True
+
+
+def _verify_harness_companion(
+    *,
+    public_key: bytes,
+    context: AttestationContext,
+    companion: CompanionAttestation | None,
+    canonical_bytes: bytes,
+) -> bool:
+    """Shared immutable companion/context predicate."""
+    public = Ed25519PublicKey.from_public_bytes(public_key)
+    if (
+        type(companion) is not CompanionAttestation
+        or type(companion.canonical_bytes) is not bytes
+        or len(companion.canonical_bytes) > 8192
+        or type(companion.signature) is not bytes
+        or len(companion.signature) != 64
+        or companion.canonical_bytes != companion_message(context, canonical_bytes)
+    ):
+        return False
+    try:
+        public.verify(companion.signature, companion.canonical_bytes)
+    except InvalidSignature:
+        return False
+    return True
+
+
+def _verify_harness_signature(
+    *,
+    public_key: bytes,
+    context: AttestationContext,
+    companion: CompanionAttestation | None,
+    canonical_bytes: bytes,
+    signature: bytes,
+) -> bool:
+    return _verify_harness_owner(
+        public_key=public_key,
+        context=context,
+        canonical_bytes=canonical_bytes,
+        signature=signature,
+    ) and _verify_harness_companion(
+        public_key=public_key,
+        context=context,
+        companion=companion,
+        canonical_bytes=canonical_bytes,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ProtectedHarnessVerifier:
     """Construct once at authorized startup and install through Control's owner.
@@ -349,36 +427,21 @@ class ProtectedHarnessVerifier:
             != TrustEligibility.ELIGIBLE
         ):
             return False
-        # Owner separately validates canonical form, timestamps, standing and ledger.
-        self._public.verify(signature, canonical_bytes)
-        document = json.loads(canonical_bytes, object_pairs_hook=_unique_object)
-        if not isinstance(document, dict) or set(document) != _OWNER_KEYS:
-            return False
-        if (
-            document["schema"] != "dotmac.deployment_control.rehearsal_harness_evidence"
-            or type(document["version"]) is not int
-            or document["version"] != 1
-            or document["environment"] != "rehearsal"
-            or document["lease_id"] != self.context.lease_id
-            or document["controller_fingerprint"] != self.context.controller_fingerprint
-            or document["target_ref"] != self.context.target_ref
+        if not _verify_harness_owner(
+            public_key=self.public_key,
+            context=self.context,
+            canonical_bytes=canonical_bytes,
+            signature=signature,
         ):
             return False
         lookup = "sha256:" + hashlib.sha256(canonical_bytes).hexdigest()
         companion = self.read_companion(lookup)
-        if (
-            type(companion) is not CompanionAttestation
-            or type(companion.canonical_bytes) is not bytes
-            or len(companion.canonical_bytes) > 8192
-            or type(companion.signature) is not bytes
-            or len(companion.signature) != 64
-            or companion.canonical_bytes
-            != companion_message(self.context, canonical_bytes)
+        if not _verify_harness_companion(
+            public_key=self.public_key,
+            context=self.context,
+            companion=companion,
+            canonical_bytes=canonical_bytes,
         ):
-            return False
-        try:
-            self._public.verify(companion.signature, companion.canonical_bytes)
-        except InvalidSignature:
             return False
         # Fail closed if refresh/revocation occurred during transport verification.
         return (
@@ -396,6 +459,22 @@ class ProofRegistrationRefused(ValueError):
 
     def __init__(self) -> None:
         super().__init__("gate0_proof_registration_refused")
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredProofExport:
+    """Immutable private evidence readback, with no live verifier capability."""
+
+    evidence_digest: str
+    owner_envelope: bytes
+    owner_bytes: bytes
+    owner_signature: bytes
+    key_id: str
+    algorithm: str
+    context: AttestationContext
+    companion: CompanionAttestation
+    transcript: bytes
+    metadata: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,6 +537,171 @@ def _sha256(encoded: bytes) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedProof:
+    owner_envelope: bytes
+    owner_bytes: bytes
+    owner_signature: bytes
+    key_id: str
+    algorithm: str
+    issued_at: datetime
+    valid_until: datetime
+    context: AttestationContext
+    companion: CompanionAttestation
+    transcript: bytes
+    metadata: bytes
+    certificate: bytes
+    challenge: bytes
+    sshsig: bytes
+
+
+def _prepare_proof_bytes(
+    proof: ProducedAttestation,
+    expected: AdmittedOperation,
+    *,
+    key_id: str,
+    expires_at: datetime,
+) -> _PreparedProof:
+    """Immutable validation only; supplies no clock, registration or authority."""
+    from cryptography.hazmat.primitives.serialization import (
+        SSHCertificate,
+        load_ssh_public_identity,
+    )
+    from dotmac_deployment_control import parse_signed_rehearsal_harness_evidence
+
+    from vendor_cp.deployment.gate0_attester import ProducedAttestation
+
+    if (
+        type(proof) is not ProducedAttestation
+        or type(expected) is not AdmittedOperation
+    ):
+        raise ProofRegistrationRefused()
+    if (
+        type(proof.context) is not AttestationContext
+        or type(proof.companion) is not CompanionAttestation
+    ):
+        raise ProofRegistrationRefused()
+    owner_envelope = proof.control_document
+    companion_bytes = proof.companion.canonical_bytes
+    companion_signature = proof.companion.signature
+    transcript_bytes = proof.public_proof_transcript
+    context_input = proof.context
+    raw_fields = (
+        owner_envelope,
+        companion_bytes,
+        companion_signature,
+        transcript_bytes,
+    )
+    if (
+        any(type(value) is not bytes for value in raw_fields)
+        or sum(map(len, raw_fields)) > 128 * 1024
+    ):
+        raise ProofRegistrationRefused()
+    # Round-trip only the CP context; exact owner/proof bytes remain untouched.
+    context_values = asdict(context_input)
+    metadata = json.dumps(
+        context_values,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("ascii")
+    if len(metadata) > 8192:
+        raise ProofRegistrationRefused()
+    context = AttestationContext(**json.loads(metadata))
+    actual_operation = {
+        key: value
+        for key, value in context_values.items()
+        if key not in {"challenge_digest", "proof_transcript_digest"}
+    }
+    if actual_operation != asdict(expected):
+        raise ProofRegistrationRefused()
+    envelope = _strict_json(owner_envelope, 128 * 1024)
+    parsed = parse_signed_rehearsal_harness_evidence(envelope)
+    if (
+        len(parsed.canonical_bytes) > 8192
+        or len(parsed.signature) != 64
+        or parsed.key_id != key_id
+        or parsed.algorithm != "ed25519"
+        or len(companion_bytes) > 8192
+        or len(companion_signature) != 64
+    ):
+        raise ProofRegistrationRefused()
+    transcript = _strict_json(transcript_bytes, 128 * 1024)
+    if (
+        not isinstance(transcript, dict)
+        or set(transcript) != {"schema", "certificate", "challenge", "sshsig"}
+        or transcript["schema"] != "Gate0PublicProofTranscript.v1"
+    ):
+        raise ProofRegistrationRefused()
+    certificate = _bounded_base64(transcript["certificate"], 16384)
+    challenge = _bounded_base64(transcript["challenge"], 8192)
+    _bounded_base64(transcript["sshsig"], 16384)
+    cert = load_ssh_public_identity(certificate)
+    if (
+        not isinstance(cert, SSHCertificate)
+        or cert.public_bytes() != certificate
+        or _sha256(certificate) != expected.certificate_digest
+    ):
+        raise ProofRegistrationRefused()
+    challenge_document = _strict_json(challenge, 8192)
+    if not isinstance(challenge_document, dict) or set(challenge_document) != {
+        "schema",
+        "instance_id",
+        "challenge_id",
+        "nonce",
+        "context",
+        "expires_at",
+    }:
+        raise ProofRegistrationRefused()
+    if challenge_document[
+        "schema"
+    ] != "Gate0PossessionChallenge.v1" or challenge_document["context"] != asdict(
+        expected
+    ):
+        raise ProofRegistrationRefused()
+    if any(
+        not isinstance(challenge_document[name], str)
+        or re.fullmatch(r"[0-9a-f]{64}", challenge_document[name]) is None
+        for name in ("instance_id", "challenge_id", "nonce")
+    ):
+        raise ProofRegistrationRefused()
+    expiry_value = challenge_document["expires_at"]
+    if not isinstance(expiry_value, str):
+        raise ProofRegistrationRefused()
+    challenge_expiry = datetime.fromisoformat(expiry_value)
+    if (
+        not _aware_datetime(challenge_expiry)
+        or not parsed.issued_at < challenge_expiry <= expires_at
+        or parsed.valid_until > expires_at
+        or parsed.valid_until.timestamp() > cert.valid_before
+        or parsed.issued_at.timestamp() < cert.valid_after
+    ):
+        raise ProofRegistrationRefused()
+    if (
+        _sha256(challenge) != context.challenge_digest
+        or _sha256(transcript_bytes) != context.proof_transcript_digest
+    ):
+        raise ProofRegistrationRefused()
+    companion = CompanionAttestation(companion_bytes, companion_signature)
+    return _PreparedProof(
+        owner_envelope,
+        parsed.canonical_bytes,
+        parsed.signature,
+        parsed.key_id,
+        parsed.algorithm,
+        parsed.issued_at,
+        parsed.valid_until,
+        context,
+        companion,
+        transcript_bytes,
+        metadata,
+        certificate,
+        challenge,
+        _bounded_base64(transcript["sshsig"], 16384),
+    )
+
+
 class BoundedHarnessVerifier:
     """Startup-fixed four-proof dispatcher; Control remains the spend owner.
 
@@ -475,6 +719,7 @@ class BoundedHarnessVerifier:
         expires_at: datetime,
         now: Callable[[], datetime] = _utc_now,
         monotonic_clock: Callable[[], float] = monotonic,
+        deadline: float | None = None,
     ) -> None:
         from threading import Lock
 
@@ -489,7 +734,12 @@ class BoundedHarnessVerifier:
             or not 0 < duration <= 600
         ):
             raise ProofRegistrationRefused()
-        deadline = origin + duration
+        mapped_deadline = origin + duration
+        if deadline is not None:
+            if not _finite_monotonic(deadline) or deadline <= origin:
+                raise ProofRegistrationRefused()
+            mapped_deadline = min(mapped_deadline, deadline)
+        deadline = mapped_deadline
         if not math.isfinite(deadline) or deadline <= origin:
             raise ProofRegistrationRefused()
         if (
@@ -535,6 +785,17 @@ class BoundedHarnessVerifier:
     def _require_open(self) -> None:
         self._samples()
 
+    def require_window(self, *, expires_at: datetime, deadline: float) -> None:
+        """Check this verifier fits an original window without remapping it."""
+        if (
+            not _aware_datetime(expires_at)
+            or not _finite_monotonic(deadline)
+            or self._expires > expires_at.astimezone(UTC)
+            or self._deadline > deadline
+        ):
+            raise ProofRegistrationRefused()
+        self._require_open()
+
     @property
     def _retained_count(self) -> int:
         with self._lock:
@@ -549,134 +810,52 @@ class BoundedHarnessVerifier:
         self._require_open()
         return entry
 
+    def export_registered(self, digest: str) -> RegisteredProofExport:
+        """Export only already registered exact bytes within existing budgets.
+
+        Evidence export deliberately does not refresh trust, extend eligibility
+        or expose registration/leaf verification. Never send this aggregate in
+        a frame; fixed service outcomes refer to collector-held bundle digests.
+        """
+        if type(digest) is not str or _DIGEST.fullmatch(digest) is None:
+            raise ProofRegistrationRefused()
+        with self._lock:
+            entry = self._entries.get(digest)
+        if entry is None:
+            raise ProofRegistrationRefused()
+        return RegisteredProofExport(
+            digest,
+            entry.owner_envelope,
+            entry.owner_bytes,
+            entry.owner_signature,
+            entry.key_id,
+            entry.algorithm,
+            AttestationContext(**asdict(entry.context)),
+            CompanionAttestation(
+                entry.companion.canonical_bytes, entry.companion.signature
+            ),
+            entry.transcript,
+            entry.metadata,
+        )
+
     def _prepare(
         self, proof: ProducedAttestation, expected: AdmittedOperation
     ) -> _RetainedProof:
-        from cryptography.hazmat.primitives.serialization import (
-            SSHCertificate,
-            load_ssh_public_identity,
-        )
         from dotmac_deployment_control import (
             parse_signed_rehearsal_harness_evidence,
             verify_rehearsal_harness_evidence_signature,
         )
 
-        from vendor_cp.deployment.gate0_attester import ProducedAttestation
-
         self._require_open()
-        if (
-            type(proof) is not ProducedAttestation
-            or type(expected) is not AdmittedOperation
-        ):
-            raise ProofRegistrationRefused()
-        if (
-            type(proof.context) is not AttestationContext
-            or type(proof.companion) is not CompanionAttestation
-        ):
-            raise ProofRegistrationRefused()
-        owner_envelope = proof.control_document
-        companion_bytes = proof.companion.canonical_bytes
-        companion_signature = proof.companion.signature
-        transcript_bytes = proof.public_proof_transcript
-        context_input = proof.context
-        raw_fields = (
-            owner_envelope,
-            companion_bytes,
-            companion_signature,
-            transcript_bytes,
+        prepared = _prepare_proof_bytes(
+            proof, expected, key_id=self._key_id, expires_at=self._expires
         )
-        if (
-            any(type(value) is not bytes for value in raw_fields)
-            or sum(map(len, raw_fields)) > 128 * 1024
-        ):
-            raise ProofRegistrationRefused()
-        # Round-trip only the CP context; exact owner/proof bytes remain untouched.
-        context_values = asdict(context_input)
-        metadata = json.dumps(
-            context_values,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-            allow_nan=False,
-        ).encode("ascii")
-        if len(metadata) > 8192:
-            raise ProofRegistrationRefused()
-        context = AttestationContext(**json.loads(metadata))
-        actual_operation = {
-            key: value
-            for key, value in context_values.items()
-            if key not in {"challenge_digest", "proof_transcript_digest"}
-        }
-        if actual_operation != asdict(expected):
-            raise ProofRegistrationRefused()
-        envelope = _strict_json(owner_envelope, 128 * 1024)
-        parsed = parse_signed_rehearsal_harness_evidence(envelope)
-        if (
-            len(parsed.canonical_bytes) > 8192
-            or len(parsed.signature) != 64
-            or parsed.key_id != self._key_id
-            or parsed.algorithm != "ed25519"
-            or len(companion_bytes) > 8192
-            or len(companion_signature) != 64
-        ):
-            raise ProofRegistrationRefused()
-        transcript = _strict_json(transcript_bytes, 128 * 1024)
-        if (
-            not isinstance(transcript, dict)
-            or set(transcript) != {"schema", "certificate", "challenge", "sshsig"}
-            or transcript["schema"] != "Gate0PublicProofTranscript.v1"
-        ):
-            raise ProofRegistrationRefused()
-        certificate = _bounded_base64(transcript["certificate"], 16384)
-        challenge = _bounded_base64(transcript["challenge"], 8192)
-        _bounded_base64(transcript["sshsig"], 16384)
-        cert = load_ssh_public_identity(certificate)
-        if (
-            not isinstance(cert, SSHCertificate)
-            or cert.public_bytes() != certificate
-            or _sha256(certificate) != expected.certificate_digest
-        ):
-            raise ProofRegistrationRefused()
-        challenge_document = _strict_json(challenge, 8192)
-        if not isinstance(challenge_document, dict) or set(challenge_document) != {
-            "schema",
-            "instance_id",
-            "challenge_id",
-            "nonce",
-            "context",
-            "expires_at",
-        }:
-            raise ProofRegistrationRefused()
-        if challenge_document[
-            "schema"
-        ] != "Gate0PossessionChallenge.v1" or challenge_document["context"] != asdict(
-            expected
-        ):
-            raise ProofRegistrationRefused()
-        if any(
-            not isinstance(challenge_document[name], str)
-            or re.fullmatch(r"[0-9a-f]{64}", challenge_document[name]) is None
-            for name in ("instance_id", "challenge_id", "nonce")
-        ):
-            raise ProofRegistrationRefused()
-        expiry_value = challenge_document["expires_at"]
-        if not isinstance(expiry_value, str):
-            raise ProofRegistrationRefused()
-        challenge_expiry = datetime.fromisoformat(expiry_value)
-        if (
-            not _aware_datetime(challenge_expiry)
-            or not parsed.issued_at < challenge_expiry <= self._expires
-            or parsed.valid_until > self._expires
-            or parsed.valid_until.timestamp() > cert.valid_before
-            or parsed.issued_at.timestamp() < cert.valid_after
-        ):
-            raise ProofRegistrationRefused()
-        if (
-            _sha256(challenge) != context.challenge_digest
-            or _sha256(transcript_bytes) != context.proof_transcript_digest
-        ):
-            raise ProofRegistrationRefused()
-        companion = CompanionAttestation(companion_bytes, companion_signature)
+        owner_envelope = prepared.owner_envelope
+        parsed = parse_signed_rehearsal_harness_evidence(
+            _strict_json(owner_envelope, 128 * 1024)
+        )
+        context, companion = prepared.context, prepared.companion
+        transcript_bytes, metadata = prepared.transcript, prepared.metadata
         lookup = _sha256(parsed.canonical_bytes)
         leaf = ProtectedHarnessVerifier(
             key_id=self._key_id,
@@ -780,3 +959,231 @@ class BoundedHarnessVerifier:
             return verified
         except Exception:
             return False
+
+
+@dataclass(frozen=True, slots=True)
+class RetainedBundleVerification:
+    """Historical public verification result; never a registration/capability."""
+
+    proof: ProducedAttestation
+    observation: SignedSessionObservation
+    observed_from: datetime
+    observed_until: datetime
+    invocation_id: str
+    bundle_digest: str
+    proof_digest: str
+    transcript_digest: str
+    challenge_digest: str
+
+    @property
+    def context(self) -> AttestationContext:
+        return self.proof.context
+
+
+def _detach_retained_trust(snapshot: TrustStateSnapshot) -> TrustStateSnapshot:
+    """Validate and deep-detach even manually constructed snapshot inputs.
+
+    The existing record owner supplies the exact version/string/container rules
+    and MappingProxyType(dict(...))/frozenset copies. This preserves the supplied
+    original snapshot, without refreshing trust or inventing a new durable floor.
+    """
+    if type(snapshot) is not TrustStateSnapshot:
+        raise ProofRegistrationRefused()
+    return parse_trust_snapshot(
+        {
+            "version": snapshot.version,
+            "trusted_key_ids": snapshot.trusted_key_ids,
+            "revoked_key_ids": snapshot.revoked_key_ids,
+        },
+        minimum_version=1,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RetainedHarnessSignature:
+    key_id: str
+    public_key: bytes
+    trust_state: TrustStateSnapshot
+    context: AttestationContext
+    companion: CompanionAttestation
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "trust_state", _detach_retained_trust(self.trust_state)
+        )
+
+    def verify_rehearsal_harness_evidence(
+        self,
+        *,
+        key_id: str,
+        algorithm: str,
+        purpose: str,
+        canonical_bytes: bytes,
+        signature: bytes,
+    ) -> bool:
+        try:
+            if (
+                key_id != self.key_id
+                or algorithm != "ed25519"
+                or purpose != _PURPOSE
+                or type(self.trust_state) is not TrustStateSnapshot
+                or self.trust_state.eligibility(
+                    key_id=key_id, public_key_fingerprint=_sha256(self.public_key)
+                )
+                != TrustEligibility.ELIGIBLE
+                or type(canonical_bytes) is not bytes
+                or not 0 < len(canonical_bytes) <= 8192
+                or type(signature) is not bytes
+                or len(signature) != 64
+            ):
+                return False
+            return _verify_harness_signature(
+                public_key=self.public_key,
+                context=self.context,
+                companion=self.companion,
+                canonical_bytes=canonical_bytes,
+                signature=signature,
+            )
+        except (InvalidSignature, ValueError, TypeError):
+            return False
+
+
+def verify_retained_bundle(
+    raw: bytes,
+    *,
+    expected: AdmittedOperation,
+    frozen_window: FrozenIssuerWindow,
+    key_id: str,
+    public_key: bytes,
+    trust_state: TrustStateSnapshot,
+) -> RetainedBundleVerification:
+    """Verify old signed facts inside their ORIGINAL window, never current use.
+
+    No live leaf, registration, window freshness, fake now/elapsed callbacks or
+    signer is constructed. The native public SSHSIG verification child has only
+    its independent <=2s process budget; it cannot reopen the original operation.
+    The caller must independently authenticate the frozen packet and trust floor.
+    """
+    from dotmac_deployment_control import (
+        parse_signed_rehearsal_harness_evidence,
+        verify_rehearsal_harness_evidence_signature,
+    )
+
+    from vendor_cp.deployment.gate0_attester import (
+        verify_controller_certificate,
+        verify_retained_controller_evidence,
+    )
+    from vendor_cp.deployment.gate0_framing import canonical, strict_object
+    from vendor_cp.deployment.gate0_observation import (
+        parse_bundle,
+        verify_observation_signature,
+    )
+    from vendor_cp.deployment.gate0_window import FrozenIssuerWindow
+
+    try:
+        if (
+            type(expected) is not AdmittedOperation
+            or type(frozen_window) is not FrozenIssuerWindow
+            or type(trust_state) is not TrustStateSnapshot
+            or type(public_key) is not bytes
+            or len(public_key) != 32
+            or not isinstance(key_id, str)
+            or not key_id
+            or len(key_id) > 512
+        ):
+            raise ProofRegistrationRefused()
+        trust_state = _detach_retained_trust(trust_state)
+        window = FrozenIssuerWindow.parse(frozen_window.canonical_bytes)
+        doc, operation = window.document, asdict(expected)
+        start = datetime.fromisoformat(doc["not_before"].replace("Z", "+00:00"))
+        expiry = datetime.fromisoformat(doc["expires_at"].replace("Z", "+00:00"))
+        selected = dict(
+            repository_id=doc["github"]["repository_id"],
+            run_id=doc["github"]["run_id"],
+            run_attempt=doc["github"]["run_attempt"],
+            window_id=doc["window_id"],
+            lease_id=doc["controller"]["lease_id"],
+            controller_fingerprint=doc["controller"]["fingerprint"],
+            certificate_digest=doc["controller"]["certificate_digest"],
+            ca_fingerprint=doc["controller"]["ca_fingerprint"],
+            target_ref=doc["target"]["ref"],
+            operation=doc["target"]["operation"],
+            plan_purpose=doc["purpose"],
+            execution_plan_digest=doc["plan_inputs"]["execution_plan_digest"],
+        )
+        if any(operation[k] != value for k, value in selected.items()):
+            raise ProofRegistrationRefused()
+        document = strict_object(raw, 128 * 1024)
+        if canonical(document) != raw:
+            raise ProofRegistrationRefused()
+        proof, observation = parse_bundle(document)
+        prepared = _prepare_proof_bytes(
+            proof, expected, key_id=key_id, expires_at=expiry
+        )
+        parsed = parse_signed_rehearsal_harness_evidence(
+            _strict_json(prepared.owner_envelope, 128 * 1024)
+        )
+        if (
+            not start <= prepared.issued_at < prepared.valid_until <= expiry
+            or (prepared.valid_until - prepared.issued_at).total_seconds() > 30
+        ):
+            raise ProofRegistrationRefused()
+        adapter = _RetainedHarnessSignature(
+            key_id, public_key, trust_state, prepared.context, prepared.companion
+        )
+        # Explicit signed historical instant, through Control's same public
+        # parser/verify owner; this adapter has no now/clock/current authority.
+        verify_rehearsal_harness_evidence_signature(
+            parsed, verifier=adapter, at=prepared.issued_at
+        )
+        certificate = verify_controller_certificate(
+            prepared.certificate, expected, prepared.issued_at
+        )
+        challenge = strict_object(prepared.challenge, 8192)
+        challenge_expiry = datetime.fromisoformat(
+            str(challenge["expires_at"]).replace("Z", "+00:00")
+        )
+        authorization_issued = expected.authorization_issued_at
+        if (
+            canonical(challenge) != prepared.challenge
+            or canonical(strict_object(prepared.transcript, 128 * 1024))
+            != prepared.transcript
+            or not 0 < (challenge_expiry - prepared.issued_at).total_seconds() <= 30
+            or (
+                expected.phase == "consume"
+                and (
+                    authorization_issued is None
+                    or prepared.issued_at
+                    <= datetime.fromisoformat(authorization_issued)
+                )
+            )
+        ):
+            raise ProofRegistrationRefused()
+        controller = certificate.public_key()
+        if not isinstance(controller, Ed25519PublicKey):
+            raise ProofRegistrationRefused()
+        verify_retained_controller_evidence(
+            controller, prepared.challenge, prepared.sshsig
+        )
+        observed_from, observed_until, invocation = verify_observation_signature(
+            proof=proof,
+            observation=observation,
+            operation=expected,
+            window_record_digest=window.digest,
+            public_key=public_key,
+        )
+        if not start <= observed_from <= prepared.issued_at <= observed_until < expiry:
+            raise ProofRegistrationRefused()
+        return RetainedBundleVerification(
+            proof,
+            observation,
+            observed_from,
+            observed_until,
+            invocation,
+            _sha256(raw),
+            _sha256(prepared.owner_bytes),
+            _sha256(prepared.transcript),
+            _sha256(prepared.challenge),
+        )
+    except Exception:
+        raise ProofRegistrationRefused() from None

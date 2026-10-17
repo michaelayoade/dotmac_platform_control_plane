@@ -26,6 +26,14 @@ name: Build immutable production image
 on:
   workflow_dispatch:
     inputs:
+      image_target:
+        description: >-
+          Fixed image target to publish; Gate0 requires manual main and
+          production approval.
+        required: true
+        type: choice
+        default: runtime
+        options: [runtime, gate0-role]
       ci_run_id:
         description: >-
           Exact successful CI run id for the revision to publish. Verified
@@ -58,16 +66,19 @@ jobs:
     # Neither may reach the publication path; the verifier below re-checks all
     # of this against the API rather than trusting the event payload.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.image_target == 'runtime') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_branch == 'main')
+    env:
+      IMAGE_TARGET: runtime
+      RECEIPT_PREFIX: release-receipt
     runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
       reference: ${{ steps.publish.outputs.reference }}
       source_sha: ${{ steps.select.outputs.source_sha }}
-    steps:
+    steps: &accepted_candidate_steps
       # ── 1. Select an exact protected-main revision ──────────────────────
       - name: Check out main to resolve its current head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -87,30 +98,50 @@ jobs:
       # ── 2. Verify required CI succeeded on exactly that revision ────────
       - name: Verify the source revision earned its way here
         env:
+          CURRENT_MAIN: ${{ steps.select.outputs.current_main }}
+          ROLE_GATES_FILE: ${{ runner.temp }}/gate0-role-required-gates.json
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          gate_args=()
+          if [ "$IMAGE_TARGET" = gate0-role ]; then
+            python3 - <<'PYROLE'
+          import json, os
+          from pathlib import Path
+          base = json.loads(Path(".github/candidate/required-gates.json").read_text())
+          assert isinstance(base["gates"], list) and base["gates"]
+          assert all(isinstance(gate, str) and gate for gate in base["gates"])
+          assert len(set(base["gates"])) == len(base["gates"])
+          base["gates"] = base["gates"] + ["installed-sshd", "role-image"]
+          Path(os.environ["ROLE_GATES_FILE"]).write_text(json.dumps(base))
+          PYROLE
+            gate_args=(--gates "$ROLE_GATES_FILE")
+          fi
           python3 .github/candidate/verify_source_revision.py \
             --run-id "${CI_RUN_ID}" \
             --repository "${GITHUB_REPOSITORY}" \
             --workflow-path .github/workflows/ci.yml \
             --branch main \
-            --expect-head "${{ steps.select.outputs.current_main }}"
+            --expect-head "${CURRENT_MAIN}" "${gate_args[@]}"
 
       # ── 3. Build ONE local candidate. Nothing is pushed by this step. ───
       - name: Build the candidate
         env:
+          SOURCE_SHA: ${{ steps.select.outputs.source_sha }}
           FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: |
           set -euo pipefail
           DOCKER_BUILDKIT=1 docker build \
             --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
-            --build-arg "SOURCE_REVISION=${{ steps.select.outputs.source_sha }}" \
+            --build-arg "SOURCE_REVISION=${SOURCE_SHA}" \
+            --target "${IMAGE_TARGET}" \
             --tag "${CANDIDATE_TAG}" .
 
       # ── 4. Record what was built, before anything is done to it ─────────
       - name: Record the candidate's identity
         id: identity
+        env:
+          SOURCE_SHA: ${{ steps.select.outputs.source_sha }}
         run: |
           set -euo pipefail
           # Preflight, HERE and not after the push. Step 8 reads the registry's
@@ -124,6 +155,33 @@ jobs:
             || { echo "docker manifest inspect is unavailable on this runner" >&2; exit 1; }
           config_digest="$(docker image inspect --format '{{.Id}}' "${CANDIDATE_TAG}")"
           layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "${CANDIDATE_TAG}")"
+          if [ "$IMAGE_TARGET" = gate0-role ]; then
+            docker image save "${CANDIDATE_TAG}" --output candidate-image.tar
+            config_digest="$(CANDIDATE_LAYERS="$layers" python3 - <<'PYCONFIG'
+          import hashlib, json, os, re, tarfile
+          def read_member(archive: tarfile.TarFile, name: str, limit: int) -> bytes:
+              member = archive.getmember(name)
+              assert member.isfile() and 0 < member.size <= limit
+              stream = archive.extractfile(member)
+              assert stream is not None
+              with stream:
+                  raw = stream.read(limit + 1)
+              assert len(raw) == member.size and len(raw) <= limit
+              return raw
+          with tarfile.open("candidate-image.tar", "r:") as archive:
+              manifest = json.loads(read_member(archive, "manifest.json", 1048576))
+              assert isinstance(manifest, list) and len(manifest) == 1
+              name = manifest[0]["Config"]
+              assert isinstance(name, str) and re.fullmatch(r"(?:[0-9a-f]{64}\.json|blobs/sha256/[0-9a-f]{64})", name)
+              raw = read_member(archive, name, 16777216)
+              config = json.loads(raw)
+              assert config["config"]["Labels"]["org.opencontainers.image.revision"] == os.environ["SOURCE_SHA"]
+              assert config["rootfs"]["diff_ids"] == json.loads(os.environ["CANDIDATE_LAYERS"])
+              print("sha256:" + hashlib.sha256(raw).hexdigest())
+          PYCONFIG
+            )"
+            rm candidate-image.tar
+          fi
           # The RootFS chain digest is over the ORDERED layer list: two images
           # can share every layer and stack them differently, and that is a
           # different filesystem.
@@ -154,7 +212,7 @@ jobs:
             echo "dockerfile_digest=sha256:$dockerfile_digest"
           } >> "$GITHUB_OUTPUT"
           jq -n \
-            --arg source_revision "${{ steps.select.outputs.source_sha }}" \
+            --arg source_revision "${SOURCE_SHA}" \
             --arg config_digest "$config_digest" \
             --argjson layers "$layers" \
             --arg rootfs_chain "sha256:$rootfs_chain" \
@@ -175,22 +233,43 @@ jobs:
         # from the artifact it is judging.
         env:
           CANDIDATE_SOURCE_REVISION: ${{ steps.select.outputs.source_sha }}
-        run: .github/candidate/acceptance.sh "${CANDIDATE_TAG}"
+        run: |
+          set -euo pipefail
+          if [ "$IMAGE_TARGET" = gate0-role ]; then
+            docker run --rm --network none --read-only --cap-drop ALL --entrypoint cat \
+              "${CANDIDATE_TAG}" /app/application_foundation_profile.json > role-profile.json
+            jq -e --arg revision "$CANDIDATE_SOURCE_REVISION" \
+              '.source_revision == $revision' role-profile.json > /dev/null
+            docker run --rm --network none --read-only --cap-drop ALL \
+              --cap-add SETUID --cap-add SETGID --cap-add SYS_CHROOT \
+              --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m \
+              --mount "type=bind,src=${GITHUB_WORKSPACE}/conformance/gate0_role_image_smoke.py,dst=/qualification.py,readonly" \
+              --entrypoint /opt/venv/bin/python "${CANDIDATE_TAG}" -I -B /qualification.py \
+              > role-smoke.json
+            jq -e '.schema == "Gate0RoleImageSmoke.v1" and .passed == true and .live_readiness == false' \
+              role-smoke.json > /dev/null
+            bash .github/candidate/accept_gate0_network.sh "${CANDIDATE_TAG}" "$GITHUB_WORKSPACE/role-native-network.json"
+          else
+            .github/candidate/acceptance.sh "${CANDIDATE_TAG}"
+          fi
 
       # ── 6. Publish the SAME config and layers ───────────────────────────
       - name: Authenticate to GHCR
         env:
+          GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" \
-            | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+            | docker login ghcr.io --username "${GHCR_USERNAME}" --password-stdin
 
       - name: Publish the accepted candidate
         id: publish
+        env:
+          SOURCE_SHA: ${{ steps.select.outputs.source_sha }}
         run: |
           set -euo pipefail
-          tag="${IMAGE_REPOSITORY}:${{ steps.select.outputs.source_sha }}"
+          tag="${IMAGE_REPOSITORY}:${SOURCE_SHA}"
           # `docker tag` renames; it does not rebuild. The config digest and the
           # layer chain recorded in step 4 are the ones that travel.
           docker tag "${CANDIDATE_TAG}" "$tag"
@@ -204,14 +283,19 @@ jobs:
       # ── 7 + 8. Read back, and prove equality with what was accepted ─────
       - name: Prove the registry holds the accepted candidate
         id: readback
+        env:
+          PUBLISHED_REFERENCE: ${{ steps.publish.outputs.reference }}
+          ACCEPTED_ROOTFS_CHAIN: ${{ steps.identity.outputs.rootfs_chain }}
+          SOURCE_SHA: ${{ steps.select.outputs.source_sha }}
+          ACCEPTED_CONFIG_DIGEST: ${{ steps.identity.outputs.config_digest }}
         run: |
           set -euo pipefail
-          reference='${{ steps.publish.outputs.reference }}'
+          reference="${PUBLISHED_REFERENCE}"
           # Remove every local reference first. Inspecting a tag that never left
           # the runner would compare the candidate with itself and pass without
           # the registry having been consulted at all.
           docker image rm -f "${CANDIDATE_TAG}" >/dev/null 2>&1 || true
-          docker image rm -f "${IMAGE_REPOSITORY}:${{ steps.select.outputs.source_sha }}" >/dev/null 2>&1 || true
+          docker image rm -f "${IMAGE_REPOSITORY}:${SOURCE_SHA}" >/dev/null 2>&1 || true
           docker image rm -f "$reference" >/dev/null 2>&1 || true
           docker image inspect "$reference" >/dev/null 2>&1 \
             && { echo "the candidate is still resident locally; the read-back would be a no-op" >&2; exit 1; }
@@ -226,7 +310,7 @@ jobs:
           docker pull "$reference"
           pulled_layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "$reference")"
           pulled_chain="sha256:$(printf '%s' "$pulled_layers" | sha256sum | cut -d' ' -f1)"
-          accepted_chain='${{ steps.identity.outputs.rootfs_chain }}'
+          accepted_chain="${ACCEPTED_ROOTFS_CHAIN}"
 
           # THE equality. `.RootFS.Layers` is the ordered list of layer diffIDs,
           # computed from uncompressed layer content and carried inside the
@@ -249,11 +333,17 @@ jobs:
           # compares two different KINDS of value and can never hold — a false
           # refusal on every correct publication, arriving after the push. The
           # registry's own config digest is read from the manifest instead, and
-          # recorded rather than guessed at.
+          # recorded rather than guessed at. Gate0 additionally compares it
+          # with the hash of the saved candidate config bytes; the app keeps
+          # its existing RootFS/source comparison.
           registry_config="$(docker manifest inspect "$reference" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["digest"])')"
           [[ "$registry_config" =~ ^sha256:[0-9a-f]{64}$ ]] \
             || { echo "the registry returned no usable config digest" >&2; exit 1; }
+          if [ "$IMAGE_TARGET" = gate0-role ]; then
+            test "$registry_config" = "$ACCEPTED_CONFIG_DIGEST" \
+              || { echo "registry config differs from accepted role config" >&2; exit 1; }
+          fi
           echo "registry_config=$registry_config" >> "$GITHUB_OUTPUT"
 
           # The candidate's own config digest, recorded before publication, must
@@ -261,25 +351,34 @@ jobs:
           # layer count. Cheap, and it catches a reference that resolved to a
           # different image entirely.
           pulled_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$reference")"
-          test "$pulled_revision" = "${{ steps.select.outputs.source_sha }}" \
-            || { echo "registry image is labelled $pulled_revision, not ${{ steps.select.outputs.source_sha }}" >&2; exit 1; }
+          test "$pulled_revision" = "${SOURCE_SHA}" \
+            || { echo "registry image is labelled $pulled_revision, not ${SOURCE_SHA}" >&2; exit 1; }
           echo "registry bytes equal the accepted candidate"
 
       # ── 9. The receipt ──────────────────────────────────────────────────
       - name: Emit the release receipt
+        env:
+          SOURCE_SHA: ${{ steps.select.outputs.source_sha }}
+          PUBLISHED_DIGEST: ${{ steps.publish.outputs.digest }}
+          PUBLISHED_REFERENCE: ${{ steps.publish.outputs.reference }}
+          ACCEPTED_CONFIG_DIGEST: ${{ steps.identity.outputs.config_digest }}
+          ACCEPTED_ROOTFS_CHAIN: ${{ steps.identity.outputs.rootfs_chain }}
+          ACCEPTED_LOCK_DIGEST: ${{ steps.identity.outputs.lock_digest }}
+          ACCEPTED_DOCKERFILE_DIGEST: ${{ steps.identity.outputs.dockerfile_digest }}
+          REGISTRY_CONFIG_DIGEST: ${{ steps.readback.outputs.registry_config }}
         run: |
           set -euo pipefail
           jq -n \
-            --arg source_revision "${{ steps.select.outputs.source_sha }}" \
+            --arg source_revision "${SOURCE_SHA}" \
             --arg ci_run_id "${CI_RUN_ID}" \
             --arg release_run_id "${GITHUB_RUN_ID}" \
-            --arg registry_digest "${{ steps.publish.outputs.digest }}" \
-            --arg reference "${{ steps.publish.outputs.reference }}" \
-            --arg config_digest "${{ steps.identity.outputs.config_digest }}" \
-            --arg rootfs_chain "${{ steps.identity.outputs.rootfs_chain }}" \
-            --arg lock_digest "${{ steps.identity.outputs.lock_digest }}" \
-            --arg dockerfile_digest "${{ steps.identity.outputs.dockerfile_digest }}" \
-            --arg registry_config_digest "${{ steps.readback.outputs.registry_config }}" \
+            --arg registry_digest "${PUBLISHED_DIGEST}" \
+            --arg reference "${PUBLISHED_REFERENCE}" \
+            --arg config_digest "${ACCEPTED_CONFIG_DIGEST}" \
+            --arg rootfs_chain "${ACCEPTED_ROOTFS_CHAIN}" \
+            --arg lock_digest "${ACCEPTED_LOCK_DIGEST}" \
+            --arg dockerfile_digest "${ACCEPTED_DOCKERFILE_DIGEST}" \
+            --arg registry_config_digest "${REGISTRY_CONFIG_DIGEST}" \
             --argjson distributions "$(cat candidate-distributions.json)" \
             --arg accepted "candidate accepted before publication" \
             '{contract:"dotmac-candidate-release-receipt/1", accepted:$accepted,
@@ -291,6 +390,17 @@ jobs:
               dockerfile_digest:$dockerfile_digest,
               distributions:$distributions}' \
             > release-receipt.json
+          if [ "$IMAGE_TARGET" = gate0-role ]; then
+            jq --arg repository "$IMAGE_REPOSITORY" \
+              --arg profile_digest "sha256:$(sha256sum role-profile.json | cut -d' ' -f1)" \
+              --arg smoke_digest "sha256:$(sha256sum role-smoke.json | cut -d' ' -f1)" \
+              --arg native_network_digest "sha256:$(sha256sum role-native-network.json | cut -d' ' -f1)" \
+              '. + {contract:"dotmac-gate0-role-release-receipt/1", target:"gate0-role",
+                repository:$repository, profile_digest:$profile_digest,
+                smoke_digest:$smoke_digest, native_network_digest:$native_network_digest, live_readiness:false}' \
+              release-receipt.json > role-release-receipt.json
+            mv role-release-receipt.json release-receipt.json
+          fi
           cat release-receipt.json
           {
             echo '### Accepted before publication'
@@ -302,9 +412,31 @@ jobs:
       - name: Upload the receipt and the candidate identity
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-receipt-${{ steps.select.outputs.source_sha }}
+          name: ${{ env.RECEIPT_PREFIX }}-${{ steps.select.outputs.source_sha }}
           path: |
             release-receipt.json
             candidate-identity.json
             candidate-distributions.json
+            role-profile.json
+            role-smoke.json
+            role-native-network.json
           retention-days: 90
+
+  gate0-role:
+    # This job never participates in automatic app publication.
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.image_target == 'gate0-role'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      IMAGE_TARGET: gate0-role
+      IMAGE_REPOSITORY: ghcr.io/michaelayoade/dotmac_vendor_control_plane_gate0_role
+      RECEIPT_PREFIX: gate0-role-release-receipt
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+      reference: ${{ steps.publish.outputs.reference }}
+      source_sha: ${{ steps.select.outputs.source_sha }}
+    steps: *accepted_candidate_steps

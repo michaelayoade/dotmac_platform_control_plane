@@ -205,7 +205,9 @@ def find_receipt(db: Session, command_id: str) -> RecordedIssuerReceipt | None:
     return None if row is None else RecordedIssuerReceipt._from_row(row)
 
 
-def issued_authorization_refs(db: Session, plan_id: UUID) -> tuple[str, ...]:
+def issued_authorization_refs(
+    db: Session, plan_id: UUID, *, max_count: int | None = None
+) -> tuple[str, ...]:
     """The `control_ref` of every `issue_authorization` receipt for this plan,
     oldest first (`recorded_at`, with `id` as a tiebreaker for rows recorded
     in the same instant, so two concurrent drains lock authorizations in the
@@ -224,7 +226,11 @@ def issued_authorization_refs(db: Session, plan_id: UUID) -> tuple[str, ...]:
     revocation an active, converging step rather than the only backstop, not
     the only thing standing between a withdrawn plan and a live authorization.
     """
-    rows = db.execute(
+    if max_count is not None and (
+        type(max_count) is not int or not 1 <= max_count <= 64
+    ):
+        raise ValueError("issuer_receipt_read_bound_refused")
+    query = (
         select(IssuerCommandReceipt.control_ref)
         .where(
             IssuerCommandReceipt.plan_id == plan_id,
@@ -232,7 +238,9 @@ def issued_authorization_refs(db: Session, plan_id: UUID) -> tuple[str, ...]:
         )
         .order_by(IssuerCommandReceipt.recorded_at, IssuerCommandReceipt.id)
     )
-    return tuple(row[0] for row in rows)
+    if max_count is not None:
+        query = query.limit(max_count)
+    return tuple(row[0] for row in db.execute(query))
 
 
 def record_receipt(

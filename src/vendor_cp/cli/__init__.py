@@ -560,10 +560,89 @@ def build_parser() -> _Parser:
 
     gate0 = groups.add_parser("gate0", help="finite protected service adapters")
     gate0_sub = gate0.add_subparsers(dest="name", parser_class=_Parser)
+    _command(
+        gate0_sub,
+        "gate0",
+        "collection-check-activation",
+        "check selected collection input in this image",
+    )
+    _command(
+        gate0_sub,
+        "gate0",
+        "collection-check-retirement",
+        "check original collection retirement input",
+    )
+    _command(
+        gate0_sub,
+        "gate0",
+        "native-metadata-observe",
+        "observe one isolated metadata-only native fixture",
+    )
+    _command(
+        gate0_sub,
+        "gate0",
+        "native-url-presence",
+        "inspect only the fixed job URL environment name",
+    )
     _command(gate0_sub, "gate0", "issuer-run", "run one finite issuer window")
+    _command(gate0_sub, "gate0", "collect-e", "collect private finite E evidence")
+    _command(gate0_sub, "gate0", "finalize-e", "prepare encrypted private E evidence")
+    _command(
+        gate0_sub, "gate0", "await-e-transfer", "verify original encrypted transfer"
+    )
+    _command(gate0_sub, "gate0", "prepare-e-draft", "prepare selected E draft release")
+    _command(gate0_sub, "gate0", "publish-e", "publish selected reviewed E evidence")
+    _command(
+        gate0_sub,
+        "gate0",
+        "public-jit-runner-credential",
+        "exec selected public JIT runner",
+    )
+    _command(gate0_sub, "gate0", "verify-e-published", "verify completed E publication")
+    _command(
+        gate0_sub,
+        "gate0",
+        "verify-e-b-archive",
+        "verify the selected B custody archive",
+    )
+    _command(
+        gate0_sub, "gate0", "bootstrap-collector", "launch the fixed isolated collector"
+    )
+    _command(
+        gate0_sub,
+        "gate0",
+        "collect-e-credential",
+        "collect with the fixed private credential",
+    )
+    _command(gate0_sub, "gate0", "handoff-holder", "forward fixed root evidence")
+    _command(gate0_sub, "gate0", "lifecycle-run", "run the fixed A9 root lifecycle")
+    _command(
+        gate0_sub,
+        "gate0",
+        "lifecycle-retire-jit",
+        "retire the owned A9 runner invocation",
+    )
+    _command(
+        gate0_sub,
+        "gate0",
+        "jit-runner-credential",
+        "start the fixed credential-fed runner",
+    )
+    _command(
+        gate0_sub,
+        "gate0",
+        "courier-original-oidc",
+        "deliver the original job credential",
+    )
+    _command(gate0_sub, "gate0", "handoff-receiver", "receive fixed root evidence")
     _command(
         gate0_sub, "gate0", "attester-session", "serve one fixed SSH proof exchange"
     )
+    _command(
+        gate0_sub, "gate0", "capture-install", "receive one protected capture batch"
+    )
+    _command(gate0_sub, "gate0", "capture-send", "send the parent's captured batch")
+    _command(gate0_sub, "gate0", "supervise", "run one fixed installed role window")
 
     # ── diagnose ───────────────────────────────────────────────────────────
     diagnose_group = groups.add_parser("diagnose", help="questions about this process")
@@ -632,7 +711,162 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command not in by_command():
         parser.error(f"{command!r} has no declared owner")
 
-    if command in {"gate0 issuer-run", "gate0 attester-session"}:
+    if command in {
+        "gate0 collection-check-activation",
+        "gate0 collection-check-retirement",
+    }:
+        try:
+            from vendor_cp.deployment.gate0_collection_activation import (
+                run_installed_collection_check_activation,
+                run_installed_collection_check_retirement,
+            )
+
+            if command == "gate0 collection-check-activation":
+                return run_installed_collection_check_activation()
+            return run_installed_collection_check_retirement()
+        except Exception:
+            print("GATE0_COLLECTION_UNAVAILABLE", file=sys.stderr)
+            return int(ExitCode.REFUSED)
+
+    if command in {
+        "gate0 finalize-e",
+        "gate0 await-e-transfer",
+        "gate0 prepare-e-draft",
+        "gate0 publish-e",
+        "gate0 verify-e-b-archive",
+        "gate0 verify-e-published",
+    }:
+        try:
+            if command == "gate0 await-e-transfer":
+                from vendor_cp.deployment.gate0_e_transfer import (
+                    run_installed_await_e_transfer,
+                )
+
+                return run_installed_await_e_transfer()
+            if command == "gate0 prepare-e-draft":
+                from vendor_cp.deployment.gate0_e_publication import (
+                    run_installed_prepare_e_draft,
+                )
+
+                return run_installed_prepare_e_draft()
+            if command == "gate0 publish-e":
+                from vendor_cp.deployment.gate0_e_publication import (
+                    run_installed_publish_e,
+                )
+
+                return run_installed_publish_e()
+            if command == "gate0 verify-e-published":
+                from vendor_cp.deployment.gate0_e_final_readback import (
+                    run_installed_verify_e_published,
+                )
+
+                return run_installed_verify_e_published()
+            if command == "gate0 finalize-e":
+                from vendor_cp.deployment.gate0_e_writer import run_installed_prepare_e
+
+                return run_installed_prepare_e()
+            from vendor_cp.deployment.gate0_e_b_holder import (
+                run_installed_verify_e_b_archive,
+            )
+
+            return run_installed_verify_e_b_archive()
+        except Exception:
+            print("GATE0_E_UNAVAILABLE", file=sys.stderr)
+            return 3
+
+    if command in {"gate0 native-metadata-observe", "gate0 native-url-presence"}:
+        try:
+            from vendor_cp.deployment.gate0_a9_native_fixture import (
+                run_installed_metadata_observer,
+                run_installed_url_presence_probe,
+            )
+
+            if command == "gate0 native-metadata-observe":
+                return run_installed_metadata_observer()
+            return run_installed_url_presence_probe()
+        except Exception:
+            return 4
+
+    if command == "gate0 public-jit-runner-credential":
+        try:
+            from vendor_cp.deployment.gate0_runner_lifecycle_courier import (
+                run_installed_public_jit_runner,
+            )
+
+            return run_installed_public_jit_runner()
+        except Exception:
+            return 3
+
+    if command == "gate0 collect-e":
+        from vendor_cp.cli.commands import gate0_collect_e
+
+        return gate0_collect_e(args)
+
+    if command in {
+        "gate0 bootstrap-collector",
+        "gate0 collect-e-credential",
+        "gate0 lifecycle-run",
+        "gate0 lifecycle-retire-jit",
+        "gate0 jit-runner-credential",
+        "gate0 courier-original-oidc",
+    }:
+        try:
+            if command == "gate0 lifecycle-run":
+                from vendor_cp.deployment.gate0_runner_supervisor import (
+                    run_installed_lifecycle,
+                )
+
+                return run_installed_lifecycle()
+            if command == "gate0 lifecycle-retire-jit":
+                from vendor_cp.deployment.gate0_runner_supervisor import (
+                    run_installed_lifecycle_retirement,
+                )
+
+                return run_installed_lifecycle_retirement()
+            if command in {
+                "gate0 jit-runner-credential",
+                "gate0 courier-original-oidc",
+            }:
+                from vendor_cp.deployment.gate0_runner_lifecycle_courier import (
+                    run_installed_jit_runner,
+                    run_installed_job_courier,
+                )
+
+                if command == "gate0 jit-runner-credential":
+                    return run_installed_jit_runner()
+                return run_installed_job_courier()
+            if command == "gate0 bootstrap-collector":
+                from vendor_cp.deployment.gate0_runner_bootstrap import (
+                    run_installed_bootstrap,
+                )
+
+                return run_installed_bootstrap()
+            from vendor_cp.deployment.gate0_runner_credential import (
+                run_installed_credential_collection,
+            )
+
+            return run_installed_credential_collection()
+        except Exception:
+            print("GATE0_BOOTSTRAP_UNAVAILABLE", file=sys.stderr)
+            return int(ExitCode.REFUSED)
+
+    if command in {"gate0 handoff-holder", "gate0 handoff-receiver"}:
+        try:
+            from vendor_cp.deployment import gate0_runner_handoff
+        except Exception:
+            print("GATE0_HANDOFF_REFUSED", file=sys.stderr)
+            return int(ExitCode.REFUSED)
+        if command == "gate0 handoff-holder":
+            return gate0_runner_handoff.run_installed_handoff_holder()
+        return gate0_runner_handoff.run_installed_handoff_receiver()
+
+    if command in {
+        "gate0 issuer-run",
+        "gate0 attester-session",
+        "gate0 capture-install",
+        "gate0 capture-send",
+        "gate0 supervise",
+    }:
         # These owners speak a closed binary stdio protocol. Generic CLI result
         # rendering would corrupt the service's stdout stream.
         # Runtime/custody owners load only for the selected service. Building
@@ -647,8 +881,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return int(ExitCode.REFUSED)
 
         if command == "gate0 issuer-run":
-            return gate0_services.issuer_run()
-        return gate0_services.attester_session()
+            return gate0_services.run_installed_issuer()
+        if command == "gate0 attester-session":
+            return gate0_services.run_installed_attester()
+        if command == "gate0 capture-install":
+            return gate0_services.run_installed_capture_receiver()
+        if command == "gate0 capture-send":
+            return gate0_services.run_installed_capture_sender()
+        return gate0_services.run_installed_supervisor()
 
     if command == "deployment candidate-material-probe":
         from vendor_cp.deployment.candidate_materials import (

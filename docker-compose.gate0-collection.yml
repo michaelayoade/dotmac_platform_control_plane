@@ -1,0 +1,14 @@
+# Source preparation only. The existing deployment executor must explicitly
+# select this overlay after checking its protected, accepted finite selection.
+# No profile is selected by default and this file grants no execution authority.
+services:
+  app:
+    environment:
+      VENDOR_DEPLOYMENT_PROFILE: ${VENDOR_GATE0_COLLECTION_PROFILE:?Set the exact accepted collection profile from the protected selection}
+    volumes:
+      - type: bind
+        source: /run/dotmac-gate0-collection/installation.json
+        target: /run/dotmac-gate0-collection/installation.json
+        read_only: true
+        bind:
+          create_host_path: false

@@ -19,6 +19,7 @@ def window_document():
     fingerprint = "SHA256:" + base64.b64encode(bytes(32)).decode().rstrip("=")
     return {
         "schema": "Gate0IssuerWindow.v1",
+        "case_kind": "consume_replay",
         "window_id": "synthetic-window",
         "not_before": (now - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
         "expires_at": (now + timedelta(seconds=120)).isoformat().replace("+00:00", "Z"),
@@ -657,3 +658,345 @@ def test_detached_admission_and_proof_preserve_original_freshness(signed_binding
     assert driver._proof(admitted) == "synthetic-proof"
     assert seen[0] is not admitted
     assert seen[0].window_freshness is original.window_freshness
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["future-wall", "future-monotonic", "expired", "too-long", "nonfinite", "naive"],
+)
+def test_original_reader_clock_origin_is_local_bounded_and_not_renewable(invalid):
+    import math
+    import time
+
+    from vendor_cp.deployment.gate0_window import WindowClockOrigin
+
+    now, origin = datetime.now(UTC), time.monotonic()
+    started, mapped, deadline = now, origin, origin + 120
+    if invalid == "future-wall":
+        started += timedelta(seconds=1)
+    elif invalid == "future-monotonic":
+        mapped += 10
+    elif invalid == "expired":
+        deadline = origin - 1
+    elif invalid == "too-long":
+        deadline = origin + 301
+    elif invalid == "nonfinite":
+        deadline = math.inf
+    else:
+        started = now.replace(tzinfo=None)
+    with pytest.raises(ProviderRefused):
+        WindowClockOrigin(started, mapped, deadline)
+
+
+def test_owner_reader_uses_original_launch_mapping_before_first_read(monkeypatch):
+    import time
+
+    from dotmac_kernel.session_runtime import DatabaseRuntime
+
+    from vendor_cp.deployment.gate0_window import OwnerWindowReader, WindowClockOrigin
+
+    # No engine or connection is created. This type-only synthetic fixture
+    # verifies initialization; real owner reads remain in the migration suite.
+    runtime = object.__new__(DatabaseRuntime)
+    now, origin = datetime.now(UTC), time.monotonic()
+    local = WindowClockOrigin(now - timedelta(seconds=30), origin - 30, origin + 90)
+    reader = OwnerWindowReader(
+        runtime=runtime,
+        rehearsal_target_id=UUID(int=2),
+        issuer_identity=object(),
+        authorization_verifier=object(),
+        expires_at=now + timedelta(seconds=60),
+        database_io_qualified=True,
+        clock_origin=local,
+    )
+    assert reader._started == local.started_at
+    assert reader._origin == local.monotonic_origin
+    assert reader._deadline == min(local.deadline, local.monotonic_origin + 90)
+    assert reader._freshness == {}
+    with pytest.raises(ProviderRefused):
+        OwnerWindowReader(
+            runtime=runtime,
+            rehearsal_target_id=UUID(int=2),
+            issuer_identity=object(),
+            authorization_verifier=object(),
+            expires_at=now + timedelta(seconds=280),
+            database_io_qualified=True,
+            clock_origin=local,
+        )  # Original launch duration, not remaining duration, exceeds 300.
+
+
+@pytest.mark.parametrize("change", ["none", "token", "run", "expiry"])
+def test_withdrawal_only_survives_authenticated_exact_original_window(
+    signed_binding, monkeypatch, change
+):
+    from types import SimpleNamespace
+
+    from vendor_cp.deployment.gate0_window import (
+        AuthenticatedApprovalWithdrawal,
+        OwnerWindowWithdrawal,
+    )
+    from vendor_cp.deployment.gate0_workload_admission import OwnerWorkloadAdmission
+
+    binding, *_ = signed_binding
+    expected = binding.expectation
+    denial = OwnerWindowWithdrawal(
+        window=binding.window,
+        plan_id=UUID(expected.operation.plan_id),
+        request_id=expected.approval_request_id,
+        content_digest=expected.operation.plan_digest,
+        phase="consume",
+        freshness=expected.window_freshness,
+    )
+    events = []
+
+    def read(*args):
+        events.append("read")
+        raise denial
+
+    admission = object.__new__(OwnerWorkloadAdmission)
+    admission._attempts = 0
+    admission._transport = object()
+    admission._reader = SimpleNamespace(read=read)
+    admission._origin = expected.window_freshness.origin
+    admission._started_at = datetime.now(UTC)
+    admission._deadline = expected.window_freshness.deadline
+    monkeypatch.setattr(admission, "_open", lambda: None)
+    claims = dict(binding.window.document["github"])
+    now = int(datetime.now(UTC).timestamp())
+    claims.update(iat=now, nbf=now, exp=now + 30)
+    if change == "run":
+        claims["run_id"] = "999"
+    if change == "expiry":
+        claims["exp"] = now - 1
+
+    def verified(token):
+        events.append("jwt")
+        if change == "token":
+            raise ProviderRefused()
+        return claims
+
+    monkeypatch.setattr(admission, "_claims", verified)
+    if change == "none":
+        with pytest.raises(AuthenticatedApprovalWithdrawal) as caught:
+            admission.admit("synthetic", "consume", denial.plan_id, b"synthetic")
+        assert caught.value.denial is denial
+        assert events == ["jwt", "read"]
+    else:
+        with pytest.raises(ProviderRefused):
+            admission.admit("synthetic", "consume", denial.plan_id, b"synthetic")
+        assert admission._transport is None
+        assert events == (["jwt"] if change == "token" else ["jwt", "read"])
+
+
+@pytest.mark.parametrize("cleanup", ["none", "rollback", "close"])
+def test_owner_withdrawal_read_requires_confirmed_database_cleanup(
+    mutation_case, monkeypatch, cleanup
+):
+    import time
+    from types import SimpleNamespace
+
+    import vendor_cp.approvals.adapter as approvals
+    import vendor_cp.deployment.approval_barrier as barrier
+    from vendor_cp.deployment.gate0_window import (
+        OwnerWindowReader,
+        OwnerWindowWithdrawal,
+    )
+    from vendor_cp.deployment.protected_rehearsal_issuer import (
+        SUBJECT_TYPE,
+        issuer_approval_subject,
+    )
+
+    _, plan, expected, _, document = mutation_case
+    events = []
+
+    class SyntheticOwnerDenial(Exception):
+        code = approvals.ApprovalHoldRefusal.WITHDRAWN
+
+    def withdrawn(*args, **kwargs):
+        raise SyntheticOwnerDenial("sensitive-owner-detail")
+
+    monkeypatch.setattr(approvals, "ApprovalNotHeld", SyntheticOwnerDenial)
+    monkeypatch.setattr(barrier, "held_transition", withdrawn)
+    monkeypatch.setattr(
+        approvals,
+        "request_identity_evidence",
+        lambda db, selected: SimpleNamespace(
+            subject_type=SUBJECT_TYPE,
+            subject_id=issuer_approval_subject(plan),
+            content_digest=plan.plan_digest,
+            policy_code=plan.approval_policy_code,
+            policy_version=plan.approval_policy_version,
+        ),
+    )
+
+    def finish(name):
+        events.append(name)
+        if cleanup == name:
+            raise RuntimeError("sensitive-cleanup-detail")
+
+    db = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
+        execute=lambda *args: None,
+        rollback=lambda: finish("rollback"),
+        close=lambda: finish("close"),
+    )
+    reader = object.__new__(OwnerWindowReader)
+    reader._runtime = SimpleNamespace(platform_session_factory=lambda: db)
+    reader._target_id = expected.target_id
+    reader._origin = time.monotonic()
+    reader._started = datetime.now(UTC)
+    reader._expires = datetime.fromisoformat(
+        document["expires_at"].replace("Z", "+00:00")
+    )
+    reader._deadline = reader._origin + 120
+    reader._freshness = {}
+    if cleanup == "none":
+        with pytest.raises(OwnerWindowWithdrawal) as caught:
+            reader.read("consume", UUID(expected.operation.plan_id), b"synthetic")
+        assert caught.value.request_id == expected.approval_request_id
+        assert caught.value.content_digest == plan.plan_digest
+    else:
+        with pytest.raises(ProviderRefused) as caught:
+            reader.read("consume", UUID(expected.operation.plan_id), b"synthetic")
+        assert type(caught.value) is ProviderRefused
+        assert "sensitive" not in str(caught.value)
+    assert events == ["rollback", "close"]
+
+
+def test_actual_worker_frames_one_typed_terminal_and_cannot_rearm(
+    signed_binding, monkeypatch
+):
+    import socket
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from vendor_cp.deployment import gate0_services as services
+    from vendor_cp.deployment.gate0_collection import IssuerOutcome, OutcomeKind
+    from vendor_cp.deployment.gate0_framing import FramedChannel, ServiceRefused
+    from vendor_cp.deployment.gate0_observation import encode
+    from vendor_cp.deployment.gate0_window import (
+        AuthenticatedApprovalWithdrawal,
+        OwnerWindowWithdrawal,
+    )
+
+    binding, *_ = signed_binding
+    expected = binding.expectation
+    denial = OwnerWindowWithdrawal(
+        window=binding.window,
+        plan_id=UUID(expected.operation.plan_id),
+        request_id=expected.approval_request_id,
+        content_digest=expected.operation.plan_digest,
+        phase="consume",
+        freshness=expected.window_freshness,
+    )
+
+    def consume(*args):
+        raise AuthenticatedApprovalWithdrawal(denial)
+
+    monkeypatch.setattr(
+        services,
+        "assemble_gate0_composition",
+        lambda **kwargs: SimpleNamespace(consume=consume),
+    )
+    worker = services.IssuerWorker(
+        SimpleNamespace(
+            database_qualified=True,
+            actor_ref="synthetic",
+            sessions=lambda: None,
+            require_frozen_window=False,
+            custody=None,
+            admission=None,
+            verifier=SimpleNamespace(_require_open=lambda: None),
+            signer=None,
+            authorization_verifier=None,
+            authorization_ttl=None,
+        )
+    )
+    left, right = socket.socketpair()
+    try:
+        deadline = time.monotonic() + 5
+        client = FramedChannel(left.fileno(), left.fileno(), deadline=deadline)
+        server = FramedChannel(right.fileno(), right.fileno(), deadline=deadline)
+        request = {
+            "schema": "Gate0IssuerSubmission.v1",
+            "operation": "consume",
+            "plan_id": expected.operation.plan_id,
+            "authorization": encode(b"synthetic"),
+            "proof": {},
+            "workload_token": "sensitive-synthetic-token",
+        }
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            serving = pool.submit(worker.run, server)
+            client.send(request)
+            client.send(request)  # Never read after the first terminal refusal.
+            outcome = IssuerOutcome.parse(client.receive())
+            assert outcome.kind is OutcomeKind.OWNER_REFUSED
+            assert outcome.ordinal == 1 and outcome.owner_namespace == "approvals"
+            assert len(worker.outcomes) == 1
+            with pytest.raises(services.ServiceOwnerRefused):
+                serving.result(timeout=5)
+        with pytest.raises(ServiceRefused):
+            worker.run(server)
+    finally:
+        left.close()
+        right.close()
+
+
+@pytest.mark.parametrize("case_kind", ["consume_replay", "withdrawal_later_use"])
+def test_closed_case_kind_is_bound_to_canonical_owner_window(
+    window_document, case_kind
+):
+    value = dict(window_document, case_kind=case_kind)
+    parsed = FrozenIssuerWindow.parse(canonical(value))
+    assert parsed.document["case_kind"] == case_kind
+    other = dict(
+        value,
+        case_kind="withdrawal_later_use"
+        if case_kind == "consume_replay"
+        else "consume_replay",
+    )
+    assert FrozenIssuerWindow.parse(canonical(other)).digest != parsed.digest
+
+
+@pytest.mark.parametrize(
+    "case_kind",
+    [
+        None,
+        True,
+        1,
+        [],
+        {},
+        "A",
+        "consume",
+        " consume_replay",
+        "consume_replay ",
+        "WITHDRAWAL_LATER_USE",
+    ],
+)
+def test_case_kind_refuses_unknown_values_and_type_coercion(window_document, case_kind):
+    with pytest.raises(ProviderRefused):
+        FrozenIssuerWindow.parse(canonical(dict(window_document, case_kind=case_kind)))
+
+
+def test_case_kind_is_required_in_closed_window(window_document):
+    value = dict(window_document)
+    del value["case_kind"]
+    with pytest.raises(ProviderRefused):
+        FrozenIssuerWindow.parse(canonical(value))
+
+
+def test_changing_only_case_kind_invalidates_held_window_before_mutation(mutation_case):
+    from vendor_cp.deployment.gate0_composition import CompositionRefused
+
+    driver, plan, expected, events, document = mutation_case
+    plan.snapshot["spec"]["gate0_window_v1"] = dict(
+        document, case_kind="withdrawal_later_use"
+    )
+    with pytest.raises(CompositionRefused):
+        driver._mutate(
+            expected,
+            None,
+            lambda db: pytest.fail("changed case reached owner mutation"),
+        )
+    assert events == ["rollback", "close"]

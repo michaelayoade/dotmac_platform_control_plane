@@ -13,10 +13,13 @@ import re
 import secrets
 import stat
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from vendor_cp.deployment.gate0_role_custody import RoleCustody
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import (
@@ -28,8 +31,11 @@ from vendor_cp.deployment.gate0_attester import (
     AttesterProofProducer,
     ssh_public_fingerprint,
 )
-from vendor_cp.deployment.gate0_composition import AdmissionExpectation
-from vendor_cp.deployment.gate0_framing import FramedChannel, ServiceRefused
+from vendor_cp.deployment.gate0_composition import (
+    AdmissionExpectation,
+    RequestAuthenticationFreshness,
+)
+from vendor_cp.deployment.gate0_framing import FramedChannel, ServiceRefused, canonical
 from vendor_cp.deployment.gate0_observation import (
     SignedSessionObservation,
     bundle_document,
@@ -146,6 +152,19 @@ class SessionAdmission(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class AttesterSessionCompletion:
+    """Local retained identity of the actual complete signed bundle write."""
+
+    bundle_digest: str
+    invocation_id: str
+    authentication_freshness: RequestAuthenticationFreshness | None = None
+
+    def require_open(self) -> None:
+        if self.authentication_freshness is not None:
+            self.authentication_freshness.require_open()
+
+
+@dataclass(frozen=True, slots=True)
 class AttesterSession:
     admission: SessionAdmission
     ca_public_key: bytes
@@ -155,9 +174,17 @@ class AttesterSession:
     sign: Callable[[bytes], bytes]
     expires_at: datetime
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
+    custody: RoleCustody | None = None
+    required_phase: Literal["issue", "consume"] | None = None
+    required_plan_id: UUID | None = None
+    completion: AttesterSessionCompletion | None = field(
+        default=None, init=False, compare=False
+    )
 
     def run(self, channel: FramedChannel, authenticated_certificate: bytes) -> None:
         """Exactly two input frames, one active challenge, then terminal output."""
+        if self.completion is not None:
+            raise ServiceRefused()
         started = self.now()
         invocation_id = secrets.token_hex(32)
         request = channel.receive()
@@ -175,6 +202,11 @@ class AttesterSession:
             phase = "consume"
         else:
             raise ServiceRefused()
+        plan_id = UUID(str(request["plan_id"]))
+        if (self.required_phase is not None and phase != self.required_phase) or (
+            self.required_plan_id is not None and plan_id != self.required_plan_id
+        ):
+            raise ServiceRefused()
         token = request["workload_token"]
         if not isinstance(token, str) or not 0 < len(token) <= 16384:
             raise ServiceRefused()
@@ -186,12 +218,14 @@ class AttesterSession:
         if (phase == "issue") != (authorization is None):
             raise ServiceRefused()
         try:
-            expected = self.admission.admit(
-                token, phase, UUID(str(request["plan_id"])), authorization
-            )
+            expected = self.admission.admit(token, phase, plan_id, authorization)
         finally:
             request.pop("workload_token", None)
             del token
+        authentication = expected.authentication_freshness
+        if authentication is not None:
+            authentication.require_open()
+            channel.deadline = min(channel.deadline, authentication.deadline)
         operation = expected.operation
         certificate = load_ssh_public_identity(authenticated_certificate)
         if not isinstance(certificate, SSHCertificate):
@@ -209,6 +243,8 @@ class AttesterSession:
         ):
             raise ServiceRefused()
         channel.require_open()
+        if self.custody is not None:
+            self.custody.refresh(phase="challenge")
         producer = AttesterProofProducer(
             admitted=AdmittedOperation(**asdict(operation)),
             ca_public_key=self.ca_public_key,
@@ -217,7 +253,13 @@ class AttesterSession:
             attester_public_key=self.public_key,
             trust_state=self.trust_state,
             sign=self.sign,
-            expires_at=min(self.expires_at, started + timedelta(seconds=30)),
+            expires_at=min(
+                self.expires_at,
+                started + timedelta(seconds=30),
+                self.expires_at
+                if authentication is None
+                else authentication.expires_at,
+            ),
             now=self.now,
         )
         challenge = producer.begin_challenge(authenticated_certificate)
@@ -240,6 +282,10 @@ class AttesterSession:
         # frames and bounds a peer that never closes under the same deadline.
         if channel.receive(allow_eof=True) is not None:
             raise ServiceRefused()
+        if self.custody is not None:
+            self.custody.refresh(phase="complete")
+        if authentication is not None:
+            authentication.require_open()
         proof = producer.complete_challenge(
             challenge.challenge_id, decode(response["sshsig"], 16384)
         )
@@ -256,6 +302,18 @@ class AttesterSession:
         signature = self.sign(message)
         Ed25519PublicKey.from_public_bytes(self.public_key).verify(signature, message)
         producer._clock()
-        channel.send(
-            bundle_document(proof, SignedSessionObservation(message, signature))
+        if authentication is not None:
+            authentication.require_open()
+        bundle = bundle_document(proof, SignedSessionObservation(message, signature))
+        raw_bundle = canonical(bundle)
+        channel.send(bundle)
+        if authentication is not None:
+            authentication.require_open()
+        channel.require_open()
+        object.__setattr__(
+            self,
+            "completion",
+            AttesterSessionCompletion(
+                digest(raw_bundle), invocation_id, authentication
+            ),
         )

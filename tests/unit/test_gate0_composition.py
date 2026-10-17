@@ -324,6 +324,65 @@ def test_enclosing_monotonic_deadline_cannot_reset_at_late_registration(
         registry._register(packet, op)
 
 
+def _window_bounded_registry(registry_fixture, deadline):
+    existing, _, wall, elapsed, *_ = registry_fixture
+    return BoundedHarnessVerifier(
+        key_id=existing._key_id,
+        public_key=existing._public_key,
+        trust_state=existing._trust,
+        expires_at=wall[0] + timedelta(seconds=120),
+        now=lambda: wall[0],
+        monotonic_clock=lambda: elapsed[0],
+        deadline=deadline,
+    )
+
+
+@pytest.mark.parametrize("deadline", [False, 0.0, 100.0, float("inf"), float("nan")])
+def test_supplied_verifier_deadline_must_be_finite_and_future(
+    registry_fixture, deadline
+):
+    with pytest.raises(ProofRegistrationRefused):
+        _window_bounded_registry(registry_fixture, deadline)
+
+
+def test_original_window_deadline_caps_verifier_without_wall_remapping(
+    registry_fixture,
+):
+    _, _, wall, elapsed, *_ = registry_fixture
+    expires = wall[0] + timedelta(seconds=120)
+    registry = _window_bounded_registry(registry_fixture, 150.0)
+    registry.require_window(expires_at=expires, deadline=150.0)
+    elapsed[0] = 150.0
+    # The wall clock is still open, but equality at the original monotonic cap
+    # refuses. Calling the public check cannot create a new window.
+    with pytest.raises(ProofRegistrationRefused):
+        registry.require_window(expires_at=expires, deadline=150.0)
+
+
+def test_supplied_later_deadline_cannot_extend_existing_verifier_window(
+    registry_fixture,
+):
+    _, _, wall, elapsed, *_ = registry_fixture
+    expires = wall[0] + timedelta(seconds=120)
+    registry = _window_bounded_registry(registry_fixture, 500.0)
+    registry.require_window(expires_at=expires, deadline=220.0)
+    elapsed[0] = 220.0
+    with pytest.raises(ProofRegistrationRefused):
+        registry.require_window(expires_at=expires, deadline=500.0)
+
+
+@pytest.mark.parametrize("short_wall", [False, True])
+def test_window_check_rejects_a_verifier_with_looser_bounds(
+    registry_fixture, short_wall
+):
+    registry, _, wall, _, *_ = registry_fixture
+    with pytest.raises(ProofRegistrationRefused):
+        registry.require_window(
+            expires_at=wall[0] + timedelta(seconds=119 if short_wall else 120),
+            deadline=220.0 if short_wall else 219.0,
+        )
+
+
 def test_unconfigured_admission_refuses_before_any_database(registry_fixture):
     registry, *_ = registry_fixture
     calls = []
@@ -485,6 +544,13 @@ def driver_fixture(registry_fixture, monkeypatch):
         admission=lambda phase, plan_id: state["expected"],
         proof_resolver=lambda _: state["proof"],
         verifier=registry,
+    )
+    monkeypatch.setattr(
+        driver,
+        "_issue_receipt",
+        lambda invocation, expected, committed: replace(
+            committed, issuer_receipt=b"synthetic-owner-receipt"
+        ),
     )
     state.update(
         driver=driver,
@@ -1014,3 +1080,98 @@ def test_consume_entrypoint_rejects_authentic_issue_proof(
         state["driver"].consume(UUID(int=1), document)
     assert calls == ["proof"] and state["driver"]._verifier._retained_count == 0
     assert all(db.closed and db.commits == 0 for db in state["sessions"])
+
+
+def test_public_registered_export_is_detached_and_never_exposes_leaf(registry_fixture):
+    from dataclasses import FrozenInstanceError, fields
+
+    registry, proof, *_ = registry_fixture
+    operation, produced, owner, signature = proof()
+    with pytest.raises(ProofRegistrationRefused):
+        registry.export_registered(digest(owner))
+    registered = registry._register(produced, operation)
+    exported = registry.export_registered(registered)
+    assert exported.evidence_digest == registered
+    assert exported.owner_envelope == produced.control_document
+    assert exported.owner_bytes == owner
+    assert exported.owner_signature == signature
+    assert exported.context == produced.context
+    assert exported.companion == produced.companion
+    assert exported.transcript == produced.public_proof_transcript
+    assert "leaf" not in {field.name for field in fields(exported)}
+    with pytest.raises(FrozenInstanceError):
+        exported.transcript = b"forged"
+    assert registry.export_registered(registered) == exported
+
+
+@pytest.mark.parametrize("failure", ["none", "fingerprint", "close", "open"])
+def test_committed_issuance_receipt_readback_cleanup_is_required(
+    driver_fixture, monkeypatch, failure
+):
+    from types import SimpleNamespace
+
+    from vendor_cp.deployment import issuer_receipts
+    from vendor_cp.deployment.gate0_composition import (
+        CompositionIncomplete,
+        PhaseResult,
+    )
+    from vendor_cp.deployment.rehearsal_issuer_seam import RehearsalIssuerInvocation
+
+    state = driver_fixture
+    expected = state["expected"]
+    command = RehearsalIssuerCommand(
+        "synthetic-receipt-command", UUID(expected.operation.plan_id)
+    )
+    envelope = json.loads(state["proof"].control_document)
+    invocation = RehearsalIssuerInvocation(command, envelope)
+    fingerprint = issuer_receipts.request_fingerprint(
+        issuer_receipts.ISSUE_AUTHORIZATION,
+        {
+            **dict(invocation.to_control_request()),
+            "harness_evidence_digest": digest(canonical(envelope)),
+        },
+    )
+    receipt = SimpleNamespace(
+        id=UUID(int=4),
+        command_id=command.command_id,
+        verb=issuer_receipts.ISSUE_AUTHORIZATION,
+        request_fingerprint=fingerprint
+        if failure != "fingerprint"
+        else digest(b"wrong"),
+        plan_id=command.plan_id,
+        approval_request_id=expected.approval_request_id,
+        control_ref="synthetic-authorization",
+        recorded_at=datetime.now(UTC),
+    )
+    monkeypatch.setattr(issuer_receipts, "find_receipt", lambda db, command_id: receipt)
+    original = state["driver"]._sessions
+
+    def sessions():
+        if failure == "open":
+            raise RuntimeError("sensitive-open")
+        db = original()
+        if failure == "close":
+
+            def broken_close():
+                raise RuntimeError("sensitive-close")
+
+            db.close = broken_close
+        return db
+
+    state["driver"]._sessions = sessions
+    committed = PhaseResult(
+        digest(b"proof"), receipt.control_ref, expected.operation.lease_id
+    )
+    if failure == "none":
+        result = Gate0Composition._issue_receipt(
+            state["driver"], invocation, expected, committed
+        )
+        assert json.loads(result.issuer_receipt)["request_fingerprint"] == fingerprint
+        assert state["sessions"][-1].rollbacks == 1 and state["sessions"][-1].closed
+    else:
+        with pytest.raises(CompositionIncomplete) as caught:
+            Gate0Composition._issue_receipt(
+                state["driver"], invocation, expected, committed
+            )
+        assert "sensitive" not in str(caught.value)
+    assert sum(db.commits for db in state["sessions"]) == 0

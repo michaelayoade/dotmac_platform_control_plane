@@ -1,0 +1,29 @@
+[Unit]
+Description=Finite Gate0 A9 collector candidate
+BindsTo=dotmac-gate0-a9-bootstrap.service
+After=dotmac-gate0-a9-bootstrap.service
+Conflicts=dotmac-gate0-a9-expired.target
+[Service]
+Type=exec
+ExitType=main
+ExecStart=@BINARY@ gate0 collect-e-credential
+User=@UID@
+Group=@GID@
+SupplementaryGroups=
+Restart=no
+RemainAfterExit=no
+KillMode=control-group
+KillSignal=SIGKILL
+FinalKillSignal=SIGKILL
+SendSIGKILL=yes
+TimeoutStartSec=2s
+TimeoutStopSec=2s
+Delegate=no
+NoNewPrivileges=yes
+AmbientCapabilities=
+CapabilityBoundingSet=
+LoadCredential=oidc-request-token:/run/dotmac-gate0-collector/oidc-request-token
+@JOB_ENV@
+StandardInput=null
+StandardOutput=null
+StandardError=null

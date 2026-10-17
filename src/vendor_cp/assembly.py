@@ -27,7 +27,11 @@ from vendor_cp.approvals.feature import feature as approvals_feature
 from vendor_cp.config import validate_runtime_configuration, vendor_settings
 from vendor_cp.console.feature import feature as console_feature
 from vendor_cp.contracts.feature import feature as contracts_feature
+from vendor_cp.deployment.gate0_collection_api import (
+    feature as gate0_collection_reads_feature,
+)
 from vendor_cp.deployment_profile import (
+    PROFILES,
     VendorDeploymentProfile,
     admit_surfaces,
     load_deployment_profile,
@@ -110,6 +114,7 @@ VENDOR_SURFACES = (
     licensing_feature,
     provisioning_feature,
     withdrawal_conflicts_feature,
+    gate0_collection_reads_feature,
 )
 
 
@@ -150,7 +155,27 @@ COMPOSED_MANIFESTS: tuple[FeatureManifest | ModuleManifest, ...] = (
 )
 
 
-def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssemblySpec:
+def export_deployment_profile_declarations() -> list[dict[str, object]]:
+    """Build-time projection of every admitted declaration; never boot an app."""
+    rows: list[dict[str, object]] = []
+    for profile in sorted(PROFILES, key=lambda profile: profile.code):
+        admit_surfaces(profile, COMPOSED_MANIFESTS)
+        rows.append(
+            {
+                "code": profile.code,
+                "version": profile.version,
+                "production_accepted": profile.production_accepted,
+                "laboratory": profile.laboratory,
+                "surface_inventory": sorted(profile.surface_inventory),
+                "withheld_surfaces": sorted(profile.withheld_surfaces),
+            }
+        )
+    return rows
+
+
+def build_spec_with_profile(
+    profile: VendorDeploymentProfile | None = None,
+) -> tuple[ProductAssemblySpec, VendorDeploymentProfile]:
     """Compose the vendor control-plane assembly.
 
     Slice 2: the platform-admin surface + the console shell. Slice 3 adds the
@@ -198,7 +223,7 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
     # ROUTES, because a withheld surface is not a disabled subsystem.
     install_runtime_licence_signers(vendor_settings)
 
-    return ProductAssemblySpec(
+    spec = ProductAssemblySpec(
         name=ASSEMBLY_NAME,
         # The INTENT half of the composition (`dotmac_starter_mt` ADR-0028):
         # which plane of a selectable module this product installs. Not
@@ -218,3 +243,11 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
         api_documentation=environment_api_documentation_policy(),
         web_enabled=True,
     )
+
+    return spec, effective
+
+
+def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssemblySpec:
+    """Compatibility entrypoint; the profile is still read exactly once."""
+    spec, _ = build_spec_with_profile(profile)
+    return spec

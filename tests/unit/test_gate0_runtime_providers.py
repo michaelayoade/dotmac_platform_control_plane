@@ -115,8 +115,7 @@ class SyntheticBao:
             result = {
                 "data": {
                     "creation_path": (
-                        f"auth/approle/role/platform-cp-rehearsal-{self.role}"
-                        "/secret-id"
+                        f"auth/approle/role/platform-cp-rehearsal-{self.role}/secret-id"
                     ),
                     "creation_time": datetime.now(UTC).isoformat(),
                     "creation_ttl": 60,
@@ -397,7 +396,9 @@ def jwt_case():
 
 def test_valid_synthetic_jwt_and_window_and_no_cache(jwt_case):
     admission, window, transport, token = jwt_case
-    assert admission.admit(token(), "issue", UUID(int=1)) == window.expectation
+    admitted = admission.admit(token(), "issue", UUID(int=1))
+    assert replace(admitted, authentication_freshness=None) == window.expectation
+    assert admitted.authentication_freshness is not None
     assert (
         admission.window_record_digest(window.expectation)
         == window.authority_record_digest
@@ -576,7 +577,9 @@ def test_jwks_rejects_duplicate_key_ids(jwt_case):
 
 def test_cached_record_cannot_extend_original_deadline(jwt_case, monkeypatch):
     admission, window, _, token = jwt_case
-    assert admission.admit(token(), "issue", UUID(int=1)) == window.expectation
+    admitted = admission.admit(token(), "issue", UUID(int=1))
+    assert replace(admitted, authentication_freshness=None) == window.expectation
+    assert admitted.authentication_freshness is not None
     monkeypatch.setattr(
         "vendor_cp.deployment.gate0_workload_admission.time.monotonic",
         lambda: admission._deadline + 1,
@@ -733,6 +736,9 @@ def combined_worker(jwt_case, monkeypatch):
         def _evidence(self, digest):
             return entries[digest]
 
+        def export_registered(self, digest):
+            return entries[digest]
+
     registry = Registry()
     # Exact synthetic current plan; the real composition compares every field.
     plan = SimpleNamespace(
@@ -805,11 +811,23 @@ def combined_worker(jwt_case, monkeypatch):
     monkeypatch.setattr(control, "rehearsal_issuer_standing_for", standing)
     monkeypatch.setattr(composition, "issue_authorization", issued)
     monkeypatch.setattr(composition, "consume_authorization", consumed)
+
+    def synthetic_proof(self, expected):
+        # This provider fixture models retention, not signed proof validation.
+        # Standing must still select an explicitly retained registered identity.
+        phase = expected.operation.phase
+        evidence = "sha256:" + ("a" if phase == "issue" else "b") * 64
+        raw_bundle = canonical({"synthetic_phase": phase})
+        self._bundles[evidence] = raw_bundle
+        self._current_proof_identity = (evidence, services.digest(raw_bundle))
+        return SimpleNamespace(synthetic_phase=phase)
+
+    monkeypatch.setattr(services.IssuerWorker, "_proof", synthetic_proof)
     monkeypatch.setattr(
-        services.IssuerWorker,
-        "_proof",
-        lambda self, expected: SimpleNamespace(
-            synthetic_phase=expected.operation.phase
+        composition.Gate0Composition,
+        "_issue_receipt",
+        lambda self, invocation, expected, committed: replace(
+            committed, issuer_receipt=b"synthetic-owner-receipt"
         ),
     )
     # The real composition registers the synthetic proof through its resolver.
@@ -831,6 +849,7 @@ def combined_worker(jwt_case, monkeypatch):
     class Channel:
         def __init__(self, requests):
             self.requests, self.output = iter(requests), []
+            self.deadline = original._deadline
 
         def receive(self, allow_eof=False):
             return next(self.requests, None)
@@ -883,13 +902,23 @@ def test_combined_issue_standing_consume_retains_install_and_phase_binding(
 ):
     case = combined_worker
     channel = case.channel([case.request(p) for p in ("issue", "standing", "consume")])
+    original_deadline = channel.deadline
     case.worker.run(channel)
+    assert channel.deadline == original_deadline
     assert [item["operation"] for item in channel.output] == [
         "issue",
         "standing",
         "consume",
     ]
-    assert case.effects == ["issue", "commit", "standing", "consume", "commit"]
+    # Standing is a read-only owner transaction and releases its hold by rollback.
+    assert case.effects == [
+        "issue",
+        "commit",
+        "standing",
+        "rollback",
+        "consume",
+        "commit",
+    ]
     assert len(case.installs) == 1 and len(case.entries) == 2
     assert case.transport.calls == 3
     assert all(item["readiness_accepted"] is False for item in channel.output)
@@ -915,8 +944,11 @@ def test_combined_lifecycle_substitutions_refuse(combined_worker, substitution):
         case.plan.plan_digest = "sha256:" + "9" * 64
     else:
         case.transport.document = {"keys": []}
+    channel = case.channel([request])
+    original_deadline = channel.deadline
     with pytest.raises(ValueError):
-        case.worker.run(case.channel([request]))
+        case.worker.run(channel)
+    assert channel.deadline == original_deadline
     assert case.effects == ["issue", "commit"]
     assert len(case.installs) == 1
 
@@ -975,3 +1007,32 @@ def test_child_fallback_broken_pipe_emits_no_exception_details(monkeypatch, caps
     )
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
+
+
+def test_original_launch_clock_maps_short_window_without_renewal(jwt_case, monkeypatch):
+    import vendor_cp.deployment.gate0_workload_admission as module
+    from vendor_cp.deployment.gate0_window import WindowClockOrigin
+
+    _, window, _, _ = jwt_case
+    now = datetime.now(UTC)
+    import vendor_cp.deployment.gate0_window as clocks
+
+    monkeypatch.setattr(clocks.time, "monotonic", lambda: 140.0)
+    original = WindowClockOrigin(now - timedelta(seconds=40), 100.0, 200.0)
+    short = replace(window, approved_until=now + timedelta(seconds=10))
+    admission = WorkloadAdmission(
+        windows=(short,),
+        transport=BoundedJSONTransport(GITHUB_ISSUER),
+        expires_at=now + timedelta(seconds=50),
+        clock_origin=original,
+    )
+    assert admission._origin == 100.0
+    assert admission._window_deadlines[
+        ("issue", short.expectation.operation.plan_id)
+    ] == pytest.approx(150.0)
+    monkeypatch.setattr(module.time, "monotonic", lambda: 151.0)
+    with pytest.raises(ProviderRefused):
+        admission._window("issue", UUID(short.expectation.operation.plan_id))
+    assert admission._window_deadlines[
+        ("issue", short.expectation.operation.plan_id)
+    ] == pytest.approx(150.0)
