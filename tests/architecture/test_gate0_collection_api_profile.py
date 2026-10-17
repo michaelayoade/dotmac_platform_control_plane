@@ -113,7 +113,11 @@ def test_collection_profile_v2_adds_exact_existing_approval_surface(monkeypatch)
 
     expected = {
         ("/platform/vendor/approvals/policies", frozenset({"POST"}), "publish_policy"),
-        ("/platform/vendor/approvals/decisions", frozenset({"POST"}), "record_decision"),
+        (
+            "/platform/vendor/approvals/decisions",
+            frozenset({"POST"}),
+            "record_decision",
+        ),
         (
             "/platform/vendor/approvals/requests/{request_id}/withdraw",
             frozenset({"POST"}),
