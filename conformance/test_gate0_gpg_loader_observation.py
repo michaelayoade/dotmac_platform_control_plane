@@ -48,6 +48,10 @@ OUTPUT = (
     f"\tlibc.so.6 => {LISTED} (0x123)\n"
     "\t/lib64/ld-linux-x86-64.so.2 (0x456)\n"
 ).encode()
+ALIAS_OUTPUT = OUTPUT.replace(
+    b"/lib64/ld-linux-x86-64.so.2 (0x456)",
+    (G["INTERPRETER"] + " => " + LOADER + " (0x456)").encode(),
+)
 
 
 @contextmanager
@@ -70,6 +74,35 @@ def root_metadata():
 
 
 class LoaderParsingTests(unittest.TestCase):
+    def test_exact_validated_interpreter_alias_and_faults(self):
+        self.assertEqual(
+            N["parse_loader"](ALIAS_OUTPUT, LOADER),
+            N["parse_loader"](OUTPUT, LOADER),
+        )
+        for raw in (
+            ALIAS_OUTPUT.replace(G["INTERPRETER"].encode(), b"/lib64/wrong-loader"),
+            ALIAS_OUTPUT.replace(LOADER.encode(), b"/usr/lib/wrong-loader"),
+            ALIAS_OUTPUT.replace(
+                LOADER.encode(), b"/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+            ),
+            ALIAS_OUTPUT.replace(
+                (G["INTERPRETER"] + " => ").encode(),
+                (G["INTERPRETER"] + "  => ").encode(),
+            ),
+            ALIAS_OUTPUT.replace(
+                (G["INTERPRETER"] + " => ").encode(),
+                (G["INTERPRETER"] + "\t=>\t").encode(),
+            ),
+            ALIAS_OUTPUT.replace(b"(0x456)", b"(0xABC)"),
+            ALIAS_OUTPUT + ALIAS_OUTPUT.splitlines(keepends=True)[-1],
+            ALIAS_OUTPUT + OUTPUT.splitlines(keepends=True)[-1],
+        ):
+            with (
+                self.subTest(raw_hash=hashlib.sha256(raw).hexdigest()),
+                self.assertRaises(G["Incomplete"]),
+            ):
+                N["parse_loader"](raw, LOADER)
+
     def test_bounded_actual_elf_and_closed_output(self):
         self.assertEqual(N["elf_interpreter"](elf()), G["INTERPRETER"])
         bindings = N["parse_loader"](OUTPUT, LOADER)
@@ -403,6 +436,19 @@ class CompositionTests(unittest.TestCase):
         )
         self.assertIsNone(record["targets"]["gpg"]["dependencies"][0]["file_id"])
 
+    def test_alias_row_composition_joins_same_held_loader_identity(self):
+        def provider(argv, deadline):
+            return ALIAS_OUTPUT if "--list" in argv else self.provider(argv, deadline)
+
+        record = self.run_observe(provider=provider)
+        for target in record["targets"].values():
+            interpreter = [
+                b for b in target["dependencies"] if b["kind"] == "interpreter"
+            ]
+            self.assertEqual(len(interpreter), 1)
+            self.assertEqual(interpreter[0]["listed_path"], G["INTERPRETER"])
+            self.assertEqual(interpreter[0]["file_id"], record["loader"]["file_id"])
+
     def test_bootstrap_owner_swap_refuses_before_primitives_or_commands(self):
         # Bootstrap executed A, while the initial roster and potential prior
         # pair name B. The actual orchestration must refuse before using A.
@@ -572,7 +618,6 @@ class FailureDiagnosticTests(unittest.TestCase):
     def test_rejected_loader_row_shapes_redact_values_without_accepting(self):
         alias = G["INTERPRETER"] + " => " + LOADER + " (0xabcdef)"
         cases = [
-            (alias, "absolute-mapping", True, False),
             (alias.replace(" => ", "  => "), "absolute-mapping", True, True),
             (
                 "/UNKNOWN_PRIVATE_LEFT => /UNKNOWN_PRIVATE_RIGHT (0x123)",

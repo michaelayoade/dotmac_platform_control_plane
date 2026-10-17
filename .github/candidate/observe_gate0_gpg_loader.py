@@ -342,6 +342,10 @@ def parse_loader(raw, loader):
         mapped = re.fullmatch(
             r"([A-Za-z0-9_.+-]{1,128}) => (/[^ ]+) \(0x[0-9a-f]+\)", line
         )
+        interpreter_alias = re.fullmatch(
+            re.escape(INTERPRETER) + r" => " + re.escape(loader) + r" \(0x[0-9a-f]+\)",
+            line,
+        )
         direct = re.fullmatch(r"(/[^ ]+) \(0x[0-9a-f]+\)", line)
         if vdso:
             name, path, kind = "linux-vdso.so.1", None, "kernel-vdso"
@@ -350,6 +354,12 @@ def parse_loader(raw, loader):
             library_coordinate(path)
             require(name == Path(path).name and name != "linux-vdso.so.1")
             kind = "library"
+        elif interpreter_alias:
+            # Hosted output maps the fixed PT_INTERP alias to this already
+            # validated canonical loader. Keep the listed alias so capture
+            # rejoins its protected symlink chain to the held loader inode.
+            require(loader in LOADERS)
+            name, path, kind = "interpreter", INTERPRETER, "interpreter"
         elif direct:
             path = direct.group(1)
             require(path in (INTERPRETER, loader))
