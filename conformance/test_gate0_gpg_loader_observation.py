@@ -612,6 +612,16 @@ class FailureDiagnosticTests(unittest.TestCase):
             self.assertIn(row["file_category"], G["FILE_CATEGORIES"] | {None})
             self.assertIs(type(row["grammar_matched"]), bool)
             self.assertIs(type(row["exact_alias_matched"]), bool)
+        if record["package_query"] is not None:
+            query = record["package_query"]
+            self.assertEqual(
+                set(query), set(G["QUERY_COUNT_KEYS"]) | set(G["QUERY_BOOL_KEYS"])
+            )
+            for key in G["QUERY_COUNT_KEYS"]:
+                self.assertIs(type(query[key]), int)
+                self.assertTrue(0 <= query[key] <= 128)
+            for key in G["QUERY_BOOL_KEYS"]:
+                self.assertIs(type(query[key]), bool)
         for item in record["exception_chain"]:
             self.assertIn(item["kind"], G["EXCEPTION_KINDS"] | {"other"})
             self.assertIn(item["relation"], {"raised", "cause", "context"})
@@ -624,6 +634,92 @@ class FailureDiagnosticTests(unittest.TestCase):
                 self.assertIs(type(frame["line"]), int)
                 self.assertGreater(frame["line"], 0)
         return text, record
+
+    def test_complete_query_summary_precedes_first_refusal_without_more_commands(self):
+        lines = [
+            "diversion by private-owner from: " + LISTED,
+            "diversion by private-owner to: " + LISTED + ".UNKNOWN_PRIVATE_SUFFIX",
+            "private-owner:amd64: " + CANONICAL,
+        ]
+        row = dict(id="synthetic", canonical_path=CANONICAL, listed_paths=[LISTED])
+        calls = []
+
+        def command(*args):
+            calls.append(args)
+            return ("\n".join(lines) + "\n").encode()
+
+        # Mock only the existing command boundary; actual ownership parsing
+        # still refuses the first row and summarizes later rows.
+        with patch.dict(
+            G,
+            {
+                "DIAGNOSTIC": {"phase": "package", "work_failure": None},
+                "command": command,
+            },
+        ):
+            try:
+                N["package_owners"]([row], time.monotonic() + 5)
+            except G["Incomplete"] as error:
+                text, record = self.decode(error)
+            else:
+                self.fail("diversion record unexpectedly accepted")
+        self.assertEqual(len(calls), 1)
+        query = record["package_query"]
+        self.assertEqual(query["rows"], 3)
+        self.assertEqual(query["package_owner_rows"], 1)
+        self.assertEqual(query["diversion_from_rows"], 1)
+        self.assertEqual(query["diversion_to_rows"], 1)
+        self.assertEqual(query["from_alias_matches"], 1)
+        self.assertEqual(query["ownership_alias_matches"], 1)
+        self.assertEqual(query["to_same_directory_basename_suffix"], 1)
+        self.assertFalse(query["diversion_owner_exact_matches_ownership"])
+        self.assertTrue(query["diversion_owner_base_matches_ownership"])
+        self.assertTrue(query["from_to_count_balance_not_pair_proof"])
+        for forbidden in ("private-owner", "UNKNOWN_PRIVATE_SUFFIX", LISTED, CANONICAL):
+            self.assertNotIn(forbidden, text)
+
+    def test_query_summary_limits_unknown_local_and_owner_ambiguity(self):
+        aliases = {LISTED, CANONICAL}
+        lines = [
+            "local diversion from: " + LISTED,
+            "local diversion to: /UNKNOWN_PRIVATE_PATH",
+            "private-owner: " + CANONICAL,
+            "other-owner: " + CANONICAL,
+            "UNKNOWN_PRIVATE_ROW",
+        ]
+        query = N["package_query_summary"](lines, aliases)
+        self.assertEqual(query["local_diversion_rows"], 2)
+        self.assertEqual(query["ownership_owners"], 2)
+        self.assertEqual(query["other_rows"], 1)
+        self.assertEqual(query["to_outside_library_roots"], 1)
+        self.assertFalse(query["unique_ownership_owner"])
+        self.assertFalse(query["diversion_owner_base_matches_ownership"])
+        bounded = N["package_query_summary"](lines * 40, aliases)
+        self.assertEqual(bounded["rows"], 128)
+        self.assertTrue(bounded["overflow"])
+        self.assertFalse(bounded["from_to_count_balance_not_pair_proof"])
+        self.assertFalse(bounded["unique_diversion_owner"])
+        injected = dict.fromkeys(G["QUERY_COUNT_KEYS"], "UNKNOWN_PRIVATE_COUNT")
+        injected.update(dict.fromkeys(G["QUERY_BOOL_KEYS"], 1))
+        injected["rows"] = True
+        with patch.dict(
+            G,
+            {
+                "DIAGNOSTIC": {
+                    "phase": "package",
+                    "work_failure": None,
+                    "package_query": injected,
+                }
+            },
+        ):
+            text, record = self.decode(ValueError("UNKNOWN_PRIVATE_ERROR"))
+        self.assertTrue(
+            all(record["package_query"][key] == 0 for key in G["QUERY_COUNT_KEYS"])
+        )
+        self.assertTrue(
+            all(record["package_query"][key] is False for key in G["QUERY_BOOL_KEYS"])
+        )
+        self.assertNotIn("UNKNOWN_PRIVATE", text)
 
     def test_package_query_failure_shapes_refuse_and_redact_held_categories(self):
         cases = [

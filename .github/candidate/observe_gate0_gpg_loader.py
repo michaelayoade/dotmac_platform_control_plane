@@ -102,11 +102,45 @@ PACKAGE_ROW_SHAPES = frozenset(
     {"package-owner", "diversion-from", "diversion-to", "other"}
 )
 FILE_CATEGORIES = frozenset({"target", "loader", "library"})
+QUERY_COUNT_KEYS = (
+    "rows",
+    "package_owner_rows",
+    "diversion_from_rows",
+    "diversion_to_rows",
+    "local_diversion_rows",
+    "other_rows",
+    "ownership_owners",
+    "diversion_owners",
+    "ownership_alias_matches",
+    "from_alias_matches",
+    "to_alias_matches",
+    "from_exact_alias",
+    "from_same_directory_basename_suffix",
+    "from_other_library_root",
+    "from_outside_library_roots",
+    "to_exact_alias",
+    "to_same_directory_basename_suffix",
+    "to_other_library_root",
+    "to_outside_library_roots",
+    "ownership_exact_alias",
+    "ownership_same_directory_basename_suffix",
+    "ownership_other_library_root",
+    "ownership_outside_library_roots",
+)
+QUERY_BOOL_KEYS = (
+    "overflow",
+    "unique_ownership_owner",
+    "unique_diversion_owner",
+    "diversion_owner_exact_matches_ownership",
+    "diversion_owner_base_matches_ownership",
+    "from_to_count_balance_not_pair_proof",
+)
 DIAGNOSTIC = {
     "phase": "bootstrap",
     "work_failure": None,
     "loader_row": None,
     "package_row": None,
+    "package_query": None,
 }
 
 
@@ -195,6 +229,16 @@ def failure_diagnostic(error):
             grammar_matched=row.get("grammar_matched") is True,
             exact_alias_matched=row.get("exact_alias_matched") is True,
         )
+    query = DIAGNOSTIC.get("package_query")
+    package_query = None
+    if type(query) is dict:
+        package_query = {
+            key: query[key]
+            if type(query.get(key)) is int and 0 <= query[key] <= 128
+            else 0
+            for key in QUERY_COUNT_KEYS
+        }
+        package_query.update({key: query.get(key) is True for key in QUERY_BOOL_KEYS})
     work = None
     if remembered is not None:
         work_phase, work_error = remembered
@@ -210,6 +254,7 @@ def failure_diagnostic(error):
             chain_truncated=bool(pending),
             loader_row=loader_row,
             package_row=package_row,
+            package_query=package_query,
         ),
         sort_keys=True,
         separators=(",", ":"),
@@ -540,8 +585,83 @@ def rejected_package_row(line, match, aliases, row):
     )
 
 
+def package_query_summary(lines, aliases):
+    """Syntax counts over one held response, never authority or diversion pairing."""
+    counts = dict.fromkeys(QUERY_COUNT_KEYS, 0)
+    owners, diversion_owners = set(), set()
+    counts["rows"] = min(len(lines), 128)
+    overflow = len(lines) > 128
+    from_counts, to_counts = {}, {}
+
+    def relationship(path):
+        if path in aliases:
+            return "exact_alias"
+        if any(
+            posixpath.dirname(path) == posixpath.dirname(alias)
+            and posixpath.basename(path).startswith(posixpath.basename(alias) + ".")
+            and len(posixpath.basename(path)) > len(posixpath.basename(alias)) + 1
+            for alias in aliases
+        ):
+            return "same_directory_basename_suffix"
+        if path.startswith(("/lib/", "/lib64/", "/usr/lib/")):
+            return "other_library_root"
+        return "outside_library_roots"
+
+    for line in lines[:128]:
+        owner = re.fullmatch(
+            r"([a-z0-9][a-z0-9+.-]{0,127}(?::amd64)?)\: (/[^\n]+)", line
+        )
+        diversion = re.fullmatch(
+            r"(local diversion|diversion by ([a-z0-9][a-z0-9+.-]{0,127}(?::amd64)?))"
+            r" (from|to): (/[^\n]+)",
+            line,
+        )
+        if owner is not None:
+            name, path = owner.groups()
+            owners.add(name)
+            counts["package_owner_rows"] += 1
+            counts["ownership_alias_matches"] += path in aliases
+            counts["ownership_" + relationship(path)] += 1
+        elif diversion is not None:
+            _, name, direction, path = diversion.groups()
+            # None denotes a local diversion internally; no name is published.
+            diversion_owners.add(name)
+            counts["local_diversion_rows"] += name is None
+            counts["diversion_" + direction + "_rows"] += 1
+            counts[direction + "_alias_matches"] += path in aliases
+            counts[direction + "_" + relationship(path)] += 1
+            tally = from_counts if direction == "from" else to_counts
+            tally[name] = tally.get(name, 0) + 1
+        else:
+            counts["other_rows"] += 1
+    counts["ownership_owners"] = len(owners)
+    counts["diversion_owners"] = len(diversion_owners)
+    unique = (
+        not overflow
+        and len(owners) == 1
+        and len(diversion_owners) == 1
+        and None not in diversion_owners
+    )
+    counts.update(
+        overflow=overflow,
+        unique_ownership_owner=not overflow and len(owners) == 1,
+        unique_diversion_owner=not overflow and len(diversion_owners) == 1,
+        diversion_owner_exact_matches_ownership=unique and owners == diversion_owners,
+        diversion_owner_base_matches_ownership=unique
+        and (
+            {name.split(":")[0] for name in owners}
+            == {name.split(":")[0] for name in diversion_owners}
+        ),
+        from_to_count_balance_not_pair_proof=bool(diversion_owners)
+        and not overflow
+        and from_counts == to_counts,
+    )
+    return counts
+
+
 def package_owners(rows, deadline):
     DIAGNOSTIC["package_row"] = None
+    DIAGNOSTIC["package_query"] = None
     packages = {}
     for row in rows:
         candidates = sorted(set(row["listed_paths"] + [row["canonical_path"]]))
@@ -560,11 +680,12 @@ def package_owners(rows, deadline):
         pattern = row["canonical_path"]
         if pattern.startswith("/usr/lib/"):
             pattern = "*" + pattern.removeprefix("/usr")
-        for line in (
+        lines = (
             command(["/usr/bin/dpkg-query", "--search", pattern], deadline)
             .decode("ascii")
             .splitlines()
-        ):
+        )
+        for line in lines:
             match = re.fullmatch(
                 r"([a-z0-9][a-z0-9+.-]{0,127}(?::amd64)?)\: (/[^\n]+)", line
             )
@@ -572,6 +693,7 @@ def package_owners(rows, deadline):
                 DIAGNOSTIC["package_row"] = rejected_package_row(
                     line, match, aliases, row
                 )
+                DIAGNOSTIC["package_query"] = package_query_summary(lines, aliases)
             require(match is not None and match.group(2) in aliases)
             owners.add(match.group(1))
         require(len(owners) == 1)
@@ -930,7 +1052,11 @@ def publish(record, verify, deadline):
 def main():
     global TEMP
     DIAGNOSTIC.update(
-        phase="bootstrap", work_failure=None, loader_row=None, package_row=None
+        phase="bootstrap",
+        work_failure=None,
+        loader_row=None,
+        package_row=None,
+        package_query=None,
     )
     require(len(sys.argv) == 1 and os.geteuid() != 0)
     TEMP = Path(os.environ["RUNNER_TEMP"])
