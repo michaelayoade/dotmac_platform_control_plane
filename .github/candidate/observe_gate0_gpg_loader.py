@@ -98,7 +98,16 @@ LOADER_ROW_SHAPES = frozenset(
         "other",
     }
 )
-DIAGNOSTIC = {"phase": "bootstrap", "work_failure": None, "loader_row": None}
+PACKAGE_ROW_SHAPES = frozenset(
+    {"package-owner", "diversion-from", "diversion-to", "other"}
+)
+FILE_CATEGORIES = frozenset({"target", "loader", "library"})
+DIAGNOSTIC = {
+    "phase": "bootstrap",
+    "work_failure": None,
+    "loader_row": None,
+    "package_row": None,
+}
 
 
 class Incomplete(ValueError):
@@ -170,6 +179,22 @@ def failure_diagnostic(error):
             ),
             known_row_spacing_variant=row.get("known_row_spacing_variant") is True,
         )
+    row = DIAGNOSTIC.get("package_row")
+    package_row = None
+    if type(row) is dict:
+        shape, category = row.get("shape"), row.get("file_category")
+        package_row = dict(
+            shape=shape
+            if type(shape) is str and shape in PACKAGE_ROW_SHAPES
+            else "other",
+            file_category=(
+                category
+                if type(category) is str and category in FILE_CATEGORIES
+                else None
+            ),
+            grammar_matched=row.get("grammar_matched") is True,
+            exact_alias_matched=row.get("exact_alias_matched") is True,
+        )
     work = None
     if remembered is not None:
         work_phase, work_error = remembered
@@ -184,6 +209,7 @@ def failure_diagnostic(error):
             exception_chain=chain,
             chain_truncated=bool(pending),
             loader_row=loader_row,
+            package_row=package_row,
         ),
         sort_keys=True,
         separators=(",", ":"),
@@ -489,7 +515,33 @@ def no_preload():
     raise Incomplete("public-loader-observation-incomplete")
 
 
+def rejected_package_row(line, match, aliases, row):
+    """Closed syntax facts only; no queried owner or pathname is retained."""
+    owner = r"(?:local diversion|diversion by [a-z0-9][a-z0-9+.-]{0,127}(?::amd64)?)"
+    if match is not None:
+        shape = "package-owner"
+    elif re.fullmatch(owner + r" from: /[^\n]+", line):
+        shape = "diversion-from"
+    elif re.fullmatch(owner + r" to: /[^\n]+", line):
+        shape = "diversion-to"
+    else:
+        shape = "other"
+    canonical = row["canonical_path"]
+    category = (
+        "target"
+        if canonical in TARGETS.values()
+        else ("loader" if canonical in LOADERS else "library")
+    )
+    return dict(
+        shape=shape,
+        file_category=category,
+        grammar_matched=match is not None,
+        exact_alias_matched=match is not None and match.group(2) in aliases,
+    )
+
+
 def package_owners(rows, deadline):
+    DIAGNOSTIC["package_row"] = None
     packages = {}
     for row in rows:
         candidates = sorted(set(row["listed_paths"] + [row["canonical_path"]]))
@@ -516,6 +568,10 @@ def package_owners(rows, deadline):
             match = re.fullmatch(
                 r"([a-z0-9][a-z0-9+.-]{0,127}(?::amd64)?)\: (/[^\n]+)", line
             )
+            if match is None or match.group(2) not in aliases:
+                DIAGNOSTIC["package_row"] = rejected_package_row(
+                    line, match, aliases, row
+                )
             require(match is not None and match.group(2) in aliases)
             owners.add(match.group(1))
         require(len(owners) == 1)
@@ -873,7 +929,9 @@ def publish(record, verify, deadline):
 
 def main():
     global TEMP
-    DIAGNOSTIC.update(phase="bootstrap", work_failure=None, loader_row=None)
+    DIAGNOSTIC.update(
+        phase="bootstrap", work_failure=None, loader_row=None, package_row=None
+    )
     require(len(sys.argv) == 1 and os.geteuid() != 0)
     TEMP = Path(os.environ["RUNNER_TEMP"])
     require(TEMP.is_absolute() and ".." not in TEMP.parts)

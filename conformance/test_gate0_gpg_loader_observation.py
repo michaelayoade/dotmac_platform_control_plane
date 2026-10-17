@@ -602,6 +602,16 @@ class FailureDiagnosticTests(unittest.TestCase):
             self.assertIn(row["shape"], G["LOADER_ROW_SHAPES"])
             self.assertIs(type(row["validated_interpreter_alias_mapping"]), bool)
             self.assertIs(type(row["known_row_spacing_variant"]), bool)
+        if record["package_row"] is not None:
+            row = record["package_row"]
+            self.assertEqual(
+                set(row),
+                {"shape", "file_category", "grammar_matched", "exact_alias_matched"},
+            )
+            self.assertIn(row["shape"], G["PACKAGE_ROW_SHAPES"])
+            self.assertIn(row["file_category"], G["FILE_CATEGORIES"] | {None})
+            self.assertIs(type(row["grammar_matched"]), bool)
+            self.assertIs(type(row["exact_alias_matched"]), bool)
         for item in record["exception_chain"]:
             self.assertIn(item["kind"], G["EXCEPTION_KINDS"] | {"other"})
             self.assertIn(item["relation"], {"raised", "cause", "context"})
@@ -614,6 +624,93 @@ class FailureDiagnosticTests(unittest.TestCase):
                 self.assertIs(type(frame["line"]), int)
                 self.assertGreater(frame["line"], 0)
         return text, record
+
+    def test_package_query_failure_shapes_refuse_and_redact_held_categories(self):
+        cases = [
+            ("private-owner: /UNKNOWN_PRIVATE_PATH", "package-owner", True),
+            (
+                "diversion by private-owner from: /UNKNOWN_PRIVATE_PATH",
+                "diversion-from",
+                False,
+            ),
+            ("local diversion from: /UNKNOWN_PRIVATE_PATH", "diversion-from", False),
+            (
+                "diversion by private-owner:amd64 to: /UNKNOWN_PRIVATE_PATH",
+                "diversion-to",
+                False,
+            ),
+            ("local diversion to: /UNKNOWN_PRIVATE_PATH", "diversion-to", False),
+            ("private-owner:arm64: /UNKNOWN_PRIVATE_PATH", "other", False),
+            ("UNKNOWN_PRIVATE_ROW", "other", False),
+        ]
+        for category, canonical in (
+            ("target", G["TARGETS"]["gpg"]),
+            ("loader", LOADER),
+            ("library", CANONICAL),
+        ):
+            for line, shape, matched in cases:
+                row = dict(
+                    id="synthetic", canonical_path=canonical, listed_paths=[canonical]
+                )
+                with (
+                    self.subTest(category=category, shape=shape),
+                    patch.dict(
+                        G,
+                        {
+                            "DIAGNOSTIC": {
+                                "phase": "package",
+                                "work_failure": None,
+                                "package_row": None,
+                            },
+                            "command": lambda *args, line=line: (line + "\n").encode(),
+                        },
+                    ),
+                ):
+                    try:
+                        N["package_owners"]([row], time.monotonic() + 5)
+                    except G["Incomplete"] as error:
+                        text, record = self.decode(error)
+                    else:
+                        self.fail(
+                            "diagnostic classification accepted a refused package row"
+                        )
+                    self.assertEqual(
+                        record["package_row"],
+                        dict(
+                            shape=shape,
+                            file_category=category,
+                            grammar_matched=matched,
+                            exact_alias_matched=False,
+                        ),
+                    )
+                    for forbidden in ("private-owner", "UNKNOWN_PRIVATE", canonical):
+                        self.assertNotIn(forbidden, text)
+        with patch.dict(
+            G,
+            {
+                "DIAGNOSTIC": {
+                    "phase": "package",
+                    "work_failure": None,
+                    "package_row": {
+                        "shape": "UNKNOWN_PRIVATE_SHAPE",
+                        "file_category": "UNKNOWN_PRIVATE_CATEGORY",
+                        "grammar_matched": 1,
+                        "exact_alias_matched": "UNKNOWN_PRIVATE_BOOL",
+                    },
+                }
+            },
+        ):
+            text, record = self.decode(ValueError("UNKNOWN_PRIVATE_ERROR"))
+        self.assertEqual(
+            record["package_row"],
+            dict(
+                shape="other",
+                file_category=None,
+                grammar_matched=False,
+                exact_alias_matched=False,
+            ),
+        )
+        self.assertNotIn("UNKNOWN_PRIVATE", text)
 
     def test_rejected_loader_row_shapes_redact_values_without_accepting(self):
         alias = G["INTERPRETER"] + " => " + LOADER + " (0xabcdef)"
