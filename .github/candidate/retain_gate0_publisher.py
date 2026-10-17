@@ -12,6 +12,7 @@ import io
 import json
 import tarfile
 import time
+from types import MappingProxyType
 from typing import BinaryIO
 
 DESIGN_SHA256 = "f32f50a82f05ee17ccd5980c72417c3f2ac45351489686c4e9652ef5c4cdaa58"
@@ -100,7 +101,7 @@ def compress_inspected_rootfs(
     }
 
 
-def write_inner_archive(
+def _write_inner_archive(
     output: BinaryIO,
     rootfs: BinaryIO,
     compressed_bytes: int,
@@ -108,6 +109,8 @@ def write_inner_archive(
     build: bytes,
     shape: bytes,
     deadline: float,
+    *,
+    role: bool,
 ) -> None:
     """Exactly four deterministic members; build manifest has no future hashes."""
     if not 0 < compressed_bytes <= MAX_COMPRESSED_BYTES or any(
@@ -119,15 +122,16 @@ def write_inner_archive(
         )
     ):
         raise RetentionRefused("runtime retention refused")
+    names = ROLE_INNER_NAMES if role else INNER_NAMES
     rootfs.seek(0)
     with tarfile.open(
         fileobj=output, mode="w|", format=tarfile.USTAR_FORMAT
     ) as archive:
         for name, source, size in (
-            (INNER_NAMES[0], rootfs, compressed_bytes),
-            (INNER_NAMES[1], io.BytesIO(files), len(files)),
-            (INNER_NAMES[2], io.BytesIO(build), len(build)),
-            (INNER_NAMES[3], io.BytesIO(shape), len(shape)),
+            (names[0], rootfs, compressed_bytes),
+            (names[1], io.BytesIO(files), len(files)),
+            (names[2], io.BytesIO(build), len(build)),
+            (names[3], io.BytesIO(shape), len(shape)),
         ):
             check_deadline(deadline)
             item = tarfile.TarInfo(name)
@@ -135,6 +139,29 @@ def write_inner_archive(
             item.size = size
             archive.addfile(item, DeadlineReader(source, deadline))
     check_deadline(deadline)
+
+
+def write_inner_archive(
+    output, rootfs, compressed_bytes, files, build, shape, deadline
+):
+    return _write_inner_archive(
+        output, rootfs, compressed_bytes, files, build, shape, deadline, role=False
+    )
+
+
+def write_role_inner_archive(
+    output, rootfs, compressed_bytes, files, build, qualification, deadline
+):
+    return _write_inner_archive(
+        output,
+        rootfs,
+        compressed_bytes,
+        files,
+        build,
+        qualification,
+        deadline,
+        role=True,
+    )
 
 
 # Fixed production selection. No command, recipient or destination is caller chosen.
@@ -159,6 +186,35 @@ LIMITS = {
     "regular_member_bytes": 512 * 1024**2,
     "files_manifest_bytes": MAX_FILES_BYTES,
 }
+
+
+ROLE_SCHEMA = "DotmacRoleRuntimeQualificationRetentionExecution.v1"
+ROLE_PURPOSE = "private-native-qualification-input-only"
+ROLE_WORKFLOW = ".github/workflows/gate0-sshd-conformance.yml"
+ROLE_BASE_IMAGE = (
+    "ubuntu:24.04@sha256:"
+    "f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b"
+)
+ROLE_SOURCE_FILES = MappingProxyType(
+    {
+        "dockerfile_sha256": "Dockerfile",
+        "pyproject_sha256": "pyproject.toml",
+        "poetry_lock_sha256": "poetry.lock",
+        "prepare_helper_sha256": ".github/candidate/prepare_gate0_native.py",
+        "native_artifacts_sha256": "conformance/openssh-ubuntu-artifacts.json",
+        "inspect_helper_sha256": ".github/candidate/inspect_gate0_publisher.py",
+        "retention_helper_sha256": ".github/candidate/retain_gate0_publisher.py",
+        "smoke_helper_sha256": "conformance/gate0_role_image_smoke.py",
+        "network_wrapper_sha256": ".github/candidate/accept_gate0_network.sh",
+        "network_proof_sha256": "conformance/test_gate0_network_privileges.py",
+    }
+)
+ROLE_INNER_NAMES = (
+    "role-rootfs.tar.gz",
+    "files.json",
+    "build.json",
+    "qualification.json",
+)
 
 
 def closed(value, keys):
@@ -218,7 +274,7 @@ def parse_json(raw, maximum):
     )
 
 
-def load_packet(raw, selected_sha256, now):
+def _load_packet(raw, selected_sha256, now, *, role):
     import re
 
     if hashlib.sha256(raw).hexdigest() != sha256(selected_sha256):
@@ -228,6 +284,7 @@ def load_packet(raw, selected_sha256, now):
         (
             "schema",
             "operation",
+            *(("purpose",) if role else ()),
             "source",
             "github",
             "validity",
@@ -241,7 +298,9 @@ def load_packet(raw, selected_sha256, now):
     if raw != canonical_json(packet, 16 * 1024):
         raise RetentionRefused("runtime retention refused")
     if (
-        packet["schema"] != "DotmacPublisherRuntimeRetentionExecution.v1"
+        packet["schema"]
+        != (ROLE_SCHEMA if role else "DotmacPublisherRuntimeRetentionExecution.v1")
+        or (role and packet["purpose"] != ROLE_PURPOSE)
         or packet["operation"] != "build-inspect-encrypt-retain"
     ):
         raise RetentionRefused("runtime retention refused")
@@ -261,10 +320,12 @@ def load_packet(raw, selected_sha256, now):
         or ".." in source["ref"]
     ):
         raise RetentionRefused("runtime retention refused")
-    if source["workflow_path"] != WORKFLOW:
+    if source["workflow_path"] != (ROLE_WORKFLOW if role else WORKFLOW):
         raise RetentionRefused("runtime retention refused")
     sha256(source["workflow_blob_sha256"])
-    for value in closed(source["files"], SOURCE_FILES).values():
+    for value in closed(
+        source["files"], ROLE_SOURCE_FILES if role else SOURCE_FILES
+    ).values():
         sha256(value)
     github = closed(
         packet["github"],
@@ -277,7 +338,9 @@ def load_packet(raw, selected_sha256, now):
             "job_key",
         ),
     )
-    if github["repository"] != REPOSITORY or github["job_key"] != "image":
+    if github["repository"] != REPOSITORY or github["job_key"] != (
+        "role-image" if role else "image"
+    ):
         raise RetentionRefused("runtime retention refused")
     for key in ("repository_id", "owner_id", "workflow_id", "actor_id"):
         positive(github[key])
@@ -295,27 +358,38 @@ def load_packet(raw, selected_sha256, now):
     }:
         raise RetentionRefused("runtime retention refused")
     sha256(packet["tool_qualification_sha256"])
-    if closed(
-        packet["build"],
-        ("mode", "platform", "base_image", "production_target", "publisher_target"),
-    ) != {
+    expected_build = {
         "mode": "build-once-in-selected-job",
         "platform": "linux/amd64",
-        "base_image": BASE_IMAGE,
-        "production_target": "runtime",
-        "publisher_target": "gate0-publisher",
-    }:
+        "base_image": ROLE_BASE_IMAGE if role else BASE_IMAGE,
+        **(
+            {"target": "gate0-role"}
+            if role
+            else {"production_target": "runtime", "publisher_target": "gate0-publisher"}
+        ),
+    }
+    if closed(packet["build"], expected_build) != expected_build:
         raise RetentionRefused("runtime retention refused")
     for key, value in closed(packet["limits"], LIMITS).items():
         if positive(value) > LIMITS[key]:
             raise RetentionRefused("runtime retention refused")
     if closed(packet["artifact"], ("name", "retention_days", "files")) != {
-        "name": "gate0-publisher-runtime",
+        "name": "gate0-role-qualification-runtime"
+        if role
+        else "gate0-publisher-runtime",
         "retention_days": 30,
         "files": ["encrypted-runtime-bundle.pgp", "producer-receipt.json"],
     }:
         raise RetentionRefused("runtime retention refused")
     return packet
+
+
+def load_packet(raw, selected_sha256, now):
+    return _load_packet(raw, selected_sha256, now, role=False)
+
+
+def load_role_packet(raw, selected_sha256, now):
+    return _load_packet(raw, selected_sha256, now, role=True)
 
 
 def run_bounded(
@@ -436,16 +510,19 @@ def read_owned_regular(path, maximum, *, private):
         return raw
 
 
-def authenticate_context(packet, environment, repository_root, deadline):
+def _authenticate_context(packet, environment, repository_root, deadline, *, role):
     import base64
     import re
     import urllib.parse
 
+    workflow_path = ROLE_WORKFLOW if role else WORKFLOW
+    source_files = ROLE_SOURCE_FILES if role else SOURCE_FILES
+    job_key = "role-image" if role else "image"
     if (
         environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
         or environment.get("GITHUB_RUN_ATTEMPT") != "1"
         or environment.get("GITHUB_REPOSITORY") != REPOSITORY
-        or environment.get("GITHUB_JOB") != "image"
+        or environment.get("GITHUB_JOB") != job_key
     ):
         raise RetentionRefused("runtime retention refused")
     source = packet["source"]
@@ -457,7 +534,7 @@ def authenticate_context(packet, environment, repository_root, deadline):
     if (
         environment.get("GITHUB_WORKFLOW_SHA") != source["revision"]
         or environment.get("GITHUB_WORKFLOW_REF")
-        != REPOSITORY + "/" + WORKFLOW + "@" + source["ref"]
+        != REPOSITORY + "/" + workflow_path + "@" + source["ref"]
     ):
         raise RetentionRefused("runtime retention refused")
     run_id_text = environment.get("GITHUB_RUN_ID", "")
@@ -475,7 +552,10 @@ def authenticate_context(packet, environment, repository_root, deadline):
     )
     if head != source["revision"]:
         raise RetentionRefused("runtime retention refused")
-    for key, relative in {"workflow_blob_sha256": WORKFLOW, **SOURCE_FILES}.items():
+    for key, relative in {
+        "workflow_blob_sha256": workflow_path,
+        **source_files,
+    }.items():
         path = repository_root / relative
         for parent in path.parents:
             if parent == repository_root:
@@ -509,12 +589,12 @@ def authenticate_context(packet, environment, repository_root, deadline):
     workflow = api_json(
         prefix + "/actions/workflows/" + str(github["workflow_id"]), token, deadline
     )
-    if workflow["id"] != github["workflow_id"] or workflow["path"] != WORKFLOW:
+    if workflow["id"] != github["workflow_id"] or workflow["path"] != workflow_path:
         raise RetentionRefused("runtime retention refused")
     remote = api_json(
         prefix
         + "/contents/"
-        + WORKFLOW
+        + workflow_path
         + "?ref="
         + urllib.parse.quote(source["revision"], safe=""),
         token,
@@ -536,7 +616,7 @@ def authenticate_context(packet, environment, repository_root, deadline):
     )
     if jobs["total_count"] != len(jobs["jobs"]) or len(jobs["jobs"]) > 100:
         raise RetentionRefused("runtime retention refused")
-    selected = [job for job in jobs["jobs"] if job["name"] == "image"]
+    selected = [job for job in jobs["jobs"] if job["name"] == job_key]
     if (
         len(selected) != 1
         or selected[0]["run_id"] != int(run_id_text)
@@ -562,6 +642,18 @@ def authenticate_context(packet, environment, repository_root, deadline):
     }
 
 
+def authenticate_context(packet, environment, repository_root, deadline):
+    return _authenticate_context(
+        packet, environment, repository_root, deadline, role=False
+    )
+
+
+def authenticate_role_context(packet, environment, repository_root, deadline):
+    return _authenticate_context(
+        packet, environment, repository_root, deadline, role=True
+    )
+
+
 def ascii_field(value, maximum=200):
     if (
         not isinstance(value, str)
@@ -572,7 +664,7 @@ def ascii_field(value, maximum=200):
     return value
 
 
-def qualify_tools(raw, expected_digest, now, deadline):
+def _qualify_tools(raw, expected_digest, now, deadline, *, role):
     import os
     import platform
     import re
@@ -596,8 +688,18 @@ def qualify_tools(raw, expected_digest, now, deadline):
         ),
     )
     if (
-        record["schema"] != "DotmacPublisherRuntimeGpgQualification.v1"
-        or record["method_scope"] != "publisher-runtime-public-key-encryption.v1"
+        record["schema"]
+        != (
+            "DotmacRoleRuntimeGpgQualification.v1"
+            if role
+            else "DotmacPublisherRuntimeGpgQualification.v1"
+        )
+        or record["method_scope"]
+        != (
+            "role-runtime-public-key-encryption.v1"
+            if role
+            else "publisher-runtime-public-key-encryption.v1"
+        )
         or not utc(record["qualified_at"]) <= now < utc(record["valid_until"])
     ):
         raise RetentionRefused("runtime retention refused")
@@ -694,6 +796,14 @@ def qualify_tools(raw, expected_digest, now, deadline):
     if names != sorted(set(names)) or not {"gpg", "gpgconf"} <= set(names):
         raise RetentionRefused("runtime retention refused")
     return record
+
+
+def qualify_tools(raw, expected_digest, now, deadline):
+    return _qualify_tools(raw, expected_digest, now, deadline, role=False)
+
+
+def qualify_role_tools(raw, expected_digest, now, deadline):
+    return _qualify_tools(raw, expected_digest, now, deadline, role=True)
 
 
 def packet_header(stream):
@@ -1243,11 +1353,734 @@ def production_main(private_argument, preflight=False):
                 os.unlink(private / "producer-receipt.json.pending")
 
 
+def role_private_directory(argument):
+    import os
+    import re
+    import stat
+    from pathlib import Path
+
+    private = Path(argument)
+    if (
+        private.parent != Path(os.environ["RUNNER_TEMP"])
+        or re.fullmatch(r"gate0-role\.[A-Za-z0-9]{8}", private.name) is None
+    ):
+        raise RetentionRefused("runtime retention refused")
+    info = private.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise RetentionRefused("runtime retention refused")
+    return private
+
+
+def role_context(private):
+    """Authenticate before candidate import; original packaging clocks only."""
+    import base64
+    import importlib.util
+    import os
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    clock = closed(
+        parse_json(
+            read_owned_regular(private / "packaging-clock.json", 1024, private=True),
+            1024,
+        ),
+        ("monotonic", "wall"),
+    )
+    now, monotonic = time.time(), time.monotonic()
+    if (
+        any(type(value) not in {int, float} for value in clock.values())
+        or not 0 <= monotonic - clock["monotonic"] < 1200
+        or not 0 <= now - clock["wall"] < 1200
+    ):
+        raise RetentionRefused("runtime retention refused")
+    packet = load_role_packet(
+        os.environ.get("RETENTION_PACKET_CONFIGURATION", "").encode(),
+        os.environ.get("RETENTION_PACKET_SHA256", ""),
+        now,
+    )
+    expiry = utc(packet["validity"]["expires_at"])
+    deadline = ProductionDeadline(
+        min(clock["monotonic"] + 1180, monotonic + expiry - now),
+        min(clock["wall"] + 1180, expiry),
+    )
+    check_deadline(deadline)
+    producer = authenticate_role_context(packet, os.environ, root, deadline)
+    tool = qualify_role_tools(
+        os.environ.get("RETENTION_GPG_QUALIFICATION_CONFIGURATION", "").encode(),
+        packet["tool_qualification_sha256"],
+        now,
+        deadline,
+    )
+    expiry = utc(tool["valid_until"])
+    deadline = ProductionDeadline(
+        min(deadline, time.monotonic() + expiry - time.time()),
+        min(deadline.wall_expiry, expiry),
+    )
+    encoded = os.environ.get("RETENTION_CERTIFICATE_CONFIGURATION", "")
+    if len(encoded) > 90_000:
+        raise RetentionRefused("runtime retention refused")
+    certificate = base64.b64decode(encoded, validate=True)
+    if (
+        not 0 < len(certificate) <= 64 * 1024
+        or hashlib.sha256(certificate).hexdigest() != CERTIFICATE_SHA256
+    ):
+        raise RetentionRefused("runtime retention refused")
+    certificate_packet_shape(certificate)
+    spec = importlib.util.spec_from_file_location(
+        "role_retention_inspector", root / ROLE_SOURCE_FILES["inspect_helper_sha256"]
+    )
+    if spec is None or spec.loader is None:
+        raise RetentionRefused("runtime retention refused")
+    inspector = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(inspector)
+    check_deadline(deadline)
+    return packet, producer, deadline, certificate, inspector
+
+
+def _role_owner_record(private, name, value):
+    import os
+
+    descriptor = os.open(
+        private / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(canonical_json(value, 4096))
+
+
+def _read_role_owner_record(private, name):
+    import os
+    import stat
+
+    descriptor = os.open(private / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as source:
+        info = os.fstat(source.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o077
+            or not 0 < info.st_size <= 4096
+        ):
+            raise RetentionRefused("runtime retention refused")
+        raw = source.read(4097)
+        current = (private / name).lstat()
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise RetentionRefused("runtime retention refused")
+    return parse_json(raw, 4096), raw, (info.st_dev, info.st_ino)
+
+
+def _role_container_subject(container_id, name, image_id, deadline):
+    sha256(container_id)
+    document = parse_json(
+        run_bounded(
+            ["/usr/bin/docker", "container", "inspect", container_id], deadline
+        ),
+        MAX_METADATA_BYTES,
+    )
+    if (
+        not isinstance(document, list)
+        or len(document) != 1
+        or document[0]["Id"] != container_id
+        or document[0]["Name"] != "/" + name
+        or document[0]["Image"] != image_id
+    ):
+        raise RetentionRefused("runtime retention refused")
+    return document[0]
+
+
+def role_export_create(private, image_id, deadline):
+    """Fixed never-started export creation with durable owned-attempt identity."""
+    private = role_private_directory(str(private))
+    if not image_id.startswith("sha256:"):
+        raise RetentionRefused("runtime retention refused")
+    sha256(image_id[7:])
+    observed = (
+        read_owned_regular(private / "role-image-id", 128, private=True)
+        .decode("ascii")
+        .strip()
+    )
+    if observed != image_id:
+        raise RetentionRefused("runtime retention refused")
+    original = read_owned_regular(
+        private / "role-image.json", MAX_METADATA_BYTES, private=True
+    )
+    inspected = run_bounded(["/usr/bin/docker", "image", "inspect", image_id], deadline)
+    document = parse_json(original, MAX_METADATA_BYTES)
+    if (
+        document != parse_json(inspected, MAX_METADATA_BYTES)
+        or not isinstance(document, list)
+        or len(document) != 1
+        or document[0]["Id"] != image_id
+        or document[0]["Config"]["Labels"].get("io.dotmac.runtime")
+        != "gate0-finite-role"
+    ):
+        raise RetentionRefused("runtime retention refused")
+    name = "gate0-role-export-" + private.name.removeprefix("gate0-role.")
+    if run_bounded(
+        [
+            "/usr/bin/docker",
+            "container",
+            "ls",
+            "-aq",
+            "--filter",
+            "name=^" + name + "$",
+        ],
+        deadline,
+    ).strip():
+        raise RetentionRefused("runtime retention refused")
+    info = private.lstat()
+    intent = {
+        "schema": "Gate0RoleExportOwnershipIntent.v1",
+        "name": name,
+        "image_id": image_id,
+        "private_device": info.st_dev,
+        "private_inode": info.st_ino,
+        "work_deadline": float(deadline),
+        "wall_deadline": deadline.wall_expiry,
+    }
+    _role_owner_record(private, "export-ownership-intent.json", intent)
+    run_bounded(
+        [
+            "/usr/bin/docker",
+            "create",
+            "--name",
+            name,
+            "--cidfile",
+            str(private / "export-container-id"),
+            "--entrypoint",
+            "/bin/true",
+            image_id,
+        ],
+        deadline,
+    )
+    cid_record, cid_raw, cid_identity = _read_role_cid(private)
+    subject = _role_container_subject(cid_record, name, image_id, deadline)
+    if (
+        subject["State"]["Status"] != "created"
+        or subject["State"]["Running"] is not False
+        or subject["Mounts"]
+    ):
+        raise RetentionRefused("runtime retention refused")
+    _role_owner_record(
+        private,
+        "export-created-owner.json",
+        {
+            "schema": "Gate0RoleExportCreatedOwner.v1",
+            "container_id": cid_record,
+            "cid_device": cid_identity[0],
+            "cid_inode": cid_identity[1],
+            "intent_sha256": hashlib.sha256(canonical_json(intent, 4096)).hexdigest(),
+        },
+    )
+    return cid_record
+
+
+def _read_role_cid(private):
+    import os
+    import stat
+
+    descriptor = os.open(
+        private / "export-container-id", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    )
+    with os.fdopen(descriptor, "rb") as source:
+        info = os.fstat(source.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o077
+            or not 0 < info.st_size <= 65
+        ):
+            raise RetentionRefused("runtime retention refused")
+        raw = source.read(66)
+        current = (private / "export-container-id").lstat()
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise RetentionRefused("runtime retention refused")
+    cid = raw.decode("ascii").strip()
+    sha256(cid)
+    return cid, raw, (info.st_dev, info.st_ino)
+
+
+def role_export_cleanup(private):
+    """Remove only a reverified recorded CID/name/image; preserve unknown custody."""
+    private = role_private_directory(str(private))
+    intent, intent_raw, _ = _read_role_owner_record(
+        private, "export-ownership-intent.json"
+    )
+    closed(
+        intent,
+        (
+            "schema",
+            "name",
+            "image_id",
+            "private_device",
+            "private_inode",
+            "work_deadline",
+            "wall_deadline",
+        ),
+    )
+    info = private.lstat()
+    expected_name = "gate0-role-export-" + private.name.removeprefix("gate0-role.")
+    image_id = (
+        read_owned_regular(private / "role-image-id", 128, private=True)
+        .decode("ascii")
+        .strip()
+    )
+    if (
+        intent["schema"] != "Gate0RoleExportOwnershipIntent.v1"
+        or intent["name"] != expected_name
+        or intent["image_id"] != image_id
+        or (intent["private_device"], intent["private_inode"])
+        != (info.st_dev, info.st_ino)
+        or any(
+            type(intent[key]) not in {int, float}
+            for key in ("work_deadline", "wall_deadline")
+        )
+    ):
+        raise RetentionRefused("runtime retention refused")
+    if not image_id.startswith("sha256:"):
+        raise RetentionRefused("runtime retention refused")
+    sha256(image_id[7:])
+    cleanup = ProductionDeadline(
+        intent["work_deadline"] + 20, intent["wall_deadline"] + 20
+    )
+    owner, _, _ = _read_role_owner_record(private, "export-created-owner.json")
+    closed(
+        owner, ("schema", "container_id", "cid_device", "cid_inode", "intent_sha256")
+    )
+    cid, _, identity = _read_role_cid(private)
+    if (
+        owner["schema"] != "Gate0RoleExportCreatedOwner.v1"
+        or owner["container_id"] != cid
+        or (owner["cid_device"], owner["cid_inode"]) != identity
+        or owner["intent_sha256"] != hashlib.sha256(intent_raw).hexdigest()
+    ):
+        raise RetentionRefused("runtime retention refused")
+    _role_container_subject(cid, expected_name, image_id, cleanup)
+    run_bounded(["/usr/bin/docker", "container", "rm", "-f", cid], cleanup)
+    if run_bounded(
+        ["/usr/bin/docker", "container", "ls", "-aq", "--filter", "id=" + cid], cleanup
+    ).strip():
+        raise RetentionRefused("runtime retention refused")
+    _role_owner_record(
+        private,
+        "export-cleanup-confirmed.json",
+        {
+            "schema": "Gate0RoleExportCleanupConfirmed.v1",
+            "container_id": cid,
+            "intent_sha256": hashlib.sha256(intent_raw).hexdigest(),
+        },
+    )
+
+
+def role_base_identity(raw):
+    """Docker canonicalizes RepoDigests by removing the source reference tag.
+
+    Admit only the exact source-pinned ubuntu repository and manifest digest;
+    publisher image_identity keeps its original exact-reference behavior.
+    """
+    document = parse_json(raw, MAX_METADATA_BYTES)
+    if not isinstance(document, list) or len(document) != 1:
+        raise RetentionRefused("runtime retention refused")
+    references = document[0].get("RepoDigests")
+    canonical = "ubuntu@" + ROLE_BASE_IMAGE.split("@", 1)[1]
+    if not isinstance(references, list) or not all(
+        isinstance(value, str) for value in references
+    ):
+        raise RetentionRefused("runtime retention refused")
+    selected = next(
+        (value for value in references if value in {ROLE_BASE_IMAGE, canonical}), None
+    )
+    if selected is None:
+        raise RetentionRefused("runtime retention refused")
+    result = image_identity(raw, selected, None, None)
+    # The source coordinate remains fixed; the observed ID and ordered diffIDs
+    # come from the actual Docker inspection, never from the execution packet.
+    result["reference"] = ROLE_BASE_IMAGE
+    return result
+
+
+def role_export_image_subject(private, revision, inspector, deadline):
+    identity = (
+        read_owned_regular(private / "role-image-id", 128, private=True)
+        .decode("ascii")
+        .strip()
+    )
+    if not identity.startswith("sha256:"):
+        raise RetentionRefused("runtime retention refused")
+    sha256(identity[7:])
+    container_id = (
+        read_owned_regular(private / "export-container-id", 128, private=True)
+        .decode("ascii")
+        .strip()
+    )
+    if len(container_id) != 64:
+        raise RetentionRefused("runtime retention refused")
+    sha256(container_id)
+    container = parse_json(
+        run_bounded(
+            ["/usr/bin/docker", "container", "inspect", container_id], deadline
+        ),
+        MAX_METADATA_BYTES,
+    )
+    if (
+        not isinstance(container, list)
+        or len(container) != 1
+        or container[0]["Id"] != container_id
+        or container[0]["Image"] != identity
+        or container[0]["State"]["Status"] != "created"
+        or container[0]["State"]["Running"] is not False
+        or container[0]["Mounts"]
+    ):
+        raise RetentionRefused("runtime retention refused")
+    original = read_owned_regular(
+        private / "role-image.json", MAX_METADATA_BYTES, private=True
+    )
+    current = run_bounded(["/usr/bin/docker", "image", "inspect", identity], deadline)
+    # Inspection JSON is compared semantically; actual original bytes are bound.
+    if parse_json(current, MAX_METADATA_BYTES) != parse_json(
+        original, MAX_METADATA_BYTES
+    ):
+        raise RetentionRefused("runtime retention refused")
+    base_raw = run_bounded(
+        ["/usr/bin/docker", "image", "inspect", ROLE_BASE_IMAGE], deadline
+    )
+    base = role_base_identity(base_raw)
+    role = image_identity(
+        original,
+        None,
+        "gate0-role",
+        revision,
+        base["rootfs_diff_ids"],
+    )
+    if role["image_id"] != identity:
+        raise RetentionRefused("runtime retention refused")
+    image = parse_json(original, MAX_METADATA_BYTES)[0]
+    if (
+        image["Config"]["Labels"].get("io.dotmac.runtime") != "gate0-finite-role"
+        or image["Config"]["User"] != "0:0"
+        or image["Config"]["Entrypoint"]
+        != ["/opt/venv/bin/dotmac-platform", "gate0", "supervise"]
+    ):
+        raise RetentionRefused("runtime retention refused")
+    with inspector.private_input(
+        private / "role-image-save.tar", MAX_TAR_BYTES
+    ) as saved:
+        inspector.bounded_tar_headers(saved)
+        with tarfile.open(fileobj=saved, mode="r:") as archive:
+            entries = inspector.inventory(archive, publisher=False)
+            manifest_raw = inspector.read(
+                archive, entries, "manifest.json", MAX_METADATA_BYTES
+            )
+            manifest = parse_json(manifest_raw, MAX_METADATA_BYTES)
+            if not isinstance(manifest, list) or len(manifest) != 1:
+                raise RetentionRefused("runtime retention refused")
+            config_name = inspector.member_name(manifest[0]["Config"])
+            if config_name not in {
+                identity[7:] + ".json",
+                "blobs/sha256/" + identity[7:],
+            }:
+                raise RetentionRefused("runtime retention refused")
+            config = inspector.read(archive, entries, config_name, MAX_METADATA_BYTES)
+            if hashlib.sha256(config).hexdigest() != identity[7:]:
+                raise RetentionRefused("runtime retention refused")
+            document = parse_json(config, MAX_METADATA_BYTES)
+            if (
+                document["rootfs"]["diff_ids"] != role["rootfs_diff_ids"]
+                or document["config"] != image["Config"]
+            ):
+                raise RetentionRefused("runtime retention refused")
+            role["config_sha256"] = hashlib.sha256(config).hexdigest()
+            role["config_bytes"] = len(config)
+    return {"base": base, "role": role}
+
+
+def role_image_subject(private, packet, inspector, deadline):
+    return role_export_image_subject(
+        private, packet["source"]["revision"], inspector, deadline
+    )
+
+
+def role_export_measurement(private, source, limits, inspector, rootfs, image_id):
+    inspector.bounded_tar_headers(rootfs)
+    with tarfile.open(fileobj=rootfs, mode="r:") as archive:
+        inventory = inspector.role_inventory(archive)
+        subjects = inspector.role_subjects(archive, inventory, source)
+        files = inspector.complete_role_files(archive, inventory)
+        footprint = {
+            "entries": len(inventory),
+            "regular_files": sum(item.isfile() for item in inventory.values()),
+            "regular_bytes": sum(
+                item.size for item in inventory.values() if item.isfile()
+            ),
+            "largest_member_bytes": max(
+                (item.size for item in inventory.values()), default=0
+            ),
+            "role_tar_bytes": __import__("os").fstat(rootfs.fileno()).st_size,
+        }
+    smoke = read_owned_regular(private / "smoke.json", MAX_METADATA_BYTES, private=True)
+    network = read_owned_regular(
+        private / "network.json", MAX_METADATA_BYTES, private=True
+    )
+    qualification = inspector.role_synthetic_qualification(
+        smoke, network, source["revision"], image_id
+    )
+    if (
+        footprint["entries"] > limits["rootfs_members"]
+        or footprint["largest_member_bytes"] > limits["regular_member_bytes"]
+        or footprint["role_tar_bytes"] > limits["rootfs_uncompressed_bytes"]
+        or len(files) > limits["files_manifest_bytes"]
+    ):
+        raise RetentionRefused("runtime retention refused")
+    measurement = {
+        "schema": "Gate0RoleQualificationInspection.v1",
+        "role_rootfs_sha256": inspector.stream_digest(rootfs),
+        "files_manifest_sha256": hashlib.sha256(files).hexdigest(),
+        "qualification_manifest_sha256": hashlib.sha256(qualification).hexdigest(),
+        "subjects": subjects,
+        "footprint": footprint,
+    }
+    return canonical_json(measurement, MAX_METADATA_BYTES), files, qualification
+
+
+def role_measurement(private, packet, inspector, rootfs, image_id):
+    return role_export_measurement(
+        private, packet["source"], packet["limits"], inspector, rootfs, image_id
+    )
+
+
+def role_inspection(private):
+    packet, _, deadline, _, inspector = role_context(private)
+    images = role_image_subject(private, packet, inspector, deadline)
+    with inspector.private_input(private / "role.tar", MAX_TAR_BYTES) as rootfs:
+        outputs = role_measurement(
+            private, packet, inspector, rootfs, images["role"]["image_id"]
+        )
+    for name, raw in zip(
+        ("manifest.json", "files.json", "qualification.json"), outputs, strict=True
+    ):
+        check_deadline(deadline)
+        with inspector.private_output(private / name) as output:
+            output.write(raw)
+
+
+def role_main(private_argument, preflight=False):
+    import os
+
+    private = role_private_directory(private_argument)
+    complete = (
+        private / "encrypted-runtime-bundle.pgp",
+        private / "producer-receipt.json",
+    )
+    success = False
+    owned_completions = {}
+    pending_identities = {}
+    try:
+        if any(path.exists() or path.is_symlink() for path in complete):
+            raise RetentionRefused("runtime retention refused")
+        packet, producer, deadline, certificate, inspector = role_context(private)
+        if preflight:
+            with inspector.private_output(
+                private / "packaging-deadline.json"
+            ) as output:
+                output.write(
+                    canonical_json(
+                        {"monotonic": float(deadline), "wall": deadline.wall_expiry},
+                        1024,
+                    )
+                )
+            return
+        images = role_image_subject(private, packet, inspector, deadline)
+        with inspector.private_input(private / "role.tar", MAX_TAR_BYTES) as rootfs:
+            measured, files, qualification = role_measurement(
+                private, packet, inspector, rootfs, images["role"]["image_id"]
+            )
+            for name, expected, maximum in (
+                ("manifest.json", measured, MAX_METADATA_BYTES),
+                ("files.json", files, MAX_FILES_BYTES),
+                ("qualification.json", qualification, MAX_METADATA_BYTES),
+            ):
+                if (
+                    read_owned_regular(private / name, maximum, private=True)
+                    != expected
+                ):
+                    raise RetentionRefused("runtime retention refused")
+            measurement = parse_json(measured, MAX_METADATA_BYTES)
+            descriptor = os.open(
+                private / "role-rootfs.tar.gz",
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+            with os.fdopen(descriptor, "w+b") as compressed:
+                compression = compress_inspected_rootfs(
+                    rootfs, compressed, measurement["role_rootfs_sha256"], deadline
+                )
+                if (
+                    compression["compressed_bytes"]
+                    > packet["limits"]["rootfs_compressed_bytes"]
+                ):
+                    raise RetentionRefused("runtime retention refused")
+                runtime = {
+                    "uncompressed_tar_sha256": compression["uncompressed_sha256"],
+                    "uncompressed_tar_bytes": compression["uncompressed_bytes"],
+                    "compressed_archive_sha256": compression["compressed_sha256"],
+                    "compressed_archive_bytes": compression["compressed_bytes"],
+                    "files_manifest_sha256": hashlib.sha256(files).hexdigest(),
+                    "files_manifest_bytes": len(files),
+                    "qualification_manifest_sha256": hashlib.sha256(
+                        qualification
+                    ).hexdigest(),
+                    "qualification_manifest_bytes": len(qualification),
+                    **measurement["subjects"],
+                }
+                build = canonical_json(
+                    {
+                        "schema": "Gate0RoleQualificationPrivateBuild.v1",
+                        "source": {
+                            "revision": packet["source"]["revision"],
+                            "workflow_blob_sha256": packet["source"][
+                                "workflow_blob_sha256"
+                            ],
+                            **packet["source"]["files"],
+                        },
+                        "producer": producer,
+                        "images": images,
+                        "runtime": runtime,
+                        "limits": packet["limits"],
+                        "footprint": measurement["footprint"],
+                        "tool_qualification_sha256": packet[
+                            "tool_qualification_sha256"
+                        ],
+                    },
+                    MAX_METADATA_BYTES,
+                )
+                with inspector.private_output(private / "build.json") as output:
+                    output.write(build)
+                descriptor = os.open(
+                    private / "runtime-payload.tar",
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                )
+                with os.fdopen(descriptor, "w+b") as payload:
+                    write_role_inner_archive(
+                        payload,
+                        compressed,
+                        compression["compressed_bytes"],
+                        files,
+                        build,
+                        qualification,
+                        deadline,
+                    )
+                    payload.flush()
+                    if payload.tell() > MAX_CIPHERTEXT_BYTES - 1024**2:
+                        raise RetentionRefused("runtime retention refused")
+                    home = private / "gpg-home"
+                    home.mkdir(mode=0o700)
+                    descriptor = os.open(
+                        private / "encrypted-runtime-bundle.pgp.pending",
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                    )
+                    with os.fdopen(descriptor, "w+b") as cipher:
+                        checked_encrypt(
+                            certificate,
+                            PRIMARY_FINGERPRINT,
+                            ENCRYPTION_FINGERPRINT,
+                            home,
+                            payload,
+                            cipher,
+                            deadline,
+                        )
+                        size = os.fstat(cipher.fileno()).st_size
+                        if not 0 < size <= MAX_CIPHERTEXT_BYTES:
+                            raise RetentionRefused("runtime retention refused")
+                        cipher_hash = inspector.stream_digest(
+                            cipher, MAX_CIPHERTEXT_BYTES
+                        )
+                        info = os.fstat(cipher.fileno())
+                        pending_identities["encrypted-runtime-bundle.pgp"] = (
+                            info.st_dev,
+                            info.st_ino,
+                        )
+                    receipt = canonical_json(
+                        {
+                            "schema": "Gate0RoleQualificationProducerReceipt.v1",
+                            "purpose": ROLE_PURPOSE,
+                            "image_target": "gate0-role",
+                            "source_revision": packet["source"]["revision"],
+                            "workflow_blob_sha256": packet["source"][
+                                "workflow_blob_sha256"
+                            ],
+                            "run_id": producer["run_id"],
+                            "attempt": 1,
+                            "job_id": producer["job_id"],
+                            "recipient_certificate_sha256": CERTIFICATE_SHA256,
+                            "recipient_encryption_fingerprint": ENCRYPTION_FINGERPRINT,
+                            "encrypted_bundle_sha256": cipher_hash,
+                            "encrypted_bundle_bytes": size,
+                            "private_manifest_sha256": hashlib.sha256(
+                                build
+                            ).hexdigest(),
+                        },
+                        16384,
+                    )
+                    with inspector.private_output(
+                        private / "producer-receipt.json.pending"
+                    ) as output:
+                        output.write(receipt)
+                        info = os.fstat(output.fileno())
+                        pending_identities["producer-receipt.json"] = (
+                            info.st_dev,
+                            info.st_ino,
+                        )
+                    check_deadline(deadline)
+                    for path in complete:
+                        # Reuse publisher's no-overwrite completion primitive.
+                        # Record our FD-derived inode before the link, including
+                        # a syscall failure after its effect. Never erase a
+                        # preexisting or replacement destination on refusal.
+                        owned_completions[path] = pending_identities[path.name]
+                        os.link(str(path) + ".pending", path)
+                        os.unlink(str(path) + ".pending")
+                    check_deadline(deadline)
+                    success = True
+    finally:
+        if not success:
+            # Never erase an initial/preexisting output or a replacement inode.
+            # Only completion files created by this exact attempt are ours.
+            for path, identity in owned_completions.items():
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    continue
+                if (info.st_dev, info.st_ino) == identity:
+                    path.unlink()
+
+
 if __name__ == "__main__":
     import sys
 
     try:
-        if len(sys.argv) == 3 and sys.argv[1] == "preflight":
+        if len(sys.argv) == 3 and sys.argv[1] == "role-export-create":
+            private = role_private_directory(sys.argv[2])
+            _, _, deadline, _, _ = role_context(private)
+            image_id = (
+                read_owned_regular(private / "role-image-id", 128, private=True)
+                .decode("ascii")
+                .strip()
+            )
+            role_export_create(private, image_id, deadline)
+        elif len(sys.argv) == 3 and sys.argv[1] == "role-export-cleanup":
+            role_export_cleanup(role_private_directory(sys.argv[2]))
+        elif len(sys.argv) == 3 and sys.argv[1] == "role-preflight":
+            role_main(sys.argv[2], preflight=True)
+        elif len(sys.argv) == 3 and sys.argv[1] == "role":
+            role_main(sys.argv[2])
+        elif len(sys.argv) == 3 and sys.argv[1] == "preflight":
             production_main(sys.argv[2], preflight=True)
         elif len(sys.argv) == 2:
             production_main(sys.argv[1])

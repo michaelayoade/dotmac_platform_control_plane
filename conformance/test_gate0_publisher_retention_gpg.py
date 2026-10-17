@@ -140,6 +140,72 @@ class ActualSyntheticRuntimeGpgTests(unittest.TestCase):
                         )
                     cipher.seek(0)
                     encrypted_bytes = cipher.read()
+                # The same qualified primitives preserve the finite role roster;
+                # this recipient is ephemeral synthetic test material only.
+                role_home = root / "role-public-only"
+                role_home.mkdir(mode=0o700)
+                with (
+                    (root / "role-payload.tar").open("w+b") as role_payload,
+                    (root / "role.pgp").open("w+b") as role_cipher,
+                ):
+                    role_compressed = io.BytesIO(gzip.compress(raw, mtime=0))
+                    RETAIN.write_role_inner_archive(
+                        role_payload,
+                        role_compressed,
+                        len(role_compressed.getvalue()),
+                        b'{"synthetic":"role-files"}\n',
+                        b'{"synthetic":"role-build"}\n',
+                        b'{"synthetic":"qualification"}\n',
+                        deadline,
+                    )
+                    RETAIN.checked_encrypt(
+                        certificate,
+                        fingerprint,
+                        fingerprint,
+                        role_home,
+                        role_payload,
+                        role_cipher,
+                        deadline,
+                    )
+                    role_cipher.seek(0)
+                    role_decrypted = RETAIN.run_bounded(
+                        [
+                            *common,
+                            "--pinentry-mode",
+                            "loopback",
+                            "--passphrase",
+                            "",
+                            "--decrypt",
+                        ],
+                        deadline,
+                        stdin=role_cipher,
+                        maximum=2 * 1024**2,
+                    )
+                    role_payload.seek(0)
+                    self.assertEqual(role_decrypted, role_payload.read())
+                    with tarfile.open(
+                        fileobj=io.BytesIO(role_decrypted), mode="r:"
+                    ) as role_archive:
+                        self.assertEqual(
+                            tuple(role_archive.getnames()), RETAIN.ROLE_INNER_NAMES
+                        )
+                        self.assertEqual(
+                            gzip.decompress(
+                                role_archive.extractfile("role-rootfs.tar.gz").read()
+                            ),
+                            raw,
+                        )
+                    role_cipher.seek(0)
+                    role_bytes = role_cipher.read()
+                    for invalid in (role_bytes[:-1], role_bytes + role_bytes):
+                        with self.assertRaises(RETAIN.RetentionRefused):
+                            RETAIN.verify_ciphertext_framing(
+                                io.BytesIO(invalid), fingerprint, deadline
+                            )
+                    with self.assertRaises(RETAIN.RetentionRefused):
+                        RETAIN.verify_ciphertext_framing(
+                            io.BytesIO(role_bytes), "0" * 40, deadline
+                        )
                 for malformed in (
                     encrypted_bytes[:-1],
                     encrypted_bytes + encrypted_bytes,

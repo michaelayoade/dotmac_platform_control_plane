@@ -1,6 +1,13 @@
 name: Gate 0 installed SSH conformance
 
 on:
+  workflow_dispatch:
+    inputs:
+      retention_packet_sha256:
+        description: Optional reviewed private role qualification retention packet SHA256
+        type: string
+        required: false
+        default: ""
   pull_request:
     branches: [main]
   push:
@@ -109,35 +116,171 @@ jobs:
           retention-days: 30
 
   role-image:
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Hold the private role image observation directory
+        run: |
+          set -euo pipefail
+          umask 077
+          private="$(mktemp -d "$RUNNER_TEMP/gate0-role.XXXXXXXX")"
+          chmod 700 "$private"
+          echo "GATE0_ROLE_PRIVATE_DIR=$private" >> "$GITHUB_ENV"
       - name: Build an unpublished finite-role candidate
         env:
           FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: |
           set -euo pipefail
+          umask 077
           source_revision="$(git rev-parse HEAD)"
           DOCKER_BUILDKIT=1 docker build --target gate0-role \
             --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
             --build-arg "SOURCE_REVISION=$source_revision" \
+            --iidfile "$GATE0_ROLE_PRIVATE_DIR/role-image-id" \
             --tag gate0-role-qualified-local .
-          docker image inspect gate0-role-qualified-local > "$RUNNER_TEMP/gate0-role-image.json"
+          image_id="$(cat "$GATE0_ROLE_PRIVATE_DIR/role-image-id")"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker image inspect "$image_id" > "$GATE0_ROLE_PRIVATE_DIR/role-image.json"
+          cp "$GATE0_ROLE_PRIVATE_DIR/role-image.json" "$RUNNER_TEMP/gate0-role-image.json"
       - name: Check those image bytes with no network or operational inputs
         run: |
           set -euo pipefail
+          umask 077
+          image_id="$(cat "$GATE0_ROLE_PRIVATE_DIR/role-image-id")"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
           docker run --rm --network none --read-only --cap-drop ALL \
             --cap-add SETUID --cap-add SETGID --cap-add SYS_CHROOT \
             --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m \
             --mount type=bind,source="$PWD/conformance/gate0_role_image_smoke.py",target=/qualification.py,readonly \
-            --entrypoint /opt/venv/bin/python gate0-role-qualified-local \
-            -I -B /qualification.py > "$RUNNER_TEMP/gate0-role-smoke.json"
+            --entrypoint /opt/venv/bin/python "$image_id" \
+            -I -B /qualification.py > "$GATE0_ROLE_PRIVATE_DIR/smoke.json"
+          cp "$GATE0_ROLE_PRIVATE_DIR/smoke.json" "$RUNNER_TEMP/gate0-role-smoke.json"
       - name: Prove native capability and socket boundaries on those image bytes
         run: |
-          bash .github/candidate/accept_gate0_network.sh gate0-role-qualified-local "$RUNNER_TEMP/gate0-role-native-network.json"
+          set -euo pipefail
+          umask 077
+          image_id="$(cat "$GATE0_ROLE_PRIVATE_DIR/role-image-id")"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          bash .github/candidate/accept_gate0_network.sh "$image_id" "$GATE0_ROLE_PRIVATE_DIR/network.json"
+          cp "$GATE0_ROLE_PRIVATE_DIR/network.json" "$RUNNER_TEMP/gate0-role-native-network.json"
+      - name: Inspect the already-smoked role export as hosted source conformance
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.retention_packet_sha256 == '' }}
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          umask 077
+          private="$(mktemp -d "$RUNNER_TEMP/gate0-role.XXXXXXXX")"
+          chmod 700 "$private"
+          echo "GATE0_ROLE_EXPORT_CHECK_PRIVATE_DIR=$private" >> "$GITHUB_ENV"
+          timeout --signal=TERM --kill-after=5s 305s \
+            python3 -I -B conformance/check_gate0_role_export.py "$GATE0_ROLE_PRIVATE_DIR" "$private"
+      - name: Reconcile owned source-conformance cleanup on every outcome
+        if: always()
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          private="${GATE0_ROLE_EXPORT_CHECK_PRIVATE_DIR:-}"
+          if [[ -n "$private" && -e "$private" ]]; then
+            [[ "$private" == "$RUNNER_TEMP"/gate0-role.???????? && -d "$private" && ! -L "$private" ]]
+            if [[ -e "$private/export-ownership-intent.json" || -L "$private/export-ownership-intent.json" || -e "$private/export-container-id" || -L "$private/export-container-id" ]]; then
+              timeout --signal=TERM --kill-after=5s 25s \
+                python3 -I -B .github/candidate/retain_gate0_publisher.py role-export-cleanup "$private"
+              [[ -f "$private/export-cleanup-confirmed.json" && ! -L "$private/export-cleanup-confirmed.json" ]]
+            fi
+            rm -rf -- "$private"
+            [[ ! -e "$private" ]]
+          fi
+      - name: Package the selected private role qualification input
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.retention_packet_sha256 != '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RETENTION_PACKET_SHA256: ${{ inputs.retention_packet_sha256 }}
+          RETENTION_PACKET_CONFIGURATION: ${{ vars.GATE0_ROLE_RETENTION_PACKET_JSON }}
+          RETENTION_CERTIFICATE_CONFIGURATION: ${{ vars.GATE0_ROLE_RETENTION_CERTIFICATE_BASE64 }}
+          RETENTION_GPG_QUALIFICATION_CONFIGURATION: ${{ vars.GATE0_ROLE_RETENTION_GPG_QUALIFICATION_JSON }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 -I -B - <<'PYTHON'
+          import json, os, pathlib, time
+          private = pathlib.Path(os.environ["GATE0_ROLE_PRIVATE_DIR"])
+          with (private / "packaging-clock.json").open("x") as output:
+              json.dump({"monotonic": time.monotonic(), "wall": time.time()}, output)
+          PYTHON
+          python3 -I -B .github/candidate/retain_gate0_publisher.py role-preflight "$GATE0_ROLE_PRIVATE_DIR"
+          remaining="$(python3 -I -B - <<'PYTHON'
+          import json, os, pathlib, time
+          clock = json.loads((pathlib.Path(os.environ["GATE0_ROLE_PRIVATE_DIR"]) / "packaging-deadline.json").read_bytes())
+          print(max(0, int(min(clock["monotonic"] - time.monotonic(), clock["wall"] - time.time()))))
+          PYTHON
+          )"
+          [[ "$remaining" =~ ^[1-9][0-9]{0,3}$ ]]
+          timeout --signal=TERM --kill-after=5s "${remaining}s" bash -euo pipefail <<'PACKAGE'
+          private="$GATE0_ROLE_PRIVATE_DIR"
+          image_id="$(cat "$private/role-image-id")"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker pull ubuntu:24.04@sha256:f610ab94648195aa356059f5b41d6085c9d4d903c072430cdd1af7bdb646106b >/dev/null
+          python3 -I -B .github/candidate/retain_gate0_publisher.py role-export-create "$private"
+          container_id="$(cat "$private/export-container-id")"
+          [[ "$container_id" =~ ^[0-9a-f]{64}$ ]]
+          docker export --output "$private/role.tar" "$container_id"
+          docker image save --output "$private/role-image-save.tar" "$image_id"
+          python3 -I -B .github/candidate/inspect_gate0_publisher.py role-inspect "$private"
+          python3 -I -B .github/candidate/retain_gate0_publisher.py role "$private"
+          PACKAGE
+      - name: Clean the owned role export before staging
+        if: always()
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          private="${GATE0_ROLE_PRIVATE_DIR:-}"
+          if [[ -n "$private" && ( -e "$private/export-ownership-intent.json" || -L "$private/export-ownership-intent.json" || -e "$private/export-container-id" || -L "$private/export-container-id" ) ]]; then
+            timeout --signal=TERM --kill-after=5s 25s \
+              python3 -I -B .github/candidate/retain_gate0_publisher.py role-export-cleanup "$private"
+            [[ -f "$private/export-cleanup-confirmed.json" && ! -L "$private/export-cleanup-confirmed.json" ]]
+          fi
+      - name: Stage only the completed encrypted role pair
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.retention_packet_sha256 != '' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          staging="$RUNNER_TEMP/gate0-role-qualification-upload"
+          mkdir -m 700 "$staging"
+          for name in encrypted-runtime-bundle.pgp producer-receipt.json; do
+            [[ -f "$GATE0_ROLE_PRIVATE_DIR/$name" && ! -L "$GATE0_ROLE_PRIVATE_DIR/$name" ]]
+            cp "$GATE0_ROLE_PRIVATE_DIR/$name" "$staging/$name"
+          done
+      - name: Retain the selected encrypted role qualification input
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.retention_packet_sha256 != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gate0-role-qualification-runtime
+          path: |
+            ${{ runner.temp }}/gate0-role-qualification-upload/encrypted-runtime-bundle.pgp
+            ${{ runner.temp }}/gate0-role-qualification-upload/producer-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+          overwrite: false
+      - name: Remove all owned private role packaging and upload files
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${GATE0_ROLE_PRIVATE_DIR:-}" ]]; then
+            [[ "$GATE0_ROLE_PRIVATE_DIR" == "$RUNNER_TEMP"/gate0-role.???????? && -d "$GATE0_ROLE_PRIVATE_DIR" && ! -L "$GATE0_ROLE_PRIVATE_DIR" ]]
+            if [[ -e "$GATE0_ROLE_PRIVATE_DIR/export-ownership-intent.json" || -L "$GATE0_ROLE_PRIVATE_DIR/export-ownership-intent.json" || -e "$GATE0_ROLE_PRIVATE_DIR/export-container-id" || -L "$GATE0_ROLE_PRIVATE_DIR/export-container-id" ]]; then
+              [[ -f "$GATE0_ROLE_PRIVATE_DIR/export-cleanup-confirmed.json" && ! -L "$GATE0_ROLE_PRIVATE_DIR/export-cleanup-confirmed.json" ]]
+            fi
+            rm -rf -- "$GATE0_ROLE_PRIVATE_DIR"
+            [[ ! -e "$GATE0_ROLE_PRIVATE_DIR" ]]
+          fi
+          rm -rf -- "$RUNNER_TEMP/gate0-role-qualification-upload"
+          [[ ! -e "$RUNNER_TEMP/gate0-role-qualification-upload" ]]
       - name: Retain candidate identity and smoke evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

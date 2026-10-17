@@ -176,7 +176,7 @@ RUN python3 -I -B /opt/prepare_gate0_native.py \
 # the shared builder. No movable/cross-distribution virtual environment is used.
 COPY .github/bootstrap/poetry-requirements.txt /opt/poetry-requirements.txt
 RUN /usr/bin/python3 -m venv "$POETRY_HOME" \
-    && "$POETRY_HOME/bin/pip" install --disable-pip-version-check \
+    && "$POETRY_HOME/bin/pip" install --no-cache-dir --disable-pip-version-check \
        --require-hashes --only-binary=:all: \
        --requirement /opt/poetry-requirements.txt \
     && /usr/bin/python3 -m venv "$VIRTUAL_ENV" \
@@ -187,7 +187,7 @@ RUN --mount=type=secret,id=forgejo_token \
     POETRY_HTTP_BASIC_FORGEJO_PASSWORD="$(cat /run/secrets/forgejo_token)" \
     poetry install --only main --no-root --no-interaction --no-ansi
 COPY --from=builder /app/dist /app/dist
-RUN "$VIRTUAL_ENV/bin/pip" install --no-deps --no-index /app/dist/*.whl
+RUN "$VIRTUAL_ENV/bin/pip" install --no-cache-dir --no-deps --no-index /app/dist/*.whl
 COPY --from=builder /app/distributions.json /app/distributions.json
 COPY --from=builder /app/alembic /app/alembic
 COPY --from=builder /app/alembic.ini /app/alembic.ini
@@ -204,7 +204,9 @@ RUN DATABASE_URL=postgresql+psycopg://app_user@127.0.0.1:5432/vendor_cp \
         --output /app/migration_heads.json \
     && chmod 444 /app/*json \
     && /opt/venv/bin/dotmac-platform --version \
-    && /usr/bin/ssh -V
+    && /usr/bin/ssh -V \
+    && rm -rf /root/.cache/pip /root/.cache/pypoetry \
+    && if [ -d /root/.cache ]; then rmdir /root/.cache; fi
 
 # Root supervises the declared delegated cgroup; signing workers use fixed
 # unprivileged UIDs. No key, launch packet, Docker socket or auto-start fallback.

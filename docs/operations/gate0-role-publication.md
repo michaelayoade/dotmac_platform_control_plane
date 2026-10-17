@@ -54,3 +54,22 @@ run/local packets, network and worker permissions, database qualification where
 required, custody and current approvals. A successful publication receipt supplies
 image provenance only. It neither supplies these inputs nor closes CP Work
 Packet E, A8/A9, reverse CA or recovery requirements.
+
+Private qualification transport is separately prepared in the existing
+`gate0-sshd-conformance.yml` role job. Its optional manual packet selects only
+an encrypted `gate0-role-qualification-runtime` artifact with a distinct
+qualification-only receipt. Empty manual, push and PR runs retain public
+observations only. The actual role image is built once, smoked and checked by
+the existing native network proof, then exported once from its immutable ID;
+private inventory/encryption never rebuilds or strips that export.
+
+The closed schemas, roster/link policy, measured runtime keys, bounded cleanup
+and fixed source/tool/recipient joins are documented in
+[the candidate owner README](../../.github/candidate/README.md#private-role-qualification-retention).
+The inner synthetic qualification fixes `live_readiness`,
+`installed_native_qualified`, `operationally_accepted` and `gate0_accepted` to
+false. Private transport does not satisfy this publication gate or installed
+IDP3/NS3 launch guards. A genuine role-scoped GPG qualification record, exact
+owner-authorized packet/recipient use and later separately authorized custody
+and native qualification remain operational inputs; none are configured or
+executed by preparing this source.
