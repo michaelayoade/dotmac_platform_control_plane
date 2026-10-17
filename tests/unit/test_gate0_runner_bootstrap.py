@@ -1128,3 +1128,76 @@ def test_actual_installed_original_clock_keeps_a_stricter_earlier_cutoff(
     )
     assert actual.clock.cutoff == expected
     assert actual.clock.cutoff < n.bootstrap.clock.cutoff
+
+
+def test_native_event_close_then_error_and_fd_reuse_cannot_publish_or_close_twice(
+    candidate, monkeypatch, tmp_path
+):
+    manager, values, _ = _bound_retirement_manager(candidate, monkeypatch, tmp_path)
+    # Valid original-window manager time lets the real normal retirement path
+    # reach NativeSystemManager.close rather than an earlier missing-field error.
+    values["StateChangeTimestampMonotonic"] = "1009000000"
+    original_events = manager._events
+    replacement_path = tmp_path / "replacement"
+    replacement_path.write_bytes(b"replacement-stays-open")
+    native_close, native_open = owner.os.close, owner.os.open
+    calls, replacement, published, retired = [], [], [], []
+
+    def uncertain_close(descriptor):
+        calls.append(descriptor)
+        native_close(descriptor)
+        if descriptor == original_events and not replacement:
+            replacement.append(native_open(replacement_path, owner.os.O_RDONLY))
+            assert replacement[0] == original_events
+            raise OSError("PRIVATE-NATIVE-CLOSE-MARKER")
+
+    monkeypatch.setattr(owner.os, "close", uncertain_close)
+    monkeypatch.setattr(
+        owner.BootstrapInstallation, "from_installed", lambda: candidate
+    )
+    monkeypatch.setattr(
+        owner,
+        "read_protected_handoff",
+        lambda *args, **kwargs: b"synthetic-private-input",
+    )
+    monkeypatch.setattr(owner, "_exclusive", lambda *args: None)
+    monkeypatch.setattr(owner, "NativeSystemManager", lambda installation: manager)
+    monkeypatch.setattr(manager, "qualify", lambda: b"{}")
+    monkeypatch.setattr(manager, "arm_original_timer", lambda: {})
+    monkeypatch.setattr(manager, "start_fixed_collector", lambda deadline: None)
+    monkeypatch.setattr(manager, "bind_actual_collector", lambda *args: None)
+    monkeypatch.setattr(manager, "stop_fixed_collector", lambda deadline: None)
+    states = iter(
+        [
+            {**values, "ActiveState": "active", "SubState": "running", "MainPID": "18"},
+            values,
+        ]
+    )
+    monkeypatch.setattr(manager, "read_fixed_invocation", lambda deadline: next(states))
+    monkeypatch.setattr(
+        owner, "_promote_listener", lambda *args: {"fixture": "same-inode"}
+    )
+
+    def retire(current, fact, deadline, *, complete):
+        assert current is manager and complete and manager.owns_retirement(fact)
+        retired.append(fact)
+
+    monkeypatch.setattr(owner, "_retire_lifecycle_files", retire)
+    monkeypatch.setattr(
+        owner, "_publish_normal_observation", lambda *args: published.append(args)
+    )
+    monkeypatch.setattr(owner, "_publish_lifecycle_failure", lambda deadline: None)
+    try:
+        assert owner.run_installed_bootstrap() == 3
+        assert retired and not published
+        assert manager._closed and manager._events == -1 and manager._retirement is None
+        assert not manager.owns_retirement(retired[0])
+        manager.close()
+        manager.close()
+        assert calls == [original_events]
+        assert owner.os.pread(replacement[0], 64, 0) == b"replacement-stays-open"
+    finally:
+        if replacement:
+            native_close(replacement[0])
+        elif manager._events >= 0:
+            native_close(manager._events)

@@ -1350,3 +1350,96 @@ def test_publication_public_pin_refuses_private_history_before_open(monkeypatch)
             "/etc/dotmac-gate0-e/publication-native.json",
         )
     assert not opened
+
+
+@pytest.mark.parametrize("producer_delay", [30, 181])
+def test_publisher_original_deadline_covers_slow_producer_and_historical_reads(
+    receipt_composition,  # noqa: F811
+    monkeypatch,
+    producer_delay,
+):
+    c = receipt_composition
+    p = _ready_publish(c, monkeypatch)
+    owner = p.load(draft_reads=c.draft_reads)
+    installed_writer = c.load("publish", c.pins)
+    clock = [100.0]
+    producer_deadlines, historical_deadlines = [], []
+    producer_get = gh._spawn_get
+    historical_get = writer.historical_owner._spawn_get
+
+    def slow_producer(path, token, binary, maximum, origins, deadline, page):
+        producer_deadlines.append(deadline)
+        result = producer_get(path, token, binary, maximum, origins, deadline, page)
+        if len(producer_deadlines) == 1:
+            clock[0] += producer_delay
+        return result
+
+    def historical(path, token, binary, maximum, origins, deadline, page):
+        historical_deadlines.append((deadline, deadline - clock[0]))
+        return historical_get(path, token, binary, maximum, origins, deadline, page)
+
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(gh, "_spawn_get", slow_producer)
+    monkeypatch.setattr(writer.historical_owner, "_spawn_get", historical)
+    args = (
+        installed_writer,
+        c.draft_reads,
+        c.draft,
+        c.pub_reads,
+        c.pub_facts,
+        c.summary,
+    )
+    if producer_delay > 180:
+        with pytest.raises(publication.EPublicationRefused):
+            owner.publish_once(*args)
+        assert not historical_deadlines
+        assert not any(
+            op in ("upload_receipt", "publish") for op, _, _, _ in p.native.calls
+        )
+    else:
+        result = owner.publish_once(*args)
+        assert result.result == "PUBLICATION_OBSERVED"
+        assert historical_deadlines
+        assert all(
+            end == 280.0 and remaining == 150.0
+            for end, remaining in historical_deadlines
+        )
+        assert all(call[3] == 280.0 for call in p.native.calls)
+    # The unchanged publisher end is propagated, while the existing producer
+    # phase retains its stricter 90-second cap from phase start at100.
+    assert producer_deadlines and set(producer_deadlines) == {min(280.0, 100.0 + 90)}
+
+
+def test_historical_read_overruns_original_publication_end_without_success_or_mutation(
+    receipt_composition,  # noqa: F811
+    monkeypatch,
+):
+    c = receipt_composition
+    p = _ready_publish(c, monkeypatch)
+    owner = p.load(draft_reads=c.draft_reads)
+    installed_writer = c.load("publish", c.pins)
+    clock = [100.0]
+    deadlines = []
+    native = writer.historical_owner._spawn_get
+
+    def slow_historical(path, token, binary, maximum, origins, deadline, page):
+        deadlines.append(deadline)
+        result = native(path, token, binary, maximum, origins, deadline, page)
+        clock[0] = 281.0
+        return result
+
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(writer.historical_owner, "_spawn_get", slow_historical)
+    with pytest.raises(publication.EPublicationRefused):
+        owner.publish_once(
+            installed_writer,
+            c.draft_reads,
+            c.draft,
+            c.pub_reads,
+            c.pub_facts,
+            c.summary,
+        )
+    assert deadlines == [280.0]
+    assert not any(
+        op in ("upload_receipt", "publish") for op, _, _, _ in p.native.calls
+    )

@@ -1994,9 +1994,20 @@ def open_slot_wrapper(claim: SessionClaim) -> int:
     parent = _protected(ROOT / "claims", directory=True, uid=context.worker_uid)
     try:
         fd = os.open(
-            str(name), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent
+            str(name),
+            os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent,
         )
-        os.close(fd)
+        try:
+            info = os.fstat(fd)
+            if (
+                info.st_uid != context.worker_uid
+                or info.st_mode & 0o222
+                or not stat.S_ISREG(info.st_mode)
+            ):
+                raise ProviderRefused()
+        finally:
+            os.close(fd)
     finally:
         os.close(parent)
     # Root owns the fixed wrapper inode; only selected worker gets read access.
@@ -3277,7 +3288,7 @@ class FiniteGate0Supervisor:
         try:
             fd = os.open(
                 "terminal.json",
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
                 dir_fd=parent,
             )
             try:

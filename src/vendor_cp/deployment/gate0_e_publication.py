@@ -871,8 +871,9 @@ class InstalledEPublication:
         # BEFORE any publication mutation. Caller JSON is never a receipt.
         workflow_digest = writer.selection.source.workflow_digest
         receipt = writer.construct_receipt(
-            draft_reads, draft, publication_reads, publication
+            draft_reads, draft, publication_reads, publication, deadline=self._deadline
         )
+        _require(time.monotonic() < self._deadline)
         receipt_doc = github._obj(github._json(receipt))
         _require(
             receipt_doc["policy_digest"] == "sha256:" + self._document["policy_digest"]

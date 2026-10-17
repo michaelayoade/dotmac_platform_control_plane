@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,7 +37,11 @@ def final_slots(receipt_composition, monkeypatch):  # noqa: F811
     """
     c = receipt_composition
     receipt = c.load("publish", c.pins).construct_receipt(
-        c.draft_reads, c.draft, c.pub_reads, c.pub_facts
+        c.draft_reads,
+        c.draft,
+        c.pub_reads,
+        c.pub_facts,
+        deadline=time.monotonic() + 180,
     )
     slots = {}
 

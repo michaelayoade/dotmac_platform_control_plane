@@ -2028,3 +2028,57 @@ def test_missing_network_measurement_cannot_qualify_complete_mechanics():
     # The acceptance DTO still requires an actual SHA digest for every field.
     with pytest.raises(ProviderRefused):
         RootHostBinding(launch.canonical(binding))
+
+
+@pytest.mark.parametrize("slot", [launch.SLOTS[0], "issuer"])
+def test_real_worker_terminal_fifo_refuses_bounded_and_exports_incomplete_cleanup(
+    tmp_path, monkeypatch, slot
+):
+    import signal
+
+    supervisor = synthetic_cleanup_supervisor()
+    supervisor.worker_uid = os.geteuid()
+    root = tmp_path / "launch"
+    status = root / "status" / slot
+    status.mkdir(parents=True)
+    os.mkfifo(status / "terminal.json", 0o400)
+    transient = root / "context.json"
+    transient.write_bytes(b"synthetic-transient")
+    monkeypatch.setattr(launch, "ROOT", root)
+    monkeypatch.setattr(
+        launch,
+        "_protected",
+        lambda path, **kwargs: os.open(
+            path, os.O_RDONLY | (os.O_DIRECTORY if kwargs.get("directory") else 0)
+        ),
+    )
+    monkeypatch.setattr(
+        launch, "_write_public_root_frame", lambda *args, **kwargs: None
+    )
+    # A real FIFO with no writer must refuse. An independent child alarm bounds
+    # the regression itself: a blocking open terminates the test child, not CI.
+    child = os.fork()
+    if child == 0:
+        signal.alarm(2)
+        try:
+            try:
+                supervisor._require_terminal_success(slot)
+            except ProviderRefused:
+                supervisor._remember_failure(launch.CleanupReason.EXECUTION_INCOMPLETE)
+            else:
+                os._exit(11)
+            assert not supervisor._terminals
+            supervisor.close()
+            supervisor.export_cleanup()
+        except BaseException:
+            os._exit(12)
+        os._exit(0)
+    _, result = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(result) == 0
+    assert not transient.exists()
+    assert (status / "terminal.json").exists()  # Retained worker claim.
+    document = launch.strict_object((root / "status/launch-cleanup.json").read_bytes())
+    assert document["outcome"] == "incomplete"
+    assert document["reason"] == launch.CleanupReason.EXECUTION_INCOMPLETE.value
+    assert not document["terminals"]
+    assert set(document["removed"]) == set(supervisor._transient_paths())

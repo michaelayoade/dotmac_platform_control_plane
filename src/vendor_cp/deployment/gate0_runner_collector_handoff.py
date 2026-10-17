@@ -405,6 +405,7 @@ class OwnedCollectorHandoff:
         self._a_complete = False
         self._b_complete = False
         self._closed = False
+        self._cleanup_failed = False
         self._records: list[bytes] = []
         self._joins: list[bytes] = []
         self._terminals: dict[str, bytes] = {}
@@ -435,7 +436,7 @@ class OwnedCollectorHandoff:
 
     @property
     def case_a_complete(self) -> bool:
-        return self._a_complete
+        return self._a_complete and not getattr(self, "_cleanup_failed", False)
 
     @property
     def records(self) -> tuple[bytes, ...]:
@@ -878,6 +879,8 @@ class OwnedCollectorHandoff:
         consume_expected: AdmissionExpectation,
     ) -> bytes:
         try:
+            if self._closed or getattr(self, "_cleanup_failed", False):
+                raise ProviderRefused()
             if self._case_index != 0 or self._a_complete:
                 raise ProviderRefused()
             join = self._join(
@@ -921,6 +924,8 @@ class OwnedCollectorHandoff:
         consume_expected: AdmissionExpectation,
     ) -> bytes:
         try:
+            if self._closed or getattr(self, "_cleanup_failed", False):
+                raise ProviderRefused()
             if self._case_index != 1 or not self._a_complete or self._b_complete:
                 raise ProviderRefused()
             join = self._join(
@@ -941,11 +946,24 @@ class OwnedCollectorHandoff:
             raise
 
     def close(self) -> None:
-        if not self._closed:
-            self._closed = True
-            for channel in (self._peer, self._listener):
-                if channel is not None:
+        if self._closed:
+            if getattr(self, "_cleanup_failed", False):
+                raise ProviderRefused()
+            return
+        self._closed = True
+        channels = self._peer, self._listener
+        self._peer = self._listener = None
+        failure: ProviderRefused | None = None
+        for channel in channels:
+            if channel is not None:
+                try:
                     channel.close()
+                except BaseException:
+                    self._cleanup_failed = True
+                    if failure is None:
+                        failure = ProviderRefused()
+        if failure is not None:
+            raise failure from None
 
     def __enter__(self) -> OwnedCollectorHandoff:
         return self

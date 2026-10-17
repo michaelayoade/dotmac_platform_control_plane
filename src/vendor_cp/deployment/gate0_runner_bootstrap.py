@@ -1214,9 +1214,11 @@ class NativeSystemManager:
     def close(self) -> None:
         self._retirement = None
         self._closed = True
-        if self._events >= 0:
-            os.close(self._events)
-            self._events = -1
+        events, self._events = self._events, -1
+        if events >= 0:
+            # A native close may release the FD and still report an error.
+            # Detaching first prevents finally/repeated close from hitting reuse.
+            os.close(events)
 
 
 def _promote_listener(

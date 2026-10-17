@@ -153,6 +153,11 @@ def _require(condition: bool) -> None:
         raise EWriterRefused()
 
 
+def _require_deadline(deadline: float) -> None:
+    _require(type(deadline) in (int, float) and math.isfinite(deadline))
+    _require(time.monotonic() < deadline)
+
+
 def _sha(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
@@ -1462,12 +1467,22 @@ class InstalledEWriter:
         self,
         release: DraftReleaseFacts | DownloadedReleaseFacts,
         publication: PublicationFacts,
+        *,
+        deadline: float,
     ) -> bytes:
-        """Rebuild public receipt; private predicates belong to authenticated B."""
+        """Rebuild public receipt within the caller's unchanged absolute deadline."""
+        _require_deadline(deadline)
+
+        def selected(pin: dict[str, Any]) -> bytes:
+            _require_deadline(deadline)
+            raw = self._selected(pin)
+            _require_deadline(deadline)
+            return raw
+
         _require(type(self.selection) is EPublicSelection)
         doc, pins = self._document, self._document["publication"]
         _require(pins is not None)
-        summary_raw = self._selected(pins["summary"])
+        summary_raw = selected(pins["summary"])
         summary = _object(
             summary_raw,
             "schema repository_id release_id ciphertext_asset_id "
@@ -1509,26 +1524,22 @@ class InstalledEWriter:
         _require(summary["holder_source_digest"] == doc["holder_source_digest"])
         _require(summary["holder_profile_digest"] == doc["holder_profile_digest"])
         provenance = _object(
-            self._selected(pins["provenance"]),
+            selected(pins["provenance"]),
             "schema contract_digest decision_digest reviewer_id native_receipt_digest",
         )
         _require(provenance["schema"] == "Gate0EPublicationDecisionProvenance.v1")
-        _require(
-            provenance["contract_digest"] == _sha(self._selected(pins["contract"]))
-        )
-        _require(
-            provenance["decision_digest"] == _sha(self._selected(pins["decision"]))
-        )
+        _require(provenance["contract_digest"] == _sha(selected(pins["contract"])))
+        _require(provenance["decision_digest"] == _sha(selected(pins["decision"])))
         _require(type(provenance["reviewer_id"]) is int)
         _require(provenance["reviewer_id"] == pins["reviewer_id"])
         _hash(provenance["native_receipt_digest"])
-        qualification = _object(self._selected(doc["qualification"]))
+        qualification = _object(selected(doc["qualification"]))
         _require(
             provenance["native_receipt_digest"]
             == qualification["native_receipt"]["digest"]
         )
         contract = _object(
-            self._selected(pins["contract"]),
+            selected(pins["contract"]),
             "schema meaning proposal_digest adoption_digest",
         )
         _require(
@@ -1586,7 +1597,7 @@ class InstalledEWriter:
                 asset.size == len(asset.raw_bytes)
                 and asset.sha256 == _sha(asset.raw_bytes)[7:]
             )
-        projection_raw = self._selected(pins["projection"])
+        projection_raw = selected(pins["projection"])
         _require(projection_raw == assets["gate0-evidence-public.json"].raw_bytes)
         projection = validate_encrypted_e_projection(projection_raw)
         for key, expected in dict(
@@ -1599,14 +1610,17 @@ class InstalledEWriter:
             inner_manifest_digest=summary["manifest_digest"],
         ).items():
             _require(projection[key] == expected)
+        _require_deadline(deadline)
         historical = InstalledHistoricalSourceReads.from_installed_public()
-        facts = historical.verify_public(deadline=time.monotonic() + 180)
+        _require_deadline(deadline)
+        facts = historical.verify_public(deadline=deadline)
+        _require_deadline(deadline)
         _require(
             type(facts) is historical_owner.PublicHistoricalSourceFacts
             and historical.owns_facts(facts)
         )
         _require("sha256:" + facts.source_policy_digest == doc["policy_digest"])
-        _require(facts.coordinates_bytes == self._selected(doc["historical_reference"]))
+        _require(facts.coordinates_bytes == selected(doc["historical_reference"]))
         # Archived source-reference bytes were authenticated at B. A fresh host's
         # public wrapper is intentionally not substituted for the archived hash.
         target = (
@@ -1615,7 +1629,7 @@ class InstalledEWriter:
             else cast(DownloadedReleaseFacts, release).peeled_commit
         )
         _require(target == self.producer.source_revision)
-        return canonical(
+        receipt = canonical(
             dict(
                 schema="Gate0ReadinessReceipt.v1",
                 policy_digest=self.selection.policy_digest,
@@ -1659,6 +1673,8 @@ class InstalledEWriter:
                 result="candidate_independent_readiness_verified",
             )
         )
+        _require_deadline(deadline)
+        return receipt
 
     def construct_receipt(
         self,
@@ -1666,11 +1682,13 @@ class InstalledEWriter:
         draft: DraftReleaseFacts,
         publication_reads: InstalledGate0GitHubReads,
         publication: PublicationFacts,
+        *,
+        deadline: float,
     ) -> bytes:
         result = self._construct_receipt_checked(
-            draft_reads, draft, publication_reads, publication
+            draft_reads, draft, publication_reads, publication, deadline=deadline
         )
-        del self, draft_reads, draft, publication_reads, publication
+        del self, draft_reads, draft, publication_reads, publication, deadline
         if isinstance(result, _PrivateFailure):
             _raise_private_failure(result)
         return result
@@ -1681,18 +1699,21 @@ class InstalledEWriter:
         draft: DraftReleaseFacts,
         publication_reads: InstalledGate0GitHubReads,
         publication: PublicationFacts,
+        *,
+        deadline: float,
     ) -> bytes | _PrivateFailure:
         try:
             receipt = self._construct_receipt_work(
-                draft_reads, draft, publication_reads, publication
+                draft_reads, draft, publication_reads, publication, deadline=deadline
             )
             self._discard_private_state()
+            _require_deadline(deadline)
             return receipt
         except BaseException as error:
             self._discard_private_state()
             return _private_failure(error)
         finally:
-            del self, draft_reads, draft, publication_reads, publication
+            del self, draft_reads, draft, publication_reads, publication, deadline
 
     def _construct_receipt_work(
         self,
@@ -1700,8 +1721,11 @@ class InstalledEWriter:
         draft: DraftReleaseFacts,
         publication_reads: InstalledGate0GitHubReads,
         publication: PublicationFacts,
+        *,
+        deadline: float,
     ) -> bytes:
-        """Sole receipt constructor; returns bytes for the separate mutation owner."""
+        """Sole receipt constructor; shares the publisher's absolute deadline."""
+        _require_deadline(deadline)
         _require(not self._used and self._document["operation"] == "publish")
         self._used = True
         _require(
@@ -1714,12 +1738,17 @@ class InstalledEWriter:
             == self._document["reader_slots"]["release"]
         )
         _require(len(draft.assets) == 2)
+        _require_deadline(deadline)
         producer_reads = InstalledGate0GitHubReads.from_installed_producer_completion()
+        _require_deadline(deadline)
         _require(
             "sha256:" + producer_reads.installed_selection_digest
             == self._document["reader_slots"]["producer"]
         )
-        producer = producer_reads.producer_snapshot(ProducerStage.PRODUCER_RUN_COMPLETE)
+        producer = producer_reads.producer_snapshot(
+            ProducerStage.PRODUCER_RUN_COMPLETE, deadline=deadline
+        )
+        _require_deadline(deadline)
         self._producer_join(
             producer_reads, producer, ProducerStage.PRODUCER_RUN_COMPLETE
         )
@@ -1730,7 +1759,7 @@ class InstalledEWriter:
         )
         self._publication_join(publication_reads, publication)
         _require(publication.run.stage == ProducerStage.COLLECTION_SNAPSHOT)
-        return self._receipt_document(draft, publication)
+        return self._receipt_document(draft, publication, deadline=deadline)
 
     def verify_published(
         self,
@@ -1839,7 +1868,9 @@ class InstalledEWriter:
             producer_reads, producer, ProducerStage.PRODUCER_RUN_COMPLETE
         )
         _require(producer.status == "completed" and producer.conclusion == "success")
-        expected = self._receipt_document(release, publication)
+        expected = self._receipt_document(
+            release, publication, deadline=time.monotonic() + 180
+        )
         assets = {asset.name: asset for asset in release.assets}
         _require(
             set(assets)

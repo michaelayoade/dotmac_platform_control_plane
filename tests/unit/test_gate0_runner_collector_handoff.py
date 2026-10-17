@@ -1201,3 +1201,45 @@ def test_actual_capture_readback_closed_coordinates_and_hashes(change):
         completion["readback_digest"] = "sha256:" + "f" * 64
     with pytest.raises(ProviderRefused):
         verify_capture_completion(packet, completion)
+
+
+def test_peer_close_failure_attempts_listener_and_permanently_refuses_completion():
+    events = []
+    owner = object.__new__(OwnedCollectorHandoff)
+    owner._closed = owner._cleanup_failed = False
+    owner._a_complete, owner._b_complete, owner._case_index = True, False, 1
+    owner._records, owner._joins = [b"bounded-root-audit"], [b"completed-a-join"]
+
+    def peer_close():
+        events.append("peer")
+        assert owner._peer is None and owner._listener is None
+        raise OSError("PRIVATE-CLOSE-PATH-MARKER")
+
+    def listener_close():
+        events.append("listener")
+        assert owner._peer is None and owner._listener is None
+        raise RuntimeError("SECOND-PRIVATE-CLOSE-MARKER")
+
+    owner._peer = SimpleNamespace(close=peer_close)
+    owner._listener = SimpleNamespace(close=listener_close)
+    with pytest.raises(ProviderRefused) as raised:
+        owner.close()
+    assert events == ["peer", "listener"]
+    assert str(raised.value) == "gate0_provider_refused"
+    assert raised.value.__cause__ is None
+    assert "PRIVATE-CLOSE-PATH-MARKER" not in str(raised.value)
+    assert "SECOND-PRIVATE-CLOSE-MARKER" not in str(raised.value)
+    assert owner._closed and owner._cleanup_failed
+    assert not owner.case_a_complete
+    # Retained bounded audit facts survive; failed cleanup cannot authorize any
+    # completion or a later apparently successful close before normal export.
+    assert owner.records == (b"bounded-root-audit",)
+    assert owner.joins == (b"completed-a-join",)
+    with pytest.raises(ProviderRefused):
+        owner.complete_case_b(
+            None, None, None, issue_expected=None, consume_expected=None
+        )
+    with pytest.raises(ProviderRefused):
+        owner.close()
+    assert not owner._b_complete
+    assert events == ["peer", "listener"]

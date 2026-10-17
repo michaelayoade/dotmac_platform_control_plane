@@ -187,7 +187,9 @@ def test_publication_and_acceptance_refuse_unowned_dtos_before_receipt(private_e
         selection,
     )
     with pytest.raises(writer.EWriterRefused):
-        installed.construct_receipt(object(), object(), object(), object())
+        installed.construct_receipt(
+            object(), object(), object(), object(), deadline=time.monotonic() + 180
+        )
     assert installed._used
 
 
@@ -417,7 +419,7 @@ def test_foreign_or_unqualified_adoption_provenance_cannot_authorize_receipt(
     )
     # Failure must precede use of any publication DTO or release evidence.
     with pytest.raises(writer.EWriterRefused):
-        installed._receipt_document(None, None)
+        installed._receipt_document(None, None, deadline=time.monotonic() + 180)
 
 
 def test_historical_coordinates_ignore_only_host_retained_paths():
@@ -1318,7 +1320,13 @@ def test_live_installed_receipt_composition_and_exact_private_archive(
 ):
     c = receipt_composition
     installed = c.load("publish", c.pins)
-    raw = installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+    raw = installed.construct_receipt(
+        c.draft_reads,
+        c.draft,
+        c.pub_reads,
+        c.pub_facts,
+        deadline=time.monotonic() + 180,
+    )
     receipt = strict_object(raw)
     assert receipt["private_prerequisite_digest"] == writer._sha(
         c.packages[0][1]["prerequisites.json"]
@@ -1354,7 +1362,13 @@ def test_foreign_live_publication_selection_refuses(receipt_composition, change)
         pins["reader_selection_digest"] = "sha256:" + "0" * 64
     installed = c.load("publish", pins)
     with pytest.raises(writer.EWriterRefused):
-        installed.construct_receipt(c.draft_reads, c.draft, actual_reads, actual)
+        installed.construct_receipt(
+            c.draft_reads,
+            c.draft,
+            actual_reads,
+            actual,
+            deadline=time.monotonic() + 180,
+        )
 
 
 @pytest.mark.parametrize("fail_official", [False, True])
@@ -1363,7 +1377,11 @@ def test_completed_live_publication_producer_release_and_direct_official_boundar
 ):
     c = receipt_composition
     receipt = c.load("publish", c.pins).construct_receipt(
-        c.draft_reads, c.draft, c.pub_reads, c.pub_facts
+        c.draft_reads,
+        c.draft,
+        c.pub_reads,
+        c.pub_facts,
+        deadline=time.monotonic() + 180,
     )
     pub_reads, publication = c.publication("publication_complete")
     producer_reads = c.reader("producer")
@@ -1581,7 +1599,13 @@ def test_receipt_late_projection_failure_discards_owner_and_frames(
     pins["projection"] = c.pin("wrong-projection.json", b"changed-public-projection")
     installed = c.load("publish", pins)
     with pytest.raises(writer.EWriterRefused) as error:
-        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+        installed.construct_receipt(
+            c.draft_reads,
+            c.draft,
+            c.pub_reads,
+            c.pub_facts,
+            deadline=time.monotonic() + 180,
+        )
     _assert_writer_exception_clean(error.value, installed)
 
 
@@ -1644,7 +1668,13 @@ def test_cancellation_during_public_projection_stops_and_scrubs(
 
     monkeypatch.setattr(writer, "validate_encrypted_e_projection", interrupt)
     with pytest.raises(kind) as error:
-        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+        installed.construct_receipt(
+            c.draft_reads,
+            c.draft,
+            c.pub_reads,
+            c.pub_facts,
+            deadline=time.monotonic() + 180,
+        )
     assert reached == [True]
     if kind is SystemExit:
         assert error.value.code == 7
@@ -1675,7 +1705,13 @@ def test_successful_receipt_boundary_releases_consumed_private_selection(
     owner = c.load("publish", c.pins)
     public_workflow_digest = owner.selection.source.workflow_digest
     retained_files = dict(c.files)
-    receipt = owner.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+    receipt = owner.construct_receipt(
+        c.draft_reads,
+        c.draft,
+        c.pub_reads,
+        c.pub_facts,
+        deadline=time.monotonic() + 180,
+    )
     assert strict_object(receipt)["b_summary_digest"] == writer._sha(c.summary)
     assert canonical(strict_object(receipt)) == receipt
     assert public_workflow_digest == c.selection.source.workflow_digest
@@ -1684,7 +1720,13 @@ def test_successful_receipt_boundary_releases_consumed_private_selection(
     # evidence at the external native boundary is unchanged and remains usable.
     assert c.files == retained_files
     with pytest.raises(writer.EWriterRefused) as raised:
-        owner.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+        owner.construct_receipt(
+            c.draft_reads,
+            c.draft,
+            c.pub_reads,
+            c.pub_facts,
+            deadline=time.monotonic() + 180,
+        )
     _assert_writer_exception_clean(raised.value, owner)
 
 
@@ -1752,9 +1794,17 @@ def test_public_installed_loader_and_receipt_never_open_private_inputs(
     )
     # The same public receipt builder is used by whole-run final readback.
     raw = (
-        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+        installed.construct_receipt(
+            c.draft_reads,
+            c.draft,
+            c.pub_reads,
+            c.pub_facts,
+            deadline=time.monotonic() + 180,
+        )
         if operation == "publish"
-        else installed._receipt_document(c.draft, c.pub_facts)
+        else installed._receipt_document(
+            c.draft, c.pub_facts, deadline=time.monotonic() + 180
+        )
     )
     receipt = strict_object(raw)
     archived = strict_object(c.packages[0][1]["prerequisites.json"])
@@ -1811,7 +1861,13 @@ def test_public_receipt_requires_exact_authenticated_b_v2(receipt_composition, c
     pins["summary"] = c.pin("changed-summary.json", canonical(summary))
     installed = c.load("publish", pins)
     with pytest.raises(writer.EWriterRefused):
-        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+        installed.construct_receipt(
+            c.draft_reads,
+            c.draft,
+            c.pub_reads,
+            c.pub_facts,
+            deadline=time.monotonic() + 180,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1844,7 +1900,13 @@ def test_public_review_requires_adopted_exact_contract_and_native_decision(
         pins["provenance"] = c.pin("foreign-provenance.json", canonical(provenance))
     installed = c.load("publish", pins)
     with pytest.raises(writer.EWriterRefused):
-        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+        installed.construct_receipt(
+            c.draft_reads,
+            c.draft,
+            c.pub_reads,
+            c.pub_facts,
+            deadline=time.monotonic() + 180,
+        )
 
 
 def test_public_readback_refuses_before_whole_publication_completes(
@@ -1852,7 +1914,11 @@ def test_public_readback_refuses_before_whole_publication_completes(
 ):
     c = receipt_composition
     receipt = c.load("publish", c.pins).construct_receipt(
-        c.draft_reads, c.draft, c.pub_reads, c.pub_facts
+        c.draft_reads,
+        c.draft,
+        c.pub_reads,
+        c.pub_facts,
+        deadline=time.monotonic() + 180,
     )
     producer_reads = c.reader("producer")
     producer = producer_reads.producer_snapshot(
@@ -1964,7 +2030,13 @@ def test_public_projection_and_completed_producer_match_independent_selection(
         c.document[change] = "sha256:" + "0" * 64
     with pytest.raises(writer.EWriterRefused):
         installed = c.load("publish", c.pins)
-        installed.construct_receipt(c.draft_reads, c.draft, c.pub_reads, c.pub_facts)
+        installed.construct_receipt(
+            c.draft_reads,
+            c.draft,
+            c.pub_reads,
+            c.pub_facts,
+            deadline=time.monotonic() + 180,
+        )
 
 
 def test_public_receipt_digest_matches_full_private_verified_digest_projection(
@@ -1984,7 +2056,11 @@ def test_public_receipt_digest_matches_full_private_verified_digest_projection(
         archive.unpack_private_archive(plaintext), c.selection, selected
     )
     raw = c.load("publish", c.pins).construct_receipt(
-        c.draft_reads, c.draft, c.pub_reads, c.pub_facts
+        c.draft_reads,
+        c.draft,
+        c.pub_reads,
+        c.pub_facts,
+        deadline=time.monotonic() + 180,
     )
     receipt = strict_object(raw)
     assert set(receipt) == {
@@ -2100,7 +2176,11 @@ def test_writer_public_historical_mode_uses_only_closed_public_slots(
 
     monkeypatch.setattr(historical, "_protected", public_only)
     raw = c.load("publish", c.pins).construct_receipt(
-        c.draft_reads, c.draft, c.pub_reads, c.pub_facts
+        c.draft_reads,
+        c.draft,
+        c.pub_reads,
+        c.pub_facts,
+        deadline=time.monotonic() + 180,
     )
     receipt = strict_object(raw)
     summary = strict_object(c.summary)
@@ -2165,3 +2245,48 @@ def test_installed_draft_phase_is_not_normalized_or_generalized(
 
     with pytest.raises(gh.GitHubReadRefused):
         installed_composition.reader(phase, release_files={})
+
+
+def test_expired_receipt_deadline_refuses_before_producer_or_historical_read(
+    receipt_composition, monkeypatch
+):
+    c = receipt_composition
+    installed = c.load("publish", c.pins)
+    reads = []
+
+    def unexpected_read(*args, **kwargs):
+        reads.append(True)
+        pytest.fail("expired receipt attempted a read")
+
+    monkeypatch.setattr(
+        writer.InstalledGate0GitHubReads,
+        "from_installed_producer_completion",
+        unexpected_read,
+    )
+    monkeypatch.setattr(
+        writer.InstalledHistoricalSourceReads, "from_installed_public", unexpected_read
+    )
+    with pytest.raises(writer.EWriterRefused):
+        installed.construct_receipt(
+            c.draft_reads,
+            c.draft,
+            c.pub_reads,
+            c.pub_facts,
+            deadline=time.monotonic() - 1,
+        )
+    assert not reads
+    assert installed.__dict__ == {"_used": True}
+
+
+def test_receipt_document_expired_deadline_refuses_before_retained_read(
+    receipt_composition, monkeypatch
+):
+    c = receipt_composition
+    installed = c.load("publish", c.pins)
+
+    def unexpected_read(*args):
+        pytest.fail("expired receipt read retained content")
+
+    monkeypatch.setattr(writer.InstalledEWriter, "_selected", unexpected_read)
+    with pytest.raises(writer.EWriterRefused):
+        installed._receipt_document(c.draft, c.pub_facts, deadline=time.monotonic() - 1)
