@@ -50,6 +50,7 @@ def test_the_workflow_directory_holds_every_file_the_guard_must_reach() -> None:
         "engineering-standards.yml",
         "gate0-sshd-conformance.yml",
         "kernel-lock.yml",
+        "product-manifest-regenerate.yml",
         "production-deploy.yml",
         "production-image.yml",
         "protected-issuer-successors.yml",
