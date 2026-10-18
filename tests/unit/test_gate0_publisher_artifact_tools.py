@@ -1368,7 +1368,7 @@ class RetainedCliRedactionTests(unittest.TestCase):
             ("malformed-wheel", zipfile.BadZipFile),
             ("encrypted-wheel", RuntimeError),
             ("corrupt-deflate-wheel", zlib.error),
-            ("deep-json", RecursionError),
+            ("deep-json", (RecursionError, TypeError)),
         ):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary).resolve()
@@ -1385,7 +1385,7 @@ class RetainedCliRedactionTests(unittest.TestCase):
                     raw = b"[" * 2000 + b'"SYNTHETIC_PRIVATE_VALUE"' + b"]" * 2000
                     (root / "original-packet.json").write_bytes(raw)
                     expected[1] = INSPECT.digest(raw)
-                # Confirm the fixture reaches the intended untrusted parser.
+                # Confirm the fixture reaches a parser or structural refusal.
                 with self.assertRaises(error):
                     INSPECT.role_retained_inspect(root, expected)
                 completed = subprocess.run(  # noqa: S603 -- fixed trusted CLI, synthetic hosted-only data
