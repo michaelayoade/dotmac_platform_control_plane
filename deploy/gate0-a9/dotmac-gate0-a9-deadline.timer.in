@@ -1,0 +1,9 @@
+[Unit]
+Description=Original Gate0 A9 cutoff candidate
+[Timer]
+OnBootSec=@DEADLINE_US@us
+AccuracySec=1us
+RandomizedDelaySec=0
+WakeSystem=no
+RemainAfterElapse=yes
+Unit=dotmac-gate0-a9-expired.target

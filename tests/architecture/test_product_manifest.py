@@ -89,7 +89,7 @@ def test_the_accepted_descriptor_matches_its_declared_accepted_manifest() -> Non
 
 def test_the_accepted_and_prospective_manifests_differ_only_by_the_adoption() -> None:
     """The split is not a way to hide drift: apart from the adopted module
-    versions (and Control's retired stale literal) and the one assembly surface
+    versions (and Control's retired stale literal) and the two assembly surfaces
     this composition change adds, the manifests agree."""
     accepted = json.loads(ACCEPTED_MANIFEST.read_text())
     prospective = json.loads(PROSPECTIVE_MANIFEST.read_text())
@@ -99,11 +99,19 @@ def test_the_accepted_and_prospective_manifests_differ_only_by_the_adoption() ->
     before = {m["code"]: m for m in accepted["modules"]}
     after = {m["code"]: m for m in prospective["modules"]}
     # Gate-0 C2 S4 composes exactly one new assembly surface, the
-    # platform-admin withdrawal-conflict resolution route; nothing is removed.
-    assert set(after) - set(before) == {"withdrawal_conflicts"}
+    # platform-admin withdrawal-conflict resolution route. The adopted Gate-0
+    # workload reads add one separately withheld surface; nothing is removed.
+    assert set(after) - set(before) == {
+        "withdrawal_conflicts",
+        "gate0_collection_reads",
+    }
     assert set(before) <= set(after)
     assert after["withdrawal_conflicts"] == {
         "code": "withdrawal_conflicts",
+        "source": "assembly",
+    }
+    assert after["gate0_collection_reads"] == {
+        "code": "gate0_collection_reads",
         "source": "assembly",
     }
     changed = sorted(code for code in before if before[code] != after[code])

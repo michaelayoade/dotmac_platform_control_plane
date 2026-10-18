@@ -48,6 +48,10 @@ WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 
 _JOB_HEADER = re.compile(r"^  ([A-Za-z_][\w.-]*):\s*$")
 _ITEM = re.compile(r"^(\s*)-\s")
+_STEPS_HEADER = re.compile(
+    r"^    steps:\s*(?:&(?P<anchor>[A-Za-z_][\w.-]*)|"
+    r"\*(?P<alias>[A-Za-z_][\w.-]*))?\s*$"
+)
 
 
 @dataclass(frozen=True)
@@ -80,31 +84,51 @@ def _job_blocks(text: str) -> dict[str, str]:
     blocks: dict[str, list[str]] = {}
     name: str | None = None
     for line in lines[start + 1 :]:
+        if line.startswith("#"):
+            continue  # preserve indented shell comments for expression inspection
+        if line and not line[0].isspace():
+            break  # actual top-level mapping ends jobs; comments do not
         header = _JOB_HEADER.match(line)
+        if (
+            re.match(r"^  \S", line)
+            and not line.lstrip().startswith("#")
+            and header is None
+        ):
+            raise ValueError("unsupported workflow job mapping")
         if header:
             name = header.group(1)
+            if name in blocks:
+                raise ValueError("duplicate workflow job")
             blocks[name] = []
-            continue
-        if line and not line[0].isspace():
-            # Dedented out of the `jobs:` mapping entirely (e.g. a top-level
-            # key after the last job).
-            name = None
             continue
         if name is not None:
             blocks[name].append(line)
     return {job_name: "\n".join(body) for job_name, body in blocks.items()}
 
 
+def _steps_header(job_text: str) -> tuple[int, str | None, str | None] | None:
+    """Closed sequence syntax; unsupported/duplicate headers cannot disappear."""
+    found: tuple[int, str | None, str | None] | None = None
+    for index, line in enumerate(job_text.splitlines()):
+        if re.match(r"^    (?:steps\s*:|[\"\']steps[\"\']\s*:)", line) is None:
+            continue
+        match = _STEPS_HEADER.fullmatch(line)
+        if match is None or found is not None:
+            raise ValueError("unsupported or duplicate workflow steps")
+        found = index, match["anchor"], match["alias"]
+    return found
+
+
 def _step_blocks(job_text: str) -> list[str]:
     """Every step's own text block (the `- ` line and everything under it)."""
 
     lines = job_text.splitlines()
-    steps_at = next(
-        (index for index, line in enumerate(lines) if line.strip() == "steps:"),
-        None,
-    )
-    if steps_at is None:
+    header = _steps_header(job_text)
+    if header is None:
         return []
+    steps_at, _anchor, alias = header
+    if alias is not None:
+        raise ValueError("workflow steps alias requires resolution")
     steps_indent = len(lines[steps_at]) - len(lines[steps_at].lstrip(" "))
     blocks: list[list[str]] = []
     item_indent: int | None = None
@@ -118,11 +142,42 @@ def _step_blocks(job_text: str) -> list[str]:
             break  # dedented out of the `steps:` sequence
         item = _ITEM.match(line)
         if item and (item_indent is None or len(item.group(1)) == item_indent):
+            if re.match(r"^\s*-\s*[&*{!]", line):
+                raise ValueError("unsupported workflow step alias")
             item_indent = len(item.group(1))
             blocks.append([line])
         elif blocks:
             blocks[-1].append(line)
     return ["\n".join(block) for block in blocks]
+
+
+def _resolved_step_blocks(jobs: dict[str, str]) -> dict[str, list[str]]:
+    """Resolve prior sequence anchors once; inspect every executing alias job.
+
+    This deliberately supports only whole steps sequences, with unique named
+    definitions. Unknown/forward aliases and unsupported shapes fail closed;
+    they cannot make an expression-bearing job invisible to the ratchet.
+    """
+    anchors: dict[str, list[str]] = {}
+    resolved: dict[str, list[str]] = {}
+    for name, body in jobs.items():
+        header = _steps_header(body)
+        if header is None:
+            resolved[name] = []
+            continue
+        _index, anchor, alias = header
+        if alias is not None:
+            if alias not in anchors:
+                raise ValueError("unknown or forward workflow steps alias")
+            resolved[name] = list(anchors[alias])
+            continue
+        blocks = _step_blocks(body)
+        resolved[name] = blocks
+        if anchor is not None:
+            if anchor in anchors:
+                raise ValueError("duplicate workflow steps anchor")
+            anchors[anchor] = blocks
+    return resolved
 
 
 def _step_fields(step_text: str) -> dict[str, str]:
@@ -141,13 +196,24 @@ def _step_fields(step_text: str) -> dict[str, str]:
     current: str | None = None
     for line in normalized:
         indent = len(line) - len(line.lstrip(" ")) if line.strip() else field_indent + 1
+        if indent == field_indent and line.lstrip().startswith(('"', "'", "<<:")):
+            raise ValueError("unsupported workflow step field mapping")
         match = key_pattern.match(line)
+        if indent == field_indent and re.match(r"^\s*run\s*:", line) and match is None:
+            raise ValueError("unsupported workflow run field")
         if match and indent == field_indent:
             current = match.group(1)
+            if current in fields:
+                raise ValueError("duplicate workflow step field")
+            if current == "run" and match.group(2).lstrip().startswith(("&", "*", "!")):
+                raise ValueError("unsupported workflow run anchor or alias")
             fields[current] = [match.group(2)]
         elif current is not None:
             fields[current].append(line)
-    return {key: "\n".join(value) for key, value in fields.items()}
+    result = {key: "\n".join(value) for key, value in fields.items()}
+    if result.get("run", "").lstrip().startswith(("&", "*", "!")):
+        raise ValueError("unsupported workflow run anchor or alias")
+    return result
 
 
 def _step_key(fields: dict[str, str], index: int) -> str:
@@ -171,8 +237,8 @@ def run_block_expression_sites(
         workflows_dir.glob("*.yaml")
     ):
         text = path.read_text(encoding="utf-8")
-        for job_name, job_text in _job_blocks(text).items():
-            for index, step_text in enumerate(_step_blocks(job_text)):
+        for job_name, blocks in _resolved_step_blocks(_job_blocks(text)).items():
+            for index, step_text in enumerate(blocks):
                 fields = _step_fields(step_text)
                 run = fields.get("run", "")
                 count = run.count("${{")
@@ -227,8 +293,9 @@ def baseline_mismatches(
 #: an interpolation, and it is repaired (not retired) directly in this
 #: change.
 #:
-#: RETIREMENT. These are scheduled for two later PRs — `production-image.yml`
-#: first, then `production-deploy.yml` — each removing only its own entries.
+#: RETIREMENT. The publisher's sites were retired when its shared role path
+#: moved all values into structured env fields. The production deployment site
+#: remains scheduled for its separate retirement; no new site is admitted.
 #: The baseline is two-directional: `test_only_the_frozen_baseline_carries_a_
 #: run_block_expression` fails if the measured count RISES past this table
 #: (an unrecorded new site, or a partial retirement) or FALLS below it
@@ -245,19 +312,4 @@ def baseline_mismatches(
 #: the step a name rather than baselining an index.
 RUN_BLOCK_EXPRESSION_BASELINE: dict[tuple[str, str, str], int] = {
     ("production-deploy.yml", "deploy", "Verify that the image exists"): 1,
-    (
-        "production-image.yml",
-        "candidate",
-        "Verify the source revision earned its way here",
-    ): 1,
-    ("production-image.yml", "candidate", "Build the candidate"): 1,
-    ("production-image.yml", "candidate", "Record the candidate's identity"): 1,
-    ("production-image.yml", "candidate", "Authenticate to GHCR"): 1,
-    ("production-image.yml", "candidate", "Publish the accepted candidate"): 1,
-    (
-        "production-image.yml",
-        "candidate",
-        "Prove the registry holds the accepted candidate",
-    ): 5,
-    ("production-image.yml", "candidate", "Emit the release receipt"): 8,
 }

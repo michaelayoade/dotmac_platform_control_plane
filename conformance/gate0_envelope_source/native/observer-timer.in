@@ -1,0 +1,10 @@
+[Unit]
+Description=Original native observer cutoff
+DefaultDependencies=no
+[Timer]
+OnBootSec=@@C_US@@us
+AccuracySec=@@OBSERVER_ACCURACY_US@@us
+RandomizedDelaySec=0
+WakeSystem=no
+RemainAfterElapse=yes
+Unit=@@OBSERVER_EXPIRED@@

@@ -1,0 +1,4 @@
+[Unit]
+Description=Original finite Gate0 cutoff
+DefaultDependencies=no
+Conflicts=@@READY@@ @@SERVICE@@

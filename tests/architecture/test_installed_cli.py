@@ -396,3 +396,27 @@ def test_the_image_job_still_builds_the_thing_the_acceptance_inspects() -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "--tag dotmac-vendor-control-plane:ci ." in workflow
     assert workflow.count("image=dotmac-vendor-control-plane:ci") == 1
+
+
+def test_native_fixture_adapters_are_closed_and_have_distinct_owners() -> None:
+    parsers = _parsers()
+    commands = {
+        "gate0 native-metadata-observe": ("run_installed_metadata_observer", True),
+        "gate0 native-url-presence": ("run_installed_url_presence_probe", False),
+    }
+    for command, (symbol, mutates) in commands.items():
+        owner = by_command()[command]
+        assert owner.module == "vendor_cp.deployment.gate0_a9_native_fixture"
+        assert owner.symbol == symbol and owner.mutates is mutates
+        assert {
+            option
+            for action in parsers[command]._actions
+            for option in action.option_strings
+        } == {"-h", "--help"}
+        assert build_parser().parse_args(command.split()).command == command
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    assert "Gate-0 installed synthetic native fixture conformance" in workflow
+    assert (
+        "--cap-add SYS_PTRACE --network none --user 0:0 --entrypoint python" in workflow
+    )
+    assert "< conformance/test_gate0_a9_native_fixture.py" in workflow

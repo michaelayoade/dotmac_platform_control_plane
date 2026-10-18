@@ -10,6 +10,7 @@ from vendor_cp.deployment.rehearsal_issuer_trust_state import (
     RehearsalIssuerTrustState,
     TrustEligibility,
     TrustStateInstallError,
+    parse_trust_snapshot,
 )
 
 
@@ -40,6 +41,54 @@ def standing(
     state: RehearsalIssuerTrustState, key: str = "issuer-1"
 ) -> TrustEligibility:
     return state.eligibility(key_id=key, public_key_fingerprint="sha256:public-one")
+
+
+class DetachedTrustSnapshotTests(unittest.TestCase):
+    def test_original_floor_is_required_without_installing_a_live_reader(self) -> None:
+        snapshot = parse_trust_snapshot(record(), minimum_version=7)
+        self.assertEqual(snapshot.version, 7)
+        self.assertFalse(hasattr(snapshot, "refresh"))
+        self.assertFalse(hasattr(snapshot, "available"))
+        with self.assertRaises(TrustStateInstallError):
+            parse_trust_snapshot(record(version=6), minimum_version=7)
+        for invalid in (True, 0, -1, 7.0, "7", None):
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaises(TrustStateInstallError),
+            ):
+                parse_trust_snapshot(record(), minimum_version=invalid)
+
+    def test_snapshot_is_detached_and_revocation_wins(self) -> None:
+        trusted = {"issuer-1": "sha256:public-one"}
+        revoked = ["issuer-1"]
+        snapshot = parse_trust_snapshot(
+            record(trusted=trusted, revoked=revoked), minimum_version=7
+        )
+        trusted.clear()
+        revoked.clear()
+        self.assertEqual(snapshot.trusted_key_ids["issuer-1"], "sha256:public-one")
+        self.assertIs(
+            snapshot.eligibility(
+                key_id="issuer-1", public_key_fingerprint="sha256:wrong"
+            ),
+            TrustEligibility.REVOKED,
+        )
+        with self.assertRaises(TypeError):
+            snapshot.trusted_key_ids["issuer-1"] = "changed"
+
+    def test_detached_predicate_matches_available_live_state(self) -> None:
+        state = start()
+        snapshot = state.snapshot
+        self.assertIsNotNone(snapshot)
+        for key, fingerprint in (
+            ("issuer-1", "sha256:public-one"),
+            ("issuer-1", "sha256:wrong"),
+            ("unknown", "sha256:public-one"),
+        ):
+            self.assertIs(
+                snapshot.eligibility(key_id=key, public_key_fingerprint=fingerprint),
+                state.eligibility(key_id=key, public_key_fingerprint=fingerprint),
+            )
 
 
 class RehearsalIssuerTrustStateTests(unittest.TestCase):

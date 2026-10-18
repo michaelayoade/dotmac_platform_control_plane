@@ -163,6 +163,75 @@ def _verify_sshsig(
         return result.returncode == 0
 
 
+def verify_controller_certificate(
+    encoded: bytes,
+    expected: AdmittedOperation,
+    at: datetime,
+    *,
+    ca_public_key: bytes | None = None,
+) -> SSHCertificate:
+    """The producer's exact certificate predicate at an explicit signed time."""
+    wall = at
+    if type(encoded) is not bytes or not encoded or len(encoded) > _MAX_PUBLIC_INPUT:
+        raise AttesterRefused()
+    cert = load_ssh_public_identity(encoded)
+    if not isinstance(cert, SSHCertificate):
+        raise AttesterRefused()
+    cert.verify_cert_signature()
+    ca = cert.signature_key()
+    controller = cert.public_key()
+    if not isinstance(ca, Ed25519PublicKey) or not isinstance(
+        controller, Ed25519PublicKey
+    ):
+        raise AttesterRefused()
+    expected_key_id = (
+        f"gate0:{expected.repository_id}:" f"{expected.run_id}:{expected.run_attempt}"
+    ).encode("ascii")
+    if (
+        (
+            ca_public_key is not None
+            and ca.public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH) != ca_public_key
+        )
+        or ssh_public_fingerprint(ca) != expected.ca_fingerprint
+        or cert.type != SSHCertificateType.USER
+        or cert.valid_principals != [b"dotmac-gate0-controller"]
+        or cert.key_id != expected_key_id
+        or cert.critical_options
+        or cert.extensions
+        or not 0 < cert.valid_before - cert.valid_after <= 600
+        or not cert.valid_after <= wall.timestamp() < cert.valid_before
+        or ssh_public_fingerprint(controller) != expected.controller_fingerprint
+        or _digest(cert.public_bytes()) != expected.certificate_digest
+    ):
+        raise AttesterRefused()
+    return cert
+
+
+def verify_retained_controller_evidence(
+    public_key: Ed25519PublicKey,
+    message: bytes,
+    signature: bytes,
+) -> None:
+    """Native public verification only; a <=2s process budget, no live window.
+
+    Reuses the actual producer's fixed executable, namespace and public-file
+    staging owner. No signing key, clock override or caller callback is accepted.
+    """
+    if (
+        not isinstance(public_key, Ed25519PublicKey)
+        or type(message) is not bytes
+        or not 0 < len(message) <= 8192
+        or type(signature) is not bytes
+        or not 0 < len(signature) <= 16384
+    ):
+        raise AttesterRefused()
+    end = monotonic() + 2.0
+    if not _verify_sshsig(public_key, message, signature, lambda: end - monotonic()):
+        raise AttesterRefused()
+    if monotonic() >= end:
+        raise AttesterRefused()
+
+
 class AttesterProofProducer:
     """Construct once with role-local signer and independently admitted context.
 
@@ -275,41 +344,9 @@ class AttesterProofProducer:
         return wall, elapsed
 
     def _certificate(self, encoded: bytes, wall: datetime) -> SSHCertificate:
-        if (
-            type(encoded) is not bytes
-            or not encoded
-            or len(encoded) > _MAX_PUBLIC_INPUT
-        ):
-            raise AttesterRefused()
-        cert = load_ssh_public_identity(encoded)
-        if not isinstance(cert, SSHCertificate):
-            raise AttesterRefused()
-        cert.verify_cert_signature()
-        ca = cert.signature_key()
-        controller = cert.public_key()
-        if not isinstance(ca, Ed25519PublicKey) or not isinstance(
-            controller, Ed25519PublicKey
-        ):
-            raise AttesterRefused()
-        expected_key_id = (
-            f"gate0:{self._admitted.repository_id}:"
-            f"{self._admitted.run_id}:{self._admitted.run_attempt}"
-        ).encode("ascii")
-        if (
-            ca.public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH) != self._ca
-            or cert.type != SSHCertificateType.USER
-            or cert.valid_principals != [b"dotmac-gate0-controller"]
-            or cert.key_id != expected_key_id
-            or cert.critical_options
-            or cert.extensions
-            or not 0 < cert.valid_before - cert.valid_after <= 600
-            or not cert.valid_after <= wall.timestamp() < cert.valid_before
-            or ssh_public_fingerprint(controller)
-            != self._admitted.controller_fingerprint
-            or _digest(cert.public_bytes()) != self._admitted.certificate_digest
-        ):
-            raise AttesterRefused()
-        return cert
+        return verify_controller_certificate(
+            encoded, self._admitted, wall, ca_public_key=self._ca
+        )
 
     def begin_challenge(self, certificate_bytes: bytes) -> PossessionChallenge:
         failed = False

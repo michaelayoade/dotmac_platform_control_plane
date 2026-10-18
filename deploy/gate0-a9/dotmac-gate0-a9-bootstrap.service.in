@@ -1,0 +1,26 @@
+[Unit]
+Description=Finite Gate0 A9 root bootstrap candidate
+Conflicts=dotmac-gate0-a9-expired.target
+BindsTo=dotmac-gate0-a9-lifecycle.service
+After=dotmac-gate0-a9-lifecycle.service
+[Service]
+Type=exec
+ExitType=main
+ExecStart=@BINARY@ gate0 bootstrap-collector
+User=0
+Group=0
+Restart=no
+RemainAfterExit=no
+KillMode=control-group
+KillSignal=SIGKILL
+FinalKillSignal=SIGKILL
+SendSIGKILL=yes
+TimeoutStartSec=2s
+TimeoutStopSec=2s
+Delegate=no
+NoNewPrivileges=yes
+AmbientCapabilities=
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID CAP_SYS_PTRACE
+StandardInput=null
+StandardOutput=null
+StandardError=null

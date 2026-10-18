@@ -389,6 +389,8 @@ def test_d4_the_re_implementation_detector_sees_a_planted_definition(
         "def verify_rehearsal_issuer_authorization("
         "self, *, canonical_bytes, signature):\n    return False\n",
         "def verify_release_authorization_signature(document):\n    return False\n",
+        "def verify_retained_controller_evidence(public_key, message, signature):\n"
+        "    return None\n",
     ],
 )
 def test_d4_signed_authorization_artifacts_are_not_actor_authentication(

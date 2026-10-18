@@ -1,0 +1,31 @@
+#!@@QUALIFIED_PYTHON_PATH@@ -I
+"""UNRENDERED CANDIDATE. Four separately frozen zero-argument selections."""
+import os
+import sys
+
+if len(sys.argv) != 1:
+    raise SystemExit(125)
+# Mandatory reviewed inline implementation, not arbitrary caller code or a plugin.
+# Must validate protected ancestry/data and original selection/boot/E, claim this
+# instance persistently O_EXCL (never unlink/reset), and reject an existing unit.
+# No policy/window authority is duplicated here; installed bounds only refuse.
+@@QUALIFIED_ACTIVATION_CHECKS@@
+os.execve('/usr/bin/systemd-run', [
+    '/usr/bin/systemd-run', '--quiet', '--pipe', '--wait',
+    '--expand-environment=no', '--unit=dotmac-gate0-@@INSTANCE@@.service',
+    '--property=Type=exec', '--property=ExitType=main',
+    '--property=DefaultDependencies=no',
+    '--property=Requisite=dotmac-gate0-@@INSTANCE@@-ready.target',
+    '--property=After=dotmac-gate0-@@INSTANCE@@-ready.target',
+    '--property=Restart=no', '--property=SuccessExitStatus=',
+    '--property=RemainAfterExit=no', '--property=KillMode=control-group',
+    '--property=KillSignal=SIGKILL', '--property=FinalKillSignal=SIGKILL',
+    '--property=SendSIGKILL=yes', '--property=TimeoutStopSec=@@T_US@@us',
+    '--property=Delegate=yes', '--property=DelegateSubgroup=launcher',
+    '--property=User=0', '--property=Group=0', '--property=LimitCORE=0',
+    '--property=LimitFSIZE=@@DIAGNOSTIC_MAX_BYTES@@',
+    '--property=CPUQuota=@@CPU_QUOTA_PERCENT@@%',
+    '--property=MemoryMax=@@MEMORY_MAX_BYTES@@',
+    '--property=TasksMax=@@TASKS_MAX@@',
+    '/usr/local/libexec/dotmac-gate0/@@CAMPAIGN@@/@@CASE@@-@@ROLE@@-inside',
+], {})

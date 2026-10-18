@@ -1,0 +1,34 @@
+{
+  "ociVersion": "@@ACCEPTED_OCI_VERSION@@",
+  "root": {"path": "@@ACCEPTED_READONLY_ROOTFS@@", "readonly": true},
+  "process": {
+    "terminal": false,
+    "user": {"uid": 0, "gid": 0, "additionalGids": []},
+    "args": ["/opt/venv/bin/dotmac-platform", "gate0", "supervise"],
+    "env": @@QUALIFIED_FIXED_PUBLIC_ENV_JSON@@,
+    "cwd": "@@QUALIFIED_IMAGE_CWD@@",
+    "noNewPrivileges": true,
+    "capabilities": {
+      "bounding": ["CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_KILL", "CAP_SETGID", "CAP_SETUID", "CAP_SETPCAP", "CAP_NET_ADMIN", "CAP_SYS_CHROOT"],
+      "effective": ["CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_KILL", "CAP_SETGID", "CAP_SETUID", "CAP_SETPCAP", "CAP_NET_ADMIN", "CAP_SYS_CHROOT"],
+      "permitted": ["CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_KILL", "CAP_SETGID", "CAP_SETUID", "CAP_SETPCAP", "CAP_NET_ADMIN", "CAP_SYS_CHROOT"],
+      "ambient": [], "inheritable": []
+    },
+    "rlimits": [{"type": "RLIMIT_CORE", "hard": 0, "soft": 0}, {"type": "RLIMIT_FSIZE", "hard": @@DIAGNOSTIC_MAX_BYTES@@, "soft": @@DIAGNOSTIC_MAX_BYTES@@}],
+    "apparmorProfile": "@@QUALIFIED_LSM_PROFILE@@"
+  },
+  "mounts": @@QUALIFIED_EXACT_MOUNTS_JSON@@,
+  "linux": {
+    "cgroupsPath": "/system.slice/dotmac-gate0-@@INSTANCE@@.service/payload",
+    "namespaces": [
+      {"type": "pid"}, {"type": "mount"}, {"type": "ipc"},
+      {"type": "uts"}, {"type": "cgroup"},
+      {"type": "network", "path": "/run/netns/@@INSTANCE@@"}
+    ],
+    "devices": @@QUALIFIED_EXACT_DEVICES_JSON@@,
+    "resources": {"devices": @@QUALIFIED_DEVICE_ALLOWLIST_JSON@@},
+    "seccomp": @@QUALIFIED_SECCOMP_JSON@@,
+    "maskedPaths": @@QUALIFIED_MASKED_PATHS_JSON@@,
+    "readonlyPaths": @@QUALIFIED_READONLY_PATHS_JSON@@
+  }
+}

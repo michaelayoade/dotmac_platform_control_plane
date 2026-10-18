@@ -283,3 +283,156 @@ def test_withdraw_maps_refusals_to_conflict_error(
     monkeypatch.setattr(approvals, "withdraw_platform_approval", raise_refused)
     with pytest.raises(ConflictError):
         approvals.withdraw_request(db, _withdraw_command())
+
+
+def test_withdrawal_reference_read_is_exact_detached_idempotent_and_reason_free(
+    monkeypatch,
+):
+    from dataclasses import FrozenInstanceError, asdict
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    request_id, withdrawal_id, actor_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    approved_at = datetime.now(UTC)
+    owner = SimpleNamespace(
+        withdrawal_id=withdrawal_id,
+        actor_id=actor_id,
+        approved_at=approved_at,
+        effective_at=approved_at + timedelta(seconds=1),
+        authority_ref="synthetic-human-route",
+        external_ref="human-reference-is-not-a-uuid",
+        reason="sensitive-owner-reason-never-retained",
+    )
+    marker, calls = object(), []
+
+    def get(session, *, request_id):
+        assert session is marker
+        calls.append(request_id)
+        return owner
+
+    monkeypatch.setattr(approvals, "get_platform_withdrawal", get)
+    first = approvals.withdrawal_for_reference(
+        marker, request_id=request_id, external_ref=owner.external_ref
+    )
+    second = approvals.withdrawal_for_reference(
+        marker, request_id=request_id, external_ref=owner.external_ref
+    )
+    assert first == second
+    assert first.request_id == request_id and first.withdrawal_id == withdrawal_id
+    assert first.external_ref != str(first.withdrawal_id)
+    assert calls == [request_id, request_id]
+    assert "reason" not in asdict(first)
+    with pytest.raises(FrozenInstanceError):
+        first.external_ref = "changed"
+    owner.external_ref = "changed-after-read"
+    assert first.external_ref == "human-reference-is-not-a-uuid"
+
+
+@pytest.mark.parametrize(
+    "external_ref",
+    [
+        "",
+        " ",
+        " leading",
+        "trailing ",
+        "x" * 201,
+        "\nref",
+        "ref\x00",
+        None,
+        True,
+        1,
+        [],
+        {},
+    ],
+)
+def test_withdrawal_reference_read_rejects_bad_reference_before_owner_call(
+    monkeypatch, external_ref
+):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid reference reached owner getter")
+
+    monkeypatch.setattr(approvals, "get_platform_withdrawal", forbidden)
+    with pytest.raises(ConflictError):
+        approvals.withdrawal_for_reference(
+            object(), request_id=uuid.uuid4(), external_ref=external_ref
+        )
+
+
+def test_withdrawal_reference_read_distinguishes_missing_and_mismatch(monkeypatch):
+    from types import SimpleNamespace
+
+    request_id = uuid.uuid4()
+    monkeypatch.setattr(
+        approvals, "get_platform_withdrawal", lambda *args, **kwargs: None
+    )
+    assert (
+        approvals.withdrawal_for_reference(
+            object(), request_id=request_id, external_ref="exact"
+        )
+        is None
+    )
+    monkeypatch.setattr(
+        approvals,
+        "get_platform_withdrawal",
+        lambda *args, **kwargs: SimpleNamespace(
+            external_ref="sensitive-other-reference"
+        ),
+    )
+    with pytest.raises(ConflictError) as caught:
+        approvals.withdrawal_for_reference(
+            object(), request_id=request_id, external_ref="exact"
+        )
+    assert "sensitive" not in str(caught.value) and "exact" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "request_id", [None, "00000000-0000-0000-0000-000000000001", 1, True]
+)
+def test_withdrawal_reference_read_requires_typed_request_before_owner(
+    monkeypatch, request_id
+):
+    monkeypatch.setattr(
+        approvals,
+        "get_platform_withdrawal",
+        lambda *args, **kwargs: pytest.fail("bad request reached owner"),
+    )
+    with pytest.raises(ConflictError):
+        approvals.withdrawal_for_reference(
+            object(), request_id=request_id, external_ref="exact"
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("withdrawal_id", "not-a-uuid"),
+        ("actor_id", "not-a-uuid"),
+        ("authority_ref", "x" * 201),
+        ("authority_ref", ""),
+        ("approved_at", None),
+        ("effective_at", None),
+    ],
+)
+def test_withdrawal_reference_read_refuses_malformed_owner_identity(
+    monkeypatch, field, value
+):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    now = datetime.now(UTC)
+    owner = SimpleNamespace(
+        withdrawal_id=uuid.uuid4(),
+        actor_id=uuid.uuid4(),
+        authority_ref="owner",
+        approved_at=now,
+        effective_at=now,
+        external_ref="exact",
+    )
+    setattr(owner, field, value)
+    monkeypatch.setattr(
+        approvals, "get_platform_withdrawal", lambda *args, **kwargs: owner
+    )
+    with pytest.raises(ConflictError):
+        approvals.withdrawal_for_reference(
+            object(), request_id=uuid.uuid4(), external_ref="exact"
+        )

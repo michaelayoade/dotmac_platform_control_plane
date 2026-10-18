@@ -1,0 +1,31 @@
+[Unit]
+Description=One fixed ephemeral Gate0 A9 protected JIT job
+BindsTo=dotmac-gate0-a9-lifecycle.service
+After=dotmac-gate0-a9-lifecycle.service
+Conflicts=dotmac-gate0-a9-lifecycle-expired.target
+[Service]
+Type=exec
+ExitType=main
+ExecStart=@BINARY@ gate0 jit-runner-credential
+User=@COURIER_UID@
+Group=@COURIER_GID@
+SupplementaryGroups=@COURIER_GROUPS@
+WorkingDirectory=/run/dotmac-gate0-jit/runner
+LoadCredential=jit-config:/run/dotmac-gate0-collector/jit-config
+Environment=PATH=/usr/bin:/bin
+Environment=LC_ALL=C
+Environment=HOME=/run/dotmac-gate0-jit/home
+BindReadOnlyPaths=/opt/dotmac-gate0-jit/bin:/run/dotmac-gate0-jit/runner/bin /opt/dotmac-gate0-jit/externals:/run/dotmac-gate0-jit/runner/externals
+Restart=no
+RemainAfterExit=no
+KillMode=control-group
+KillSignal=SIGKILL
+FinalKillSignal=SIGKILL
+SendSIGKILL=yes
+Delegate=no
+NoNewPrivileges=yes
+AmbientCapabilities=
+CapabilityBoundingSet=
+StandardInput=null
+StandardOutput=null
+StandardError=null

@@ -198,19 +198,6 @@ def _worker(inputs):
         expires_at=expiry,
     )
     fixture_signer = FixtureIssuer()
-    control.install_rehearsal_issuer_security(
-        signer=fixture_signer,
-        authorization_verifier=fixture_signer,
-        harness_verifier=verifier,
-        authorization_ttl=timedelta(seconds=30),
-    )
-    with pytest.raises(RuntimeError):
-        control.install_rehearsal_issuer_security(
-            signer=fixture_signer,
-            authorization_verifier=fixture_signer,
-            harness_verifier=verifier,
-            authorization_ttl=timedelta(seconds=30),
-        )
     expectations = {}
     controllers = {}
     certificates = {}
@@ -268,6 +255,7 @@ def _worker(inputs):
         return {
             "schema": "Gate0IssuerWindow.v1",
             "window_id": f"fixture-window-{index}",
+            "case_kind": "withdrawal_later_use" if index == "b" else "consume_replay",
             "not_before": (datetime.now(UTC) - timedelta(seconds=1))
             .isoformat()
             .replace("+00:00", "Z"),
@@ -491,6 +479,60 @@ def _worker(inputs):
         verifier=verifier,
         require_frozen_window=True,
     )
+    import socket
+    from concurrent.futures import ThreadPoolExecutor
+    from time import monotonic
+
+    from vendor_cp.deployment.gate0_collection import FramedCaseCollector, OutcomeKind
+    from vendor_cp.deployment.gate0_composition import PhaseResult
+    from vendor_cp.deployment.gate0_framing import FramedChannel, canonical
+    from vendor_cp.deployment.gate0_observation import (
+        SignedSessionObservation,
+        bundle_document,
+        decode,
+        encode,
+        observation_message,
+    )
+    from vendor_cp.deployment.gate0_services import (
+        IssuerStartup,
+        IssuerWorker,
+        ServiceOwnerRefused,
+    )
+
+    sockets = None
+    pool = None
+
+    def actual_bundle(expected):
+        started = datetime.now(UTC)
+        produced = resolve(expected)
+        ended = datetime.now(UTC)
+        message = observation_message(
+            proof=produced,
+            operation=expected.operation,
+            window_record_digest=expected.window_digest,
+            invocation_id=uuid4().hex * 2,
+            observed_from=started,
+            observed_until=ended,
+        )
+        return bundle_document(
+            produced, SignedSessionObservation(message, attester.sign(message))
+        )
+
+    def phase_result(outcome):
+        data = json.loads(outcome.result_bytes)
+        return PhaseResult(
+            data["evidence_digest"],
+            data["authorization_id"],
+            data["lease_id"],
+            None
+            if data["authorization_document"] is None
+            else decode(data["authorization_document"], 128 * 1024),
+            data["single_use_reference"],
+            None
+            if data["issuer_receipt"] is None
+            else decode(data["issuer_receipt"], 8192),
+        )
+
     try:
         canary, _ = seed("snapshot-canary")
         with platform.platform_session() as db:
@@ -536,7 +578,57 @@ def _worker(inputs):
                 == "fixture-window-snapshot-canary"
             )
         first, first_request = seed("a")
-        issued = driver.issue(RehearsalIssuerCommand(uuid4().hex, first))
+        assert (
+            readers[first].read("issue", first).window.document["case_kind"]
+            == "consume_replay"
+        )
+        # The actual worker performs the one process-wide security install.
+        # Custody/actors here remain explicitly synthetic, while PostgreSQL,
+        # held approval, signature verification and framed owner codec are real.
+        worker = IssuerWorker(
+            IssuerStartup(
+                owner_admissions[first],
+                verifier,
+                fixture_signer,
+                fixture_signer,
+                timedelta(seconds=30),
+                "synthetic-management-actor",
+                True,
+                sessions=platform.platform_session_factory,
+            )
+        )
+        with pytest.raises(RuntimeError):
+            control.install_rehearsal_issuer_security(
+                signer=fixture_signer,
+                authorization_verifier=fixture_signer,
+                harness_verifier=verifier,
+                authorization_ttl=timedelta(seconds=30),
+            )
+        sockets = socket.socketpair()
+        deadline = min(verifier._deadline, monotonic() + 60)
+        client_channel = FramedChannel(
+            sockets[0].fileno(), sockets[0].fileno(), deadline=deadline
+        )
+        owner_channel = FramedChannel(
+            sockets[1].fileno(), sockets[1].fileno(), deadline=deadline
+        )
+        framed = FramedCaseCollector(client_channel)
+        pool = ThreadPoolExecutor(max_workers=1)
+        serving = pool.submit(worker.run, owner_channel)
+        issue_bundle = actual_bundle(readers[first].read("issue", first).expectation)
+        issued_outcome = framed._exchange(
+            {
+                "schema": "Gate0IssuerSubmission.v1",
+                "operation": "issue",
+                "plan_id": str(first),
+                "command_id": uuid4().hex,
+                "proof": issue_bundle,
+                "workload_token": workload_token(first),
+            }
+        )
+        assert issued_outcome.kind is OutcomeKind.ISSUE_COMMITTED
+        assert issued_outcome.bundle_digest == _digest(canonical(issue_bundle))
+        issued = phase_result(issued_outcome)
         assert issued.readiness_accepted is False
         # A real pre-read starts a transaction; owner standing must refuse it.
         with platform.platform_session() as dirty:
@@ -590,24 +682,66 @@ def _worker(inputs):
                 ),
                 None,
             )
-        consumed = driver.consume(first, issued.authorization_document)
+        consume_bundle = actual_bundle(
+            readers[first]
+            .read("consume", first, issued.authorization_document)
+            .expectation
+        )
+        consume_submission = {
+            "schema": "Gate0IssuerSubmission.v1",
+            "operation": "consume",
+            "plan_id": str(first),
+            "authorization": encode(issued.authorization_document),
+            "proof": consume_bundle,
+            "workload_token": workload_token(first),
+        }
+        consumed_outcome = framed._exchange(consume_submission)
+        assert consumed_outcome.kind is OutcomeKind.CONSUME_COMMITTED
+        assert consumed_outcome.bundle_digest == _digest(canonical(consume_bundle))
+        consumed = phase_result(consumed_outcome)
         assert consumed.authorization_id == issued.authorization_id
-        # Replay reuses retained immutable proof; owner, not CP, rejects the spend.
-        packet = verifier._evidence(consumed.evidence_digest)
-        from vendor_cp.deployment.gate0_attester import ProducedAttestation
-
-        replay = ProducedAttestation(
-            packet.owner_envelope, packet.companion, packet.context, packet.transcript
+        assert consumed.single_use_reference
+        assert issued.issuer_receipt is not None
+        receipt = json.loads(issued.issuer_receipt)
+        assert receipt["control_ref"] == issued.authorization_id
+        standing = driver.standing(
+            issued.authorization_document, consumed.evidence_digest
         )
-        replay_driver = Gate0Composition(
-            sessions=platform.platform_session_factory,
-            admission=admission,
-            proof_resolver=lambda _: replay,
-            verifier=verifier,
+        assert (
+            standing.standing is control.RehearsalIssuerAuthorizationStanding.CONSUMED
         )
-        with pytest.raises(control.RehearsalIssuerIssuanceRefusedError):
-            replay_driver.consume(first, issued.authorization_document)
+        assert (
+            standing.refusal
+            is control.RehearsalIssuerAuthorizationRefusalCode.ALREADY_CONSUMED
+        )
+        # Identical retained proof and authorization reach actual pinned a17
+        # through the real framed worker. Generic/earlier harness failures do
+        # not satisfy this exact owner refusal characterization.
+        consume_submission["workload_token"] = workload_token(first)
+        replay_outcome = framed._exchange(consume_submission)
+        assert replay_outcome.kind is OutcomeKind.OWNER_REFUSED
+        assert replay_outcome.owner_namespace == "control.issuance"
+        assert (
+            replay_outcome.owner_code
+            == control.RehearsalIssuerIssuanceRefusalCode.ENVELOPE_MISMATCH.value
+        )
+        assert replay_outcome.proof_digest == consumed.evidence_digest
+        assert replay_outcome.bundle_digest == consumed_outcome.bundle_digest
+        with pytest.raises(ServiceOwnerRefused):
+            serving.result(timeout=5)
+        with pytest.raises(ValueError):
+            framed._exchange(consume_submission)
+        assert (
+            driver.standing(
+                issued.authorization_document, consumed.evidence_digest
+            ).standing
+            is control.RehearsalIssuerAuthorizationStanding.CONSUMED
+        )
         second, second_request = seed("b")
+        assert (
+            readers[second].read("issue", second).window.document["case_kind"]
+            == "withdrawal_later_use"
+        )
         second_issued = driver.issue(RehearsalIssuerCommand(uuid4().hex, second))
         documents[second] = second_issued.authorization_document
         ns3_approved_at_start = readers[second].read("issue", second)
@@ -619,6 +753,16 @@ def _worker(inputs):
             == authorization_binding(second_issued.authorization_document).digest
         )
 
+        human_external_ref = "synthetic-human-reference-" + uuid4().hex
+        withdrawal_actor = uuid4()
+        with platform.platform_session() as db:
+            assert (
+                approvals.withdrawal_for_reference(
+                    db, request_id=second_request, external_ref=human_external_ref
+                )
+                is None
+            )
+
         def withdraw_between_preflight_and_mutation(expected):
             proof = resolve(expected)
             with platform.platform_session() as db:
@@ -626,10 +770,10 @@ def _worker(inputs):
                     db,
                     approvals.WithdrawRequestCommand(
                         second_request,
-                        uuid4(),
+                        withdrawal_actor,
                         "synthetic-human",
                         "withdraw-test",
-                        uuid4().hex,
+                        human_external_ref,
                     ),
                 )
             return proof
@@ -654,6 +798,28 @@ def _worker(inputs):
             readers[second].read(
                 "consume", second, second_issued.authorization_document
             )
+        # Actual public owner read resolves the human reference to the immutable
+        # UUID used by the Approvals outbox trigger; pending relay stays absent.
+        with platform.platform_session() as db:
+            withdrawal = approvals.withdrawal_for_reference(
+                db, request_id=second_request, external_ref=human_external_ref
+            )
+            assert withdrawal is not None
+            assert withdrawal.actor_id == withdrawal_actor
+            assert str(withdrawal.withdrawal_id) != human_external_ref
+            assert (
+                approvals.withdrawal_for_reference(
+                    db, request_id=second_request, external_ref=human_external_ref
+                )
+                == withdrawal
+            )
+            assert outcomes_for_event(db, withdrawal.withdrawal_id) == ()
+            from dotmac_kernel import ConflictError
+
+            with pytest.raises(ConflictError):
+                approvals.withdrawal_for_reference(
+                    db, request_id=second_request, external_ref="wrong-human-reference"
+                )
         composition = RelayComposition(
             dispatcher.platform_session_factory,
             platform.platform_session_factory,
@@ -681,25 +847,45 @@ def _worker(inputs):
                 .all()
             )
             assert len(rows) == 1 and rows[0].status == OutboxStatus.SENT.value
-            outcomes = outcomes_for_event(db, rows[0].id)
+            assert rows[0].id == withdrawal.withdrawal_id
+            assert rows[0].payload["external_ref"] == human_external_ref
+            outcomes = outcomes_for_event(db, withdrawal.withdrawal_id)
             assert (
                 len(outcomes) == 1
                 and outcomes[0].disposition is WithdrawalDisposition.APPLIED
             )
+            assert outcomes[0].event_id == withdrawal.withdrawal_id
+            assert outcomes[0].approval_request_id == second_request
+            assert outcomes[0].withdrawal_ref == str(withdrawal.withdrawal_id)
+            assert outcomes[0].plan_id == second
             assert outcomes[0].evidence["authorizations_revoked"] == [
                 second_issued.authorization_id
             ]
+        from vendor_cp.deployment.gate0_window import AuthenticatedApprovalWithdrawal
+
+        with pytest.raises(AuthenticatedApprovalWithdrawal) as withdrawn_use:
+            driver.consume(second, second_issued.authorization_document)
+        assert withdrawn_use.value.denial.request_id == second_request
+        assert withdrawn_use.value.denial.plan_id == second
+        assert withdrawn_use.value.denial.phase == "consume"
         with pytest.raises(ValueError):
             driver.standing(
                 second_issued.authorization_document, second_issued.evidence_digest
             )
-        with pytest.raises(ValueError):
-            driver.consume(second, second_issued.authorization_document)
         assert verifier._retained_count == 4
         with platform.platform_session() as db:
             assert db.scalar(text("SELECT count(*) FROM mod_deploy.rollouts")) == 0
         print("synthetic-composition-lifecycle-complete")
     finally:
+        if sockets is not None:
+            for connection in sockets:
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                connection.close()
+        if pool is not None:
+            pool.shutdown(wait=True)
         platform.platform_engine.dispose()
         platform.engine.dispose()
         dispatcher.platform_engine.dispose()

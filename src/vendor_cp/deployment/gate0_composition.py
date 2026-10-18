@@ -11,8 +11,8 @@ import hashlib
 import json
 import math
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
-from datetime import UTC, timedelta
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 from uuid import UUID
@@ -76,6 +76,27 @@ class WindowFreshness:
 
 
 @dataclass(frozen=True, slots=True)
+class RequestAuthenticationFreshness:
+    """Per-request JWT/window intersection; never replaces retained window freshness."""
+
+    origin: float
+    deadline: float
+    expires_at: datetime
+
+    def __post_init__(self) -> None:
+        WindowFreshness(self.origin, self.deadline)
+        if type(self.expires_at) is not datetime or self.expires_at.tzinfo is None:
+            raise CompositionRefused()
+
+    def require_open(self) -> None:
+        if (
+            not self.origin <= monotonic() < self.deadline
+            or datetime.now(UTC) >= self.expires_at
+        ):
+            raise CompositionRefused()
+
+
+@dataclass(frozen=True, slots=True)
 class AdmissionExpectation:
     """Facts supplied by an independent authenticated admission boundary.
 
@@ -93,6 +114,7 @@ class AdmissionExpectation:
     frozen_window_bytes: bytes | None = None
     window_digest: str | None = None
     window_freshness: WindowFreshness | None = None
+    authentication_freshness: RequestAuthenticationFreshness | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -111,6 +133,12 @@ class AdmissionExpectation:
         if (
             self.window_freshness is not None
             and type(self.window_freshness) is not WindowFreshness
+        ):
+            raise CompositionRefused()
+        if (
+            self.authentication_freshness is not None
+            and type(self.authentication_freshness)
+            is not RequestAuthenticationFreshness
         ):
             raise CompositionRefused()
         if (self.frozen_window_bytes is None) != (self.window_digest is None):
@@ -192,6 +220,7 @@ class PhaseResult:
     lease_id: str
     authorization_document: bytes | None = None
     single_use_reference: str | None = None
+    issuer_receipt: bytes | None = None
 
     @property
     def readiness_accepted(self) -> Literal[False]:
@@ -221,6 +250,8 @@ class Gate0Composition:
     def _admit(
         self, phase: Literal["issue", "consume"], plan_id: UUID
     ) -> AdmissionExpectation:
+        from vendor_cp.deployment.gate0_window import AuthenticatedApprovalWithdrawal
+
         if self._admission is None or self._resolver is None:
             raise CompositionRefused()
         failed = False
@@ -240,6 +271,7 @@ class Gate0Composition:
                 result.frozen_window_bytes,
                 result.window_digest,
                 result.window_freshness,
+                result.authentication_freshness,
             )
             if result.operation.phase != phase or result.operation.plan_id != str(
                 plan_id
@@ -247,6 +279,14 @@ class Gate0Composition:
                 raise CompositionRefused()
             self._verifier._require_open()
             return result
+        except AuthenticatedApprovalWithdrawal as caught:
+            if caught.denial.plan_id != plan_id or caught.denial.phase != phase:
+                raise CompositionRefused() from None
+            self._verifier._require_open()
+            caught.denial.freshness.require_open()
+            if caught.authentication_freshness is not None:
+                caught.authentication_freshness.require_open()
+            raise
         except Exception:
             failed = True
         if failed:
@@ -305,6 +345,9 @@ class Gate0Composition:
                 binding if operation.phase == "consume" else None,
                 freshness=expected.window_freshness,
             )
+            rederived = replace(
+                rederived, authentication_freshness=expected.authentication_freshness
+            )
             if rederived != expected:
                 raise CompositionRefused()
             if binding is not None:
@@ -356,11 +399,16 @@ class Gate0Composition:
                 expected.frozen_window_bytes,
                 expected.window_digest,
                 expected.window_freshness,
+                expected.authentication_freshness,
             )
+            self._require_window_open(expected)
             proof = self._resolver(resolver_input)
+            self._require_window_open(expected)
             # Resolver must bound its wire response before constructing a value;
             # registration also checks all retained/decoded source format bounds.
-            return self._verifier._register(proof, expected.operation)
+            registered = self._verifier._register(proof, expected.operation)
+            self._require_window_open(expected)
+            return registered
         except Exception:
             failed = True
         if failed:
@@ -368,6 +416,8 @@ class Gate0Composition:
         raise CompositionRefused()
 
     def _require_window_open(self, expected: AdmissionExpectation) -> None:
+        if expected.authentication_freshness is not None:
+            expected.authentication_freshness.require_open()
         if self._require_frozen_window or expected.frozen_window_bytes is not None:
             if expected.window_freshness is None:
                 raise CompositionRefused()
@@ -415,7 +465,11 @@ class Gate0Composition:
             raise error
         if result is None:
             raise CompositionIncomplete()
-        # Never call clocks after confirmed commit and claim it did not happen.
+        # Expiry after confirmed commit cannot become a claimed rollback/refusal.
+        try:
+            self._require_window_open(expected)
+        except Exception:
+            raise CompositionIncomplete() from None
         return result
 
     def issue(self, command: RehearsalIssuerCommand) -> PhaseResult:
@@ -446,7 +500,79 @@ class Gate0Composition:
                 detached.encoded,
             )
 
-        return self._mutate(expected, None, transition)
+        committed = self._mutate(expected, None, transition)
+        return self._issue_receipt(invocation, expected, committed)
+
+    def _issue_receipt(
+        self,
+        invocation: RehearsalIssuerInvocation,
+        expected: AdmissionExpectation,
+        committed: PhaseResult,
+    ) -> PhaseResult:
+        command = invocation.command
+        evidence = invocation.harness_evidence_document
+        # A new read transaction observes the committed owner receipt. A failed
+        # read/cleanup cannot undo issuance and must remain incomplete.
+        from vendor_cp.deployment.issuer_receipts import (
+            ISSUE_AUTHORIZATION,
+            find_receipt,
+            request_fingerprint,
+        )
+
+        fingerprint = request_fingerprint(
+            ISSUE_AUTHORIZATION,
+            {
+                **dict(invocation.to_control_request()),
+                "harness_evidence_digest": "sha256:"
+                + hashlib.sha256(_canonical(evidence)).hexdigest(),
+            },
+        )
+        db: Session | None = None
+        receipt_bytes: bytes | None = None
+        failed = False
+        try:
+            db = self._sessions()
+            receipt = find_receipt(db, command.command_id)
+            if (
+                receipt is None
+                or receipt.verb != ISSUE_AUTHORIZATION
+                or receipt.request_fingerprint != fingerprint
+                or receipt.plan_id != command.plan_id
+                or receipt.approval_request_id != expected.approval_request_id
+                or receipt.control_ref != committed.authorization_id
+            ):
+                raise CompositionIncomplete()
+            receipt_bytes = _canonical(
+                {
+                    "id": str(receipt.id),
+                    "command_id": receipt.command_id,
+                    "verb": receipt.verb,
+                    "request_fingerprint": receipt.request_fingerprint,
+                    "plan_id": str(receipt.plan_id),
+                    "approval_request_id": str(receipt.approval_request_id),
+                    "control_ref": receipt.control_ref,
+                    "recorded_at": receipt.recorded_at.isoformat(),
+                }
+            )
+        except BaseException:
+            failed = True
+        finally:
+            if db is not None:
+                try:
+                    db.rollback()
+                except BaseException:
+                    failed = True
+                try:
+                    db.close()
+                except BaseException:
+                    failed = True
+        if failed or receipt_bytes is None:
+            raise CompositionIncomplete()
+        try:
+            self._require_window_open(expected)
+        except Exception:
+            raise CompositionIncomplete() from None
+        return replace(committed, issuer_receipt=receipt_bytes)
 
     def consume(self, plan_id: UUID, authorization_document: bytes) -> PhaseResult:
         from dotmac_deployment_control import RehearsalIssuerConsumptionStaged
@@ -510,17 +636,33 @@ class Gate0Composition:
             raise CompositionRefused()
         self._preflight(expected, binding)  # closed BEFORE fresh standing session
         db = self._sessions()
+        result = None
+        failed = False
         try:
             self._verifier._require_open()
-            return rehearsal_issuer_standing_for(
+            self._require_window_open(expected)
+            result = rehearsal_issuer_standing_for(
                 db,
                 authorization_document=binding.parsed.as_mapping(),
                 harness_evidence_document=_strict_json(
                     retained.owner_envelope, 128 * 1024
                 ),
             )
+        except BaseException:
+            failed = True
         finally:
-            db.close()
+            try:
+                db.rollback()
+            except BaseException:
+                failed = True
+            try:
+                db.close()
+            except BaseException:
+                failed = True
+        if failed or result is None:
+            raise CompositionRefused()
+        self._require_window_open(expected)
+        return result
 
 
 def assemble_gate0_composition(

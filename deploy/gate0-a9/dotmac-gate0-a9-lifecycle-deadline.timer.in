@@ -1,0 +1,8 @@
+[Unit]
+Description=Original absolute Gate0 A9 lifecycle finalization deadline
+[Timer]
+OnBootSec=@FINALIZATION_US@us
+AccuracySec=1us
+RandomizedDelaySec=0
+WakeSystem=no
+Unit=dotmac-gate0-a9-lifecycle-expired.target

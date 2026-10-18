@@ -1,0 +1,292 @@
+# Inlined by the offline renderer: no runtime imports from this source tree.
+import hashlib
+import json
+import stat
+import subprocess
+import time
+import resource
+
+@@NATIVE_READBACK_SOURCE@@
+
+P = @@PUBLIC_LITERAL@@
+if P['fixture_only']:
+    raise SystemExit(125)
+
+def refuse():
+    raise SystemExit(125)
+
+def protected(path, directory=False):
+    # Reject every symlink component and writable/non-root ancestor.
+    if not path.startswith('/') or '..' in path.split('/'):
+        refuse()
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        parts = path.strip('/').split('/')
+        for index, part in enumerate(parts):
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            if index < len(parts) - 1 or directory:
+                flags |= os.O_DIRECTORY
+            nxt = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+            st = os.fstat(fd)
+            if st.st_uid != 0 or st.st_gid != 0 or st.st_mode & 0o022:
+                refuse()
+            if index < len(parts) - 1 or directory:
+                if not stat.S_ISDIR(st.st_mode):
+                    refuse()
+            elif not stat.S_ISREG(st.st_mode):
+                refuse()
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def read_public_pin(path, expected):
+    fd = protected(path)
+    try:
+        st = os.fstat(fd)
+        if stat.S_IMODE(st.st_mode) != expected['mode'] or st.st_size != expected['size']:
+            refuse()
+        h = hashlib.sha256()
+        total = 0
+        while True:
+            raw = os.read(fd, 65536)
+            if not raw:
+                break
+            total += len(raw)
+            if total > expected['size']:
+                refuse()
+            h.update(raw)
+        if total != expected['size'] or h.hexdigest() != expected['sha256']:
+            refuse()
+        after = os.fstat(fd)
+        if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            refuse()
+    finally:
+        os.close(fd)
+
+def clocks():
+    if os.geteuid() != 0:
+        refuse()
+    with open('/proc/sys/kernel/random/boot_id', 'r', encoding='ascii') as f:
+        if f.read() != P['boot_id'] + '\n':
+            refuse()
+    # Original authority end E is never extended by cleanup R/T.
+    wall, mono = time.time_ns() // 1000, time.monotonic_ns() // 1000
+    if not P['not_before_wall_us'] <= wall < P['e_wall_us'] or not P['not_before_mono_us'] <= mono < min(P['e_mono_us'], P['s_us']):
+        refuse()
+
+def show(unit, keys):
+    clocks()
+    remaining = (min(P['e_mono_us'], P['s_us']) * 1000 - time.monotonic_ns()) / 1_000_000_000
+    if remaining <= 0:
+        refuse()
+    result = subprocess.run(show_vector(unit, keys),
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env={}, timeout=remaining, check=False)
+    clocks()
+    if result.returncode != 0 or len(result.stdout) > 65536:
+        refuse()
+    values = {}
+    for line in result.stdout.decode('utf-8', errors='strict').splitlines():
+        key, sep, value = line.partition('=')
+        if not sep or key not in keys or key in values:
+            refuse()
+        values[key] = value
+    if set(values) != set(keys):
+        refuse()
+    return values
+
+def exact_manager(which):
+    expected = P['manager'][which]
+    actual = show(P['units'][which], expected.keys())
+    if which == 'timer':
+        for key in ('NextElapseUSecMonotonic', 'AccuracyUSec', 'RandomizedDelayUSec'):
+            actual[key] = timespan_us(actual[key])
+    if actual != expected:
+        refuse()
+    return actual
+
+def fixed_public_checks():
+    clocks()
+    # Only public binary/config/selection/proof bytes; never credential paths.
+    for path, pin in P['files'].items():
+        read_public_pin(path, pin)
+    if os.readlink('/proc/1/exe') != '/usr/lib/systemd/systemd' or os.uname().release != P['kernel_release']:
+        refuse()
+    manager = protected('/usr/lib/systemd/systemd')
+    try:
+        selected, running = os.fstat(manager), os.stat('/proc/1/exe')
+        if (selected.st_dev, selected.st_ino) != (running.st_dev, running.st_ino):
+            refuse()
+    finally:
+        os.close(manager)
+    if show('', ['Version']) != {'Version': P['manager_version']}:
+        refuse()
+    ns = protected(P['netns_path'])
+    try:
+        selected = os.fstat(ns)
+        host = os.stat('/proc/self/ns/net')
+        if (selected.st_dev, selected.st_ino) != (P['netns_device'], P['netns_inode']) or (selected.st_dev, selected.st_ino) == (host.st_dev, host.st_ino):
+            refuse()
+    finally:
+        os.close(ns)
+    with open('/proc/self/mountinfo', 'r', encoding='ascii') as f:
+        mount_lines = [line.split() for line in f]
+    for path in P['tmpfs_paths']:
+        matches = [m for m in mount_lines if m[4] == path]
+        if len(matches) != 1 or matches[0][matches[0].index('-') + 1] != 'tmpfs':
+            refuse()
+        directory = protected(path, directory=True)
+        try:
+            if stat.S_IMODE(os.fstat(directory).st_mode) != 0o755:
+                refuse()
+        finally:
+            os.close(directory)
+    exact_manager('ready')
+    exact_manager('timer')
+    exact_manager('expired')
+    clocks()
+
+def activation_checks():
+    fixed_public_checks()
+    # An existing failed/inactive invocation is also non-reusable.
+    if show(P['units']['service'], ['LoadState']) != {'LoadState': 'not-found'}:
+        refuse()
+    parent, name = P['once_path'].rsplit('/', 1)
+    fd = protected(parent, directory=True)
+    try:
+        claim = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600, dir_fd=fd)
+        try:
+            raw = (P['instance'] + '\n' + P['boot_id'] + '\n').encode('ascii')
+            if os.write(claim, raw) != len(raw):
+                refuse()
+            os.fsync(claim)
+        finally:
+            os.close(claim)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    # Failure retains claim; no retry, rollback, unlink or rearm.
+    clocks()
+    setup_descriptors()
+    clocks()
+
+def descriptor_identity(fd):
+    s = os.fstat(fd)
+    return {'device':s.st_dev, 'inode':s.st_ino, 'type':stat.S_IFMT(s.st_mode), 'rdev':s.st_rdev}
+
+def setup_descriptors():
+    # Fixed null stdin; preserve the authenticated stdout descriptor untouched.
+    null = os.open('/dev/null', os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        s = os.fstat(null)
+        if not stat.S_ISCHR(s.st_mode) or s.st_rdev != os.makedev(1, 3):
+            refuse()
+        os.dup2(null, 0, inheritable=True)
+    finally:
+        if null != 0:
+            os.close(null)
+    parent, name = P['diagnostic_path'].rsplit('/', 1)
+    directory = protected(parent, directory=True)
+    try:
+        sink = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                       0o600, dir_fd=directory)
+        try:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (P['diagnostic_max_bytes'], P['diagnostic_max_bytes']))
+            os.dup2(sink, 2, inheritable=True)
+        finally:
+            if sink != 2:
+                os.close(sink)
+        binding = {str(fd):descriptor_identity(fd) for fd in (0, 1, 2)}
+        raw = (json.dumps(binding, sort_keys=True, separators=(',', ':')) + '\n').encode('ascii')
+        if len(raw) > 4096:
+            refuse()
+        fd = os.open('descriptor-binding.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory)
+        try:
+            if os.write(fd, raw) != len(raw):
+                refuse()
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+def verify_descriptors():
+    fd = protected(P['descriptor_path'])
+    try:
+        s = os.fstat(fd)
+        if stat.S_IMODE(s.st_mode) != 0o600 or not 0 < s.st_size <= 4096:
+            refuse()
+        raw = os.read(fd, 4097)
+        if len(raw) != s.st_size:
+            refuse()
+        observed = json.loads(raw)
+    finally:
+        os.close(fd)
+    if observed != {str(fd):descriptor_identity(fd) for fd in (0, 1, 2)}:
+        refuse()
+    null = os.fstat(0)
+    if not stat.S_ISCHR(null.st_mode) or null.st_rdev != os.makedev(1, 3):
+        refuse()
+    sink = protected(P['diagnostic_path'])
+    try:
+        s, actual = os.fstat(sink), os.fstat(2)
+        if (s.st_dev, s.st_ino) != (actual.st_dev, actual.st_ino) or stat.S_IMODE(s.st_mode) != 0o600 or s.st_size > P['diagnostic_max_bytes']:
+            refuse()
+    finally:
+        os.close(sink)
+    if resource.getrlimit(resource.RLIMIT_FSIZE) != (P['diagnostic_max_bytes'], P['diagnostic_max_bytes']):
+        refuse()
+
+def inside_checks():
+    fixed_public_checks()
+    verify_descriptors()
+    fd = protected(P['once_path'])
+    try:
+        st = os.fstat(fd)
+        expected = (P['instance'] + '\n' + P['boot_id'] + '\n').encode('ascii')
+        if stat.S_IMODE(st.st_mode) != 0o600 or os.read(fd, len(expected) + 1) != expected:
+            refuse()
+    finally:
+        os.close(fd)
+    expected = P['manager']['service']
+    keys = set(expected) | {'InvocationID', 'MainPID', 'ExecStart'}
+    actual = show(P['units']['service'], keys)
+    fixed_exec_start(actual['ExecStart'], P['inside_path'])
+    for key in ('TimeoutStopUSec', 'CPUQuotaPerSecUSec'):
+        actual[key] = timespan_us(actual[key])
+    if any(actual[k] != v for k, v in expected.items()):
+        refuse()
+    inv = actual['InvocationID']
+    if len(inv) != 32 or any(c not in '0123456789abcdef' for c in inv) or inv == '0' * 32:
+        refuse()
+    if actual['MainPID'] != str(os.getpid()) or os.environ.get('INVOCATION_ID') != inv:
+        refuse()
+    group = '/system.slice/' + P['units']['service']
+    with open('/proc/self/cgroup', 'r', encoding='ascii') as f:
+        if f.read() != '0::' + group + '/launcher\n':
+            refuse()
+    # Only nested payload creation occurs here, already under PID1's gate.
+    parent = protected('/sys/fs/cgroup' + group, directory=True)
+    try:
+        os.mkdir('payload', 0o700, dir_fd=parent)
+        payload = os.open('payload', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            ctl = os.open('cgroup.subtree_control', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=payload)
+            try:
+                if os.read(ctl, 4096).strip():
+                    refuse()
+            finally:
+                os.close(ctl)
+            os.mkdir('dotmac-gate0', 0o700, dir_fd=payload)
+        finally:
+            os.close(payload)
+    finally:
+        os.close(parent)
+    clocks()

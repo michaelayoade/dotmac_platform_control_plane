@@ -7,10 +7,11 @@ NS3 receives approved-at-start public data; only IDP3 rechecks current approval.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import time
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 from uuid import UUID
 
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         PlanView,
         RehearsalIssuerAuthorizationSignerIdentity,
         RehearsalIssuerAuthorizationStatementV1,
+        RehearsalIssuerAuthorizationSubject,
         RehearsalIssuerAuthorizationVerifier,
         TargetView,
     )
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from vendor_cp.approvals.adapter import HeldPlatformApproval
+    from vendor_cp.deployment.gate0_composition import RequestAuthenticationFreshness
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
@@ -59,6 +62,7 @@ class WindowController(TypedDict):
 class WindowDocument(TypedDict):
     schema: str
     window_id: str
+    case_kind: Literal["consume_replay", "withdrawal_later_use"]
     not_before: str
     expires_at: str
     purpose: str
@@ -104,19 +108,22 @@ class FrozenIssuerWindow:
     def parse(cls, raw: bytes) -> FrozenIssuerWindow:
         failed = False
         try:
-            from vendor_cp.deployment.gate0_workload_admission import _FIXED_CLAIMS
+            from vendor_cp.deployment.gate0_github_jwt import _FIXED_CLAIMS
 
             value = cast(WindowDocument, strict_object(raw, 32768))
             if canonical(value) != raw:
                 raise ProviderRefused()
             _fields(
                 value,
-                "schema window_id not_before expires_at purpose allowed_phases github "
+                "schema window_id case_kind not_before expires_at purpose "
+                "allowed_phases github "
                 "target approval_policy plan_inputs controller "
                 "prerequisite_evidence_refs authorization_binding",
             )
             if (
                 value["schema"] != "Gate0IssuerWindow.v1"
+                or type(value["case_kind"]) is not str
+                or value["case_kind"] not in ("consume_replay", "withdrawal_later_use")
                 or value["purpose"] != "rehearsal_issuer_operation"
                 or value["allowed_phases"] != ["issue", "consume"]
                 or value["authorization_binding"] != "control_parsed_full_envelope_v1"
@@ -262,12 +269,27 @@ class FrozenIssuerWindow:
     def check_authorization_times(
         self, statement: RehearsalIssuerAuthorizationStatementV1
     ) -> None:
+        self.check_retained_authorization_times(
+            statement, observed_at=datetime.now(UTC)
+        )
+
+    def check_retained_authorization_times(
+        self,
+        statement: RehearsalIssuerAuthorizationStatementV1,
+        *,
+        observed_at: datetime,
+    ) -> None:
+        """Original signed times only; never live eligibility."""
         document = self.document
-        if not _instant(
-            document["not_before"]
-        ) <= statement.not_before <= statement.issued_at <= datetime.now(
-            UTC
-        ) or statement.expires_at > _instant(document["expires_at"]):
+        if (
+            observed_at.tzinfo is None
+            or observed_at.utcoffset() != timedelta(0)
+            or not _instant(document["not_before"])
+            <= statement.not_before
+            <= statement.issued_at
+            <= observed_at
+            or statement.expires_at > _instant(document["expires_at"])
+        ):
             raise ProviderRefused()
 
     def expectation(
@@ -384,6 +406,33 @@ class ApprovedWindowBinding:
             raise ProviderRefused()
 
 
+def issuer_authorization_subject(
+    operation: AdmittedOperation,
+    *,
+    target_id: str,
+    environment: str,
+    descriptor_digest: str,
+    authorized_image_digests: tuple[str, ...],
+    signer_public_key_fingerprint: str,
+) -> RehearsalIssuerAuthorizationSubject:
+    """One exact subject builder for live and historical Control verification."""
+    from dotmac_deployment_control import RehearsalIssuerAuthorizationSubject
+
+    return RehearsalIssuerAuthorizationSubject(
+        immutable_reference=operation.plan_id,
+        target_id=target_id,
+        target_ref=operation.target_ref,
+        desired_state_digest=operation.plan_digest,
+        profile_digest=descriptor_digest,
+        authorized_image_digests=authorized_image_digests,
+        execution_plan_digest=operation.execution_plan_digest,
+        controller_fingerprint=operation.controller_fingerprint,
+        environment=environment,
+        signer_public_key_fingerprint=signer_public_key_fingerprint,
+        lease_id=operation.lease_id,
+    )
+
+
 def derive_consume_expectation(
     binding: ApprovedWindowBinding,
     actual_document: bytes,
@@ -391,7 +440,6 @@ def derive_consume_expectation(
     authorization_verifier: RehearsalIssuerAuthorizationVerifier,
 ) -> AdmissionExpectation:
     from dotmac_deployment_control import (
-        RehearsalIssuerAuthorizationSubject,
         verify_rehearsal_issuer_authorization,
     )
 
@@ -403,18 +451,13 @@ def derive_consume_expectation(
     expected = binding.expectation
     op = expected.operation
     actual = authorization_binding(actual_document)
-    subject = RehearsalIssuerAuthorizationSubject(
-        immutable_reference=op.plan_id,
+    subject = issuer_authorization_subject(
+        op,
         target_id=str(expected.target_id),
-        target_ref=op.target_ref,
-        desired_state_digest=op.plan_digest,
-        profile_digest=binding.descriptor_digest,
-        authorized_image_digests=binding.authorized_image_digests,
-        execution_plan_digest=op.execution_plan_digest,
-        controller_fingerprint=op.controller_fingerprint,
         environment=expected.environment,
+        descriptor_digest=binding.descriptor_digest,
+        authorized_image_digests=binding.authorized_image_digests,
         signer_public_key_fingerprint=issuer_identity.public_key_fingerprint,
-        lease_id=op.lease_id,
     )
     verified = verify_rehearsal_issuer_authorization(
         actual.parsed.as_mapping(),
@@ -432,6 +475,73 @@ def derive_consume_expectation(
             authorization_issued_at=actual.issued_at,
         ),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class WindowClockOrigin:
+    """Trusted local launch clocks; never portable window/capture authority."""
+
+    started_at: datetime
+    monotonic_origin: float
+    deadline: float
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.started_at) is not datetime
+            or self.started_at.tzinfo is None
+            or self.started_at.utcoffset() != timedelta(0)
+            or self.started_at > datetime.now(UTC)
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in (self.monotonic_origin, self.deadline)
+            )
+            or not 0 <= self.monotonic_origin <= time.monotonic() < self.deadline
+            or not 0 < self.deadline - self.monotonic_origin <= 300
+        ):
+            raise ProviderRefused()
+
+
+class OwnerWindowWithdrawal(ProviderRefused):
+    """Detached exact owner denial after confirmed read-transaction cleanup.
+
+    This carries no approved binding. Only the fixed JWT admission provider
+    may classify it as an authenticated attempted use.
+    """
+
+    def __init__(
+        self,
+        *,
+        window: FrozenIssuerWindow,
+        plan_id: UUID,
+        request_id: UUID,
+        content_digest: str,
+        phase: Literal["issue", "consume"],
+        freshness: WindowFreshness,
+    ) -> None:
+        ValueError.__init__(self, "gate0_owner_window_withdrawn")
+        self.window, self.plan_id, self.request_id = window, plan_id, request_id
+        self.content_digest, self.phase, self.freshness = (
+            content_digest,
+            phase,
+            freshness,
+        )
+
+
+class AuthenticatedApprovalWithdrawal(ProviderRefused):
+    """Fixed provider verified JWT and exact original denial coordinates.
+
+    Trusted source contract, not an unforgeable Python capability or grant.
+    """
+
+    def __init__(
+        self,
+        denial: OwnerWindowWithdrawal,
+        *,
+        authentication_freshness: RequestAuthenticationFreshness | None = None,
+    ) -> None:
+        ValueError.__init__(self, "gate0_authenticated_approval_withdrawn")
+        self.denial = denial
+        self.authentication_freshness = authentication_freshness
 
 
 class OwnerWindowReader:
@@ -452,6 +562,7 @@ class OwnerWindowReader:
         expires_at: datetime | None = None,
         database_io_qualified: bool = False,
         rehearsal_target_id: UUID | None = None,
+        clock_origin: WindowClockOrigin | None = None,
     ) -> None:
         from dotmac_kernel.session_runtime import DatabaseRuntime
 
@@ -472,9 +583,22 @@ class OwnerWindowReader:
             authorization_verifier,
         )
         self._target_id = rehearsal_target_id
-        self._started, self._origin = datetime.now(UTC), time.monotonic()
+        if clock_origin is not None:
+            if type(clock_origin) is not WindowClockOrigin:
+                raise ProviderRefused()
+            clock_origin.__post_init__()
+            if not 0 < (expires_at - clock_origin.started_at).total_seconds() <= 300:
+                raise ProviderRefused()
+            self._started, self._origin = (
+                clock_origin.started_at,
+                clock_origin.monotonic_origin,
+            )
+        else:
+            self._started, self._origin = datetime.now(UTC), time.monotonic()
         self._expires = expires_at
         self._deadline = self._origin + (expires_at - self._started).total_seconds()
+        if clock_origin is not None:
+            self._deadline = min(self._deadline, clock_origin.deadline)
         self._freshness: dict[tuple[UUID, str], WindowFreshness] = {}
 
     def _open(self) -> None:
@@ -492,6 +616,11 @@ class OwnerWindowReader:
     ) -> ApprovedWindowBinding:
         from dotmac_deployment_control import get_plan, get_target
 
+        from vendor_cp.approvals.adapter import (
+            ApprovalHoldRefusal,
+            ApprovalNotHeld,
+            request_identity_evidence,
+        )
         from vendor_cp.deployment.approval_barrier import held_transition
         from vendor_cp.deployment.protected_rehearsal_issuer import (
             SUBJECT_TYPE,
@@ -509,6 +638,7 @@ class OwnerWindowReader:
         db: Session | None = None
         result: ApprovedWindowBinding | None = None
         window_deadline = 0.0
+        denial: OwnerWindowWithdrawal | None = None
         try:
             db = self._runtime.platform_session_factory()
             if db.get_bind().dialect.name != "postgresql":
@@ -592,14 +722,37 @@ class OwnerWindowReader:
 
             if plan.approval_decision_ref is None or plan.plan_digest is None:
                 raise ProviderRefused()
-            result = held_transition(
-                db,
-                request_id=UUID(plan.approval_decision_ref),
-                subject_type=SUBJECT_TYPE,
-                subject_id=issuer_approval_subject(plan),
-                content_digest=plan.plan_digest,
-                transition=checked,
-            )
+            try:
+                result = held_transition(
+                    db,
+                    request_id=UUID(plan.approval_decision_ref),
+                    subject_type=SUBJECT_TYPE,
+                    subject_id=issuer_approval_subject(plan),
+                    content_digest=plan.plan_digest,
+                    transition=checked,
+                )
+            except ApprovalNotHeld as caught:
+                if caught.code is not ApprovalHoldRefusal.WITHDRAWN:
+                    raise
+                identity = request_identity_evidence(
+                    db, UUID(plan.approval_decision_ref)
+                )
+                if (
+                    identity.subject_type != SUBJECT_TYPE
+                    or identity.subject_id != issuer_approval_subject(plan)
+                    or identity.content_digest != plan.plan_digest
+                    or identity.policy_code != plan.approval_policy_code
+                    or identity.policy_version != plan.approval_policy_version
+                ):
+                    raise ProviderRefused() from None
+                denial = OwnerWindowWithdrawal(
+                    window=window,
+                    plan_id=plan_id,
+                    request_id=UUID(plan.approval_decision_ref),
+                    content_digest=plan.plan_digest,
+                    phase=phase,
+                    freshness=freshness,
+                )
             self._open()
             if time.monotonic() >= window_deadline:
                 raise ProviderRefused()
@@ -608,12 +761,21 @@ class OwnerWindowReader:
         finally:
             if db is not None:
                 try:
+                    # No mutation is made here; explicitly confirm rollback and
+                    # close before any owner denial can become evidence.
+                    db.rollback()
+                except BaseException:
+                    failed = True
+                try:
                     db.close()
-                except Exception:
+                except BaseException:
                     failed = True
         if failed:
             raise ProviderRefused()
         self._open()
+        if denial is not None:
+            denial.freshness.require_open()
+            raise denial
         if result is None or time.monotonic() >= window_deadline:
             raise ProviderRefused()
         return result

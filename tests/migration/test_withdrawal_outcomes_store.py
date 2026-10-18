@@ -314,3 +314,56 @@ def test_a_second_resolution_for_the_same_outcome_is_refused(engine: Engine) -> 
         with pytest.raises(IntegrityError):
             db.flush()
         db.rollback()
+
+
+def test_event_limit_bounds_changed_payload_conflicts_without_hiding_null_coordinates(
+    engine: Engine,
+) -> None:
+    event_id, request_id, plan_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    with Session(engine) as db:
+        record_outcome(
+            db,
+            event_id=event_id,
+            digest=payload_digest("approval.withdrawn", {"revision": 0}),
+            event_type="approval.withdrawn",
+            subject_type="deployment_plan",
+            subject_id=str(plan_id),
+            approval_request_id=request_id,
+            plan_id=plan_id,
+            withdrawal_ref=str(event_id),
+            disposition=WithdrawalDisposition.APPLIED,
+            reason_code="withdrawal_settled",
+            evidence={"authorizations_revoked": ["synthetic-auth"]},
+        )
+        for revision in range(1, 6):
+            record_outcome(
+                db,
+                event_id=event_id,
+                digest=payload_digest("approval.withdrawn", {"revision": revision}),
+                event_type="approval.withdrawn",
+                subject_type="deployment_plan",
+                subject_id=str(plan_id),
+                disposition=WithdrawalDisposition.SECURITY_CONFLICT,
+                reason_code="changed_payload",
+                evidence={},
+            )
+        db.commit()
+    with Session(engine) as db:
+        legacy = outcomes_for_event(db, event_id)
+        explicit_legacy = outcomes_for_event(db, event_id, limit=None)
+        limited = outcomes_for_event(db, event_id, limit=3)
+    assert len(legacy) == len(explicit_legacy) == 6
+    assert {row.id for row in legacy} == {row.id for row in explicit_legacy}
+    assert len(limited) == 3
+    assert {row.id for row in limited} <= {row.id for row in legacy}
+    assert all(row.event_id == event_id for row in limited)
+    conflicts = [
+        row
+        for row in limited
+        if row.disposition is WithdrawalDisposition.SECURITY_CONFLICT
+    ]
+    assert len(conflicts) >= 2
+    assert all(
+        row.approval_request_id is None and row.withdrawal_ref is None
+        for row in conflicts
+    )

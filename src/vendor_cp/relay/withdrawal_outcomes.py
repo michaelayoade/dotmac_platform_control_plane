@@ -67,6 +67,7 @@ __all__ = [
     "payload_digest",
     "recorded_outcome",
     "outcomes_for_event",
+    "outcomes_for_request",
     "list_unresolved_conflicts",
     "record_outcome",
     "resolve_conflict",
@@ -276,18 +277,44 @@ def recorded_outcome(
     return None if row is None else RecordedOutcome._from_row(row)
 
 
-def outcomes_for_event(db: Session, event_id: UUID) -> tuple[RecordedOutcome, ...]:
-    """Every outcome row for one event, oldest first.
-
-    More than one row means a `security_conflict`: the non-conflict partial
-    unique index guarantees at most one non-conflict row, so a second row for
-    the same event can only be a conflict.
-    """
+def outcomes_for_request(
+    db: Session, *, request_id: UUID, withdrawal_ref: str
+) -> tuple[RecordedOutcome, ...]:
+    """Read only the actual durable outcome for an exact withdrawal identity."""
+    if type(request_id) is not UUID or not 0 < len(withdrawal_ref) <= 200:
+        raise ValueError("withdrawal_identity_refused")
     rows = db.scalars(
+        select(ApprovalWithdrawalOutcome)
+        .where(
+            ApprovalWithdrawalOutcome.approval_request_id == request_id,
+            ApprovalWithdrawalOutcome.withdrawal_ref == withdrawal_ref,
+        )
+        .order_by(ApprovalWithdrawalOutcome.recorded_at)
+        .limit(3)
+    )
+    return tuple(RecordedOutcome._from_row(row) for row in rows)
+
+
+def outcomes_for_event(
+    db: Session, event_id: UUID, *, limit: int | None = None
+) -> tuple[RecordedOutcome, ...]:
+    """Event-scoped outcome history; optional small prefix bounded in the query.
+
+    Default None preserves complete history for existing consumers. A limited
+    result is a prefix, never proof that no later row exists. More than one row
+    proves a conflict because the unique index permits only one non-conflict.
+    Request/ref coordinates deliberately do not filter SECURITY_CONFLICT rows.
+    """
+    if limit is not None and (type(limit) is not int or not 1 <= limit <= 3):
+        raise ValueError("withdrawal_outcome_limit_refused")
+    statement = (
         select(ApprovalWithdrawalOutcome)
         .where(ApprovalWithdrawalOutcome.event_id == event_id)
         .order_by(ApprovalWithdrawalOutcome.recorded_at)
     )
+    if limit is not None:
+        statement = statement.limit(limit)
+    rows = db.scalars(statement)
     return tuple(RecordedOutcome._from_row(row) for row in rows)
 
 

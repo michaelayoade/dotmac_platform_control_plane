@@ -1,0 +1,10 @@
+[Unit]
+Description=Original finite Gate0 manager cutoff
+DefaultDependencies=no
+[Timer]
+OnBootSec=@@S_US@@us
+AccuracySec=@@ACCURACY_US@@us
+RandomizedDelaySec=0
+WakeSystem=no
+RemainAfterElapse=yes
+Unit=@@EXPIRED@@

@@ -156,7 +156,9 @@ def session(setup):
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
     admission = SimpleNamespace(
-        admit=lambda *args: SimpleNamespace(operation=setup["operation"]),
+        admit=lambda *args: SimpleNamespace(
+            operation=setup["operation"], authentication_freshness=None
+        ),
         window_record_digest=lambda expected: digest(b"synthetic-independent-window"),
     )
     return AttesterSession(
@@ -174,9 +176,18 @@ def session(setup):
 def test_completed_same_channel_exchange_produces_signed_observation(proof_setup):
     setup = proof_setup
     exchange = SyntheticExchange(setup)
-    session(setup).run(exchange, setup["cert"])
+    instance = session(setup)
+    instance.run(exchange, setup["cert"])
+    assert instance.completion is not None
+    assert instance.completion.bundle_digest == digest(canonical(exchange.output[-1]))
     proof, sidecar = parse_bundle(exchange.output[-1])
     verify(setup, proof, sidecar)
+    assert (
+        instance.completion.invocation_id
+        == json.loads(sidecar.canonical_bytes[len(DOMAIN) :])["invocation_id"]
+    )
+    with pytest.raises(ServiceRefused):
+        instance.run(SyntheticExchange(setup), setup["cert"])
     assert len(setup["calls"]) == 3
 
 
@@ -242,3 +253,51 @@ def test_same_uid_can_fabricate_auth_file_parser_is_not_an_authenticator(
         )  # noqa: S108 -- explicit forged same-UID fixture
     finally:
         os.close(directory)
+
+
+def test_expired_request_cannot_emit_completed_attester_bundle(
+    proof_setup, monkeypatch
+):
+    from vendor_cp.deployment import gate0_composition as composition
+
+    setup = proof_setup
+    current = [100.0]
+    authentication = composition.RequestAuthenticationFreshness(
+        100.0, 110.0, setup["now"] + timedelta(seconds=10)
+    )
+
+    class Clock:
+        @staticmethod
+        def now(tz):
+            return setup["now"]
+
+    monkeypatch.setattr(composition, "datetime", Clock)
+    monkeypatch.setattr(composition, "monotonic", lambda: current[0])
+    instance = session(setup)
+    instance = replace(
+        instance,
+        admission=SimpleNamespace(
+            admit=lambda *a: SimpleNamespace(
+                operation=setup["operation"], authentication_freshness=authentication
+            ),
+            window_record_digest=lambda expected: digest(
+                b"synthetic-independent-window"
+            ),
+        ),
+    )
+    original_sign = instance.sign
+
+    def sign(message):
+        signature = original_sign(message)
+        if len(setup["calls"]) == 3:
+            current[0] = 111.0
+        return signature
+
+    instance = replace(instance, sign=sign)
+    exchange = SyntheticExchange(setup)
+    exchange.deadline = 200.0
+    with pytest.raises(composition.CompositionRefused):
+        instance.run(exchange, setup["cert"])
+    assert exchange.deadline == 110.0
+    assert len(exchange.output) == 1
+    assert exchange.output[0]["schema"] == "Gate0SessionChallenge.v1"
