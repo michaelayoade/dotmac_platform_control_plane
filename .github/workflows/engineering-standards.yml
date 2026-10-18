@@ -1,7 +1,7 @@
 name: Engineering standards
 
 # Vendor Control Plane's adoption of the Governance-owned conformance engine
-# at profile schema version 9. The exact pin is repeated in the environment,
+# at profile schema version 11. The exact pin is repeated in the environment,
 # action ref and profile because GitHub does not allow expressions in `uses:`.
 # scripts/check_governance_pin.py owns their equality.
 
@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 env:
-  GOVERNANCE_REF: "a19259b10568d29dc0a9617347498fea7f1e7a97"
+  GOVERNANCE_REF: "f4bd3400747094c621559b88146bf7baa6a05e0a"
 
 jobs:
   pin-preflight:
@@ -38,8 +38,86 @@ jobs:
     steps:
       - name: Check out the evaluated product revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Enforce the accepted Dotmac engineering standards
-        uses: michaelayoade/dotmac_governance/.github/actions/standards-check@a19259b10568d29dc0a9617347498fea7f1e7a97
+        uses: michaelayoade/dotmac_governance/.github/actions/standards-check@f4bd3400747094c621559b88146bf7baa6a05e0a
         with:
           default-branch: ${{ github.event.repository.default_branch }}
+
+  kernel-adoption:
+    name: Kernel adoption is measured, not declared
+    needs: [pin-preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # `fetch-depth: 0`, and it is load-bearing rather than cautious. The
+      # runner proves `source_predecessor` is a STRICT ANCESTOR of the measured
+      # revision with `git merge-base --is-ancestor`, in this repository's own
+      # job so that no external oracle is needed. A shallow clone cannot decide
+      # ancestry, and the runner correctly refuses to read a truncated history
+      # as a refutation -- so the default depth would make the run undecidable
+      # rather than wrong.
+      - name: Check out the evaluated product revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Governance owns the runner; this repository owns the run. ADR 0013 s 1
+      # puts a claim about another repository outside repository-local facts,
+      # so Governance may not measure this product and publish the verdict --
+      # the run happens here, over this checkout, where every input is local.
+      - name: Check out the pinned Governance revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: michaelayoade/dotmac_governance
+          ref: ${{ env.GOVERNANCE_REF }}
+          path: .governance
+
+      - name: Move pinned Governance checkout outside measured worktree
+        run: |
+          governance_path="${RUNNER_TEMP}/dotmac-governance"
+          mv .governance "$governance_path"
+          echo "GOVERNANCE_PATH=$governance_path" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: ./.github/actions/setup-poetry
+
+      - name: Install (kernel from Forgejo)
+        env:
+          POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
+          POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: poetry install --no-interaction --no-root
+
+      # The observer reads the INSTALLED kernel's own SUPPORTED_MODULES and
+      # INTERNAL_MODULES, so this step needs the composed environment above:
+      # a catalogue typed into a file would make an unknown-surface verdict an
+      # artefact of that file's staleness rather than a fact about the product.
+      #
+      # `--as-of` is the UTC date of the run and has no default, so the verdict
+      # is reproducible: re-running with the same date gives the same answer
+      # forever. Exit 0 means conforming AND citable as enforcement; 1 means
+      # violations; 2 means the run could not be made; 3 means it conformed and
+      # is not citable, which fails here deliberately -- a green step that
+      # announces its own result is uncitable is worse than a red one.
+      - name: Measure this assembly's Kernel adoption
+        run: |
+          poetry run python -m kernel_adoption_control \
+            --root . \
+            --observer scripts.kernel_adoption_observation:observe \
+            --as-of "$(date -u +%F)" \
+            --json kernel-adoption-report.json
+        env:
+          PYTHONPATH: ${{ env.GOVERNANCE_PATH }}
+
+      - name: Publish the run report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kernel-adoption-report
+          path: kernel-adoption-report.json
+          if-no-files-found: warn
