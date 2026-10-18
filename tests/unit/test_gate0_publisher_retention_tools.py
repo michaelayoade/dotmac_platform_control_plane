@@ -1725,3 +1725,158 @@ class RoleObservedConfigDefaultEquivalenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetainedFramingTests(unittest.TestCase):
+    def test_single_gzip_checksum_eof_and_budget(self):
+        import gzip
+
+        valid = gzip.compress(b"synthetic" * 100, mtime=0)
+        for raw, cap in (
+            (valid[:-1], 10000),
+            (valid + valid, 10000),
+            (valid + b"trailing", 10000),
+            (valid, 8),
+            (valid[:-8] + bytes(8), 10000),
+        ):
+            with (
+                self.subTest(size=len(raw), cap=cap),
+                tempfile.TemporaryFile() as output,
+            ):
+                with self.assertRaises(ValueError):
+                    INSPECT.retained_gzip(io.BytesIO(raw), output, cap)
+        with tempfile.TemporaryFile() as output:
+            self.assertEqual(
+                INSPECT.retained_gzip(io.BytesIO(valid), output, 10000), 900
+            )
+            self.assertEqual(output.read(), b"synthetic" * 100)
+
+    def test_outer_tar_is_exact_ordered_ordinary_ustar(self):
+        names = ("role-rootfs.tar.gz", "files.json", "build.json", "qualification.json")
+
+        def payload(changed_name=None, changed_kind=None, format=tarfile.USTAR_FORMAT):
+            output = io.BytesIO()
+            with tarfile.open(fileobj=output, mode="w", format=format) as archive:
+                for index, name in enumerate(names):
+                    item = tarfile.TarInfo(
+                        changed_name if index == 0 and changed_name else name
+                    )
+                    item.mode, item.size = 0o600, 1
+                    if index == 0 and changed_kind:
+                        item.type, item.linkname = changed_kind, "target"
+                    if index == 0 and format == tarfile.PAX_FORMAT:
+                        item.pax_headers = {"comment": "unapproved extension"}
+                    archive.addfile(item, io.BytesIO(b"x"))
+            return output.getvalue()
+
+        limits = {"rootfs_compressed_bytes": 16, "files_manifest_bytes": 16}
+        valid = payload()
+        malformed = [
+            payload(changed_name=name)
+            for name in (
+                "/role-rootfs.tar.gz",
+                "../role-rootfs.tar.gz",
+                "./role-rootfs.tar.gz",
+                "a//b",
+                "files.json",
+            )
+        ]
+        malformed += [
+            payload(changed_kind=kind)
+            for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.GNUTYPE_SPARSE)
+        ]
+        malformed += [
+            payload(format=tarfile.PAX_FORMAT),
+            valid[:511],
+            valid[:2048],
+            valid + b"x" + bytes(511),
+        ]
+        for raw in malformed:
+            with self.subTest(size=len(raw)), tempfile.TemporaryFile() as rootfs:
+                with self.assertRaises(ValueError):
+                    INSPECT.retained_outer(io.BytesIO(raw), rootfs, limits)
+        with tempfile.TemporaryFile() as rootfs:
+            self.assertEqual(
+                INSPECT.retained_outer(io.BytesIO(valid), rootfs, limits),
+                {"files.json": b"x", "build.json": b"x", "qualification.json": b"x"},
+            )
+            self.assertEqual(rootfs.read(), b"x")
+        with tempfile.TemporaryFile() as rootfs, self.assertRaises(ValueError):
+            INSPECT.retained_outer(
+                io.BytesIO(valid),
+                rootfs,
+                {"rootfs_compressed_bytes": 0, "files_manifest_bytes": 16},
+            )
+
+
+class RetainedCurrentHelperLoadingTests(unittest.TestCase):
+    def test_pinned_own_helper_load_does_not_reopen_source_path(self):
+        import importlib.machinery
+
+        raw = (ROOT / ".github/candidate/retain_gate0_publisher.py").read_bytes()
+        with patch.object(
+            importlib.machinery.SourceFileLoader,
+            "get_data",
+            side_effect=AssertionError("must use captured own helper bytes"),
+        ):
+            owner = INSPECT.retained_owner(
+                io.BytesIO(raw), hashlib.sha256(raw).hexdigest()
+            )
+        self.assertEqual(owner.ROLE_PURPOSE, RETAIN.ROLE_PURPOSE)
+        with self.assertRaises(ValueError):
+            INSPECT.retained_owner(io.BytesIO(raw), "0" * 64)
+
+
+class RetainedCapturedHelperCanaryTests(unittest.TestCase):
+    def test_bad_hash_precedes_compilation_and_hostile_pyc_is_unused(self):
+        import importlib.machinery
+        import importlib.util
+        import marshal
+        import struct
+
+        raw = (ROOT / ".github/candidate/retain_gate0_publisher.py").read_bytes()
+        with patch.object(
+            importlib.machinery.SourceFileLoader,
+            "source_to_code",
+            side_effect=AssertionError("bad bytes must refuse before compile"),
+        ):
+            with self.assertRaises(ValueError):
+                INSPECT.retained_owner(
+                    io.BytesIO(raw + b"# changed"), hashlib.sha256(raw).hexdigest()
+                )
+        # A valid hostile bytecode payload must remain inert, even alongside a
+        # fresh matching source timestamp. The loader cannot consult get_data.
+        with tempfile.TemporaryDirectory() as temporary:
+            helper = Path(temporary) / "retain_gate0_publisher.py"
+            helper.write_bytes(raw)
+            cache = Path(importlib.util.cache_from_source(str(helper)))
+            cache.parent.mkdir()
+            header = importlib.util.MAGIC_NUMBER + struct.pack(
+                "<III", 0, int(helper.stat().st_mtime), len(raw)
+            )
+            cache.write_bytes(
+                header
+                + marshal.dumps(
+                    compile(
+                        "raise AssertionError('hostile pyc executed')",
+                        str(helper),
+                        "exec",
+                    )
+                )
+            )
+            with (
+                patch.object(
+                    INSPECT,
+                    "__file__",
+                    str(helper.with_name("inspect_gate0_publisher.py")),
+                ),
+                patch.object(
+                    importlib.machinery.SourceFileLoader,
+                    "get_data",
+                    side_effect=AssertionError("no source/pyc reopen"),
+                ),
+            ):
+                owner = INSPECT.retained_owner(
+                    io.BytesIO(raw), hashlib.sha256(raw).hexdigest()
+                )
+            self.assertEqual(owner.ROLE_PURPOSE, RETAIN.ROLE_PURPOSE)

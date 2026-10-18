@@ -249,3 +249,90 @@ strict CID and requires exact actual ID/name/image matches. Unknown, missing or
 changed custody preserves the CID/private folder and fails; final recursive
 cleanup requires confirmed ownership cleanup. Focused hosted canaries exercise
 actual record/descriptor validation and wrong CID/name/image/inode refusals.
+
+### Retained role data inspection (source preparation only)
+
+`inspect_gate0_publisher.py role-retained-inspect` is an external, offline data
+inspector for the existing four-member role retention archive. It does not
+perform decryption, installation, native execution, network calls, Docker work,
+or qualification advancement. The inspector is outside the retained role wheel
+and rootfs: preserve the historical producer packet/source hashes and pin the
+new external inspector and its fixed retention helper separately. This source
+change does not require rebuilding the retained image.
+
+A separately reviewed operational invocation must select all nine expected
+SHA256 values from owner-authenticated evidence. A neighboring hash file, a
+manifest's own claimed hash, and an archive's self-description are not trust
+anchors. Source preparation does not grant access to plaintext, private keys,
+vaults, or a present custody window. An authorized custody operation must provide
+bounded private scratch and attributable cleanup separately.
+
+The command takes a single absolute, owner-owned mode0700 directory, then nine
+lowercase SHA256 arguments in this exact order:
+
+```text
+python3 inspect_gate0_publisher.py role-retained-inspect PRIVATE_DIRECTORY \
+  PLAINTEXT_ARCHIVE_SHA256 ORIGINAL_PACKET_SHA256 PRODUCER_RECEIPT_SHA256 \
+  AUTHENTICATED_READBACK_SHA256 HISTORICAL_NATIVE_PINS_SHA256 \
+  TERMINAL_RUN_SHA256 TERMINAL_JOBS_SHA256 \
+  EXTERNAL_INSPECTOR_SHA256 EXTERNAL_RETENTION_HELPER_SHA256
+```
+
+The seven fixed input filenames in that directory are `runtime-payload.tar`,
+`original-packet.json`, `producer-receipt.json`,
+`authenticated-retention-readback.json`, `historical-native-artifacts.json`,
+`terminal-run.json`, and `terminal-jobs.json`. They must be owner-owned regular
+mode0600 files with one link. The Python interpreter and initial inspector
+invocation are the externally trusted bootstrap; in-process hash checks cannot
+prove an untrusted bootstrap. The final two hashes select the running inspector
+and its fixed sibling `retain_gate0_publisher.py`; they do not replace the
+historical hashes in the original producer packet. Terminal run/jobs are the
+owner-authenticated GitHub API records from the original successful producer,
+not a fresh network lookup. Their selected bytes join repository, owner,
+workflow, actor, revision, branch, run, attempt, job and original timestamps.
+Historical native pins are data only, selected against the original packet's
+native-artifacts source hash; retained source is never imported. The fixed
+current inspector helper is loaded from its held, independently selected source
+bytes through an internal captured-source loader. It never reopens the helper
+pathname for code loading and accepts no module or loader callback from input
+data. This explicit current-helper compilation/import boundary requires source
+review; it is not execution of the historical producer or archived role code.
+
+The inspector holds nofollow file and ancestry descriptors, refuses input
+aliases/hardlinks and replacement, and streams the exactly ordered ordinary
+USTAR members `role-rootfs.tar.gz`, `files.json`, `build.json`, and
+`qualification.json`. Outer extensions, sparse/link/special entries, aliases,
+duplicates and nonzero trailing data refuse. A single gzip stream must pass its
+checksum and EOF with no concatenated member or trailing bytes. Anonymous
+mode0600 scratch files hold compressed and uncompressed data without filesystem
+extraction. Packet limits remain bounded by 2GiB compressed, 8GiB rootfs tar,
+128MiB files manifest, 1MiB per metadata member, 250000 rootfs entries, and
+512MiB per regular rootfs member. No regular-member cap is raised for the larger
+outer compressed-rootfs member.
+
+The public receipt authenticates the exact private `build.json` bytes. Closed
+build/runtime/producer joins and the existing role inventory, complete files and
+subject validators then recompute rootfs hashes, byte sizes, footprint and
+subjects. Original producer timestamps must fall within the original packet
+window; the old expiry is neither extended nor required to be currently open.
+
+Success exclusively creates private mode0600 `retained-inspection.json`, with
+selected identities, counts and a data-only verdict. Existing output refuses.
+All four `live_readiness`, `installed_native_qualified`,
+`operationally_accepted`, and `gate0_accepted` flags remain false. Failure emits
+only a fixed refusal through the CLI.
+
+Limits of the verdict: the archive omits image-save/config bytes, so the
+producer's authenticated image summary is validated without independently
+reconstructing config or diffIDs. Qualification validation checks parsed smoke
+and network semantics and preserves authenticated original diagnostic hashes;
+it does not claim reserialized-byte equality or reexecuted native proof. A tar
+hash is not the R4 rootfs-tree digest, and a config ID is not a registry manifest
+digest. Existing installer-owner mapping remains pending. The E archive/B-holder
+is a different format with a 16MiB/E-only contract and is not repurposed here.
+
+Synthetic fixtures cover the actual data mode and refusal boundaries. During
+this source-only preparation they are authored, not executed; local project
+imports, tests, builds and dependency installation remain prohibited. Hosted
+validation follows independent review and coordinator integration. This source
+preparation is not retained-runtime or Gate0 acceptance.

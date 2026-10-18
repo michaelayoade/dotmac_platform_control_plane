@@ -328,3 +328,135 @@ def test_failure_diagnostics_do_no_io_and_keep_failure_cleanup_deadlines():
         'raise SystemExit("role export source conformance refused") from None'
         in checker
     )
+
+
+def test_retained_inspection_data_functions_have_no_operational_calls():
+    tree = ast.parse(INSPECT.read_text())
+    functions = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    selected = (
+        "retained_outer",
+        "retained_gzip",
+        "retained_join",
+        "retained_measure",
+        "retained_equal",
+        "retained_stat",
+        "retained_directory",
+        "role_retained_inspect",
+    )
+    forbidden = {
+        "exec",
+        "eval",
+        "compile",
+        "extract",
+        "extractall",
+        "run_bounded",
+        "api_json",
+        "checked_encrypt",
+        "role_context",
+        "role_inspection",
+        "role_main",
+        "system",
+        "popen",
+        "run",
+        "check_output",
+        "connect",
+    }
+    for name in selected:
+        for node in ast.walk(functions[name]):
+            if isinstance(node, ast.Call):
+                called = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else None
+                )
+                assert called not in forbidden
+    mode = functions["role_retained_inspect"]
+    literals = {
+        node.value
+        for node in ast.walk(mode)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "retained-inspection.json" in literals
+    assert "DotmacRoleRetainedInspection.v1" in literals
+    for flag in (
+        "live_readiness",
+        "installed_native_qualified",
+        "operationally_accepted",
+        "gate0_accepted",
+    ):
+        assert flag in literals
+
+
+def test_retained_current_helper_loader_is_captured_and_hash_checked():
+    tree = ast.parse(INSPECT.read_text())
+    functions = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    loader_owner = functions["retained_owner"]
+    classes = [node for node in loader_owner.body if isinstance(node, ast.ClassDef)]
+    assert len(classes) == 1
+    loader = classes[0]
+    assert [ast.unparse(base) for base in loader.bases] == [
+        "importlib.machinery.SourceFileLoader"
+    ]
+    methods = [node for node in loader.body if isinstance(node, ast.FunctionDef)]
+    assert [method.name for method in methods] == ["get_code"]
+    returned = next(
+        node for node in ast.walk(methods[0]) if isinstance(node, ast.Return)
+    )
+    assert ast.unparse(returned.value) == "self.source_to_code(raw, path)"
+    calls = [node for node in ast.walk(loader_owner) if isinstance(node, ast.Call)]
+    names = [ast.unparse(call.func) for call in calls]
+    assert "stream.read" in names and "digest" in names
+    assert "loader.exec_module" in names
+    assert not {
+        "open",
+        "os.open",
+        "exec",
+        "eval",
+        "compile",
+        "importlib.util.spec_from_file_location",
+    }.intersection(names)
+    refusal = next(
+        index
+        for index, node in enumerate(loader_owner.body)
+        if isinstance(node, ast.If)
+    )
+    load = next(
+        index
+        for index, node in enumerate(loader_owner.body)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and ast.unparse(node.value.func) == "loader.exec_module"
+    )
+    assert "digest(raw) != expected" in ast.unparse(loader_owner.body[refusal].test)
+    assert refusal < load
+    mode_calls = [
+        node
+        for node in ast.walk(functions["role_retained_inspect"])
+        if isinstance(node, ast.Call)
+    ]
+    assert [
+        ast.unparse(node)
+        for node in mode_calls
+        if ast.unparse(node.func) == "retained_owner"
+    ] == ["retained_owner(streams[-1], expected[-1])"]
+    measure_calls = [
+        node
+        for node in ast.walk(functions["retained_measure"])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"role_subjects", "role_synthetic_qualification"}
+    ]
+    assert len(measure_calls) == 2
+    assert all(
+        any(
+            keyword.arg == "validation_owner" and ast.unparse(keyword.value) == "owner"
+            for keyword in call.keywords
+        )
+        for call in measure_calls
+    )

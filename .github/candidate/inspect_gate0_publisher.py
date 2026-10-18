@@ -779,9 +779,11 @@ def _role_retention_owner():
     return owner
 
 
-def role_subjects(archive, members, source):
+def role_subjects(
+    archive, members, source, *, native_pins_raw=None, validation_owner=None
+):
     """Join data in the actual export to selected source; execute no member."""
-    owner = _role_retention_owner()
+    owner = _role_retention_owner() if validation_owner is None else validation_owner
     closed, parse_json, sha256 = owner.closed, owner.parse_json, owner.sha256
 
     manifest = read(archive, members, "app/distributions.json", 1024**2)
@@ -945,12 +947,16 @@ def role_subjects(archive, members, source):
         "/usr/sbin/nft",
     )
     closed(native["binaries"], paths)
-    pins_raw = owner.read_owned_regular(
-        Path(__file__).resolve().parents[2]
-        / owner.ROLE_SOURCE_FILES["native_artifacts_sha256"],
-        1024**2,
-        private=False,
-    )
+    pins_raw = native_pins_raw
+    if pins_raw is None:
+        pins_raw = owner.read_owned_regular(
+            Path(__file__).resolve().parents[2]
+            / owner.ROLE_SOURCE_FILES["native_artifacts_sha256"],
+            1024**2,
+            private=False,
+        )
+    if not isinstance(pins_raw, bytes) or len(pins_raw) > 1024**2:
+        raise ValueError("native source pin budget")
     if digest(pins_raw) != source["files"]["native_artifacts_sha256"]:
         raise ValueError("native source pin")
     pins = parse_json(pins_raw, 1024**2)
@@ -1031,8 +1037,10 @@ def role_subjects(archive, members, source):
     return hashes
 
 
-def role_synthetic_qualification(smoke_raw, network_raw, revision, image_id):
-    owner = _role_retention_owner()
+def role_synthetic_qualification(
+    smoke_raw, network_raw, revision, image_id, *, validation_owner=None
+):
+    owner = _role_retention_owner() if validation_owner is None else validation_owner
     ROLE_PURPOSE, canonical_json, closed, parse_json = (
         owner.ROLE_PURPOSE,
         owner.canonical_json,
@@ -1112,6 +1120,669 @@ def role_synthetic_qualification(smoke_raw, network_raw, revision, image_id):
         },
         1024**2,
     )
+
+
+# Data-only retained inspection. These fixed names are deliberately separate
+# from the producer's live export/retention entrypoints.
+RETAINED_INPUTS = (
+    "runtime-payload.tar",
+    "original-packet.json",
+    "producer-receipt.json",
+    "authenticated-retention-readback.json",
+    "historical-native-artifacts.json",
+    "terminal-run.json",
+    "terminal-jobs.json",
+)
+RETAINED_OUTER_BYTES = 2 * 1024**3 + MAX_FILES_BYTES + 3 * 1024**2
+
+
+def retained_outer(stream, rootfs, limits):
+    """Read exactly four ordinary USTAR members, without tarfile extensions."""
+    metadata = {}
+    names = ("role-rootfs.tar.gz", "files.json", "build.json", "qualification.json")
+    caps = (
+        limits["rootfs_compressed_bytes"],
+        limits["files_manifest_bytes"],
+        1024**2,
+        1024**2,
+    )
+    stream.seek(0)
+    for name, maximum in zip(names, caps, strict=True):
+        header = stream.read(512)
+        if len(header) != 512:
+            raise ValueError("retained outer header")
+        try:
+            item = tarfile.TarInfo.frombuf(header, "ascii", "strict")
+        except (tarfile.TarError, UnicodeError) as error:
+            raise ValueError("retained outer header") from error
+        # Equality to the ordinary USTAR encoding refuses prefix/path aliases,
+        # extensions, base256 numbers, links, sparse maps and hidden header data.
+        expected = tarfile.TarInfo(name)
+        expected.mode, expected.size = 0o600, item.size
+        if not 0 < item.size <= maximum or header != expected.tobuf(
+            format=tarfile.USTAR_FORMAT, encoding="ascii", errors="strict"
+        ):
+            raise ValueError("retained outer member")
+        remaining = item.size
+        chunks = []
+        while remaining:
+            block = stream.read(min(1024 * 1024, remaining))
+            if not block:
+                raise ValueError("retained outer truncation")
+            remaining -= len(block)
+            if name == names[0]:
+                rootfs.write(block)
+            else:
+                chunks.append(block)
+        padding = (-item.size) % 512
+        if stream.read(padding) != bytes(padding):
+            raise ValueError("retained outer padding")
+        if name != names[0]:
+            metadata[name] = b"".join(chunks)
+    if stream.read(1024) != bytes(1024):
+        raise ValueError("retained outer terminator")
+    while block := stream.read(1024 * 1024):
+        if any(block):
+            raise ValueError("retained outer trailing data")
+    if stream.tell() % 512:
+        raise ValueError("retained outer framing")
+    rootfs.flush()
+    rootfs.seek(0)
+    return metadata
+
+
+def retained_gzip(compressed, uncompressed, maximum):
+    """Bound output allocation and reject extra gzip members and trailing bytes."""
+    import zlib
+
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    total = 0
+    compressed.seek(0)
+    try:
+        while block := compressed.read(1024 * 1024):
+            if decoder.eof:
+                raise ValueError("retained gzip trailing data")
+            while block:
+                raw = decoder.decompress(block, min(1024 * 1024, maximum - total + 1))
+                total += len(raw)
+                if total > maximum:
+                    raise ValueError("retained gzip budget")
+                uncompressed.write(raw)
+                if decoder.unused_data:
+                    raise ValueError("retained gzip trailing data")
+                block = decoder.unconsumed_tail
+        if not decoder.eof or total == 0:
+            raise ValueError("retained gzip truncation")
+    except zlib.error as error:
+        raise ValueError("retained gzip framing") from error
+    uncompressed.flush()
+    uncompressed.seek(0)
+    return total
+
+
+def retained_join(
+    packet_raw, receipt_raw, readback_raw, run_raw, jobs_raw, expected, owner
+):
+    """Only owner-selected hashes authenticate these public evidence records."""
+    receipt = owner.closed(
+        owner.parse_json(receipt_raw, 16384),
+        (
+            "schema",
+            "purpose",
+            "image_target",
+            "source_revision",
+            "workflow_blob_sha256",
+            "run_id",
+            "attempt",
+            "job_id",
+            "recipient_certificate_sha256",
+            "recipient_encryption_fingerprint",
+            "encrypted_bundle_sha256",
+            "encrypted_bundle_bytes",
+            "private_manifest_sha256",
+        ),
+    )
+    readback = owner.closed(
+        owner.parse_json(readback_raw, 16384),
+        (
+            "schema",
+            "archive_bytes",
+            "archive_sha256",
+            "artifact_id",
+            "attempt",
+            "ciphertext_retained",
+            "encrypted_bundle_bytes",
+            "encrypted_bundle_sha256",
+            "exact_pair",
+            "gate0_accepted",
+            "job_id",
+            "plaintext_decrypted",
+            "private_manifest_independently_verified",
+            "producer_receipt_joins",
+            "producer_receipt_sha256",
+            "role_runtime_accepted",
+            "run_id",
+            "verified_at",
+        ),
+    )
+    # Historical packet validation uses a time inside its ORIGINAL interval.
+    # This is not a grant for present custody or an extension of that interval.
+    preliminary = owner.parse_json(packet_raw, 16384)
+    packet = owner.load_role_packet(
+        packet_raw, expected[1], owner.utc(preliminary["validity"]["not_before"])
+    )
+    if (
+        receipt["schema"] != "Gate0RoleQualificationProducerReceipt.v1"
+        or receipt["purpose"] != owner.ROLE_PURPOSE
+        or receipt["image_target"] != "gate0-role"
+        or receipt["source_revision"] != packet["source"]["revision"]
+        or receipt["workflow_blob_sha256"] != packet["source"]["workflow_blob_sha256"]
+        or receipt["recipient_certificate_sha256"]
+        != packet["recipient"]["certificate_sha256"]
+        or receipt["recipient_encryption_fingerprint"]
+        != packet["recipient"]["encryption_fingerprint"]
+        or readback["schema"] != "DotmacAuthenticatedRoleRetentionReadback.v1"
+        or readback["producer_receipt_sha256"] != expected[2]
+    ):
+        raise ValueError("retained evidence join")
+    for key in ("run_id", "job_id", "encrypted_bundle_bytes"):
+        owner.positive(receipt[key])
+    if receipt["encrypted_bundle_bytes"] > owner.MAX_CIPHERTEXT_BYTES:
+        raise ValueError("retained ciphertext budget")
+    for key in ("encrypted_bundle_sha256", "private_manifest_sha256"):
+        owner.sha256(receipt[key])
+    owner.sha256(readback["archive_sha256"])
+    for key in ("artifact_id", "archive_bytes"):
+        owner.positive(readback[key])
+    if type(receipt["attempt"]) is not int or receipt["attempt"] != 1:
+        raise ValueError("retained attempt")
+    for key in (
+        "run_id",
+        "attempt",
+        "job_id",
+        "encrypted_bundle_sha256",
+        "encrypted_bundle_bytes",
+    ):
+        if (
+            type(readback[key]) is not type(receipt[key])
+            or readback[key] != receipt[key]
+        ):
+            raise ValueError("retained readback join")
+    for key in ("ciphertext_retained", "exact_pair", "producer_receipt_joins"):
+        if readback[key] is not True:
+            raise ValueError("retained evidence predicate")
+    for key in (
+        "gate0_accepted",
+        "plaintext_decrypted",
+        "private_manifest_independently_verified",
+        "role_runtime_accepted",
+    ):
+        if readback[key] is not False:
+            raise ValueError("retained evidence predicate")
+    run = owner.parse_json(run_raw, 1024**2)
+    jobs = owner.parse_json(jobs_raw, 1024**2)
+    source, github = packet["source"], packet["github"]
+    for value in (
+        run["id"],
+        run["run_attempt"],
+        run["repository"]["id"],
+        run["repository"]["owner"]["id"],
+        run["workflow_id"],
+        run["actor"]["id"],
+        run["triggering_actor"]["id"],
+    ):
+        owner.positive(value)
+    if (
+        run["id"] != receipt["run_id"]
+        or run["run_attempt"] != 1
+        or run["event"] != "workflow_dispatch"
+        or run["head_sha"] != source["revision"]
+        or run["head_branch"] != source["ref"].removeprefix("refs/heads/")
+        or run["path"] != source["workflow_path"]
+        or run["repository"]["full_name"] != github["repository"]
+        or run["head_repository"]["full_name"] != github["repository"]
+        or run["repository"]["id"] != github["repository_id"]
+        or run["repository"]["owner"]["id"] != github["owner_id"]
+        or run["workflow_id"] != github["workflow_id"]
+        or run["actor"]["id"] != github["actor_id"]
+        or run["triggering_actor"]["id"] != github["actor_id"]
+        or run["status"] != "completed"
+        or run["conclusion"] != "success"
+    ):
+        raise ValueError("retained run join")
+    roster = jobs["jobs"]
+    if (
+        not isinstance(roster, list)
+        or not 0 < len(roster) <= 100
+        or type(jobs["total_count"]) is not int
+        or jobs["total_count"] != len(roster)
+    ):
+        raise ValueError("retained job roster")
+    selected = [job for job in roster if job["name"] == github["job_key"]]
+    if len(selected) != 1:
+        raise ValueError("retained selected job")
+    job = selected[0]
+    for key in ("id", "run_id", "run_attempt"):
+        owner.positive(job[key])
+    if (
+        job["id"] != receipt["job_id"]
+        or job["run_id"] != receipt["run_id"]
+        or job["run_attempt"] != 1
+        or job["head_sha"] != source["revision"]
+        or job["status"] != "completed"
+        or job["conclusion"] != "success"
+    ):
+        raise ValueError("retained job join")
+    # Validate ORIGINAL producer times, not the current inspection clock.
+    times = [
+        owner.utc(value)
+        for value in (
+            run["created_at"],
+            run["run_started_at"],
+            job["started_at"],
+            job["completed_at"],
+            run["updated_at"],
+        )
+    ]
+    if (
+        times != sorted(times)
+        or not owner.utc(packet["validity"]["not_before"]) <= times[0]
+        or not times[-1] < owner.utc(packet["validity"]["expires_at"])
+    ):
+        raise ValueError("retained historical producer times")
+    return packet, receipt
+
+
+def retained_equal(actual, expected):
+    """Compare closed JSON joins without Python's bool/int/float aliases."""
+    if type(actual) is not type(expected):
+        return False
+    if type(expected) is dict:
+        return actual.keys() == expected.keys() and all(
+            retained_equal(actual[key], value) for key, value in expected.items()
+        )
+    if type(expected) is list:
+        return len(actual) == len(expected) and all(
+            retained_equal(left, right)
+            for left, right in zip(actual, expected, strict=True)
+        )
+    return type(expected) in {str, int, float, bool, type(None)} and actual == expected
+
+
+def retained_measure(rootfs, compressed, metadata, packet, receipt, native_raw, owner):
+    """Authenticate private manifests before recomputing the role data subjects."""
+    build_raw = metadata["build.json"]
+    if digest(build_raw) != receipt["private_manifest_sha256"]:
+        raise ValueError("retained private manifest digest")
+    build = owner.closed(
+        owner.parse_json(build_raw, 1024**2),
+        (
+            "schema",
+            "source",
+            "producer",
+            "images",
+            "runtime",
+            "limits",
+            "footprint",
+            "tool_qualification_sha256",
+        ),
+    )
+    if build_raw != owner.canonical_json(build, 1024**2):
+        raise ValueError("retained private manifest encoding")
+    source = packet["source"]
+    expected_source = {
+        "revision": source["revision"],
+        "workflow_blob_sha256": source["workflow_blob_sha256"],
+        **source["files"],
+    }
+    if (
+        build["schema"] != "Gate0RoleQualificationPrivateBuild.v1"
+        or not retained_equal(
+            owner.closed(build["source"], expected_source), expected_source
+        )
+        or not retained_equal(build["limits"], packet["limits"])
+        or build["tool_qualification_sha256"] != packet["tool_qualification_sha256"]
+    ):
+        raise ValueError("retained build source join")
+    producer = owner.closed(
+        build["producer"],
+        (
+            "repository_id",
+            "owner_id",
+            "workflow_id",
+            "actor_id",
+            "run_id",
+            "attempt",
+            "job_id",
+        ),
+    )
+    for key, value in producer.items():
+        owner.positive(value)
+        if value != (
+            packet["github"][key] if key in packet["github"] else receipt[key]
+        ):
+            raise ValueError("retained producer join")
+    images = owner.closed(build["images"], ("base", "role"))
+    base = owner.closed(images["base"], ("reference", "image_id", "rootfs_diff_ids"))
+    image = owner.closed(
+        images["role"],
+        (
+            "target",
+            "image_id",
+            "source_revision_label",
+            "rootfs_diff_ids",
+            "inspect_sha256",
+            "config_sha256",
+            "config_bytes",
+        ),
+    )
+    for summary in (base, image):
+        if not isinstance(summary["image_id"], str) or not summary[
+            "image_id"
+        ].startswith("sha256:"):
+            raise ValueError("retained image identity")
+        owner.sha256(summary["image_id"][7:])
+        layers = summary["rootfs_diff_ids"]
+        if not isinstance(layers, list) or not 0 < len(layers) <= 256:
+            raise ValueError("retained image layers")
+        for layer in layers:
+            if not isinstance(layer, str) or not layer.startswith("sha256:"):
+                raise ValueError("retained image layers")
+            owner.sha256(layer[7:])
+    if (
+        base["reference"] != owner.ROLE_BASE_IMAGE
+        or image["target"] != "gate0-role"
+        or image["source_revision_label"] != source["revision"]
+        or image["config_sha256"] != image["image_id"][7:]
+        or image["rootfs_diff_ids"][: len(base["rootfs_diff_ids"])]
+        != base["rootfs_diff_ids"]
+        or len(image["rootfs_diff_ids"]) <= len(base["rootfs_diff_ids"])
+    ):
+        raise ValueError("retained image summary join")
+    owner.sha256(image["inspect_sha256"])
+    if owner.positive(image["config_bytes"]) > 1024**2:
+        raise ValueError("retained image config size")
+    qualification_raw = metadata["qualification.json"]
+    qualification = owner.closed(
+        owner.parse_json(qualification_raw, 1024**2),
+        (
+            "schema",
+            "purpose",
+            "source_revision",
+            "image_id",
+            "smoke_sha256",
+            "network_sha256",
+            "smoke",
+            "network",
+            "live_readiness",
+            "installed_native_qualified",
+            "operationally_accepted",
+            "gate0_accepted",
+        ),
+    )
+    # Reuse the parsed semantic validator, but do NOT claim the reserialized
+    # smoke/network bytes have the original diagnostic digests.
+    checked = owner.parse_json(
+        role_synthetic_qualification(
+            owner.canonical_json(qualification["smoke"], 1024**2),
+            owner.canonical_json(qualification["network"], 1024**2),
+            source["revision"],
+            image["image_id"],
+            validation_owner=owner,
+        ),
+        1024**2,
+    )
+    for key in ("smoke_sha256", "network_sha256"):
+        owner.sha256(qualification[key])
+        checked[key] = qualification[key]
+    if any(
+        qualification[key] is not False
+        for key in (
+            "live_readiness",
+            "installed_native_qualified",
+            "operationally_accepted",
+            "gate0_accepted",
+        )
+    ) or not retained_equal(qualification, checked):
+        raise ValueError("retained qualification join")
+    bounded_tar_headers(rootfs)
+    with tarfile.open(fileobj=rootfs, mode="r:") as archive:
+        members = role_inventory(archive)
+        subjects = role_subjects(
+            archive, members, source, native_pins_raw=native_raw, validation_owner=owner
+        )
+        files = complete_role_files(archive, members)
+        footprint = {
+            "entries": len(members),
+            "regular_files": sum(item.isfile() for item in members.values()),
+            "regular_bytes": sum(
+                item.size for item in members.values() if item.isfile()
+            ),
+            "largest_member_bytes": max(
+                (item.size for item in members.values()), default=0
+            ),
+            "role_tar_bytes": os.fstat(rootfs.fileno()).st_size,
+        }
+    limits = packet["limits"]
+    if (
+        files != metadata["files.json"]
+        or len(files) > limits["files_manifest_bytes"]
+        or footprint["entries"] > limits["rootfs_members"]
+        or footprint["largest_member_bytes"] > limits["regular_member_bytes"]
+        or footprint["role_tar_bytes"] > limits["rootfs_uncompressed_bytes"]
+        or not retained_equal(owner.closed(build["footprint"], footprint), footprint)
+    ):
+        raise ValueError("retained inventory join")
+    runtime = {
+        "uncompressed_tar_sha256": stream_digest(rootfs),
+        "uncompressed_tar_bytes": footprint["role_tar_bytes"],
+        "compressed_archive_sha256": stream_digest(compressed),
+        "compressed_archive_bytes": os.fstat(compressed.fileno()).st_size,
+        "files_manifest_sha256": digest(files),
+        "files_manifest_bytes": len(files),
+        "qualification_manifest_sha256": digest(qualification_raw),
+        "qualification_manifest_bytes": len(qualification_raw),
+        **subjects,
+    }
+    if not retained_equal(owner.closed(build["runtime"], runtime), runtime):
+        raise ValueError("retained runtime join")
+    return footprint
+
+
+def retained_owner(stream, expected):
+    """Load ONLY the captured, pinned current inspector-owned helper source.
+
+    The ordinary sibling loader could reopen a replaced path before final
+    refusal. This fixed loader consumes the already held helper bytes and never
+    accepts a module/path/code callback from retained data. No retained producer
+    source is loaded. Pure validators receive this one current owner explicitly.
+    """
+    import importlib.machinery
+    import importlib.util
+
+    stream.seek(0)
+    raw = stream.read(1024**2 + 1)
+    stream.seek(0)
+    if len(raw) > 1024**2 or digest(raw) != expected:
+        raise ValueError("retained inspector helper pin")
+    path = str(Path(__file__).absolute().with_name("retain_gate0_publisher.py"))
+
+    class CapturedInspectorLoader(importlib.machinery.SourceFileLoader):
+        def get_code(self, fullname):
+            if fullname != "retained_current_inspector_owner":
+                raise ValueError("retained inspector helper module")
+            return self.source_to_code(raw, path)
+
+    loader = CapturedInspectorLoader("retained_current_inspector_owner", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    if spec is None:
+        raise ValueError("retained inspector helper module")
+    owner = importlib.util.module_from_spec(spec)
+    loader.exec_module(owner)
+    return owner
+
+
+def retained_stat(info):
+    # Reads may update atime; byte/ownership/replacement coordinates may not move.
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def retained_directory(path, held):
+    """Hold every ancestry component and forbid symlink traversal."""
+    directories = []
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    held.callback(os.close, descriptor)
+    for component in path.parts[1:]:
+        child = os.open(
+            component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor
+        )
+        held.callback(os.close, child)
+        info = os.fstat(child)
+        if info.st_uid not in {0, os.getuid()} or (
+            info.st_mode & 0o022
+            and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX)
+        ):
+            raise ValueError("retained private ancestry")
+        directories.append((descriptor, component, child, info))
+        descriptor = child
+    return descriptor, directories
+
+
+def role_retained_inspect(private: Path, expected) -> None:
+    """Fixed data inspection only; operational custody authority is external."""
+    import contextlib
+    import tempfile
+
+    if len(expected) != 9 or any(
+        len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        for value in expected
+    ):
+        raise ValueError("retained expected hashes")
+    if not private.is_absolute() or any(part in {".", ".."} for part in private.parts):
+        raise ValueError("retained private path")
+    with contextlib.ExitStack() as held:
+        descriptor, directories = retained_directory(private, held)
+        info = os.fstat(descriptor)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError("retained private directory")
+        streams, identities = [], []
+        source_paths = (
+            Path(__file__).absolute(),
+            Path(__file__).absolute().with_name("retain_gate0_publisher.py"),
+        )
+        for index, path in enumerate((*RETAINED_INPUTS, *source_paths)):
+            # Source code is fixed trusted inspector code, never an archive path.
+            if index < len(RETAINED_INPUTS):
+                fd = os.open(
+                    path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=descriptor
+                )
+                parent_fd, name = descriptor, path
+            else:
+                parent_fd, source_directories = retained_directory(path.parent, held)
+                directories.extend(source_directories)
+                name = path.name
+                fd = os.open(
+                    name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent_fd
+                )
+            stream = held.enter_context(os.fdopen(fd, "rb"))
+            info = os.fstat(fd)
+            cap = RETAINED_OUTER_BYTES if index == 0 else 1024**2
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_uid != os.getuid()
+                or not 0 < info.st_size <= cap
+                or info.st_mode & (0o077 if index < len(RETAINED_INPUTS) else 0o022)
+                or (info.st_dev, info.st_ino)
+                in {(old.st_dev, old.st_ino) for *_, old in identities}
+                or stream_digest(stream, cap) != expected[index]
+            ):
+                raise ValueError("retained held input")
+            streams.append(stream)
+            identities.append((parent_fd, name, info))
+        # The fixed sibling is pinned BEFORE importing its pure validators.
+        owner = retained_owner(streams[-1], expected[-1])
+        packet, receipt = retained_join(
+            *(streams[index].read() for index in (1, 2, 3, 5, 6)), expected, owner
+        )
+        native_raw = streams[4].read()
+        if digest(native_raw) != packet["source"]["files"]["native_artifacts_sha256"]:
+            raise ValueError("retained historical native pin")
+        # Anonymous files are unlinked at creation, mode0600, and bounded by the
+        # streaming loops. No member pathname is ever extracted or executed.
+        with (
+            tempfile.TemporaryFile(mode="w+b", dir=private) as compressed,
+            tempfile.TemporaryFile(mode="w+b", dir=private) as rootfs,
+        ):
+            metadata = retained_outer(streams[0], compressed, packet["limits"])
+            retained_gzip(
+                compressed, rootfs, packet["limits"]["rootfs_uncompressed_bytes"]
+            )
+            footprint = retained_measure(
+                rootfs, compressed, metadata, packet, receipt, native_raw, owner
+            )
+        for parent, component, child, initial in directories:
+            current = os.stat(component, dir_fd=parent, follow_symlinks=False)
+            if current != os.fstat(child) or (
+                current.st_dev,
+                current.st_ino,
+                current.st_mode,
+                current.st_uid,
+            ) != (initial.st_dev, initial.st_ino, initial.st_mode, initial.st_uid):
+                raise ValueError("retained directory changed")
+        for index, (parent, name, initial) in enumerate(identities):
+            current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (
+                retained_stat(current)
+                != retained_stat(os.fstat(streams[index].fileno()))
+                or retained_stat(current) != retained_stat(initial)
+                or stream_digest(
+                    streams[index], RETAINED_OUTER_BYTES if index == 0 else 1024**2
+                )
+                != expected[index]
+            ):
+                raise ValueError("retained input changed")
+        result = owner.canonical_json(
+            {
+                "schema": "DotmacRoleRetainedInspection.v1",
+                "verdict": "authenticated-data-only",
+                "input_sha256": dict(
+                    zip(
+                        (*RETAINED_INPUTS, "inspector", "retention_helper"),
+                        expected,
+                        strict=True,
+                    )
+                ),
+                "source_revision": packet["source"]["revision"],
+                "run_id": receipt["run_id"],
+                "job_id": receipt["job_id"],
+                "footprint": footprint,
+                "live_readiness": False,
+                "installed_native_qualified": False,
+                "operationally_accepted": False,
+                "gate0_accepted": False,
+            },
+            16384,
+        )
+        fd = os.open(
+            "retained-inspection.json",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=descriptor,
+        )
+        with os.fdopen(fd, "wb") as output:
+            output.write(result)
 
 
 def role_inspect(private: Path) -> None:
@@ -1204,6 +1875,11 @@ def shape() -> None:
 if __name__ == "__main__":
     if sys.argv[1:] == ["shape"]:
         shape()
+    elif len(sys.argv) == 12 and sys.argv[1] == "role-retained-inspect":
+        try:
+            role_retained_inspect(Path(sys.argv[2]), sys.argv[3:])
+        except Exception:
+            raise SystemExit("retained inspection refused") from None
     elif len(sys.argv) == 3 and sys.argv[1] == "role-inspect":
         role_inspect(Path(sys.argv[2]))
     elif len(sys.argv) in {6, 7} and sys.argv[1] == "inspect":
