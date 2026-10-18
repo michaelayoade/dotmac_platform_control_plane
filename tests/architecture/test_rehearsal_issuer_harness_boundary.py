@@ -181,11 +181,12 @@ def test_harness_proves_the_application_control_and_kernel_artifact_pins() -> No
         hashes = {item["file"]: item["hash"] for item in package["files"]}
         assert hashes[evidence["filename"]] == "sha256:" + evidence["sha256"]
     workflow = (ROOT / ".github/workflows/rehearsal-issuer-harness.yml").read_text()
-    assert "conformance/test_host_admission_conformance.py" in workflow
-    assert "assert len(cases) == 11" in workflow
-    assert '"skipped", "failure", "error"' in workflow
-    assert "d74bf8dd8c399dd92047174365403b861f82ddd0" in workflow
-    assert "assert origin.is_relative_to(installed)" in workflow
+    assert "conformance/test_host_admission_conformance.py" not in workflow
+    assert "rehearsal_issuer_harness/" in workflow
+    composition = (ROOT / ".github/workflows/ci.yml").read_text()
+    assert "conformance/test_host_admission_conformance.py" in composition
+    assert "-m vendor_cp.deployment.conformance_report" in composition
+    assert "d74bf8dd8c399dd92047174365403b861f82ddd0" in composition
 
 
 def test_planted_mutable_locator_and_wrong_bytes_fail_lock(tmp_path: Path) -> None:

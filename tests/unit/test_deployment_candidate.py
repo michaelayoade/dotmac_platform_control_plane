@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -25,6 +26,13 @@ from vendor_cp.deployment.candidate import (
     admit_candidate_image,
     render_candidate,
 )
+
+if TYPE_CHECKING:
+    from dotmac_deployment_foundation.execution_plan import HostPrestateV1
+
+# Port-only marker: actual Foundation values are exercised in conformance.
+PRESTATE = cast("HostPrestateV1", object())
+PROFILE_DIGEST = "sha256:" + "a" * 64
 
 ROOT = Path(__file__).resolve().parents[2]
 DESCRIPTOR = ROOT / "deploy" / "product.toml"
@@ -72,7 +80,7 @@ class _Spy:
     second opinion about what those values mean.
     """
 
-    calls: list[dict[str, str]] = field(default_factory=list)
+    calls: list[dict[str, object]] = field(default_factory=list)
 
     def __call__(
         self,
@@ -81,6 +89,8 @@ class _Spy:
         image: CandidateImage,
         target: str,
         operation: str,
+        prestate: HostPrestateV1,
+        application_profile_digest: str,
     ) -> RenderedCandidate:
         self.calls.append(
             {
@@ -89,9 +99,18 @@ class _Spy:
                 "source_revision": image.source_revision,
                 "target": target,
                 "operation": operation,
+                "prestate": prestate,
+                "application_profile_digest": application_profile_digest,
             }
         )
-        return RenderedCandidate("sha256:" + "0" * 64, "sha256:" + "1" * 64, b"{}")
+        return RenderedCandidate(
+            "sha256:" + "0" * 64,
+            "sha256:" + "1" * 64,
+            b"{}",
+            b"{}",
+            prestate,
+            application_profile_digest,
+        )
 
 
 def _render(receipt_document: dict[str, str], spy: _Spy) -> None:
@@ -102,6 +121,8 @@ def _render(receipt_document: dict[str, str], spy: _Spy) -> None:
         image,
         target="vendor-cp-prod",
         operation="deploy",
+        prestate=PRESTATE,
+        application_profile_digest=PROFILE_DIGEST,
         renderer=spy,
     )
 
@@ -270,5 +291,48 @@ def test_a_candidate_with_no_target_is_refused() -> None:
     image = admit_candidate_image(receipt, _observation(receipt))
     with pytest.raises(CandidateRefused, match="authorizes every host"):
         render_candidate(
-            str(DESCRIPTOR), image, target="  ", operation="deploy", renderer=_Spy()
+            str(DESCRIPTOR),
+            image,
+            target="  ",
+            operation="deploy",
+            prestate=PRESTATE,
+            application_profile_digest=PROFILE_DIGEST,
+            renderer=_Spy(),
         )
+
+
+@pytest.mark.parametrize("digest", ["", " ", "a" * 64, "sha256:" + "A" * 64, None])
+def test_missing_or_noncanonical_profile_coordinate_never_reaches_renderer(
+    digest: str,
+) -> None:
+    receipt = ReleaseReceiptV1.from_document(dict(RECEIPT))
+    spy = _Spy()
+    with pytest.raises(
+        CandidateRefused, match="candidate_profile_coordinate_unavailable"
+    ):
+        render_candidate(
+            str(DESCRIPTOR),
+            admit_candidate_image(receipt, _observation(receipt)),
+            target="vendor-cp-prod",
+            operation="deploy",
+            prestate=PRESTATE,
+            application_profile_digest=digest,
+            renderer=spy,
+        )
+    assert not spy.calls
+
+
+def test_missing_prestate_never_reaches_renderer() -> None:
+    receipt = ReleaseReceiptV1.from_document(dict(RECEIPT))
+    spy = _Spy()
+    with pytest.raises(CandidateRefused, match="candidate_prestate_unavailable"):
+        render_candidate(
+            str(DESCRIPTOR),
+            admit_candidate_image(receipt, _observation(receipt)),
+            target="vendor-cp-prod",
+            operation="deploy",
+            prestate=None,  # type: ignore[arg-type]
+            application_profile_digest=PROFILE_DIGEST,
+            renderer=spy,
+        )
+    assert not spy.calls

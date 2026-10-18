@@ -1,53 +1,90 @@
 # Conformance suites
 
-## Host-admission components and current CP V3 refusal
+## Installed Foundation render and CP approval/finalizer composition
 
-The required `rehearsal-issuer-harness` CI job runs
-`test_host_admission_conformance.py` explicitly against released Control
-`0.1.0a17`,
-Kernel `0.1.0a100`, the CP wheel built from the revision under
-test, and a test-only Foundation wheel built from exact Starter source
-`d74bf8dd8c399dd92047174365403b861f82ddd0`.
+The required `CI / postgres` job runs
+`test_candidate_renderer_real_foundation.py` and
+`test_host_admission_conformance.py` against the complete CP wheel, its locked
+Kernel `0.1.0a100` dependency,
+plus Control `0.1.0a17` and Approvals `0.1.0a8`,
+and a test-only Foundation wheel built from clean exact Starter source
+`d74bf8dd8c399dd92047174365403b861f82ddd0`. The job migrates the full composition
+on disposable PostgreSQL, then invokes these cases as `platform_api`.
 
-The workflow is the executable recipe: it verifies the private wheel hashes,
-builds and installs the two local test wheels without resolving private
-credentials, checks installed versions and import origins outside the checkout,
-migrates a disposable PostgreSQL database as `app_admin`, and invokes the
-suite as `platform_api`. Its JUnit gate requires exactly eleven passing cases
-and zero skips. This source validation build is not a Foundation candidate
-allocation, publication, runtime dependency or rehearsal receipt.
+The workflow replaces CP's editable install with the built wheel, installs the
+Foundation wheel without changing the runtime lock, copies only the two test
+files, conftest, separately authored `fixtures/renderer-component.toml` and the
+unchanged production descriptor into `RUNNER_TEMP`, and runs there.
+Each imported owner/service must resolve under that interpreter's installed
+`purelib`/`platlib`. Build hashes and installed versions/origins are recorded in
+CI. The source commit plus build hash identifies tested Foundation bytes;
+it is **not** evidence of an eligible published Foundation successor, a new
+runtime pin, a candidate allocation or deployment adoption.
 
-The ten component cases exercise real Control context resolution, Foundation
-attestation-pair verification, and Control's sole finalizer with the complete
-`FoundationDispatchConsumptionV1` signed authorization/dispatch pair. Expected
-business facts come from Control-owned rows, not from the presented envelope.
-They prove positive verification, tamper and semantic-binding refusal, fresh
-revocation/expiry checks, durable consumption and component commit ordering.
+The installed module `python -m vendor_cp.deployment.conformance_report`
+requires twenty-one exact named cases: five renderer variants, ten component
+security cases and six CP V3 composition cases. An omitted, duplicated, renamed,
+skipped or failed case refuses the gate. The separate rehearsal-issuer harness keeps its restricted
+Control/Kernel dependency closure and no longer runs these full CP tests.
 
-These ten cases use a **test-owned driver**, not CP's obsolete pre-V3
-`admit_and_launch_host_source` reference. That reference no longer matches
-Control's finalizer and is not an executable compatibility path for a17.
-The former claims that this suite proved CP's positive orchestration are
-retired, along with the historical manual recipe that built obsolete sources.
+Positive renderer cases use the independently authored fictional
+`conformance/fixtures/renderer-component.toml`, never a stripped or modified
+production descriptor. They compare CP's exact two-field candidate substitution
+with real Foundation canonical descriptor/plan output, prove changed prestate
+and synthetic profile coordinates change the execution digest, and refuse a
+dictionary pretending to be `HostPrestateV1`. These are transport/render
+component proofs, not production compatibility or canonical profile admission.
 
-The eleventh case exercises CP's real `compose_foundation_v3_providers`:
-genuine Foundation F2 verifies the pair and checks its actual installed wheel,
-then the V3 provider reads the real approval-requiring plan and refuses with
-`c2_dispatch_approval_subject_unavailable` before finalization or consumption.
-It proves separate sessions and no committed marker. This is the C2-D1
-fail-closed boundary, not a failed adoption claim: positive CP execution still
-requires Gate 3's owned Approvals subject/barrier and eligible Foundation
-release. This change neither bypasses that boundary nor launches a workload.
+A separate required case reads the actual promoted `deploy/product.toml`
+byte-for-byte, establishes its promised `row_counts` verification and absent
+`external_executor`, and requires the real installed Foundation `SpecError`:
+`backup.verification.unperformable` at `backup.datasets[0]`. CI compares the
+copied production file to the original before execution. This expected refusal
+is negative compatibility evidence; it is never counted as a positive
+production render. D7's actual row-count verification owner remains **OPEN**.
+No verification promise is removed and no replacement executor is invented.
 
-The signature adapters are deterministic SHA-256/HMAC **test doubles**, not
-Ed25519. The tests execute real component verification logic and reject
-tampering, but do not prove asymmetric signer custody, OIDC, live controller
-authentication, deployment, or end-to-end execution authority.
+Every host fixture now opens and decides an actual Approvals request, approves
+through CP's live shared-lock barrier, then requests a signed rollout and
+signed dispatch through fresh barriers. Each authority phase commits before
+the next, preserving Approvals-before-Control lock order. Ten component cases
+retain the test-owned resolve/verify/finalize driver and its signature, semantic
+binding, expiry/revocation, marker durability and commit-order refusals.
 
-The fixture uses Control's test reset hooks, stored-dispatch locator and marker
-scope constant. These private test dependencies are not production imports;
-they can change across releases and must be re-proven by this exact-wheel gate.
-Public committed-consumption lookup independently checks every marker assertion.
+The six CP cases exercise the startup composition with real Foundation F2,
+actual installed-artifact reads and Control's sole finalizer. They require a
+real held approval at consumption, prove withdrawal-first refusal and
+transition-first blocking through the caller commit, preserve missing-startup-
+barrier refusal, reject autocommit, refuse consumed-dispatch replay and recover
+a deliberately lost commit acknowledgement through a fresh committed lookup.
+Session A closes before Foundation verification; Session B owns the single
+finalizer commit. These tests stage durable consumption but launch no workload.
+
+The signature adapters remain deterministic SHA-256/HMAC **test doubles**,
+not Ed25519 custody evidence. This gate executes real signature verification
+ports, rejects tampering, and tests real database locks. It does not establish
+asymmetric signer custody, OIDC, live controller authentication, canonical
+profile admission, eligible release or receipt-producing deployment.
+
+The fixture retains Control's test reset hooks, stored-dispatch locator and
+marker-scope constant as test-only private dependencies. They are not production
+imports and must be re-proven at each artifact change. Public committed lookup
+independently checks durable marker assertions.
+
+The ordinary migration run also emits a separate approval report. After the
+actual CP wheel is installed and execution moves outside the checkout, the same
+installed module with `--approval` requires all twenty-one named cases from
+`tests/migration/test_foundation_approval.py`, including both withdrawal
+orderings at actual approve, signed rollout and signed dispatch commands, with
+caller single-commit and peer lock-timeout probes. Its ephemeral HMAC signer
+ports are test cryptography, not production custody. The report gate does not
+permit this file to disappear or skip while unrelated migration cases pass.
+
+New source/tests are prepared for hosted execution; no passing result is implied
+by their presence. Unmet integrated acceptance still includes complete admitted
+profile/selection provenance, actual Executor/effects and receipt production,
+and production-shaped host/UI deploy/redeploy/rollback. No green result in
+these suites discharges those separate obligations.
 
 ## Preconditions and evidence
 
@@ -64,9 +101,9 @@ Record only non-secret host/database identifiers, never credential-bearing
 DSNs.
 
 For every Control/Foundation pin change, the required isolated CI lane must
-execute again before merge. Record its exact CP revision, released Control
+execute again before merge. Record its exact CP revision, released Control/Approvals
 source/tag/verify coordinates, Foundation source commit, all installed wheel
-hashes/import origins, migration heads and the eleven-case/no-skip result.
+hashes/import origins, migration heads and the twenty-case/no-skip result.
 Ordinary lint, Protocol-shaped unit doubles or a previously green run do not
 discharge that gate for a new dependency revision. The protected lock workflow
 alone owns application dependency resolution; conformance must never rewrite

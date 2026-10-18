@@ -1,0 +1,40 @@
+# Independently authored parser/render component fixture.
+# This fictional product has no production compatibility, backup verification,
+# canonical profile admission, deployment or recovery claim.
+schema = "ProductDeploymentSpec.v1"
+product = "renderer_component"
+environment = "component"
+
+[assembly]
+manifest_path = "component/assembly.json"
+manifest_digest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+
+[image]
+reference = "registry.example/renderer-component@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+source_revision = "2222222222222222222222222222222222222222"
+
+[migration]
+command = ["component-schema", "apply"]
+heads_command = ["component-schema", "heads"]
+owner_material = "COMPONENT_SCHEMA_URL"
+expected_heads = ["component_revision"]
+compatibility = "online"
+
+[[roles]]
+code = "app"
+command = ["component-service"]
+
+[roles.resources]
+cpus = "0.25"
+memory = "64m"
+pids = 32
+
+# Fictional readiness contract for parser/render coverage, never executed here.
+[roles.health.ready]
+path = "/component-ready"
+port = 8080
+probe = ["component-health", "ready"]
+interval_seconds = 10
+timeout_seconds = 2
+retries = 3
+start_period_seconds = 0
