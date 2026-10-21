@@ -14,7 +14,9 @@ scope/design decision; it must not remove a security control or negative case.
 | Component | Approved ceiling |
 | --- | ---: |
 | Shared contracts | 450 |
-| CP feature, migration and wiring | 1,250 |
+| CP Python implementation, migration and wiring | 1,250 |
+| Mandatory CP immutable descriptor, promotion and prospective metadata | 250 |
+| Combined CP implementation and mandatory metadata | 1,500 |
 | Agent Python | 1,100 |
 | Launcher, systemd and public config | 150 |
 | CI YAML additions/changes | 350 |
@@ -30,6 +32,14 @@ remaining proof and provisioning work. These are source measurements, not a
 runtime acceptance claim. The separately approved predecessor guard counts in
 the overall inventory; its tests count in the test ceiling. No additional engine
 behavior changes are authorized by this budget amendment.
+
+Michael subsequently approved a separate 250-line allowance for mandatory CP
+governance metadata on the same date, retaining the 1,250-line Python limit and
+the 8,000-line overall limit. The required immutable candidate and promotion,
+accepted descriptor copy and prospective composition metadata add 233 lines;
+with 1,235 implementation lines the combined count is 1,468. All these artifacts
+remain counted. The source-only correction is recorded in
+`.cutover-private/inc2-cp-governance-metadata-amendment-20261021.json`.
 
 ## Source merge gates
 

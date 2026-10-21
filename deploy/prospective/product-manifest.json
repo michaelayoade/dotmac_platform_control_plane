@@ -40,6 +40,10 @@
       "source": "assembly"
     },
     {
+      "code": "deploy_agent",
+      "source": "assembly"
+    },
+    {
       "code": "deployment_control",
       "contract_version": 2,
       "distribution": "dotmac-deployment-control",
