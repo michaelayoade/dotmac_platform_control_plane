@@ -27,6 +27,10 @@ from vendor_cp.approvals.feature import feature as approvals_feature
 from vendor_cp.config import validate_runtime_configuration, vendor_settings
 from vendor_cp.console.feature import feature as console_feature
 from vendor_cp.contracts.feature import feature as contracts_feature
+from vendor_cp.deploy_agent.feature import feature as deploy_agent_feature
+from vendor_cp.deploy_agent.runtime import (
+    install_runtime as install_deploy_agent_runtime,
+)
 from vendor_cp.deployment_profile import (
     VendorDeploymentProfile,
     admit_surfaces,
@@ -110,6 +114,7 @@ VENDOR_SURFACES = (
     licensing_feature,
     provisioning_feature,
     withdrawal_conflicts_feature,
+    deploy_agent_feature,
 )
 
 
@@ -197,6 +202,7 @@ def build_spec(profile: VendorDeploymentProfile | None = None) -> ProductAssembl
     # deliberately still do under a profile that withholds the licensing
     # ROUTES, because a withheld surface is not a disabled subsystem.
     install_runtime_licence_signers(vendor_settings)
+    install_deploy_agent_runtime()
 
     return ProductAssemblySpec(
         name=ASSEMBLY_NAME,

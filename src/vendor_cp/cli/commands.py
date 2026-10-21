@@ -186,6 +186,15 @@ def admin_descriptor_drift(args: argparse.Namespace) -> Result:
     )
 
 
+def admin_deploy_ledger_rebuild(args: argparse.Namespace) -> Result:
+    from vendor_cp.deploy_agent.runtime import install_runtime, ledger_rebuild
+
+    install_runtime()
+    with platform_db() as db:
+        result = ledger_rebuild(db)
+    return Result(command="admin deploy-ledger-rebuild", data=result)
+
+
 def admin_accounts(args: argparse.Namespace) -> Result:
     from vendor_cp.accounts.service import list_accounts
 

@@ -56,6 +56,13 @@ class Owner:
 #: an owner declared without a command both fail.
 OWNERS: Final[tuple[Owner, ...]] = (
     Owner(
+        "admin deploy-ledger-rebuild",
+        "vendor_cp.deploy_agent.runtime",
+        "ledger_rebuild",
+        True,
+        "rebuild deploy-agent projection from immutable signed git events",
+    ),
+    Owner(
         "gate0 issuer-run",
         "vendor_cp.deployment.gate0_services",
         "issuer_run",
