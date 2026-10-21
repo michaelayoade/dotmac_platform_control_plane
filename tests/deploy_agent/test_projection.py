@@ -1,10 +1,16 @@
 """Projection corruption detector only: fake cursor, no database parity claim."""
 
+from unittest.mock import Mock
+from uuid import uuid4
+
 import pytest
 from conformance_data import TestSigner, desired
+from fastapi import HTTPException, Response
 
 from vendor_cp.deploy_agent import contracts as c
 from vendor_cp.deploy_agent.projection import rebuild
+from vendor_cp.deploy_agent.router import receipt
+from vendor_cp.deploy_agent.service import DeployAgentService
 
 
 @pytest.mark.parametrize("corruption", ["envelope", "nonce", "kind", "deployment_ref"])
@@ -42,3 +48,30 @@ def test_projection_refuses_corruption_with_preserved_fingerprint(corruption):
 
     with pytest.raises(c.ContractError, match="projection_conflict"):
         rebuild(CursorOnly(), FixtureLedger())
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_receipt_reads_stored_evidence_only_in_fixed_scope(monkeypatch, missing):
+    report, ref, db = uuid4(), "fixed/staging/host", Mock()
+    row = dict(
+        deployment_ref=ref, report_id=str(report), path="stored", fingerprint="stored"
+    )
+    db.execute.return_value.mappings.return_value.one_or_none.return_value = (
+        None if missing else row
+    )
+    owner = DeployAgentService(None, None, deployment_ref=ref)
+    monkeypatch.setattr("vendor_cp.deploy_agent.router.service", lambda: owner)
+    response = Response()
+    if missing:
+        with pytest.raises(HTTPException) as error:
+            receipt(report, None, db, response)
+        assert error.value.status_code == 404
+    else:
+        assert receipt(report, None, db, response) == row
+    statement, params = db.execute.call_args.args
+    assert "WHERE kind='applied' AND deployment_ref=:ref AND report_id=:report" in str(
+        statement
+    )
+    assert params == {"ref": ref, "report": str(report)}
+    assert len(db.mock_calls) == 3
+    assert response.headers["Cache-Control"] == "no-store"

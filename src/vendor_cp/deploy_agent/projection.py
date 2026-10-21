@@ -9,6 +9,24 @@ from sqlalchemy.orm import Session
 
 from . import contracts as c
 from .ledger import GitLedger
+from .models import Receipt
+
+
+def receipt(db: Session, deployment_ref: str, report_id: UUID) -> Receipt | None:
+    """Read stored projection evidence for comparison with sealed bytes and Git."""
+    row = (
+        db.execute(
+            text(
+                "SELECT deployment_ref,report_id,path,fingerprint "
+                "FROM public.deploy_agent_receipts "
+                "WHERE kind='applied' AND deployment_ref=:ref AND report_id=:report"
+            ),
+            {"ref": deployment_ref, "report": str(report_id)},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    return cast(Receipt, dict(row)) if row is not None else None
 
 
 def project(db: Session, path: str, event: c.Json) -> None:

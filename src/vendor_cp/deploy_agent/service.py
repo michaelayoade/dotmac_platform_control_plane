@@ -21,10 +21,11 @@ from .models import (
     KeyState,
     PlanPreview,
     PreviewCommand,
+    Receipt,
     RegisterKey,
     RevokeKey,
 )
-from .projection import rebuild
+from .projection import rebuild, receipt
 
 GENERATED_FIELDS = set(
     "schema nonce issued_at expires_at signer_key_id plan_digest".split()
@@ -511,6 +512,9 @@ class DeployAgentService:
                     return quarantine("nonce_replay")
             self._record(db, {path: envelope})
             return {"verdict": "accepted"}
+
+    def receipt(self, db: Session, report_id: UUID) -> Receipt | None:
+        return receipt(db, self.deployment_ref, report_id)
 
     def drift(self) -> Drift:
         with self.ledger.transaction():

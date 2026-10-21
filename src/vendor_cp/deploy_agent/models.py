@@ -80,6 +80,13 @@ class Drift(TypedDict):
     drift: bool
 
 
+class Receipt(TypedDict):
+    deployment_ref: str
+    report_id: str
+    path: str
+    fingerprint: str
+
+
 def parse_command(value: c.Json, model: type[object]) -> object:
     c._shape(value, model)
     return value

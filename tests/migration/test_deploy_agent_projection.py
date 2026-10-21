@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from vendor_cp.deploy_agent import contracts as c
 from vendor_cp.deploy_agent.ledger import GitLedger
 from vendor_cp.deploy_agent.models import KeyRecord
-from vendor_cp.deploy_agent.projection import rebuild
+from vendor_cp.deploy_agent.projection import rebuild, receipt
 from vendor_cp.platform_admin import upsert_platform_admin
 
 
@@ -238,6 +238,17 @@ def test_rebuild_is_idempotent_and_advances_key_projection(
         }
         advanced = receipts(databases.owner)
         assert len(advanced) == 4 and all(row in advanced for row in first)
+        report = c.validate_applied(
+            c.read_json(c.unb64(fixture.applied["payload_b64"]))
+        )
+        report_id = UUID(report["report_id"])
+        assert receipt(db, report["deployment_ref"], report_id) == {
+            "deployment_ref": report["deployment_ref"],
+            "report_id": str(report_id),
+            "path": "applied/fixture.json",
+            "fingerprint": c.digest(fixture.applied),
+        }
+        assert receipt(db, "another/staging/host", report_id) is None
         key = db.execute(
             text(
                 "SELECT state,event_path FROM public.deploy_host_keys "

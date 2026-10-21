@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from typing import Annotated, cast
+from uuid import UUID
 
 from dotmac_kernel import PlatformAdmin
 from dotmac_kernel.deps import get_platform_db
@@ -20,6 +21,7 @@ from .models import (
     KeyState,
     PlanPreview,
     PreviewCommand,
+    Receipt,
     RegisterKey,
     RevokeKey,
     parse_command,
@@ -120,3 +122,12 @@ async def activate(request: Request, admin: Admin, db: Db) -> KeyState:
 @router.get("/drift")
 def drift(_admin: Admin) -> Drift:
     return call(lambda: service().drift())
+
+
+@router.get("/receipts/{report_id}")
+def receipt(report_id: UUID, _admin: Admin, db: Db, response: Response) -> Receipt:
+    response.headers["Cache-Control"] = "no-store"
+    result = call(lambda: service().receipt(db, report_id))
+    if result is None:
+        raise HTTPException(404, "receipt_absent")
+    return result
