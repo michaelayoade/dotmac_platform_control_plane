@@ -58,5 +58,5 @@ def upgrade():
 
 def downgrade():
     raise RuntimeError(
-        "deploy-agent authoritative evidence is retained; forward repair required"
+        "deploy-agent evidence cannot be downgraded; retained, forward repair required"
     )
