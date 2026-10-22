@@ -5,10 +5,10 @@ import os
 import subprocess
 import threading
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
-from .contracts import Json, canonical_json, read_json, require
+from .contracts import ContractError, Json, canonical_json, read_json, require
 
 
 class GitLedger:
@@ -37,13 +37,15 @@ class GitLedger:
                     "log",
                     "--format=",
                     "--name-only",
-                    "--diff-filter=MD",
+                    "--no-renames",
+                    "--diff-filter=MDT",
                     "--",
                     "desired",
                     "applied",
                     "keys",
                     "commands",
                     "quarantine",
+                    "gate0",
                 ).strip(),
                 "ledger_rewritten",
             )
@@ -74,11 +76,38 @@ class GitLedger:
     def append(self, name: str, value: object) -> bool:
         return self.append_many({name: value})
 
+    @contextmanager
+    def _parent(self, name: str) -> Iterator[int]:
+        """Pin each directory with no-follow openat before creating any leaf."""
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        try:
+            with ExitStack() as opened:
+                directory = os.open("/", flags)
+                opened.callback(os.close, directory)
+                for part in self.root.parts[1:]:
+                    directory = os.open(part, flags, dir_fd=directory)
+                    opened.callback(os.close, directory)
+                for part in Path(name).parts[:-1]:
+                    try:
+                        os.mkdir(part, mode=0o755, dir_fd=directory)
+                    except FileExistsError:
+                        pass
+                    directory = os.open(part, flags, dir_fd=directory)
+                    opened.callback(os.close, directory)
+                yield directory
+        except OSError:
+            raise ContractError("ledger_path") from None
+
     def append_many(self, values: Mapping[str, object]) -> bool:
         pending = {}
         for name, value in values.items():
+            path = Path(name)
             require(
-                not Path(name).is_absolute() and ".." not in Path(name).parts,
+                bool(path.parts)
+                and not path.is_absolute()
+                and name == path.as_posix()
+                and "\x00" not in name
+                and not {".", "..", ".git"}.intersection(path.parts),
                 "ledger_path",
             )
             raw = canonical_json(value)
@@ -87,14 +116,25 @@ class GitLedger:
                 require(existing == raw, "ledger_conflict")
             else:
                 pending[name] = raw
-        for name, raw in pending.items():
-            target = self.root / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            require(not target.is_symlink(), "ledger_path")
-            with target.open("xb") as output:
-                output.write(raw)
-                output.flush()
-                os.fsync(output.fileno())
+        with ExitStack() as opened:
+            # Validate/pin all parent chains before writing any of the batch.
+            parents = {
+                name: opened.enter_context(self._parent(name)) for name in pending
+            }
+            try:
+                for name, raw in pending.items():
+                    fd = os.open(
+                        Path(name).name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o644,
+                        dir_fd=parents[name],
+                    )
+                    with os.fdopen(fd, "wb") as output:
+                        output.write(raw)
+                        output.flush()
+                        os.fsync(output.fileno())
+            except OSError:
+                raise ContractError("ledger_path") from None
         if pending:
             self.git("add", "--", *pending)
             self.git("commit", "-m", "deploy-agent append " + ",".join(pending))

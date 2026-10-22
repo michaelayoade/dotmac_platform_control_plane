@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from .candidates import GitHubCandidateEvidenceReader
 from .contracts import ContractError, require
+from .gate_admission import load_scope
 from .keys import ConfiguredDesiredSigner
 from .ledger import GitLedger
 from .projection import rebuild
@@ -32,7 +33,11 @@ def install_runtime() -> None:
             os.environ.get("VENDOR_DEPLOY_GH_EXECUTABLE", ""),
             os.environ.get("VENDOR_DEPLOY_GH_SHA256", ""),
         )
-        _runtime = DeployAgentService(ledger, signer, candidate_reader=reader)
+        scope_file = os.environ.get("VENDOR_DEPLOY_GATE_SCOPE_FILE", "")
+        scope = load_scope(scope_file) if scope_file else None
+        _runtime = DeployAgentService(
+            ledger, signer, candidate_reader=reader, gate_scope=scope
+        )
 
 
 def service() -> DeployAgentService:

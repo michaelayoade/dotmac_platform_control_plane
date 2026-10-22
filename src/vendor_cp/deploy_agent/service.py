@@ -41,11 +41,17 @@ class DeployAgentService:
         deployment_ref: str = "dotmac_sub/staging/dotmac-sub-staging",
         clock: Callable[[], datetime] | None = None,
         candidate_reader: CandidateEvidenceReader | None = None,
+        gate_scope: bytes | None = None,
     ) -> None:
         self.ledger, self.signer = ledger, signer
         self.deployment_ref = deployment_ref
         self.clock = clock or (lambda: datetime.now(UTC))
         self.candidate_reader = candidate_reader
+        from .gate_admission import scope_bytes
+
+        self.gate_scope = (
+            scope_bytes(c.read_json(gate_scope)) if gate_scope is not None else None
+        )
 
     def _events(self, kind: str) -> list[tuple[str, c.Json]]:
         return [
@@ -151,6 +157,28 @@ class DeployAgentService:
                 )
                 c.require(doc["nonce"] not in desired, "ledger_conflict")
                 desired[doc["nonce"]] = doc
+            elif path.startswith("quarantine/"):
+                c.exact(event, {"code", "envelope"})
+                envelope = cast(c.Envelope, event["envelope"])
+                c._shape(envelope, c.Envelope)
+                key = keys.get(envelope["key_id"])
+                c.require(
+                    key is not None and key["state"] == "active", "host_key_inactive"
+                )
+                c.validate_applied(c.verify(c.APPLIED, envelope, key["public_key_b64"]))
+                c.require(
+                    path == f"quarantine/{c.digest(envelope)[7:]}.json"
+                    and event["code"]
+                    in {
+                        "deployment_mismatch",
+                        "report_reused",
+                        "desired_unknown",
+                        "observed_mismatch",
+                        "desired_mismatch",
+                        "nonce_replay",
+                    },
+                    "ledger_identity",
+                )
             elif path.startswith("applied/"):
                 envelope = cast(c.Envelope, event)
                 key = keys[envelope["key_id"]]
@@ -177,6 +205,10 @@ class DeployAgentService:
                         self._valid_success(report, desired[nonce]), "observed_mismatch"
                     )
                 consumed.add(nonce)
+
+        from .gate_admission import history
+
+        history(self)
 
     def _latest_report(
         self, ref: str, *, successful: bool = False

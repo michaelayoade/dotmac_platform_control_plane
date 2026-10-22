@@ -1,45 +1,48 @@
 # Increment 2 acceptance and approved source budget
 
-Michael approved this bounded replacement of the original design's section 2.7
-limits on 2026-10-21, for the existing staging signer/agent/ledger scope and its
-required proofs. It adds no product capabilities and authorizes no live activation.
-The coordinator retains the explicit approval and measured decision record at
-`.cutover-private/inc2-budget-amendment-20261021.json` outside the repository.
+Michael approved the complete bounded source-only amendment on 2026-10-22.
+It retains the existing deployment/agent/restore owners and adds the finite
+proof/provisioning adapters and one authenticated CP evidence endpoint. It
+adds no product capability and authorizes no activation or production change.
+Michael subsequently approved the measured source shipping ceilings on the same
+date for proposal SHA-256
+`5816f7931087687b6500cd6ed7731bd65a54dbf0925492e8df24db0150010c62`.
+The coordinator retains the reviewed measurement packet at
+`.cutover-private/keyless-measured-shipping-amendment-20261022.json`
+and the explicit approval; the original amendment remains retained.
 
-The hard limits count nonblank, noncomment source, including fixtures, helpers,
-vectors and any shipped implementation. They do not permit moving implementation
-to uncounted templates or private wrappers. Any new excess stops for a new measured
-scope/design decision; it must not remove a security control or negative case.
+Count all nonblank, noncomment source, fixtures, helpers, physical vendored
+contracts, mandatory metadata and adopted documentation under the explicit
+conservative baseline method. Implementation cannot move to an uncounted
+wrapper/template. The corrected conservative baseline is 10,168, including all
+565 lines of private test source, CP implementation 1,236, CP metadata 233 and
+both contract copies 854. These are source measurements, never live acceptance
+evidence.
 
-| Component | Approved ceiling |
+| Component | Approved shipping ceiling |
 | --- | ---: |
-| Shared contracts | 450 |
-| CP Python implementation, migration and wiring | 1,250 |
-| Mandatory CP immutable descriptor, promotion and prospective metadata | 250 |
-| Combined CP implementation and mandatory metadata | 1,500 |
-| Agent Python | 1,100 |
+| Shared contracts, per physical module | 450 |
+| CP Python implementation, migration, wiring and evidence admission | 2,400 |
+| Mandatory CP metadata | 300 |
+| Combined CP implementation and mandatory metadata | 2,700 |
+| Agent runtime | 1,100 |
 | Launcher, systemd and public config | 150 |
-| CI YAML additions/changes | 350 |
-| OpenBao definitions/apply | 250 |
+| CI YAML changes | 350 |
+| OpenBao and adopted credential helpers | 1,400 |
 | Egress renderer/config | 150 |
-| Gate-0 proof harness and restore acceptance tool changes | 750 |
-| Required tests across increments 1–2 and approved engine guard | 3,000 |
-| Overall new source | 8,000 |
+| Gate0 proof and restore acceptance runtime, including adopted diagnostics | 4,100 |
+| Finite agent/resolver/runner provisioning, including adopted wrappers | 950 |
+| Required tests across all increments and the approved engine guard | 7,700 |
+| Approved predecessor guard runtime | 60 |
+| Overall counted new source | 20,000 |
 
-At approval, measured contracts were 427, CP 1,202, agent 1,091, OpenBao 233,
-and known required tests 2,320. The known overall subtotal was 5,681 before the
-remaining proof and provisioning work. These are source measurements, not a
-runtime acceptance claim. The separately approved predecessor guard counts in
-the overall inventory; its tests count in the test ceiling. No additional engine
-behavior changes are authorized by this budget amendment.
-
-Michael subsequently approved a separate 250-line allowance for mandatory CP
-governance metadata on the same date, retaining the 1,250-line Python limit and
-the 8,000-line overall limit. The required immutable candidate and promotion,
-accepted descriptor copy and prospective composition metadata add 233 lines;
-with 1,235 implementation lines the combined count is 1,468. All these artifacts
-remain counted. The source-only correction is recorded in
-`.cutover-private/inc2-cp-governance-metadata-amendment-20261021.json`.
+The measured shipping approval supersedes the earlier drafting-only budget
+restriction for this same bounded feature. All other component ceilings remain
+unchanged. Reserve covers necessary review and exact-CI corrections only, with
+updated hashes, counts and independent review before merge. The reviewed packet
+records the complete measurement; documentation corrections are remeasured by
+the coordinator. No security check or meaningful negative case may be removed
+to make a measurement pass. This source approval grants no live authority.
 
 ## Source merge gates
 
