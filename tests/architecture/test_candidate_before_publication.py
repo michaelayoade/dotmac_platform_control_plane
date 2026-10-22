@@ -111,7 +111,7 @@ def test_the_read_back_compares_like_for_like() -> None:
     assert '["config"]["digest"]' in compare
     # The retired comparison must stay retired.
     assert "pulled_config" not in compare
-    assert 'test "$registry_config" = "$accepted_config"' in compare
+    assert 'test "$registry_config" = "$ACCEPTED_CONFIG_DIGEST"' in compare
     assert "deliberately NOT compared" in compare
 
 
@@ -131,9 +131,13 @@ def test_registry_config_guard_executes_before_output(
     start = readback.index('          registry_config="')
     guard = textwrap.dedent(readback[start : readback.index("\n\n", start)])
     expression = "${{ steps.identity.outputs.config_digest }}"
-    assert guard.count(expression) == 1
+    step_fields = readback[: readback.index("        run: |")]
+    assert (
+        f"        env:\n          ACCEPTED_CONFIG_DIGEST: {expression}\n" in step_fields
+    )
+    assert step_fields.count("ACCEPTED_CONFIG_DIGEST:") == 1
+    assert "${{" not in guard
     expected = "sha256:" + "a" * 64
-    guard = guard.replace(expression, expected)
     output = tmp_path / "github-output"
     result = subprocess.run(  # noqa: S603 — trusted workflow and fixed fixtures
         [
@@ -153,6 +157,7 @@ def test_registry_config_guard_executes_before_output(
             "MANIFEST": json.dumps({"config": {"digest": registry_digest}}),
             "reference": "registry.invalid/candidate@sha256:" + "c" * 64,
             "GITHUB_OUTPUT": str(output),
+            "ACCEPTED_CONFIG_DIGEST": expected,
         },
         capture_output=True,
         text=True,

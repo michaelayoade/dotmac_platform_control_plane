@@ -204,6 +204,8 @@ jobs:
       # ── 7 + 8. Read back, and prove equality with what was accepted ─────
       - name: Prove the registry holds the accepted candidate
         id: readback
+        env:
+          ACCEPTED_CONFIG_DIGEST: ${{ steps.identity.outputs.config_digest }}
         run: |
           set -euo pipefail
           reference='${{ steps.publish.outputs.reference }}'
@@ -254,8 +256,7 @@ jobs:
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["digest"])')"
           [[ "$registry_config" =~ ^sha256:[0-9a-f]{64}$ ]] \
             || { echo "the registry returned no usable config digest" >&2; exit 1; }
-          accepted_config='${{ steps.identity.outputs.config_digest }}'
-          test "$registry_config" = "$accepted_config" \
+          test "$registry_config" = "$ACCEPTED_CONFIG_DIGEST" \
             || { echo "registry config digest differs from accepted candidate" >&2; exit 1; }
           echo "registry_config=$registry_config" >> "$GITHUB_OUTPUT"
 
