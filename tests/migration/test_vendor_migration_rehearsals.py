@@ -69,8 +69,8 @@ DEPLOYMENT_CONTROL_HEAD = "dc_0016_controller_key_nonreuse"
 VENDOR_ROOT = "v001_vendor_accounts"
 VENDOR_ROOT_DEP = "0009_platform_audit_inbox"  # what v001 depends_on
 # C2 S4 adds `v020_withdrawal_outcomes` above `v019_relay_heartbeat`; D18
-# adds `v021_issuer_command_receipts` above that.
-VENDOR_HEAD = "v021_issuer_command_receipts"
+# adds `v021_issuer_command_receipts` above that; deploy-agent evidence adds v022.
+VENDOR_HEAD = "v022_deploy_agent"
 
 #: The vendor head as it stood BEFORE allocation authority moved.
 #:

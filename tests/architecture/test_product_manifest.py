@@ -89,8 +89,8 @@ def test_the_accepted_descriptor_matches_its_declared_accepted_manifest() -> Non
 
 def test_the_accepted_and_prospective_manifests_differ_only_by_the_adoption() -> None:
     """The split is not a way to hide drift: apart from the adopted module
-    versions (and Control's retired stale literal) and the one assembly surface
-    this composition change adds, the manifests agree."""
+    versions (and Control's retired stale literal) and the assembly surfaces
+    these composition changes add, the manifests agree."""
     accepted = json.loads(ACCEPTED_MANIFEST.read_text())
     prospective = json.loads(PROSPECTIVE_MANIFEST.read_text())
     assert {k: v for k, v in accepted.items() if k != "modules"} == {
@@ -98,14 +98,15 @@ def test_the_accepted_and_prospective_manifests_differ_only_by_the_adoption() ->
     }
     before = {m["code"]: m for m in accepted["modules"]}
     after = {m["code"]: m for m in prospective["modules"]}
-    # Gate-0 C2 S4 composes exactly one new assembly surface, the
-    # platform-admin withdrawal-conflict resolution route; nothing is removed.
-    assert set(after) - set(before) == {"withdrawal_conflicts"}
+    # Gate-0 C2 S4 adds withdrawal-conflict resolution; deploy-agent source
+    # composition adds its evidence adapter while runtime activation stays opt-in.
+    assert set(after) - set(before) == {"withdrawal_conflicts", "deploy_agent"}
     assert set(before) <= set(after)
     assert after["withdrawal_conflicts"] == {
         "code": "withdrawal_conflicts",
         "source": "assembly",
     }
+    assert after["deploy_agent"] == {"code": "deploy_agent", "source": "assembly"}
     changed = sorted(code for code in before if before[code] != after[code])
     # The adopted modules: Approvals, Commercial Agreements and Control.
     assert changed == ["approvals", "commercial_agreements", "deployment_control"]

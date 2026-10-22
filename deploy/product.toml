@@ -21,18 +21,15 @@
 # indistinguishable from the next CORRECTION.
 #
 # Provenance of these bytes:
-#   candidate    deploy/candidates/2026-10-01-controller-key-nonreuse.toml
-#   promoted     2026-10-01, as a COMPOSITION CHANGE, not a deployment
+#   candidate    deploy/candidates/2026-10-21-deploy-agent-evidence.toml
+#   promoted     2026-10-21, as a COMPOSITION CHANGE, not a deployment
 #   record       deploy/descriptor-promotions.json (append-only)
-#   supersedes   deploy/candidates/2026-09-27-issuer-command-receipts.toml
+#   supersedes   deploy/candidates/2026-10-01-controller-key-nonreuse.toml
 #
-# Control a16 -> a17 replaces dc_0015_plan_purpose with
-# dc_0016_controller_key_nonreuse. This is the published wheel's declared
-# lineage, not a live-catalogue transcription. The composed-heads CI gate
-# re-derives the complete set. No deployment, issuer activation, Foundation
-# allocation or legacy-writer retirement is claimed or authorized.
-# Upgrade refuses duplicate controller fingerprints without changing history;
-# after this cutover fix forward, never use a16 as a runtime fallback.
+# Vendor v022_deploy_agent replaces v021_issuer_command_receipts with retained
+# deploy-agent evidence and the public host-key registry. The composed-heads CI
+# gate re-derives the complete set. This source composition changes no runtime
+# activation setting and performs no deployment or database operation.
 #
 # The image half is UNCHANGED and deliberately so. `[image]` still names the
 # artifact the application is running and `[assembly].manifest_digest` still
@@ -62,7 +59,7 @@
 #   [migration] AHEAD OF THE TARGET. `expected_heads` names what the NEXT
 #               deployment will reach (`ap_0003_withdrawals`,
 #               `cg_0002_approval_withdrawals`, `dc_0016_controller_key_nonreuse`,
-#               `v021_issuer_command_receipts`), not what the running
+#               `v022_deploy_agent`), not what the running
 #               database holds. Until that deployment lands, a drift check
 #               against production reports those four as declared-absent and
 #               `ap_0002`/`dc_0002`/`v019` as present-undeclared.
@@ -384,6 +381,10 @@ owner_material = "MIGRATION_DATABASE_URL"
 # 2026-10-01: Control a17 adds dc_0016_controller_key_nonreuse on top of
 # dc_0015_plan_purpose: permanent controller fingerprint uniqueness across
 # every target/lease/state, including spent and revoked history.
+#
+# 2026-10-21: Vendor v022_deploy_agent replaces v021_issuer_command_receipts.
+# It adds retained deploy-agent receipts and the public host-key registry;
+# no deployment, database application or deploy-agent activation is claimed.
 expected_heads = [
   "0028_machine_attribution",
   "ap_0003_withdrawals",
@@ -391,7 +392,7 @@ expected_heads = [
   "dc_0016_controller_key_nonreuse",
   "ea_0003_platform_audit_log",
   "rl_0001_release_artifacts",
-  "v021_issuer_command_receipts",
+  "v022_deploy_agent",
 ]
 compatibility = "maintenance_required"
 lock_timeout_seconds = 300

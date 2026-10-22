@@ -134,6 +134,14 @@ def build_parser() -> _Parser:
     migrate.add_argument("--target", default="heads")
     migrate.set_defaults(handler=commands.admin_migrate)
 
+    ledger_rebuild = _command(
+        admin_sub,
+        "admin",
+        "deploy-ledger-rebuild",
+        "replay signed deploy-agent git events into the database projection",
+    )
+    ledger_rebuild.set_defaults(handler=commands.admin_deploy_ledger_rebuild)
+
     descriptor_drift = _command(
         admin_sub,
         "admin",

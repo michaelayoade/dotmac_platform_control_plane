@@ -270,6 +270,18 @@ def _gauge(schema: str, table: str, rationale: str) -> TablePolicy:
 #: exemption shape `dotmac_starter_mt` ADR-0018 refuses, and a table the database
 #: has that is not here refuses admission.
 GOVERNED_TABLES: Final[tuple[TablePolicy, ...]] = (
+    _retain(
+        "public",
+        "deploy_agent_receipts",
+        "immutable signed git-ledger event projection; v022 refuses UPDATE, "
+        "DELETE and TRUNCATE",
+    ),
+    _gauge(
+        "public",
+        "deploy_host_keys",
+        "current public identity activation state, rebuilt from retained git key "
+        "events; no private key material",
+    ),
     # ── `public`, kernel lineage ─────────────────────────────────────────
     _retain(
         "public",

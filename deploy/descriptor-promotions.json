@@ -208,6 +208,26 @@
       "deploy_ordering": "D16 fenced transition and an isolated restored-database rehearsal remain required before any deployment. dc_0016 refuses historical duplicate controller fingerprints without rewriting records. After the cutover, fix forward; do not restore a16 as a compatibility fallback.",
       "drift_reading": "Before deployment, dc_0016 is declared-absent and dc_0015 is present-undeclared. The composition-change record is not a production observation.",
       "authored_by": "New immutable candidate and append-only composition-change promotion; tests/architecture/test_descriptor_promotion.py re-derives composed heads and checks exact candidate bytes, changed sections, ledger chain and unchanged image/manifest coordinates."
+    },
+    {
+      "promoted_at": "2026-10-21",
+      "kind": "composition_change",
+      "candidate": "deploy/candidates/2026-10-21-deploy-agent-evidence.toml",
+      "descriptor_sha256": "sha256:5dfc6b2028a21d009e7394350df4a4f34d98fe16e6cc56f67e40fb4fcfdea381",
+      "supersedes": "sha256:6f5f61bc2ebc1ba3bc018af3b32143fee570914b9bda55567888ebbf02a4f6c0",
+      "summary": "Declares vendor v022_deploy_agent in place of v021_issuer_command_receipts: retained deploy-agent evidence and the public host-key registry. The composed effective-head checks re-derive the declaration from the installed lineages. Source composition only; no deployment, database application or activation is claimed or authorized.",
+      "changed_sections": [
+        "migration"
+      ],
+      "carried_forward": {
+        "why": "Source composition declares the next migration heads only. No deployment occurs; accepted image, source revision and assembly manifest remain byte-identical. Prospective composition changes separately and cannot assert live adoption.",
+        "image.reference": "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:45715e425dc248d85fe374fa5d347087328a445cf7ead1f8abc29f05f0117b0d",
+        "image.source_revision": "af9fcf6d3fbd259fbef6b589d37b39d548f7ba8e",
+        "assembly.manifest_digest": "sha256:6956c4777765fced1bce992a531c75334e7ab5fe627e53511b17d700d3d5dbf8"
+      },
+      "deploy_ordering": "The D16 fenced transition and isolated restored-database rehearsal remain required before deployment. v022 retains authoritative evidence and refuses downgrade; repair forward. Runtime enablement remains opt-in and is unchanged.",
+      "drift_reading": "Relative to the preceding source declaration, v022_deploy_agent replaces v021_issuer_command_receipts. This is not a production observation.",
+      "authored_by": "New immutable candidate and append-only composition-change promotion; exact candidate bytes, changed sections, ledger ancestry and carried-forward application coordinates are checked by tests/architecture/test_descriptor_promotion.py."
     }
   ]
 }

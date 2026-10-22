@@ -365,7 +365,7 @@ class VendorDeploymentProfile:
 PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
     VendorDeploymentProfile(
         code=FULL,
-        version="5",
+        version="6",
         withheld_surfaces=frozenset(),
         surface_inventory=(
             "accounts",
@@ -373,6 +373,7 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "console",
             "contracts",
             "deployment_control",
+            "deploy_agent",
             "licence_delivery",
             "offers",
             "provisioning",
@@ -390,14 +391,20 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "Version 4 includes the deployment-control browser surface and "
             "readiness surface, which every profile publishes or explicitly "
             "withholds. Version 5 adds the withdrawal-conflict resolution "
-            "surface."
+            "surface. Version 6 publishes the opt-in deploy-agent API."
         ),
     ),
     VendorDeploymentProfile(
         code=PRODUCTION_BOOTSTRAP,
         version="6",
         withheld_surfaces=frozenset(
-            {"deployment_control", "licence_delivery", "offers", "provisioning"}
+            {
+                "deployment_control",
+                "deploy_agent",
+                "licence_delivery",
+                "offers",
+                "provisioning",
+            }
         ),
         surface_inventory=(
             "accounts",
@@ -440,6 +447,7 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
                 "accounts",
                 "contracts",
                 "deployment_control",
+                "deploy_agent",
                 "licence_delivery",
                 "offers",
                 "provisioning",
