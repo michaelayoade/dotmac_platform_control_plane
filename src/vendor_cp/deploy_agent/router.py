@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 
 from . import contracts as c
 from .contracts import ContractError, canonical_json, read_json
+from .gate_admission import admit
+from .gate_evidence import GateEvidence, PublishedReceipt
 from .models import (
     ActivateKey,
     Drift,
@@ -131,3 +133,14 @@ def receipt(report_id: UUID, _admin: Admin, db: Db, response: Response) -> Recei
     if result is None:
         raise HTTPException(404, "receipt_absent")
     return result
+
+
+@router.post("/gate-evidence")
+async def gate_evidence(request: Request, admin: Admin, db: Db) -> PublishedReceipt:
+    raw = await body(request)
+    command = call(lambda: parse_command(raw, GateEvidence))
+    return call(
+        lambda: admit(
+            service(), db, cast(GateEvidence, command), actor_admin_id=admin.id
+        )
+    )

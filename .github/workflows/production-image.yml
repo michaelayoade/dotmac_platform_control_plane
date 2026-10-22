@@ -204,6 +204,8 @@ jobs:
       # ── 7 + 8. Read back, and prove equality with what was accepted ─────
       - name: Prove the registry holds the accepted candidate
         id: readback
+        env:
+          ACCEPTED_CONFIG_DIGEST: ${{ steps.identity.outputs.config_digest }}
         run: |
           set -euo pipefail
           reference='${{ steps.publish.outputs.reference }}'
@@ -249,17 +251,16 @@ jobs:
           # compares two different KINDS of value and can never hold — a false
           # refusal on every correct publication, arriving after the push. The
           # registry's own config digest is read from the manifest instead, and
-          # recorded rather than guessed at.
+          # compared with the accepted local config digest, then recorded.
           registry_config="$(docker manifest inspect "$reference" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["digest"])')"
           [[ "$registry_config" =~ ^sha256:[0-9a-f]{64}$ ]] \
             || { echo "the registry returned no usable config digest" >&2; exit 1; }
+          test "$registry_config" = "$ACCEPTED_CONFIG_DIGEST" \
+            || { echo "registry config digest differs from accepted candidate" >&2; exit 1; }
           echo "registry_config=$registry_config" >> "$GITHUB_OUTPUT"
 
-          # The candidate's own config digest, recorded before publication, must
-          # still describe the image we just pulled: same revision label, same
-          # layer count. Cheap, and it catches a reference that resolved to a
-          # different image entirely.
+          # Independently retain the selected revision-label check on the pull.
           pulled_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$reference")"
           test "$pulled_revision" = "${{ steps.select.outputs.source_sha }}" \
             || { echo "registry image is labelled $pulled_revision, not ${{ steps.select.outputs.source_sha }}" >&2; exit 1; }

@@ -13,6 +13,9 @@ correct step and still be wrong.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -94,9 +97,9 @@ def test_the_read_back_compares_like_for_like() -> None:
     and can never hold — a false refusal on every correct publication, arriving
     after the push had already happened.
 
-    The equality therefore rests on the RootFS layer chain, which is the same
-    object on both sides, and the registry's own config digest is READ from the
-    manifest rather than inferred from a field that changes meaning.
+    Compare the RootFS layer chain and the accepted local config digest with
+    the registry's own config digest READ from the manifest, rather than inferring
+    the latter from a field that changes meaning.
     """
     workflow = _text(IMAGE_WORKFLOW)
     readback = workflow[
@@ -108,8 +111,64 @@ def test_the_read_back_compares_like_for_like() -> None:
     assert '["config"]["digest"]' in compare
     # The retired comparison must stay retired.
     assert "pulled_config" not in compare
-    assert "!= accepted $accepted_config" not in compare
+    assert 'test "$registry_config" = "$ACCEPTED_CONFIG_DIGEST"' in compare
     assert "deliberately NOT compared" in compare
+
+
+@pytest.mark.parametrize(
+    ("registry_digest", "accepted"),
+    [("sha256:" + "a" * 64, True), ("sha256:" + "b" * 64, False), ("malformed", False)],
+    ids=["matching-config", "valid-wrong-config", "malformed-config"],
+)
+def test_registry_config_guard_executes_before_output(
+    tmp_path: Path, registry_digest: str, accepted: bool
+) -> None:
+    """Execute the workflow guard with a manifest fixture; never invoke Docker."""
+    workflow = _text(IMAGE_WORKFLOW)
+    readback = workflow[
+        workflow.index("Prove the registry holds the accepted candidate") :
+    ]
+    start = readback.index('          registry_config="')
+    guard = textwrap.dedent(readback[start : readback.index("\n\n", start)])
+    expression = "${{ steps.identity.outputs.config_digest }}"
+    step_fields = readback[: readback.index("        run: |")]
+    assert (
+        f"        env:\n          ACCEPTED_CONFIG_DIGEST: {expression}\n" in step_fields
+    )
+    assert step_fields.count("ACCEPTED_CONFIG_DIGEST:") == 1
+    assert "${{" not in guard
+    expected = "sha256:" + "a" * 64
+    output = tmp_path / "github-output"
+    result = subprocess.run(  # noqa: S603 — trusted workflow and fixed fixtures
+        [
+            "/bin/bash",
+            "-c",
+            """set -euo pipefail
+            docker() {
+              [[ $# == 3 && "$1" == manifest && "$2" == inspect ]] || return 91
+              [[ "$3" == "$reference" ]] || return 91
+              printf '%s\n' "$MANIFEST"
+            }
+            """
+            + guard,
+        ],
+        env={
+            "PATH": os.defpath,
+            "MANIFEST": json.dumps({"config": {"digest": registry_digest}}),
+            "reference": "registry.invalid/candidate@sha256:" + "c" * 64,
+            "GITHUB_OUTPUT": str(output),
+            "ACCEPTED_CONFIG_DIGEST": expected,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if accepted:
+        assert result.returncode == 0, result.stderr
+        assert output.read_text() == f"registry_config={expected}\n"
+    else:
+        assert result.returncode != 0
+        assert not output.exists()
 
 
 def test_the_receipt_records_the_registrys_own_config_digest() -> None:

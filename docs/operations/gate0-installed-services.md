@@ -99,7 +99,10 @@ disable PTY and user RC, exclude subsystem/shell bypasses and reject nonempty
 The observed NS3 package version supplied by the coordinator is Ubuntu
 `1:9.6p1-3ubuntu13.19`. The coordinator-owned
 `conformance/openssh-ubuntu-artifacts.json` now pins exact Ubuntu server/client
-archives; `.github/workflows/gate0-sshd-conformance.yml` verifies those hashes,
+archives from Ubuntu snapshot `20261013T000000Z`, before their live-pool retirement.
+Ubuntu USN-8721-1 and USN-8928-1 bracket this version on 3 September and
+14 October 2026; hosted CI must confirm the same pinned size and SHA-256.
+`.github/workflows/gate0-sshd-conformance.yml` verifies those hashes,
 extracts binaries, derives binary identities and explicitly invokes this suite
 with the installed wheel outside the checkout. Those source bindings require
 independent review and successful hosted evidence. Patched-source format,
