@@ -191,8 +191,8 @@ The reviewed measurement packet and approval are referenced in
 `increment2-acceptance.md`; this grants no activation, host changes or production
 acceptance. Governed JWT apply, human custody, approved public fingerprints and
 explicit activation approval remain required. Focused offline Git/crypto
-and isolated-router tests use the available kernel a97 environment; pinned a100
-assembly and migrated PostgreSQL checks remain hosted-CI gates.
+and isolated-router tests used a shared environment whose kernel differed from
+the repository pin. Exact pinned assembly and migrated PostgreSQL remain CI gates.
 
 The current forward transition must match the campaign's exact target revision
 and tree, including a failed attempted transition with supplied signed evidence.
