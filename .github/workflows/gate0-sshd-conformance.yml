@@ -49,7 +49,7 @@ jobs:
           assert pins["schema"] == "Gate0HostedSshArtifacts.v1"
           descriptor = {}
           for item in pins["artifacts"]:
-              assert item["url"].startswith("https://security.ubuntu.com/ubuntu/pool/main/o/openssh/")
+              assert item["url"].startswith("https://snapshot.ubuntu.com/ubuntu/20261013T000000Z/pool/main/o/openssh/")
               assert item["version"] == "1:9.6p1-3ubuntu13.19" and item["architecture"] == "amd64"
               with urllib.request.urlopen(item["url"], timeout=20) as response:
                   assert response.geturl() == item["url"]

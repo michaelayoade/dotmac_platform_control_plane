@@ -10,14 +10,14 @@ import os
 import stat
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, TypeGuard, cast
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from . import contracts as c
 from . import gate_evidence as g
-from .models import Receipt
+from .models import KeyRecord, Receipt
 
 if TYPE_CHECKING:
     from .service import DeployAgentService
@@ -155,9 +155,19 @@ def addition_commit(owner: DeployAgentService, path: str) -> str:
     return commits[0]
 
 
+def is_envelope(value: object) -> TypeGuard[c.Envelope]:
+    c._shape(value, c.Envelope)
+    return True
+
+
+def is_key_record(value: object) -> TypeGuard[KeyRecord]:
+    c._shape(value, KeyRecord)
+    return True
+
+
 def enrolled_key(
     owner: DeployAgentService, request: g.GateEvidence, *, before: str | None = None
-):
+) -> KeyRecord:
     key = None
     for path, event in owner.ledger.events():
         if path == before:
@@ -170,6 +180,8 @@ def enrolled_key(
         and key["deployment_ref"] == request["deployment_ref"],
         "host_key_inactive",
     )
+    if not is_key_record(key):
+        raise c.ContractError("host_key_inactive")
     return key
 
 
@@ -230,30 +242,36 @@ def observed_interval(
 def report_reference(
     owner: DeployAgentService,
     request: g.GateEvidence,
-    ref,
-    key,
+    ref: g.RefusalEvidence | g.TransitionEvidence,
+    key: KeyRecord,
     scope: CampaignScope,
     *,
     before: str | None = None,
-):
+) -> tuple[c.AppliedState, c.DesiredState, c.Envelope, str]:
     """Resolve exact signed bytes from derived paths, never caller-supplied paths."""
     classification = ref.get("classification", "accepted")
     if classification == "accepted":
         path = f"applied/{request['deployment_ref']}/{ref['report_id']}.json"
         raw = owner.ledger.read(path)
-        c.require(raw is not None, "evidence_missing")
-        envelope = c.read_json(raw)
+        if raw is None:
+            raise c.ContractError("evidence_missing")
+        envelope_value: object = c.read_json(raw)
     else:
         path = f"quarantine/{ref['report_sha256'][7:]}.json"
         raw = owner.ledger.read(path)
-        c.require(raw is not None, "evidence_missing")
+        if raw is None:
+            raise c.ContractError("evidence_missing")
         record = c.read_json(raw)
         c.exact(record, {"code", "envelope"})
         c.require(
-            record["code"] == "nonce_replay" and ref["case"] == "nonce_replay",
+            record["code"] == "nonce_replay"
+            and dict(ref).get("case") == "nonce_replay",
             "evidence_classification",
         )
-        envelope = record["envelope"]
+        envelope_value = record["envelope"]
+    if not is_envelope(envelope_value):
+        raise c.ContractError("evidence_substitution")
+    envelope = envelope_value
     c.require(
         c.digest(envelope) == ref["report_sha256"]
         and envelope["key_id"] == request["host_key_id"],
@@ -273,13 +291,18 @@ def report_reference(
         "/" not in ref["nonce"] and ".." not in ref["nonce"], "evidence_substitution"
     )
     desired_raw = owner.ledger.read(desired_path)
-    c.require(desired_raw is not None, "desired_unknown")
+    if desired_raw is None:
+        raise c.ContractError("desired_unknown")
     desired_envelope = c.read_json(desired_raw)
+    if not is_envelope(desired_envelope):
+        raise c.ContractError("evidence_substitution")
     desired = c.validate_desired(
         c.verify(c.DESIRED, desired_envelope, owner.signer.public_key_b64)
     )
     c.require(
-        all(desired[field] == value for field, value in report["desired"].items()),
+        all(
+            dict(desired)[field] == value for field, value in report["desired"].items()
+        ),
         "evidence_substitution",
     )
     c.require(c.plan_document(desired) in scope["candidates"], "candidate_scope")
@@ -295,7 +318,10 @@ def report_reference(
 
 
 def signed_interval(
-    report: c.AppliedState, desired: c.DesiredState, ref, scope: CampaignScope
+    report: c.AppliedState,
+    desired: c.DesiredState,
+    ref: g.RefusalEvidence | g.TransitionEvidence,
+    scope: CampaignScope,
 ) -> None:
     """New daemon evidence must be signed during its actual campaign attempt."""
     lower, upper = (
@@ -316,7 +342,7 @@ def verify_refusals(
     owner: DeployAgentService,
     request: g.GateEvidence,
     proof: g.ProofOutcome,
-    key,
+    key: KeyRecord,
     scope: CampaignScope,
     *,
     before: str | None = None,
@@ -347,7 +373,7 @@ def verify_refusals(
             signed_interval(report, desired, ref, scope)
         submitted = dict(envelope)
         if ref["case"] == "bad_signature":
-            signature = bytearray(c.unb64(submitted["signature_b64"]))
+            signature = bytearray(c.unb64(envelope["signature_b64"]))
             signature[0] ^= 1
             submitted["signature_b64"] = c.b64(bytes(signature))
         c.require(c.digest(submitted) == ref["submitted_sha256"], "submitted_mismatch")
@@ -409,7 +435,7 @@ def verify_transition(
     owner: DeployAgentService,
     request: g.GateEvidence,
     ref: g.TransitionEvidence,
-    key,
+    key: KeyRecord,
     scope: CampaignScope,
     *,
     passed: bool = True,
@@ -576,7 +602,7 @@ def verify_egress(
         raise c.ContractError("dns_evidence") from None
 
 
-def terminal_verdict(request: g.GateEvidence) -> str:
+def terminal_verdict(request: g.GateEvidence) -> Literal["PASS", "FAIL"]:
     required = {1, 2, 3, 4, 5} if request["phase"] == "initial" else {2, 3, 4}
     passed = all(p["outcome"] == "pass" for p in request["proofs"])
     c.require(
@@ -633,36 +659,38 @@ def verify_proofs(
                 )
                 transitions.append(proof["transition"])
             if proof["proof"] == 4 and proof["egress"] is not None:
-                c.require(proof["transition"] is not None, "evidence_missing")
+                if proof["transition"] is None:
+                    raise c.ContractError("evidence_missing")
                 verify_egress(
                     proof["egress"], proof["transition"], scope, passed=passed
                 )
         elif proof["proof"] == 5 and proof["restore"] is not None:
-            evidence = proof["restore"]
+            restore_evidence = proof["restore"]
             c.require(
-                evidence["source_identity"] == scope["restore_source_identity"]
-                and evidence["test_host_identity"]
+                restore_evidence["source_identity"] == scope["restore_source_identity"]
+                and restore_evidence["test_host_identity"]
                 == scope["restore_test_host_identity"]
-                and evidence["bundle_sha256"] == scope["restore_bundle_sha256"]
-                and evidence["capture_sha256"] == scope["restore_capture_sha256"]
-                and evidence["source_inventory_sha256"]
+                and restore_evidence["bundle_sha256"] == scope["restore_bundle_sha256"]
+                and restore_evidence["capture_sha256"]
+                == scope["restore_capture_sha256"]
+                and restore_evidence["source_inventory_sha256"]
                 == scope["restore_inventory_sha256"],
                 "evidence_substitution",
             )
             if passed:
                 c.require(
-                    evidence["no_ddl_enforced"]
-                    and evidence["source_parity"] is True
-                    and evidence["scratch_absent"] is True
-                    and evidence["restored_inventory_sha256"] is not None
-                    and evidence["source_inventory_sha256"]
-                    == evidence["restored_inventory_sha256"],
+                    restore_evidence["no_ddl_enforced"]
+                    and restore_evidence["source_parity"] is True
+                    and restore_evidence["scratch_absent"] is True
+                    and restore_evidence["restored_inventory_sha256"] is not None
+                    and restore_evidence["source_inventory_sha256"]
+                    == restore_evidence["restored_inventory_sha256"],
                     "proof_failed",
                 )
             c.require(
                 c.timestamp(scope["observation_not_before"])
-                <= c.timestamp(evidence["capture_started_at"])
-                <= c.timestamp(evidence["capture_finished_at"])
+                <= c.timestamp(restore_evidence["capture_started_at"])
+                <= c.timestamp(restore_evidence["capture_finished_at"])
                 <= c.timestamp(request["deadline"]),
                 "observation_interval",
             )
@@ -674,7 +702,7 @@ def verify_proofs(
         replay = next(ref for ref in refusals if ref["case"] == "nonce_replay")
         c.require(
             all(
-                replay[field] == transition[field]
+                dict(replay)[field] == dict(transition)[field]
                 for field in ("nonce", "report_id", "report_sha256")
             ),
             "replay_transition_mismatch",
@@ -711,7 +739,7 @@ def verify_prior(
         prior["phase"] == "initial"
         and terminal_verdict(prior) == "PASS"
         and all(
-            prior[key] == request[key]
+            dict(prior)[key] == dict(request)[key]
             for key in (
                 "deployment_ref",
                 "host_key_id",
@@ -735,6 +763,8 @@ def verify_prior(
         and request["source_tree"] != prior["source_tree"],
         "source_reused",
     )
+    if transition is None or prior_transition is None:
+        raise c.ContractError("evidence_missing")
     c.require(transition["nonce"] != prior_transition["nonce"], "transition_replay")
     c.require(
         transition["after"]["observed"]["running_image"]
@@ -756,7 +786,8 @@ def history(owner: DeployAgentService) -> None:
             c._shape(value, CommandRecord)
             command = cast(CommandRecord, value)
             raw = owner.ledger.read(command["evidence_path"])
-            c.require(raw is not None, "ledger_identity")
+            if raw is None:
+                raise c.ContractError("ledger_identity")
             request = g.validate(c.read_json(raw))
             c.require(
                 path == command_path(request)
@@ -794,7 +825,7 @@ def authorize(
 ) -> None:
     c.require(str(actor_admin_id) in scope["actor_admin_ids"], "campaign_actor")
     c.require(
-        all(request[key] == value for key, value in scope["context"].items()),
+        all(dict(request)[key] == value for key, value in scope["context"].items()),
         "campaign_scope",
     )
 
@@ -807,7 +838,8 @@ def admit(
     actor_admin_id: UUID,
 ) -> g.PublishedReceipt:
     request = g.validate(request)
-    c.require(owner.gate_scope is not None, "campaign_unavailable")
+    if owner.gate_scope is None:
+        raise c.ContractError("campaign_unavailable")
     scope = cast(CampaignScope, c.read_json(owner.gate_scope))
     authorize(request, scope, actor_admin_id)
     fingerprint = c.digest({"request": request, "actor_admin_id": str(actor_admin_id)})
@@ -844,7 +876,8 @@ def admit(
         # Projection repairs a commit->database crash also on identical retries.
         owner._record(db, {})
         evidence = owner.ledger.read(path)
-        c.require(evidence == c.canonical_json(request), "ledger_conflict")
+        if evidence is None or evidence != c.canonical_json(request):
+            raise c.ContractError("ledger_conflict")
         return {
             "run_id": request["run_id"],
             "command_sha256": c.digest(request),

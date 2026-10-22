@@ -161,11 +161,12 @@ class DeployAgentService:
                 c.exact(event, {"code", "envelope"})
                 envelope = cast(c.Envelope, event["envelope"])
                 c._shape(envelope, c.Envelope)
-                key = keys.get(envelope["key_id"])
-                c.require(
-                    key is not None and key["state"] == "active", "host_key_inactive"
+                quarantine_key = keys.get(envelope["key_id"])
+                if quarantine_key is None or quarantine_key["state"] != "active":
+                    raise c.ContractError("host_key_inactive")
+                c.validate_applied(
+                    c.verify(c.APPLIED, envelope, quarantine_key["public_key_b64"])
                 )
-                c.validate_applied(c.verify(c.APPLIED, envelope, key["public_key_b64"]))
                 c.require(
                     path == f"quarantine/{c.digest(envelope)[7:]}.json"
                     and event["code"]

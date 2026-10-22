@@ -186,7 +186,7 @@ def validate(value: object) -> GateEvidence:
             ("egress", proof["proof"] == 4),
             ("restore", proof["proof"] == 5),
         ):
-            present = bool(proof[field])
+            present = bool(dict(proof)[field])
             c.require(not present or expected)
             if expected and not present:
                 c.require(
