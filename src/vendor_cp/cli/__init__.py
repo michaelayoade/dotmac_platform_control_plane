@@ -117,6 +117,14 @@ def build_parser() -> _Parser:
     admin = groups.add_parser("admin", help="platform administrators and the database")
     admin_sub = admin.add_subparsers(dest="name", parser_class=_Parser)
 
+    github_auth = _command(
+        admin_sub,
+        "admin",
+        "github-auth-renew",
+        "renew the ledger-only GitHub App lease",
+    )
+    github_auth.set_defaults(handler=commands.admin_github_auth_renew)
+
     create = _command(admin_sub, "admin", "create", "create or rotate a platform admin")
     create.add_argument("email")
     create.add_argument("--inactive", action="store_true")

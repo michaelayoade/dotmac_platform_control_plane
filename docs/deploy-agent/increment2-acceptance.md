@@ -22,19 +22,19 @@ evidence.
 | Component | Approved shipping ceiling |
 | --- | ---: |
 | Shared contracts, per physical module | 450 |
-| CP Python implementation, migration, wiring and evidence admission | 2,400 |
+| CP Python implementation, migration, wiring and evidence admission | 3,100 |
 | Mandatory CP metadata | 300 |
-| Combined CP implementation and mandatory metadata | 2,700 |
+| Combined CP implementation and mandatory metadata | 3,400 |
 | Agent runtime | 1,100 |
 | Launcher, systemd and public config | 150 |
 | CI workflows and candidate tooling | 350 |
 | OpenBao and adopted credential helpers | 1,400 |
 | Egress renderer/config | 150 |
-| Gate0 proof and restore acceptance runtime, including adopted diagnostics | 4,100 |
+| Gate0 proof and restore acceptance runtime, including adopted diagnostics | 4,200 |
 | Finite agent/resolver/runner provisioning, including adopted wrappers | 950 |
-| Required tests across all increments and the approved engine guard | 9,000 |
+| Required tests across all increments and the approved engine guard | 9,900 |
 | Approved predecessor guard runtime | 60 |
-| Overall counted new source | 21,300 |
+| Overall counted new source | 23,000 |
 
 The measured shipping approval supersedes the earlier drafting-only budget
 restriction for this same bounded feature. All other component ceilings remain

@@ -4,6 +4,7 @@ umask 077
 
 readonly EXPECTED_HOST_ID="vendor-cp-prod"
 readonly COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.production.yml}"
+readonly COMPOSE_OVERRIDE_FILE="${COMPOSE_OVERRIDE_FILE:-}"
 readonly ENV_FILE="${ENV_FILE:-.env}"
 readonly HOST_ID_FILE="${HOST_ID_FILE:-/etc/dotmac-host-id}"
 readonly BACKUP_DIR="${BACKUP_DIR:-/opt/backups/dotmac-vendor-control-plane}"
@@ -157,7 +158,11 @@ readonly VENDOR_APP_IMAGE="ghcr.io/michaelayoade/dotmac_vendor_control_plane@${D
 export VENDOR_APP_IMAGE
 
 compose() {
-    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+    local -a compose_files=(-f "$COMPOSE_FILE")
+    if [[ -n "$COMPOSE_OVERRIDE_FILE" ]]; then
+        compose_files+=(-f "$COMPOSE_OVERRIDE_FILE")
+    fi
+    docker compose --env-file "$ENV_FILE" "${compose_files[@]}" "$@"
 }
 
 docker pull "$VENDOR_APP_IMAGE"

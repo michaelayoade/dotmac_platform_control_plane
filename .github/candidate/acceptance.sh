@@ -26,6 +26,7 @@ WORKDIR="$(mktemp -d)"
 DB_PORT="${CANDIDATE_DB_PORT:-5449}"
 DB_CONTAINER="candidate-postgres"
 APP_CONTAINER="candidate-app"
+DEPLOY_VOLUME=""
 CANDIDATE_NETWORK="candidate-vendor-backend"
 PG_IMAGE="${CANDIDATE_POSTGRES_IMAGE:-postgres:16}"
 # The platform host this run addresses. It is a Host HEADER only — every request
@@ -70,6 +71,9 @@ step() { printf '\n== %s\n' "$*"; }
 cleanup() {
     docker rm -f "$APP_CONTAINER" "$DB_CONTAINER" >/dev/null 2>&1 || true
     docker network rm "$CANDIDATE_NETWORK" >/dev/null 2>&1 || true
+    if test -n "$DEPLOY_VOLUME"; then
+        docker volume rm "$DEPLOY_VOLUME" >/dev/null 2>&1 || true
+    fi
     rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
@@ -616,15 +620,16 @@ unset signing_key
 # a switch on the check. Readiness still refuses an ageing backlog here, and
 # it correctly reports that relay liveness during quiescence is not
 # measurable in this arrangement, because there is no relay to measure.
+APP_OPTIONS=()
 start_app() {
-    local database_url="$1"
+    local database_url="$1" profile="${2:-production-bootstrap}"
     docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
     docker run -d --name "$APP_CONTAINER" --network host \
         --env "DATABASE_URL=$database_url" \
         --env "PLATFORM_DATABASE_URL=$database_url" \
         --env APP_ENV=production \
         --env ENVIRONMENT=production \
-        --env VENDOR_DEPLOYMENT_PROFILE=production-bootstrap \
+        --env "VENDOR_DEPLOYMENT_PROFILE=$profile" \
         --env "PLATFORM_ROOT_DOMAIN=${HOSTNAME_HEADER}" \
         --env "TRUSTED_HOSTS=${HOSTNAME_HEADER}" \
         --env TENANCY=multi \
@@ -642,7 +647,7 @@ start_app() {
         --env VENDOR_LICENCE_DELIVERY_MODE=logging \
         --env VENDOR_RELAY_EXPECTED=false \
         --volume "$WORKDIR/primary.key:/run/candidate/primary.key:ro" \
-        "$IMAGE" >/dev/null
+        "${APP_OPTIONS[@]}" "$IMAGE" >/dev/null
 }
 
 probe() { curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -959,5 +964,167 @@ PROFILE
 pass "the foundation profile readback found, parsed and bound-checked the artifact's document"
 pass "11 of 13 concerns bound; request_evidence_context and integration named unsatisfied"
 pass "the verdict moved from document_absent to concerns_incomplete, which is the proof it is READ"
+
+step "19  enabled deploy runtime in the actual keyless production image"
+# Disposable local transport proves runtime closure only. Sub GitHub permission,
+# protected-remote policy and signed Seabone effects remain live Gate 0 proofs.
+# Neither this fixture nor its generated signing key grants production custody.
+gh_digest=sha256:a95a4e011d77e9cd0e9922c13fda2b95195c6be29dfa58207075fd983bbae744
+DEPLOY_VOLUME="$(docker volume create)"
+docker run --rm --interactive --network none --user 0:0 \
+    --volume "$DEPLOY_VOLUME:/run/candidate/deploy" \
+    --volume "$WORKDIR:/fixture" \
+    --entrypoint python "$IMAGE" - <<'DEPLOY_FIXTURE'
+import base64
+import os
+import pathlib
+import subprocess
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+root = pathlib.Path("/run/candidate/deploy")
+root.chmod(0o755)
+os.chown(root, 10001, 10001)
+raw = Ed25519PrivateKey.generate().private_bytes(
+    serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+    serialization.NoEncryption(),
+)
+with pathlib.Path("/fixture/desired.key").open("xb") as key:
+    os.fchmod(key.fileno(), 0o600)
+    os.fchown(key.fileno(), 10001, 10001)
+    key.write(base64.urlsafe_b64encode(raw).rstrip(b"="))
+os.environ["HOME"] = str(root)
+os.setgid(10001)
+os.setuid(10001)
+
+def git(*args):
+    subprocess.run(["/usr/bin/git", *args], check=True, capture_output=True)
+
+git("init", "--bare", "--initial-branch=main", str(root / "remote.git"))
+git("clone", str(root / "remote.git"), str(root / "ledger"))
+git("-C", str(root / "ledger"), "config", "user.name", "Candidate fixture")
+git("-C", str(root / "ledger"), "config", "user.email", "candidate@example.com")
+git("-C", str(root / "ledger"), "commit", "--allow-empty", "-m", "fixture")
+git("-C", str(root / "ledger"), "push", "-u", "origin", "main")
+DEPLOY_FIXTURE
+APP_OPTIONS=(
+    --read-only --cap-drop ALL --security-opt no-new-privileges:true
+    --tmpfs /tmp:rw,noexec,nosuid,size=64m
+    --volume "$DEPLOY_VOLUME:/run/candidate/deploy"
+    --volume "$WORKDIR/desired.key:/run/candidate/desired.key:ro"
+    --env VENDOR_DEPLOY_AGENT_ENABLED=false
+    --env VENDOR_DESIRED_SIGNING_KEY_ID=candidate-desired
+    --env VENDOR_DESIRED_SIGNING_KEY_FILE=/run/candidate/desired.key
+    --env VENDOR_DESIRED_SIGNING_KEY_POINTER=secret/dotmac/platform-cp/desired-state/signing-key
+    --env VENDOR_DEPLOY_LEDGER_DIR=/run/candidate/deploy/ledger
+    --env VENDOR_DEPLOY_GH_EXECUTABLE=/usr/local/bin/gh
+    --env "VENDOR_DEPLOY_GH_SHA256=$gh_digest"
+)
+# Pipe the existing bearer into curl's config instead of putting it on argv.
+deploy_read() {
+    printf 'header = "Authorization: Bearer %s"\n' "$token" | curl --config - \
+        --silent --output "$WORKDIR/deploy.json" --write-out '%{http_code}' \
+        --max-time 10 --header "Host: ${HOSTNAME_HEADER}" \
+        http://127.0.0.1:8000/platform/deploy/drift
+}
+assert_enabled_deployment() {
+    local code
+    code="$(deploy_read)" || fail "enabled deployment transport failed"
+    test "$code" = 200 || fail "enabled deployment read returned $code"
+    python3 - "$WORKDIR/deploy.json" <<'DEPLOY_READ'
+import json
+import sys
+
+body = json.load(open(sys.argv[1]))
+assert set(body) == {"deployment_ref", "desired", "applied", "drift"}, body.keys()
+assert body["deployment_ref"] and body["desired"] is None
+assert body["applied"] is None and body["drift"] is False
+DEPLOY_READ
+}
+start_app "$(dsn app_admin restored_ok)" production-keyless-v1
+await_liveness || fail "keyless disabled control did not boot"
+test "$(deploy_read)" = 503 || fail "disabled deployment control did not refuse"
+python3 - "$WORKDIR/deploy.json" <<'DISABLED'
+import json
+import sys
+assert json.load(open(sys.argv[1])) == {"detail": "feature_disabled"}
+DISABLED
+# The same readiness-only result must fail the enabled acceptance predicate.
+if (assert_enabled_deployment) >/dev/null 2>&1; then
+    fail "disabled mode passed the enabled deployment gate"
+fi
+APP_OPTIONS+=(--env VENDOR_DEPLOY_AGENT_ENABLED=true)
+start_app "$(dsn app_admin restored_ok)" production-keyless-v1
+await_liveness || fail "enabled keyless deploy runtime did not boot"
+for _ in $(seq 1 30); do test "$(probe /health/ready)" = 200 && break; sleep 1; done
+test "$(probe /health/ready)" = 200 || fail "enabled runtime is not database-ready"
+assert_enabled_deployment || fail "enabled authenticated deployment read failed"
+docker exec "$APP_CONTAINER" /usr/local/bin/gh --version \
+    | grep -q '^gh version 2\.87\.3 ' || fail "packaged GitHub CLI version mismatch"
+# A service-owned 0600 key on a writable mount would still pass the signer.
+# Require the production read-only mount: O_WRONLY never truncates or writes.
+docker exec --interactive "$APP_CONTAINER" python - <<'READ_ONLY_KEY'
+import errno
+import os
+
+try:
+    fd = os.open(os.environ["VENDOR_DESIRED_SIGNING_KEY_FILE"], os.O_WRONLY)
+except OSError as error:
+    assert error.errno == errno.EROFS, error.errno
+else:
+    os.close(fd)
+    raise SystemExit("desired signing key mount is writable")
+READ_ONLY_KEY
+# Exercise the real ledger owner's append -> commit -> PUSH and next FETCH,
+# alongside the reader's independent executable digest check, as service UID.
+docker exec --interactive "$APP_CONTAINER" python - <<'DEPLOY_TRANSPORT'
+import os
+from vendor_cp.deploy_agent.candidates import GitHubCandidateEvidenceReader
+from vendor_cp.deploy_agent.ledger import GitLedger
+
+GitHubCandidateEvidenceReader(
+    os.environ["VENDOR_DEPLOY_GH_EXECUTABLE"], os.environ["VENDOR_DEPLOY_GH_SHA256"],
+)
+ledger = GitLedger(os.environ["VENDOR_DEPLOY_LEDGER_DIR"])
+with ledger.transaction():
+    assert ledger.append("candidate-runtime.json", {"fixture": True})
+with ledger.transaction():
+    assert ledger.read("candidate-runtime.json") is not None
+assert ledger.git("rev-parse", "HEAD") == ledger.git("rev-parse", "origin/main")
+DEPLOY_TRANSPORT
+# Each isolated constructor refusal keeps the same mounted key and real ledger.
+# No key bytes, bearer or credential values are printed by these checks.
+expect_runtime_refusal() {
+    local reason="$1" override="$2"
+    docker exec --interactive --env "$override" "$APP_CONTAINER" python - "$reason" <<'REFUSE_RUNTIME'
+import sys
+from vendor_cp.deploy_agent.contracts import ContractError
+from vendor_cp.deploy_agent.runtime import install_runtime
+
+try:
+    install_runtime()
+except ContractError as error:
+    assert error.code == sys.argv[1], error.code
+except RuntimeError as error:
+    assert str(error) == sys.argv[1], "unexpected runtime refusal"
+else:
+    raise SystemExit("invalid enabled runtime configuration was accepted")
+REFUSE_RUNTIME
+}
+expect_runtime_refusal candidate_reader_unavailable \
+    VENDOR_DEPLOY_GH_SHA256=sha256:0000000000000000000000000000000000000000000000000000000000000000
+expect_runtime_refusal ledger_unavailable VENDOR_DEPLOY_LEDGER_DIR=/tmp/absent-ledger
+# Only the root fixture owner changes permissions, through its temporary bind.
+# The application keeps the same read-only key mount throughout both cases.
+fixture_key_mode() {
+    docker run --rm --network none --user 0:0 \
+        --volume "$WORKDIR:/fixture" --entrypoint python "$IMAGE" -c \
+        'import os, sys; os.chmod("/fixture/desired.key", int(sys.argv[1], 8))' "$1"
+}
+fixture_key_mode 0644
+expect_runtime_refusal 'desired-state signing key unavailable' VENDOR_DEPLOY_AGENT_ENABLED=true
+fixture_key_mode 0600
+assert_enabled_deployment || fail "enabled deployment read failed after negative controls"
+pass "enabled keyless runtime: authenticated read, packaged gh, Git FETCH/PUSH and refusal controls"
 
 printf '\nCANDIDATE ACCEPTED\n'

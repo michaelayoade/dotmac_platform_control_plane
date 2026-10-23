@@ -12,6 +12,22 @@ POINTER = "secret/dotmac/platform-cp/desired-state/signing-key"
 
 
 class ConfiguredDesiredSigner:
+    @staticmethod
+    def _material(key_id: str, material: str, pointer: str) -> Ed25519PrivateKey:
+        identifier(key_id)
+        require(pointer == POINTER, "signing_purpose_mismatch")
+        raw = unb64(material)
+        require(len(raw) == 32, "signing_key_unavailable")
+        return Ed25519PrivateKey.from_private_bytes(raw)
+
+    @classmethod
+    def public_key_from_material(
+        cls, key_id: str, material: str, pointer: str = POINTER
+    ) -> str:
+        """Validate held operator input through the runtime's custody contract."""
+        key = cls._material(key_id, material, pointer)
+        return b64(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw))
+
     def __init__(self, key_id: str, key_file: str, pointer: str = POINTER) -> None:
         identifier(key_id)
         require(pointer == POINTER, "signing_purpose_mismatch")
@@ -26,9 +42,8 @@ class ConfiguredDesiredSigner:
                     and info.st_uid == os.geteuid(),
                     "signing_key_permissions",
                 )
-                raw = unb64(source.read(256).decode().strip())
-            require(len(raw) == 32, "signing_key_unavailable")
-            self._key = Ed25519PrivateKey.from_private_bytes(raw)
+                material = source.read(256).decode().strip()
+            self._key = self._material(key_id, material, pointer)
         except (OSError, UnicodeError, ValueError):
             raise RuntimeError("desired-state signing key unavailable") from None
         self.public_key_b64 = b64(

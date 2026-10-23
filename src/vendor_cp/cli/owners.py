@@ -56,6 +56,13 @@ class Owner:
 #: an owner declared without a command both fail.
 OWNERS: Final[tuple[Owner, ...]] = (
     Owner(
+        "admin github-auth-renew",
+        "vendor_cp.github_app_credentials",
+        "renew_host_credentials",
+        True,
+        "renew only the ledger installation lease from a protected host App key",
+    ),
+    Owner(
         "admin deploy-ledger-rebuild",
         "vendor_cp.deploy_agent.runtime",
         "ledger_rebuild",

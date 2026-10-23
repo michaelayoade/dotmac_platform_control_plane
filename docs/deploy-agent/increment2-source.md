@@ -268,12 +268,92 @@ Direct manual Compose use retains the `.env` default. The selector permits only
 bootstrap and keyless; it cannot select `full`.
 Feature enablement and signer/ledger prerequisites remain separate configuration.
 
+### Draft runtime configuration through the existing CP owner
+
+The explicit `docker-compose.keyless.yml` overlay supplies the app runtime.
+The existing adapter accepts `COMPOSE_OVERRIDE_FILE` as an optional second
+`-f` after `COMPOSE_FILE`; an absent or empty override preserves its single-file
+default and validated `ENV_FILE`. For a separately authorized keyless deployment,
+the deployment owner selects `COMPOSE_OVERRIDE_FILE=docker-compose.keyless.yml`
+and `EXPECTED_DEPLOYMENT_PROFILE=production-keyless-v1`. Profile selection remains
+an assembly decision. The overlay adds no executor or profile-dependent behavior.
+
+Only `app` receives `VENDOR_DEPLOY_AGENT_ENABLED=true`, from the overlay.
+The shared runtime environment must omit that variable so relay and ops retain
+the runtime's disabled default; migration needs neither desired signing nor GitHub.
+The base Compose services retain their read-only root filesystems, dropped
+capabilities and existing restrictions. The overlay supplies no host binary.
+The image must contain `/usr/local/bin/gh`, whose configured SHA-256 is
+`sha256:a95a4e011d77e9cd0e9922c13fda2b95195c6be29dfa58207075fd983bbae744`.
+
+The deployment owner must provision these inputs before selecting the overlay:
+
+| Public configuration | Protected host source and container use |
+| --- | --- |
+| `VENDOR_DESIRED_SIGNING_KEY_ID` | Required public identity of the independently provisioned desired-state key. |
+| Fixed desired-state key source | `/run/secrets/dotmac/platform-cp/desired-state/primary.key`, mounted at the same path read-only. Its pointer remains `secret/dotmac/platform-cp/desired-state/signing-key`. Never reuse the licence or D16 key. |
+| `VENDOR_DEPLOY_CP_LEDGER_HOST_DIR` | Required existing ledger checkout, mounted read-write at `/var/lib/dotmac-deploy/ledger`; the only writable overlay mount. |
+| `VENDOR_DEPLOY_CP_GATE_SCOPE_HOST_FILE` | Required protected public scope file, mounted read-only at `/etc/dotmac-deploy/gate-scope.json`. |
+| `VENDOR_DEPLOY_CP_GITHUB_AUTH_HOST_DIR` | Required protected authentication directory, mounted read-only at `/run/secrets/dotmac/platform-cp/github`, the fixed `GH_CONFIG_DIR`. |
+| `VENDOR_DEPLOY_CP_GIT_CONFIG_HOST_FILE` | Required protected public Git configuration, mounted read-only at `/etc/dotmac-deploy/gitconfig`, the fixed `GIT_CONFIG_GLOBAL`; uses the existing gh credential helper without embedding credentials. |
+
+Every added bind uses `bind.create_host_path=false`; Compose cannot fabricate a
+missing key, checkout, scope, auth directory or Git configuration. Required public
+variables use Compose's `:?` form to refuse missing and empty inputs. The key must
+meet the runtime's service-owned regular 0600-file checks. The ledger checkout must
+be writable by the image's service identity; scope ownership, parent-directory
+protection and canonical bytes must meet the existing scope loader's checks.
+The protected auth directory must be readable by that identity with usable
+preprovisioned gh authentication. No token is supplied in environment or argv.
+`GIT_TERMINAL_PROMPT=0` and `GH_PROMPT_DISABLED=1` refuse interactive fallback.
+
+The existing CP deployment tooling owns authentication provisioning, the public
+Git credential-helper configuration and the ledger checkout. Its `origin` must
+be the selected HTTPS remote
+`https://github.com/michaelayoade/dotmac-deploy-ledger.git`, on `main`, with
+service-identity author configuration and protection against history rewriting.
+The public remote selection is recorded here; this overlay does not create,
+clone, reconfigure or attest the remote. Its existing protection, exact checkout
+state, read/write authentication and noninteractive helper operation require
+fresh deployment-owner validation for live use. No secret material is generated
+or read by this source wiring.
+
+The offline architecture tests check the YAML declarations, protected mounts,
+base-service restrictions and actual shell argument composition using a fake
+docker command. Strict Compose interpolation/merged rendering on missing inputs,
+image acceptance, material provisioning, startup and authenticated ledger/GitHub
+operation remain hosted CI or separately authorized live proofs. This source
+approval does not close those live and artifact acceptance obligations.
+
 This source change performs no live adoption. The host identity is unchanged;
 `PLATFORM_ROOT_DOMAIN` and `TRUSTED_HOSTS` require `platform.dotmac.io`. Candidate
 inputs permit bootstrap or keyless; assembly retains production profile admission;
 endpoint TLS, ingress and immutable-image adoption require separate evidence.
 Mandatory descriptor/promotion/prospective metadata remains 233 counted lines.
 The profile declaration and deployment guard are counted as CP runtime/wiring.
-The profile, guard, tests and documentation delta is measured separately and
-must fit the approved 21,000-line overall and 8,800-line required-test ceilings
-before publication; source adoption grants no live activation authority.
+The approved enabled-runtime amendment permits 23,000 overall counted lines,
+9,900 required-test lines, 3,100 CP implementation/wiring lines and 4,200 proof
+lines. CI remains capped at 350; other component limits remain unchanged. Source
+adoption grants no live activation authority.
+
+### Ledger GitHub App credential provisioning
+
+The owner-only `dotmac-deployment-ledger` App (5448762, installation 174650996)
+is installed only on `michaelayoade/dotmac-deploy-ledger` (1431613388), with
+Contents write and Metadata read. Its private key is a root-only held file at
+`/etc/dotmac/platform-cp/github-app/private-key.pem`, outside application mounts.
+The existing installed CLI command `admin github-auth-renew` delegates issuance
+to the credential owner under the existing production deployment lock. It
+requests only that repository and permission set, validates the returned scope
+and expiration, and atomically replaces `hosts.yml` inside the auth directory.
+The application reads that directory; it never receives the App private key.
+
+The checked-in service and twenty-minute timer are installation inputs only.
+They require a root-owned installed wheel in the host operator environment at
+`/opt/dotmac/vendor-control-plane/operator`, protected auth-directory ancestry,
+and a successful manual issuance before timer activation. `cp-github.gitconfig`
+contains only the noninteractive gh credential helper. A failed renewal retains
+the previous token file; GitHub expiry closes access if renewals remain broken.
+Public lease receipts expose no token. Real issuance, restart/renewal behavior,
+protected-main append and Sub candidate evidence reads require live proof.
+These files neither install the timer nor enable the application.

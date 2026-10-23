@@ -6,6 +6,7 @@ from becoming a deployable release.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import io
@@ -866,3 +867,141 @@ def test_the_declared_ui_asset_expectation_is_exact() -> None:
     assert len(lines) == 2, "expected a count and a digest"
     assert lines[0].isdigit() and int(lines[0]) > 0
     assert len(lines[1]) == 64 and all(c in "0123456789abcdef" for c in lines[1])
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "transport_exit", "accepted"),
+    [
+        (
+            200,
+            {
+                "deployment_ref": "fixture",
+                "desired": None,
+                "applied": None,
+                "drift": False,
+            },
+            0,
+            True,
+        ),
+        (503, {"detail": "feature_disabled"}, 0, False),
+        (200, {"detail": "feature_disabled"}, 0, False),
+        (
+            200,
+            {
+                "deployment_ref": "fixture",
+                "desired": None,
+                "applied": None,
+                "drift": True,
+            },
+            0,
+            False,
+        ),
+        (
+            200,
+            {
+                "deployment_ref": "fixture",
+                "desired": None,
+                "applied": None,
+                "drift": False,
+            },
+            7,
+            False,
+        ),
+    ],
+)
+@pytest.mark.parametrize("conditional", ["if", "or"])
+def test_enabled_gate_rejects_disabled_and_unrelated_healthy_responses(
+    tmp_path, status, body, transport_exit, accepted, conditional
+):
+    """Execute the actual shell predicate with synthetic HTTP observations."""
+    function = BATTERY.split("assert_enabled_deployment() {", 1)[1].split(
+        '\nstart_app "$(dsn app_admin restored_ok)" production-keyless-v1', 1
+    )[0]
+    (tmp_path / "deploy.json").write_text(json.dumps(body))
+    invocation = (
+        "if (assert_enabled_deployment); then exit 0; else exit 1; fi"
+        if conditional == "if"
+        else "assert_enabled_deployment || fail refused"
+    )
+    script = (
+        "set -euo pipefail\nfail() { exit 1; }\n"
+        f"deploy_read() {{ printf %s {status}; return {transport_exit}; }}\n"
+        "assert_enabled_deployment() {" + function + "\n" + invocation + "\n"
+    )
+    result = subprocess.run(  # noqa: S603 -- repository gate, synthetic response
+        ["/bin/bash", "-c", script],
+        env={"PATH": os.defpath, "WORKDIR": str(tmp_path)},
+        capture_output=True,
+        check=False,
+    )
+    assert (result.returncode == 0) is accepted, result.stderr
+
+
+def test_both_candidate_callers_reach_the_same_enabled_runtime_gate():
+    for workflow in (CI_WORKFLOW, IMAGE_WORKFLOW):
+        assert ".github/candidate/acceptance.sh" in _text(workflow)
+    gate = BATTERY.split('step "19  enabled deploy runtime', 1)[1]
+    assert gate.index("VENDOR_DEPLOY_AGENT_ENABLED=false") < gate.index(
+        "VENDOR_DEPLOY_AGENT_ENABLED=true"
+    )
+    assert (
+        gate.count('start_app "$(dsn app_admin restored_ok)" production-keyless-v1')
+        == 2
+    )
+    assert "if (assert_enabled_deployment)" in gate
+    assert 'test "$(probe /health/ready)" = 200' in gate
+    assert gate.index("assert_enabled_deployment || fail") < gate.index(
+        "CANDIDATE ACCEPTED"
+    )
+    for evidence in (
+        "--read-only --cap-drop ALL --security-opt no-new-privileges:true",
+        "os.setuid(10001)",
+        "os.fchmod(key.fileno(), 0o600)",
+        "Ed25519PrivateKey.generate()",
+        'ledger.append("candidate-runtime.json"',
+        'ledger.git("rev-parse", "origin/main")',
+        "/usr/local/bin/gh --version",
+        "candidate_reader_unavailable",
+        "ledger_unavailable",
+        "desired-state signing key unavailable",
+        '--volume "$WORKDIR/desired.key:/run/candidate/desired.key:ro"',
+        'DEPLOY_VOLUME="$(docker volume create)"',
+        'docker volume rm "$DEPLOY_VOLUME"',
+    ):
+        assert evidence in BATTERY
+
+
+def test_runtime_transport_is_packaged_from_public_verified_inputs():
+    recipe = _text(ROOT / "Dockerfile")
+    runtime = recipe.split(" AS runtime", 1)[1]
+    assert "apt-get install --no-install-recommends -y git ca-certificates" in runtime
+    assert "COPY --from=github-cli --chown=root:root /gh /usr/local/bin/gh" in runtime
+    assert "gh_2.87.3_checksums.txt" in recipe
+    assert 'test "$(dpkg --print-architecture)" = amd64' in recipe
+    assert "hashlib.sha256(archive).hexdigest() != expected" in recipe
+    assert "c6e5537631fca45f277ef405ce8751d139b491e9402cc20891a003525a8773b2" in recipe
+    assert "a95a4e011d77e9cd0e9922c13fda2b95195c6be29dfa58207075fd983bbae744" in BATTERY
+
+
+@pytest.mark.parametrize(
+    ("error_number", "accepted"),
+    [(errno.EROFS, True), (errno.EACCES, False), (None, False)],
+)
+def test_desired_key_mount_probe_requires_read_only_filesystem(error_number, accepted):
+    """Writable and permission-denied mounts must both fail the actual probe."""
+    from unittest.mock import patch
+
+    probe = BATTERY.split("<<'READ_ONLY_KEY'\n", 1)[1].split("\nREAD_ONLY_KEY", 1)[0]
+    error = (
+        OSError(error_number, "synthetic filesystem result") if error_number else None
+    )
+    with (
+        patch.dict(os.environ, {"VENDOR_DESIRED_SIGNING_KEY_FILE": "/fixture/key"}),
+        patch("os.open", side_effect=error, return_value=42),
+        patch("os.close"),
+    ):
+        if accepted:
+            exec(compile(probe, "<candidate-key-mount-probe>", "exec"), {})  # noqa: S102 -- trusted repository probe
+        else:
+            with pytest.raises((AssertionError, SystemExit)):
+                exec(compile(probe, "<candidate-key-mount-probe>", "exec"), {})  # noqa: S102 -- trusted repository probe

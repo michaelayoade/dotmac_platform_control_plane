@@ -46,7 +46,13 @@ def test_runtime_image_uses_a_build_secret_and_runs_unprivileged() -> None:
     dockerfile = _text("Dockerfile")
 
     assert dockerfile.startswith("# syntax=docker/dockerfile:")
-    assert dockerfile.count("python:3.12-slim@sha256:") == 2
+    stages = re.findall(r"(?m)^FROM (.+)$", dockerfile)
+    assert len(stages) == 3
+    python_base = stages[0].split(" AS ", 1)[0]
+    assert re.fullmatch(r"python:3\.12-slim@sha256:[0-9a-f]{64}", python_base)
+    assert stages == [
+        f"{python_base} AS {name}" for name in ("builder", "github-cli", "runtime")
+    ]
     assert "--require-hashes --only-binary=:all:" in dockerfile
     assert ".github/bootstrap/poetry-requirements.txt" in dockerfile
     assert "--mount=type=secret,id=forgejo_token" in dockerfile

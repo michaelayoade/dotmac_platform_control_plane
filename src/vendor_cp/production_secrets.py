@@ -45,6 +45,8 @@ from vendor_cp.product_release_pins import (
 )
 
 LICENCE_SIGNING_PATH = "secret/dotmac/licensing/signing-key"
+DESIRED_SIGNING_PATH = "secret/dotmac/platform-cp/desired-state/signing-key"
+DESIRED_SIGNING_DIRECTORY = Path("/run/secrets/dotmac/platform-cp/desired-state")
 DATABASE_PATH = "secret/dotmac/vendor-control-plane/production/database"
 RUNTIME_PATH = "secret/dotmac/vendor-control-plane/production/runtime"
 DEPLOY_SSH_PATH = "secret/dotmac/vendor-control-plane/production/deploy-ssh"
@@ -175,6 +177,59 @@ class MaterializedHostSecrets:
     env_file: Path
     signing_key_file: Path
     authorized_keys_file: Path
+
+
+@dataclass(frozen=True, slots=True)
+class DesiredSignerBundle:
+    """Purpose-bound held material; only public identity leaves the receiver."""
+
+    key_id: str
+    private_key_b64url: str = field(repr=False)
+    custody_version: int
+    pointer: str = DESIRED_SIGNING_PATH
+
+    def public_identity(self) -> dict[str, object]:
+        from vendor_cp.deploy_agent.keys import ConfiguredDesiredSigner
+
+        try:
+            if (
+                self.pointer != DESIRED_SIGNING_PATH
+                or type(self.custody_version) is not int
+                or self.custody_version < 1
+                or not isinstance(self.private_key_b64url, str)
+                or len(self.private_key_b64url) != 43
+            ):
+                raise ValueError
+            public = ConfiguredDesiredSigner.public_key_from_material(
+                self.key_id, self.private_key_b64url, self.pointer
+            )
+        except (ValueError, TypeError, RuntimeError):
+            raise ProductionSecretError(
+                "invalid desired-state signer material"
+            ) from None
+        return {
+            "key_id": self.key_id,
+            "public_key_b64": public,
+            "custody_version": self.custody_version,
+            "pointer": self.pointer,
+        }
+
+    def to_json(self) -> str:
+        """Encode for a held stdin pipe only; never print or persist this value."""
+        self.public_identity()
+        return json.dumps(asdict(self), separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, raw: str) -> DesiredSignerBundle:
+        try:
+            body = json.loads(raw)
+            if not isinstance(body, dict) or set(body) != set(cls.__annotations__):
+                raise ValueError
+            bundle = cls(**body)
+            bundle.public_identity()
+            return bundle
+        except (ValueError, TypeError):
+            raise ProductionSecretError("invalid desired-state signer bundle") from None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -653,7 +708,7 @@ class OpenBaoClient:
         self._timeout = timeout
 
     def _url(self, path: str, *, version: int | None = None) -> str:
-        if path not in SECRET_FIELDS:
+        if path not in SECRET_FIELDS and path != DESIRED_SIGNING_PATH:
             raise ProductionSecretError("OpenBao path is outside the approved set")
         relative = path.removeprefix("secret/")
         encoded = urllib.parse.quote(relative, safe="/")
@@ -918,6 +973,13 @@ def _remediation(path: str, missing: Sequence[str]) -> str:
 
 
 def validate_record(path: str, fields: Mapping[str, str]) -> None:
+    if path == DESIRED_SIGNING_PATH:
+        if set(fields) != {"key_id", "private_key_b64url"}:
+            raise ProductionSecretError("desired-state signer record schema mismatch")
+        DesiredSignerBundle(
+            fields["key_id"], fields["private_key_b64url"], 1
+        ).public_identity()
+        return
     expected = SECRET_FIELDS.get(path)
     if expected is None:
         raise ProductionSecretError("secret path is outside the approved set")
@@ -1568,6 +1630,108 @@ def pin_product_release(
     return True
 
 
+def desired_signer_bundle(client: OpenBaoClient) -> DesiredSignerBundle:
+    """Read this purpose only; never fall back to licensing or incident keys."""
+    record = client.read_versioned(DESIRED_SIGNING_PATH)
+    validate_record(record.path, record.fields)
+    if record.path != DESIRED_SIGNING_PATH:
+        raise ProductionSecretError("desired-state signer custody path mismatch")
+    bundle = DesiredSignerBundle(
+        record.fields["key_id"], record.fields["private_key_b64url"], record.version
+    )
+    bundle.public_identity()
+    return bundle
+
+
+def seed_desired_signer(client: OpenBaoClient, key_id: str) -> dict[str, object]:
+    """Explicit create-only enrollment; the ordinary bundle seed is unchanged."""
+    fields = client.read_optional(DESIRED_SIGNING_PATH)
+    created = fields is None
+    if fields is None:
+        fields = {
+            "key_id": key_id,
+            "private_key_b64url": _b64url(secrets.token_bytes(32)),
+        }
+        validate_record(DESIRED_SIGNING_PATH, fields)
+        client.create(DESIRED_SIGNING_PATH, fields)
+    if fields["key_id"] != key_id:
+        raise ProductionSecretError("desired-state signer already has another identity")
+    bundle = desired_signer_bundle(client)
+    if bundle.key_id != key_id or not hmac.compare_digest(
+        bundle.private_key_b64url, fields["private_key_b64url"]
+    ):
+        raise ProductionSecretError("desired-state signer custody read-back mismatch")
+    return {**bundle.public_identity(), "created": created}
+
+
+def materialize_desired_signer(
+    bundle: DesiredSignerBundle,
+    *,
+    directory: Path = DESIRED_SIGNING_DIRECTORY,
+    app_owner: tuple[int, int] = (10001, 10001),
+) -> dict[str, object]:
+    """Install one complete immutable key identity; refuse replacement/rotation."""
+    identity = bundle.public_identity()
+    if not directory.is_absolute() or directory.resolve() != directory:
+        raise ProductionSecretError("desired-state signer directory is not canonical")
+    for parent in reversed(directory.parents):
+        if not parent.exists():
+            parent.mkdir(mode=0o700)
+        info = parent.lstat()
+        trusted_sticky = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid not in {0, os.geteuid()}
+            or (info.st_mode & 0o022 and not trusted_sticky)
+        ):
+            raise ProductionSecretError("desired-state signer ancestry is unprotected")
+    key = directory / "primary.key"
+    metadata = directory / "identity.json"
+    material = bundle.private_key_b64url + "\n"
+    if directory.exists():
+        info = directory.lstat()
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ProductionSecretError("desired-state signer directory is unprotected")
+        for path, owner in ((key, app_owner), (metadata, (os.geteuid(), os.getegid()))):
+            if path.is_symlink() or not path.is_file():
+                raise ProductionSecretError("desired-state signer state is incomplete")
+            info = path.stat()
+            if (
+                (info.st_uid, info.st_gid) != owner
+                or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                raise ProductionSecretError("desired-state signer file is unprotected")
+        if (
+            set(p.name for p in directory.iterdir()) != {"primary.key", "identity.json"}
+            or metadata.read_text() != json.dumps(identity, sort_keys=True) + "\n"
+            or not hmac.compare_digest(key.read_text(), material)
+        ):
+            raise ProductionSecretError("desired-state signer replacement refused")
+        return {**identity, "installed": False}
+    with tempfile.TemporaryDirectory(
+        prefix=".desired-state-", dir=directory.parent
+    ) as tmp:
+        stage = Path(tmp) / "bundle"
+        stage.mkdir(mode=0o700)
+        os.chown(stage, os.geteuid(), os.getegid())
+        stage.chmod(0o700)
+        _atomic_write(stage / "primary.key", material, mode=0o600, owner=app_owner)
+        _atomic_write(
+            stage / "identity.json",
+            json.dumps(identity, sort_keys=True) + "\n",
+            mode=0o600,
+            owner=(os.geteuid(), os.getegid()),
+        )
+        os.rename(stage, directory)
+        descriptor = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    return {**identity, "installed": True}
+
+
 def materialize_host_bundle(
     bundle: HostSecretBundle,
     *,
@@ -1622,6 +1786,50 @@ def transfer_host_bundle(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> None:
     """Send the validated bundle only on SSH stdin to the installed receiver."""
+    _transfer_host_payload(
+        bundle.to_json(),
+        receiver_args=(
+            "receive",
+            "--env-template",
+            f"{target_dir}/.env.production.example",
+            "--env-file",
+            f"{target_dir}/.env",
+        ),
+        target=target,
+        target_dir=target_dir,
+        known_hosts_file=known_hosts_file,
+        runner=runner,
+    )
+
+
+def transfer_desired_signer(
+    bundle: DesiredSignerBundle,
+    *,
+    target: str,
+    target_dir: str,
+    known_hosts_file: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Use the existing protected transfer owner for this one purpose."""
+    _transfer_host_payload(
+        bundle.to_json(),
+        receiver_args=("receive-desired-signer",),
+        target=target,
+        target_dir=target_dir,
+        known_hosts_file=known_hosts_file,
+        runner=runner,
+    )
+
+
+def _transfer_host_payload(
+    payload: str,
+    *,
+    receiver_args: Sequence[str],
+    target: str,
+    target_dir: str,
+    known_hosts_file: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
     if re.fullmatch(r"[A-Za-z0-9_.-]+@[A-Za-z0-9_.:-]+", target) is None:
         raise ProductionSecretError("SSH target has an unsafe shape")
     if (
@@ -1642,14 +1850,10 @@ def transfer_host_bundle(
         f"PYTHONPATH={target_dir}/src",
         "python3",
         f"{target_dir}/scripts/materialize_production_secrets.py",
-        "receive",
-        "--env-template",
-        f"{target_dir}/.env.production.example",
-        "--env-file",
-        f"{target_dir}/.env",
+        *receiver_args,
     )
     try:
-        runner(command, input=bundle.to_json(), text=True, check=True)
+        runner(command, input=payload, text=True, check=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ProductionSecretError("host secret transfer failed") from exc
 
