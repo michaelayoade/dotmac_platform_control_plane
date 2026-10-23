@@ -1,6 +1,6 @@
 # Vendor Control Plane production deployment
 
-The production control plane is `vendor.dotmac.io` on the explicitly selected
+The production control plane is `platform.dotmac.io` on the explicitly selected
 host `149.102.158.144`. It is a separate third-plane assembly. It does not share
 Sub's database, import Sub, or become authoritative for Sub's subscribers. Sub
 remains live at `selfcare.dotmac.io`; Vendor consumes only product-emitted,
@@ -36,7 +36,7 @@ The host then performs one ordered operation:
    lineages, as an installed console script inside the `ops` container;
 9. start the relay with `--no-deps`, replace the app with `--no-deps`, and prove
    `/health` and `/health/ready` on the loopback port while declaring
-   `Host: vendor.dotmac.io`, so the probe passes through the same trusted-host
+   `Host: platform.dotmac.io`, so the probe passes through the same trusted-host
    boundary as production traffic rather than weakening it for an IP-only probe.
 
 The candidate probes use the pulled immutable image through the existing

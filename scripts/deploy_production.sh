@@ -26,6 +26,13 @@ readonly AUTHORIZATION_REF="$2"
 [[ "$AUTHORIZATION_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
     || die "authorization reference must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\$"
 
+# Opt-in surface selection; bootstrap remains the deployment default.
+readonly EXPECTED_DEPLOYMENT_PROFILE="${EXPECTED_DEPLOYMENT_PROFILE-production-bootstrap}"
+case "$EXPECTED_DEPLOYMENT_PROFILE" in
+    production-bootstrap|production-keyless-v1) ;;
+    *) die "expected deployment profile must be production-bootstrap or production-keyless-v1" ;;
+esac
+
 # This script's own cleanup. The wrapper that hands it a registry token traps;
 # this process is the one holding the compose operation and the bundle
 # temporary when an SSH connection drops, and it had no trap of its own.
@@ -79,17 +86,21 @@ printf '%s %s\n' "$$" "legacy-freeze ${DIGEST}" >"$LOCK_FILE"
 grep -Fqx 'APP_ENV=production' "$ENV_FILE" || die "APP_ENV marker mismatch"
 grep -Fqx 'SERVER_NAME=vendor-cp-prod' "$ENV_FILE" || die "server marker mismatch"
 grep -Fqx 'ENVIRONMENT=production' "$ENV_FILE" || die "runtime is not production"
-grep -Fqx 'PLATFORM_ROOT_DOMAIN=vendor.dotmac.io' "$ENV_FILE" \
+grep -Fqx 'PLATFORM_ROOT_DOMAIN=platform.dotmac.io' "$ENV_FILE" \
     || die "platform domain mismatch"
-# The deployment profile is REQUIRED here rather than defaulted in the image.
-# `load_deployment_profile` falls back to `full` OUTSIDE production only, so a
-# developer sees the whole assembly; since ADR-0015 an absent profile in a
-# production environment fails the boot instead. This grep is therefore no
-# longer the only thing standing between the host and the `full` composition —
-# it is the cheap check that runs before the image starts, and the loader is
-# the one that runs on every restart this script does not perform.
-grep -Fqx 'VENDOR_DEPLOYMENT_PROFILE=production-bootstrap' "$ENV_FILE" \
-    || die "deployment profile is not production-bootstrap"
+# Require one canonical assignment matching the explicit deployment intent.
+# Count colon, bare-key and whitespace/export spellings: Compose must not resolve a
+# second assignment differently from this early check. Runtime production
+# validation independently refuses an absent profile or the full laboratory.
+[[ "$(grep -Ec '^[[:space:]]*(export[[:space:]]+)?VENDOR_DEPLOYMENT_PROFILE[[:space:]]*([:=]|$)' "$ENV_FILE")" -eq 1 ]] \
+    || die "deployment profile requires exactly one assignment"
+grep -Fqx "VENDOR_DEPLOYMENT_PROFILE=$EXPECTED_DEPLOYMENT_PROFILE" "$ENV_FILE" \
+    || die "deployment profile does not match expected profile"
+# Services must consume the same file whose production markers were checked.
+case "$ENV_FILE" in
+    /*) export VENDOR_CP_RUNTIME_ENV_FILE="$ENV_FILE" ;;
+    *) export VENDOR_CP_RUNTIME_ENV_FILE="$PWD/$ENV_FILE" ;;
+esac
 # ── Fast environment floor, before candidate containers or database work ─────
 #
 # Look at the order of this script. `compose up -d --no-deps app --wait` is the
@@ -440,10 +451,10 @@ compose up -d --no-deps app --wait
 # is the one that gates the printed result, and liveness is kept as the
 # positive control that distinguishes "not ready" from "not answering at all".
 curl --fail --silent --show-error --max-time 10 \
-    --header "Host: vendor.dotmac.io" \
+    --header "Host: platform.dotmac.io" \
     "http://127.0.0.1:${VENDOR_APP_PORT:-8100}/health" >/dev/null
 curl --fail --silent --show-error --max-time 10 \
-    --header "Host: vendor.dotmac.io" \
+    --header "Host: platform.dotmac.io" \
     "http://127.0.0.1:${VENDOR_APP_PORT:-8100}/health/ready" >/dev/null
 
 printf 'Deployed %s\nrecovery bundle: %s\nrecovery bundle digest: %s\n' \

@@ -167,7 +167,7 @@ def test_production_compose_pulls_only_and_keeps_state_private() -> None:
     assert 'profiles: ["ops"]' in compose
     assert "no-new-privileges:true" in compose
     assert "cap_drop:" in compose and "- ALL" in compose
-    assert "headers={'Host': 'vendor.dotmac.io'}" in compose
+    assert "headers={'Host': 'platform.dotmac.io'}" in compose
     assert "vendor_backend:\n    internal: true" in compose
     assert 'com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"' in compose
 
@@ -298,7 +298,7 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     assert "compose up -d --no-deps app --wait" in commands
     assert "ALTER ROLE app_admin" not in deploy
     assert '"false|false|true|true"' in deploy
-    assert '--header "Host: vendor.dotmac.io"' in deploy
+    assert '--header "Host: platform.dotmac.io"' in deploy
     assert (
         "VENDOR_DB_BOOTSTRAP_PASSWORD"
         not in compose.split("  app:\n", 1)[1].split("  ops:\n", 1)[0]
@@ -329,7 +329,7 @@ def test_production_environment_has_no_secret_defaults() -> None:
     assert required_empty <= values.keys()
     assert all(values[key] == "" for key in required_empty)
     assert values["ENVIRONMENT"] == "production"
-    assert values["PLATFORM_ROOT_DOMAIN"] == "vendor.dotmac.io"
+    assert values["PLATFORM_ROOT_DOMAIN"] == "platform.dotmac.io"
     assert values["VENDOR_LICENCE_SIGNING_MODE"] == "configured"
     assert values["VENDOR_PRODUCT_RELEASE_PINS_JSON"] == "{}"
     # The profile is required on the host, not defaulted in the image. Since
@@ -338,8 +338,10 @@ def test_production_environment_has_no_secret_defaults() -> None:
     # thing between the host and `full` — which would publish every withheld
     # surface, the provisioning laboratory included.
     assert values["VENDOR_DEPLOYMENT_PROFILE"] == "production-bootstrap"
-    assert "grep -Fqx 'VENDOR_DEPLOYMENT_PROFILE=production-bootstrap'" in _text(
-        "scripts/deploy_production.sh"
+    deploy = _text("scripts/deploy_production.sh")
+    assert "${EXPECTED_DEPLOYMENT_PROFILE-production-bootstrap}" in deploy
+    assert (
+        'grep -Fqx "VENDOR_DEPLOYMENT_PROFILE=$EXPECTED_DEPLOYMENT_PROFILE"' in deploy
     )
 
 
@@ -571,6 +573,108 @@ def test_the_deploy_probes_runtime_material_before_database_work() -> None:
 
 
 @pytest.mark.parametrize(
+    "expected_profile", ["production-bootstrap", "production-keyless-v1"]
+)
+@pytest.mark.parametrize(
+    "alternate",
+    [
+        None,
+        "VENDOR_DEPLOYMENT_PROFILE: {other}",
+        "export VENDOR_DEPLOYMENT_PROFILE : {other}",
+        " VENDOR_DEPLOYMENT_PROFILE:{other}",
+        "VENDOR_DEPLOYMENT_PROFILE",
+    ],
+)
+@pytest.mark.parametrize("relative_env_file", [False, True])
+def test_profile_guard_rejects_alternate_overrides(
+    tmp_path: Path,
+    expected_profile: str,
+    alternate: str | None,
+    relative_env_file: bool,
+) -> None:
+    """Execute the exact early guards without locks, Docker or private env data."""
+    script = _text("scripts/deploy_production.sh")
+    guard = script[script.index("die() {") : script.index("[[ $#")]
+    guard += script[
+        script.index("# Opt-in surface selection") : script.index(
+            "# This script's own cleanup."
+        )
+    ]
+    guard += script[
+        script.index("# Require one canonical assignment") : script.index(
+            "# ── Fast environment floor"
+        )
+    ]
+    guard += 'printf "%s" "$VENDOR_CP_RUNTIME_ENV_FILE"'
+    other = (
+        "production-keyless-v1"
+        if expected_profile == "production-bootstrap"
+        else "production-bootstrap"
+    )
+    env_file = tmp_path / "public-profile.env"
+    env_file.write_text(
+        f"VENDOR_DEPLOYMENT_PROFILE={expected_profile}\n"
+        + (alternate.format(other=other) + "\n" if alternate else ""),
+        encoding="utf-8",
+    )
+    result = subprocess.run(  # noqa: S603 -- repository source guard, public fixtures
+        ["bash", "-c", guard],  # noqa: S607 -- fixed interpreter, no host operations
+        env={
+            **os.environ,
+            "ENV_FILE": env_file.name if relative_env_file else str(env_file),
+            "EXPECTED_DEPLOYMENT_PROFILE": expected_profile,
+            "VENDOR_DEPLOYMENT_PROFILE": other,
+            "VENDOR_CP_RUNTIME_ENV_FILE": "/ignored-external-file",
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    assert result.returncode == (1 if alternate else 0)
+    assert result.stdout == ("" if alternate else str(env_file))
+    if alternate:
+        assert result.stderr == "deployment profile requires exactly one assignment\n"
+
+
+@pytest.mark.parametrize(
+    ("expected_profile", "profile_assignment", "profile_refusal"),
+    [
+        (None, "production-bootstrap", None),
+        ("production-keyless-v1", "production-keyless-v1", None),
+        (None, "production-keyless-v1", "does not match expected profile"),
+        (
+            "production-keyless-v1",
+            "production-bootstrap",
+            "does not match expected profile",
+        ),
+        ("full", "full", "must be production-bootstrap or production-keyless-v1"),
+        (
+            "",
+            "production-bootstrap",
+            "must be production-bootstrap or production-keyless-v1",
+        ),
+        (None, "", "requires exactly one assignment"),
+        (None, "full", "does not match expected profile"),
+        (
+            None,
+            "production-bootstrap\nVENDOR_DEPLOYMENT_PROFILE=full",
+            "requires exactly one assignment",
+        ),
+        (
+            None,
+            "production-bootstrap\nexport VENDOR_DEPLOYMENT_PROFILE=full",
+            "requires exactly one assignment",
+        ),
+        (
+            None,
+            "production-bootstrap\n VENDOR_DEPLOYMENT_PROFILE =full",
+            "requires exactly one assignment",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
     ("failed_role", "probe_status"),
     [
         (None, 0),
@@ -584,7 +688,12 @@ def test_the_deploy_probes_runtime_material_before_database_work() -> None:
     ],
 )
 def test_material_probe_commands_fail_closed_before_database_work(
-    tmp_path: Path, failed_role: str | None, probe_status: int
+    tmp_path: Path,
+    failed_role: str | None,
+    probe_status: int,
+    expected_profile: str | None,
+    profile_assignment: str,
+    profile_refusal: str | None,
 ) -> None:
     """Record real adapter commands; fake Docker never opens a daemon/socket.
 
@@ -594,8 +703,13 @@ def test_material_probe_commands_fail_closed_before_database_work(
     env_file = tmp_path / "runtime.env"
     env_file.write_text(
         "APP_ENV=production\nSERVER_NAME=vendor-cp-prod\n"
-        "ENVIRONMENT=production\nPLATFORM_ROOT_DOMAIN=vendor.dotmac.io\n"
-        "VENDOR_DEPLOYMENT_PROFILE=production-bootstrap\nCSRF_ENABLED=true\n"
+        "ENVIRONMENT=production\nPLATFORM_ROOT_DOMAIN=platform.dotmac.io\n"
+        + (
+            f"VENDOR_DEPLOYMENT_PROFILE={profile_assignment}\n"
+            if profile_assignment
+            else ""
+        )
+        + "CSRF_ENABLED=true\n"
         f"CSRF_SECRET={'c' * 32}\nJWT_SECRET={'j' * 32}\n"
         f"SESSION_HASH_SECRET={'s' * 32}\n",
         encoding="utf-8",
@@ -612,7 +726,8 @@ def test_material_probe_commands_fail_closed_before_database_work(
         "args = sys.argv[1:]\n"
         "with open(os.environ['COMMAND_RECORD'], 'a') as stream:\n"
         "    stream.write(json.dumps({'args': args, "
-        "'image': os.environ.get('VENDOR_APP_IMAGE')}) + '\\n')\n"
+        "'image': os.environ.get('VENDOR_APP_IMAGE'), "
+        "'runtime_env_file': os.environ.get('VENDOR_CP_RUNTIME_ENV_FILE')}) + '\\n')\n"
         "if args[0] == 'pull':\n"
         "    sys.exit(0)\n"
         "if 'candidate-material-probe' in args:\n"
@@ -637,13 +752,22 @@ def test_material_probe_commands_fail_closed_before_database_work(
             "test-change",
         ],
         env={
-            **os.environ,
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if key != "EXPECTED_DEPLOYMENT_PROFILE"
+            },
             "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
             "ENV_FILE": str(env_file),
             "COMPOSE_FILE": str(compose_file),
             "HOST_ID_FILE": str(host_id),
             "BACKUP_DIR": str(backup_dir),
             "LOCK_FILE": str(tmp_path / "deploy.lock"),
+            **(
+                {"EXPECTED_DEPLOYMENT_PROFILE": expected_profile}
+                if expected_profile is not None
+                else {}
+            ),
             "COMMAND_RECORD": str(record),
             "FAILED_ROLE": failed_role or "",
             "PROBE_STATUS": str(probe_status),
@@ -656,7 +780,13 @@ def test_material_probe_commands_fail_closed_before_database_work(
     assert result.returncode == 1
     assert "raw-secret-canary" not in result.stdout + result.stderr
     assert not backup_dir.exists()
+    if profile_refusal is not None:
+        assert profile_refusal in result.stderr
+        assert not record.exists()
+        return
     calls = [json.loads(line) for line in record.read_text().splitlines()]
+    for call in calls:
+        assert call.pop("runtime_env_file") == str(env_file)
     assert calls[0] == {"args": ["pull", image], "image": image}
     prefix = ["compose", "--env-file", str(env_file), "-f", str(compose_file)]
     roles = ["app"] if failed_role == "app" else ["app", "relay"]
@@ -697,12 +827,26 @@ def test_material_probe_commands_fail_closed_before_database_work(
     assert calls[1:] == expected
 
 
+def test_deployment_services_consume_the_validated_environment_file() -> None:
+    deploy = _commands(_text("scripts/deploy_production.sh"))
+    binding = 'case "$ENV_FILE" in'
+    assert '/*) export VENDOR_CP_RUNTIME_ENV_FILE="$ENV_FILE"' in deploy
+    assert '*) export VENDOR_CP_RUNTIME_ENV_FILE="$PWD/$ENV_FILE"' in deploy
+    assert deploy.index(
+        "deployment profile does not match expected profile"
+    ) < deploy.index(binding)
+    assert deploy.index(binding) < deploy.index('docker pull "$VENDOR_APP_IMAGE"')
+    for role in ("app", "relay", "ops"):
+        block = _compose_service_block(_text("docker-compose.production.yml"), role)
+        assert "env_file: ${VENDOR_CP_RUNTIME_ENV_FILE:-.env}" in block
+
+
 def test_material_probes_reuse_runtime_service_environment_and_signing_mount() -> None:
     """Command recording binds roles; this checks the existing service bindings."""
     compose = _text("docker-compose.production.yml")
     for role in ("app", "relay"):
         block = _compose_service_block(compose, role)
-        assert "env_file: .env" in block
+        assert "env_file: ${VENDOR_CP_RUNTIME_ENV_FILE:-.env}" in block
         assert (
             "DATABASE_URL: postgresql+psycopg://app_user:"
             "${VENDOR_DB_APP_USER_PASSWORD:?" in block

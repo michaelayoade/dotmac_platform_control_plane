@@ -54,7 +54,7 @@ services:
 
   app:
     image: ${VENDOR_APP_IMAGE:?Set VENDOR_APP_IMAGE to an immutable digest reference}
-    env_file: .env
+    env_file: ${VENDOR_CP_RUNTIME_ENV_FILE:-.env}
     environment:
       DATABASE_URL: postgresql+psycopg://app_user:${VENDOR_DB_APP_USER_PASSWORD:?Set VENDOR_DB_APP_USER_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
       PLATFORM_DATABASE_URL: postgresql+psycopg://platform_api:${VENDOR_DB_PLATFORM_API_PASSWORD:?Set VENDOR_DB_PLATFORM_API_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
@@ -98,7 +98,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health/ready', headers={'Host': 'vendor.dotmac.io'}); urllib.request.urlopen(r, timeout=3)",
+          "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/health/ready', headers={'Host': 'platform.dotmac.io'}); urllib.request.urlopen(r, timeout=3)",
         ]
       interval: 10s
       timeout: 5s
@@ -119,7 +119,7 @@ services:
   # No published port. It serves nothing; it polls.
   relay:
     image: ${VENDOR_APP_IMAGE:?Set VENDOR_APP_IMAGE to an immutable digest reference}
-    env_file: .env
+    env_file: ${VENDOR_CP_RUNTIME_ENV_FILE:-.env}
     environment:
       DATABASE_URL: postgresql+psycopg://app_user:${VENDOR_DB_APP_USER_PASSWORD:?Set VENDOR_DB_APP_USER_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
       PLATFORM_DATABASE_URL: postgresql+psycopg://platform_api:${VENDOR_DB_PLATFORM_API_PASSWORD:?Set VENDOR_DB_PLATFORM_API_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
@@ -175,7 +175,7 @@ services:
   ops:
     image: ${VENDOR_APP_IMAGE:?Set VENDOR_APP_IMAGE to an immutable digest reference}
     profiles: ["ops"]
-    env_file: .env
+    env_file: ${VENDOR_CP_RUNTIME_ENV_FILE:-.env}
     environment:
       DATABASE_URL: postgresql+psycopg://app_user:${VENDOR_DB_APP_USER_PASSWORD:?Set VENDOR_DB_APP_USER_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}
       PLATFORM_DATABASE_URL: postgresql+psycopg://platform_api:${VENDOR_DB_PLATFORM_API_PASSWORD:?Set VENDOR_DB_PLATFORM_API_PASSWORD}@db:5432/${VENDOR_DB_NAME:-vendor_control_plane}

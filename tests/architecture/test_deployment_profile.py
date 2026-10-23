@@ -82,6 +82,7 @@ from vendor_cp.deployment_profile import (
     NEVER_WITHHELD_SURFACES,
     PRODUCTION_BOOTSTRAP,
     PRODUCTION_COMPOSED_V1,
+    PRODUCTION_KEYLESS_V1,
     PROFILE_ENV_VAR,
     PROFILES,
     PROVISIONING_SURFACE,
@@ -545,7 +546,7 @@ def test_composed_route_bearing_module_is_profiled_and_admitted() -> None:
         {"deployment_control"}
     )
     assert "deployment_control" in deployment_profile(FULL).surface_inventory
-    for code in (PRODUCTION_BOOTSTRAP, PRODUCTION_COMPOSED_V1):
+    for code in (PRODUCTION_BOOTSTRAP, PRODUCTION_COMPOSED_V1, PRODUCTION_KEYLESS_V1):
         profile = deployment_profile(code)
         assert "deployment_control" in profile.withheld_surfaces
         assert not _under(_paths(code), DEPLOYMENT_CONTROL_PREFIX), code
@@ -577,6 +578,66 @@ def test_production_bootstrap_withholds_licensing_offers_and_the_laboratory() ->
     # SENSITIVITY: the check must be able to see a mounted vendor surface, or it
     # would pass just as well against an assembly that mounted nothing at all.
     assert _under(paths, CONTRACTS_PREFIX), paths
+
+
+def test_keyless_profile_adds_only_deploy_agent_to_bootstrap() -> None:
+    bootstrap = deployment_profile(PRODUCTION_BOOTSTRAP)
+    profile = deployment_profile(PRODUCTION_KEYLESS_V1)
+    assert profile.version == "1"
+    assert bootstrap.version == "6"
+    assert not profile.laboratory
+    assert profile.production_accepted
+    assert set(profile.surface_inventory) == {
+        "accounts",
+        "allocations",
+        "console",
+        "contracts",
+        "deploy_agent",
+        "readiness",
+        "vendor_approvals",
+        "withdrawal_conflicts",
+    }
+    assert set(profile.surface_inventory) == set(bootstrap.surface_inventory) | {
+        "deploy_agent"
+    }
+    assert profile.withheld_surfaces == {
+        "deployment_control",
+        "licence_delivery",
+        "offers",
+        "provisioning",
+    }
+    assert bootstrap.withheld_surfaces == profile.withheld_surfaces | {"deploy_agent"}
+
+
+def test_keyless_profile_publishes_deploy_agent_and_preserves_bootstrap_routes() -> (
+    None
+):
+    signatures = _route_signatures(
+        assembly.build_spec(deployment_profile(PRODUCTION_KEYLESS_V1))
+    )
+    bootstrap = _route_signatures(
+        assembly.build_spec(deployment_profile(PRODUCTION_BOOTSTRAP))
+    )
+    paths = {signature[0] for signature in signatures}
+    bootstrap_paths = {signature[0] for signature in bootstrap}
+    assert {
+        s for s in signatures if not s[0].startswith("/platform/deploy/")
+    } == bootstrap
+    deploy_paths = set(_under(paths, "/platform/deploy/"))
+    assert "/platform/deploy/gate-evidence" in deploy_paths
+    assert "/platform/deploy/desired-state" in deploy_paths
+    assert not _under(bootstrap_paths, "/platform/deploy/")
+    assert paths == bootstrap_paths | deploy_paths
+    assert "/health/ready" in paths
+    for prefix in (ACCOUNTS_PREFIX, CONTRACTS_PREFIX, APPROVALS_PREFIX):
+        assert _under(paths, prefix), prefix
+    for prefix in (
+        DEPLOYMENT_CONTROL_PREFIX,
+        LICENSING_PREFIX,
+        OFFERS_PREFIX,
+        PROVISIONING_PREFIX,
+    ):
+        assert not _under(paths, prefix), prefix
 
 
 def test_production_composed_v1_publishes_exactly_its_declared_inventory() -> None:
@@ -645,7 +706,7 @@ def test_a_withheld_surface_keeps_its_manifest_declarations() -> None:
     every composed manifest passes through the profile, so every composed
     manifest is a candidate for this.
     """
-    for code in (PRODUCTION_BOOTSTRAP, PRODUCTION_COMPOSED_V1):
+    for code in (PRODUCTION_BOOTSTRAP, PRODUCTION_COMPOSED_V1, PRODUCTION_KEYLESS_V1):
         profile = deployment_profile(code)
         modules = {
             manifest.name: manifest for manifest in assembly.build_spec(profile).modules
@@ -714,7 +775,7 @@ def test_a_laboratory_environment_accepts_fake_provisioning(monkeypatch) -> None
 
 def test_production_accepts_a_production_profile(monkeypatch) -> None:
     """The other half of the refusal: a production-accepted profile validates."""
-    for code in (PRODUCTION_BOOTSTRAP, PRODUCTION_COMPOSED_V1):
+    for code in (PRODUCTION_BOOTSTRAP, PRODUCTION_COMPOSED_V1, PRODUCTION_KEYLESS_V1):
         profile = deployment_profile(code)
         assert profile.production_accepted
         assert not profile.exposes(PROVISIONING_SURFACE)
@@ -762,7 +823,7 @@ def test_the_fallback_still_applies_outside_production(monkeypatch) -> None:
 def test_a_configured_production_profile_is_the_one_loaded(monkeypatch) -> None:
     """And it is never `full`: production reads what the host declared."""
     monkeypatch.setenv("ENVIRONMENT", "production")
-    for code in (PRODUCTION_BOOTSTRAP, PRODUCTION_COMPOSED_V1):
+    for code in (PRODUCTION_BOOTSTRAP, PRODUCTION_COMPOSED_V1, PRODUCTION_KEYLESS_V1):
         monkeypatch.setenv(PROFILE_ENV_VAR, code)
         loaded = load_deployment_profile()
         assert loaded.code == code

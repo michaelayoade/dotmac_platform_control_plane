@@ -162,6 +162,7 @@ PROVISIONING_SURFACE: Final[str] = "provisioning"
 
 FULL: Final[str] = "full"
 PRODUCTION_BOOTSTRAP: Final[str] = "production-bootstrap"
+PRODUCTION_KEYLESS_V1: Final[str] = "production-keyless-v1"
 PRODUCTION_COMPOSED_V1: Final[str] = "production-composed-v1"
 
 #: The route fields a manifest can carry, and — for the kernel this assembly
@@ -441,6 +442,34 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
         ),
     ),
     VendorDeploymentProfile(
+        code=PRODUCTION_KEYLESS_V1,
+        version="1",
+        withheld_surfaces=frozenset(
+            {"deployment_control", "licence_delivery", "offers", "provisioning"}
+        ),
+        surface_inventory=(
+            "accounts",
+            "allocations",
+            "console",
+            "contracts",
+            "deploy_agent",
+            "readiness",
+            "vendor_approvals",
+            "withdrawal_conflicts",
+        ),
+        laboratory=False,
+        production_accepted=True,
+        rationale=(
+            "An opt-in production composition based on production-bootstrap "
+            "version 6, adding only the deploy-agent API for keyless cutover. "
+            "Existing bootstrap operator surfaces and mandatory readiness stay "
+            "published; Deployment Control, licence delivery, offers and the "
+            "provisioning laboratory remain withheld. Version 1 declares this "
+            "surface decision; deployment-specific configuration, endpoint "
+            "TLS/domain evidence and explicit live adoption remain separate gates."
+        ),
+    ),
+    VendorDeploymentProfile(
         code=PRODUCTION_COMPOSED_V1,
         version="5",
         withheld_surfaces=frozenset(
@@ -485,7 +514,7 @@ PROFILES: Final[tuple[VendorDeploymentProfile, ...]] = (
             "reaches `/platform/console` inside the built artifact "
             "(`.github/candidate/acceptance.sh` step 7; first observed green in "
             "release run 33474406793 at `2c9800d2`). Declared, not adopted: "
-            "`scripts/deploy_production.sh` still pins `production-bootstrap`, "
+            "`scripts/deploy_production.sh` defaults to `production-bootstrap`, "
             "and adoption remains an explicit operator action under ADR-0015 "
             "§ 6 — the blocker that sentence described is gone, and whether "
             "its removal is sufficient to adopt is not settled here. "
@@ -650,6 +679,7 @@ __all__ = [
     "NEVER_WITHHELD_SURFACES",
     "PRODUCTION_BOOTSTRAP",
     "PRODUCTION_COMPOSED_V1",
+    "PRODUCTION_KEYLESS_V1",
     "PRODUCTION_ENVIRONMENT",
     "PROFILES",
     "PROFILE_ENV_VAR",

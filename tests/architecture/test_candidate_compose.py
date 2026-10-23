@@ -20,7 +20,7 @@ RUN_ID = "0123456789abcdef0123456789abcdef"
 IMAGE = "ghcr.io/michaelayoade/dotmac_vendor_control_plane@sha256:" + "a" * 64
 RUN_DIR_PREFIX = "/opt/dotmac/vendor-control-plane/candidate-runs/"
 REVIEWED_COMPOSE_SHA256 = (
-    "d452382e11296a2c41bd9f171921ab8e1f0e7dea0eaa41b72f331801c828fee1"
+    "a4615d7cb7c7ff5d6998b2b8c37e10988d9777a2cef2dfbeee28855bd8bcc2a1"
 )
 
 
@@ -50,6 +50,7 @@ def test_candidate_compose_declares_only_isolated_app_and_absolute_file() -> Non
     assert source.count("image: ${VENDOR_CANDIDATE_APP_IMAGE:?") == 1
     assert source.count(f"{RUN_DIR_PREFIX}${{VENDOR_CANDIDATE_RUN_ID:?") == 1
     assert "/app.env" in source and "/relay.env" not in source
+    assert "headers={'Host': 'platform.dotmac.io'}" in source
     assert "  candidate-app:\n" in source
     assert "  candidate-relay:\n" not in source
     assert "  relay:\n" not in source
