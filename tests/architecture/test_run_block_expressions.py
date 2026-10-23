@@ -95,7 +95,7 @@ def test_kernel_lock_workflow_carries_no_baseline_entry() -> None:
     ]
 
 
-def test_the_measured_shape_matches_the_recorded_eight_sites_and_nineteen_openers() -> (
+def test_the_measured_shape_matches_the_recorded_eight_sites_and_fourteen_openers() -> (
     None
 ):
     """NON-VACUITY. This is the measured shape, not an assumption — a guard
@@ -103,7 +103,7 @@ def test_the_measured_shape_matches_the_recorded_eight_sites_and_nineteen_opener
 
     sites = run_block_expression_sites()
     assert len(sites) == 8, sites
-    assert sum(site.count for site in sites) == 19, sites
+    assert sum(site.count for site in sites) == 14, sites
 
 
 # ── the extraction itself: sensitivity, near-miss, structured-field scope ──

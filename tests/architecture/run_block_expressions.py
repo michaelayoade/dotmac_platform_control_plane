@@ -259,5 +259,5 @@ RUN_BLOCK_EXPRESSION_BASELINE: dict[tuple[str, str, str], int] = {
         "candidate",
         "Prove the registry holds the accepted candidate",
     ): 5,
-    ("production-image.yml", "candidate", "Emit the release receipt"): 8,
+    ("production-image.yml", "candidate", "Emit the release receipt"): 3,
 }
