@@ -3,7 +3,7 @@
 This source implements the staging signer, host public-key registry, signed
 report ingest, git evidence authority and rebuildable PostgreSQL projection.
 It has **no live acceptance or activation approval**. Michael approved the
-complete bounded amendment and measured source shipping ceilings on 2026-10-22;
+2026-10-22 bounded amendment and the 2026-10-24 enabled-runtime shipping limits;
 source publication may proceed through normal review and prescribed exact-head
 CI. The approved limits and retained acceptance gates are recorded in
 `increment2-acceptance.md`. Approval does not authorize live activation.
