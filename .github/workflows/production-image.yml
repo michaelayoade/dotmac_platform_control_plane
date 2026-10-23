@@ -103,7 +103,7 @@ jobs:
           FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: |
           set -euo pipefail
-          docker buildx build --load --metadata-file candidate-build.json \
+          docker buildx build --load \
             --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
             --build-arg "SOURCE_REVISION=${{ steps.select.outputs.source_sha }}" \
             --tag "${CANDIDATE_TAG}" .
@@ -113,59 +113,9 @@ jobs:
         id: identity
         run: |
           set -euo pipefail
-          # Registry inspection must be available before accepting or publishing.
+          # Fail before acceptance if registry read-back is unavailable.
           docker buildx imagetools inspect --help > /dev/null
-          config_digest="$(jq -er '."containerimage.config.digest"' candidate-build.json)"
-          [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          platform="$(docker image inspect "${CANDIDATE_TAG}" |
-            jq -er '.[0] | [.Os,.Architecture,(.Variant // "")] | join("/") | rtrimstr("/")')"
-          [[ "$platform" =~ ^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$ ]]
-          layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "${CANDIDATE_TAG}")"
-          # The RootFS chain digest is over the ORDERED layer list: two images
-          # can share every layer and stack them differently, and that is a
-          # different filesystem.
-          rootfs_chain="$(printf '%s' "$layers" | sha256sum | cut -d' ' -f1)"
-          lock_digest="$(sha256sum poetry.lock | cut -d' ' -f1)"
-          dockerfile_digest="$(sha256sum Dockerfile | cut -d' ' -f1)"
-          # Per-file digests of the wheel and the sdist, READ OUT of the
-          # candidate rather than measured beside it. The image computed them in
-          # the same build stage that installed the wheel; recomputing here
-          # would mean a second `poetry build`, and a zip carries timestamps, so
-          # that would describe bytes this image does not contain.
-          #
-          # Until now the receipt recorded bundle granularity only — the config
-          # digest and the layer chain name the container, not the artifacts
-          # inside it.
-          docker run --rm --network none --entrypoint cat \
-            "${CANDIDATE_TAG}" /app/distributions.json > candidate-distributions.json
-          jq -e '[.files[].filename | endswith(".whl")] | any' \
-            candidate-distributions.json > /dev/null
-          jq -e '[.files[].filename | endswith(".tar.gz")] | any' \
-            candidate-distributions.json > /dev/null
-          jq -e '.files | length >= 2 and all(.sha256 | test("^sha256:[0-9a-f]{64}$"))' \
-            candidate-distributions.json > /dev/null
-          {
-            echo "config_digest=$config_digest"
-            echo "platform=$platform"
-            echo "rootfs_chain=sha256:$rootfs_chain"
-            echo "lock_digest=sha256:$lock_digest"
-            echo "dockerfile_digest=sha256:$dockerfile_digest"
-          } >> "$GITHUB_OUTPUT"
-          jq -n \
-            --arg source_revision "${{ steps.select.outputs.source_sha }}" \
-            --arg config_digest "$config_digest" \
-            --arg platform "$platform" \
-            --argjson layers "$layers" \
-            --arg rootfs_chain "sha256:$rootfs_chain" \
-            --arg lock_digest "sha256:$lock_digest" \
-            --arg dockerfile_digest "sha256:$dockerfile_digest" \
-            --argjson distributions "$(cat candidate-distributions.json)" \
-            '{source_revision:$source_revision, config_digest:$config_digest, platform:$platform,
-              layers:$layers, rootfs_chain:$rootfs_chain,
-              lock_digest:$lock_digest, dockerfile_digest:$dockerfile_digest,
-              distributions:$distributions}' \
-            > candidate-identity.json
-          cat candidate-identity.json
+          python3 .github/candidate/record_identity.py "${CANDIDATE_TAG}" "${{ steps.select.outputs.source_sha }}"
 
       # ── 5. Test those exact bytes ───────────────────────────────────────
       - name: Accept the candidate, or refuse it
@@ -270,29 +220,22 @@ jobs:
 
       # ── 9. The receipt ──────────────────────────────────────────────────
       - name: Emit the release receipt
+        env:
+          ACCEPTED_IDENTITY: ${{ steps.identity.outputs.identity_json }}
         run: |
           set -euo pipefail
           jq -n \
-            --arg source_revision "${{ steps.select.outputs.source_sha }}" \
+            --argjson identity "$ACCEPTED_IDENTITY" \
             --arg ci_run_id "${CI_RUN_ID}" \
             --arg release_run_id "${GITHUB_RUN_ID}" \
             --arg registry_digest "${{ steps.publish.outputs.digest }}" \
             --arg reference "${{ steps.publish.outputs.reference }}" \
-            --arg config_digest "${{ steps.identity.outputs.config_digest }}" \
-            --arg rootfs_chain "${{ steps.identity.outputs.rootfs_chain }}" \
-            --arg lock_digest "${{ steps.identity.outputs.lock_digest }}" \
-            --arg dockerfile_digest "${{ steps.identity.outputs.dockerfile_digest }}" \
             --arg registry_config_digest "${{ steps.readback.outputs.registry_config }}" \
-            --argjson distributions "$(cat candidate-distributions.json)" \
-            --arg accepted "candidate accepted before publication" \
-            '{contract:"dotmac-candidate-release-receipt/1", accepted:$accepted,
-              source_revision:$source_revision, ci_run_id:$ci_run_id,
+            '$identity | del(.layers,.platform) +
+             {contract:"dotmac-candidate-release-receipt/1",
+              accepted:"candidate accepted before publication", ci_run_id:$ci_run_id,
               release_run_id:$release_run_id, registry_digest:$registry_digest,
-              reference:$reference, config_digest:$config_digest,
-              registry_config_digest:$registry_config_digest,
-              rootfs_chain:$rootfs_chain, lock_digest:$lock_digest,
-              dockerfile_digest:$dockerfile_digest,
-              distributions:$distributions}' \
+              reference:$reference, registry_config_digest:$registry_config_digest}' \
             > release-receipt.json
           cat release-receipt.json
           {

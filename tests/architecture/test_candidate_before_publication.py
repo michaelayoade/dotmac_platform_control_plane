@@ -7,9 +7,12 @@ from becoming a deployable release.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import subprocess
+import tarfile
 import textwrap
 from pathlib import Path
 
@@ -30,6 +33,15 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+IMAGE = _text(IMAGE_WORKFLOW)
+BATTERY = _text(ACCEPTANCE)
+RECORDER = ROOT / ".github/candidate/record_identity.py"
+IDENTITY = _text(RECORDER)
+spec = importlib.util.spec_from_file_location("candidate_identity", RECORDER)
+recorder = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(recorder)
+
+
 def _manifest(media_type: str, **fields: object) -> str:
     return json.dumps({"schemaVersion": 2, "mediaType": media_type, **fields})
 
@@ -38,37 +50,199 @@ def _digest(raw: str) -> str:
     return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
 
 
+@pytest.mark.parametrize("layout", ["classic", "oci"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "missing-manifest",
+        "duplicate-manifest",
+        "link-manifest",
+        "hardlink-manifest",
+        "bad-manifest",
+        "empty-manifest",
+        "multiple-images",
+        "large-manifest",
+        "missing-config",
+        "duplicate-config",
+        "link-config",
+        "hardlink-config",
+        "large-config",
+        "bad-path",
+        "traversal",
+        "wrong-hash",
+        "bad-config",
+        "wrong-platform",
+        "wrong-layers",
+        "wrong-revision",
+        "bad-distributions",
+        "wrong-config-revision",
+        "bad-rootfs-type",
+        "empty-layers",
+        "bad-layer-digest",
+    ],
+)
+def test_recorder_archive_and_output_guards(tmp_path, monkeypatch, layout, case):
+    """Run the full shared recorder; every refusal must precede every output."""
+    revision, layer = "a" * 40, "sha256:" + "b" * 64
+    config = {
+        "os": "linux",
+        "architecture": "amd64",
+        "config": {"Labels": {"org.opencontainers.image.revision": revision}},
+        "rootfs": {"type": "layers", "diff_ids": [layer]},
+    }
+    if case == "wrong-config-revision":
+        config["config"]["Labels"]["org.opencontainers.image.revision"] = "c" * 40
+    if case == "bad-rootfs-type":
+        config["rootfs"]["type"] = "unknown"
+    if case in {"empty-layers", "bad-layer-digest"}:
+        config["rootfs"]["diff_ids"] = [] if case == "empty-layers" else ["bad"]
+    raw = json.dumps(config).encode()
+    if case == "bad-config":
+        raw = b"{"
+    if case == "wrong-platform":
+        raw = raw.replace(b"amd64", b"arm64")
+    name = hashlib.sha256(raw).hexdigest() + ".json"
+    if layout == "oci":
+        name = "blobs/sha256/" + name.removesuffix(".json")
+    if case in {"bad-path", "traversal", "wrong-hash"}:
+        name = {
+            "bad-path": "config.json",
+            "traversal": "../" + name,
+            "wrong-hash": "c" * 64 + ".json",
+        }[case]
+    manifest = json.dumps(
+        [{"Config": name}] * (2 if case == "multiple-images" else 1)
+    ).encode()
+    if case in {"bad-manifest", "empty-manifest"}:
+        manifest = b"{" if case == "bad-manifest" else b"[]"
+    archive_path = tmp_path / "fixture.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        for kind, member_name, content in (
+            ("manifest", "manifest.json", manifest),
+            ("config", name, raw),
+        ):
+            if case == "missing-" + kind:
+                continue
+            for _ in range(2 if case == "duplicate-" + kind else 1):
+                member = tarfile.TarInfo(member_name)
+                member.size = len(content)
+                if case in {"link-" + kind, "hardlink-" + kind}:
+                    member.type = (
+                        tarfile.LNKTYPE
+                        if case.startswith("hardlink")
+                        else tarfile.SYMTYPE
+                    )
+                    member.linkname = "elsewhere"
+                if case == "large-" + kind:
+                    content = b" " * (4 * 1024 * 1024 + 1)
+                    member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+    inspected = [
+        {
+            "Os": "linux",
+            "Architecture": "amd64",
+            "Id": "store-id",
+            "Config": {"Labels": {"org.opencontainers.image.revision": revision}},
+            "RootFS": {"Layers": [] if case == "wrong-layers" else [layer]},
+        }
+    ]
+    distributions = {
+        "files": [
+            {"filename": "package" + suffix, "sha256": layer}
+            for suffix in (".whl", ".tar.gz")
+        ]
+    }
+
+    def docker(*args):
+        if args == ("image", "inspect", "candidate"):
+            return json.dumps(inspected).encode()
+        if args[:3] == ("image", "save", "--platform"):
+            assert (
+                args[3] == "linux/amd64" and args[4] == "-o" and args[6] == "candidate"
+            )
+            Path(args[5]).write_bytes(archive_path.read_bytes())
+            return b""
+        assert args == (
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "cat",
+            "candidate",
+            "/app/distributions.json",
+        )
+        return (
+            b"{}" if case == "bad-distributions" else json.dumps(distributions).encode()
+        )
+
+    monkeypatch.setattr(recorder, "docker", docker)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "outputs"))
+    for filename in ("poetry.lock", "Dockerfile"):
+        (tmp_path / filename).write_text(filename)
+    if case != "valid":
+        with pytest.raises((ValueError, KeyError, TypeError)):
+            recorder.main(
+                "candidate", "d" * 40 if case == "wrong-revision" else revision
+            )
+        assert not (tmp_path / "outputs").exists()
+        assert not (tmp_path / "candidate-identity.json").exists()
+        return
+    recorder.main("candidate", revision)
+    outputs = dict(
+        line.split("=", 1) for line in (tmp_path / "outputs").read_text().splitlines()
+    )
+    assert (tmp_path / "outputs").read_text().count("identity_json=") == 1
+    identity = json.loads(outputs["identity_json"])
+    assert identity == json.loads((tmp_path / "candidate-identity.json").read_text())
+    assert identity["config_digest"] == "sha256:" + hashlib.sha256(raw).hexdigest()
+    assert identity["layers"] == [layer] and identity["rootfs_chain"] == _digest(
+        json.dumps([layer], separators=(",", ":"))
+    )
+    assert (
+        identity["distributions"] == distributions
+        and identity["source_revision"] == revision
+    )
+    for key in (
+        "config_digest",
+        "platform",
+        "rootfs_chain",
+        "lock_digest",
+        "dockerfile_digest",
+    ):
+        assert outputs[key] == identity[key]
+
+
 # ── the ordering, which is the whole point ──────────────────────────────────
 
 
 def test_the_candidate_is_accepted_before_anything_is_published() -> None:
     """Accept recorded bytes before registry login, publication and receipts."""
-    workflow = _text(IMAGE_WORKFLOW)
-    build = workflow.index("Build the candidate")
-    identity = workflow.index("Record the candidate's identity")
-    accept = workflow.index("Accept the candidate, or refuse it")
-    login = workflow.index("Authenticate to GHCR")
-    publish = workflow.index("Publish the accepted candidate")
-    readback = workflow.index("Prove the registry holds the accepted candidate")
-    receipt = workflow.index("Emit the release receipt")
+    build = IMAGE.index("Build the candidate")
+    identity = IMAGE.index("Record the candidate's identity")
+    accept = IMAGE.index("Accept the candidate, or refuse it")
+    login = IMAGE.index("Authenticate to GHCR")
+    publish = IMAGE.index("Publish the accepted candidate")
+    readback = IMAGE.index("Prove the registry holds the accepted candidate")
+    receipt = IMAGE.index("Emit the release receipt")
     assert build < identity < accept < login < publish < readback < receipt
+    assert identity < IMAGE.index("docker buildx imagetools inspect --help") < accept
 
 
 def test_nothing_is_pushed_before_the_candidate_is_accepted() -> None:
     """The single assertion that would have caught the previous design."""
-    workflow = _text(IMAGE_WORKFLOW)
-    accept = workflow.index("Accept the candidate, or refuse it")
+    accept = IMAGE.index("Accept the candidate, or refuse it")
     pushes = [
-        index
-        for index in range(len(workflow))
-        if workflow.startswith("docker push", index)
+        index for index in range(len(IMAGE)) if IMAGE.startswith("docker push", index)
     ]
     assert pushes, "no publication step was found at all"
     assert all(index > accept for index in pushes), (
         "a `docker push` appears before the acceptance step; a failing "
         "acceptance would leave published bytes nobody accepted"
     )
-    assert "docker login" not in workflow[:accept], (
+    assert "docker login" not in IMAGE[:accept], (
         "the registry credential is acquired before acceptance, which is the "
         "shape that makes an early push possible"
     )
@@ -76,22 +250,22 @@ def test_nothing_is_pushed_before_the_candidate_is_accepted() -> None:
 
 def test_the_identity_recorded_is_the_identity_compared() -> None:
     """Recording a digest nobody compares is bookkeeping, not a proof."""
-    workflow = _text(IMAGE_WORKFLOW)
     for field in ("config_digest", "rootfs_chain", "lock_digest", "dockerfile_digest"):
-        assert f"{field}=" in workflow, field
-    assert "steps.identity.outputs.config_digest" in workflow
-    assert "steps.identity.outputs.rootfs_chain" in workflow
-    assert "source_revision" in workflow
+        assert field in IDENTITY, field
+    assert "steps.identity.outputs.config_digest" in IMAGE
+    assert "steps.identity.outputs.rootfs_chain" in IMAGE
+    assert "source_revision" in IMAGE
 
 
 def test_the_read_back_compares_like_for_like() -> None:
-    """Build metadata names the config; registry raw bytes name the pull digest."""
-    workflow = _text(IMAGE_WORKFLOW)
-    assert "--load --metadata-file candidate-build.json" in workflow
-    assert '."containerimage.config.digest"' in workflow
-    assert ".Id" not in workflow and ".RepoDigests" not in workflow
-    assert 'reference="${IMAGE_REPOSITORY}@$digest"' in workflow
-    assert 'test "$registry_config" = "$ACCEPTED_CONFIG_DIGEST"' in workflow
+    """Saved original config bytes and registry raw manifests name like objects."""
+    assert "--metadata-file" not in IMAGE
+    assert "containerimage.config.digest" not in IMAGE
+    assert 'docker("image", "save", "--platform", selected' in IDENTITY
+    assert "hashlib.sha256(raw).hexdigest()" in IDENTITY
+    assert ".Id" not in IMAGE and ".RepoDigests" not in IMAGE
+    assert 'reference="${IMAGE_REPOSITORY}@$digest"' in IMAGE
+    assert 'test "$registry_config" = "$ACCEPTED_CONFIG_DIGEST"' in IMAGE
 
 
 @pytest.mark.parametrize(
@@ -119,9 +293,7 @@ def test_registry_config_guard_executes_before_output(
     tmp_path: Path, case: str
 ) -> None:
     """Execute the actual registry guard with synthetic Docker output only."""
-    readback = _text(IMAGE_WORKFLOW).split(
-        "Prove the registry holds the accepted candidate", 1
-    )[1]
+    readback = IMAGE.split("Prove the registry holds the accepted candidate", 1)[1]
     fields = readback.split("        run: |", 1)[0]
     for field in ("config_digest", "platform"):
         name = "ACCEPTED_" + field.upper()
@@ -231,20 +403,12 @@ def test_registry_config_guard_executes_before_output(
         assert not output.exists()
 
 
-def test_the_receipt_records_the_registrys_own_config_digest() -> None:
-    """Retain the registry config digest independently of local store IDs."""
-    workflow = _text(IMAGE_WORKFLOW)
-    assert "registry_config_digest" in workflow
-    assert "steps.readback.outputs.registry_config" in workflow
-
-
 def test_the_read_back_actually_leaves_the_runner() -> None:
     """A digest-pinned pull follows removal and proof of local absence."""
-    workflow = _text(IMAGE_WORKFLOW)
-    remove = workflow.index("docker image rm -f")
-    inspect_guard = workflow.index("the candidate is still resident locally")
-    pull = workflow.index('docker pull --platform "$ACCEPTED_PLATFORM" "$reference"')
-    compare = workflow.index("registry RootFS chain $pulled_chain != accepted")
+    remove = IMAGE.index("docker image rm -f")
+    inspect_guard = IMAGE.index("the candidate is still resident locally")
+    pull = IMAGE.index('docker pull --platform "$ACCEPTED_PLATFORM" "$reference"')
+    compare = IMAGE.index("registry RootFS chain $pulled_chain != accepted")
     assert remove < inspect_guard < pull < compare
     # And the pull's own output is kept, so the run log carries the fetch as an
     # OBSERVATION rather than leaving the whole proof resting on the guard.
@@ -252,26 +416,13 @@ def test_the_read_back_actually_leaves_the_runner() -> None:
     # discarded, and the log therefore showed no evidence the bytes had moved.
     assert (
         'docker pull --platform "$ACCEPTED_PLATFORM" "$reference" >/dev/null'
-        not in workflow
+        not in IMAGE
     )
-
-
-def test_the_receipt_records_per_file_distribution_digests() -> None:
-    """A release receipt identifies both the wheel and the source archive."""
-    workflow = _text(IMAGE_WORKFLOW)
-    receipt = workflow[workflow.index("Emit the release receipt") :]
-    assert "distributions:$distributions" in receipt
-    assert "candidate-distributions.json" in receipt
 
 
 def test_the_distribution_digests_are_read_from_the_candidate_not_remeasured() -> None:
     """Read installed artifact digests without rebuilding timestamped archives."""
-    workflow = _text(IMAGE_WORKFLOW)
-    identity = workflow[
-        workflow.index("Record the candidate's identity") : workflow.index(
-            "Accept the candidate, or refuse it"
-        )
-    ]
+    identity = IDENTITY
     assert "/app/distributions.json" in identity
     # The property is that nothing INVOKES a second build, not that the words
     # are unmentionable — the comment explaining why it must not is the
@@ -291,19 +442,10 @@ def test_the_distribution_digests_are_read_from_the_candidate_not_remeasured() -
 
 def test_the_manifest_the_receipt_reads_is_checked_before_publication() -> None:
     """Validate the installed distribution manifest before publication."""
-    acceptance = _text(ACCEPTANCE)
-    assert "/app/distributions.json" in acceptance
-    assert "dotmac-distribution-digests/1" in acceptance
+    assert "/app/distributions.json" in BATTERY
+    assert "dotmac-distribution-digests/1" in BATTERY
     # Tied to the installed distribution, not free-floating.
-    assert "importlib.metadata import version" in acceptance
-
-
-def test_the_registry_read_back_is_preflighted_before_the_push() -> None:
-    """A tool that is missing must not be discovered with bytes already published."""
-    workflow = _text(IMAGE_WORKFLOW)
-    preflight = workflow.index("docker buildx imagetools inspect --help")
-    push = workflow.index("docker push")
-    assert preflight < push
+    assert "importlib.metadata import version" in BATTERY
 
 
 def test_the_image_carries_the_distributions_the_receipt_describes() -> None:
@@ -322,6 +464,12 @@ def test_the_battery_is_reachable_from_the_pull_request_path() -> None:
     """PR CI exercises the same candidate battery used for publication."""
     ci = _text(CI_WORKFLOW)
     assert "Rehearse the acceptance battery" in ci
+    assert 'record_identity.py dotmac-vendor-control-plane:ci "$GITHUB_SHA"' in ci
+    assert ci.index("record_identity.py") < ci.index("Boot-smoke the built bytes")
+    assert (
+        'record_identity.py "${CANDIDATE_TAG}" "${{ steps.select.outputs.source_sha }}"'
+        in IMAGE
+    )
     assert ".github/candidate/acceptance.sh" in ci
     # One script, two callers. A rehearsal that had its own copy would drift,
     # and a drifting rehearsal is worse than no rehearsal.
@@ -333,30 +481,27 @@ def test_the_rehearsal_does_not_become_the_acceptance() -> None:
     """Accept the exact candidate even when CI rehearsed the battery.
     A rehearsal image differs from the protected-main artifact being published.
     """
-    workflow = _text(IMAGE_WORKFLOW)
-    accept = workflow.index("Accept the candidate, or refuse it")
-    assert ".github/candidate/acceptance.sh" in workflow[accept:]
-    assert workflow.index("docker push") > accept
+    accept = IMAGE.index("Accept the candidate, or refuse it")
+    assert ".github/candidate/acceptance.sh" in IMAGE[accept:]
+    assert IMAGE.index("docker push") > accept
 
 
 def test_the_role_contract_query_renders_the_form_it_declares() -> None:
     """Render PostgreSQL booleans explicitly as text for the declared contract.
     Default boolean output uses t/f and cannot equal true/false.
     """
-    acceptance = _text(ACCEPTANCE)
-    contract = acceptance[acceptance.index('step "5  database ownership') :]
+    contract = BATTERY[BATTERY.index('step "5  database ownership') :]
     contract = contract[: contract.index("owner_contract=")]
     for flag in ("rolsuper", "rolcreaterole", "rolbypassrls", "rolcanlogin"):
         assert f"{flag}::text" in contract, (
             f"{flag} is rendered by the boolean output function, which emits "
             "t/f and can never equal the declared true/false"
         )
-    assert 'test "$role_contract" = "false|false|true|true"' in acceptance
+    assert 'test "$role_contract" = "false|false|true|true"' in BATTERY
 
 
 def test_the_receipt_binds_the_revision_the_run_and_the_bytes() -> None:
-    workflow = _text(IMAGE_WORKFLOW)
-    receipt = workflow[workflow.index("Emit the release receipt") :]
+    receipt = IMAGE[IMAGE.index("Emit the release receipt") :]
     for field in (
         "source_revision",
         "ci_run_id",
@@ -368,8 +513,72 @@ def test_the_receipt_binds_the_revision_the_run_and_the_bytes() -> None:
         "dockerfile_digest",
         "distributions",
     ):
-        assert field in receipt, field
+        assert field in receipt or field in IDENTITY, field
     assert "dotmac-candidate-release-receipt/1" in receipt
+    assert "registry_config_digest" in receipt
+    assert "steps.readback.outputs.registry_config" in receipt
+    assert "ACCEPTED_IDENTITY: ${{ steps.identity.outputs.identity_json }}" in receipt
+    assert '--argjson identity "$ACCEPTED_IDENTITY"' in receipt
+    assert "del(.layers,.platform)" in receipt
+    assert "$(cat candidate-distributions.json)" not in receipt
+    assert "candidate-distributions.json" in receipt
+
+
+def test_receipt_executes_with_latched_identity(tmp_path):
+    """Mutation of uploaded files cannot change the identity in the receipt."""
+    receipt = IMAGE.split("Emit the release receipt", 1)[1]
+    script = textwrap.dedent(
+        receipt.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0]
+    )
+    replacements = {
+        "${{ steps.publish.outputs.digest }}": "registry-digest",
+        "${{ steps.publish.outputs.reference }}": "registry-reference",
+        "${{ steps.readback.outputs.registry_config }}": "registry-config",
+    }
+    for key, value in replacements.items():
+        script = script.replace(key, value)
+    assert "${{" not in script
+    identity = dict(
+        source_revision="revision",
+        config_digest="config",
+        rootfs_chain="chain",
+        lock_digest="lock",
+        dockerfile_digest="dockerfile",
+        distributions={"files": ["latched"]},
+        layers=["layer"],
+        platform="linux/amd64",
+    )
+    (tmp_path / "candidate-distributions.json").write_text('{"files":["mutated"]}')
+    result = subprocess.run(  # noqa: S603 -- fixed workflow script and synthetic environment
+        ["/bin/bash", "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.defpath,
+            "ACCEPTED_IDENTITY": json.dumps(identity),
+            "CI_RUN_ID": "ci",
+            "GITHUB_RUN_ID": "release",
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        },
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    expected = {
+        key: value
+        for key, value in identity.items()
+        if key not in {"layers", "platform"}
+    }
+    expected.update(
+        contract="dotmac-candidate-release-receipt/1",
+        accepted="candidate accepted before publication",
+        ci_run_id="ci",
+        release_run_id="release",
+        registry_digest="registry-digest",
+        reference="registry-reference",
+        registry_config_digest="registry-config",
+    )
+    assert json.loads((tmp_path / "release-receipt.json").read_text()) == expected
 
 
 # ── admission: which revisions may be built at all ──────────────────────────
@@ -527,9 +736,8 @@ def test_the_candidate_build_still_requires_the_tip() -> None:
     """Require candidate builds to use the current protected-main revision.
     Deployment may reuse accepted history; a new build must use the selected tip.
     """
-    workflow = _text(IMAGE_WORKFLOW)
-    assert 'current_main="$(git rev-parse HEAD)"' in workflow
-    assert '--expect-head "${{ steps.select.outputs.current_main }}"' in workflow
+    assert 'current_main="$(git rev-parse HEAD)"' in IMAGE
+    assert '--expect-head "${{ steps.select.outputs.current_main }}"' in IMAGE
 
 
 # ── the acceptance battery covers what it claims to ─────────────────────────
@@ -604,31 +812,29 @@ REQUIRED_CHECKS: dict[str, str] = {
 
 @pytest.mark.parametrize(("what", "marker"), sorted(REQUIRED_CHECKS.items()))
 def test_the_acceptance_battery_still_asks_this(what: str, marker: str) -> None:
-    assert marker in _text(ACCEPTANCE), f"the battery no longer checks {what}"
+    assert marker in BATTERY, f"the battery no longer checks {what}"
 
 
 def test_the_restored_migration_test_has_both_lanes() -> None:
     """Prove correctly owned restores migrate and wrongly owned restores refuse.
     The negative lane must fail for database permissions, not an unrelated fault.
     """
-    acceptance = _text(ACCEPTANCE)
-    lane_a = acceptance.index("lane A: a correctly-owned restored copy upgrades")
-    lane_b = acceptance.index("lane B: a wrongly-owned restored copy is refused")
+    lane_a = BATTERY.index("lane A: a correctly-owned restored copy upgrades")
+    lane_b = BATTERY.index("lane B: a wrongly-owned restored copy is refused")
     assert lane_a < lane_b
-    assert "CREATE DATABASE restored_wrong_owner OWNER postgres" in acceptance
-    assert "failed for some OTHER reason" in acceptance
+    assert "CREATE DATABASE restored_wrong_owner OWNER postgres" in BATTERY
+    assert "failed for some OTHER reason" in BATTERY
 
 
 def test_the_two_restore_lanes_differ_in_exactly_one_variable() -> None:
     """Hold public schema ownership fixed while varying database ownership.
     Otherwise a privilege failure cannot identify which ownership caused it.
     """
-    acceptance = _text(ACCEPTANCE)
-    assert "ALTER SCHEMA public OWNER TO app_admin" in acceptance
-    assert 'test "$ok_owners" = "app_admin|app_admin"' in acceptance
-    assert 'test "$bad_owners" = "postgres|app_admin"' in acceptance
-    setup = acceptance.index("the lanes must differ only in DATABASE ownership")
-    migrate = acceptance.index("lane B: a wrongly-owned restored copy is refused")
+    assert "ALTER SCHEMA public OWNER TO app_admin" in BATTERY
+    assert 'test "$ok_owners" = "app_admin|app_admin"' in BATTERY
+    assert 'test "$bad_owners" = "postgres|app_admin"' in BATTERY
+    setup = BATTERY.index("the lanes must differ only in DATABASE ownership")
+    migrate = BATTERY.index("lane B: a wrongly-owned restored copy is refused")
     assert setup < migrate
 
 
@@ -639,9 +845,8 @@ def test_the_readiness_check_runs_its_negative_case_first() -> None:
     liveness route is asserted alongside it as a positive control — otherwise
     "not ready" and "not answering" would be indistinguishable.
     """
-    acceptance = _text(ACCEPTANCE)
-    negative = acceptance.index("database unreachable: /health 200")
-    positive = acceptance.index("database reachable: /health/ready 200")
+    negative = BATTERY.index("database unreachable: /health 200")
+    positive = BATTERY.index("database reachable: /health/ready 200")
     assert negative < positive
 
 

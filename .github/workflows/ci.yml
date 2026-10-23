@@ -331,6 +331,8 @@ jobs:
             --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
             --build-arg "SOURCE_REVISION=${GITHUB_SHA}" \
             --tag dotmac-vendor-control-plane:ci .
+      - name: Record the CI candidate identity with the publication recorder
+        run: python3 .github/candidate/record_identity.py dotmac-vendor-control-plane:ci "$GITHUB_SHA"
       - name: Boot-smoke the built bytes
         run: |
           set -euo pipefail

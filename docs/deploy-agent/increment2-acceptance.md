@@ -27,14 +27,14 @@ evidence.
 | Combined CP implementation and mandatory metadata | 2,700 |
 | Agent runtime | 1,100 |
 | Launcher, systemd and public config | 150 |
-| CI YAML changes | 350 |
+| CI workflows and candidate tooling | 350 |
 | OpenBao and adopted credential helpers | 1,400 |
 | Egress renderer/config | 150 |
 | Gate0 proof and restore acceptance runtime, including adopted diagnostics | 4,100 |
 | Finite agent/resolver/runner provisioning, including adopted wrappers | 950 |
-| Required tests across all increments and the approved engine guard | 8,800 |
+| Required tests across all increments and the approved engine guard | 9,000 |
 | Approved predecessor guard runtime | 60 |
-| Overall counted new source | 21,000 |
+| Overall counted new source | 21,300 |
 
 The measured shipping approval supersedes the earlier drafting-only budget
 restriction for this same bounded feature. All other component ceilings remain
