@@ -1047,7 +1047,10 @@ test "$(deploy_read)" = 503 || fail "disabled deployment control did not refuse"
 python3 - "$WORKDIR/deploy.json" <<'DISABLED'
 import json
 import sys
-assert json.load(open(sys.argv[1])) == {"detail": "feature_disabled"}
+body = json.load(open(sys.argv[1]))
+assert set(body) == {"code", "message", "details", "request_id"}, body.keys()
+assert body["code"] == "http_error" and body["message"] == "feature_disabled"
+assert body["details"] is None
 DISABLED
 # The same readiness-only result must fail the enabled acceptance predicate.
 if (assert_enabled_deployment) >/dev/null 2>&1; then

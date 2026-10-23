@@ -2,288 +2,197 @@
 
 This source implements the staging signer, host public-key registry, signed
 report ingest, git evidence authority and rebuildable PostgreSQL projection.
-It has **no live acceptance or activation approval**. Michael approved the
-2026-10-22 bounded amendment and the 2026-10-24 enabled-runtime shipping limits;
-source publication may proceed through normal review and prescribed exact-head
-CI. The approved limits and retained acceptance gates are recorded in
-`increment2-acceptance.md`. Approval does not authorize live activation.
-Focused offline proofs do not establish CP assembly, PostgreSQL migration,
-GitHub/OpenBao access, environment approval, or any Gate-0 staging proof.
+`increment2-acceptance.md` records Michael's 2026-10-22 amendment and 2026-10-24
+shipping approval, measurements and gates. Review/exact-head CI remain required;
+**source approval grants no live activation or acceptance**. Offline proofs cannot
+establish pinned assembly, PostgreSQL migration, GitHub/OpenBao access, environment
+approval or staging. Governed JWT apply, custody, approved public fingerprints and
+explicit activation approval remain required.
 
-The new feature imports no existing `vendor_cp.deployment` seam and owns no
-fleet desired-state tables. Its two tables contain retained evidence and a
-public-identity projection. Existing production profiles withhold its routes; `full`
-explicitly inventories them and advances its surface version.
+The feature imports no `vendor_cp.deployment` seam or fleet desired-state owner.
+Its two tables retain evidence and public-identity projections. `full` inventories
+its routes at version7; existing production profiles withhold them except the
+explicit keyless selection below.
 
-## Corrected signed transition and bootstrap
+## Signed transition, bootstrap and API custody
 
-The desired exact schema adds required `from_image_digest`. The canonical plan
-projects the fields in `contracts.PLAN_FIELDS`, including that baseline. Every
-host can rederive the approved digest from signed bytes. CP obtains its baseline
-from accepted healthy reports, ordered by desired issuance in git, never by host
-clock or report arrival. A delayed older report remains evidence and cannot
-regress baseline or drift. Key rotation cannot overwrite accepted applied state.
+`contracts.PLAN_FIELDS` projects the required `from_image_digest` into the
+canonical plan, allowing hosts to rederive the approved digest from signed bytes.
+CP derives that baseline from healthy accepted reports in desired-issuance Git
+order, never host clock or arrival order. Delayed reports remain evidence without
+regressing baseline or drift; key rotation cannot overwrite accepted applied state.
+A missing baseline refuses issuance.
 
-A host without an accepted report bootstraps through the existing key-activation
-route. A distinct `dotmac.deploy_host_possession/1` payload and Ed25519 domain
-bind every stored challenge field plus the host-observed image digest. The host
-helper checks independently configured key and deployment identity before
-signing. CP requires the pending unexpired matching challenge and the admin's
-out-of-band approved public-key fingerprint. This observation establishes a
-baseline; it asserts no apply, health or staging acceptance. Missing baseline
-refuses issuance.
+Bootstrap uses the existing key-activation route. The distinct Ed25519 domain
+and `dotmac.deploy_host_possession/1` payload bind every challenge field and the
+host-observed image digest. The host helper checks its independently configured
+key/deployment identity. CP checks the pending, unexpired matching challenge and
+the admin's out-of-band approved public-key fingerprint. This establishes only
+a baseline, without asserting apply, health or staging acceptance.
 
-## API and custody
-
-All admin routes use the kernel's bearer `require_platform_admin` owner.
-Authenticated `PlatformAdmin.id` binds command idempotency, key events and
-projection audit. Supplied `approvals[].actor` is upstream evidence and never
-substitutes for that principal. Public GET returns signed envelopes with
-`Cache-Control: no-store`; public ingest authenticates the host's signature.
+All admin routes use kernel bearer `require_platform_admin`; `PlatformAdmin.id`
+binds idempotency, key events and projection audit. Upstream `approvals[].actor`
+never substitutes for that principal. Public GET serves signed envelopes with
+`Cache-Control: no-store`; public ingest authenticates host signatures.
 
 * `POST /platform/deploy/desired-state`: `{command_id, desired,
-  approved_plan_digest}`. `desired` contains exactly the unsigned fields.
-  `{mode:"preview",desired}` on that same route returns `{plan,plan_digest}`;
-  preview omits `from_image_digest`, which CP derives. No signature is issued.
+  approved_plan_digest}`, with exactly unsigned fields in `desired`.
+  `{mode:"preview",desired}` returns unsigned `{plan,plan_digest}` and omits
+  `from_image_digest`, which CP derives.
 * `POST /platform/deploy/host-keys`: register `{key_id,deployment_ref,
   public_key_b64}` or revoke `{operation:"revoke",key_id}`.
 * `POST /platform/deploy/host-keys/{key_id}/challenge` returns the challenge.
-* `POST /platform/deploy/host-keys/challenge-response` accepts `{envelope,
+* `POST /platform/deploy/host-keys/challenge-response`: `{envelope,
   approved_public_key_fingerprint}`.
-* `POST /platform/deploy/applied-state` accepts canonical envelope bytes and
-  returns `{verdict:"accepted"}`, `idempotent_replay`, or `quarantined:<code>`.
-  Same report id with different bytes and unknown desired evidence quarantine.
+* `POST /platform/deploy/applied-state` accepts canonical envelope bytes, returning
+  `{verdict:"accepted"}`, `idempotent_replay` or `quarantined:<code>`; conflicting
+  bytes under one report id and unknown desired evidence quarantine.
 * `GET /platform/deploy/drift` is admin-only.
 
-Enablement is explicit: `VENDOR_DEPLOY_AGENT_ENABLED=true`. Startup requires
-`VENDOR_DESIRED_SIGNING_KEY_ID`, `VENDOR_DESIRED_SIGNING_KEY_FILE`,
-`VENDOR_DESIRED_SIGNING_KEY_POINTER` equal to
-`secret/dotmac/platform-cp/desired-state/signing-key`,
-`VENDOR_DEPLOY_LEDGER_DIR`, `VENDOR_DEPLOY_GH_EXECUTABLE` (absolute path), and
-`VENDOR_DEPLOY_GH_SHA256`. The signer file is read once, must be a regular
-service-owned 0600 file, and cannot be a symlink. No ephemeral fallback exists.
-The configured gh binary is checksum pinned. Its existing authentication is
-owned by CP deployment tooling; this feature never reads or prints credentials.
-
-Before signing, the real reader verifies both build/evidence GitHub runs against
-fixed repository/workflow, successful completed `workflow_dispatch` on `main`,
-exact run ids and revision, and same-repository head identity. It downloads the
-fixed evidence artifact into a private temporary directory, checks its exact
-schema and six plan facts, and uses the public kernel manifest parser to verify
-canonical manifest bytes and digest. Reader failure refuses issuance.
+Mandatory inputs/mounts appear below. The signer reads a service-owned regular
+0600 file once; symlinks/ephemeral fallback refuse. CP tooling owns authentication;
+the feature never reads/prints credentials. Signing requires both completed,
+successful `workflow_dispatch` runs on `main`, fixed repository/workflow, exact
+run ids/revision and same-repository head. The reader privately downloads the
+fixed artifact and verifies exact schema, six plan facts and canonical manifest
+bytes/digest through the public kernel parser; failure refuses issuance.
 
 ## Evidence transactions and operational recovery
 
-A process mutex and filesystem flock serialize whole git transactions. Existing
-paths cannot change; modified/deleted history, dirty worktrees and remote
-movement refuse. Desired envelope and command receipt share one commit. Push
-must succeed before serving. Accepted host envelopes retain their exact canonical
-bytes. Registry changes are separate immutable git events under `keys/`.
-
-The DB receipt and kernel audit are written in one projection transaction after
-git commit. A crash in between leaves git authoritative. The installed command
+Mutex/flock serialize Git transactions; dirty worktrees, remote movement and
+modified/deleted paths refuse. Desired envelope/receipt share one pushed commit;
+host bytes stay canonical and immutable key events live under `keys/`. Git remains
+authoritative across crashes before the atomic DB receipt/kernel-audit projection.
 `dotmac-platform admin deploy-ledger-rebuild` verifies signatures, possession,
-immutable key identity, public-key uniqueness, state transitions, nonce joins and
-success observations before replay. Projection comparison checks stored envelope
-hashes and all indexed fields, refuses divergent retained rows, and repairs
-missing receipts/current registry. No SQLite parity claim is made.
+immutable/unique keys, transitions, nonce joins and success observations, compares
+all hashes/indexed fields, refuses divergence and repairs missing receipts/registry.
 
-A failed git push retains the local commit. If the remote did not accept it,
-subsequent service reads and writes refuse `ledger_conflict`. If the remote
-accepted it but the acknowledgement was lost, the failed command returns no
-signed envelope; a later successful fetch must confirm equal tips before any
-service read can serve it. An unavailable fetch refuses rather than trusting a
-local tracking reference.
+Failed push retains the local commit and returns no signed envelope. Subsequent
+reads/writes refuse `ledger_conflict` unless a successful fetch confirms equal
+tips, including when the remote accepted a push whose acknowledgement was lost.
+An unavailable fetch never trusts the local tracking ref.
+**Recovery owner: Michael and the CP deployment owner.**
 
-**Recovery owner: Michael and the CP deployment owner.** The bounded manual
-procedure is:
+1. Stop CP, preserve both histories and exclusively acquire `.git/deploy-agent.lock`.
+2. Fetch `origin`, record `HEAD`/`origin/main`, and require
+   `git merge-base --is-ancestor origin/main HEAD`; otherwise retain the hold for
+   reviewed reconciliation. Never reset, delete or force-push unknown remote data.
+3. Validate retained signatures and identity/nonce/state semantics against pinned
+   public keyrings, and confirm required branch protection. The stopped-service
+   fixture uses `DeployAgentService.validate_history`; the deployment owner owes
+   a reviewed live invocation. No installed recovery command is added;
+   `deploy-ledger-rebuild` refuses while remote and local differ.
+4. Retry only `git push origin HEAD`, fetch and require equal tips before restart.
+   Retry the original command id as the original authenticated admin to return the
+   identical envelope and repair missing DB projection.
 
-1. Stop CP and preserve both histories. Acquire the existing
-   `.git/deploy-agent.lock` exclusively so another writer cannot enter recovery.
-2. Fetch the configured `origin`, record local `HEAD` and `origin/main`, and
-   check `git merge-base --is-ancestor origin/main HEAD`. If that fails, retain
-   the hold and both histories for reviewed reconciliation. Unknown remote data
-   is never reset, removed or force-pushed over.
-3. Validate the retained history's signatures and semantic identity/nonce/state
-   rules against the pinned public keyrings, and confirm the remote's required
-   branch-protection evidence. The source owner is
-   `DeployAgentService.validate_history`; the fixture invokes it while the
-   service is stopped. This change adds no installed recovery command. The
-   deployment owner must provide a reviewed invocation for the live ceremony;
-   `deploy-ledger-rebuild` itself refuses while the remote differs.
-4. Retry only the ordinary `git push origin HEAD`, fetch again, and require
-   exact equality of local `HEAD` and `origin/main` before restarting CP. Retry
-   the original command id with the original authenticated admin: the retained
-   command returns the identical envelope and repairs missing DB projection.
-
-`tests/deploy_agent/test_ledger_recovery.py` exercises this sequence against a
-local bare Git remote using real signed history: rejection before acceptance,
-remote acceptance with lost acknowledgement, and an independently advanced
-remote that must preserve the hold. It proves the ordinary retry adds no new
-commit or rewritten evidence. It does not establish live branch protection,
-credential availability, PostgreSQL projection correctness or staging acceptance.
-
-Public verifier key rotation/history and production endpoint publication still
-need deployment-specific configuration and evidence; this source makes no claim
-that those live obligations are discharged.
+`tests/deploy_agent/test_ledger_recovery.py` uses real signed local-bare-remote
+history for rejected push, accepted push/lost acknowledgement and independently
+advanced remote. Ordinary retry adds no commit or rewritten evidence. Live branch
+protection, credentials, PostgreSQL projection, public verifier rotation/history
+and production endpoint publication remain deployment-specific obligations.
 
 ## Gate0 machine-evidence admission
 
-`POST /platform/deploy/gate-evidence` is the sole additional adapter. It uses the
-existing kernel platform bearer guard and `GateEvidence` closed public types;
-`actor_admin_id` is never accepted in the payload. The authenticated admin is
-attributed in the immutable command record and existing projection audit.
-`gate_admission` owns campaign authorization and evidence joins; the router
-only validates and delegates. This adds no CLI authentication, deployment
-executor, database, signer authority, or human signoff.
+`POST /platform/deploy/gate-evidence` uses kernel bearer auth and closed
+`GateEvidence` types; payload `actor_admin_id` is forbidden. The immutable command
+and projection audit attribute the authenticated admin. `gate_admission` owns
+campaign authorization/joins; the router validates and delegates. It adds no CLI
+auth, deployment executor, database, signer authority or human signoff.
 
-The optional `VENDOR_DEPLOY_GATE_SCOPE_FILE` names a public, regular, root-owned
-file beneath canonical root-owned non-writable parent directories. Symlinks and
-group/other writable files or parents refuse. The service retains its validated
-canonical bytes for the process lifetime; changing a file requires an explicit
-configuration/restart ceremony outside this source task. Absent configuration
-keeps evidence admission disabled while preserving the existing deploy API.
-`CampaignScope` is the closed configuration type: it binds the complete
-`GateContext`, allowed authenticated admin UUIDs, enrolled host public-key hash,
-selected complete candidate plans, the observation window, exact proof1 run and
-artifact identities, exact restore source/test host and bundle/capture/inventory
-hashes, the prepared-source artifact digest, the exact egress DNS/probe target,
-and the required prior-run evidence digest for a same-session repeatability campaign.
-The configured observation window is at most 24 hours. This file contains public
-evidence and approval references, never bearer credentials or private keys.
+Optional `VENDOR_DEPLOY_GATE_SCOPE_FILE` requires a public regular root-owned file
+under canonical root-owned non-writable parents; symlinks and group/other writable
+files/parents refuse. Validated canonical bytes last for the process lifetime;
+change requires an external configuration/restart ceremony. Absent scope disables
+admission while preserving the deploy API. Closed `CampaignScope` binds complete
+`GateContext`, allowed admin UUIDs, enrolled host public-key hash, complete selected
+plans, observation window (at most 24h), exact proof1 run/artifacts, restore source/
+test host and bundle/capture/inventory hashes, prepared-source artifact digest,
+egress DNS/probe target and prior-run digest for same-session repeatability.
+Scope contains public evidence/approval references, never credentials/private keys.
 
-The owner resolves exact desired/applied/quarantine bytes from derived ledger
-paths, verifies signed history and host enrollment, and binds nonce, candidate,
-report classification, original submitted fixture bytes, receipt digest and
-commit contents. Newly signed refusal/transition reports must belong to both
-the campaign window and the actual before/after observation interval. The
-original terminal receipt remains intentionally historical only for nonce replay. The same genuine applied transition must serve proofs3/4.
-Independent host observations remain claims attributed to the authenticated
-submitter; CP does not claim it executed those probes. DNS evidence must include
-real kernel expiry bounded by the observed A/AAAA TTL, and a bounded independent
-observation that all old A and AAAA destinations disappeared, rather than
-merely adding different addresses. Restore evidence must bind the
-protected controlled capture and source inventory, with successful cleanup.
+Admission resolves exact desired/applied/quarantine ledger bytes, verifies history
+and enrollment, and binds nonce, candidate, report classification, original fixture
+bytes, receipt digest and commit contents. Newly signed refusal/transition reports
+must satisfy campaign and actual observation intervals; only nonce replay retains
+an intentionally historical terminal receipt. Proofs3/4 share one genuine applied
+transition. Host observations are submitter-attributed claims, not CP execution.
+DNS proofs require kernel expiry bounded by observed A/AAAA TTL and independently
+bounded disappearance of every old A/AAAA destination. Restore binds protected
+controlled capture/source inventory and successful cleanup.
 
-Evidence and actor-bound command records share the existing serialized
-`append_many`/push transaction under `gate0/<date>/<run>/evidence.json` and
-`gate0/commands/<command>.json`. Gate0 history has the same append-only rewrite
-protection as deployment evidence, including renames and file-type changes. Directory traversal and creation use
-pinned no-follow descriptors; symlink ancestors refuse before any leaf write.
-The receipt contains exact evidence and its digest plus its original addition
-commit. A second identical authenticated POST performs authoritative readback
-and returns that identical receipt, even after unrelated appends or expiry.
-Changed bytes or actor under one command, or another command under one run,
-refuse. A valid terminal failure can retain only the performed proof outcomes,
-with a bounded failure code and no invented observations. Missing payload is
-permitted only for the early `evidence_missing` or `transport_failed` stage;
-all supplied signed references remain fully verified. An attempted restore
-exception may retain null restored-inventory, source-parity and scratch-absence
-observations; these can never satisfy PASS. Receipts explicitly carry
-`verdict:PASS|FAIL`; publishing a FAIL receipt never creates Gate PASS. The
-proof client must verify the identical second-POST readback before terminating
-with that verdict. Push failure returns no published receipt and preserves the existing
-manual non-force recovery hold. Machine evidence never supplies Michael signoff.
+Evidence and actor-bound commands share serialized `append_many`/push under
+`gate0/<date>/<run>/evidence.json` and `gate0/commands/<command>.json`. Append-only
+history rejects renames/type changes; pinned no-follow traversal/creation refuses
+symlink ancestors before writes. Receipts bind exact evidence, digest and original
+addition commit. An identical authenticated second POST returns the same receipt,
+even after expiry/unrelated appends. Changed bytes/actor under one command, or a
+second command for one run, refuse. Terminal FAIL retains only performed outcomes
+with bounded failure codes. Missing payload is allowed only for early
+`evidence_missing`/`transport_failed`; supplied signed references remain verified.
+Attempted restore exceptions may retain null restored-inventory/source-parity/
+scratch-absence, never PASS. Receipts declare `verdict:PASS|FAIL`; FAIL cannot grant
+Gate PASS. The proof client verifies identical second-POST readback before exit.
+Push failure publishes no receipt and retains the manual non-force recovery hold.
+Machine evidence never supplies Michael signoff.
 
-The 2026-10-22 measured source shipping approval permits this reviewed bounded
-source through normal publication and prescribed CI within the approved ceilings.
-The reviewed measurement packet and approval are referenced in
-`increment2-acceptance.md`; this grants no activation, host changes or production
-acceptance. Governed JWT apply, human custody, approved public fingerprints and
-explicit activation approval remain required. Focused offline Git/crypto
-and isolated-router tests used a shared environment whose kernel differed from
-the repository pin. Exact pinned assembly and migrated PostgreSQL remain CI gates.
+Forward transitions, including failed attempts carrying signed evidence, must
+match campaign revision/tree. Repeatability binds the published initial PASS but
+uses new revision/tree/nonce/target digest; its before image equals the initial
+after image. Deployment, enrolled host and tool revision stay fixed. Partial
+failure invents no unperformed candidate or host observation.
+Full PASS binds proof2 replay to the same proofs3/4 nonce, report UUID and digest.
+Replay follows forward3/4 within the signed validity window (exclusive expiry),
+then refusal fixtures run from the post-forward baseline. Older receipts cannot
+substitute. Public evidence types are unchanged. Fixtures may leave latest desired/
+report refused and `drift=true`; the healthy baseline remains the accepted target.
+The live packet reads that final state; polling restoration grants no signoff.
 
-The current forward transition must match the campaign's exact target revision
-and tree, including a failed attempted transition with supplied signed evidence.
-A successful same-session repeatability run binds the exact published initial PASS but uses a
-new revision, tree, desired nonce and target digest; its before image must equal
-the initial accepted after image. Deployment, enrolled host and tool revision
-remain fixed across that relationship. An unperformed transition in a truthful
-partial failure does not invent a new candidate or host observation.
+Same-session `repeatability` after initial PASS retains immutable joins and image
+continuity. Proofs2–4 repeat bad signature, signed rollback and same-run replay
+across daemon stop/start, proved by distinct validated InvocationIDs/fresh matching
+journals; nonce bytes/original report survive. Nonce/outbox/ledger resets, rotation,
+reinstall and test-hook residue are forbidden; enrollment hashes/cleanup stay exact.
+`next_morning` is retained only for immutable historical decoding: `validate` and
+`scope_bytes` reject it except through ledger readers' explicit history-only flag.
+Original bytes preserve historical fingerprints/hashes and the original calendar
+rule; future API admission/scope loading remain strict.
 
-No additional descriptor promotion or prospective manifest regeneration is
-required for this adapter: `scripts/generate_product_manifest.py:build_manifest`
-records module identities, versions, planes and web enablement, all unchanged
-here. `tests/architecture/test_product_manifest.py` checks those generated bytes;
-`test_descriptor_promotion.py` preserves the existing immutable candidate. The
-full deployment profile advances to version7; the existing production profiles
-still withhold the deploy_agent feature. The separate embedded profile is generated by
-`deployment/profile.py:build_profile_document` from the exact source and built
-wheel during image CI. These source observations do not establish architecture
-checks, pinned-kernel assembly or image acceptance. The lean evidence patch
-retains the frozen pre-profile metadata measurement of 233 counted lines. The
-opt-in profile below adds 30 counted CP runtime/wiring declaration lines;
-metadata source selection and bytes remain unchanged.
-
-Full PASS binds proof2 nonce replay to the same run's exact applied transition
-nonce, report UUID and report digest shared by proofs3/4. Replay observations
-follow the completed transition and remain inside the signed desired validity
-window; expiration is exclusive. The producer runs forward3/4, then replay, then
-the refusal fixtures from the post-forward baseline. An older prior-run receipt
-cannot substitute for the current transition. Public evidence types are unchanged.
-The finite refusal fixtures may leave the latest desired/report refused and
-`drift=true`, while the last healthy applied baseline remains the accepted target.
-Normal polling restoration and admitted proof evidence do not advance human
-signoff or production authorization; the live packet reads back that final state.
-
-The approved 2026-10-22 lean amendment uses phase `repeatability` after an
-initial published PASS; future requests using `next_morning` are refused.
-The prior deadline no longer needs an earlier calendar date: the same session
-is sufficient. Prior PASS admission, immutable ledger/digest bindings, source
-and tree distinction, target digest distinction and accepted-image continuity
-remain required. Proofs2–4 still repeat, including bad signature, signed rollback
-and same-run nonce replay after a controlled daemon stop/start. Distinct validated
-InvocationIDs and fresh matching journal entries prove restart; nonce bytes and
-the original applied report survive it. Nonce/outbox/ledger resets, key rotation, reinstall and test-hook residue
-are forbidden between runs; protected host
-enrollment hashes and exact fixture cleanup remain the evidence owners.
-
-The CP stored phase type retains `next_morning` solely to decode immutable
-historical ledger bytes. `validate` and `scope_bytes` reject it by default;
-only ledger readers use their explicit history-only flag. Historical fingerprints
-and evidence hashes use the original bytes, and retired-phase history retains
-its original calendar rule. Future API admission and scope loading stay strict.
-
+`scripts/generate_product_manifest.py:build_manifest` retains module identities,
+versions, planes/web enablement; no promotion/regeneration is needed, checked by
+`test_product_manifest.py`/`test_descriptor_promotion.py`. Image CI generates the
+separate embedded profile from exact source/wheel through
+`deployment/profile.py:build_profile_document`. Frozen metadata remains 233 lines;
+keyless adds 30 CP wiring lines. Offline Git/crypto/router proofs used a different
+kernel; pinned assembly, migrated PostgreSQL and image acceptance remain CI gates.
 
 ## Opt-in keyless production profile
 
-`production-keyless-v1` version 1 publishes the seven surfaces of
-`production-bootstrap` version 6 plus `deploy_agent`. It preserves accounts,
-contracts, vendor approvals, allocations, console, withdrawal conflicts and
-mandatory readiness. It continues withholding `deployment_control`,
-`licence_delivery`, `offers` and the provisioning laboratory. Existing profile
-versions and inventories are unchanged. This is a production-accepted surface
-selection, not a laboratory or evidence of deployment acceptance.
+`production-keyless-v1` version1 adds `deploy_agent` to `production-bootstrap` v6's
+seven surfaces, preserving accounts, contracts, vendor approvals, allocations,
+console, withdrawal conflicts and readiness. It withholds `deployment_control`,
+`licence_delivery`, `offers` and the provisioning laboratory. Other profile
+versions/inventories are unchanged; production acceptance selects surfaces only.
 
-The legacy deployment adapter defaults to expecting `production-bootstrap`.
-An operator can explicitly select `EXPECTED_DEPLOYMENT_PROFILE=production-keyless-v1`
-for an authorized deployment; the host runtime environment must contain exactly
-one canonical matching `VENDOR_DEPLOYMENT_PROFILE` assignment. Missing, duplicate,
-alternate or mismatched assignments refuse before candidate containers and DB
-work, including colon and inherited bare-key declarations. The adapter exports
-`VENDOR_CP_RUNTIME_ENV_FILE` as an absolute path from its validated `ENV_FILE`;
-app, relay and ops consume that same file even with a different Compose directory.
-Direct manual Compose use retains the `.env` default. The selector permits only
-bootstrap and keyless; it cannot select `full`.
-Feature enablement and signer/ledger prerequisites remain separate configuration.
+The existing adapter defaults to `production-bootstrap`; explicit
+`EXPECTED_DEPLOYMENT_PROFILE=production-keyless-v1` requires exactly one canonical
+matching `VENDOR_DEPLOYMENT_PROFILE` assignment. Missing, duplicate, alternate,
+colon, bare-key or mismatched assignments refuse before containers/DB work.
+Its validated `ENV_FILE` becomes absolute `VENDOR_CP_RUNTIME_ENV_FILE` for app,
+relay and ops even across Compose directories; manual Compose defaults to `.env`.
+Only bootstrap/keyless are permitted, never `full`; enablement remains separate.
 
-### Draft runtime configuration through the existing CP owner
+### Runtime configuration through the existing CP owner
 
-The explicit `docker-compose.keyless.yml` overlay supplies the app runtime.
-The existing adapter accepts `COMPOSE_OVERRIDE_FILE` as an optional second
-`-f` after `COMPOSE_FILE`; an absent or empty override preserves its single-file
-default and validated `ENV_FILE`. For a separately authorized keyless deployment,
-the deployment owner selects `COMPOSE_OVERRIDE_FILE=docker-compose.keyless.yml`
-and `EXPECTED_DEPLOYMENT_PROFILE=production-keyless-v1`. Profile selection remains
-an assembly decision. The overlay adds no executor or profile-dependent behavior.
-
-Only `app` receives `VENDOR_DEPLOY_AGENT_ENABLED=true`, from the overlay.
-The shared runtime environment must omit that variable so relay and ops retain
-the runtime's disabled default; migration needs neither desired signing nor GitHub.
-The base Compose services retain their read-only root filesystems, dropped
-capabilities and existing restrictions. The overlay supplies no host binary.
-The image must contain `/usr/local/bin/gh`, whose configured SHA-256 is
+For a separately authorized keyless deployment, select
+`COMPOSE_OVERRIDE_FILE=docker-compose.keyless.yml`. The existing adapter adds an
+optional second `-f` after `COMPOSE_FILE`; absent/empty preserves the single-file
+and validated-env defaults. Assembly owns profiles; no executor/behavior branch
+is added. Only app receives `VENDOR_DEPLOY_AGENT_ENABLED=true`; omit it from the
+shared environment so relay/ops stay disabled and migrate without signer/GitHub.
+Base read-only root filesystems, dropped capabilities and restrictions remain.
+No host binary is mounted: the image supplies `/usr/local/bin/gh`, configured as
+`VENDOR_DEPLOY_GH_EXECUTABLE` with `VENDOR_DEPLOY_GH_SHA256` equal to
 `sha256:a95a4e011d77e9cd0e9922c13fda2b95195c6be29dfa58207075fd983bbae744`.
 
 The deployment owner must provision these inputs before selecting the overlay:
@@ -291,69 +200,48 @@ The deployment owner must provision these inputs before selecting the overlay:
 | Public configuration | Protected host source and container use |
 | --- | --- |
 | `VENDOR_DESIRED_SIGNING_KEY_ID` | Required public identity of the independently provisioned desired-state key. |
-| Fixed desired-state key source | `/run/secrets/dotmac/platform-cp/desired-state/primary.key`, mounted at the same path read-only. Its pointer remains `secret/dotmac/platform-cp/desired-state/signing-key`. Never reuse the licence or D16 key. |
-| `VENDOR_DEPLOY_CP_LEDGER_HOST_DIR` | Required existing ledger checkout, mounted read-write at `/var/lib/dotmac-deploy/ledger`; the only writable overlay mount. |
-| `VENDOR_DEPLOY_CP_GATE_SCOPE_HOST_FILE` | Required protected public scope file, mounted read-only at `/etc/dotmac-deploy/gate-scope.json`. |
-| `VENDOR_DEPLOY_CP_GITHUB_AUTH_HOST_DIR` | Required protected authentication directory, mounted read-only at `/run/secrets/dotmac/platform-cp/github`, the fixed `GH_CONFIG_DIR`. |
-| `VENDOR_DEPLOY_CP_GIT_CONFIG_HOST_FILE` | Required protected public Git configuration, mounted read-only at `/etc/dotmac-deploy/gitconfig`, the fixed `GIT_CONFIG_GLOBAL`; uses the existing gh credential helper without embedding credentials. |
+| Fixed desired-state key source | `/run/secrets/dotmac/platform-cp/desired-state/primary.key`, mounted at the same path read-only, the fixed `VENDOR_DESIRED_SIGNING_KEY_FILE`. `VENDOR_DESIRED_SIGNING_KEY_POINTER` is `secret/dotmac/platform-cp/desired-state/signing-key`. Never reuse the licence or D16 key. |
+| `VENDOR_DEPLOY_CP_LEDGER_HOST_DIR` | Required existing checkout, mounted read-write at `/var/lib/dotmac-deploy/ledger`, the fixed `VENDOR_DEPLOY_LEDGER_DIR`; the only writable overlay mount. |
+| `VENDOR_DEPLOY_CP_GATE_SCOPE_HOST_FILE` | Required protected public scope, mounted read-only at `/etc/dotmac-deploy/gate-scope.json`, the fixed `VENDOR_DEPLOY_GATE_SCOPE_FILE`. |
+| `VENDOR_DEPLOY_CP_GITHUB_AUTH_HOST_DIR` | Required protected auth directory, mounted read-only at `/run/secrets/dotmac/platform-cp/github`, the fixed `GH_CONFIG_DIR`. |
+| `VENDOR_DEPLOY_CP_GIT_CONFIG_HOST_FILE` | Required protected public Git configuration, mounted read-only at `/etc/dotmac-deploy/gitconfig`, the fixed `GIT_CONFIG_GLOBAL`; existing gh credential helper, no embedded credentials. |
 
-Every added bind uses `bind.create_host_path=false`; Compose cannot fabricate a
-missing key, checkout, scope, auth directory or Git configuration. Required public
-variables use Compose's `:?` form to refuse missing and empty inputs. The key must
-meet the runtime's service-owned regular 0600-file checks. The ledger checkout must
-be writable by the image's service identity; scope ownership, parent-directory
-protection and canonical bytes must meet the existing scope loader's checks.
-The protected auth directory must be readable by that identity with usable
-preprovisioned gh authentication. No token is supplied in environment or argv.
-`GIT_TERMINAL_PROMPT=0` and `GH_PROMPT_DISABLED=1` refuse interactive fallback.
+All added binds set `bind.create_host_path=false`; required public inputs use `:?`
+to refuse missing/empty values. Key checks remain service-owned regular 0600;
+ledger must be service-writable, and scope/parents must satisfy the loader's
+ownership/protection/canonical-byte checks. Auth must be service-readable and
+preprovisioned. No token enters env/argv; `GIT_TERMINAL_PROMPT=0` and
+`GH_PROMPT_DISABLED=1` prohibit interactive fallback.
+CP deployment tooling owns auth, public helper configuration and checkout.
+Its `origin` must be `https://github.com/michaelayoade/dotmac-deploy-ledger.git`
+on `main`, with service author configuration and history-rewrite protection.
+The overlay neither clones, configures nor attests it. Fresh deployment-owner
+validation must prove protection, exact checkout, read/write auth and helper
+operation; this source wiring generates/reads no secret material.
 
-The existing CP deployment tooling owns authentication provisioning, the public
-Git credential-helper configuration and the ledger checkout. Its `origin` must
-be the selected HTTPS remote
-`https://github.com/michaelayoade/dotmac-deploy-ledger.git`, on `main`, with
-service-identity author configuration and protection against history rewriting.
-The public remote selection is recorded here; this overlay does not create,
-clone, reconfigure or attest the remote. Its existing protection, exact checkout
-state, read/write authentication and noninteractive helper operation require
-fresh deployment-owner validation for live use. No secret material is generated
-or read by this source wiring.
-
-The offline architecture tests check the YAML declarations, protected mounts,
-base-service restrictions and actual shell argument composition using a fake
-docker command. Strict Compose interpolation/merged rendering on missing inputs,
-image acceptance, material provisioning, startup and authenticated ledger/GitHub
-operation remain hosted CI or separately authorized live proofs. This source
-approval does not close those live and artifact acceptance obligations.
-
-This source change performs no live adoption. The host identity is unchanged;
-`PLATFORM_ROOT_DOMAIN` and `TRUSTED_HOSTS` require `platform.dotmac.io`. Candidate
-inputs permit bootstrap or keyless; assembly retains production profile admission;
-endpoint TLS, ingress and immutable-image adoption require separate evidence.
-Mandatory descriptor/promotion/prospective metadata remains 233 counted lines.
-The profile declaration and deployment guard are counted as CP runtime/wiring.
-The approved enabled-runtime amendment permits 23,000 overall counted lines,
-9,900 required-test lines, 3,100 CP implementation/wiring lines and 4,200 proof
-lines. CI remains capped at 350; other component limits remain unchanged. Source
-adoption grants no live activation authority.
+Offline architecture tests check YAML, mounts, restrictions and fake-docker shell
+composition. Strict missing-input interpolation/merged Compose rendering, image
+acceptance, provisioning, startup and authenticated GitHub/ledger operation remain
+hosted CI or separately authorized live proofs. Host identity is unchanged;
+`PLATFORM_ROOT_DOMAIN`/`TRUSTED_HOSTS` require `platform.dotmac.io`. Candidate inputs
+permit bootstrap/keyless with assembly admission; TLS, ingress and immutable-image
+adoption need separate evidence. Mandatory metadata remains 233 counted lines;
+profile/guard count as CP runtime/wiring. Approved ceilings: 23,000 overall, 9,900
+required tests, 3,100 CP, 4,200 proof, 350 CI; other limits remain unchanged.
 
 ### Ledger GitHub App credential provisioning
 
 The owner-only `dotmac-deployment-ledger` App (5448762, installation 174650996)
-is installed only on `michaelayoade/dotmac-deploy-ledger` (1431613388), with
-Contents write and Metadata read. Its private key is a root-only held file at
-`/etc/dotmac/platform-cp/github-app/private-key.pem`, outside application mounts.
-The existing installed CLI command `admin github-auth-renew` delegates issuance
-to the credential owner under the existing production deployment lock. It
-requests only that repository and permission set, validates the returned scope
-and expiration, and atomically replaces `hosts.yml` inside the auth directory.
-The application reads that directory; it never receives the App private key.
-
-The checked-in service and twenty-minute timer are installation inputs only.
-They require a root-owned installed wheel in the host operator environment at
-`/opt/dotmac/vendor-control-plane/operator`, protected auth-directory ancestry,
-and a successful manual issuance before timer activation. `cp-github.gitconfig`
-contains only the noninteractive gh credential helper. A failed renewal retains
-the previous token file; GitHub expiry closes access if renewals remain broken.
-Public lease receipts expose no token. Real issuance, restart/renewal behavior,
-protected-main append and Sub candidate evidence reads require live proof.
-These files neither install the timer nor enable the application.
+is restricted to `michaelayoade/dotmac-deploy-ledger` (1431613388), Contents write/
+Metadata read. Its root-only key `/etc/dotmac/platform-cp/github-app/private-key.pem`
+is outside app mounts. Installed `admin github-auth-renew` delegates issuance to
+the credential owner under the production deploy lock, requesting only that scope,
+validating scope/expiry and atomically replacing auth-directory `hosts.yml`.
+The app reads the directory and never receives the App private key.
+The checked-in service/twenty-minute timer require a root-owned installed operator
+wheel at `/opt/dotmac/vendor-control-plane/operator`, protected auth ancestry and
+successful manual issuance before activation. `cp-github.gitconfig` contains only
+the noninteractive gh helper. Failed renewal retains the previous file; expiry
+closes access. Public lease receipts expose no token. Issuance, restart/renewal,
+protected-main append and Sub candidate reads still need live proof. These inputs
+neither install the timer nor enable the app.

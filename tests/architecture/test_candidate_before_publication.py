@@ -13,6 +13,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import textwrap
 from pathlib import Path
@@ -935,6 +936,40 @@ def test_enabled_gate_rejects_disabled_and_unrelated_healthy_responses(
         check=False,
     )
     assert (result.returncode == 0) is accepted, result.stderr
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        None,
+        {"message": "ledger_unavailable"},
+        {"code": "other"},
+        {"details": {}},
+        "plain",
+    ],
+)
+def test_disabled_control_requires_the_pinned_kernel_refusal(tmp_path, change):
+    body = {
+        "code": "http_error",
+        "message": "feature_disabled",
+        "details": None,
+        "request_id": "fixture",
+    }
+    if change == "plain":
+        body = {"detail": "feature_disabled"}
+    elif change is not None:
+        body.update(change)
+    path = tmp_path / "refusal.json"
+    path.write_text(json.dumps(body))
+    program = BATTERY.split("<<'DISABLED'\n", 1)[1].split("\nDISABLED", 1)[0]
+    result = subprocess.run(  # noqa: S603 -- actual predicate, synthetic response
+        [sys.executable, "-", str(path)],
+        input=program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert (result.returncode == 0) is (change is None)
 
 
 def test_both_candidate_callers_reach_the_same_enabled_runtime_gate():

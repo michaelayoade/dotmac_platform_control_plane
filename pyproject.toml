@@ -209,6 +209,7 @@ priority = "explicit"
 pytest = "^8.3"
 ruff = "^0.6"
 mypy = "^1.11"
+PyYAML = "6.0.2"
 
 [tool.ruff]
 line-length = 88
