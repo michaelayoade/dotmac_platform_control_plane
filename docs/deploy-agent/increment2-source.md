@@ -270,7 +270,7 @@ Feature enablement and signer/ledger prerequisites remain separate configuration
 
 This source change performs no live adoption. The host identity is unchanged;
 `PLATFORM_ROOT_DOMAIN` and `TRUSTED_HOSTS` require `platform.dotmac.io`. Candidate
-inputs admit bootstrap or keyless through the existing production profile owner;
+inputs permit bootstrap or keyless; assembly retains production profile admission;
 endpoint TLS, ingress and immutable-image adoption require separate evidence.
 Mandatory descriptor/promotion/prospective metadata remains 233 counted lines.
 The profile declaration and deployment guard are counted as CP runtime/wiring.
