@@ -541,13 +541,14 @@ def test_authenticated_restore_failure_preserves_truthful_unobserved_fields(
     assert client.post("/platform/deploy/gate-evidence", json=request).json() == receipt
 
 
-def morning_campaign(
+def repeatability_campaign(
     admitted,
     *,
     revision="1" * 40,
     tree="2" * 40,
     digest="sha256:" + "3" * 64,
     baseline=None,
+    day=21,
 ):
     """Issue and ingest fresh signed B evidence after a published initial A run."""
     service, initial, initial_scope = admitted
@@ -564,7 +565,7 @@ def morning_campaign(
     )
     old_image = previous_report["observed"]["running_image"]
     from_digest = baseline or old_image.rsplit("@", 1)[1]
-    service.clock = lambda: datetime(2026, 10, 22, 10, 10, tzinfo=UTC)
+    service.clock = lambda: datetime(2026, 10, day, 11, 10, tzinfo=UTC)
     host = TestSigner("test-host", seed=2)
     refs = []
     plans = []
@@ -576,8 +577,8 @@ def morning_campaign(
             source_tree=tree,
             image_digest=digest,
             from_image_digest=from_digest,
-            issued_at="2026-10-22T10:01:00Z",
-            expires_at="2026-10-22T14:00:00Z",
+            issued_at=f"2026-10-{day:02}T11:01:00Z",
+            expires_at=f"2026-10-{day:02}T14:00:00Z",
         )
         doc["plan_digest"] = c.plan_digest(doc)
         signed = c.seal(c.DESIRED, doc, service.signer)
@@ -585,12 +586,12 @@ def morning_campaign(
             None, {f"desired/{service.deployment_ref}/{doc['nonce']}.json": signed}
         )
         report = applied(doc)
-        report.update(report_id=str(uuid4()), observed_at="2026-10-22T10:01:00Z")
+        report.update(report_id=str(uuid4()), observed_at=f"2026-10-{day:02}T11:01:00Z")
         report["health"] = copy.deepcopy(previous_report["health"])
         for field in ("live", "ready"):
-            report["health"][field]["checked_at"] = "2026-10-22T10:01:00Z"
+            report["health"][field]["checked_at"] = f"2026-10-{day:02}T11:01:00Z"
         before = {
-            "observed_at": "2026-10-22T10:01:00Z",
+            "observed_at": f"2026-10-{day:02}T11:01:00Z",
             "observed": copy.deepcopy(previous_report["observed"]),
             "health": copy.deepcopy(report["health"]),
             "executor_count": 1,
@@ -612,7 +613,7 @@ def morning_campaign(
     commit = service.ledger.git("rev-parse", "HEAD").decode().strip()
     doc, signed, report, envelope, before, path = refs[-1]
     after = {
-        "observed_at": "2026-10-22T10:02:00Z",
+        "observed_at": f"2026-10-{day:02}T11:02:00Z",
         "observed": report["observed"],
         "health": report["health"],
         "executor_count": 2,
@@ -641,11 +642,11 @@ def morning_campaign(
     request.update(
         command_id=str(uuid4()),
         run_id=str(uuid4()),
-        phase="next_morning",
+        phase="repeatability",
         prior_run_id=prior["run_id"],
         source_revision=revision,
         source_tree=tree,
-        deadline="2026-10-22T14:00:00Z",
+        deadline=f"2026-10-{day:02}T14:00:00Z",
         proofs=copy.deepcopy(prior["proofs"][1:4]),
     )
     refusal_refs = []
@@ -667,7 +668,7 @@ def morning_campaign(
             ledger_commit=commit,
             before=observed_before,
             after=copy.deepcopy(observed_before),
-            cleanup_observed_at="2026-10-22T10:03:00Z",
+            cleanup_observed_at=f"2026-10-{day:02}T11:03:00Z",
         )
         refusal_refs.append(template)
     replay = copy.deepcopy(prior["proofs"][1]["refusals"][1])
@@ -678,7 +679,7 @@ def morning_campaign(
         submitted_sha256=c.digest(signed),
         before=copy.deepcopy(after),
         after=copy.deepcopy(after),
-        cleanup_observed_at="2026-10-22T10:03:00Z",
+        cleanup_observed_at=f"2026-10-{day:02}T11:03:00Z",
         ledger_commit=commit,
     )
     refusal_refs.append(replay)
@@ -687,9 +688,9 @@ def morning_campaign(
         proof["transition"] = copy.deepcopy(transition)
     egress = request["proofs"][2]["egress"]
     egress.update(
-        started_at="2026-10-22T10:00:00Z",
-        finished_at="2026-10-22T10:10:00Z",
-        old_expiry_observed_at="2026-10-22T10:01:02Z",
+        started_at=f"2026-10-{day:02}T11:00:00Z",
+        finished_at=f"2026-10-{day:02}T11:10:00Z",
+        old_expiry_observed_at=f"2026-10-{day:02}T11:01:02Z",
         transition_report_id=report["report_id"],
         transition_report_sha256=c.digest(envelope),
     )
@@ -700,7 +701,7 @@ def morning_campaign(
             for key, value in request.items()
             if key not in ("command_id", "proofs")
         },
-        observation_not_before="2026-10-22T09:00:00Z",
+        observation_not_before=f"2026-10-{day:02}T11:00:00Z",
         prior_evidence_sha256=c.digest(prior),
         candidates=scope["candidates"] + plans,
     )
@@ -708,8 +709,49 @@ def morning_campaign(
     return service, request, scope, prior
 
 
-def test_two_day_admission_binds_real_fresh_target_and_prior(admitted):
-    service, request, scope, prior = morning_campaign(admitted)
+def test_retired_phase_refused(admitted):
+    _, request, _ = admitted
+    request["phase"] = "next_morning"
+    with pytest.raises(c.ContractError):
+        g.validate(request)
+
+
+def test_retained_legacy_phase_rebuilds_without_rewriting_signed_history(admitted):
+    service, request, scope, prior = repeatability_campaign(admitted, day=22)
+    request["phase"] = scope["context"]["phase"] = "next_morning"
+    with pytest.raises(c.ContractError, match="retired_phase"):
+        g.validate(request)
+    with pytest.raises(c.ContractError, match="retired_phase"):
+        a.scope_bytes(scope)
+    with pytest.raises(c.ContractError, match="retired_phase"):
+        a.admit(service, None, request, actor_admin_id=ACTOR)
+    changed = copy.deepcopy(request)
+    changed["deadline"] = prior["deadline"]
+    with pytest.raises(c.ContractError, match="prior_run_mismatch"):
+        a.verify_prior(service, changed, scope)
+    path = a.evidence_path(request)
+    raw = c.canonical_json(request)
+    service._record(
+        None,
+        {
+            path: request,
+            a.command_path(request): {
+                "fingerprint": c.digest(
+                    {"request": request, "actor_admin_id": str(ACTOR)}
+                ),
+                "actor_admin_id": str(ACTOR),
+                "evidence_path": path,
+                "scope": scope,
+            },
+        },
+    )
+    service.validate_history()
+    assert service.ledger.read(path) == raw
+    assert g.validate(c.read_json(raw), historical=True)["phase"] == "next_morning"
+
+
+def test_same_session_admission_binds_real_fresh_target_and_prior(admitted):
+    service, request, scope, prior = repeatability_campaign(admitted)
     variants = []
     changed = copy.deepcopy(request)
     changed["tool_revision"] = "9" * 40
@@ -758,10 +800,11 @@ def test_two_day_admission_binds_real_fresh_target_and_prior(admitted):
     )
     for key in ("nonce", "report_id", "report_sha256", "submitted_sha256"):
         current_replay[key] = prior_replay[key]
-    with pytest.raises(c.ContractError, match="replay_expired"):
+    with pytest.raises(c.ContractError, match="replay_transition_mismatch"):
         a.admit(service, None, old_replay_request, actor_admin_id=ACTOR)
     receipt = a.admit(service, None, request, actor_admin_id=ACTOR)
     assert receipt["verdict"] == "PASS"
+    assert request["deadline"] == prior["deadline"]
     assert request["source_revision"] != prior["source_revision"]
     assert request["source_tree"] != prior["source_tree"]
     assert a.admit(service, None, request, actor_admin_id=ACTOR) == receipt
@@ -788,10 +831,10 @@ def test_two_day_admission_binds_real_fresh_target_and_prior(admitted):
         ),
     ],
 )
-def test_next_morning_refuses_noop_tree_reuse_and_discontinuity(
+def test_repeatability_refuses_noop_tree_reuse_and_discontinuity(
     admitted, revision, tree, digest, baseline, code
 ):
-    service, request, _, _ = morning_campaign(
+    service, request, _, _ = repeatability_campaign(
         admitted, revision=revision, tree=tree, digest=digest, baseline=baseline
     )
     with pytest.raises(c.ContractError, match=code):
@@ -821,14 +864,14 @@ def test_transition_source_substitution_refuses_pass_and_fail(admitted):
         assert service.ledger.read(a.evidence_path(changed)) is None
 
 
-def test_next_morning_partial_fail_does_not_invent_transition(admitted):
+def test_repeatability_partial_fail_does_not_invent_transition(admitted):
     service, initial, scope = admitted
     a.admit(service, None, initial, actor_admin_id=ACTOR)
     request = copy.deepcopy(initial)
     request.update(
         command_id=str(uuid4()),
         run_id=str(uuid4()),
-        phase="next_morning",
+        phase="repeatability",
         prior_run_id=initial["run_id"],
         source_revision="1" * 40,
         source_tree="2" * 40,

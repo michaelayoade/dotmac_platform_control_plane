@@ -126,8 +126,10 @@ class ProofOutcome(TypedDict):
 
 
 class GateContext(TypedDict):
+    """Stored phase vocabulary; live validation refuses the retired value."""
+
     run_id: UUIDText
-    phase: Literal["initial", "next_morning"]
+    phase: Literal["initial", "repeatability", "next_morning"]
     prior_run_id: UUIDText | None
     source_revision: c.Revision
     source_tree: c.Revision
@@ -157,10 +159,11 @@ def raw_digest(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-def validate(value: object) -> GateEvidence:
+def validate(value: object, *, historical: bool = False) -> GateEvidence:
     c.require(len(c.canonical_json(value)) <= 131072)
     c._shape(value, GateEvidence)
     request = cast(GateEvidence, value)
+    c.require(historical or request["phase"] != "next_morning", "retired_phase")
     for key in ("run_id", "command_id", "prior_run_id"):
         if request[key] is not None:
             c.require(str(UUID(request[key])) == request[key])

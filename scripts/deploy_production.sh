@@ -26,6 +26,13 @@ readonly AUTHORIZATION_REF="$2"
 [[ "$AUTHORIZATION_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
     || die "authorization reference must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\$"
 
+# Opt-in surface selection; bootstrap remains the deployment default.
+readonly EXPECTED_DEPLOYMENT_PROFILE="${EXPECTED_DEPLOYMENT_PROFILE-production-bootstrap}"
+case "$EXPECTED_DEPLOYMENT_PROFILE" in
+    production-bootstrap|production-keyless-v1) ;;
+    *) die "expected deployment profile must be production-bootstrap or production-keyless-v1" ;;
+esac
+
 # This script's own cleanup. The wrapper that hands it a registry token traps;
 # this process is the one holding the compose operation and the bundle
 # temporary when an SSH connection drops, and it had no trap of its own.
@@ -81,15 +88,19 @@ grep -Fqx 'SERVER_NAME=vendor-cp-prod' "$ENV_FILE" || die "server marker mismatc
 grep -Fqx 'ENVIRONMENT=production' "$ENV_FILE" || die "runtime is not production"
 grep -Fqx 'PLATFORM_ROOT_DOMAIN=vendor.dotmac.io' "$ENV_FILE" \
     || die "platform domain mismatch"
-# The deployment profile is REQUIRED here rather than defaulted in the image.
-# `load_deployment_profile` falls back to `full` OUTSIDE production only, so a
-# developer sees the whole assembly; since ADR-0015 an absent profile in a
-# production environment fails the boot instead. This grep is therefore no
-# longer the only thing standing between the host and the `full` composition —
-# it is the cheap check that runs before the image starts, and the loader is
-# the one that runs on every restart this script does not perform.
-grep -Fqx 'VENDOR_DEPLOYMENT_PROFILE=production-bootstrap' "$ENV_FILE" \
-    || die "deployment profile is not production-bootstrap"
+# Require one canonical assignment matching the explicit deployment intent.
+# Count colon, bare-key and whitespace/export spellings: Compose must not resolve a
+# second assignment differently from this early check. Runtime production
+# validation independently refuses an absent profile or the full laboratory.
+[[ "$(grep -Ec '^[[:space:]]*(export[[:space:]]+)?VENDOR_DEPLOYMENT_PROFILE[[:space:]]*([:=]|$)' "$ENV_FILE")" -eq 1 ]] \
+    || die "deployment profile requires exactly one assignment"
+grep -Fqx "VENDOR_DEPLOYMENT_PROFILE=$EXPECTED_DEPLOYMENT_PROFILE" "$ENV_FILE" \
+    || die "deployment profile does not match expected profile"
+# Services must consume the same file whose production markers were checked.
+case "$ENV_FILE" in
+    /*) export VENDOR_CP_RUNTIME_ENV_FILE="$ENV_FILE" ;;
+    *) export VENDOR_CP_RUNTIME_ENV_FILE="$PWD/$ENV_FILE" ;;
+esac
 # ── Fast environment floor, before candidate containers or database work ─────
 #
 # Look at the order of this script. `compose up -d --no-deps app --wait` is the

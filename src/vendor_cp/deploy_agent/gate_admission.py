@@ -52,11 +52,12 @@ class CommandRecord(TypedDict):
     scope: CampaignScope
 
 
-def scope_bytes(value: object) -> bytes:
+def scope_bytes(value: object, *, historical: bool = False) -> bytes:
     """Validate once and retain immutable canonical public configuration bytes."""
     c._shape(value, CampaignScope)
     scope = cast(CampaignScope, value)
     context = scope["context"]
+    c.require(historical or context["phase"] != "next_morning", "retired_phase")
     c.require(
         bool(scope["actor_admin_ids"]) and bool(scope["candidates"]),
         "campaign_configuration",
@@ -734,7 +735,7 @@ def verify_prior(
         and g.raw_digest(matches[0][1]) == scope["prior_evidence_sha256"],
         "prior_run_missing",
     )
-    prior = g.validate(c.read_json(matches[0][1]))
+    prior = g.validate(c.read_json(matches[0][1]), historical=True)
     c.require(
         prior["phase"] == "initial"
         and terminal_verdict(prior) == "PASS"
@@ -746,8 +747,11 @@ def verify_prior(
                 "tool_revision",
             )
         )
-        and c.timestamp(prior["deadline"]).date()
-        < c.timestamp(request["deadline"]).date(),
+        and (
+            request["phase"] != "next_morning"
+            or c.timestamp(prior["deadline"]).date()
+            < c.timestamp(request["deadline"]).date()
+        ),
         "prior_run_mismatch",
     )
     if before:
@@ -788,7 +792,7 @@ def history(owner: DeployAgentService) -> None:
             raw = owner.ledger.read(command["evidence_path"])
             if raw is None:
                 raise c.ContractError("ledger_identity")
-            request = g.validate(c.read_json(raw))
+            request = g.validate(c.read_json(raw), historical=True)
             c.require(
                 path == command_path(request)
                 and command["evidence_path"] == evidence_path(request),
@@ -802,14 +806,17 @@ def history(owner: DeployAgentService) -> None:
                 "ledger_identity",
             )
         elif path.startswith("gate0/"):
-            request = g.validate(value)
+            request = g.validate(value, historical=True)
             c.require(
                 path == evidence_path(request) and command_path(request) in events,
                 "ledger_identity",
             )
             c._shape(events[command_path(request)], CommandRecord)
             command = cast(CommandRecord, events[command_path(request)])
-            scope = cast(CampaignScope, c.read_json(scope_bytes(command["scope"])))
+            scope = cast(
+                CampaignScope,
+                c.read_json(scope_bytes(command["scope"], historical=True)),
+            )
             authorize(request, scope, UUID(command["actor_admin_id"]))
             commit = addition_commit(owner, path)
             c.require(

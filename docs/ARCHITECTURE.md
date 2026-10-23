@@ -466,18 +466,27 @@ publishes. It is read in exactly one place — `build_spec()` — and a test fai
 the build if a second module imports the loader, because `dotmac_starter_mt`
 ADR-0003 forbids feature code branching on a profile name.
 
-`production-bootstrap` (required by `scripts/deploy_production.sh` in the host
-env file) composes and runs everything and does not mount the `licence_delivery`,
-`offers` or `provisioning` routers. Licensing's issuer is composed; Vendor still
+`production-bootstrap` (the default expected by `scripts/deploy_production.sh`
+in the host env file) composes and runs everything and withholds the
+`deployment_control`, `deploy_agent`, `licence_delivery`, `offers` and
+`provisioning` routers. Licensing's issuer is composed; Vendor still
 owns its route adapter, key custody and delivery. A withheld surface is not a
 disabled subsystem: licence key custody still loads at boot, and a test asserts
 it.
 
 `production-composed-v1` is the target composition (ADR-0015): the platform-admin
 console and the read-only allocation view, and nothing else. It is DECLARED but
-not adopted — the deploy script
-still pins `production-bootstrap`. The console is listed as an ACCEPTED surface
-because ADR-0014 gave it a single browser authentication owner.
+not adopted — the deploy script defaults to expecting `production-bootstrap`.
+The console is listed as an ACCEPTED surface because ADR-0014 gave it a single browser authentication owner.
+
+`production-keyless-v1` version 1 retains bootstrap version 6's seven published
+surfaces and adds only `deploy_agent`. It still withholds `deployment_control`,
+`licence_delivery`, `offers` and `provisioning`, and keeps readiness mandatory.
+The deployment adapter accepts this profile only through explicit
+`EXPECTED_DEPLOYMENT_PROFILE=production-keyless-v1` intent matching one canonical
+host environment assignment. This declaration performs no live adoption and
+changes no host or domain guard; endpoint TLS/domain and ingress adoption remain
+separate gates. See `docs/deploy-agent/increment2-source.md`.
 
 **The login path works, corrected 2026-09-01.** This paragraph used to say the
 console was accepted but not USABLE, because the assembly declared no

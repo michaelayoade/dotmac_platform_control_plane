@@ -59,8 +59,9 @@ to make a measurement pass. This source approval grants no live authority.
 Private-only OpenBao access and governed JWT apply; ledger branch protection;
 signer and host-key custody with approved public fingerprints; a signed immutable
 agent package and pinned root-owned runtime/tools; the guarded executor; all five
-same-day Seabone proofs; and the next-morning rerun remain required. Feature
-enablement stays explicit and production profiles continue withholding the routes.
+Seabone proofs; and the same-session repeatability rerun remain required. Feature
+enablement stays explicit. Existing production profiles withhold the routes;
+`production-keyless-v1` declares opt-in publication, with no live adoption implied.
 The production digest must be the staging-accepted immutable digest. Old Lane 3
 execution remains stopped and its retirement follows replacement acceptance.
 
