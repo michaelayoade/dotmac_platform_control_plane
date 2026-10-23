@@ -4,12 +4,12 @@ Michael approved the complete bounded source-only amendment on 2026-10-22.
 It retains the existing deployment/agent/restore owners and adds the finite
 proof/provisioning adapters and one authenticated CP evidence endpoint. It
 adds no product capability and authorizes no activation or production change.
-Michael subsequently approved the measured source shipping ceilings on the same
-date for proposal SHA-256
-`5816f7931087687b6500cd6ed7731bd65a54dbf0925492e8df24db0150010c62`.
-The coordinator retains the reviewed measurement packet at
-`.cutover-private/keyless-measured-shipping-amendment-20261022.json`
-and the explicit approval; the original amendment remains retained.
+Michael approved the enabled-runtime shipping amendment on 2026-10-24.
+Its frozen measurement and decision packet has SHA-256
+`776e1a4c9db3301db6f3d4917ee9cf2cdaf07da679adbad42dd913f04e83fb77`.
+The coordinator retains that packet at
+`.cutover-private/keyless-enabled-runtime-reviewed-20261024/measurement-and-decision.json`
+and its explicit approval; the historical October 22 packet remains retained.
 
 Count all nonblank, noncomment source, fixtures, helpers, physical vendored
 contracts, mandatory metadata and adopted documentation under the explicit
@@ -22,19 +22,19 @@ evidence.
 | Component | Approved shipping ceiling |
 | --- | ---: |
 | Shared contracts, per physical module | 450 |
-| CP Python implementation, migration, wiring and evidence admission | 2,400 |
+| CP Python implementation, migration, wiring and evidence admission | 3,100 |
 | Mandatory CP metadata | 300 |
-| Combined CP implementation and mandatory metadata | 2,700 |
+| Combined CP implementation and mandatory metadata | 3,400 |
 | Agent runtime | 1,100 |
 | Launcher, systemd and public config | 150 |
 | CI workflows and candidate tooling | 350 |
 | OpenBao and adopted credential helpers | 1,400 |
 | Egress renderer/config | 150 |
-| Gate0 proof and restore acceptance runtime, including adopted diagnostics | 4,100 |
+| Gate0 proof and restore acceptance runtime, including adopted diagnostics | 4,200 |
 | Finite agent/resolver/runner provisioning, including adopted wrappers | 950 |
-| Required tests across all increments and the approved engine guard | 9,000 |
+| Required tests across all increments and the approved engine guard | 9,900 |
 | Approved predecessor guard runtime | 60 |
-| Overall counted new source | 21,300 |
+| Overall counted new source | 23,000 |
 
 The measured shipping approval supersedes the earlier drafting-only budget
 restriction for this same bounded feature. All other component ceilings remain

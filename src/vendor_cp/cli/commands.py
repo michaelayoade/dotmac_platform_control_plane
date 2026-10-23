@@ -186,6 +186,19 @@ def admin_descriptor_drift(args: argparse.Namespace) -> Result:
     )
 
 
+def admin_github_auth_renew(args: argparse.Namespace) -> Result:
+    from vendor_cp.github_app_credentials import (
+        GitHubCredentialError,
+        renew_host_credentials,
+    )
+
+    try:
+        result = renew_host_credentials()
+    except GitHubCredentialError as error:
+        raise refuse("execution.failed", str(error)) from None
+    return Result(command="admin github-auth-renew", data=result)
+
+
 def admin_deploy_ledger_rebuild(args: argparse.Namespace) -> Result:
     from vendor_cp.deploy_agent.runtime import install_runtime, ledger_rebuild
 

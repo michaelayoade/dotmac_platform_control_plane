@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the control-plane ledger GitHub App lease every twenty minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=20min
+AccuracySec=30s
+Unit=dotmac-cp-github-auth.service
+
+[Install]
+WantedBy=timers.target

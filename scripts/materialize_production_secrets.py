@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
 
 from vendor_cp.production_secrets import (
     ROLLBACK_CONFIRMATION,
+    DesiredSignerBundle,
     HostSecretBundle,
     ProductionSecretError,
     bootstrap_relay_dispatcher_on_existing_host,
@@ -17,8 +19,10 @@ from vendor_cp.production_secrets import (
     build_rollback_payload,
     client_from_environment,
     complete_rotation_rollback,
+    desired_signer_bundle,
     execute_secret_rotation,
     install_rotation_adapter,
+    materialize_desired_signer,
     materialize_host_bundle,
     pin_product_release,
     preflight_rotation_target,
@@ -27,8 +31,10 @@ from vendor_cp.production_secrets import (
     reconcile_host_environment_declarations,
     retire_rotation_adapter,
     rollback_openbao_rotation,
+    seed_desired_signer,
     seed_missing_records,
     sync_github_deploy_key,
+    transfer_desired_signer,
     transfer_host_bundle,
     transfer_rotation_payload,
 )
@@ -39,6 +45,17 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("seed", help="create absent OpenBao records with CAS=0")
+    desired = subparsers.add_parser(
+        "seed-desired-signer", help="explicit create-only desired-state key enrollment"
+    )
+    desired.add_argument("--key-id", required=True)
+    desired_push = subparsers.add_parser(
+        "push-desired-signer", help="transfer only the canonical desired-state signer"
+    )
+    desired_push.add_argument("--target", required=True)
+    desired_push.add_argument("--target-dir", required=True)
+    desired_push.add_argument("--known-hosts", required=True, type=Path)
+    subparsers.add_parser("receive-desired-signer", help=argparse.SUPPRESS)
 
     rotate = subparsers.add_parser(
         "rotate-production",
@@ -138,6 +155,30 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _parser().parse_args()
     try:
+        if args.command == "seed-desired-signer":
+            result = seed_desired_signer(client_from_environment(), args.key_id)
+            print(json.dumps(result))
+            return 0
+        if args.command == "push-desired-signer":
+            bundle = desired_signer_bundle(client_from_environment())
+            transfer_desired_signer(
+                bundle,
+                target=args.target,
+                target_dir=args.target_dir,
+                known_hosts_file=args.known_hosts,
+            )
+            return 0
+        if args.command == "receive-desired-signer":
+            if os.geteuid() != 0:
+                raise ProductionSecretError("receive-desired-signer must run as root")
+            raw = sys.stdin.read(8193)
+            if len(raw) > 8192:
+                raise ProductionSecretError("desired-state signer input is oversized")
+            bundle = DesiredSignerBundle.from_json(raw)
+            with production_deployment_lock():
+                result = materialize_desired_signer(bundle)
+            print(json.dumps(result))
+            return 0
         if args.command == "seed":
             created = seed_missing_records(client_from_environment())
             for path in created:

@@ -133,6 +133,31 @@ RUN VENDOR_MIGRATION_ROOT=/app python -m vendor_cp.deployment.image_heads \
         --source-revision "$SOURCE_REVISION" \
         --output /app/migration_heads.json
 
+# Public upstream release, independently pinned by cli/cli's published checksums:
+# https://github.com/cli/cli/releases/download/v2.87.3/gh_2.87.3_checksums.txt
+# This deployment target and its acceptance runner are linux/amd64; refuse
+# another architecture instead of installing the wrong executable silently.
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS github-cli
+RUN test "$(dpkg --print-architecture)" = amd64
+RUN python - <<'GITHUB_CLI'
+import hashlib
+import io
+import pathlib
+import tarfile
+import urllib.request
+
+url = "https://github.com/cli/cli/releases/download/v2.87.3/gh_2.87.3_linux_amd64.tar.gz"
+archive = urllib.request.urlopen(url, timeout=120).read()
+expected = "c6e5537631fca45f277ef405ce8751d139b491e9402cc20891a003525a8773b2"
+if hashlib.sha256(archive).hexdigest() != expected:
+    raise SystemExit("GitHub CLI release checksum mismatch")
+with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as release:
+    executable = release.extractfile("gh_2.87.3_linux_amd64/bin/gh").read()
+path = pathlib.Path("/gh")
+path.write_bytes(executable)
+path.chmod(0o755)
+GITHUB_CLI
+
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 
 ARG SOURCE_REVISION=unknown
@@ -148,6 +173,15 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     VENDOR_MIGRATION_ROOT=/app
+
+# GitLedger deliberately invokes /usr/bin/git. Git, HTTPS transport and TLS roots
+# come from the pinned base image's Debian APT repositories and their signed
+# package indexes (no extra repository or floating upstream installer). Package
+# versions follow that OS owner's security updates; they are not exact pins.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=github-cli --chown=root:root /gh /usr/local/bin/gh
 
 RUN groupadd --gid 10001 vendor \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin vendor

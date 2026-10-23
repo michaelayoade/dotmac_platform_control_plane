@@ -1,0 +1,48 @@
+# Explicit second file for the existing CP deployment owner; never auto-loaded.
+# Provision these protected sources before selecting this overlay.
+services:
+  app:
+    environment:
+      VENDOR_DEPLOY_AGENT_ENABLED: "true"
+      VENDOR_DESIRED_SIGNING_KEY_ID: ${VENDOR_DESIRED_SIGNING_KEY_ID:?Set the public desired-state signing key id}
+      VENDOR_DESIRED_SIGNING_KEY_FILE: /run/secrets/dotmac/platform-cp/desired-state/primary.key
+      VENDOR_DESIRED_SIGNING_KEY_POINTER: secret/dotmac/platform-cp/desired-state/signing-key
+      VENDOR_DEPLOY_LEDGER_DIR: /var/lib/dotmac-deploy/ledger
+      VENDOR_DEPLOY_GH_EXECUTABLE: /usr/local/bin/gh
+      VENDOR_DEPLOY_GH_SHA256: sha256:a95a4e011d77e9cd0e9922c13fda2b95195c6be29dfa58207075fd983bbae744
+      VENDOR_DEPLOY_GATE_SCOPE_FILE: /etc/dotmac-deploy/gate-scope.json
+      GH_CONFIG_DIR: /run/secrets/dotmac/platform-cp/github
+      GIT_CONFIG_GLOBAL: /etc/dotmac-deploy/gitconfig
+      GIT_TERMINAL_PROMPT: "0"
+      GH_PROMPT_DISABLED: "1"
+    volumes:
+      - type: bind
+        source: /run/secrets/dotmac/platform-cp/desired-state/primary.key
+        target: /run/secrets/dotmac/platform-cp/desired-state/primary.key
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VENDOR_DEPLOY_CP_LEDGER_HOST_DIR:?Set the CP ledger host directory}
+        target: /var/lib/dotmac-deploy/ledger
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VENDOR_DEPLOY_CP_GATE_SCOPE_HOST_FILE:?Set the protected CP gate scope file}
+        target: /etc/dotmac-deploy/gate-scope.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VENDOR_DEPLOY_CP_GITHUB_AUTH_HOST_DIR:?Set the protected CP GitHub auth directory}
+        target: /run/secrets/dotmac/platform-cp/github
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${VENDOR_DEPLOY_CP_GIT_CONFIG_HOST_FILE:?Set the protected public CP Git config file}
+        target: /etc/dotmac-deploy/gitconfig
+        read_only: true
+        bind:
+          create_host_path: false
