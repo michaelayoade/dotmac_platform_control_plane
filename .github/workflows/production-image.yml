@@ -103,7 +103,7 @@ jobs:
           FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: |
           set -euo pipefail
-          DOCKER_BUILDKIT=1 docker build \
+          docker buildx build --load --metadata-file candidate-build.json \
             --secret id=forgejo_token,env=FORGEJO_READ_TOKEN \
             --build-arg "SOURCE_REVISION=${{ steps.select.outputs.source_sha }}" \
             --tag "${CANDIDATE_TAG}" .
@@ -113,16 +113,13 @@ jobs:
         id: identity
         run: |
           set -euo pipefail
-          # Preflight, HERE and not after the push. Step 8 reads the registry's
-          # own config digest with `docker manifest inspect`, and a runner whose
-          # CLI cannot run that subcommand would fail the pipeline with the bytes
-          # already published and the receipt never emitted — the exact shape
-          # this ordering exists to prevent. Proving the subcommand resolves
-          # costs nothing and happens before anything is accepted, let alone
-          # pushed.
-          docker manifest inspect --help > /dev/null \
-            || { echo "docker manifest inspect is unavailable on this runner" >&2; exit 1; }
-          config_digest="$(docker image inspect --format '{{.Id}}' "${CANDIDATE_TAG}")"
+          # Registry inspection must be available before accepting or publishing.
+          docker buildx imagetools inspect --help > /dev/null
+          config_digest="$(jq -er '."containerimage.config.digest"' candidate-build.json)"
+          [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          platform="$(docker image inspect "${CANDIDATE_TAG}" |
+            jq -er '.[0] | [.Os,.Architecture,(.Variant // "")] | join("/") | rtrimstr("/")')"
+          [[ "$platform" =~ ^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$ ]]
           layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "${CANDIDATE_TAG}")"
           # The RootFS chain digest is over the ORDERED layer list: two images
           # can share every layer and stack them differently, and that is a
@@ -149,6 +146,7 @@ jobs:
             candidate-distributions.json > /dev/null
           {
             echo "config_digest=$config_digest"
+            echo "platform=$platform"
             echo "rootfs_chain=sha256:$rootfs_chain"
             echo "lock_digest=sha256:$lock_digest"
             echo "dockerfile_digest=sha256:$dockerfile_digest"
@@ -156,12 +154,13 @@ jobs:
           jq -n \
             --arg source_revision "${{ steps.select.outputs.source_sha }}" \
             --arg config_digest "$config_digest" \
+            --arg platform "$platform" \
             --argjson layers "$layers" \
             --arg rootfs_chain "sha256:$rootfs_chain" \
             --arg lock_digest "sha256:$lock_digest" \
             --arg dockerfile_digest "sha256:$dockerfile_digest" \
             --argjson distributions "$(cat candidate-distributions.json)" \
-            '{source_revision:$source_revision, config_digest:$config_digest,
+            '{source_revision:$source_revision, config_digest:$config_digest, platform:$platform,
               layers:$layers, rootfs_chain:$rootfs_chain,
               lock_digest:$lock_digest, dockerfile_digest:$dockerfile_digest,
               distributions:$distributions}' \
@@ -195,8 +194,9 @@ jobs:
           # layer chain recorded in step 4 are the ones that travel.
           docker tag "${CANDIDATE_TAG}" "$tag"
           docker push "$tag"
-          reference="$(docker image inspect --format '{{index .RepoDigests 0}}' "$tag")"
-          digest="${reference#*@}"
+          docker buildx imagetools inspect --raw "$tag" > registry-root.json
+          digest="sha256:$(sha256sum registry-root.json | cut -d' ' -f1)"
+          reference="${IMAGE_REPOSITORY}@$digest"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "reference=$reference" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -206,6 +206,7 @@ jobs:
         id: readback
         env:
           ACCEPTED_CONFIG_DIGEST: ${{ steps.identity.outputs.config_digest }}
+          ACCEPTED_PLATFORM: ${{ steps.identity.outputs.platform }}
         run: |
           set -euo pipefail
           reference='${{ steps.publish.outputs.reference }}'
@@ -225,7 +226,7 @@ jobs:
           # auditing the log afterwards could not see the fetch happen. The
           # layer lines and the resolved digest are cheap and they are the
           # observation.
-          docker pull "$reference"
+          docker pull --platform "$ACCEPTED_PLATFORM" "$reference"
           pulled_layers="$(docker image inspect --format '{{json .RootFS.Layers}}' "$reference")"
           pulled_chain="sha256:$(printf '%s' "$pulled_layers" | sha256sum | cut -d' ' -f1)"
           accepted_chain='${{ steps.identity.outputs.rootfs_chain }}'
@@ -237,23 +238,24 @@ jobs:
           test "$pulled_chain" = "$accepted_chain" \
             || { echo "registry RootFS chain $pulled_chain != accepted $accepted_chain" >&2; exit 1; }
 
-          # `.Id` is deliberately NOT compared across the push boundary, and
-          # this is a correction rather than an omission. For a locally built
-          # image `.Id` is the CONFIG digest; for an image pulled BY DIGEST
-          # docker reports the MANIFEST digest in the same field. Measured on
-          # a real published artifact, those are three different values:
-          #
-          #   manifest        sha256:b45d81c6…   (what you pull by)
-          #   docker .Id      sha256:b45d81c6…   (the manifest digest again)
-          #   config.digest   sha256:8a7ac23b…   (what the registry stores)
-          #
-          # Comparing the local config digest with the pulled `.Id` therefore
-          # compares two different KINDS of value and can never hold — a false
-          # refusal on every correct publication, arriving after the push. The
-          # registry's own config digest is read from the manifest instead, and
-          # compared with the accepted local config digest, then recorded.
-          registry_config="$(docker manifest inspect "$reference" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["digest"])')"
+          # Verify immutable raw manifests; Docker store IDs are not config IDs.
+          docker buildx imagetools inspect --raw "$reference" > registry-root.json
+          test "sha256:$(sha256sum registry-root.json | cut -d' ' -f1)" = "${reference##*@}"
+          child="$(jq -er --arg platform "$ACCEPTED_PLATFORM" '
+            if .schemaVersion != 2 then error("unsupported schema version")
+            elif .mediaType == "application/vnd.oci.image.index.v1+json" or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json" then
+              [.manifests[] | select(([.platform.os,.platform.architecture,(.platform.variant // "")] | join("/") | rtrimstr("/")) == $platform)
+               | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest")]
+              | if length == 1 then .[0].digest else error("platform is absent or ambiguous") end
+            elif .mediaType == "application/vnd.oci.image.manifest.v1+json" or .mediaType == "application/vnd.docker.distribution.manifest.v2+json" then ""
+            else error("unsupported registry manifest") end' registry-root.json)"
+          if [[ -n "$child" ]]; then
+            [[ "$child" =~ ^sha256:[0-9a-f]{64}$ ]]
+            docker buildx imagetools inspect --raw "${IMAGE_REPOSITORY}@$child" > registry-platform.json
+            test "sha256:$(sha256sum registry-platform.json | cut -d' ' -f1)" = "$child"
+            mv registry-platform.json registry-root.json
+          fi
+          registry_config="$(jq -er 'select(.schemaVersion == 2) | select(.mediaType == "application/vnd.oci.image.manifest.v1+json" or .mediaType == "application/vnd.docker.distribution.manifest.v2+json") | select(.config.mediaType == "application/vnd.oci.image.config.v1+json" or .config.mediaType == "application/vnd.docker.container.image.v1+json") | .config.digest' registry-root.json)"
           [[ "$registry_config" =~ ^sha256:[0-9a-f]{64}$ ]] \
             || { echo "the registry returned no usable config digest" >&2; exit 1; }
           test "$registry_config" = "$ACCEPTED_CONFIG_DIGEST" \

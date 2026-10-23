@@ -1,17 +1,12 @@
-"""Nothing reaches the registry that has not already been accepted.
+"""Require acceptance before publication and compare the same candidate afterward.
 
-The pipeline this file guards replaced one that pushed and then smoked. That
-ordering has a specific consequence, and it is not a style question: a failing
-smoke left PUBLISHED bytes nobody had accepted, with no mechanism for unpublishing
-them and every downstream consumer free to pin the result. The registry recorded
-what was built rather than what passed.
-
-So the assertions here are mostly about ORDER. A step list can contain every
-correct step and still be wrong.
+Ordering, immutable identity and a real registry read keep a failed candidate
+from becoming a deployable release.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -35,17 +30,19 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _manifest(media_type: str, **fields: object) -> str:
+    return json.dumps({"schemaVersion": 2, "mediaType": media_type, **fields})
+
+
+def _digest(raw: str) -> str:
+    return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
+
+
 # ── the ordering, which is the whole point ──────────────────────────────────
 
 
 def test_the_candidate_is_accepted_before_anything_is_published() -> None:
-    """Build, record, TEST, publish, read back, compare, receipt — in that order.
-
-    Every index below is a step that must not move. If acceptance drifted after
-    publication the workflow would still contain the word "acceptance" and would
-    still pass a naive presence check, which is how the previous pipeline read
-    as correct.
-    """
+    """Accept recorded bytes before registry login, publication and receipts."""
     workflow = _text(IMAGE_WORKFLOW)
     build = workflow.index("Build the candidate")
     identity = workflow.index("Record the candidate's identity")
@@ -88,82 +85,145 @@ def test_the_identity_recorded_is_the_identity_compared() -> None:
 
 
 def test_the_read_back_compares_like_for_like() -> None:
-    """`.Id` means two different things on the two sides of a push.
-
-    For a locally built image it is the CONFIG digest; for an image pulled by
-    digest, docker reports the MANIFEST digest in the same field. Measured on a
-    real published artifact those are distinct values, so comparing the recorded
-    config digest against the pulled `.Id` compares two different KINDS of value
-    and can never hold — a false refusal on every correct publication, arriving
-    after the push had already happened.
-
-    Compare the RootFS layer chain and the accepted local config digest with
-    the registry's own config digest READ from the manifest, rather than inferring
-    the latter from a field that changes meaning.
-    """
+    """Build metadata names the config; registry raw bytes name the pull digest."""
     workflow = _text(IMAGE_WORKFLOW)
-    readback = workflow[
-        workflow.index("Prove the registry holds the accepted candidate") :
-    ]
-    compare = readback[: readback.index("Emit the release receipt")]
-    assert "registry RootFS chain" in compare
-    assert "docker manifest inspect" in compare
-    assert '["config"]["digest"]' in compare
-    # The retired comparison must stay retired.
-    assert "pulled_config" not in compare
-    assert 'test "$registry_config" = "$ACCEPTED_CONFIG_DIGEST"' in compare
-    assert "deliberately NOT compared" in compare
+    assert "--load --metadata-file candidate-build.json" in workflow
+    assert '."containerimage.config.digest"' in workflow
+    assert ".Id" not in workflow and ".RepoDigests" not in workflow
+    assert 'reference="${IMAGE_REPOSITORY}@$digest"' in workflow
+    assert 'test "$registry_config" = "$ACCEPTED_CONFIG_DIGEST"' in workflow
 
 
 @pytest.mark.parametrize(
-    ("registry_digest", "accepted"),
-    [("sha256:" + "a" * 64, True), ("sha256:" + "b" * 64, False), ("malformed", False)],
-    ids=["matching-config", "valid-wrong-config", "malformed-config"],
+    "case",
+    [
+        "oci",
+        "docker",
+        "index",
+        "docker-index",
+        "wrong-config",
+        "malformed",
+        "ambiguous",
+        "wrong-platform",
+        "wrong-child",
+        "attestation",
+        "bad-json",
+        "bad-media",
+        "malformed-child-digest",
+        "wrong-root",
+        "bad-schema",
+        "bad-config-kind",
+    ],
 )
 def test_registry_config_guard_executes_before_output(
-    tmp_path: Path, registry_digest: str, accepted: bool
+    tmp_path: Path, case: str
 ) -> None:
-    """Execute the workflow guard with a manifest fixture; never invoke Docker."""
-    workflow = _text(IMAGE_WORKFLOW)
-    readback = workflow[
-        workflow.index("Prove the registry holds the accepted candidate") :
-    ]
-    start = readback.index('          registry_config="')
+    """Execute the actual registry guard with synthetic Docker output only."""
+    readback = _text(IMAGE_WORKFLOW).split(
+        "Prove the registry holds the accepted candidate", 1
+    )[1]
+    fields = readback.split("        run: |", 1)[0]
+    for field in ("config_digest", "platform"):
+        name = "ACCEPTED_" + field.upper()
+        assert fields.count(name + ":") == 1
+        assert f"{name}: ${{{{ steps.identity.outputs.{field} }}}}" in fields
+    start = readback.index("          docker buildx imagetools inspect --raw")
     guard = textwrap.dedent(readback[start : readback.index("\n\n", start)])
-    expression = "${{ steps.identity.outputs.config_digest }}"
-    step_fields = readback[: readback.index("        run: |")]
-    assert (
-        f"        env:\n          ACCEPTED_CONFIG_DIGEST: {expression}\n" in step_fields
-    )
-    assert step_fields.count("ACCEPTED_CONFIG_DIGEST:") == 1
     assert "${{" not in guard
     expected = "sha256:" + "a" * 64
-    output = tmp_path / "github-output"
-    result = subprocess.run(  # noqa: S603 — trusted workflow and fixed fixtures
+    media = "application/vnd.oci.image.manifest.v1+json"
+    if case.startswith("docker"):
+        media = "application/vnd.docker.distribution.manifest.v2+json"
+    config = "malformed" if case == "malformed" else "sha256:" + "b" * 64
+    child = _manifest(
+        media,
+        schemaVersion=1 if case == "bad-schema" else 2,
+        config={
+            "mediaType": "unknown"
+            if case == "bad-config-kind"
+            else "application/vnd.oci.image.config.v1+json",
+            "digest": config if case in {"malformed", "wrong-config"} else expected,
+        },
+    )
+    digest = _digest(child)
+    descriptor = {
+        "digest": digest,
+        "platform": {"os": "linux", "architecture": "amd64"},
+    }
+    root = child
+    if case in {
+        "index",
+        "docker-index",
+        "ambiguous",
+        "wrong-platform",
+        "wrong-child",
+        "attestation",
+        "malformed-child-digest",
+    }:
+        if case == "wrong-platform":
+            descriptor["platform"]["architecture"] = "arm64"
+        if case == "attestation":
+            descriptor["annotations"] = {
+                "vnd.docker.reference.type": "attestation-manifest"
+            }
+        if case == "malformed-child-digest":
+            descriptor["digest"] = "malformed"
+        descriptors = [descriptor] * (2 if case == "ambiguous" else 1)
+        if case in {"index", "docker-index"}:
+            descriptors.insert(
+                0,
+                dict(
+                    descriptor,
+                    annotations={"vnd.docker.reference.type": "attestation-manifest"},
+                ),
+            )
+        root = _manifest(
+            "application/vnd.docker.distribution.manifest.list.v2+json"
+            if case == "docker-index"
+            else "application/vnd.oci.image.index.v1+json",
+            manifests=descriptors,
+        )
+    if case in {"bad-json", "bad-media"}:
+        root = "{" if case == "bad-json" else _manifest("unknown")
+    reference = "registry.invalid/candidate@" + _digest(root)
+    output = tmp_path / "output"
+    result = subprocess.run(  # noqa: S603 -- fixed workflow guard and fixtures
         [
             "/bin/bash",
             "-c",
             """set -euo pipefail
             docker() {
-              [[ $# == 3 && "$1" == manifest && "$2" == inspect ]] || return 91
-              [[ "$3" == "$reference" ]] || return 91
-              printf '%s\n' "$MANIFEST"
+              [[ $# == 5 ]] || return 90
+              [[ $1 == buildx && $2 == imagetools &&
+                 $3 == inspect && $4 == --raw ]] || return 91
+              if [[ $5 == "$reference" ]]; then
+                printf %s "$ROOT_MANIFEST"
+              elif [[ $5 == "$IMAGE_REPOSITORY@$CHILD_DIGEST" ]]; then
+                printf %s "$CHILD_MANIFEST"
+              else
+                return 92
+              fi
             }
             """
             + guard,
         ],
         env={
-            "PATH": os.defpath,
-            "MANIFEST": json.dumps({"config": {"digest": registry_digest}}),
-            "reference": "registry.invalid/candidate@sha256:" + "c" * 64,
+            "PATH": os.defpath + os.pathsep + "/sbin",
+            "ROOT_MANIFEST": root + (" " if case == "wrong-root" else ""),
+            "CHILD_MANIFEST": child + (" " if case == "wrong-child" else ""),
+            "CHILD_DIGEST": digest,
+            "reference": reference,
+            "IMAGE_REPOSITORY": "registry.invalid/candidate",
             "GITHUB_OUTPUT": str(output),
             "ACCEPTED_CONFIG_DIGEST": expected,
+            "ACCEPTED_PLATFORM": "linux/amd64",
         },
+        cwd=tmp_path,
         capture_output=True,
         text=True,
         check=False,
     )
-    if accepted:
+    if case in {"oci", "docker", "index", "docker-index"}:
         assert result.returncode == 0, result.stderr
         assert output.read_text() == f"registry_config={expected}\n"
     else:
@@ -172,41 +232,32 @@ def test_registry_config_guard_executes_before_output(
 
 
 def test_the_receipt_records_the_registrys_own_config_digest() -> None:
-    """Recorded, not guessed: it is the value the registry stores, and it is not
-    the digest the image is pulled by."""
+    """Retain the registry config digest independently of local store IDs."""
     workflow = _text(IMAGE_WORKFLOW)
     assert "registry_config_digest" in workflow
     assert "steps.readback.outputs.registry_config" in workflow
 
 
 def test_the_read_back_actually_leaves_the_runner() -> None:
-    """Comparing a local tag with itself passes without consulting the registry.
-
-    So the local references are removed and their absence asserted before the
-    pull. Without that the equality check is a tautology — and a tautology that
-    reads exactly like a proof.
-    """
+    """A digest-pinned pull follows removal and proof of local absence."""
     workflow = _text(IMAGE_WORKFLOW)
     remove = workflow.index("docker image rm -f")
     inspect_guard = workflow.index("the candidate is still resident locally")
-    pull = workflow.index('docker pull "$reference"')
+    pull = workflow.index('docker pull --platform "$ACCEPTED_PLATFORM" "$reference"')
     compare = workflow.index("registry RootFS chain $pulled_chain != accepted")
     assert remove < inspect_guard < pull < compare
     # And the pull's own output is kept, so the run log carries the fetch as an
     # OBSERVATION rather than leaving the whole proof resting on the guard.
     # Measured need: release run 33474406793 passed this step with the output
     # discarded, and the log therefore showed no evidence the bytes had moved.
-    assert 'docker pull "$reference" >/dev/null' not in workflow
+    assert (
+        'docker pull --platform "$ACCEPTED_PLATFORM" "$reference" >/dev/null'
+        not in workflow
+    )
 
 
 def test_the_receipt_records_per_file_distribution_digests() -> None:
-    """Bundle granularity names the container, not what is inside it.
-
-    The config digest and the layer chain identify an image. Neither answers
-    "which wheel is installed in it?", so a receipt carrying only those cannot
-    be checked against a distribution artifact at all — which is the granularity
-    a prior release record called out as missing.
-    """
+    """A release receipt identifies both the wheel and the source archive."""
     workflow = _text(IMAGE_WORKFLOW)
     receipt = workflow[workflow.index("Emit the release receipt") :]
     assert "distributions:$distributions" in receipt
@@ -214,13 +265,7 @@ def test_the_receipt_records_per_file_distribution_digests() -> None:
 
 
 def test_the_distribution_digests_are_read_from_the_candidate_not_remeasured() -> None:
-    """A second `poetry build` describes different bytes.
-
-    A wheel is a zip and a zip carries timestamps, so rebuilding to measure
-    would produce a digest for an archive this image does not contain — a
-    receipt field that looks like evidence and is not. The image computes them
-    in the stage that installed them; the pipeline READS them out.
-    """
+    """Read installed artifact digests without rebuilding timestamped archives."""
     workflow = _text(IMAGE_WORKFLOW)
     identity = workflow[
         workflow.index("Record the candidate's identity") : workflow.index(
@@ -245,13 +290,7 @@ def test_the_distribution_digests_are_read_from_the_candidate_not_remeasured() -
 
 
 def test_the_manifest_the_receipt_reads_is_checked_before_publication() -> None:
-    """The read happens only on the publication path, so the battery holds it.
-
-    A malformed or silently narrowed `/app/distributions.json` would otherwise
-    first be discovered by the step that reads it — after the push, with the
-    receipt unemitted. That is the exact failure shape the ordering exists to
-    prevent, so the property belongs to acceptance rather than to publication.
-    """
+    """Validate the installed distribution manifest before publication."""
     acceptance = _text(ACCEPTANCE)
     assert "/app/distributions.json" in acceptance
     assert "dotmac-distribution-digests/1" in acceptance
@@ -262,7 +301,7 @@ def test_the_manifest_the_receipt_reads_is_checked_before_publication() -> None:
 def test_the_registry_read_back_is_preflighted_before_the_push() -> None:
     """A tool that is missing must not be discovered with bytes already published."""
     workflow = _text(IMAGE_WORKFLOW)
-    preflight = workflow.index("docker manifest inspect --help")
+    preflight = workflow.index("docker buildx imagetools inspect --help")
     push = workflow.index("docker push")
     assert preflight < push
 
@@ -280,19 +319,7 @@ def test_the_image_carries_the_distributions_the_receipt_describes() -> None:
 
 
 def test_the_battery_is_reachable_from_the_pull_request_path() -> None:
-    """Every defect this battery has had was found by a publication run.
-
-    Three of them, each costing a merge to protected main to discover: a restore
-    lane that landed zero tables, a read-back that compared two different kinds
-    of digest, and a role-contract assertion that compared PostgreSQL's boolean
-    OUTPUT (`t`/`f`) against its boolean CAST (`true`/`false`) and could not
-    hold on any correct database. All three were defects in the CHECK, and all
-    three were unreachable from the pull-request path.
-
-    The rehearsal does not weaken the ordering: acceptance is still the run
-    against the exact candidate about to be published, asserted above. This only
-    makes the battery's own defects fail in review.
-    """
+    """PR CI exercises the same candidate battery used for publication."""
     ci = _text(CI_WORKFLOW)
     assert "Rehearse the acceptance battery" in ci
     assert ".github/candidate/acceptance.sh" in ci
@@ -303,12 +330,8 @@ def test_the_battery_is_reachable_from_the_pull_request_path() -> None:
 
 
 def test_the_rehearsal_does_not_become_the_acceptance() -> None:
-    """CI proves the battery runs; it does not prove the published bytes.
-
-    The image CI builds is not the candidate — it is built from a pull-request
-    head, and nothing publishes it. If acceptance were ever deleted from the
-    publication path on the grounds that "CI already runs it", the registry
-    would again hold bytes nothing accepted.
+    """Accept the exact candidate even when CI rehearsed the battery.
+    A rehearsal image differs from the protected-main artifact being published.
     """
     workflow = _text(IMAGE_WORKFLOW)
     accept = workflow.index("Accept the candidate, or refuse it")
@@ -317,16 +340,8 @@ def test_the_rehearsal_does_not_become_the_acceptance() -> None:
 
 
 def test_the_role_contract_query_renders_the_form_it_declares() -> None:
-    """PostgreSQL renders a boolean two ways, and they do not agree.
-
-    `format('%s', ...)` calls the type's output function and emits `t`/`f`; the
-    boolean-to-text CAST emits `true`/`false`. Written without the casts this
-    assertion compared `f|f|t|t` against `false|false|true|true` — measured
-    failing in run 33407635872, at the FIRST assertion of step 5, which is why
-    nothing after it in the battery had ever executed.
-
-    The readable spelling is kept in the declaration, because it is what an
-    operator reads in the failure message, and the QUERY is the half corrected.
+    """Render PostgreSQL booleans explicitly as text for the declared contract.
+    Default boolean output uses t/f and cannot equal true/false.
     """
     acceptance = _text(ACCEPTANCE)
     contract = acceptance[acceptance.index('step "5  database ownership') :]
@@ -361,11 +376,8 @@ def test_the_receipt_binds_the_revision_the_run_and_the_bytes() -> None:
 
 
 def test_the_required_gate_set_matches_the_workflows_in_both_directions() -> None:
-    """A list that can only shrink silently is not an admission rule.
-
-    Declared gates must be jobs that exist, and every job that exists must be
-    declared. A gate added to CI and forgotten here would be a required check
-    the publication path never looks at.
+    """Compare declared required gates with workflow jobs in both directions.
+    Either a missing gate or an invented gate invalidates source admission.
     """
     declared = set(json.loads(_text(GATES))["gates"])
     # Sliced from `jobs:` onward, because `on:` and `permissions:` also carry
@@ -399,11 +411,8 @@ def test_the_required_gate_set_is_not_empty() -> None:
 
 
 def test_the_verifier_makes_all_seven_checks() -> None:
-    """Seven separate ways a pasted run id can be wrong.
-
-    Named individually because each has a failure the others do not catch, and
-    the seventh — a required gate that SKIPPED — is invisible at the run level,
-    which is exactly why it is easiest to leave out.
+    """Require every source-revision admission check in the shared verifier.
+    A successful run alone cannot prove source identity or required-gate success.
     """
     verifier = _text(VERIFIER)
     assert "belongs to" in verifier  # 1 repository
@@ -456,19 +465,8 @@ def test_the_deploy_requires_a_receipt_rather_than_a_pasted_digest() -> None:
 
 
 def test_every_verifier_argument_it_reads_is_one_it_declares() -> None:
-    """The verifier could refuse but could not ACCEPT, and that shipped.
-
-    Renaming `--current-main` to `--expect-head` updated the parser, the
-    signature and the call site, and missed one `args.current_main` in the
-    ACCEPTED message. Every refusal path still worked, so every existing test
-    passed; the success path raised `AttributeError` and exited 1. The net
-    effect was a gate that could only ever say no — a wrong answer wearing a
-    refusal's clothes — and it blocked every candidate build until CI hit it.
-
-    `test_the_verifier_makes_all_seven_checks` asserts the refusal markers are
-    present. Nothing asserted the verifier can reach acceptance at all. This
-    closes that half without a network call: every `args.<name>` the module
-    reads must be a dest the parser declares.
+    """Exercise each verifier against the workflow arguments it consumes.
+    An undeclared option must fail in review rather than block publication.
     """
     import ast
 
@@ -509,17 +507,8 @@ def test_every_verifier_argument_it_reads_is_one_it_declares() -> None:
 
 
 def test_the_deploy_names_the_image_revision_rather_than_assuming_the_tip() -> None:
-    """Two identities, and conflating them is what removed the reverse path.
-
-    The IMAGE SOURCE REVISION belongs to the artifact and is fixed by its
-    release receipt. The DEPLOYMENT-ADAPTER REVISION is the protected commit the
-    workflow runs from. While the deploy resolved the first as `origin/main`'s
-    head, the only deployable image was the one built from the tip — and the
-    bytes that are running are never the tip, so nothing could be redeployed.
-
-    Both halves are asserted. Dropping the ancestry check would let a revision
-    that was never merged be deployed, which is the protection the old
-    tip-equality gave for free.
+    """Bind deployment to the accepted image revision, distinct from adapter main.
+    The accepted image may precede the adapter without losing its provenance.
     """
     workflow = _text(DEPLOY_WORKFLOW)
 
@@ -535,12 +524,8 @@ def test_the_deploy_names_the_image_revision_rather_than_assuming_the_tip() -> N
 
 
 def test_the_candidate_build_still_requires_the_tip() -> None:
-    """The separation is not a weakening applied everywhere.
-
-    Building a candidate from a superseded commit really does describe a tree
-    nobody is deploying, so the IMAGE workflow keeps the tip-equality the deploy
-    workflow no longer needs. A change that relaxed both would have read as one
-    consistent decision and been wrong in half of it.
+    """Require candidate builds to use the current protected-main revision.
+    Deployment may reuse accepted history; a new build must use the selected tip.
     """
     workflow = _text(IMAGE_WORKFLOW)
     assert 'current_main="$(git rev-parse HEAD)"' in workflow
@@ -623,12 +608,8 @@ def test_the_acceptance_battery_still_asks_this(what: str, marker: str) -> None:
 
 
 def test_the_restored_migration_test_has_both_lanes() -> None:
-    """Lane A alone proves nothing about the trap.
-
-    A correctly-owned restored copy upgrading successfully is compatible with a
-    world where the wrong-owner failure has silently stopped being detectable.
-    Lane B plants the exact defect the 2026-08-31 rehearsal hit and REQUIRES the
-    failure, and requires it to be the right failure rather than any failure.
+    """Prove correctly owned restores migrate and wrongly owned restores refuse.
+    The negative lane must fail for database permissions, not an unrelated fault.
     """
     acceptance = _text(ACCEPTANCE)
     lane_a = acceptance.index("lane A: a correctly-owned restored copy upgrades")
@@ -639,16 +620,8 @@ def test_the_restored_migration_test_has_both_lanes() -> None:
 
 
 def test_the_two_restore_lanes_differ_in_exactly_one_variable() -> None:
-    """A two-variable experiment cannot attribute its own result.
-
-    The first construction left `public` owned by `postgres` in lane B as well,
-    so `app_admin` could create nothing and the restore landed zero tables. The
-    non-empty guard caught it — but had it not, lane B would have failed with
-    the right message for entirely the wrong reason, and the battery would have
-    reported a trap it was no longer testing.
-
-    Both copies now carry `public` owned by `app_admin`; only `datdba` differs,
-    and the script asserts both halves of that rather than assuming them.
+    """Hold public schema ownership fixed while varying database ownership.
+    Otherwise a privilege failure cannot identify which ownership caused it.
     """
     acceptance = _text(ACCEPTANCE)
     assert "ALTER SCHEMA public OWNER TO app_admin" in acceptance
