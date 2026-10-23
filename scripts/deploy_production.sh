@@ -86,7 +86,7 @@ printf '%s %s\n' "$$" "legacy-freeze ${DIGEST}" >"$LOCK_FILE"
 grep -Fqx 'APP_ENV=production' "$ENV_FILE" || die "APP_ENV marker mismatch"
 grep -Fqx 'SERVER_NAME=vendor-cp-prod' "$ENV_FILE" || die "server marker mismatch"
 grep -Fqx 'ENVIRONMENT=production' "$ENV_FILE" || die "runtime is not production"
-grep -Fqx 'PLATFORM_ROOT_DOMAIN=vendor.dotmac.io' "$ENV_FILE" \
+grep -Fqx 'PLATFORM_ROOT_DOMAIN=platform.dotmac.io' "$ENV_FILE" \
     || die "platform domain mismatch"
 # Require one canonical assignment matching the explicit deployment intent.
 # Count colon, bare-key and whitespace/export spellings: Compose must not resolve a
@@ -451,10 +451,10 @@ compose up -d --no-deps app --wait
 # is the one that gates the printed result, and liveness is kept as the
 # positive control that distinguishes "not ready" from "not answering at all".
 curl --fail --silent --show-error --max-time 10 \
-    --header "Host: vendor.dotmac.io" \
+    --header "Host: platform.dotmac.io" \
     "http://127.0.0.1:${VENDOR_APP_PORT:-8100}/health" >/dev/null
 curl --fail --silent --show-error --max-time 10 \
-    --header "Host: vendor.dotmac.io" \
+    --header "Host: platform.dotmac.io" \
     "http://127.0.0.1:${VENDOR_APP_PORT:-8100}/health/ready" >/dev/null
 
 printf 'Deployed %s\nrecovery bundle: %s\nrecovery bundle digest: %s\n' \

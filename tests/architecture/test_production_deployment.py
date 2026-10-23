@@ -167,7 +167,7 @@ def test_production_compose_pulls_only_and_keeps_state_private() -> None:
     assert 'profiles: ["ops"]' in compose
     assert "no-new-privileges:true" in compose
     assert "cap_drop:" in compose and "- ALL" in compose
-    assert "headers={'Host': 'vendor.dotmac.io'}" in compose
+    assert "headers={'Host': 'platform.dotmac.io'}" in compose
     assert "vendor_backend:\n    internal: true" in compose
     assert 'com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"' in compose
 
@@ -298,7 +298,7 @@ def test_deploy_backs_up_and_runs_the_composed_migration_owner_before_app() -> N
     assert "compose up -d --no-deps app --wait" in commands
     assert "ALTER ROLE app_admin" not in deploy
     assert '"false|false|true|true"' in deploy
-    assert '--header "Host: vendor.dotmac.io"' in deploy
+    assert '--header "Host: platform.dotmac.io"' in deploy
     assert (
         "VENDOR_DB_BOOTSTRAP_PASSWORD"
         not in compose.split("  app:\n", 1)[1].split("  ops:\n", 1)[0]
@@ -329,7 +329,7 @@ def test_production_environment_has_no_secret_defaults() -> None:
     assert required_empty <= values.keys()
     assert all(values[key] == "" for key in required_empty)
     assert values["ENVIRONMENT"] == "production"
-    assert values["PLATFORM_ROOT_DOMAIN"] == "vendor.dotmac.io"
+    assert values["PLATFORM_ROOT_DOMAIN"] == "platform.dotmac.io"
     assert values["VENDOR_LICENCE_SIGNING_MODE"] == "configured"
     assert values["VENDOR_PRODUCT_RELEASE_PINS_JSON"] == "{}"
     # The profile is required on the host, not defaulted in the image. Since
@@ -703,7 +703,7 @@ def test_material_probe_commands_fail_closed_before_database_work(
     env_file = tmp_path / "runtime.env"
     env_file.write_text(
         "APP_ENV=production\nSERVER_NAME=vendor-cp-prod\n"
-        "ENVIRONMENT=production\nPLATFORM_ROOT_DOMAIN=vendor.dotmac.io\n"
+        "ENVIRONMENT=production\nPLATFORM_ROOT_DOMAIN=platform.dotmac.io\n"
         + (
             f"VENDOR_DEPLOYMENT_PROFILE={profile_assignment}\n"
             if profile_assignment

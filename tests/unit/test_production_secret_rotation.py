@@ -1979,6 +1979,10 @@ def test_the_legacy_program_refuses_an_image_that_serves_readiness() -> None:
         image_reference=LEGACY_RUNTIME_PROBE_IMAGE, source_revision="d" * 40
     )
     assert "raise SystemExit(26)" in rotation_target_preflight_program(http)
+    assert "headers={'Host':'platform.dotmac.io'}" in rotation_target_preflight_program(
+        http
+    )
+    assert "vendor.dotmac.io" not in rotation_target_preflight_program(http)
 
 
 # ── the runtime oracle proof cannot exist without its negative half ──────────

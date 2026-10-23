@@ -19,13 +19,21 @@ from typing import Final
 from sqlalchemy.engine import make_url
 
 from vendor_cp.deployment.candidate_roles import CandidateRoles
+from vendor_cp.deployment_profile import (
+    PRODUCTION_BOOTSTRAP,
+    PRODUCTION_KEYLESS_V1,
+    ProductionProfileRefusedError,
+    UnknownDeploymentProfileError,
+    deployment_profile,
+    validate_profile_for_environment,
+)
 
 DEFAULT_RUN_ROOT: Final = Path("/opt/dotmac/vendor-control-plane/candidate-runs")
 DEFAULT_COMPOSE_FILE: Final = Path(
     "/opt/dotmac/vendor-control-plane/docker-compose.candidate.yml"
 )
 COMPOSE_SHA256: Final = (
-    "d452382e11296a2c41bd9f171921ab8e1f0e7dea0eaa41b72f331801c828fee1"
+    "a4615d7cb7c7ff5d6998b2b8c37e10988d9777a2cef2dfbeee28855bd8bcc2a1"
 )
 IMAGE_REPOSITORY: Final = "ghcr.io/michaelayoade/dotmac_vendor_control_plane"
 LICENCE_KEY_HOST_FILE: Final = Path(
@@ -74,9 +82,8 @@ _REQUIRED_LITERAL: Final = {
     "APP_ENV": "production",
     "SERVER_NAME": "vendor-cp-prod",
     "ENVIRONMENT": "production",
-    "VENDOR_DEPLOYMENT_PROFILE": "production-bootstrap",
-    "PLATFORM_ROOT_DOMAIN": "vendor.dotmac.io",
-    "TRUSTED_HOSTS": "vendor.dotmac.io",
+    "PLATFORM_ROOT_DOMAIN": "platform.dotmac.io",
+    "TRUSTED_HOSTS": "platform.dotmac.io",
     "TENANCY": "multi",
     "CSRF_ENABLED": "true",
     "RATE_LIMIT_ENABLED": "true",
@@ -204,6 +211,17 @@ def _read_literal_env(path: Path) -> dict[str, str]:
     for key, expected in _REQUIRED_LITERAL.items():
         if values.get(key) != expected:
             raise CandidateInputRefused(f"candidate app.env requires exact {key}")
+    try:
+        profile = deployment_profile(values.get("VENDOR_DEPLOYMENT_PROFILE", ""))
+        validate_profile_for_environment(
+            profile, environment="production", provider_mode="fake"
+        )
+        if profile.code not in {PRODUCTION_BOOTSTRAP, PRODUCTION_KEYLESS_V1}:
+            raise ProductionProfileRefusedError
+    except (ProductionProfileRefusedError, UnknownDeploymentProfileError):
+        raise CandidateInputRefused(
+            "candidate app.env requires admitted VENDOR_DEPLOYMENT_PROFILE"
+        ) from None
     for key in _REQUIRED_NONEMPTY:
         if not values.get(key):
             raise CandidateInputRefused(f"candidate app.env requires {key}")

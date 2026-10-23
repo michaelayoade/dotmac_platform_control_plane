@@ -32,9 +32,9 @@ evidence.
 | Egress renderer/config | 150 |
 | Gate0 proof and restore acceptance runtime, including adopted diagnostics | 4,100 |
 | Finite agent/resolver/runner provisioning, including adopted wrappers | 950 |
-| Required tests across all increments and the approved engine guard | 7,700 |
+| Required tests across all increments and the approved engine guard | 8,800 |
 | Approved predecessor guard runtime | 60 |
-| Overall counted new source | 20,000 |
+| Overall counted new source | 21,000 |
 
 The measured shipping approval supersedes the earlier drafting-only budget
 restriction for this same bounded feature. All other component ceilings remain

@@ -2248,7 +2248,7 @@ def _http_probe_status(
             "--write-out",
             "%{http_code}",
             "--header",
-            "Host: vendor.dotmac.io",
+            "Host: platform.dotmac.io",
             f"http://127.0.0.1:8100{path}",
         ),
         require_success=False,
@@ -3350,7 +3350,7 @@ def rotation_target_preflight_program(
                 "raise SystemExit(23)"
             ),
             "def status(path):",
-            " request=urllib.request.Request('http://127.0.0.1:8100'+path,headers={'Host':'vendor.dotmac.io'})",
+            " request=urllib.request.Request('http://127.0.0.1:8100'+path,headers={'Host':'platform.dotmac.io'})",
             " try:",
             (
                 "  with urllib.request.urlopen(request,timeout=10) as response: "

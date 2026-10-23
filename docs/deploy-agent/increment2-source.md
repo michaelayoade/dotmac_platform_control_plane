@@ -268,10 +268,10 @@ Direct manual Compose use retains the `.env` default. The selector permits only
 bootstrap and keyless; it cannot select `full`.
 Feature enablement and signer/ledger prerequisites remain separate configuration.
 
-This source change performs no live adoption. The host identity and
-`PLATFORM_ROOT_DOMAIN=vendor.dotmac.io` deployment guards are unchanged. The new
-profile does not establish or repair platform endpoint TLS, DNS or ingress;
-platform domain/TLS adoption remains a separate gate before live keyless use.
+This source change performs no live adoption. The host identity is unchanged;
+`PLATFORM_ROOT_DOMAIN` and `TRUSTED_HOSTS` require `platform.dotmac.io`. Candidate
+inputs admit bootstrap or keyless through the existing production profile owner;
+endpoint TLS, ingress and immutable-image adoption require separate evidence.
 Mandatory descriptor/promotion/prospective metadata remains 233 counted lines.
 The profile declaration and deployment guard are counted as CP runtime/wiring.
 The profile, guard, tests and documentation delta is measured separately and

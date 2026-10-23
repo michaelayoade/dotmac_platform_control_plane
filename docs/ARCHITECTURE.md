@@ -542,7 +542,7 @@ class.
 
 ## Production topology
 
-The first production assembly is `vendor.dotmac.io` on the explicitly named
+The first production assembly is `platform.dotmac.io` on the explicitly named
 `vendor-cp-prod` host (`149.102.158.144`). It is isolated from Marketing's
 Compose project and from every product data plane:
 
@@ -556,7 +556,7 @@ Compose project and from every product data plane:
   authority for an application's route inventory, and the loopback port above
   is reachable with no vhost in front of it at all (ADR-0016);
 - container and deploy health probes call the loopback endpoint with the
-  canonical `vendor.dotmac.io` host identity; trusted-host rejection remains
+  canonical `platform.dotmac.io` host identity; trusted-host rejection remains
   active for raw IP host headers;
 - the deploy owner reconciles the named product-manifest volume to UID/GID
   10001 and mode `0750` through a networkless, read-only-root initializer with

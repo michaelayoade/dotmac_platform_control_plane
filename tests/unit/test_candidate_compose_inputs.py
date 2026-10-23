@@ -43,8 +43,8 @@ def _values() -> dict[str, str]:
         "SERVER_NAME": "vendor-cp-prod",
         "ENVIRONMENT": "production",
         "VENDOR_DEPLOYMENT_PROFILE": "production-bootstrap",
-        "PLATFORM_ROOT_DOMAIN": "vendor.dotmac.io",
-        "TRUSTED_HOSTS": "vendor.dotmac.io",
+        "PLATFORM_ROOT_DOMAIN": "platform.dotmac.io",
+        "TRUSTED_HOSTS": "platform.dotmac.io",
         "TENANCY": "multi",
         "JWT_SECRET": secrets.token_urlsafe(32) + "$literal",
         "SESSION_HASH_SECRET": secrets.token_urlsafe(32),
@@ -112,12 +112,17 @@ def test_allowlist_is_grounded_in_the_production_app_template() -> None:
     assert "VENDOR_RELAY_DISPATCHER_DATABASE_URL" not in ALLOWED_APP_ENV_KEYS
 
 
+@pytest.mark.parametrize("profile", ["production-bootstrap", "production-keyless-v1"])
 def test_valid_launch_is_redacted_and_secret_dollar_is_literal(
     candidate: dict[str, object],
+    profile: str,
 ) -> None:
-    launch = _build(candidate)
     env_file = candidate["env_file"]
     assert isinstance(env_file, Path)
+    configured = _values()
+    configured["VENDOR_DEPLOYMENT_PROFILE"] = profile
+    _write_env(env_file, configured)
+    launch = _build(candidate)
     values = _read_literal_env(env_file)
     assert values["JWT_SECRET"].endswith("$literal")
     assert "$literal" in values["DATABASE_URL"]
@@ -406,4 +411,24 @@ def test_candidate_url_must_have_password_host_and_database(
         values[which] = re.sub(r"@[^/]+/[^/]+$", replacement, values[which])
     _write_env(env_file, values)
     with pytest.raises(CandidateInputRefused, match=which):
+        _build(candidate)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("VENDOR_DEPLOYMENT_PROFILE", profile)
+        for profile in ("", "full", "production-composed-v1", "unknown")
+    ]
+    + [(key, "vendor.dotmac.io") for key in ("PLATFORM_ROOT_DOMAIN", "TRUSTED_HOSTS")],
+)
+def test_candidate_profile_and_public_host_refusals(
+    candidate: dict[str, object], key: str, value: str
+) -> None:
+    env_file = candidate["env_file"]
+    assert isinstance(env_file, Path)
+    values = _values()
+    values[key] = value
+    _write_env(env_file, values)
+    with pytest.raises(CandidateInputRefused, match=key):
         _build(candidate)
