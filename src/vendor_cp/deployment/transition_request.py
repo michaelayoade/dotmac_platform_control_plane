@@ -35,6 +35,7 @@ from vendor_cp.deployment.cp_transition import (
 REPOSITORY = "michaelayoade/dotmac_platform_control_plane"
 REPOSITORY_ID = "1317527604"
 REPOSITORY_OWNER_ID = "32591929"
+REPOSITORY_OWNER = REPOSITORY.split("/", 1)[0]
 WORKFLOW_PATH = ".github/workflows/authorize-cp-transition.yml"
 PREDICATE_TYPE = "https://dotmac.io/attestations/cp-transition-authorization/v1"
 
@@ -74,6 +75,9 @@ def author_request(
         "GITHUB_REPOSITORY": REPOSITORY,
         "GITHUB_REPOSITORY_ID": REPOSITORY_ID,
         "GITHUB_REPOSITORY_OWNER_ID": REPOSITORY_OWNER_ID,
+        "GITHUB_ACTOR": REPOSITORY_OWNER,
+        "GITHUB_ACTOR_ID": REPOSITORY_OWNER_ID,
+        "GITHUB_TRIGGERING_ACTOR": REPOSITORY_OWNER,
         "GITHUB_REF": "refs/heads/main",
         "GITHUB_REF_PROTECTED": "true",
         "GITHUB_SHA": expected_revision,

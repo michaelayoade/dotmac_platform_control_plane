@@ -96,14 +96,16 @@ def _synthetic_authorization(request, root, monkeypatch, now):
     """Only the subprocess result is synthetic; owner verification remains real."""
     proof = canonical_json(
         {
-            "schema": "dotmac.cp_transition_environment_protection/1",
+            "schema": "dotmac.cp_transition_environment_protection/2",
             "repository_id": "100",
             "repository_owner_id": "200",
             "workflow_revision": "c" * 40,
             "environment": "production",
             "protected_main": True,
-            "prevent_self_review": True,
-            "required_reviewer_ids": [300],
+            "approval_model": "single-user-manual",
+            "prevent_self_review": False,
+            "can_admins_bypass": False,
+            "required_reviewer_ids": [200],
             "expires_at": request["expires_at"],
         }
     )
@@ -482,7 +484,7 @@ def admission(scratch_db, postgres_url, url_for, tmp_path, monkeypatch, request)
             "plan_digest": "",
             "authorization_run_id": 123,
             "authorization_run_attempt": 2,
-            "trusted_actor": "boundary-reviewer",
+            "trusted_actor": "example",
             "expires_at": (now + timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
             "previous_receipt_digest": None,
         }

@@ -32,7 +32,9 @@ def context() -> dict[str, str]:
         "RUNNER_ENVIRONMENT": "github-hosted",
         "GITHUB_RUN_ID": "123",
         "GITHUB_RUN_ATTEMPT": "2",
-        "GITHUB_ACTOR": "reviewed-actor",
+        "GITHUB_ACTOR": producer.REPOSITORY_OWNER,
+        "GITHUB_ACTOR_ID": producer.REPOSITORY_OWNER_ID,
+        "GITHUB_TRIGGERING_ACTOR": producer.REPOSITORY_OWNER,
     }
 
 
@@ -74,7 +76,7 @@ def test_exact_consumer_roundtrip_and_predicate(tmp_path: Path) -> None:
     request = author()
     assert request["authorization_run_id"] == 123
     assert request["authorization_run_attempt"] == 2
-    assert request["trusted_actor"] == "reviewed-actor"
+    assert request["trusted_actor"] == producer.REPOSITORY_OWNER
     assert cp.timestamp(request["expires_at"]) == NOW + timedelta(hours=23)
     assert request["target"]["revision"] != REVISION
     output = tmp_path / "authorization"
@@ -97,9 +99,6 @@ def test_exact_consumer_roundtrip_and_predicate(tmp_path: Path) -> None:
 def test_untrusted_workflow_context_refused(field: str) -> None:
     trusted = context()
     trusted[field] = "invalid"
-    # Another valid-looking actor is trusted context, not operator input.
-    if field == "GITHUB_ACTOR":
-        trusted[field] = "unsafe/actor"
     with pytest.raises(ContractError):
         author(trusted=trusted)
 
@@ -216,3 +215,106 @@ def test_cli_authors_request_and_safe_computed_outputs(
         f"predicate_type={producer.PREDICATE_TYPE}\n"
     )
     assert read_json(raw)["authorization_run_attempt"] == 2
+
+
+@pytest.mark.parametrize("attempt", ["1", "2", "3"])
+def test_owner_dispatch_and_owner_rerun_use_exact_owner_identity(attempt):
+    trusted = context()
+    trusted["GITHUB_RUN_ATTEMPT"] = attempt
+    value = author(trusted=trusted)
+    assert value["trusted_actor"] == producer.REPOSITORY_OWNER
+    assert value["authorization_run_attempt"] == int(attempt)
+
+
+@pytest.mark.parametrize(
+    ("field", "foreign"),
+    [
+        ("GITHUB_ACTOR", "another-valid-actor"),
+        ("GITHUB_ACTOR_ID", "32591930"),
+        ("GITHUB_TRIGGERING_ACTOR", "another-valid-actor"),
+    ],
+)
+def test_foreign_dispatch_actor_id_or_rerun_cannot_author_request(field, foreign):
+    trusted = context()
+    trusted[field] = foreign
+    with pytest.raises(ContractError):
+        author(trusted=trusted)
+
+
+def test_actual_producer_cli_runs_with_database_and_kernel_imports_blocked(tmp_path):
+    """Exercise the workflow's real producer with only portable public imports."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_bytes(canonical_json(plan()))
+    output = tmp_path / "authorization"
+    github_output = tmp_path / "github-output"
+    program = r"""
+import importlib.abc
+import runpy
+import sys
+
+class PublicProducerBoundary(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.partition('.')[0] in {'sqlalchemy', 'psycopg', 'dotmac_kernel'}:
+            raise ImportError(
+                'database or private kernel dependency reached public producer'
+            )
+        return None
+
+sys.meta_path.insert(0, PublicProducerBoundary())
+sys.path.insert(0, sys.argv.pop(1))
+sys.argv[0] = 'transition_request'
+runpy.run_module(
+    'vendor_cp.deployment.transition_request', run_name='__main__', alter_sys=True
+)
+"""
+    result = subprocess.run(  # noqa: S603 -- actual reviewed producer, isolated fixture context
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            program,
+            str(root / "src"),
+            "--plan",
+            str(plan_path),
+            "--expected-revision",
+            REVISION,
+            "--output",
+            str(output),
+        ],
+        env={**context(), "GITHUB_OUTPUT": str(github_output), "PATH": os.defpath},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    authored = json.loads((output / "request.json").read_bytes())
+    assert authored["trusted_actor"] == producer.REPOSITORY_OWNER
+    assert authored["authorization_run_attempt"] == 2
+    predicate = json.loads((output / "predicate.json").read_bytes())
+    assert set(predicate) == {"request_digest", "trusted_actor", "environment"}
+    assert predicate["request_digest"] == cp.request_digest(authored)
+    assert github_output.read_text().splitlines() == [
+        "subject_digest=" + cp.raw_digest((output / "request.json").read_bytes()),
+        "predicate_type=" + producer.PREDICATE_TYPE,
+    ]
+
+
+def test_authorization_workflow_keeps_manual_gate_and_repeats_owner_guards():
+    workflow = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/authorize-cp-transition.yml"
+    ).read_text()
+    assert "environment: production" in workflow
+    for guard in (
+        "github.actor == github.repository_owner",
+        "github.actor_id == github.repository_owner_id",
+        "github.triggering_actor == github.repository_owner",
+    ):
+        assert guard in workflow
+    assert "names = {'cryptography', 'cffi', 'pycparser'}" in workflow
