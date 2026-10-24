@@ -92,7 +92,7 @@ The GitHub authorization executable and environment-protection proof are
 **explicitly synthetic**; the real `GhAttestationVerifier` still validates their
 bindings. This battery does not establish real protected-environment issuance,
 production maintenance, production routing or full host acceptance. Its report
-states these limits alongside native success, restored heads/catalogue equality,
+states these limits alongside native success, restored heads and bound catalogue comparison,
 host source-preflight `_observe` wrong-owner refusal before DDL, the separate
 rollback-only database privilege probe, malformed authorization/evidence and tree/revision sensitivity, and
 durable replay refusal. It never issues a private migration capability or uses
@@ -102,3 +102,17 @@ The PostgreSQL scratch image uses a measured immutable repository digest. Before
 restore, the driver joins the running source database container's image ID to an
 independent inspection of the requested PostgreSQL image and its digest reference.
 A mutable input tag alone cannot establish the scratch image's identity.
+
+The catalogue comparison preserves complete source and restored bytes with their
+actual, potentially different digests. PostgreSQL 16 can reparse an array cast
+into a different textual CHECK definition during dump/restore. The shared
+comparison owner requires every other category, constraint identity and flag to
+match exactly. For changed ordinary local table CHECKs only, PostgreSQL parses
+both recorded expressions against the same restored table in temporary views;
+their complete non-pretty view definitions must match. The views are never read,
+and their creation is rolled back before the restored catalogue is remeasured.
+Domains and unsupported inherited shapes fail closed. Recovery additionally
+requires a fresh cluster; initial CI fixture comparisons use separate disposable
+databases in one cluster. Offline evidence verification establishes complete
+bindings to these root-measured parser outputs, not provenance against a
+malicious root. No raw catalogue, expression or parser output is logged.

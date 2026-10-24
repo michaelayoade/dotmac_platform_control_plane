@@ -22,7 +22,7 @@ from vendor_cp.deployment.cp_transition import (
     TransitionSideV1,
     raw_digest,
 )
-from vendor_cp.deployment.effects import ProcessResult
+from vendor_cp.deployment.effects import PlatformBackupResult, ProcessResult
 from vendor_cp.deployment.image_heads import render_image_document
 
 
@@ -1321,3 +1321,106 @@ def test_scratch_probe_refuses_changed_binary_and_still_cleans_owned_resource(
     assert cleanup == [
         (f"vcp-d16-restore-{nonce[:32]}", nonce, module.request_digest(request))
     ]
+
+
+@pytest.mark.parametrize("case", ["measured", "field-drift", "missing", "invalid"])
+def test_restore_retains_raw_catalogues_and_requires_bound_comparison(
+    host, tmp_path, monkeypatch, case
+):
+    source_side, _ = side(host.config.source_image)
+    request = cast(
+        CpTransitionRequestV1,
+        {
+            "host": "cp",
+            "database": "cp",
+            "cluster_system_identifier": "123",
+            "source": source_side,
+            "target": source_side,
+        },
+    )
+    nonce = "a" * 64
+    retained = {}
+
+    def retain(raw):
+        checksum = raw_digest(raw)
+        retained[checksum] = raw
+        return checksum
+
+    source_catalogue = b"independent source catalogue"
+    restored_catalogue = b"independent restored catalogue"
+    comparison = b"measured scratch comparison"
+    host.genesis = {
+        "side": source_side,
+        "descriptor_declarations": {},
+        "database_owner": "app_admin",
+        "roles": ["app_admin"],
+        "catalogue_digest": retain(source_catalogue),
+    }
+    restored = {**host.genesis, "catalogue_digest": retain(restored_catalogue)}
+    if case == "field-drift":
+        restored["database_owner"] = "unexpected"
+    host._globals_replay_digest = retain(b"globals proof")
+    host._globals_replay_sha = raw_digest(b"replayed globals")
+    # A previous attempt's proof must never satisfy the current restore.
+    host._catalogue_comparison_digest = retain(b"stale comparison")
+    backup = PlatformBackupResult("cp", str(tmp_path), 1, "checksum", "sha256")
+    owner = SimpleNamespace(
+        capture_transition=lambda **kwargs: backup, verify=lambda _: True
+    )
+    (tmp_path / "manifest.json").write_bytes(
+        canonical_json(
+            {
+                "database_name": "cp",
+                "cluster_system_identifier": "123",
+                "postgres_major": 16,
+            }
+        )
+    )
+    monkeypatch.setattr(host, "_retain", retain)
+    monkeypatch.setattr(host.store, "read", retained.__getitem__)
+    monkeypatch.setattr(host, "_bound", lambda *args: None)
+    monkeypatch.setattr(host, "_strict", lambda *args: None)
+    monkeypatch.setattr(host, "_recovery_process", lambda _: nullcontext(object()))
+    monkeypatch.setattr(
+        module.PlatformCpRecoveryBundle, "for_transition", lambda *args, **kwargs: owner
+    )
+    monkeypatch.setattr(host, "_evidence", lambda request, nonce, stage, result: result)
+
+    def restore(*args):
+        if case != "missing":
+            host._catalogue_comparison_digest = retain(comparison)
+        return restored
+
+    verified = []
+
+    def verify(raw, **bindings):
+        assert raw == comparison
+        assert bindings == {
+            "source_catalogue": source_catalogue,
+            "restored_catalogue": restored_catalogue,
+            "request_digest": module.request_digest(request),
+            "host_nonce": nonce,
+            "expected_source_cluster": "123",
+            "expected_source_database": "cp",
+        }
+        verified.append(raw)
+        if case == "invalid":
+            raise ContractError("catalogue_comparison_refused")
+
+    monkeypatch.setattr(host, "_restore_fresh", restore)
+    monkeypatch.setattr(module, "verify_restore_comparison", verify)
+    if case == "measured":
+        result = host.capture_and_restore(request, nonce)
+        assert result["restored_source"] == restored
+        assert result["source"]["catalogue_digest"] != restored["catalogue_digest"]
+        assert retained[result["restore_evidence_digest"]] == canonical_json(restored)
+        assert retained[result["catalogue_comparison_digest"]] == comparison
+        assert verified == [comparison]
+    else:
+        code = {
+            "field-drift": "restore_source_mismatch",
+            "missing": "catalogue_comparison_proof_missing",
+            "invalid": "catalogue_comparison_refused",
+        }[case]
+        with pytest.raises(ContractError, match=code):
+            host.capture_and_restore(request, nonce)

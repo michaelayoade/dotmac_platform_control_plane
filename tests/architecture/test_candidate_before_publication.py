@@ -1541,14 +1541,17 @@ def test_restores_are_strict_identical_and_equal_to_source_before_owner_flip():
     setup = native.split(
         'with host.lock(), host._connect("restored_ok") as observer:', 1
     )[1]
-    correct = setup.index('"source-vs-restored_ok"')
-    wrong = setup.index('"source-vs-restored_wrong_owner"')
+    compare = setup.index("comparison = capture_restore_comparison(")
+    verify = setup.index("verify_restore_comparison(")
     flip = setup.index("ALTER DATABASE restored_wrong_owner OWNER TO postgres")
     post_flip_pair = setup.index(
         "verify_pair_parity(snapshot(observer), snapshot(wrong))"
     )
     preflight = setup.index('lambda: host._observe(wrong, request["source"])')
-    assert correct < wrong < flip < post_flip_pair < preflight
+    assert compare < verify < flip < post_flip_pair < preflight
+    assert 'for database in ("restored_ok", "restored_wrong_owner"):' in setup
+    assert 'expected_source_database="prodshape"' in setup
+    assert '"fixture_heads_differ"' in setup
     assert "original_snapshot = snapshot(original)" in setup
     assert '"restore_database_owner_intervention_mismatch"' in setup
 
@@ -1564,6 +1567,14 @@ def test_pair_diagnostic_limits_changed_identities_after_filtering(capsys):
                 f"table_{index:03}",
                 "constraint_name",
                 "SECRET_CHECK_DEFINITION",
+                "c",
+                True,
+                False,
+                False,
+                False,
+                True,
+                0,
+                "SECRET_CHECK_EXPRESSION",
             ]
             for index in range(100)
         ]
@@ -1571,6 +1582,7 @@ def test_pair_diagnostic_limits_changed_identities_after_filtering(capsys):
     restored = json.loads(json.dumps(original))
     for row in restored["constraints"][40:]:
         row[3] = "CHANGED_SECRET_CHECK_DEFINITION"
+        row[11] = "CHANGED_SECRET_CHECK_EXPRESSION"
     correct, wrong = (
         (("v016",), json.dumps(original).encode()),
         (("v016",), json.dumps(restored).encode()),
@@ -1584,6 +1596,7 @@ def test_pair_diagnostic_limits_changed_identities_after_filtering(capsys):
     assert len(category["rows"]) == 32
     assert category["rows"][0]["identity"] == ["public", "table_040", "constraint_name"]
     assert category["same_rows_different_order"] is False
+    assert category["rows"][0]["differing_column_indices"] == [3, 11]
     fingerprints = category["rows"][0]["definition_fingerprints"]
     for side, value in (
         ("correct", "SECRET_CHECK_DEFINITION"),

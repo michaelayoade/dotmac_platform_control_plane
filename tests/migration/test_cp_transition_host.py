@@ -28,6 +28,7 @@ from vendor_cp.deployment.cp_transition_host import (
     ExistingCpTransitionHost,
     measure_candidate_quiescence,
     measure_catalogue,
+    verify_restore_comparison,
 )
 from vendor_cp.deployment.effects import SubprocessExecutor
 from vendor_cp.deployment.transition_fence import fence_writers
@@ -324,8 +325,25 @@ def test_actual_fresh_globals_dump_restore_matches_independent_source(
                 env=env,
             )
             assert result.ok
-        restored = host._restore_fresh(request, uuid.uuid4().hex * 2, tmp_path, major)
-        assert restored == source
+        nonce = uuid.uuid4().hex * 2
+        restored = host._restore_fresh(request, nonce, tmp_path, major)
+        assert {
+            key: value for key, value in restored.items() if key != "catalogue_digest"
+        } == {key: value for key, value in source.items() if key != "catalogue_digest"}
+        assert host._catalogue_comparison_digest is not None
+        comparison_raw = host.store.read(host._catalogue_comparison_digest)
+        verify_restore_comparison(
+            comparison_raw,
+            source_catalogue=host.store.read(source["catalogue_digest"]),
+            restored_catalogue=host.store.read(restored["catalogue_digest"]),
+            request_digest=cp_transition.request_digest(request),
+            host_nonce=nonce,
+            expected_source_cluster=cluster_id,
+            expected_source_database=database,
+        )
+        comparison = read_json(comparison_raw)
+        assert comparison["source_catalogue_digest"] == source["catalogue_digest"]
+        assert comparison["restored_catalogue_digest"] == restored["catalogue_digest"]
         assert host._globals_replay_digest is not None
         proof = read_json(host.store.read(host._globals_replay_digest))
         assert proof["original_digest"] == raw_digest(

@@ -144,6 +144,7 @@ def test_the_profile_tracks_the_remaining_vendor_licensing_boundary() -> None:
         {
             "surface_id": "cp-native-transition-operator-contract",
             "paths": [
+                "src/vendor_cp/deployment/cp_catalogue.py",
                 "src/vendor_cp/deployment/cp_transition.py",
                 "src/vendor_cp/deployment/cp_transition_host.py",
                 "src/vendor_cp/deployment/transition_operator.py",

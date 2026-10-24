@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from vendor_cp.deploy_agent.contracts import ContractError, canonical_json
+from vendor_cp.deployment import cp_catalogue
 from vendor_cp.deployment import cp_transition as cp
 
 NOW = datetime(2026, 10, 24, tzinfo=UTC)
@@ -403,9 +404,42 @@ class Host:
             "database_owner": "app_admin",
             "roles": sorted(cp.REQUIRED_ROLES),
             "catalogue_digest": retain(
-                canonical_json({"bootstrap": [["postgres", 10, True]]})
+                canonical_json(
+                    {
+                        **{name: [] for name in cp_catalogue.CATALOGUE_QUERIES},
+                        "bootstrap": [["postgres", 10, True]],
+                    }
+                )
             ),
         }
+        # Explicitly synthetic parser boundary, like this fixture's recovery bytes.
+        catalogue_proof = retain(
+            canonical_json(
+                {
+                    "schema": "dotmac.cp_catalogue_restore_comparison/1",
+                    "request_digest": cp.request_digest(request()),
+                    "host_nonce": self.nonce,
+                    "source_cluster_system_identifier": request()[
+                        "cluster_system_identifier"
+                    ],
+                    "source_database": request()["database"],
+                    "source_catalogue_digest": genesis["catalogue_digest"],
+                    "restored_catalogue_digest": genesis["catalogue_digest"],
+                    "method": "postgres16-temp-view-parse/1",
+                    "parser": {
+                        "server_version_num": 160004,
+                        "cluster_system_identifier": str(
+                            int(request()["cluster_system_identifier"]) + 1
+                        ),
+                        "database": request()["database"],
+                        "search_path": "pg_catalog",
+                        "standard_conforming_strings": "on",
+                    },
+                    "checks": [],
+                    "restored_catalogue_after_digest": genesis["catalogue_digest"],
+                }
+            )
+        )
         manifest = canonical_json(
             {
                 "schema": "PlatformCpRecoveryBundle.v2",
@@ -541,6 +575,7 @@ class Host:
                 "restored_dump_digest": cp.raw_digest(b"dump"),
                 "restored_globals_digest": cp.raw_digest(replay_raw),
                 "globals_replay_digest": replay_proof,
+                "catalogue_comparison_digest": catalogue_proof,
             },
             "fence-source-rechecked": {
                 "source": source,
@@ -1275,4 +1310,47 @@ def test_globals_recipe_streams_and_matches_complete_lines_only(store, case):
         assert cp.globals_replay_fingerprint(path) == (
             cp.raw_digest(expected),
             len(expected),
+        )
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing", "nonce", "catalogue", "same-cluster", "database", "extra"]
+)
+def test_catalogue_comparison_is_bound_and_recovery_requires_fresh_cluster(
+    store, trust, monkeypatch, fault
+):
+    checksum = execute(store, trust, monkeypatch, Host())
+    receipt = cp.read_json(store.read(checksum, kind="receipt"))
+    stage = cp.read_json(store.read(receipt["evidence"]["recovery-restored"]))
+    proof = cp.read_json(store.read(stage["result"]["catalogue_comparison_digest"]))
+    if fault == "missing":
+        stage["result"].pop("catalogue_comparison_digest")
+    else:
+        if fault == "nonce":
+            proof["host_nonce"] = "f" * 64
+        elif fault == "catalogue":
+            proof["source_catalogue_digest"] = SHA
+        elif fault == "same-cluster":
+            # Generic comparison permits a separate DB in one disposable cluster.
+            # Recovery independently requires a different cluster as well.
+            proof["parser"]["cluster_system_identifier"] = request()[
+                "cluster_system_identifier"
+            ]
+            proof["parser"]["database"] = "separate_scratch_database"
+        elif fault == "database":
+            proof["source_database"] = "another_database"
+        elif fault == "extra":
+            proof["verified"] = True
+        stage["result"]["catalogue_comparison_digest"] = store.put(
+            canonical_json(proof)
+        )
+    with pytest.raises(ContractError):
+        cp._validate_evidence(
+            stage,
+            request=request(),
+            nonce=receipt["host_nonce"],
+            kind="recovery-restored",
+            store=store,
+            evidence=receipt["evidence"],
+            recovery=store.recovery,
         )

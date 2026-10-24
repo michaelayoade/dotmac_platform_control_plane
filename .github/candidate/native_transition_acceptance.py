@@ -31,6 +31,10 @@ from sqlalchemy.exc import DBAPIError
 from vendor_cp import migrations
 from vendor_cp.deploy_agent.contracts import ContractError, canonical_json, require
 from vendor_cp.deployment import cp_transition as cp
+from vendor_cp.deployment.cp_catalogue import (
+    capture_restore_comparison,
+    verify_restore_comparison,
+)
 from vendor_cp.deployment.cp_transition_host import (
     CpTransitionHostConfig,
     ExistingCpTransitionHost,
@@ -760,32 +764,6 @@ def main():
     # The host's production lock directory is never mounted into this fixture.
     PRODUCTION_DEPLOYMENT_LOCK.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with host.lock(), host._connect("restored_ok") as observer:
-        # All restored fields must match the real source before planting the
-        # single database-owner defect. No catalogue field is normalized away.
-        with host._connect("prodshape") as original:
-            original_snapshot = snapshot(original)
-        verify_pair_parity(
-            original_snapshot, snapshot(observer), "source-vs-restored_ok"
-        )
-        with host._connect("restored_wrong_owner") as wrong:
-            verify_pair_parity(
-                original_snapshot, snapshot(wrong), "source-vs-restored_wrong_owner"
-            )
-        observer.exec_driver_sql(
-            "ALTER DATABASE restored_wrong_owner OWNER TO postgres"
-        )
-        owners = observer.execute(
-            text(
-                "SELECT datname,pg_get_userbyid(datdba) FROM pg_database "
-                "WHERE datname IN ('restored_ok','restored_wrong_owner') "
-                "ORDER BY datname"
-            )
-        ).all()
-        require(
-            [tuple(row) for row in owners]
-            == [("restored_ok", "app_admin"), ("restored_wrong_owner", "postgres")],
-            "restore_database_owner_intervention_mismatch",
-        )
         source_heads = list(sorted(migrations._source_heads(observer)))
         target_heads = list(
             composed_effective_heads(migrations.deploy_config(None, root=code))
@@ -844,6 +822,53 @@ def main():
         auth = synthetic_authorization(request, ROOT, datetime.now(UTC))
         nonce = store.reserve(request, auth)
         host._request, host._nonce = request, nonce
+        # These are separate disposable databases in one CI cluster. The shared
+        # owner refuses parsing in the exact source database identity. Runtime
+        # recovery additionally requires a different, freshly restored cluster.
+        with host._connect("prodshape") as original:
+            original_snapshot = snapshot(original)
+        fixture_comparisons = []
+        for database in ("restored_ok", "restored_wrong_owner"):
+            with host._connect(database, autocommit=False) as copy:
+                with copy.begin():
+                    copy_snapshot = snapshot(copy)
+                    require(
+                        original_snapshot[0] == copy_snapshot[0], "fixture_heads_differ"
+                    )
+                    comparison = capture_restore_comparison(
+                        copy,
+                        original_snapshot[1],
+                        copy_snapshot[1],
+                        request_digest=cp.request_digest(request),
+                        host_nonce=nonce,
+                        expected_source_cluster=cluster,
+                        expected_source_database="prodshape",
+                    )
+                    verify_restore_comparison(
+                        comparison,
+                        original_snapshot[1],
+                        copy_snapshot[1],
+                        request_digest=cp.request_digest(request),
+                        host_nonce=nonce,
+                        expected_source_cluster=cluster,
+                        expected_source_database="prodshape",
+                    )
+                    fixture_comparisons.append(host._retain(comparison))
+        observer.exec_driver_sql(
+            "ALTER DATABASE restored_wrong_owner OWNER TO postgres"
+        )
+        owners = observer.execute(
+            text(
+                "SELECT datname,pg_get_userbyid(datdba) FROM pg_database "
+                "WHERE datname IN ('restored_ok','restored_wrong_owner') "
+                "ORDER BY datname"
+            )
+        ).all()
+        require(
+            [tuple(row) for row in owners]
+            == [("restored_ok", "app_admin"), ("restored_wrong_owner", "postgres")],
+            "restore_database_owner_intervention_mismatch",
+        )
         host.proof = fence_writers(
             observer, database="restored_ok", fence_id=nonce, session_wait_seconds=3
         )
@@ -908,7 +933,32 @@ def main():
             restored = host._restore_fresh(
                 request, nonce, bundle, manifest["postgres_major"]
             )
-            require(restored == host.genesis, "actual_restore_source_mismatch")
+            require(
+                {
+                    key: value
+                    for key, value in restored.items()
+                    if key != "catalogue_digest"
+                }
+                == {
+                    key: value
+                    for key, value in host.genesis.items()
+                    if key != "catalogue_digest"
+                },
+                "actual_restore_source_mismatch",
+            )
+            require(
+                host._catalogue_comparison_digest is not None,
+                "catalogue_comparison_missing",
+            )
+            verify_restore_comparison(
+                store.read(host._catalogue_comparison_digest),
+                store.read(host.genesis["catalogue_digest"]),
+                store.read(restored["catalogue_digest"]),
+                request_digest=cp.request_digest(request),
+                host_nonce=nonce,
+                expected_source_cluster=request["cluster_system_identifier"],
+                expected_source_database=request["database"],
+            )
             results = {
                 "inspection": {
                     "source": request["source"],
@@ -954,6 +1004,7 @@ def main():
                     "restored_dump_digest": backup.database_dump_sha256,
                     "restored_globals_digest": host._globals_replay_sha,
                     "globals_replay_digest": host._globals_replay_digest,
+                    "catalogue_comparison_digest": host._catalogue_comparison_digest,
                 },
                 "fence-source-rechecked": {
                     "source": request["source"],
@@ -1088,13 +1139,16 @@ def main():
         "migration_tree_digest": tree_digest,
         "request_digest": cp.request_digest(request),
         "restore_construction": (
-            "strict identical restores; full source/catalogue/head equality "
+            "strict identical restores; bound source/catalogue parse comparison "
+            "and head equality "
             "before sole database-owner flip"
         ),
         "source_heads": source_heads,
         "target_heads": target_heads,
         "recovery_manifest_digest": "sha256:" + backup.checksum,
         "globals_replay_digest": host._globals_replay_digest,
+        "catalogue_comparison_digest": host._catalogue_comparison_digest,
+        "historical_fixture_comparison_digests": fixture_comparisons,
         "negative": [
             "host source preflight _observe wrong-owner typed refusal before DDL",
             "rollback-only CREATE SCHEMA SQLSTATE 42501 database denial",

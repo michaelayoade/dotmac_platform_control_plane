@@ -214,6 +214,34 @@ def _retained_prefix(request, authorization, nonce, store, connection):
         ),
         "catalogue_digest": retain(measure_catalogue(connection)),
     }
+    # This helper supplies explicitly synthetic recovery/parser boundaries.
+    catalogue_proof = retain(
+        canonical_json(
+            {
+                "schema": "dotmac.cp_catalogue_restore_comparison/1",
+                "request_digest": cp.request_digest(request),
+                "host_nonce": nonce,
+                "source_cluster_system_identifier": request[
+                    "cluster_system_identifier"
+                ],
+                "source_database": request["database"],
+                "source_catalogue_digest": genesis["catalogue_digest"],
+                "restored_catalogue_digest": genesis["catalogue_digest"],
+                "method": "postgres16-temp-view-parse/1",
+                "parser": {
+                    "server_version_num": 160004,
+                    "cluster_system_identifier": str(
+                        int(request["cluster_system_identifier"]) + 1
+                    ),
+                    "database": request["database"],
+                    "search_path": "pg_catalog",
+                    "standard_conforming_strings": "on",
+                },
+                "checks": [],
+                "restored_catalogue_after_digest": genesis["catalogue_digest"],
+            }
+        )
+    )
     dump, globals_bytes = (
         b"synthetic boundary dump",
         b"CREATE ROLE postgres;\nsynthetic boundary globals\n",
@@ -339,6 +367,7 @@ def _retained_prefix(request, authorization, nonce, store, connection):
             "restored_dump_digest": cp.raw_digest(dump),
             "restored_globals_digest": cp.raw_digest(replay_raw),
             "globals_replay_digest": replay_proof,
+            "catalogue_comparison_digest": catalogue_proof,
         },
         "fence-source-rechecked": {
             "source": source,

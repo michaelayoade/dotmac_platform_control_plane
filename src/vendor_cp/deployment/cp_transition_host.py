@@ -55,6 +55,14 @@ from vendor_cp.deployment.candidate_compose_inputs import (
     CandidateComposeLaunch,
     build_candidate_compose_launch,
 )
+from vendor_cp.deployment.cp_catalogue import (
+    CATALOGUE_QUERIES as _CATALOGUE_QUERIES,
+)
+from vendor_cp.deployment.cp_catalogue import (
+    capture_restore_comparison,
+    measure_catalogue,
+    verify_restore_comparison,
+)
 from vendor_cp.deployment.cp_transition import (
     ArtifactStore,
     CpTransitionRequestV1,
@@ -445,83 +453,6 @@ class _PinnedRecoveryProcess:
         )
 
 
-# OID-independent structural evidence. Data bytes are independently preserved
-# and restored by pg_dump/pg_restore. This catalogue proof deliberately does not
-# claim row-by-row equivalence or password restoration (globals excludes them).
-_CATALOGUE_QUERIES = {
-    "bootstrap": "SELECT rolname,oid::bigint,rolsuper FROM pg_roles WHERE oid=10",
-    "schemas": """SELECT nspname, pg_get_userbyid(nspowner), nspacl::text
-        FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'
-        ORDER BY nspname""",
-    "relations": """SELECT n.nspname,c.relname,c.relkind,pg_get_userbyid(c.relowner),
-        c.relrowsecurity,c.relforcerowsecurity,c.relacl::text,c.reloptions
-        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
-        ORDER BY n.nspname,c.relname""",
-    "columns": """SELECT n.nspname,c.relname,a.attname,
-        format_type(a.atttypid,a.atttypmod),a.attnotnull,a.attidentity,a.attgenerated,
-        pg_get_expr(d.adbin,d.adrelid),a.attacl::text
-        FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid
-        JOIN pg_namespace n ON n.oid=c.relnamespace
-        LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
-        WHERE a.attnum>0 AND NOT a.attisdropped AND n.nspname !~ '^pg_'
-        AND n.nspname <> 'information_schema' ORDER BY n.nspname,c.relname,a.attnum""",
-    "constraints": """SELECT n.nspname,c.relname,k.conname,
-        pg_get_constraintdef(k.oid,true) FROM pg_constraint k
-        JOIN pg_namespace n ON n.oid=k.connamespace
-        LEFT JOIN pg_class c ON c.oid=k.conrelid
-        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
-        ORDER BY n.nspname,c.relname,k.conname""",
-    "indexes": """SELECT schemaname,tablename,indexname,indexdef FROM pg_indexes
-        WHERE schemaname !~ '^pg_' AND schemaname <> 'information_schema'
-        ORDER BY schemaname,tablename,indexname""",
-    "views": """SELECT schemaname,viewname,definition FROM pg_views
-        WHERE schemaname !~ '^pg_' AND schemaname <> 'information_schema'
-        ORDER BY schemaname,viewname""",
-    "functions": """SELECT n.nspname,p.proname,
-        pg_get_function_identity_arguments(p.oid),
-        pg_get_userbyid(p.proowner),p.proacl::text,p.prosecdef,p.proconfig,
-        pg_get_functiondef(p.oid) FROM pg_proc p
-        JOIN pg_namespace n ON n.oid=p.pronamespace
-        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
-        AND p.prokind <> 'a' ORDER BY n.nspname,p.proname,
-        pg_get_function_identity_arguments(p.oid)""",
-    "policies": """SELECT schemaname,tablename,policyname,permissive,roles,
-        cmd,qual,with_check
-        FROM pg_policies WHERE schemaname !~ '^pg_'
-        ORDER BY schemaname,tablename,policyname""",
-    "triggers": """SELECT n.nspname,c.relname,t.tgname,
-        pg_get_triggerdef(t.oid,true),t.tgenabled
-        FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
-        JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE NOT t.tgisinternal AND n.nspname !~ '^pg_'
-        ORDER BY n.nspname,c.relname,t.tgname""",
-    "default-acls": """SELECT pg_get_userbyid(d.defaclrole),n.nspname,
-        d.defaclobjtype,d.defaclacl::text FROM pg_default_acl d
-        LEFT JOIN pg_namespace n ON n.oid=d.defaclnamespace
-        ORDER BY 1,2,3""",
-    "roles": """SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,
-        rolcanlogin,rolreplication,rolbypassrls,rolconnlimit,rolconfig
-        FROM pg_roles WHERE rolname !~ '^pg_'
-        ORDER BY rolname""",
-    "memberships": """SELECT parent.rolname,member.rolname,grantor.rolname,
-        m.admin_option,m.inherit_option,m.set_option FROM pg_auth_members m
-        JOIN pg_roles parent ON parent.oid=m.roleid
-        JOIN pg_roles member ON member.oid=m.member
-        JOIN pg_roles grantor ON grantor.oid=m.grantor
-        ORDER BY 1,2,3""",
-}
-
-
-def measure_catalogue(connection: Connection) -> bytes:
-    """Read an independent, deterministic structural/role baseline."""
-    value = {
-        name: [list(row) for row in connection.execute(text(sql))]
-        for name, sql in _CATALOGUE_QUERIES.items()
-    }
-    return canonical_json(value)
-
-
 def measure_candidate_quiescence(connection: Connection) -> dict[str, object]:
     """Bounded mutation witness over one fenced database, never a sandbox.
 
@@ -625,6 +556,7 @@ class ExistingCpTransitionHost:
         self._candidate_quiescence_before: bytes | None = None
         self._candidate_quiescence_digest: str | None = None
         self._candidate_backends_exited = False
+        self._catalogue_comparison_digest: str | None = None
         self._globals_replay_digest: str | None = None
         self._globals_replay_sha: str | None = None
 
@@ -1197,9 +1129,11 @@ class ExistingCpTransitionHost:
         return self._evidence(request, nonce, "source-genesis", self.genesis)
 
     def capture_and_restore(self, request: CpTransitionRequestV1, nonce: str) -> bytes:
+        self._catalogue_comparison_digest = None
         self._bound(request, nonce)
         self._strict(request)
         require(self.genesis is not None, "genesis_missing")
+        assert self.genesis is not None  # noqa: S101
         config = self.config
         with self._recovery_process(nonce) as process:
             owner = PlatformCpRecoveryBundle.for_transition(
@@ -1251,7 +1185,29 @@ class ExistingCpTransitionHost:
         restored = self._restore_fresh(
             request, nonce, root, cast(int, manifest["postgres_major"])
         )
-        require(restored == self.genesis, "restore_source_mismatch")
+        require(
+            {key: value for key, value in restored.items() if key != "catalogue_digest"}
+            == {
+                key: value
+                for key, value in self.genesis.items()
+                if key != "catalogue_digest"
+            },
+            "restore_source_mismatch",
+        )
+        require(
+            self._catalogue_comparison_digest is not None,
+            "catalogue_comparison_proof_missing",
+        )
+        assert self._catalogue_comparison_digest is not None  # noqa: S101
+        verify_restore_comparison(
+            self.store.read(self._catalogue_comparison_digest),
+            source_catalogue=self.store.read(self.genesis["catalogue_digest"]),
+            restored_catalogue=self.store.read(restored["catalogue_digest"]),
+            request_digest=request_digest(request),
+            host_nonce=nonce,
+            expected_source_cluster=request["cluster_system_identifier"],
+            expected_source_database=request["database"],
+        )
         require(owner.verify(backup), "recovery_changed_during_restore")
         require(
             self._globals_replay_digest is not None
@@ -1273,6 +1229,7 @@ class ExistingCpTransitionHost:
                 "dump_size": backup.database_dump_size_bytes,
                 "globals_size": backup.globals_size_bytes,
                 "globals_replay_digest": self._globals_replay_digest,
+                "catalogue_comparison_digest": self._catalogue_comparison_digest,
                 "restored_dump_digest": backup.database_dump_sha256,
                 "restored_globals_digest": self._globals_replay_sha,
             },
@@ -1295,6 +1252,7 @@ class ExistingCpTransitionHost:
         root: Path,
         postgres_major: int,
     ) -> SourceObservation:
+        self._catalogue_comparison_digest = None
         name = f"vcp-d16-restore-{nonce[:32]}"
         bootstrap = "postgres"
         source_bootstrap = self._source_bootstrap()
@@ -1432,9 +1390,27 @@ class ExistingCpTransitionHost:
                 stdin=root / "database.dump",
             )
             with self._connect(
-                request["database"], bootstrap, container=container
+                request["database"], bootstrap, container=container, autocommit=False
             ) as connection:
-                return self._observe(connection, request["source"])
+                with connection.begin():
+                    observation = self._observe(connection, request["source"])
+                    require(self.genesis is not None, "genesis_missing")
+                    assert self.genesis is not None  # noqa: S101
+                    comparison = capture_restore_comparison(
+                        connection,
+                        source_catalogue=self.store.read(
+                            self.genesis["catalogue_digest"]
+                        ),
+                        restored_catalogue=self.store.read(
+                            observation["catalogue_digest"]
+                        ),
+                        request_digest=checksum,
+                        host_nonce=nonce,
+                        expected_source_cluster=request["cluster_system_identifier"],
+                        expected_source_database=request["database"],
+                    )
+                    self._catalogue_comparison_digest = self._retain(comparison)
+                return observation
         finally:
             self._cleanup_scratch(name, nonce, checksum)
 

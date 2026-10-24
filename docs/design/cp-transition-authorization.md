@@ -125,3 +125,20 @@ bytes, rerun identity, closed-field injection, every plan side/binding and
 untrusted workflow context. Actionlint validates syntax and GitHub expression
 contexts without triggering a workflow. Live dispatch, trust installation and
 production mutation require their separately authorized and verified steps.
+
+### PostgreSQL catalogue parse comparison
+
+Recovery retains both raw catalogues and their actual digests. All non-catalogue
+source-observation fields remain exact. The protected restore evidence also
+retains a closed `cp_catalogue_restore_comparison/1` record bound to the request,
+nonce, source database identity, both catalogues and the independently observed
+PostgreSQL parser identity. Every unaffected category, constraint identity and
+metadata flag must agree. Changed ordinary local table CHECK expressions are
+parsed into separate temporary views against the same restored table; complete
+`pg_get_viewdef(..., false)` outputs must agree. This delegates cast resolution
+to PostgreSQL without running the views or rewriting constraints. Temporary DDL
+is rolled back and a fresh catalogue measurement must equal the original
+restored bytes. The core independently requires the parser to be in a different
+cluster from production. Unsupported shapes and incomplete proof coverage
+refuse. Like other measured host-stage records, offline verification establishes
+bindings and does not assert provenance against a malicious root.

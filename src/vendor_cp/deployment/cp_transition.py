@@ -30,6 +30,7 @@ from vendor_cp.deploy_agent.contracts import (
     sha,
     timestamp,
 )
+from vendor_cp.deployment.cp_catalogue import verify_restore_comparison
 from vendor_cp.deployment.descriptor_binding import (
     SourceDescriptorDeclarations,
     source_descriptor_declarations,
@@ -667,6 +668,7 @@ class RestoreObservation(TypedDict):
     restored_dump_digest: Digest
     restored_globals_digest: Digest
     globals_replay_digest: Digest
+    catalogue_comparison_digest: Digest
 
 
 class CandidateQuiescenceProofV1(TypedDict):
@@ -786,9 +788,31 @@ def _validate_evidence(
         genesis_document = read_json(store.read(evidence["source-genesis"]))["result"]
         _shape(genesis_document, SourceObservation)
         genesis = cast(SourceObservation, genesis_document)
+        require(restored["source"] == genesis, "restore_source_mismatch")
         require(
-            restored["source"] == genesis == restored["restored_source"],
+            {key: value for key, value in genesis.items() if key != "catalogue_digest"}
+            == {
+                key: value
+                for key, value in restored["restored_source"].items()
+                if key != "catalogue_digest"
+            },
             "restore_source_mismatch",
+        )
+        comparison_bytes = store.read(restored["catalogue_comparison_digest"])
+        verify_restore_comparison(
+            comparison_bytes,
+            store.read(genesis["catalogue_digest"]),
+            store.read(restored["restored_source"]["catalogue_digest"]),
+            request_digest=request_digest(request),
+            host_nonce=nonce,
+            expected_source_cluster=request["cluster_system_identifier"],
+            expected_source_database=request["database"],
+        )
+        comparison = read_json(comparison_bytes)
+        parser = cast(dict[str, object], comparison["parser"])
+        require(
+            parser["cluster_system_identifier"] != request["cluster_system_identifier"],
+            "scratch_is_source_cluster",
         )
         restored_bytes = store.read(restored["restore_evidence_digest"])
         require(read_json(restored_bytes) == restored["restored_source"])
