@@ -53,7 +53,7 @@ def request() -> cp.CpTransitionRequestV1:
         "plan_digest": SHA,
         "authorization_run_id": 123,
         "authorization_run_attempt": 2,
-        "trusted_actor": "michael",
+        "trusted_actor": "example",
         "expires_at": "2026-10-25T00:00:00Z",
         "previous_receipt_digest": None,
     }
@@ -195,14 +195,16 @@ def trust(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     proof = canonical_json(
         {
-            "schema": "dotmac.cp_transition_environment_protection/1",
+            "schema": "dotmac.cp_transition_environment_protection/2",
             "repository_id": "100",
             "repository_owner_id": "200",
             "workflow_revision": "c" * 40,
             "environment": "production",
             "protected_main": True,
-            "prevent_self_review": True,
-            "required_reviewer_ids": [300],
+            "approval_model": "single-user-manual",
+            "prevent_self_review": False,
+            "can_admins_bypass": False,
+            "required_reviewer_ids": [200],
             "expires_at": "2026-10-25T00:00:00Z",
         }
     )
@@ -258,7 +260,7 @@ def trust(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             ],
             "predicate": {
                 "request_digest": cp.request_digest(request()),
-                "trusted_actor": "michael",
+                "trusted_actor": "example",
                 "environment": "production",
             },
         },
@@ -1354,3 +1356,92 @@ def test_catalogue_comparison_is_bound_and_recovery_requires_fresh_cluster(
             evidence=receipt["evidence"],
             recovery=store.recovery,
         )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "old-v1",
+        "missing-model",
+        "unknown-model",
+        "missing-prevent",
+        "prevent-true",
+        "missing-bypass",
+        "bypass-true",
+        "bypass-integer",
+        "wrong-reviewer",
+        "extra-reviewer",
+        "duplicate-reviewer",
+        "boolean-reviewer",
+        "string-reviewer",
+        "empty-reviewers",
+        "missing-reviewers",
+        "unknown-field",
+        "unprotected-main",
+    ],
+)
+def test_single_user_manual_v2_protection_is_closed_and_exact(trust, case):
+    from dataclasses import replace
+
+    verifier, path, _result, _cert, files = trust
+    protection = verifier.policy.environment_protection_proof
+    proof = cp.read_json(files[protection])
+    if case == "old-v1":
+        proof["schema"] = "dotmac.cp_transition_environment_protection/1"
+        del proof["approval_model"]
+        del proof["can_admins_bypass"]
+        proof["prevent_self_review"] = True
+    elif case == "missing-model":
+        del proof["approval_model"]
+    elif case == "unknown-model":
+        proof["approval_model"] = "automatic"
+    elif case == "missing-prevent":
+        del proof["prevent_self_review"]
+    elif case == "prevent-true":
+        proof["prevent_self_review"] = True
+    elif case == "missing-bypass":
+        del proof["can_admins_bypass"]
+    elif case == "bypass-true":
+        proof["can_admins_bypass"] = True
+    elif case == "bypass-integer":
+        proof["can_admins_bypass"] = 0
+    elif case == "wrong-reviewer":
+        proof["required_reviewer_ids"] = [300]
+    elif case == "extra-reviewer":
+        proof["required_reviewer_ids"] = [200, 300]
+    elif case == "duplicate-reviewer":
+        proof["required_reviewer_ids"] = [200, 200]
+    elif case == "boolean-reviewer":
+        proof["required_reviewer_ids"] = [True]
+    elif case == "string-reviewer":
+        proof["required_reviewer_ids"] = ["200"]
+    elif case == "empty-reviewers":
+        proof["required_reviewer_ids"] = []
+    elif case == "missing-reviewers":
+        del proof["required_reviewer_ids"]
+    elif case == "unknown-field":
+        proof["auto_approve"] = False
+    else:
+        proof["protected_main"] = False
+    files[protection] = canonical_json(proof)
+    verifier.policy = replace(
+        verifier.policy, environment_protection_digest=cp.raw_digest(files[protection])
+    )
+    with pytest.raises(ContractError):
+        verifier.verify(request(), request_path=path, bundle_path=None, now=NOW)
+
+
+def test_single_user_request_actor_must_be_exact_policy_owner(trust, monkeypatch):
+    import subprocess
+
+    verifier, path, _result, _cert, files = trust
+    value = request()
+    value["trusted_actor"] = "another-valid-actor"
+    files[path] = canonical_json(value)
+
+    def unexpected_verifier(*_args, **_kwargs):
+        raise AssertionError("foreign actor must refuse before attestation subprocess")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_verifier)
+    with pytest.raises(ContractError, match="environment_protection_mismatch"):
+        verifier.verify(value, request_path=path, bundle_path=None, now=NOW)

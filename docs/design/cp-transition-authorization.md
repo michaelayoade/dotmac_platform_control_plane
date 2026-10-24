@@ -65,15 +65,27 @@ Before anyone dispatches this workflow or installs host trust:
 
 1. Independently verify GitHub's actual main branch/ruleset protection and the
    production environment configuration through authoritative GitHub state.
-   Require selected-main deployment restriction, authorized required reviewers,
-   prevention of self-review and reviewed administrator bypass policy. Review
+   The single authorized repository owner, `michaelayoade` (numeric ID
+   `32591929`), may dispatch and must manually approve the protected production
+   job. Require selected-main deployment restriction, that owner as the sole
+   required reviewer, `prevent_self_review: false`, and
+   `can_admins_bypass: false`. The producer and workflow bind both
+   `GITHUB_ACTOR_ID` to the owner ID and `GITHUB_TRIGGERING_ACTOR` to the owner
+   login, allowing that owner's reruns while refusing other initiators. Review
    who can change workflows, environment rules and branch protection. YAML's
    `environment: production` and `github.ref_protected` do not prove these rules.
 2. Retain a fresh, independently checked
-   `dotmac.cp_transition_environment_protection/1` record with the real numeric
-   reviewer IDs, repository and owner IDs, exact workflow revision and expiry.
-   Bind its raw-byte digest in the separately installed trust policy. The
-   producer does not create this proof or infer reviewers from `github.actor`.
+   closed `dotmac.cp_transition_environment_protection/2` record with
+   `approval_model: "single-user-manual"`, `prevent_self_review: false`,
+   `can_admins_bypass: false`, and reviewer IDs exactly `[32591929]`.
+   Separately require the authored request actor to be the owner login.
+   Include repository and owner IDs, exact workflow revision and expiry,
+   and bind the raw-byte digest in the separately installed
+   trust policy. This installed proof is a trusted snapshot of current
+   configuration, not a historical review record. The verifier validates the
+   exact hosted job and attempt that minted the attestation; it does not infer
+   approval from terminal workflow success. The producer does not create this
+   proof or infer reviewers from `github.actor`.
 3. Separately approve and root-install the host identity, database and cluster
    identity, database OID, immutable reviewed workflow revision, predicate URI,
    pinned `gh` binary/digest/config directory, root-protected Docker and Git
@@ -87,6 +99,10 @@ Before anyone dispatches this workflow or installs host trust:
    unit fixture is not evidence of Sigstore issuance or protection settings.
    Host replay/expiry checks and fenced migration/restore/readiness proof are
    still required. Authorization is distinct from live-cutover approval.
+
+The owner must approve the GitHub environment gate manually; an agent cannot
+approve or bypass it. Refresh GitHub's actual settings before installing the
+proof; an environment with `can_admins_bypass: true` is not ready.
 
 The read-only GitHub repository connector on 2026-10-24 returned repository
 `michaelayoade/dotmac_platform_control_plane`, ID `1317527604`, owner

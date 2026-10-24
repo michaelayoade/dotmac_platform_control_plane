@@ -89,14 +89,17 @@ drain, and a new WebSocket Upgrade at the maintenance endpoint must receive 503.
 Its endpoint and measurements are retained separately from the production-shaped stage record.
 
 The GitHub authorization executable and environment-protection proof are
-**explicitly synthetic**; the real `GhAttestationVerifier` still validates their
-bindings. This battery does not establish real protected-environment issuance,
+**explicitly synthetic**, even though the fixture's actor now names the
+repository owner. The real `GhAttestationVerifier` validates their bindings;
+the fixture does not establish actual GitHub approval, protected-environment
+issuance or protection settings. This battery also does not establish
 production maintenance, production routing or full host acceptance. Its report
-states these limits alongside native success, restored heads and bound catalogue comparison,
-host source-preflight `_observe` wrong-owner refusal before DDL, the separate
-rollback-only database privilege probe, malformed authorization/evidence and tree/revision sensitivity, and
-durable replay refusal. It never issues a private migration capability or uses
-direct Alembic as candidate deployment proof.
+states these limits alongside native success, restored heads and bound
+catalogue comparison, host source-preflight `_observe` wrong-owner refusal
+before DDL, the separate rollback-only database privilege probe, malformed
+authorization/evidence and tree/revision sensitivity, and durable replay
+refusal. It never issues a private migration capability or uses direct Alembic
+as candidate deployment proof.
 
 The PostgreSQL scratch image uses a measured immutable repository digest. Before
 restore, the driver joins the running source database container's image ID to an

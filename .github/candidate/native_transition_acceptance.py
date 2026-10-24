@@ -74,14 +74,16 @@ def synthetic_authorization(request, root, now):
     request_path.write_bytes(canonical_json(request))
     proof = canonical_json(
         {
-            "schema": "dotmac.cp_transition_environment_protection/1",
+            "schema": "dotmac.cp_transition_environment_protection/2",
             "repository_id": "100",
             "repository_owner_id": "200",
             "workflow_revision": "c" * 40,
             "environment": "production",
             "protected_main": True,
-            "prevent_self_review": True,
-            "required_reviewer_ids": [300],
+            "approval_model": "single-user-manual",
+            "prevent_self_review": False,
+            "can_admins_bypass": False,
+            "required_reviewer_ids": [200],
             "expires_at": request["expires_at"],
         }
     )
@@ -814,7 +816,7 @@ def main():
             "plan_digest": "",
             "authorization_run_id": 123,
             "authorization_run_attempt": 2,
-            "trusted_actor": "SYNTHETIC-ci-reviewer",
+            "trusted_actor": "example",
             "expires_at": fixture_expiry(datetime.now(UTC)),
             "previous_receipt_digest": None,
         }

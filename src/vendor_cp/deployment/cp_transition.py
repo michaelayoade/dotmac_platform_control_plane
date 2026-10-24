@@ -30,7 +30,6 @@ from vendor_cp.deploy_agent.contracts import (
     sha,
     timestamp,
 )
-from vendor_cp.deployment.cp_catalogue import verify_restore_comparison
 from vendor_cp.deployment.descriptor_binding import (
     SourceDescriptorDeclarations,
     source_descriptor_declarations,
@@ -274,14 +273,18 @@ def raw_digest(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-class EnvironmentProtectionV1(TypedDict):
-    schema: Literal["dotmac.cp_transition_environment_protection/1"]
+class SingleUserManualV2(TypedDict):
+    """Owner dispatch plus manual production approval; administrator bypass off."""
+
+    schema: Literal["dotmac.cp_transition_environment_protection/2"]
     repository_id: str
     repository_owner_id: str
     workflow_revision: Revision
     environment: Literal["production"]
     protected_main: Literal[True]
-    prevent_self_review: Literal[True]
+    approval_model: Literal["single-user-manual"]
+    prevent_self_review: Literal[False]
+    can_admins_bypass: Literal[False]
     required_reviewer_ids: list[int]
     expires_at: str
 
@@ -468,16 +471,13 @@ class GhAttestationVerifier:
             "environment_protection_mismatch",
         )
         proof = read_json(proof_bytes)
-        _shape(proof, EnvironmentProtectionV1)
+        _shape(proof, SingleUserManualV2)
         require(
             proof["repository_id"] == policy.repository_id
             and proof["repository_owner_id"] == policy.repository_owner_id
             and proof["workflow_revision"] == policy.workflow_revision
-            and bool(proof["required_reviewer_ids"])
-            and all(
-                type(item) is int and item > 0
-                for item in cast(list[object], proof["required_reviewer_ids"])
-            )
+            and proof["required_reviewer_ids"] == [int(policy.repository_owner_id)]
+            and request["trusted_actor"] == policy.repository.split("/", 1)[0]
             and timestamp(cast(str, proof["expires_at"])) > now,
             "environment_protection_mismatch",
         )
@@ -783,6 +783,10 @@ def _validate_evidence(
             "source_descriptor_observation_mismatch",
         )
     elif kind == "recovery-restored":
+        # The public authorization producer imports this module with only its
+        # portable crypto dependencies. Database verification is execution-only.
+        from vendor_cp.deployment.cp_catalogue import verify_restore_comparison
+
         _shape(result, RestoreObservation)
         restored = cast(RestoreObservation, result)
         genesis_document = read_json(store.read(evidence["source-genesis"]))["result"]

@@ -21,6 +21,9 @@ jobs:
       github.repository == 'michaelayoade/dotmac_platform_control_plane' &&
       github.repository_id == '1317527604' &&
       github.repository_owner_id == '32591929' &&
+      github.actor == github.repository_owner &&
+      github.actor_id == github.repository_owner_id &&
+      github.triggering_actor == github.repository_owner &&
       github.ref == 'refs/heads/main' && github.ref_protected &&
       github.sha == inputs.expected_workflow_revision &&
       github.workflow_sha == inputs.expected_workflow_revision
