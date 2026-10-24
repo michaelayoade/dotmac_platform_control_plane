@@ -914,7 +914,7 @@ def test_the_restored_migration_test_has_both_lanes() -> None:
     lane_a = BATTERY.index("lane A: a correctly-owned restored copy upgrades")
     lane_b = BATTERY.index("lane B: a wrongly-owned restored copy is refused")
     assert lane_a < lane_b
-    assert "CREATE DATABASE restored_wrong_owner OWNER postgres" in BATTERY
+    assert "CREATE DATABASE restored_wrong_owner OWNER app_admin" in BATTERY
     native = _text(ROOT / ".github/candidate/native_transition_acceptance.py")
     assert '"source_role_owner_mismatch"' in native
     assert 'error.orig.sqlstate == "42501"' in native
@@ -929,7 +929,7 @@ def test_the_two_restore_lanes_differ_in_exactly_one_variable() -> None:
     """
     assert "ALTER SCHEMA public OWNER TO app_admin" in BATTERY
     assert 'test "$ok_owners" = "app_admin|app_admin"' in BATTERY
-    assert 'test "$bad_owners" = "postgres|app_admin"' in BATTERY
+    assert 'test "$bad_owners" = "app_admin|app_admin"' in BATTERY
     setup = BATTERY.index("the lanes must differ only in DATABASE ownership")
     migrate = BATTERY.index("lane B: a wrongly-owned restored copy is refused")
     assert setup < migrate
@@ -1452,3 +1452,102 @@ def test_native_fixture_expiry_is_accepted_by_actual_contract_timestamp(offset_h
     # actual strict owner, so this regression cannot be fixed by weakening it.
     with pytest.raises(contracts.ContractError):
         contracts.timestamp((now.astimezone(UTC) + timedelta(hours=2)).isoformat())
+
+
+def test_historical_source_public_owner_is_set_before_dump():
+    lane = BATTERY.split('step "4 ', 1)[1].split('step "5 ', 1)[0]
+    built = lane.index("could not build the pre-upgrade historical source fixture")
+    source_owner = lane.index(
+        'psql_admin --dbname prodshape -c "ALTER SCHEMA public OWNER TO app_admin;"'
+    )
+    dump = lane.index("pg_dump -U postgres --format custom --dbname prodshape")
+    assert built < source_owner < dump
+
+
+def test_pair_diagnostic_preserves_strict_comparison_without_disclosing_values(capsys):
+    namespace = dict(json=json, hashlib=hashlib)
+    diagnostic = _native_function("pair_diagnostic", namespace)
+    compare = _native_function("verify_pair_parity", namespace)
+    before = {
+        "schemas": [["public", "app_admin", "{app_admin=UC/app_admin}"]],
+        "functions": [
+            [
+                "public",
+                "function_name",
+                "secret_argument_literal",
+                "app_admin",
+                None,
+                True,
+                ["SECRET_CONFIG_VALUE"],
+                "SECRET_FUNCTION_BODY",
+            ]
+        ],
+        "roles": [["app_admin", False, ["SECRET_ROLE_CONFIG"]]],
+    }
+    after = json.loads(json.dumps(before))
+    after["functions"][0][7] = "CHANGED_SECRET_FUNCTION_BODY"
+    after["roles"][0][2] = ["CHANGED_SECRET_ROLE_CONFIG"]
+    correct, wrong = (
+        (("v016",), json.dumps(before).encode()),
+        (("v016",), json.dumps(after).encode()),
+    )
+    compare(correct, correct)
+    assert not capsys.readouterr().out
+    with pytest.raises(ValueError, match="restore_lanes_catalogue_or_heads_differ"):
+        compare(correct, wrong, "source-vs-restored_ok")
+    rendered = capsys.readouterr().out
+    assert "SECRET" not in rendered and "secret_argument_literal" not in rendered
+    report = json.loads(rendered)
+    assert report["comparison"] == "source-vs-restored_ok"
+    assert report["fixture_pair_diagnostic"] == diagnostic(correct, wrong)
+    categories = {
+        item["category"]: item
+        for item in report["fixture_pair_diagnostic"]["categories"]
+    }
+    assert categories["functions"]["rows"] == [
+        {"identity": ["public", "function_name"], "differing_column_indices": [7]}
+    ]
+    assert categories["roles"]["rows"] == [
+        {"identity": ["app_admin"], "differing_column_indices": [2]}
+    ]
+    assert (
+        categories["functions"]["correct_sha256"]
+        != categories["functions"]["wrong_sha256"]
+    )
+    assert (
+        report["fixture_pair_diagnostic"]["public_schema_rows"]["correct_owner"]
+        == before["schemas"]
+    )
+    # A changed head is also still rejected even with byte-identical catalogues.
+    with pytest.raises(ValueError):
+        compare(correct, (("different_head",), correct[1]))
+
+
+def test_restores_are_strict_identical_and_equal_to_source_before_owner_flip():
+    lane = BATTERY.split('step "4 ', 1)[1].split('step "5 ', 1)[0]
+    restore_loop = lane.split("for target in restored_ok restored_wrong_owner; do", 1)[
+        1
+    ].split("\ndone", 1)[0]
+    assert (
+        "--exit-on-error --clean --if-exists --no-owner --role=app_admin"
+        in restore_loop
+    )
+    assert "|| true" not in restore_loop
+    assert '< "$WORKDIR/prodshape.dump" >/dev/null 2>&1' in restore_loop
+    assert 'fail "$target strict historical restore failed"' in restore_loop
+    assert "CREATE DATABASE restored_ok OWNER app_admin" in lane
+    assert "CREATE DATABASE restored_wrong_owner OWNER app_admin" in lane
+    native = _text(ROOT / ".github/candidate/native_transition_acceptance.py")
+    setup = native.split(
+        'with host.lock(), host._connect("restored_ok") as observer:', 1
+    )[1]
+    correct = setup.index('"source-vs-restored_ok"')
+    wrong = setup.index('"source-vs-restored_wrong_owner"')
+    flip = setup.index("ALTER DATABASE restored_wrong_owner OWNER TO postgres")
+    post_flip_pair = setup.index(
+        "verify_pair_parity(snapshot(observer), snapshot(wrong))"
+    )
+    preflight = setup.index('lambda: host._observe(wrong, request["source"])')
+    assert correct < wrong < flip < post_flip_pair < preflight
+    assert "original_snapshot = snapshot(original)" in setup
+    assert '"restore_database_owner_intervention_mismatch"' in setup

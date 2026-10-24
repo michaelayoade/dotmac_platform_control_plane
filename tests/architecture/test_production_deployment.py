@@ -423,7 +423,7 @@ def test_every_test_job_runs_on_a_github_hosted_runner() -> None:
     )
     assert "DOCKER_BUILDKIT=1 docker build" in workflow
     assert "from vendor_cp.main import app" in workflow
-    assert "postgresql+psycopg://app_admin@localhost:5439/vendor_cp_test" in workflow
+    assert "postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test" in workflow
     test_compose = _text("docker-compose.test.yml")
     assert "POSTGRES_USER: postgres" in test_compose
     assert (

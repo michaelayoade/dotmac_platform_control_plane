@@ -274,6 +274,95 @@ def snapshot(connection):
     )
 
 
+def pair_diagnostic(correct, wrong):
+    """Bounded fixture metadata only; never function bodies/config/data values."""
+    identity_columns = {
+        "bootstrap": (0,),
+        "schemas": (0,),
+        "relations": (0, 1),
+        "columns": (0, 1, 2),
+        "constraints": (0, 1, 2),
+        "indexes": (0, 1, 2),
+        "views": (0, 1),
+        "functions": (0, 1),
+        "policies": (0, 1, 2),
+        "triggers": (0, 1, 2),
+        "default-acls": (0, 1),
+        "roles": (0,),
+        "memberships": (0, 1, 2),
+    }
+    catalogues = [json.loads(value[1]) for value in (correct, wrong)]
+    changes = []
+    for category in sorted(set(catalogues[0]) | set(catalogues[1])):
+        left, right = (value.get(category, []) for value in catalogues)
+        if left == right:
+            continue
+        changed = {
+            "category": category,
+            "correct_sha256": hashlib.sha256(json.dumps(left).encode()).hexdigest(),
+            "wrong_sha256": hashlib.sha256(json.dumps(right).encode()).hexdigest(),
+            "rows": [],
+        }
+        groups = []
+        for rows in (left, right):
+            grouped = {}
+            for row in rows:
+                identity = [row[index] for index in identity_columns.get(category, ())]
+                grouped.setdefault(json.dumps(identity), []).append(row)
+            groups.append(grouped)
+        for key in sorted(set(groups[0]) | set(groups[1]))[:32]:
+            first, second = (group.get(key, []) for group in groups)
+            if first == second:
+                continue
+            columns = set()
+            for index in range(max(len(first), len(second))):
+                one = first[index] if index < len(first) else []
+                two = second[index] if index < len(second) else []
+                columns.update(
+                    column
+                    for column in range(max(len(one), len(two)))
+                    if column >= len(one)
+                    or column >= len(two)
+                    or one[column] != two[column]
+                )
+            changed["rows"].append(
+                {
+                    "identity": json.loads(key),
+                    "differing_column_indices": sorted(columns),
+                }
+            )
+        changes.append(changed)
+    return {
+        "heads_equal": correct[0] == wrong[0],
+        "categories": changes,
+        "public_schema_rows": {
+            name: [row for row in value.get("schemas", []) if row[0] == "public"]
+            for name, value in zip(
+                ("correct_owner", "wrong_owner"), catalogues, strict=True
+            )
+        },
+    }
+
+
+def verify_pair_parity(correct, wrong, comparison="restore-pair-after-owner-flip"):
+    # This comparison retains every original catalogue byte and every head.
+    if wrong != correct:
+        print(
+            json.dumps(
+                {
+                    "schema": "dotmac.candidate_native_acceptance/1",
+                    "status": "refused",
+                    "reason": "restore_lanes_catalogue_or_heads_differ",
+                    "comparison": comparison,
+                    "fixture_pair_diagnostic": pair_diagnostic(correct, wrong),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+    require(wrong == correct, "restore_lanes_catalogue_or_heads_differ")
+
+
 def refusal(action, expected, connection):
     before = snapshot(connection)
     try:
@@ -650,6 +739,32 @@ def main():
     # The host's production lock directory is never mounted into this fixture.
     PRODUCTION_DEPLOYMENT_LOCK.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with host.lock(), host._connect("restored_ok") as observer:
+        # All restored fields must match the real source before planting the
+        # single database-owner defect. No catalogue field is normalized away.
+        with host._connect("prodshape") as original:
+            original_snapshot = snapshot(original)
+        verify_pair_parity(
+            original_snapshot, snapshot(observer), "source-vs-restored_ok"
+        )
+        with host._connect("restored_wrong_owner") as wrong:
+            verify_pair_parity(
+                original_snapshot, snapshot(wrong), "source-vs-restored_wrong_owner"
+            )
+        observer.exec_driver_sql(
+            "ALTER DATABASE restored_wrong_owner OWNER TO postgres"
+        )
+        owners = observer.execute(
+            text(
+                "SELECT datname,pg_get_userbyid(datdba) FROM pg_database "
+                "WHERE datname IN ('restored_ok','restored_wrong_owner') "
+                "ORDER BY datname"
+            )
+        ).all()
+        require(
+            [tuple(row) for row in owners]
+            == [("restored_ok", "app_admin"), ("restored_wrong_owner", "postgres")],
+            "restore_database_owner_intervention_mismatch",
+        )
         source_heads = list(sorted(migrations._source_heads(observer)))
         target_heads = list(
             composed_effective_heads(migrations.deploy_config(None, root=code))
@@ -714,10 +829,7 @@ def main():
         host._negative_reconnect(request)
         host.genesis = host._observe(observer, request["source"])
         with host._connect("restored_wrong_owner") as wrong:
-            require(
-                snapshot(wrong) == snapshot(observer),
-                "restore_lanes_catalogue_or_heads_differ",
-            )
+            verify_pair_parity(snapshot(observer), snapshot(wrong))
             refusal(
                 lambda: host._observe(wrong, request["source"]),
                 "source_role_owner_mismatch",
@@ -954,6 +1066,10 @@ def main():
         "import_origins": origins,
         "migration_tree_digest": tree_digest,
         "request_digest": cp.request_digest(request),
+        "restore_construction": (
+            "strict identical restores; full source/catalogue/head equality "
+            "before sole database-owner flip"
+        ),
         "source_heads": source_heads,
         "target_heads": target_heads,
         "recovery_manifest_digest": "sha256:" + backup.checksum,

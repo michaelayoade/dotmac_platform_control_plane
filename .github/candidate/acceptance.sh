@@ -424,30 +424,26 @@ docker run --rm --network host \
     --env "MIGRATION_DATABASE_URL=$(dsn app_admin prodshape)" \
     --entrypoint python "$NATIVE_SOURCE_IMAGE" -I -c "$SCRIPT" \
     || fail "could not build the pre-upgrade historical source fixture"
+# Set the source schema owner to the same intended profile as BOTH restores.
+# Keep the dump's ACL bytes intact; only database ownership differs in lane B.
+psql_admin --dbname prodshape -c "ALTER SCHEMA public OWNER TO app_admin;" >/dev/null
 docker exec "$DB_CONTAINER" pg_dump -U postgres --format custom --dbname prodshape \
     > "$WORKDIR/prodshape.dump"
 test -s "$WORKDIR/prodshape.dump" || fail "the production-shaped dump is empty"
 
-# The two lanes must differ in EXACTLY ONE thing: who owns the DATABASE. An
-# earlier construction also left the `public` schema owned by `postgres` in lane
-# B, so `app_admin` could not create anything and the restore landed zero tables
-# — the guard below caught it, and it would have "failed for the right message"
-# for entirely the wrong reason. A two-variable experiment cannot attribute its
-# own result.
-#
-# So both copies get `public` owned by `app_admin` and their objects restored as
-# `app_admin`, exactly as production has them. Only `datdba` differs.
+# Restore under one identical owner and strict recipe. The template's existing
+# public schema must be dropped/recreated by the dump along with its ACLs, so
+# --clean --if-exists applies identically to both fresh disposable databases.
+# The driver compares both full catalogues and heads to prodshape before it
+# changes ONLY lane B's database owner; the lanes must differ only in DATABASE ownership.
 psql_admin -c "CREATE DATABASE restored_ok OWNER app_admin;" >/dev/null
-psql_admin -c "CREATE DATABASE restored_wrong_owner OWNER postgres;" >/dev/null
+psql_admin -c "CREATE DATABASE restored_wrong_owner OWNER app_admin;" >/dev/null
 for target in restored_ok restored_wrong_owner; do
     psql_admin --dbname "$target" -c "ALTER SCHEMA public OWNER TO app_admin;" >/dev/null
-done
-# `|| true` because pg_restore reports ACL warnings on a cluster whose roles
-# were created by the init script rather than by the dump — the RESULT is
-# asserted below instead of the exit code, which is the honest way round.
-for target in restored_ok restored_wrong_owner; do
-    docker exec -i "$DB_CONTAINER" pg_restore -U postgres --no-owner --role=app_admin \
-        --dbname "$target" < "$WORKDIR/prodshape.dump" >/dev/null 2>&1 || true
+    docker exec -i "$DB_CONTAINER" pg_restore -U postgres \
+        --exit-on-error --clean --if-exists --no-owner --role=app_admin \
+        --dbname "$target" < "$WORKDIR/prodshape.dump" >/dev/null 2>&1 \
+        || fail "$target strict historical restore failed"
 done
 for target in restored_ok restored_wrong_owner; do
     restored_tables="$(psql_admin --tuples-only --no-align --dbname "$target" -c \
@@ -456,19 +452,17 @@ for target in restored_ok restored_wrong_owner; do
         || fail "$target restored zero tables, so the upgrade below would be a fresh install"
 done
 
-# The single-variable proof, asserted rather than assumed. Both copies must
-# agree on schema ownership and disagree on database ownership; if they ever
-# agree on both, lane B stops being a trap and starts being a duplicate of
-# lane A that happens to pass.
+# Both copies begin with identical database/schema ownership. The driver must
+# prove source/copy equality before it plants the single database-owner defect.
 ok_owners="$(psql_admin --tuples-only --no-align --dbname restored_ok -c \
   "SELECT pg_get_userbyid(datdba) || '|' || (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public') FROM pg_database WHERE datname=current_database();")"
 bad_owners="$(psql_admin --tuples-only --no-align --dbname restored_wrong_owner -c \
   "SELECT pg_get_userbyid(datdba) || '|' || (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public') FROM pg_database WHERE datname=current_database();")"
 test "$ok_owners" = "app_admin|app_admin" \
-    || fail "lane A ownership is $ok_owners, expected app_admin|app_admin"
-test "$bad_owners" = "postgres|app_admin" \
-    || fail "lane B ownership is $bad_owners, expected postgres|app_admin — the lanes must differ only in DATABASE ownership"
-pass "two copies of one production-shaped state, differing only in database ownership"
+    || fail "lane A initial ownership is $ok_owners, expected app_admin|app_admin"
+test "$bad_owners" = "app_admin|app_admin" \
+    || fail "lane B initial ownership is $bad_owners, expected app_admin|app_admin"
+pass "both strict restores begin with identical database and public schema owners"
 
 # Save actual local OCI descriptors before publication. A config ID is never a
 # manifest coordinate; no manifest is synthesized and no registry push occurs.
