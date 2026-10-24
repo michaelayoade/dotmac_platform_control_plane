@@ -84,11 +84,12 @@ jobs:
       COMPOSE_PROJECT_NAME: cp-postgres-${{ github.run_id }}-${{ github.run_attempt }}
       TEST_DB_PORT: "5439"
       TEST_RESTORE_DB_PORT: "5440"
-      TEST_DB_HOST: localhost
+      # One explicit endpoint avoids ambiguous IPv6/IPv4 denial diagnostics.
+      TEST_DB_HOST: 127.0.0.1
       TEST_DB_NAME: vendor_cp_test
       TEST_DB_ADMIN_USER: postgres
       TEST_DB_ADMIN_PASSWORD: postgres
-      TEST_RESTORE_DATABASE_URL: postgresql+psycopg://restore_bootstrap@localhost:5440/restore_control
+      TEST_RESTORE_DATABASE_URL: postgresql+psycopg://restore_bootstrap@127.0.0.1:5440/restore_control
       # Turns a missing database into a FAILURE instead of a skip. `-rs` only
       # prints skips; under required CI a suite that can pass by skipping is
       # not a gate, which is exactly how this suite stayed silently unrun.
@@ -120,15 +121,15 @@ jobs:
           docker compose -f docker-compose.test.yml up -d --wait
           # Both services share one immutable image, and must really expose
           # the same PG16 server version before native dump/restore can run.
-          source_version=$(psql postgresql://postgres@localhost:5439/vendor_cp_test -Atc 'SHOW server_version_num')
-          restore_version=$(psql postgresql://restore_bootstrap@localhost:5440/restore_control -Atc 'SHOW server_version_num')
+          source_version=$(psql postgresql://postgres@127.0.0.1:5439/vendor_cp_test -Atc 'SHOW server_version_num')
+          restore_version=$(psql postgresql://restore_bootstrap@127.0.0.1:5440/restore_control -Atc 'SHOW server_version_num')
           test "$source_version" = "$restore_version"
           test "$((source_version / 10000))" -eq 16
-          MIGRATION_DATABASE_URL=postgresql+psycopg://app_admin@localhost:5439/vendor_cp_test \
+          MIGRATION_DATABASE_URL=postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test \
             poetry run dotmac-platform admin migrate
       - name: Migration rehearsals + replay concurrency
         env:
-          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5439/vendor_cp_test
         run: poetry run pytest tests/migration -q -rs
       # The ordinary migration suite may skip optional Foundation imports.
       # This separate required step makes those four tests an executed gate
@@ -143,7 +144,7 @@ jobs:
           persist-credentials: false
       - name: D16 bundle producer and dump evidence conformance
         env:
-          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5439/vendor_cp_test
           PYTHONPATH: ${{ github.workspace }}/.d16-foundation-source/packages/dotmac-deployment-foundation/src
           PYTHONDONTWRITEBYTECODE: "1"
         run: |

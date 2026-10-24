@@ -1429,3 +1429,26 @@ def test_postgres_restore_uses_joined_immutable_image(fault):
         assert (
             measure(container, "postgres:mutable")["immutable_reference"] == reference
         )
+
+
+@pytest.mark.parametrize("offset_hours", [0, -3, 5])
+def test_native_fixture_expiry_is_accepted_by_actual_contract_timestamp(offset_hours):
+    from datetime import UTC, datetime, timedelta, timezone
+
+    # Load the portable contract module itself: no copied timestamp validator
+    # and no substitute regex or mocked contract owner participates in this check.
+    spec = importlib.util.spec_from_file_location(
+        "candidate_timestamp_contract", ROOT / "src/vendor_cp/deploy_agent/contracts.py"
+    )
+    contracts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(contracts)
+    expiry = _native_function("fixture_expiry", dict(UTC=UTC, timedelta=timedelta))
+    now = datetime(
+        2026, 10, 24, 23, 30, 1, 123456, tzinfo=timezone(timedelta(hours=offset_hours))
+    )
+    encoded = expiry(now)
+    assert contracts.timestamp(encoded) == now.astimezone(UTC) + timedelta(hours=2)
+    # The old producer's timezone-offset spelling must still be refused by the
+    # actual strict owner, so this regression cannot be fixed by weakening it.
+    with pytest.raises(contracts.ContractError):
+        contracts.timestamp((now.astimezone(UTC) + timedelta(hours=2)).isoformat())

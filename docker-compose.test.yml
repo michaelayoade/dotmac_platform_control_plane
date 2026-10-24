@@ -22,7 +22,7 @@ services:
       - ./deploy/postgres/init-roles.sh:/docker-entrypoint-initdb.d/001-vendor-roles.sh:ro
       - ./deploy/postgres/bootstrap-credential-function.sql:/docker-entrypoint-initdb.d/002-bootstrap-credential-function.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U app_admin -d ${TEST_DB_NAME:-vendor_cp_test}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U app_admin -d ${TEST_DB_NAME:-vendor_cp_test}"]
       interval: 2s
       timeout: 2s
       retries: 15
@@ -40,7 +40,7 @@ services:
     volumes:
       - postgres_restore_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U restore_bootstrap -d restore_control"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U restore_bootstrap -d restore_control"]
       interval: 2s
       timeout: 2s
       retries: 15

@@ -59,6 +59,11 @@ def descriptor(reference, revision, heads):
     ).encode()
 
 
+def fixture_expiry(now):
+    """Use the native protocol's canonical UTC timestamp spelling."""
+    return (now.astimezone(UTC) + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+
+
 def synthetic_authorization(request, root, now):
     """Execute the real verifier owner across one explicit synthetic boundary."""
     request_path = root / "request.json"
@@ -696,7 +701,7 @@ def main():
             "authorization_run_id": 123,
             "authorization_run_attempt": 2,
             "trusted_actor": "SYNTHETIC-ci-reviewer",
-            "expires_at": (datetime.now(UTC) + timedelta(hours=2)).isoformat(),
+            "expires_at": fixture_expiry(datetime.now(UTC)),
             "previous_receipt_digest": None,
         }
         request["plan_digest"] = cp.transition_plan_digest(request)

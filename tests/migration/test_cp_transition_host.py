@@ -531,6 +531,16 @@ def test_real_pg_rejects_unsupported_retained_source_bootstrap(
         "_open_directory",
         lambda path: os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
     )
+    # Hosted CI creates fixtures as its unprivileged runner. Simulate only
+    # root ownership; retain real modes, file types, link counts and all I/O.
+    protected = cp_transition._protected
+
+    def root_owned(info, *, directory):
+        values = list(info)
+        values[4] = 0
+        protected(os.stat_result(values), directory=directory)
+
+    monkeypatch.setattr(cp_transition, "_protected", root_owned)
     host = ExistingCpTransitionHost(
         _config(tmp_path), store=ArtifactStore(tmp_path), recovery={}
     )
