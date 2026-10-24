@@ -310,10 +310,17 @@ def pair_diagnostic(correct, wrong):
                 identity = [row[index] for index in identity_columns.get(category, ())]
                 grouped.setdefault(json.dumps(identity), []).append(row)
             groups.append(grouped)
-        for key in sorted(set(groups[0]) | set(groups[1]))[:32]:
+        changed_keys = [
+            key
+            for key in sorted(set(groups[0]) | set(groups[1]))
+            if groups[0].get(key, []) != groups[1].get(key, [])
+        ]
+        changed["changed_identity_count"] = len(changed_keys)
+        changed["same_rows_different_order"] = sorted(
+            json.dumps(row) for row in left
+        ) == sorted(json.dumps(row) for row in right)
+        for key in changed_keys[:32]:
             first, second = (group.get(key, []) for group in groups)
-            if first == second:
-                continue
             columns = set()
             for index in range(max(len(first), len(second))):
                 one = first[index] if index < len(first) else []
@@ -325,12 +332,26 @@ def pair_diagnostic(correct, wrong):
                     or column >= len(two)
                     or one[column] != two[column]
                 )
-            changed["rows"].append(
-                {
-                    "identity": json.loads(key),
-                    "differing_column_indices": sorted(columns),
+            row_change = {
+                "identity": json.loads(key),
+                "differing_column_indices": sorted(columns),
+            }
+            if category == "constraints":
+                row_change["definition_fingerprints"] = {
+                    side: [
+                        {
+                            "sha256": hashlib.sha256(row[3].encode()).hexdigest(),
+                            "size_bytes": len(row[3].encode()),
+                        }
+                        for row in rows[:32]
+                    ]
+                    for side, rows in (("correct", first), ("wrong", second))
                 }
-            )
+                row_change["definition_counts"] = {
+                    "correct": len(first),
+                    "wrong": len(second),
+                }
+            changed["rows"].append(row_change)
         changes.append(changed)
     return {
         "heads_equal": correct[0] == wrong[0],

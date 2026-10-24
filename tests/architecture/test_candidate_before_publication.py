@@ -1551,3 +1551,58 @@ def test_restores_are_strict_identical_and_equal_to_source_before_owner_flip():
     assert correct < wrong < flip < post_flip_pair < preflight
     assert "original_snapshot = snapshot(original)" in setup
     assert '"restore_database_owner_intervention_mismatch"' in setup
+
+
+def test_pair_diagnostic_limits_changed_identities_after_filtering(capsys):
+    namespace = dict(json=json, hashlib=hashlib)
+    diagnostic = _native_function("pair_diagnostic", namespace)
+    compare = _native_function("verify_pair_parity", namespace)
+    original = {
+        "constraints": [
+            [
+                "public",
+                f"table_{index:03}",
+                "constraint_name",
+                "SECRET_CHECK_DEFINITION",
+            ]
+            for index in range(100)
+        ]
+    }
+    restored = json.loads(json.dumps(original))
+    for row in restored["constraints"][40:]:
+        row[3] = "CHANGED_SECRET_CHECK_DEFINITION"
+    correct, wrong = (
+        (("v016",), json.dumps(original).encode()),
+        (("v016",), json.dumps(restored).encode()),
+    )
+    with pytest.raises(ValueError):
+        compare(correct, wrong)
+    rendered = capsys.readouterr().out
+    assert "SECRET" not in rendered
+    category = diagnostic(correct, wrong)["categories"][0]
+    assert category["changed_identity_count"] == 60
+    assert len(category["rows"]) == 32
+    assert category["rows"][0]["identity"] == ["public", "table_040", "constraint_name"]
+    assert category["same_rows_different_order"] is False
+    fingerprints = category["rows"][0]["definition_fingerprints"]
+    for side, value in (
+        ("correct", "SECRET_CHECK_DEFINITION"),
+        ("wrong", "CHANGED_SECRET_CHECK_DEFINITION"),
+    ):
+        assert fingerprints[side] == [
+            {
+                "sha256": hashlib.sha256(value.encode()).hexdigest(),
+                "size_bytes": len(value.encode()),
+            }
+        ]
+    # Identify an observed order-only difference without relaxing byte parity.
+    reordered = {"constraints": list(reversed(original["constraints"]))}
+    reversed_snapshot = (("v016",), json.dumps(reordered).encode())
+    assert (
+        diagnostic(correct, reversed_snapshot)["categories"][0][
+            "same_rows_different_order"
+        ]
+        is True
+    )
+    with pytest.raises(ValueError):
+        compare(correct, reversed_snapshot)
