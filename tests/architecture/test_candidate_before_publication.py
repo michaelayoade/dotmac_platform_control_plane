@@ -217,6 +217,94 @@ def test_recorder_archive_and_output_guards(tmp_path, monkeypatch, layout, case)
         assert outputs[key] == identity[key]
 
 
+@pytest.mark.parametrize(
+    "fault",
+    [
+        None,
+        "no-layout",
+        "config-only",
+        "bad-size",
+        "bad-layer",
+        "wrong-diff-id",
+        "wrong-platform",
+        "duplicate",
+    ],
+)
+def test_native_coordinate_requires_genuine_oci_manifest(tmp_path, fault):
+    revision = "a" * 40
+    layer = b"actual exported layer bytes"
+    config = json.dumps(
+        {
+            "os": "linux",
+            "architecture": "amd64",
+            "config": {"Labels": {"org.opencontainers.image.revision": revision}},
+            "rootfs": {
+                "type": "layers",
+                "diff_ids": [
+                    "sha256:" + "d" * 64
+                    if fault == "wrong-diff-id"
+                    else _digest(layer.decode())
+                ],
+            },
+        }
+    ).encode()
+    entries = {}
+
+    def descriptor(raw, media_type):
+        checksum = "sha256:" + hashlib.sha256(raw).hexdigest()
+        entries["blobs/sha256/" + checksum[7:]] = raw
+        return {"mediaType": media_type, "digest": checksum, "size": len(raw)}
+
+    config_descriptor = descriptor(config, "application/vnd.oci.image.config.v1+json")
+    layer_descriptor = descriptor(layer, "application/vnd.oci.image.layer.v1.tar")
+    if fault == "bad-size":
+        layer_descriptor["size"] += 1
+    if fault == "bad-layer":
+        entries["blobs/sha256/" + layer_descriptor["digest"][7:]] = (
+            b"altered exported layer bytes"
+        )
+    manifest = json.dumps(
+        {"schemaVersion": 2, "config": config_descriptor, "layers": [layer_descriptor]}
+    ).encode()
+    selected = descriptor(manifest, "application/vnd.oci.image.manifest.v1+json")
+    selected["platform"] = {
+        "os": "linux",
+        "architecture": "arm64" if fault == "wrong-platform" else "amd64",
+    }
+    entries["index.json"] = json.dumps(
+        {
+            "schemaVersion": 2,
+            "manifests": [selected] * (2 if fault == "duplicate" else 1),
+        }
+    ).encode()
+    entries["oci-layout"] = b'{"imageLayoutVersion":"1.0.0"}'
+    entries["manifest.json"] = json.dumps(
+        [{"Config": "blobs/sha256/" + config_descriptor["digest"][7:]}]
+    ).encode()
+    if fault == "no-layout":
+        del entries["oci-layout"]
+    if fault == "config-only":
+        entries["index.json"] = json.dumps(
+            {"schemaVersion": 2, "manifests": [config_descriptor]}
+        ).encode()
+    path = tmp_path / "export.tar"
+    with tarfile.open(path, "w") as archive:
+        for name, raw in entries.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(raw)
+            archive.addfile(member, io.BytesIO(raw))
+    if fault:
+        with pytest.raises((ValueError, KeyError)):
+            recorder.archive_oci_coordinate(path, "linux/amd64", revision)
+    else:
+        coordinate, config_sha, layers = recorder.archive_oci_coordinate(
+            path, "linux/amd64", revision
+        )
+        assert coordinate == selected["digest"] != config_descriptor["digest"]
+        assert config_sha == config_descriptor["digest"]
+        assert layers == [_digest(layer.decode())]
+
+
 # ── the ordering, which is the whole point ──────────────────────────────────
 
 
@@ -763,13 +851,15 @@ REQUIRED_CHECKS: dict[str, str] = {
     "app import": "from vendor_cp.main import app",
     "fresh zero-to-head migration": "could not migrate an empty database to heads",
     "restored-production migration": (
-        "restored copy owned by postgres migrated successfully"
+        "lane B: a wrongly-owned restored copy is refused before DDL"
     ),
     "restored-production reason": "permission denied for database",
     "restored-production single variable": (
         "the lanes must differ only in DATABASE ownership"
     ),
-    "restored-production not a table fault": "failed on TABLE privileges",
+    "restored-production not a table fault": (
+        "SQLSTATE 42501 permission denied for database"
+    ),
     "database ownership": "app_admin|app_admin",
     "role contract": "false|false|true|true",
     "grant isolation": "the plane boundary is open",
@@ -825,7 +915,12 @@ def test_the_restored_migration_test_has_both_lanes() -> None:
     lane_b = BATTERY.index("lane B: a wrongly-owned restored copy is refused")
     assert lane_a < lane_b
     assert "CREATE DATABASE restored_wrong_owner OWNER postgres" in BATTERY
-    assert "failed for some OTHER reason" in BATTERY
+    native = _text(ROOT / ".github/candidate/native_transition_acceptance.py")
+    assert '"source_role_owner_mismatch"' in native
+    assert 'error.orig.sqlstate == "42501"' in native
+    assert '"permission denied for database" in str(error.orig)' in native
+    assert "database in str(error.orig)" in native
+    assert "transaction.rollback()" in native
 
 
 def test_the_two_restore_lanes_differ_in_exactly_one_variable() -> None:
@@ -1040,3 +1135,297 @@ def test_desired_key_mount_probe_requires_read_only_filesystem(error_number, acc
         else:
             with pytest.raises((AssertionError, SystemExit)):
                 exec(compile(probe, "<candidate-key-mount-probe>", "exec"), {})  # noqa: S102 -- trusted repository probe
+
+
+def test_native_capture_adapter_executes_only_actual_owner_commands():
+    """Evaluate the actual owner prefix and adapter; unknown calls never delegate."""
+    import ast
+    from types import SimpleNamespace
+
+    path = ROOT / ".github/candidate/native_transition_acceptance.py"
+    tree = ast.parse(_text(path))
+    adapter = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "FixtureRecoveryProcess"
+    )
+    fixture_root = Path("/opt/candidate-native")
+
+    def require(condition, reason):
+        if not condition:
+            raise ValueError(reason)
+
+    namespace = {
+        "ROOT": fixture_root,
+        "DOCKER": Path("/usr/bin/docker"),
+        "require": require,
+        "SubprocessExecutor": SimpleNamespace,
+    }
+    exec(  # noqa: S102 -- trusted repository adapter AST
+        compile(ast.Module(body=[adapter], type_ignores=[]), str(path), "exec"),
+        namespace,
+    )  # noqa: S102 -- repository adapter AST, no application imports
+    process = namespace["FixtureRecoveryProcess"](
+        "a" * 64, {"acceptance.invalid/cp@sha256:fixture": "actual-image"}
+    )
+    effects_tree = ast.parse(_text(ROOT / "src/vendor_cp/deployment/effects.py"))
+    owner = next(
+        node
+        for node in effects_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "PlatformCpRecoveryBundle"
+    )
+    compose = next(
+        node
+        for node in owner.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_compose"
+    )
+    compose.decorator_list = []
+    exec(  # noqa: S102 -- trusted owner tuple AST
+        compile(
+            ast.Module(body=[compose], type_ignores=[]), "<actual-owner-prefix>", "exec"
+        ),
+        namespace,
+    )  # noqa: S102 -- actual fixed tuple only
+    owner_self = SimpleNamespace(
+        _docker_bin="/usr/bin/docker",
+        _spec=SimpleNamespace(product="dotmac_vendor_control_plane"),
+        _deploy_dir=fixture_root,
+        _env_file=fixture_root / ".env",
+        _compose_file=fixture_root / "docker-compose.production.yml",
+    )
+    prefix = namespace["_compose"](owner_self)
+    argv = (
+        *prefix,
+        "exec",
+        "-T",
+        "--user",
+        "postgres",
+        "db",
+        "pg_dumpall",
+        "--username",
+        "postgres",
+        "--globals-only",
+        "--no-role-passwords",
+    )
+    translated = process.translate(argv)
+    assert translated == [
+        "/usr/bin/docker",
+        "exec",
+        "-i",
+        "-e",
+        "POSTGRES_DB=restored_ok",
+        "--user",
+        "postgres",
+        "a" * 64,
+        "pg_dumpall",
+        "--username",
+        "postgres",
+        "--globals-only",
+        "--no-role-passwords",
+    ]
+    for invalid in (
+        ["/usr/bin/docker", "run", "unknown"],
+        [*prefix, "exec", "-T", "db", "sh", "-c", "arbitrary command"],
+        [*prefix, "exec", "-T", "other-db", "pg_restore", "--list"],
+        [*prefix, "--changed-owner-option", "exec", "-T", "db", "pg_restore", "--list"],
+        ["/usr/bin/docker", "image", "inspect", "--format", "{{.Id}}", "unknown-image"],
+    ):
+        with pytest.raises(ValueError):
+            process.translate(invalid)
+
+
+def test_native_harness_keeps_candidate_and_fixture_boundaries():
+    native = _text(ROOT / ".github/candidate/native_transition_acceptance.py")
+    builder = _text(ROOT / ".github/candidate/build_native_source_fixture.sh")
+    lane = BATTERY.split('step "4 ', 1)[1].split('step "5 ', 1)[0]
+    assert '--entrypoint python "$NATIVE_SOURCE_IMAGE" -I -c "$SCRIPT"' in lane
+    assert '--entrypoint python "$IMAGE" -I /native_transition_acceptance.py' in lane
+    assert "--pid host" in lane and "--user 0:0" in lane
+    for role, variable in (
+        ("app_user", "DATABASE_URL"),
+        ("platform_api", "PLATFORM_DATABASE_URL"),
+        ("app_admin", "MIGRATION_DATABASE_URL"),
+    ):
+        assert f'--env "{variable}=$(dsn {role} restored_ok)"' in lane
+    assert "host._retain((bundle / name).read_bytes())" not in native
+    assert "admin migrate" not in lane
+    for marker in (
+        "migrations.native_upgrade(",
+        "owner.capture_transition(",
+        "owner.verify(backup)",
+        "host._restore_fresh(",
+        "host._negative_reconnect(",
+        "store.reserve(",
+        "sysconfig.get_path(",
+        'shutil.copytree("/app/alembic"',
+        '"source_descriptor_not_actual_git_blob"',
+        '"CI prospective fixture; not accepted descriptor promotion"',
+    ):
+        assert marker in native
+    assert "monkeypatch" not in native and "_TRANSITION_PERMISSIONS" not in native
+    assert "348c31315efaaca9ea23ea7c025d137a3afaad74" in builder
+    assert "--secret id=forgejo_token,env=FORGEJO_READ_TOKEN" in builder
+    assert "docker push" not in builder and "docker login" not in builder
+
+
+def _native_function(name, namespace):
+    import ast
+    from contextlib import contextmanager
+
+    tree = ast.parse(_text(ROOT / ".github/candidate/native_transition_acceptance.py"))
+    node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    namespace["contextmanager"] = contextmanager
+    namespace["require"] = (
+        lambda condition, reason: None
+        if condition
+        else (_ for _ in ()).throw(ValueError(reason))
+    )
+    exec(  # noqa: S102 -- trusted repository fixture function
+        compile(
+            ast.Module(body=[node], type_ignores=[]), "<native-fixture-owner>", "exec"
+        ),
+        namespace,
+    )  # noqa: S102 -- trusted repository fixture function
+    return namespace[name]
+
+
+def test_actual_maintenance_fixture_measures_http_and_websocket_drain():
+    import base64
+    import http.client
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    fixture = _native_function(
+        "maintenance_fixture",
+        dict(
+            base64=base64,
+            hashlib=hashlib,
+            http=http,
+            threading=threading,
+            BaseHTTPRequestHandler=BaseHTTPRequestHandler,
+            ThreadingHTTPServer=ThreadingHTTPServer,
+        ),
+    )
+    with fixture() as observed:
+        assert observed["endpoint"].startswith("http://127.0.0.1:")
+        assert observed["before_drain"] == {"active_http": 2, "active_websockets": 1}
+        assert observed["held_request_statuses"] == [101, 503]
+        assert observed["websocket_upgrade_status"] == 503
+        assert observed["measured"] == {
+            "external_status": 503,
+            "active_http": 0,
+            "active_websockets": 0,
+        }
+
+
+@pytest.mark.parametrize(
+    "case", ["success", "cancel", "partial-create", "foreign-label"]
+)
+def test_writer_fixture_cleanup_uses_only_created_verified_cids(case):
+    nonce, image_id = "c" * 64, "sha256:" + "d" * 64
+    created, removed, calls = {}, [], []
+
+    def cli(*argv):
+        calls.append(argv)
+        if argv[1] == "run":
+            if case == "partial-create" and created:
+                raise RuntimeError("second creation failed")
+            role = "relay" if created else "app"
+            identifier = ("b" if created else "a") * 64
+            created[identifier] = {
+                "Id": identifier,
+                "Name": "/candidate-native-" + nonce[:32] + "-" + role,
+                "Image": image_id,
+                "Config": {
+                    "Labels": {
+                        "io.dotmac.candidate.run": nonce,
+                        "io.dotmac.candidate.fixture": role,
+                    }
+                },
+                "State": {"Running": False},
+                "HostConfig": {"RestartPolicy": {"Name": "no"}},
+            }
+            return identifier.encode()
+        if argv[1:3] == ("container", "inspect"):
+            value = created[argv[3]]
+            return json.dumps([value]).encode()
+        if argv[1] == "rm":
+            removed.append(argv[-1])
+        return b""
+
+    fixture = _native_function(
+        "writer_fixtures", dict(cli=cli, json=json, DOCKER=Path("/usr/bin/docker"))
+    )
+
+    def run():
+        with fixture("source-image", image_id, nonce) as writers:
+            assert len(writers) == 2
+            if case == "cancel":
+                raise SystemExit("cancel")
+            if case == "foreign-label":
+                created["b" * 64]["Config"]["Labels"]["io.dotmac.candidate.run"] = (
+                    "foreign"
+                )
+
+    if case == "cancel":
+        with pytest.raises(SystemExit):
+            run()
+    elif case == "partial-create":
+        with pytest.raises(RuntimeError):
+            run()
+    elif case == "foreign-label":
+        with pytest.raises(ValueError, match="fixture_cleanup_identity_mismatch"):
+            run()
+    else:
+        run()
+    assert removed == (
+        []
+        if case == "foreign-label"
+        else ["a" * 64]
+        if case == "partial-create"
+        else ["b" * 64, "a" * 64]
+    )
+    assert all(identifier in created for identifier in removed)
+    cleanup = BATTERY.split("cleanup() {", 1)[1].split("trap cleanup", 1)[0]
+    assert "candidate-native-source-app" not in cleanup
+    assert "candidate-native-source-relay" not in cleanup
+
+
+@pytest.mark.parametrize(
+    "fault", [None, "wrong-container-image", "missing-digest", "wrong-digest-image"]
+)
+def test_postgres_restore_uses_joined_immutable_image(fault):
+    container, image_id = "a" * 64, "sha256:" + "b" * 64
+    reference = "postgres@sha256:" + "c" * 64
+
+    def cli(*argv):
+        if argv[1] == "container":
+            value = {
+                "Id": container,
+                "State": {"Running": True},
+                "Image": "other" if fault == "wrong-container-image" else image_id,
+            }
+        else:
+            value = {
+                "Id": "other"
+                if fault == "wrong-digest-image" and argv[-1] == reference
+                else image_id,
+                "RepoDigests": [] if fault == "missing-digest" else [reference],
+            }
+        return json.dumps([value]).encode()
+
+    measure = _native_function(
+        "postgres_fixture_identity",
+        dict(cli=cli, json=json, DOCKER=Path("/usr/bin/docker")),
+    )
+    if fault:
+        with pytest.raises(ValueError):
+            measure(container, "postgres:mutable")
+    else:
+        assert (
+            measure(container, "postgres:mutable")["immutable_reference"] == reference
+        )

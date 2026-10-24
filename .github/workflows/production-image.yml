@@ -73,7 +73,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
-          fetch-depth: 1
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve current main
         id: select
@@ -117,6 +118,12 @@ jobs:
           docker buildx imagetools inspect --help > /dev/null
           python3 .github/candidate/record_identity.py "${CANDIDATE_TAG}" "${{ steps.select.outputs.source_sha }}"
 
+      # This disposable input is rebuilt from pinned old source, never pushed.
+      - name: Build the immutable historical test fixture
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: .github/candidate/build_native_source_fixture.sh
+
       # ── 5. Test those exact bytes ───────────────────────────────────────
       - name: Accept the candidate, or refuse it
         # The selected source SHA, held by this workflow rather than read back
@@ -125,6 +132,15 @@ jobs:
         env:
           CANDIDATE_SOURCE_REVISION: ${{ steps.select.outputs.source_sha }}
         run: .github/candidate/acceptance.sh "${CANDIDATE_TAG}"
+
+      - name: Retain native artifact acceptance evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-acceptance-failure-${{ github.sha }}-${{ github.run_attempt }}
+          path: candidate-native-acceptance.json
+          if-no-files-found: warn
+          retention-days: 14
 
       # ── 6. Publish the SAME config and layers ───────────────────────────
       - name: Authenticate to GHCR
@@ -253,4 +269,15 @@ jobs:
             release-receipt.json
             candidate-identity.json
             candidate-distributions.json
+            candidate-native-acceptance.json
           retention-days: 90
+
+      - name: Remove the disposable historical test image
+        if: always()
+        run: |
+          set -euo pipefail
+          if test -n "${NATIVE_SOURCE_IMAGE:-}"; then
+            test "$NATIVE_SOURCE_IMAGE" = "dotmac-native-source-fixture:348c31315efaaca9ea23ea7c025d137a3afaad74"
+            # Remove only this fixture tag, never force-remove shared images.
+            docker image rm "$NATIVE_SOURCE_IMAGE"
+          fi

@@ -407,25 +407,23 @@ docker run --rm --network host \
     || fail "the candidate could not migrate an empty database to heads"
 pass "empty database reaches composed heads"
 
-step "4  restored-production migration — the path that can actually fail"
-# CI's empty database is the path that cannot fail. A RESTORED copy is the one
-# that can, and the rehearsal on 2026-08-31 proved how: production is owned by
-# `app_admin`, while a copy created by initdb through POSTGRES_DB is owned by
-# `postgres`, so `CREATE SCHEMA` is refused. A recovery bundle can be PROVED and
-# still restore into a differently-owned database, because CatalogEvidence
-# covers schema, table and sequence ownership but not DATABASE ownership.
-#
-# So both lanes run. Lane A is the conforming restore; lane B plants the exact
-# defect and REQUIRES the failure. Without lane B, lane A passing would say
-# nothing about whether the trap is still detectable.
+step "4  historical artifact native transition and database ownership sensitivity"
+: "${NATIVE_SOURCE_IMAGE:?build_native_source_fixture.sh must supply a distinct source fixture}"
+test -s native-source-descriptor.toml && test -s native-source.bundle \
+    || fail "the pinned historical source fixture declarations/objects are absent"
+# Fixture construction alone uses direct Alembic, in the INSTALLED HISTORICAL
+# source image. Deployment acceptance below calls the target's native owner.
 psql_admin -c "CREATE DATABASE prodshape OWNER app_admin;" >/dev/null
 SCRIPT="
 from alembic import command
 from vendor_cp.migrations import make_alembic_config
 command.upgrade(make_alembic_config('$(dsn app_admin prodshape)'), 'v016_licensing_authority')
 "
-CANDIDATE_DB=prodshape in_image \
-    || fail "could not build the pre-upgrade production-shaped state"
+docker run --rm --network host \
+    --env "DATABASE_URL=$(dsn app_admin prodshape)" \
+    --env "MIGRATION_DATABASE_URL=$(dsn app_admin prodshape)" \
+    --entrypoint python "$NATIVE_SOURCE_IMAGE" -I -c "$SCRIPT" \
+    || fail "could not build the pre-upgrade historical source fixture"
 docker exec "$DB_CONTAINER" pg_dump -U postgres --format custom --dbname prodshape \
     > "$WORKDIR/prodshape.dump"
 test -s "$WORKDIR/prodshape.dump" || fail "the production-shaped dump is empty"
@@ -472,32 +470,58 @@ test "$bad_owners" = "postgres|app_admin" \
     || fail "lane B ownership is $bad_owners, expected postgres|app_admin — the lanes must differ only in DATABASE ownership"
 pass "two copies of one production-shaped state, differing only in database ownership"
 
-docker run --rm --network host \
-    --env "MIGRATION_DATABASE_URL=$(dsn app_admin restored_ok)" \
-    --env "DATABASE_URL=$(dsn app_admin restored_ok)" \
-    --entrypoint dotmac-platform "$IMAGE" admin migrate >/dev/null \
-    || fail "the candidate could not upgrade a correctly-owned restored copy"
-pass "lane A: a correctly-owned restored copy upgrades to heads"
+# Save actual local OCI descriptors before publication. A config ID is never a
+# manifest coordinate; no manifest is synthesized and no registry push occurs.
+python3 - "$IMAGE" "$NATIVE_SOURCE_IMAGE" "$WORKDIR" <<'NATIVE_COORDINATES'
+import importlib.util
+import json
+import pathlib
+import subprocess
+import sys
 
-set +e
-docker run --rm --network host \
-    --env "MIGRATION_DATABASE_URL=$(dsn app_admin restored_wrong_owner)" \
-    --env "DATABASE_URL=$(dsn app_admin restored_wrong_owner)" \
-    --entrypoint dotmac-platform "$IMAGE" admin migrate \
-    > "$WORKDIR/wrong-owner.log" 2>&1
-wrong_owner_status=$?
-set -e
-test "$wrong_owner_status" -ne 0 \
-    || fail "a restored copy owned by postgres migrated successfully — the trap is undetectable"
-grep -qi "permission denied for database" "$WORKDIR/wrong-owner.log" \
-    || fail "the wrong-owner restore failed for some OTHER reason: $(tail -5 "$WORKDIR/wrong-owner.log")"
-pass "lane B: a wrongly-owned restored copy is refused, and for the right reason"
-# And the refusal must be about the DATABASE, not about a table the restore
-# happened to leave unreachable — the failure mode the single-variable setup
-# above exists to exclude.
-grep -qi "permission denied for table\|permission denied for relation" "$WORKDIR/wrong-owner.log" \
-    && fail "lane B failed on TABLE privileges, so it was not testing database ownership"
-pass "lane B failed on database ownership specifically, not on object privileges"
+spec = importlib.util.spec_from_file_location("identity", ".github/candidate/record_identity.py")
+identity = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(identity)
+coordinates = {}
+for side, image in zip(("target", "source"), sys.argv[1:3]):
+    inspected, = json.loads(identity.docker("image", "inspect", image))
+    revision = inspected["Config"]["Labels"]["org.opencontainers.image.revision"]
+    platform = identity.platform({key.lower(): value for key, value in inspected.items()})
+    path = pathlib.Path(sys.argv[3]) / (side + ".tar")
+    identity.docker("image", "save", "--platform", platform, "-o", str(path), image)
+    manifest, config, layers = identity.archive_oci_coordinate(path, platform, revision)
+    if layers != inspected["RootFS"]["Layers"]:
+        raise ValueError("exported layers differ from actual image")
+    coordinates[side] = dict(manifest_digest=manifest, config_digest=config,
+        layers=layers, source_revision=revision, platform=platform,
+        coordinate_scope="acceptance-local OCI export; not future registry index")
+    path.unlink()
+(pathlib.Path(sys.argv[3]) / "native-coordinate.json").write_text(json.dumps(coordinates))
+NATIVE_COORDINATES
+# Git bundles carry actual objects only: never runner .git/config, credential
+# helpers, hooks, environment or a source/package overlay into the candidate.
+test "$(git rev-parse HEAD)" = "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")" \
+    || fail "candidate label differs from the exact checkout revision"
+git bundle create "$WORKDIR/source.bundle" HEAD
+cp native-source.bundle native-source-descriptor.toml "$WORKDIR/"
+db_identity="$(docker container inspect --format '{{.Id}}' "$DB_CONTAINER")"
+docker run --rm --user 0:0 --pid host --network host --cap-add SYS_PTRACE \
+    --env "DATABASE_URL=$(dsn app_user restored_ok)" \
+    --env "PLATFORM_DATABASE_URL=$(dsn platform_api restored_ok)" \
+    --env "MIGRATION_DATABASE_URL=$(dsn app_admin restored_ok)" \
+    --volume /var/run/docker.sock:/var/run/docker.sock \
+    --volume /usr/bin/docker:/usr/bin/docker:ro \
+    --volume "$WORKDIR:/inputs:ro" \
+    --volume "$PWD/.github/candidate/native_transition_acceptance.py:/native_transition_acceptance.py:ro" \
+    --entrypoint python "$IMAGE" -I /native_transition_acceptance.py \
+    "$IMAGE" "$NATIVE_SOURCE_IMAGE" "$db_identity" "$PG_IMAGE" \
+    > candidate-native-acceptance.json \
+    || fail "installed candidate native historical transition refused; see CI native report/log"
+test -s candidate-native-acceptance.json || fail "native acceptance report is absent"
+pass "lane A: a correctly-owned restored copy upgrades through native_upgrade"
+pass "lane B: a wrongly-owned restored copy is refused before DDL by host source preflight"
+pass "database sensitivity: rollback-only CREATE SCHEMA succeeds for owner; SQLSTATE 42501 permission denied for database for wrong owner"
+pass "native authorization, target revision, tree bytes and durable replay sensitivities passed"
 
 step "5  database ownership, roles, grants and isolation"
 # `::text` on every flag, and it is load-bearing rather than tidy. PostgreSQL

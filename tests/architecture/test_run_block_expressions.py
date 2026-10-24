@@ -46,6 +46,7 @@ def test_the_workflow_directory_holds_every_file_the_guard_must_reach() -> None:
 
     names = {path.name for path in WORKFLOWS_DIR.glob("*.yml")}
     assert names == {
+        "authorize-cp-transition.yml",
         "ci.yml",
         "engineering-standards.yml",
         "gate0-sshd-conformance.yml",

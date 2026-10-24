@@ -389,6 +389,17 @@ disagree, fix the drift.
     reached through one verbatim passthrough that returns the delegate's own
     status; re-growing any of them here is a second deployment engine.
 
+    **Narrow CP schema-transition exception (2026-10-24):** a one-shot CP
+    database schema transition may compose through the existing CP owners under
+    the D16 source-contract amendment. This exception does not authorize a
+    generic render/apply/observe/rollback engine or a product deployer; the
+    Foundation CLI continues to own those operations. Michael approved removing
+    hard line-count gates for this keyless cutover on 2026-10-24. Source counts
+    remain advisory and transparent; scope, owner reuse, security, meaningful
+    tests, independent review and actual migration/restore/readiness proofs
+    remain binding. Size alone requires no additional approval and never
+    substitutes for those checks or explicit live-cutover authorization.
+
     **`3` and `4` are different numbers and stay different**, including through
     `docker compose run`, which propagates the container's status unchanged. An
     owner refused and there is no evidence look identical from outside and mean
@@ -457,15 +468,23 @@ disagree, fix the drift.
     receipt binding those exact bytes to that exact revision.
 
     **The candidate battery tests the artifact, not the checkout**, because the
-    defect class is an artifact that disagrees with its source. Twelve
-    properties, and two of them carry their own sensitivity: the restored
-    -production migration runs BOTH lanes — a correctly-owned copy that must
-    upgrade, and a `postgres`-owned copy that must fail with `permission denied
-    for database` — because a bundle can be PROVED and still restore into a
-    differently-owned database (`CatalogEvidence` covers schema, table and
-    sequence ownership, not DATABASE ownership); and readiness runs its NEGATIVE
-    case first, with liveness as a positive control, because a probe returning
-    200 unconditionally passes a positive-only test.
+    defect class is an artifact that disagrees with its source. The historical
+    source is a disposable fixture rebuilt from pinned Git source, not the
+    byte-identical previous release or a production dump. Its installed
+    migrations construct v016 SQL; real capture and fresh-cluster restore then
+    feed the exact candidate's public native transition owner. Both ownership
+    lanes remain sensitive: the correctly owned restore must upgrade, while the
+    `postgres`-owned restore must receive `source_role_owner_mismatch` from
+    the host source preflight `_observe` before DDL, with heads and catalogue
+    unchanged. A separate rollback-only `CREATE SCHEMA`
+    probe as `app_admin` succeeds in the correct-owner lane and requires
+    SQLSTATE `42501` naming `permission denied for database` and the wrong
+    database in the other lane. This splits native admission from PostgreSQL's
+    privilege cause without weakening either proof. GitHub authorization uses
+    an explicitly synthetic protected verifier boundary; the report does not
+    claim protected-environment issuance, full host acceptance or routing.
+    Readiness runs its NEGATIVE case first, with liveness as a positive control,
+    because a probe returning 200 unconditionally passes a positive-only test.
 
     **Readiness is the assembly's, liveness is the kernel's.** `/health` does
     not touch the database by design, and `up -d app --wait` was satisfied by

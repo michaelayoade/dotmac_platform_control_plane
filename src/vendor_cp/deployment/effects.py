@@ -49,11 +49,14 @@ import secrets
 import shutil
 import subprocess  # noqa: S404 - argv lists, shell=False throughout
 import tempfile
+import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
+
+from vendor_cp.deployment.descriptor_binding import source_descriptor_declarations
 
 if TYPE_CHECKING:
     from dotmac_deployment_foundation.engine import CommandResult, RoleObservation
@@ -108,9 +111,14 @@ class PlatformBackupResult:
     size_bytes: int
     checksum: str
     checksum_algorithm: str
+    manifest_size_bytes: int = 0
+    database_dump_sha256: str = ""
+    database_dump_size_bytes: int = 0
+    globals_sha256: str = ""
+    globals_size_bytes: int = 0
 
 
-class ProductSpec(Protocol):
+class ProductIdentity(Protocol):
     @property
     def product(self) -> str: ...
 
@@ -123,7 +131,56 @@ class ProductSpec(Protocol):
     @property
     def source_revision(self) -> str: ...
 
+
+class ProductSpec(ProductIdentity, Protocol):
     def to_canonical_document(self) -> CanonicalDocumentLike: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _TransitionIdentity:
+    product: str
+    environment: str
+    image: str
+    source_revision: str
+    source_image: str
+    incumbent_source_revision: str
+    source_heads: tuple[str, ...]
+    source_descriptor_raw_sha256: str
+    target_descriptor_raw_sha256: str
+
+    def manifest_fields(self) -> dict[str, object]:
+        return {
+            "schema": "PlatformCpRecoveryBundle.v2",
+            "source_image": self.source_image,
+            "source_revision": self.incumbent_source_revision,
+            "source_descriptor_raw_sha256": self.source_descriptor_raw_sha256,
+            "target_descriptor_raw_sha256": self.target_descriptor_raw_sha256,
+        }
+
+
+def _native_error(step: str, message: str) -> Exception:
+    return PlatformRecoveryError(f"{step}: {message}")
+
+
+def _check_descriptor(raw: bytes, image: str, revision: str) -> str:
+    try:
+        document = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise ValueError("transition descriptor is not UTF-8 TOML") from error
+    declared = document.get("image")
+    if (
+        document.get("product") != EXPECTED_PRODUCT
+        or document.get("environment") != EXPECTED_ENVIRONMENT
+        or not isinstance(declared, dict)
+        or declared.get("reference") != image
+        or declared.get("source_revision") != revision
+        or not _IMAGE_REFERENCE.fullmatch(image)
+        or not _REVISION.fullmatch(revision)
+    ):
+        raise ValueError(
+            "transition descriptor product/environment/image/source mismatch"
+        )
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 class CanonicalDocumentLike(Protocol):
@@ -133,11 +190,20 @@ class CanonicalDocumentLike(Protocol):
 class BackupResultLike(Protocol):
     """The public structural fields Foundation reads from a backup result."""
 
-    dataset: str
-    path: str
-    size_bytes: int
-    checksum: str
-    checksum_algorithm: str
+    @property
+    def dataset(self) -> str: ...
+
+    @property
+    def path(self) -> str: ...
+
+    @property
+    def size_bytes(self) -> int: ...
+
+    @property
+    def checksum(self) -> str: ...
+
+    @property
+    def checksum_algorithm(self) -> str: ...
 
 
 class ProcessExecutor(Protocol):
@@ -356,7 +422,7 @@ class PlatformCpRecoveryBundle:
 
     def __init__(
         self,
-        spec: ProductSpec,
+        spec: ProductSpec | _TransitionIdentity,
         deploy_dir: Path | str,
         *,
         target: str | _UnboundAuthorization = UNBOUND,
@@ -378,7 +444,8 @@ class PlatformCpRecoveryBundle:
         docker = Path(docker_bin)
         if not docker.is_absolute():
             raise ValueError("docker_bin must be absolute")
-        self._spec = spec
+        self._spec: ProductIdentity = spec
+        self._transition = spec if isinstance(spec, _TransitionIdentity) else None
         self._deploy_dir = Path(deploy_dir)
         self._target: str | _UnboundAuthorization = target
         self._host_id_file = Path(host_id_file)
@@ -390,7 +457,11 @@ class PlatformCpRecoveryBundle:
         # Reopening deploy/product.toml here bound a prospective deployment's
         # backup to the PREVIOUS accepted descriptor, because the binding
         # factory receives the parsed spec but not its source filename.
-        self._descriptor_digest = spec.to_canonical_document().sha256_digest()
+        self._descriptor_digest = (
+            spec.target_descriptor_raw_sha256
+            if isinstance(spec, _TransitionIdentity)
+            else spec.to_canonical_document().sha256_digest()
+        )
         if not _DIGEST.fullmatch(self._descriptor_digest):
             raise ValueError("the Platform CP descriptor digest is malformed")
         self._incumbent_roles: tuple[tuple[str, str], ...] | _UnboundAuthorization = (
@@ -404,6 +475,106 @@ class PlatformCpRecoveryBundle:
         self._clock = clock
         self._result_factory = result_factory
         self._error_factory = error_factory
+
+    @classmethod
+    def for_transition(
+        cls,
+        deploy_dir: Path | str,
+        *,
+        source_descriptor: bytes,
+        target_descriptor: bytes,
+        source_image: str,
+        source_revision: str,
+        target_image: str,
+        target_source_revision: str,
+        expected_source_heads: tuple[str, ...],
+        target: str,
+        incumbent_roles: Sequence[tuple[str, str]],
+        host_id_file: Path | str = "/etc/dotmac-host-id",
+        compose_file: Path | str | None = None,
+        env_file: Path | str | None = None,
+        backup_dir: Path | str = "/opt/backups/dotmac-vendor-control-plane",
+        docker_bin: str = "/usr/bin/docker",
+        process: ProcessExecutor | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> PlatformCpRecoveryBundle:
+        """Bind exact descriptor bytes to CP's native transition backup contract."""
+        source_descriptor_declarations(source_descriptor)
+        if not _IMAGE_REFERENCE.fullmatch(source_image) or not _REVISION.fullmatch(
+            source_revision
+        ):
+            raise ValueError("observed source image/source revision is invalid")
+        source_digest = "sha256:" + hashlib.sha256(source_descriptor).hexdigest()
+        target_digest = _check_descriptor(
+            target_descriptor, target_image, target_source_revision
+        )
+        roles = _checked_incumbent(incumbent_roles)
+        if (
+            not target
+            or not expected_source_heads
+            or expected_source_heads != tuple(sorted(set(expected_source_heads)))
+            or any(not head or head.strip() != head for head in expected_source_heads)
+            or not roles
+            or any(digest != source_image.rsplit("@", 1)[-1] for _, digest in roles)
+        ):
+            raise ValueError(
+                "transition requires bound incumbent roles and exact source heads"
+            )
+        identity = _TransitionIdentity(
+            EXPECTED_PRODUCT,
+            EXPECTED_ENVIRONMENT,
+            target_image,
+            target_source_revision,
+            source_image,
+            source_revision,
+            expected_source_heads,
+            source_digest,
+            target_digest,
+        )
+        return cls(
+            identity,
+            deploy_dir,
+            target=target,
+            incumbent_roles=roles,
+            host_id_file=host_id_file,
+            compose_file=compose_file,
+            env_file=env_file,
+            backup_dir=backup_dir,
+            docker_bin=docker_bin,
+            process=process,
+            clock=clock,
+            result_factory=PlatformBackupResult,
+            error_factory=_native_error,
+        )
+
+    def matches_transition(
+        self,
+        *,
+        product: str,
+        environment: str,
+        target: str,
+        source_image_digest: str,
+        source_revision: str,
+        source_descriptor_raw_sha256: str,
+        source_heads: Sequence[str],
+        target_image_digest: str,
+        target_source_revision: str,
+        target_descriptor_raw_sha256: str,
+    ) -> bool:
+        """Match a request to this owner's immutable V2 capture identity."""
+        bound = self._transition
+        return bound is not None and (
+            self._target == target
+            and bound.product == product
+            and bound.environment == environment
+            and bound.source_image.rsplit("@", 1)[-1] == source_image_digest
+            and bound.incumbent_source_revision == source_revision
+            and bound.source_descriptor_raw_sha256 == source_descriptor_raw_sha256
+            and bound.source_heads == tuple(source_heads)
+            and bound.image.rsplit("@", 1)[-1] == target_image_digest
+            and bound.source_revision == target_source_revision
+            and bound.target_descriptor_raw_sha256 == target_descriptor_raw_sha256
+        )
 
     @property
     def _compose(self) -> tuple[str, ...]:
@@ -421,7 +592,15 @@ class PlatformCpRecoveryBundle:
         )
 
     def _environment(self) -> dict[str, str]:
-        environment = dict(os.environ)
+        environment = (
+            {
+                "PATH": "/usr/bin:/bin",
+                "HOME": "/nonexistent",
+                "DOCKER_HOST": "unix:///var/run/docker.sock",
+            }
+            if self._transition is not None
+            else dict(os.environ)
+        )
         environment["VENDOR_APP_IMAGE"] = self._spec.image
         # Parse-time only for an existing cluster.  Never persisted or printed.
         environment["VENDOR_DB_BOOTSTRAP_PASSWORD"] = secrets.token_urlsafe(48)
@@ -725,6 +904,28 @@ class PlatformCpRecoveryBundle:
                 )
             if not heads:
                 raise self._error("backup", "the database reports no migration heads")
+            transition = self._transition
+            if transition is not None:
+                if tuple(sorted(heads.splitlines())) != transition.source_heads:
+                    raise self._error(
+                        "backup", "captured migration heads differ from source"
+                    )
+                source_label = self._checked(
+                    (
+                        self._docker_bin,
+                        "image",
+                        "inspect",
+                        "--format",
+                        '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+                        transition.source_image,
+                    ),
+                    timeout_seconds=timeout_seconds,
+                    env=env,
+                )
+                if source_label != transition.incumbent_source_revision:
+                    raise self._error(
+                        "backup", "incumbent image source revision mismatch"
+                    )
             image_digest = self._spec.image.rsplit("@", 1)[-1]
             if not _DIGEST.fullmatch(image_digest):
                 raise self._error("backup", "the descriptor image is not digest-pinned")
@@ -767,11 +968,22 @@ class PlatformCpRecoveryBundle:
                 "created_at": stamp,
                 "restore_order": ["globals.sql", "database.dump"],
             }
+            if transition is not None:
+                manifest.pop("descriptor_sha256")
+                manifest.update(transition.manifest_fields())
+                manifest["file_sizes"] = {
+                    name: (temporary / name).stat().st_size
+                    for name in HASHED_COMPONENTS
+                }
             canonical = json.dumps(
                 manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True
             )
             (temporary / "manifest.json").write_text(canonical + "\n", encoding="ascii")
-            bundle_digest = hashlib.sha256(canonical.encode("ascii")).hexdigest()
+            bundle_digest = (
+                _sha256(temporary / "manifest.json")
+                if transition is not None
+                else hashlib.sha256(canonical.encode("ascii")).hexdigest()
+            )
             os.replace(temporary, published)
             result = self._result_factory(
                 dataset,
@@ -780,6 +992,19 @@ class PlatformCpRecoveryBundle:
                 bundle_digest,
                 "sha256",
             )
+            if transition is not None:
+                result = PlatformBackupResult(
+                    result.dataset,
+                    result.path,
+                    result.size_bytes,
+                    result.checksum,
+                    result.checksum_algorithm,
+                    (published / "manifest.json").stat().st_size,
+                    file_digests["database.dump"],
+                    (published / "database.dump").stat().st_size,
+                    file_digests["globals.sql"],
+                    (published / "globals.sql").stat().st_size,
+                )
             if not self.verify(result):
                 raise self._error(
                     "verify_backup", "the published recovery bundle does not verify"
@@ -789,6 +1014,17 @@ class PlatformCpRecoveryBundle:
             if temporary.exists():
                 shutil.rmtree(temporary)
             raise
+
+    def capture_transition(self, *, timeout_seconds: int) -> PlatformBackupResult:
+        """Return native, separately named manifest/dump/globals evidence."""
+        if self._transition is None:
+            raise PlatformRecoveryError(
+                "capture_transition requires the V2 constructor"
+            )
+        result = self.capture(EXPECTED_DATASET, timeout_seconds=timeout_seconds)
+        if not isinstance(result, PlatformBackupResult):
+            raise PlatformRecoveryError("native capture returned a foreign result")
+        return result
 
     def verify(self, result: BackupResultLike) -> bool:
         try:
@@ -823,11 +1059,13 @@ class PlatformCpRecoveryBundle:
             manifest = json.loads((root / "manifest.json").read_text(encoding="ascii"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             return False
+        if self._transition is not None and not isinstance(manifest, dict):
+            return False
         expected_files = {
             name: f"sha256:{_sha256(root / name)}" for name in HASHED_COMPONENTS
         }
         verify_target, _ = self._authorized("verify_backup")
-        required = {
+        required: dict[str, object] = {
             "schema": BUNDLE_SCHEMA,
             "product": self._spec.product,
             "environment": self._spec.environment,
@@ -838,6 +1076,38 @@ class PlatformCpRecoveryBundle:
             "files": expected_files,
             "restore_order": ["globals.sql", "database.dump"],
         }
+        transition = self._transition
+        if transition is not None:
+            if not isinstance(result, PlatformBackupResult) or (
+                result.manifest_size_bytes != (root / "manifest.json").stat().st_size
+                or result.database_dump_sha256 != expected_files["database.dump"]
+                or result.globals_sha256 != expected_files["globals.sql"]
+                or result.database_dump_size_bytes
+                != (root / "database.dump").stat().st_size
+                or result.globals_size_bytes != (root / "globals.sql").stat().st_size
+            ):
+                return False
+            required.pop("descriptor_sha256")
+            required.update(transition.manifest_fields())
+            required.update(
+                {
+                    "migration_heads": list(transition.source_heads),
+                    "incumbent_roles": [
+                        {"role": role, "image_digest": digest}
+                        for role, digest in self._authorized("verify_backup")[1]
+                    ],
+                    "file_sizes": {
+                        name: (root / name).stat().st_size for name in HASHED_COMPONENTS
+                    },
+                }
+            )
+            if (
+                "descriptor_sha256" in manifest
+                or not str(manifest.get("cluster_system_identifier", "")).isdigit()
+                or type(manifest.get("postgres_major")) is not int
+                or manifest["postgres_major"] <= 0
+            ):
+                return False
         if any(manifest.get(key) != value for key, value in required.items()):
             return False
         if not manifest.get("migration_heads") or not manifest.get("database_name"):
@@ -847,7 +1117,11 @@ class PlatformCpRecoveryBundle:
         canonical = json.dumps(
             manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True
         )
-        return hashlib.sha256(canonical.encode("ascii")).hexdigest() == checksum
+        return (
+            _sha256(root / "manifest.json")
+            if transition is not None
+            else hashlib.sha256(canonical.encode("ascii")).hexdigest()
+        ) == checksum
 
 
 class PlatformCpComposeHostEffects:

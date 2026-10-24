@@ -1,4 +1,12 @@
-# Increment 2 acceptance and approved source budget
+# Increment 2 acceptance and advisory source measurements
+
+Michael approved removing hard line-count gates for this keyless cutover on
+2026-10-24. All earlier component and overall source ceilings are advisory
+historical references, including contracts, runtime, tests, metadata, CI and
+proof tools. Growth alone is not an implementation, merge or deployment refusal
+and requires no size-only approval. Review scope, duplicated responsibility and
+unnecessary complexity directly. All source and live gates below remain binding;
+this policy authorizes no build, publication or live action.
 
 Michael approved the complete bounded source-only amendment on 2026-10-22.
 It retains the existing deployment/agent/restore owners and adds the finite
@@ -19,7 +27,7 @@ wrapper/template. The corrected conservative baseline is 10,168, including all
 both contract copies 854. These are source measurements, never live acceptance
 evidence.
 
-| Component | Approved shipping ceiling |
+| Component | Historical size reference (advisory) |
 | --- | ---: |
 | Shared contracts, per physical module | 450 |
 | CP Python implementation, migration, wiring and evidence admission | 3,100 |
@@ -36,13 +44,12 @@ evidence.
 | Approved predecessor guard runtime | 60 |
 | Overall counted new source | 23,000 |
 
-The measured shipping approval supersedes the earlier drafting-only budget
-restriction for this same bounded feature. All other component ceilings remain
-unchanged. Reserve covers necessary review and exact-CI corrections only, with
-updated hashes, counts and independent review before merge. The reviewed packet
-records the complete measurement; documentation corrections are remeasured by
-the coordinator. No security check or meaningful negative case may be removed
-to make a measurement pass. This source approval grants no live authority.
+The historical measured shipping approval superseded the earlier drafting-only
+budget restriction. Its numeric ceilings are now advisory; its feature scope
+and safety conditions remain binding. Retain transparent counts, updated hashes
+and independent review before merge. No security check or meaningful negative
+case may be removed to reduce a measurement. Source approval grants no live
+authority, and a count below any historical ceiling never establishes acceptance.
 
 ## Source merge gates
 

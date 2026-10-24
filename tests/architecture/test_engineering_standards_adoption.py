@@ -100,6 +100,31 @@ def test_the_profile_tracks_the_remaining_vendor_licensing_boundary() -> None:
                 "tests/architecture/test_engineering_standards_adoption.py",
             ],
         },
+        {
+            "authority_id": "cp-historical-migration-permission",
+            "subject": (
+                "One-use historical CP migration admission bound to the exact "
+                "connection, transaction, verified authorization and retained "
+                "transition proofs."
+            ),
+            "protected_resources": ["cp-historical-schema-migration-permission"],
+            "owner_component": "cp-migration-permission",
+            "owner_implementation": "src/vendor_cp/migrations.py",
+            "decision_interface": "vendor_cp.migrations.native_upgrade",
+            "canonical_writer_paths": ["src/vendor_cp/migrations.py"],
+            "adapter_paths": [
+                "alembic/env.py",
+                "src/vendor_cp/deployment/cp_transition_host.py",
+                "src/vendor_cp/deployment/transition_operator.py",
+                "src/vendor_cp/cli/commands.py",
+                "src/vendor_cp/cli/__init__.py",
+            ],
+            "drift_test_paths": [
+                "tests/unit/test_cp_transition_permission.py",
+                "tests/migration/test_cp_transition_permission.py",
+                "tests/migration/test_cp_transition_admission.py",
+            ],
+        },
     ]
     assert profile["typed_contract_surfaces"] == [
         {
@@ -112,6 +137,19 @@ def test_the_profile_tracks_the_remaining_vendor_licensing_boundary() -> None:
         {
             "surface_id": "candidate-material-probe-result",
             "paths": ["src/vendor_cp/deployment/candidate_materials.py"],
+            "require_public_annotations": True,
+            "forbid_any": True,
+            "require_immutable_records": True,
+        },
+        {
+            "surface_id": "cp-native-transition-operator-contract",
+            "paths": [
+                "src/vendor_cp/deployment/cp_transition.py",
+                "src/vendor_cp/deployment/cp_transition_host.py",
+                "src/vendor_cp/deployment/transition_operator.py",
+                "src/vendor_cp/deployment/transition_request.py",
+                "src/vendor_cp/migrations.py",
+            ],
             "require_public_annotations": True,
             "forbid_any": True,
             "require_immutable_records": True,

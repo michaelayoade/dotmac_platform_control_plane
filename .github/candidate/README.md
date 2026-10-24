@@ -53,3 +53,52 @@ build rather than silently weakening the admission rule.
 A `skipped` conclusion is refused explicitly. A workflow reports success at the
 run level when one of its jobs skipped, which is precisely the shape that lets
 an unrun gate look like a passed one.
+
+## Historical native transition trust boundary
+
+`build_native_source_fixture.sh` rebuilds a disposable validation image from
+immutable historical Git revision `348c31315efaaca9ea23ea7c025d137a3afaad74`.
+It uses the existing read-only dependency BuildKit secret and never publishes
+that image. It is **not** the byte-identical previous accepted release. Its
+installed migrations construct v016 SQL; that state is **not** a production
+capture. Both source and candidate coordinates are measured from genuine local
+OCI exports, with descriptor digest/size, config, platform and layer joins.
+These local manifest coordinates may differ from the later registry index;
+publication independently joins the accepted config and layer identities.
+
+`native_transition_acceptance.py` runs with `python -I` inside the exact
+candidate, with imports checked against its installed library directories.
+It copies the image's actual migration tree unchanged into a protected root,
+retains actual Git objects without credential configuration, and checks the
+migration bytes against the candidate's actual source revision. The historical
+source descriptor is the verbatim pinned Git blob. The target descriptor is an
+explicit CI prospective fixture bound to the candidate's observed OCI identity,
+revision and installed heads; it does not promote the accepted descriptor.
+
+The native migration, immutable store/reservation, fence, negative reconnect,
+`PlatformCpRecoveryBundle` capture/verification, fresh PostgreSQL restore,
+closed globals recipe, independent observer and transactional `app_admin`
+connection are real owners. A narrow capture adapter maps only the exact
+reviewed Compose database commands and logical image inspections to measured
+fixture resources. Unknown commands fail closed. Source writer containers are
+explicitly disposable fixtures with measured image identities and stopped
+states, and only returned CIDs with verified run labels are cleaned up.
+A disposable loopback HTTP maintenance gate supplies measured 503 and drain
+counters; held HTTP and WebSocket connections prove both counters rise then
+drain, and a new WebSocket Upgrade at the maintenance endpoint must receive 503.
+Its endpoint and measurements are retained separately from the production-shaped stage record.
+
+The GitHub authorization executable and environment-protection proof are
+**explicitly synthetic**; the real `GhAttestationVerifier` still validates their
+bindings. This battery does not establish real protected-environment issuance,
+production maintenance, production routing or full host acceptance. Its report
+states these limits alongside native success, restored heads/catalogue equality,
+host source-preflight `_observe` wrong-owner refusal before DDL, the separate
+rollback-only database privilege probe, malformed authorization/evidence and tree/revision sensitivity, and
+durable replay refusal. It never issues a private migration capability or uses
+direct Alembic as candidate deployment proof.
+
+The PostgreSQL scratch image uses a measured immutable repository digest. Before
+restore, the driver joins the running source database container's image ID to an
+independent inspection of the requested PostgreSQL image and its digest reference.
+A mutable input tag alone cannot establish the scratch image's identity.

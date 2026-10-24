@@ -1,5 +1,56 @@
 # D16 transition-receipt decisions (2026-09-30)
 
+## Source-contract amendment (2026-10-24)
+
+This source-only amendment changes Decisions 2–4 and the digest convention
+above for **new CP-native schema-transition contracts only**. The September
+30 rulings remain the historical Foundation contract and retain their meaning
+for existing Foundation receipts, canonical descriptor digests, and readers.
+Approval is for source implementation, independent review, and measurement
+only. This amendment does not assert that a new contract has been implemented,
+reviewed, measured, shipped, adopted, or exercised in CI or production.
+
+Michael subsequently approved replacing hard line-count gates with advisory
+measurements for this keyless cutover on 2026-10-24. This applies to all component
+and overall source-size limits, including tests, metadata, CI and proof tools.
+The proposed higher numeric caps were not adopted as replacement hard gates.
+Keep scope and owner boundaries, security checks, meaningful tests, independent
+review, actual migration/restore/readiness proofs and explicit live approval.
+Size alone no longer blocks work or requires another approval.
+
+1. **Decision 2:** A CP schema transition uses the CP-owned
+   `CpMigrationTransitionReceipt.v1` contract, composed through existing CP
+   owners. It does not require Foundation publication or add a Foundation
+   production dependency or release gate to this cutover. It does not create a
+   second deployment engine: CP owners compose the one-shot schema transition;
+   generic render/apply/observe/rollback remain Foundation CLI responsibilities.
+2. **Decision 3:** Keep the protected authorization workflow run and attempt
+   distinct from host execution. A verified authorization digest and a fresh
+   host execution nonce bind one durable, single-use reservation before any
+   side effect. Neither is an operator-entered authorization label, and the
+   workflow authorizes but does not claim to execute the migration.
+3. **Decision 4:** While the strict database fence holds and before DDL,
+   independently verify and durably retain the source image and revision,
+   product, host and environment, exact descriptor bytes, raw descriptor-byte
+   SHA-256, and observed migration heads. New CP fields name these as raw-byte
+   digests; they are not Foundation canonical descriptor digests and must not
+   populate or impersonate Foundation fields. If backup descriptor binding
+   changes, use `PlatformCpRecoveryBundle.v2`; preserve V1 semantics and
+   historical readers. Use existing backup capture routines, without copying
+   generic Foundation role-closure policy into CP.
+
+The transition remains one product composition through existing CP migration,
+fence, evidence, candidate, backup, maintenance, and readiness owners. It
+retains the fence before stopping writers, negative reconnect proof, byte-bound
+backup and actual restore evidence (including roles and database ownership),
+candidate-only readiness while original writers remain fenced, candidate
+deactivation before ACL restoration, and routing restoration only after
+receipt verification **and** compatible heads **and** readiness **and** routing
+checks. Replay refusal, an explicit chain anchor, failed-transition
+maintenance/fence retention, and the prohibition on image-only rollback across
+`dc_0015` also remain. Historical Foundation records and semantics are
+unchanged.
+
 > **Decision record, not an implementation.** Michael ruled all five items
 > below on 2026-09-30. This file fixes what the D16 transition receipt must
 > do before `TransitionReceiptV1` construction is built; it authorizes no
@@ -188,8 +239,60 @@ See `d16-evidence-preservation.md` for this slice's precise boundary.
 
 ## Status
 
+### Supported deploy-path refusal (source repair, 2026-10-24)
+
+`vendor_cp.migrations.require_deploy_transition` now checks the live source
+inside the supported deploy transaction, before Alembic runs migrations.
+`admin migrate` reports an unsupported historical transition as owner refusal
+`3`. Source inspection, migration execution and the composed-head postcondition
+all use `public.alembic_version`.
+
+The guard follows lineage and dependency ancestry to
+`dc_0015_plan_purpose`; it does not order revision names. Already-reached barrier
+states remain eligible. A fresh installation requires both no recorded heads
+and no user relations apart from the canonical version table. Unknown heads,
+partial identifiers and unversioned user tables or views refuse. There is no
+flag or caller assertion that admits a historical transition.
+
+This is supported deploy-path enforcement. Direct Alembic rehearsal
+configurations remain available for constructing test sources. It does not
+provide the protected transition producer, retained genesis, receipt, recovery
+or routing composition required above, and it does not establish deployment
+or production adoption. The historical-restore image acceptance lane must
+remain blocked until it can use the real protected transition owner; refusal
+must not be relabelled as successful migration acceptance.
+
 All five prior "next-slice decisions" named in the `dotmac-debt-register`
 Knowledge slug's D16 section are now RULED. That register entry, and this
 file, should be read together going forward; update this file (not the
 register) if any ruling here is later revisited, and update the register to
 point at this file rather than restating the rulings inline.
+
+### Historical descriptor observations (native source integration, 2026-10-24)
+
+Source admission records three independent observations: the incumbent OCI
+image and revision, the unchanged descriptor Git blob at that revision, and the
+fenced database heads. Historical promotion advances image and database halves
+independently; the descriptor's declared image, revision and optional heads are
+retained as declarations, rather than substituted for live observations. The
+unchanged `3ef3cef4` descriptor is a regression fixture for this case. Source
+admission still binds all observed values to the protected request and recovery
+bundle. Target admission continues to require exact image, revision and packaged
+migration-head agreement with its prospective descriptor.
+
+### Native fresh-cluster globals replay
+
+The supported PostgreSQL 16 profile independently measures the source and fresh
+bootstrap as `postgres`, OID 10, superuser. The fresh cluster must be pristine.
+Its existing bootstrap replaces exactly one complete `CREATE ROLE postgres;`
+statement from the pinned producer's globals stream; every other byte and its
+order remain unchanged and execution retains `ON_ERROR_STOP`. Missing or
+ambiguous statements refuse before execution. The original backup is unchanged.
+
+The retained replay recipe binds the request and host nonce, original and replay
+hashes and sizes, and both measured bootstrap identities. Receipt verification
+reconstructs the replay hash from the retained original with bounded streaming;
+it does not copy bulk globals into the metadata store or introduce a size cap.
+The receipt reports the actual replay hash. Full catalogue and grantor equality
+remain required, including custom grantors. This source validation does not
+establish full-image acceptance or authorize a live migration.
