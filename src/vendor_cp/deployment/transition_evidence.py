@@ -201,7 +201,13 @@ def _git_isolated_env() -> dict[str, str]:
     return environment
 
 
-def read_descriptor_at_revision(repo_root: Path, source_revision: str) -> bytes:
+def read_descriptor_at_revision(
+    repo_root: Path,
+    source_revision: str,
+    *,
+    git_binary: Path | None = None,
+    git_binary_digest: str | None = None,
+) -> bytes:
     """`deploy/product.toml`'s RAW BYTES AT `source_revision` — from git
     history, never the working tree.
 
@@ -217,6 +223,11 @@ def read_descriptor_at_revision(repo_root: Path, source_revision: str) -> bytes:
     `SourceRevisionUnavailable` with the command's stderr included. Returns
     `stdout` exactly as returned, in bytes — no decode, no newline
     translation — the raw bytes a caller then hashes with `raw_bytes_digest`.
+
+    Native root operators supply both ``git_binary`` and its reviewed digest.
+    That mode verifies the protected executable before use, never searches
+    PATH, and uses a minimal child environment. Supplying only one pin refuses;
+    supplying neither preserves this owner's existing read-only caller API.
     """
     if not isinstance(source_revision, str) or not SOURCE_REVISION_PATTERN.fullmatch(
         source_revision
@@ -227,7 +238,37 @@ def read_descriptor_at_revision(repo_root: Path, source_revision: str) -> bytes:
             "not fully match the expected shape"
         )
 
-    git_executable = shutil.which("git")
+    git_executable: str | None
+    if git_binary is not None or git_binary_digest is not None:
+        from vendor_cp.deploy_agent.contracts import require
+        from vendor_cp.deployment.cp_transition import _protected_executable_digest
+
+        require(
+            git_binary is not None and git_binary_digest is not None,
+            "git_tool_binding_incomplete",
+        )
+        assert git_binary is not None and git_binary_digest is not None  # noqa: S101
+        require(
+            _protected_executable_digest(git_binary) == git_binary_digest,
+            "git_binary_mismatch",
+        )
+        git_executable = str(git_binary)
+        # Native root operators never inherit loader, executable-search or Git
+        # overrides. This is a child-only environment, not process mutation.
+        git_environment = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/nonexistent",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    else:
+        # Preserve the existing non-native read-only evidence API. Native
+        # transition composition always supplies both installation pins.
+        git_executable = shutil.which("git")
+        git_environment = _git_isolated_env()
     if git_executable is None:
         raise SourceRevisionUnavailable(
             "git is not on PATH, so the descriptor at "
@@ -249,7 +290,7 @@ def read_descriptor_at_revision(repo_root: Path, source_revision: str) -> bytes:
             text=False,
             timeout=_GIT_SHOW_TIMEOUT_SECONDS,
             check=False,
-            env=_git_isolated_env(),
+            env=git_environment,
         )
     except (subprocess.TimeoutExpired, OSError) as error:
         raise SourceRevisionUnavailable(
@@ -313,6 +354,8 @@ def capture_genesis_baseline(
     repo_root: Path,
     source_revision: str,
     now_epoch: int | None = None,
+    git_binary: Path | None = None,
+    git_binary_digest: str | None = None,
 ) -> GenesisBaseline:
     """Capture the descriptor at the caller-supplied `source_revision`
     (never the working tree) plus the connection's current migration heads.
@@ -321,10 +364,20 @@ def capture_genesis_baseline(
     delegated entirely to `read_descriptor_at_revision`'s own validation,
     not duplicated here. The caller must establish the revision's running-image
     provenance and the connection's host and fence elsewhere.
+    Optional Git pins are installation policy forwarded to the existing reader;
+    they never replace its measured descriptor bytes or migration heads.
     """
-    descriptor_bytes = read_descriptor_at_revision(
-        repo_root=repo_root, source_revision=source_revision
-    )
+    if git_binary is None and git_binary_digest is None:
+        descriptor_bytes = read_descriptor_at_revision(
+            repo_root=repo_root, source_revision=source_revision
+        )
+    else:
+        descriptor_bytes = read_descriptor_at_revision(
+            repo_root=repo_root,
+            source_revision=source_revision,
+            git_binary=git_binary,
+            git_binary_digest=git_binary_digest,
+        )
     digest = raw_bytes_digest(descriptor_bytes)
     heads = read_current_migration_heads(conn)
     return GenesisBaseline(

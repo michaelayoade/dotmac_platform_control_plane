@@ -32,12 +32,14 @@ only that it was not seen.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from alembic import command
 from dotmac_approvals.models import PLATFORM_TABLES
-from sqlalchemy import create_engine, text
+from sqlalchemy import Connection, create_engine, text
 
 from vendor_cp.migrations import (
     COMPOSED_TARGET,
@@ -116,17 +118,69 @@ def _schema_exists(url: str) -> bool:
 # ── 1. Single transaction, stated where a reader can see it ─────────────────
 
 
-def test_the_composed_upgrade_runs_in_one_transaction() -> None:
-    """The whole guarantee rests on this one setting, so it is written down
-    rather than inherited. A default nobody wrote down is a default nobody
-    notices changing."""
-    env_source = (ROOT / "alembic" / "env.py").read_text()
-    assert "transaction_per_migration=False" in env_source
+@pytest.mark.parametrize("supplied_connection", [False, True])
+def test_the_composed_upgrade_runs_in_one_transaction(
+    supplied_connection: bool,
+) -> None:
+    """Execute both online paths and their real shared transaction adapter.
 
-    # And it is inside the ONLINE configure call, not a comment or the offline
-    # path — the offline path emits SQL and commits nothing.
-    online = env_source[env_source.index("def run_migrations_online") :]
-    assert "transaction_per_migration=False" in online
+    Only the environment's functions are loaded: importing its module would
+    immediately start Alembic. Fake context/engine boundaries observe which
+    connection is configured and whether migrations run inside one transaction.
+    """
+    path = ROOT / "alembic" / "env.py"
+    tree = ast.parse(path.read_text())
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"run_migrations_online", "_run_on_connection"}
+    ]
+    events: list[str] = []
+    context = MagicMock()
+    context.configure.side_effect = lambda **kwargs: events.append("configure")
+    transaction = context.begin_transaction.return_value
+    transaction.__enter__.side_effect = lambda: events.append("begin")
+    transaction.__exit__.side_effect = lambda *args: events.append("end")
+    context.run_migrations.side_effect = lambda: events.append("migrate")
+    connection = MagicMock(spec=Connection)
+    connection.in_transaction.return_value = True
+    config = MagicMock()
+    config.attributes = {"connection": connection} if supplied_connection else {}
+    config.get_section.return_value = {}
+    engine = MagicMock()
+    engine.connect.return_value.__enter__.return_value = connection
+    engine_factory = MagicMock(return_value=engine)
+    namespace = {
+        "Connection": Connection,
+        "context": context,
+        "config": config,
+        "target_metadata": object(),
+        "get_url": lambda: "postgresql://unused",
+        "engine_from_config": engine_factory,
+        "pool": MagicMock(),
+    }
+    exec(  # noqa: S102 -- fixed repository functions, fake I/O boundaries
+        compile(ast.Module(body=functions, type_ignores=[]), str(path), "exec"),
+        namespace,
+    )
+    online = namespace["run_migrations_online"]
+    assert callable(online)
+    online()
+
+    context.configure.assert_called_once()
+    configured = context.configure.call_args.kwargs
+    assert configured["connection"] is connection
+    assert configured["transaction_per_migration"] is False
+    context.begin_transaction.assert_called_once_with()
+    context.run_migrations.assert_called_once_with()
+    assert events == ["configure", "begin", "migrate", "end"]
+    if supplied_connection:
+        connection.in_transaction.assert_called_once_with()
+        engine_factory.assert_not_called()
+    else:
+        engine_factory.assert_called_once()
+        engine.dispose.assert_called_once_with()
 
 
 # ── 2. The deploy path refuses a partial upgrade ────────────────────────────

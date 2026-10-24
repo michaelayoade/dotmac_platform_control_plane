@@ -1,5 +1,6 @@
 """Record the loaded candidate's original config bytes, never a Docker store ID."""
 
+import gzip
 import hashlib
 import json
 import os
@@ -71,6 +72,117 @@ def archive_config(path, expected_platform, expected_revision):
 
 def docker(*args):
     return subprocess.check_output(["docker", *args])  # noqa: S603,S607 -- fixed CLI, argv only
+
+
+def archive_oci_coordinate(path, expected_platform, expected_revision):
+    """Read a genuine saved OCI manifest; never invent one from a config ID.
+
+    This coordinate belongs to the local acceptance export. Publication may
+    construct a different index; the release recorder independently joins its
+    config and uncompressed layer identities.
+    """
+    config_digest, diff_ids = archive_config(path, expected_platform, expected_revision)
+    with tarfile.open(path) as archive:
+        members = {}
+        for member in archive.getmembers():
+            if member.name in members:
+                raise ValueError("duplicate OCI archive member")
+            members[member.name] = member
+
+        def raw(name, *, bound=4 * 1024 * 1024):
+            member = members.get(name)
+            if member is None or not member.isreg() or not 0 < member.size <= bound:
+                raise ValueError("invalid or absent OCI archive member")
+            return archive.extractfile(member).read()
+
+        if json.loads(raw("oci-layout")) != {"imageLayoutVersion": "1.0.0"}:
+            raise ValueError("unsupported OCI layout")
+
+        def blob(descriptor, *, json_blob=True):
+            checksum, size = descriptor["digest"], descriptor["size"]
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", checksum):
+                raise ValueError("invalid OCI descriptor digest")
+            member = members.get("blobs/sha256/" + checksum[7:])
+            if (
+                member is None
+                or not member.isreg()
+                or type(size) is not int
+                or member.size != size
+                or size <= 0
+            ):
+                raise ValueError("OCI descriptor size/member mismatch")
+            measured = hashlib.sha256()
+            with archive.extractfile(member) as stream:
+                while piece := stream.read(1024 * 1024):
+                    measured.update(piece)
+            if "sha256:" + measured.hexdigest() != checksum:
+                raise ValueError("OCI descriptor digest mismatch")
+            return json.loads(raw(member.name)) if json_blob else None
+
+        index = json.loads(raw("index.json"))
+        if index.get("schemaVersion") != 2:
+            raise ValueError("invalid OCI index")
+        candidates = []
+
+        def visit(descriptor, depth=0):
+            if depth > 2:
+                raise ValueError("OCI index nesting exceeds bound")
+            document = blob(descriptor)
+            media_type = descriptor.get("mediaType")
+            if media_type in {
+                "application/vnd.oci.image.index.v1+json",
+                "application/vnd.docker.distribution.manifest.list.v2+json",
+            }:
+                for child in document["manifests"]:
+                    visit(child, depth + 1)
+            elif media_type in {
+                "application/vnd.oci.image.manifest.v1+json",
+                "application/vnd.docker.distribution.manifest.v2+json",
+            }:
+                if document.get("schemaVersion") != 2:
+                    raise ValueError("invalid OCI manifest")
+                config = blob(document["config"])
+                if platform(config) != expected_platform:
+                    return
+                if document["config"]["digest"] != config_digest:
+                    raise ValueError("OCI manifest/config identity mismatch")
+                if (
+                    "platform" in descriptor
+                    and platform(descriptor["platform"]) != expected_platform
+                ):
+                    raise ValueError("OCI descriptor/config platform mismatch")
+                layers = document["layers"]
+                if len(layers) != len(diff_ids):
+                    raise ValueError("OCI layer count mismatch")
+                for layer, diff_id in zip(layers, diff_ids, strict=True):
+                    blob(layer, json_blob=False)
+                    kind = layer.get("mediaType")
+                    if kind not in {
+                        "application/vnd.oci.image.layer.v1.tar",
+                        "application/vnd.oci.image.layer.v1.tar+gzip",
+                        "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                    }:
+                        raise ValueError("unsupported OCI layer encoding")
+                    member = members["blobs/sha256/" + layer["digest"][7:]]
+                    measured = hashlib.sha256()
+                    with archive.extractfile(member) as compressed:
+                        stream = (
+                            gzip.GzipFile(fileobj=compressed)
+                            if kind.endswith(("+gzip", ".gzip"))
+                            else compressed
+                        )
+                        with stream:
+                            while piece := stream.read(1024 * 1024):
+                                measured.update(piece)
+                    if "sha256:" + measured.hexdigest() != diff_id:
+                        raise ValueError("OCI layer/config diff_id mismatch")
+                candidates.append(descriptor["digest"])
+
+        for descriptor in index["manifests"]:
+            visit(descriptor)
+        if len(candidates) != 1:
+            raise ValueError("OCI export must select exactly one candidate manifest")
+        return candidates[0], config_digest, diff_ids
 
 
 def main(image, revision):

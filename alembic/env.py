@@ -26,7 +26,7 @@ from dotmac_kernel.messaging import models as messaging_models  # noqa: F401
 from dotmac_kernel.models import Base
 from dotmac_kernel.planes import install_module_plane_selections
 from dotmac_kernel.prerequisites import install_prerequisite_bindings
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import Connection, engine_from_config, pool
 
 # Register the vendor's own models. Importing `vendor_cp.migrations` below also
 # loads all installed modules through their public top-level migration locators,
@@ -40,7 +40,7 @@ from vendor_cp.migration_bindings import (
     ASSEMBLY_MODULE_PLANES,
     ASSEMBLY_PREREQUISITE_BINDINGS,
 )
-from vendor_cp.migrations import composed_version_locations
+from vendor_cp.migrations import composed_version_locations, require_deploy_transition
 
 # Both installed BEFORE Alembic builds the revision map: a composed module
 # lineage resolves its `depends_on` from them at script-load time, so an
@@ -76,6 +76,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=get_url(),
         target_metadata=target_metadata,
+        version_table_schema="public",
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -113,7 +114,7 @@ def _require_composed_heads(connection: object) -> None:
     script = ScriptDirectory.from_config(config)
     applied = set(
         connection.execute(  # type: ignore[attr-defined]
-            text("SELECT version_num FROM alembic_version")
+            text("SELECT version_num FROM public.alembic_version")
         ).scalars()
     )
 
@@ -162,7 +163,45 @@ def _enforce_data_governance(connection: object) -> None:
     enforce_retention(connection)  # type: ignore[arg-type]
 
 
+def _run_on_connection(connection: Connection) -> None:
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        # The guard and executor share one canonical version table even
+        # when a connection supplies a custom PostgreSQL search_path.
+        version_table_schema="public",
+        # STATED, not inherited. This is Alembic's default, and the shadow
+        # composition's central guarantee rests entirely on it: the WHOLE
+        # composed upgrade runs in ONE transaction, so `ap_0001_approvals`
+        # granting `platform_api` full DML on the module tables and vendor
+        # `v012` taking it away again are never separately visible. The
+        # COMMITTED database moves straight from "no module tables" to
+        # "module tables, SELECT-only".
+        #
+        # Flip this to True and that guarantee silently disappears — each
+        # migration would commit on its own and the DML grant would be a
+        # real, observable, committed state. A default nobody wrote down is
+        # a default nobody notices changing, so it is written down.
+        transaction_per_migration=False,
+    )
+    with context.begin_transaction():
+        if config.attributes.get("require_composed_heads"):
+            require_deploy_transition(connection, config)
+        context.run_migrations()
+        if config.attributes.get("require_composed_heads"):
+            _require_composed_heads(connection)
+            _enforce_data_governance(connection)
+
+
 def run_migrations_online() -> None:
+    supplied = config.attributes.get("connection")
+    if supplied is not None:
+        if not isinstance(supplied, Connection) or not supplied.in_transaction():
+            raise RuntimeError(
+                "supplied migration connection needs an active transaction"
+            )
+        _run_on_connection(supplied)
+        return
     configuration = config.get_section(config.config_ini_section) or {}
     configuration["sqlalchemy.url"] = get_url()
     connectable = engine_from_config(
@@ -170,29 +209,11 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            # STATED, not inherited. This is Alembic's default, and the shadow
-            # composition's central guarantee rests entirely on it: the WHOLE
-            # composed upgrade runs in ONE transaction, so `ap_0001_approvals`
-            # granting `platform_api` full DML on the module tables and vendor
-            # `v012` taking it away again are never separately visible. The
-            # COMMITTED database moves straight from "no module tables" to
-            # "module tables, SELECT-only".
-            #
-            # Flip this to True and that guarantee silently disappears — each
-            # migration would commit on its own and the DML grant would be a
-            # real, observable, committed state. A default nobody wrote down is
-            # a default nobody notices changing, so it is written down.
-            transaction_per_migration=False,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
-            if config.attributes.get("require_composed_heads"):
-                _require_composed_heads(connection)
-                _enforce_data_governance(connection)
+    try:
+        with connectable.connect() as connection:
+            _run_on_connection(connection)
+    finally:
+        connectable.dispose()
 
 
 if context.is_offline_mode():

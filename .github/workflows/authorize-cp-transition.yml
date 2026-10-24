@@ -1,0 +1,97 @@
+name: Authorize CP schema transition
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_workflow_revision:
+        description: Exact reviewed main commit (authorization workflow, not image build)
+        required: true
+        type: string
+      plan:
+        description: Closed TransitionPlanV1 JSON with reviewed plan_digest
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  authorize:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'michaelayoade/dotmac_platform_control_plane' &&
+      github.repository_id == '1317527604' &&
+      github.repository_owner_id == '32591929' &&
+      github.ref == 'refs/heads/main' && github.ref_protected &&
+      github.sha == inputs.expected_workflow_revision &&
+      github.workflow_sha == inputs.expected_workflow_revision
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout exact authorization revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install only public request-parser dependencies from reviewed lock
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+          packages = tomllib.loads(pathlib.Path('poetry.lock').read_text())['package']
+          names = {'cryptography', 'cffi', 'pycparser'}
+          selected = [package for package in packages if package['name'] in names]
+          if {package['name'] for package in selected} != names:
+              raise SystemExit('request dependencies missing from reviewed lock')
+          rows = []
+          for package in selected:
+              hashes = ' '.join('--hash=' + item['hash'] for item in package['files'])
+              rows.append(f"{package['name']}=={package['version']} {hashes}")
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'request-requirements.txt').write_text('\n'.join(rows))
+          PY
+          python -m pip install --isolated --index-url https://pypi.org/simple --require-hashes --no-deps --only-binary=:all: -r "$RUNNER_TEMP/request-requirements.txt"
+      - name: Validate closed plan and author request
+        id: request
+        shell: bash
+        env:
+          PLAN_JSON: ${{ inputs.plan }}
+          EXPECTED_REVISION: ${{ inputs.expected_workflow_revision }}
+          PYTHONPATH: src
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          Path(os.environ['RUNNER_TEMP'], 'plan.json').write_text(os.environ['PLAN_JSON'])
+          PY
+          python -m vendor_cp.deployment.transition_request --plan "$RUNNER_TEMP/plan.json" --expected-revision "$EXPECTED_REVISION" --output "$RUNNER_TEMP/cp-authorization"
+      - name: Attest request bytes only
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: request.json
+          subject-digest: ${{ steps.request.outputs.subject_digest }}
+          predicate-type: ${{ steps.request.outputs.predicate_type }}
+          predicate-path: ${{ runner.temp }}/cp-authorization/predicate.json
+          push-to-registry: false
+          create-storage-record: false
+      - name: Retain request, predicate and keyless Sigstore bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cp-transition-authorization-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cp-authorization/request.json
+            ${{ runner.temp }}/cp-authorization/predicate.json
+            ${{ steps.attest.outputs.bundle-path }}
+          if-no-files-found: error
+          retention-days: 30

@@ -106,6 +106,7 @@ def admin_migrate(args: argparse.Namespace) -> Result:
 
     from vendor_cp.migrations import (
         COMPOSED_TARGET,
+        MigrationTransitionRefused,
         deploy_config,
         deploy_target_refusal,
     )
@@ -120,12 +121,35 @@ def admin_migrate(args: argparse.Namespace) -> Result:
     if refusal is not None:
         raise refuse("owner.migration_target_refused", refusal)
     os.environ.setdefault("DATABASE_URL", url)
-    alembic_command.upgrade(deploy_config(url), COMPOSED_TARGET)
+    try:
+        alembic_command.upgrade(deploy_config(url), COMPOSED_TARGET)
+    except MigrationTransitionRefused as error:
+        raise refuse("owner.migration_transition_refused", str(error)) from error
     return Result(
         command="admin migrate",
         data={"target": COMPOSED_TARGET},
         message="composed lineages advanced to heads",
     )
+
+
+def admin_cp_transition(args: argparse.Namespace) -> Result:
+    """Delegate the protected installation and finite transition to its owner."""
+    from pathlib import Path
+
+    from vendor_cp.deployment.transition_operator import (
+        TransitionOperatorRefused,
+        run_transition,
+    )
+
+    try:
+        receipt = run_transition(
+            config_file=Path(args.config_file),
+            request_file=Path(args.request_file),
+            bundle_file=Path(args.bundle_file) if args.bundle_file else None,
+        )
+    except TransitionOperatorRefused:
+        raise refuse("owner.cp_transition_refused", "CP_TRANSITION_REFUSED") from None
+    return Result(command="admin cp-transition", data={"receipt_digest": receipt})
 
 
 def admin_descriptor_drift(args: argparse.Namespace) -> Result:
@@ -879,8 +903,7 @@ def deployment_set_desired_state(args: argparse.Namespace) -> Result:
     if not isinstance(spec, dict):
         raise refuse(
             "usage.invalid_argument",
-            f"{args.spec} does not hold a JSON object, so there is no spec to "
-            "declare",
+            f"{args.spec} does not hold a JSON object, so there is no spec to declare",
         )
 
     with platform_db() as db:
@@ -1135,6 +1158,7 @@ __all__ = [
     "admin_account_create",
     "admin_accounts",
     "admin_create",
+    "admin_cp_transition",
     "admin_descriptor_drift",
     "admin_migrate",
     "agreement_list",

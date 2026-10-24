@@ -74,17 +74,22 @@ jobs:
       # security test is not a passing one.
 
   # Postgres-backed suites also run on a disposable GitHub-hosted runner.
-  # `ubuntu-latest` reaches registry.dotmac.io (the kernel release workflow
-  # already publishes to and installs from it there), so the private kernel
+  # Ubuntu runners reach registry.dotmac.io (the kernel release workflow
+  # already publishes to and installs from there), so the private kernel
   # still resolves.
   postgres:
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04 supplies PostgreSQL 16 clients from the official Ubuntu repo.
+    runs-on: ubuntu-24.04
     env:
+      COMPOSE_PROJECT_NAME: cp-postgres-${{ github.run_id }}-${{ github.run_attempt }}
       TEST_DB_PORT: "5439"
-      TEST_DB_HOST: localhost
+      TEST_RESTORE_DB_PORT: "5440"
+      # One explicit endpoint avoids ambiguous IPv6/IPv4 denial diagnostics.
+      TEST_DB_HOST: 127.0.0.1
       TEST_DB_NAME: vendor_cp_test
       TEST_DB_ADMIN_USER: postgres
       TEST_DB_ADMIN_PASSWORD: postgres
+      TEST_RESTORE_DATABASE_URL: postgresql+psycopg://restore_bootstrap@127.0.0.1:5440/restore_control
       # Turns a missing database into a FAILURE instead of a skip. `-rs` only
       # prints skips; under required CI a suite that can pass by skipping is
       # not a gate, which is exactly how this suite stayed silently unrun.
@@ -100,14 +105,31 @@ jobs:
           POETRY_HTTP_BASIC_FORGEJO_USERNAME: ci-reader
           POETRY_HTTP_BASIC_FORGEJO_PASSWORD: ${{ secrets.FORGEJO_READ_TOKEN }}
         run: poetry install
+      - name: Install and verify native PostgreSQL 16 tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client-16
+          pg_bin=/usr/lib/postgresql/16/bin
+          echo "$pg_bin" >> "$GITHUB_PATH"
+          for tool in pg_dump pg_dumpall pg_restore psql; do
+            "$pg_bin/$tool" --version | grep -E '^.+ \(PostgreSQL\) 16\.'
+          done
       - name: Start disposable Postgres + migrate
         run: |
+          set -euo pipefail
           docker compose -f docker-compose.test.yml up -d --wait
-          MIGRATION_DATABASE_URL=postgresql+psycopg://app_admin@localhost:5439/vendor_cp_test \
+          # Both services share one immutable image, and must really expose
+          # the same PG16 server version before native dump/restore can run.
+          source_version=$(psql postgresql://postgres@127.0.0.1:5439/vendor_cp_test -Atc 'SHOW server_version_num')
+          restore_version=$(psql postgresql://restore_bootstrap@127.0.0.1:5440/restore_control -Atc 'SHOW server_version_num')
+          test "$source_version" = "$restore_version"
+          test "$((source_version / 10000))" -eq 16
+          MIGRATION_DATABASE_URL=postgresql+psycopg://app_admin@127.0.0.1:5439/vendor_cp_test \
             poetry run dotmac-platform admin migrate
       - name: Migration rehearsals + replay concurrency
         env:
-          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5439/vendor_cp_test
         run: poetry run pytest tests/migration -q -rs
       # The ordinary migration suite may skip optional Foundation imports.
       # This separate required step makes those four tests an executed gate
@@ -122,7 +144,7 @@ jobs:
           persist-credentials: false
       - name: D16 bundle producer and dump evidence conformance
         env:
-          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5439/vendor_cp_test
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5439/vendor_cp_test
           PYTHONPATH: ${{ github.workspace }}/.d16-foundation-source/packages/dotmac-deployment-foundation/src
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
@@ -322,6 +344,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - name: Build the production runtime without publishing
         env:
           FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
@@ -462,6 +487,10 @@ jobs:
       # The same script, invoked against the image this job already built, makes
       # that whole class fail in review instead. One script, two callers: a copy
       # would drift, and a drifting rehearsal is worse than none.
+      - name: Build the immutable historical test fixture
+        env:
+          FORGEJO_READ_TOKEN: ${{ secrets.FORGEJO_READ_TOKEN }}
+        run: .github/candidate/build_native_source_fixture.sh
       - name: Rehearse the acceptance battery against the built bytes
         # The revision the battery's profile readback expects. Supplied from
         # OUTSIDE the image on purpose: reading it back off the artifact would
@@ -470,3 +499,22 @@ jobs:
         env:
           CANDIDATE_SOURCE_REVISION: ${{ github.sha }}
         run: .github/candidate/acceptance.sh dotmac-vendor-control-plane:ci
+
+      - name: Retain native artifact acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-acceptance-${{ github.sha }}-${{ github.run_attempt }}
+          path: candidate-native-acceptance.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove the disposable historical test image
+        if: always()
+        run: |
+          set -euo pipefail
+          if test -n "${NATIVE_SOURCE_IMAGE:-}"; then
+            test "$NATIVE_SOURCE_IMAGE" = "dotmac-native-source-fixture:348c31315efaaca9ea23ea7c025d137a3afaad74"
+            # Remove only this fixture tag, never force-remove shared images.
+            docker image rm "$NATIVE_SOURCE_IMAGE"
+          fi

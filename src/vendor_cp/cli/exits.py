@@ -110,6 +110,8 @@ REFUSAL_CODES: Final[dict[str, ExitCode]] = {
     "owner.conflict": ExitCode.REFUSED,
     "owner.forbidden": ExitCode.REFUSED,
     "owner.migration_target_refused": ExitCode.REFUSED,
+    "owner.migration_transition_refused": ExitCode.REFUSED,
+    "owner.cp_transition_refused": ExitCode.REFUSED,
     "owner.provider_not_permitted": ExitCode.REFUSED,
     # `transition_fence.FenceRefused`: the fence itself decided no — carries
     # that module's own closed `FenceRefusalCode` (and `before_acl`, when

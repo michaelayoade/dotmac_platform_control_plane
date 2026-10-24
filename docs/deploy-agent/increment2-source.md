@@ -226,8 +226,10 @@ hosted CI or separately authorized live proofs. Host identity is unchanged;
 `PLATFORM_ROOT_DOMAIN`/`TRUSTED_HOSTS` require `platform.dotmac.io`. Candidate inputs
 permit bootstrap/keyless with assembly admission; TLS, ingress and immutable-image
 adoption need separate evidence. Mandatory metadata remains 233 counted lines;
-profile/guard count as CP runtime/wiring. Approved ceilings: 23,000 overall, 9,900
-required tests, 3,100 CP, 4,200 proof, 350 CI; other limits remain unchanged.
+profile/guard count as CP runtime/wiring. Historical size references were 23,000
+overall, 9,900 required tests, 3,100 CP, 4,200 proof and 350 CI. Michael approved
+making all keyless-cutover line counts advisory on 2026-10-24; see
+`increment2-acceptance.md`. Scope, review, CI and live-proof gates remain binding.
 
 ### Ledger GitHub App credential provisioning
 

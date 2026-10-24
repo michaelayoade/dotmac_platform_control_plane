@@ -17,9 +17,9 @@ reachability centrally, and reports every untracked Python file as an error.
 
 Measured on 2026-08-16 with the accepted schema-9 engine: 96 tracked Python
 sources measured, 37 proven test-only sources excluded, no untracked Python,
-no conserved findings, and no syntax errors. The assembly has no direct
-external connector surface; its only provider is the side-effect-free local
-simulation provider required by AGENTS.md rule 4.
+no conserved findings, and no syntax errors. At that measurement, the detector reported no direct external connector
+surface. The side-effect-free local simulation provider remains the only
+product integration provider required by AGENTS.md rule 4.
 
 | Category | Baseline | Files behind it |
 | --- | ---: | --- |
@@ -48,6 +48,25 @@ ingress, and inbox/outbox conditions.
 It also does not assign semantic ownership of the existing Vendor delivery
 attempts or retry state. Those logging/offline paths are temporary and frozen:
 ADR-0010 schedules their transfer to `dotmac-integration` in Dotmac Integrator
-after Deployment Control and before Brand Profiles. No connected transport,
-provider credential, schedule, checkpoint, lease, backoff policy or new retry
-owner may be added here while that cutover is pending.
+after Deployment Control and before Brand Profiles. No product/provider integration transport, provider credential, schedule,
+checkpoint, lease, backoff policy or new retry owner may be added here while
+that cutover is pending. The finite host deployment operations described below
+are governed by the separately authorized D16 transition contract.
+
+## Native transition operator transport (2026-10-24 source integration)
+
+The D16 host operator performs actual HTTP readiness checks against the fixed
+`https://platform.dotmac.io/health/ready` endpoint and bounded loopback candidate
+and runtime readiness and signed-ledger availability endpoints. Its authorization owner invokes the pinned GitHub CLI to verify the
+protected workflow's GitHub/Sigstore attestation. These operations implement
+the authorized transition's maintenance, candidate and authorization proofs;
+they add no product integration provider, provider credential or retry owner.
+The operator is a one-shot root host tool, separate from the application runtime.
+Its source authorization does not authorize an artifact publication or live run.
+
+The pinned schema-9 detector does not recognize `urllib.request` opener calls
+or classify GitHub CLI subprocess verification as outbound transport. Its zero
+count therefore coexists with these explicitly disclosed network operations.
+The baseline remains detector-derived, with no exclusions, alternate detector
+or transport renaming. Review must assess this semantic surface in addition to
+the unchanged numeric ratchet.

@@ -142,6 +142,17 @@ def build_parser() -> _Parser:
     migrate.add_argument("--target", default="heads")
     migrate.set_defaults(handler=commands.admin_migrate)
 
+    cp_transition = _command(
+        admin_sub,
+        "admin",
+        "cp-transition",
+        "execute one protected CP schema transition",
+    )
+    cp_transition.add_argument("--config-file", required=True, metavar="PATH")
+    cp_transition.add_argument("--request-file", required=True, metavar="PATH")
+    cp_transition.add_argument("--bundle-file", metavar="PATH")
+    cp_transition.set_defaults(handler=commands.admin_cp_transition)
+
     ledger_rebuild = _command(
         admin_sub,
         "admin",

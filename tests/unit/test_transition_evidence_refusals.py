@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from vendor_cp.deploy_agent.contracts import ContractError
+from vendor_cp.deployment import cp_transition
 from vendor_cp.deployment.transition_evidence import (
     InvalidSourceRevision,
     SourceRevisionUnavailable,
@@ -71,12 +73,84 @@ def test_capture_genesis_baseline_has_exactly_the_designed_parameter_set() -> No
     now forces a deliberate change to this test, which is the actual
     property non-circularity depends on."""
     parameters = set(inspect.signature(capture_genesis_baseline).parameters)
-    assert parameters == {"conn", "repo_root", "source_revision", "now_epoch"}
+    assert parameters == {
+        "conn",
+        "repo_root",
+        "source_revision",
+        "now_epoch",
+        "git_binary",
+        "git_binary_digest",
+    }
 
 
 def test_capture_target_state_has_exactly_the_designed_parameter_set() -> None:
     parameters = set(inspect.signature(capture_target_state).parameters)
     assert parameters == {"conn", "descriptor_path", "now_epoch"}
+
+
+def test_native_git_uses_protected_explicit_binary_and_minimal_child_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+    binary = Path("/opt/reviewed-tools/git")
+    checksum = "sha256:" + "1" * 64
+    monkeypatch.setattr(
+        cp_transition,
+        "_protected_executable_digest",
+        lambda path: calls.append(("verified", path)) or checksum,
+    )
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda *a: pytest.fail("native Git must never search ambient PATH"),
+    )
+    monkeypatch.setenv("PATH", "/untrusted")
+    monkeypatch.setenv("LD_PRELOAD", "/untrusted/loader.so")
+    monkeypatch.setenv("GIT_DIR", "/untrusted/repository")
+
+    def run(argv, **kwargs):
+        calls.append(("executed", argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, b"exact git blob\r\n", b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert (
+        read_descriptor_at_revision(
+            tmp_path, "a" * 40, git_binary=binary, git_binary_digest=checksum
+        )
+        == b"exact git blob\r\n"
+    )
+    assert calls[0] == ("verified", binary)
+    assert calls[1][1][0] == str(binary)
+    environment = calls[1][2]["env"]
+    assert environment["PATH"] == "/usr/bin:/bin"
+    assert "LD_PRELOAD" not in environment and "GIT_DIR" not in environment
+
+
+@pytest.mark.parametrize(
+    "binding", ["wrong-digest", "missing-binary", "missing-digest"]
+)
+def test_native_git_binding_refuses_before_any_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binding: str
+) -> None:
+    monkeypatch.setattr(
+        cp_transition, "_protected_executable_digest", lambda path: "sha256:" + "1" * 64
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("unverified Git must not execute"),
+    )
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda *a: pytest.fail("partial native binding must not fall back"),
+    )
+    binary = None if binding == "missing-binary" else Path("/opt/reviewed-tools/git")
+    checksum = None if binding == "missing-digest" else "sha256:" + "2" * 64
+    with pytest.raises(ContractError):
+        read_descriptor_at_revision(
+            tmp_path, "a" * 40, git_binary=binary, git_binary_digest=checksum
+        )
 
 
 @pytest.mark.parametrize(

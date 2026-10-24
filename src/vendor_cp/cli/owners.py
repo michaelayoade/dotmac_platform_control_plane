@@ -99,6 +99,13 @@ OWNERS: Final[tuple[Owner, ...]] = (
         "create or rotate a platform administrator",
     ),
     Owner(
+        "admin cp-transition",
+        "vendor_cp.deployment.transition_operator",
+        "run_transition",
+        True,
+        "execute one protected CP-native schema transition through existing owners",
+    ),
+    Owner(
         "admin migrate",
         "vendor_cp.migrations",
         "deploy_config",

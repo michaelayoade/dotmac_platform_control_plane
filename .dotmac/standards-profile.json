@@ -24,8 +24,12 @@
       "owner_component": "licence-signing-adapter",
       "owner_implementation": "src/vendor_cp/licensing/signing_adapter.py",
       "decision_interface": "vendor_cp.licensing.signing_adapter.runtime_licence_signers",
-      "canonical_writer_paths": ["src/vendor_cp/licensing/signing_adapter.py"],
-      "adapter_paths": ["src/vendor_cp/licensing/adapter.py"],
+      "canonical_writer_paths": [
+        "src/vendor_cp/licensing/signing_adapter.py"
+      ],
+      "adapter_paths": [
+        "src/vendor_cp/licensing/adapter.py"
+      ],
       "drift_test_paths": [
         "tests/architecture/test_licensing_authority.py",
         "tests/unit/test_licence_key_rotation.py"
@@ -51,12 +55,39 @@
         "tests/unit/test_candidate_materials.py",
         "tests/architecture/test_engineering_standards_adoption.py"
       ]
+    },
+    {
+      "authority_id": "cp-historical-migration-permission",
+      "subject": "One-use historical CP migration admission bound to the exact connection, transaction, verified authorization and retained transition proofs.",
+      "protected_resources": [
+        "cp-historical-schema-migration-permission"
+      ],
+      "owner_component": "cp-migration-permission",
+      "owner_implementation": "src/vendor_cp/migrations.py",
+      "decision_interface": "vendor_cp.migrations.native_upgrade",
+      "canonical_writer_paths": [
+        "src/vendor_cp/migrations.py"
+      ],
+      "adapter_paths": [
+        "alembic/env.py",
+        "src/vendor_cp/deployment/cp_transition_host.py",
+        "src/vendor_cp/deployment/transition_operator.py",
+        "src/vendor_cp/cli/commands.py",
+        "src/vendor_cp/cli/__init__.py"
+      ],
+      "drift_test_paths": [
+        "tests/unit/test_cp_transition_permission.py",
+        "tests/migration/test_cp_transition_permission.py",
+        "tests/migration/test_cp_transition_admission.py"
+      ]
     }
   ],
   "typed_contract_surfaces": [
     {
       "surface_id": "licensing-module-adapter-contract",
-      "paths": ["src/vendor_cp/licensing/adapter.py"],
+      "paths": [
+        "src/vendor_cp/licensing/adapter.py"
+      ],
       "require_public_annotations": true,
       "forbid_any": true,
       "require_immutable_records": true
@@ -69,11 +100,27 @@
       "require_public_annotations": true,
       "forbid_any": true,
       "require_immutable_records": true
+    },
+    {
+      "surface_id": "cp-native-transition-operator-contract",
+      "paths": [
+        "src/vendor_cp/deployment/cp_catalogue.py",
+        "src/vendor_cp/deployment/cp_transition.py",
+        "src/vendor_cp/deployment/cp_transition_host.py",
+        "src/vendor_cp/deployment/transition_operator.py",
+        "src/vendor_cp/deployment/transition_request.py",
+        "src/vendor_cp/migrations.py"
+      ],
+      "require_public_annotations": true,
+      "forbid_any": true,
+      "require_immutable_records": true
     }
   ],
   "module_declared_vocabularies": [],
   "testing_kit_boundary": {
-    "test_roots": ["tests"],
+    "test_roots": [
+      "tests"
+    ],
     "kit_source_roots": [],
     "conformance_probes": []
   },
