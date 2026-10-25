@@ -12,9 +12,10 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, Literal, NotRequired, TypedDict, cast
 
 from vendor_cp.deploy_agent.contracts import (
+    ContractError,
     Digest,
     Identifier,
     Revision,
@@ -31,7 +32,10 @@ from vendor_cp.deployment.effects import (
 )
 
 if TYPE_CHECKING:
-    from vendor_cp.deployment.cp_transition_host import CpTransitionHostConfig
+    from vendor_cp.deployment.cp_transition_host import (
+        CpTransitionHostConfig,
+        HeldFenceContinuation,
+    )
 
 
 class IdentityV1(TypedDict):
@@ -84,6 +88,22 @@ class HostV1(TypedDict):
     session_wait_seconds: int
 
 
+class HeldFencePinsV1(TypedDict):
+    path: str
+    digest: Digest
+    proof_digest: Digest
+    fence_id: Annotated[str, r"[0-9a-f]{64}"]
+
+
+class HeldFenceContextV1(TypedDict):
+    schema: Literal["dotmac.cp_transition_held_fence_context/1"]
+    prior_artifact_directory: str
+    request: cp.CpTransitionRequestV1
+    reservation_digest: Digest
+    failure_digest: Digest
+    failed_stage: Literal["source-restore-comparison"]
+
+
 class InstallationV1(TypedDict):
     schema: Literal["dotmac.cp_transition_installation/1"]
     identity: IdentityV1
@@ -91,6 +111,7 @@ class InstallationV1(TypedDict):
     host: HostV1
     artifact_directory: str
     historical_context_files: list[str]
+    held_fence_context: NotRequired[HeldFencePinsV1]
 
 
 class BackupMetadataV1(TypedDict):
@@ -125,6 +146,7 @@ class Installation:
     host: CpTransitionHostConfig
     store: cp.ArtifactStore
     historical_context_files: tuple[Path, ...]
+    held_fence_context: HeldFencePinsV1 | None = None
 
 
 class TransitionOperatorRefused(Exception):
@@ -279,7 +301,148 @@ def load_installation(path: Path) -> Installation:
     _directory(store.root)
     paths = tuple(_path(item) for item in value["historical_context_files"])
     require(len(paths) == len(set(paths)) and len(paths) <= 32)
-    return Installation(policy, _host_config(value["host"]), store, paths)
+    return Installation(
+        policy,
+        _host_config(value["host"]),
+        store,
+        paths,
+        value.get("held_fence_context"),
+    )
+
+
+def _load_held_fence(
+    installation: Installation,
+    request: cp.CpTransitionRequestV1,
+) -> HeldFenceContinuation | None:
+    """Receive failed-prefix facts through independently installed root pins.
+
+    Neither a request nor a serialized proof supplies its own expected digest
+    or fence ID. This context is evidence only: normal new authorization,
+    reservation, inspection and migration gates all still run.
+    """
+    pins = installation.held_fence_context
+    if pins is None:
+        return None
+    raw = cp._read_protected(_path(pins["path"]))
+    require(cp.raw_digest(raw) == pins["digest"], "held_fence_context_digest_mismatch")
+    document = read_json(raw)
+    _shape(document, HeldFenceContextV1)
+    context = cast(HeldFenceContextV1, document)
+    prior = context["request"]
+    require(
+        prior["plan_digest"] == cp.transition_plan_digest(prior),
+        "held_fence_prior_plan_mismatch",
+    )
+    prior_store = cp.ArtifactStore(_path(context["prior_artifact_directory"]))
+    _directory(prior_store.root)
+    # The root pin asserts the reviewed failed prefix. Also refuse a retained
+    # checkpoint that contradicts that assertion; absence alone proves no stage.
+    after_restore = (
+        (cp.PRE_ACL_EVIDENCE - cp.PRE_MIGRATION_EVIDENCE)
+        | cp.RUNTIME_EVIDENCE
+        | cp.ROUTING_EVIDENCE
+        | {"recovery-restored", "fence-source-rechecked"}
+    )
+    directory = cp._open_directory(prior_store.root)
+    try:
+        for name in os.listdir(directory):
+            match = re.fullmatch(r"[0-9a-f]{64}\.(evidence|receipt)\.json", name)
+            if match is None:
+                continue
+            kind = match.group(1)
+            retained_raw = prior_store.read("sha256:" + name[:64], kind=kind)
+            try:
+                retained = read_json(retained_raw)
+            except ContractError:
+                require(kind == "evidence", "held_fence_receipt_invalid")
+                # The content-addressed store also retains raw TOML/image
+                # descriptors; those are not transition checkpoint documents.
+                continue
+            if (
+                retained.get("request_digest") == cp.request_digest(prior)
+                and retained.get("host_nonce") == pins["fence_id"]
+            ):
+                require(
+                    kind != "receipt" and retained.get("kind") not in after_restore,
+                    "held_fence_prefix_after_restore",
+                )
+    finally:
+        os.close(directory)
+    identity = installation.policy.identity
+    require(
+        all(
+            prior[key] == getattr(identity, key)
+            for key in (
+                "host",
+                "database",
+                "cluster_system_identifier",
+                "database_oid",
+            )
+        ),
+        "held_fence_identity_mismatch",
+    )
+    reservation_raw = prior_store.read(cp.request_digest(prior), kind="reservation")
+    require(
+        cp.raw_digest(reservation_raw) == context["reservation_digest"],
+        "held_fence_reservation_digest_mismatch",
+    )
+    reservation = read_json(reservation_raw)
+    _shape(reservation.get("verification_digest"), Digest)
+    require(
+        set(reservation)
+        == {
+            "schema",
+            "verification_digest",
+            "request_digest",
+            "host_nonce",
+            "authorization_run_id",
+            "authorization_run_attempt",
+        },
+        "held_fence_reservation_mismatch",
+    )
+    require(
+        reservation["schema"] == "dotmac.cp_transition_attempt/2"
+        and reservation["request_digest"] == cp.request_digest(prior)
+        and reservation["host_nonce"] == pins["fence_id"]
+        and reservation["authorization_run_id"] == prior["authorization_run_id"]
+        and reservation["authorization_run_attempt"]
+        == prior["authorization_run_attempt"],
+        "held_fence_reservation_mismatch",
+    )
+    failure = read_json(prior_store.read(context["failure_digest"]))
+    require(
+        failure
+        == {
+            "schema": "dotmac.cp_transition_evidence/2",
+            "request_digest": cp.request_digest(prior),
+            "host_nonce": pins["fence_id"],
+            "kind": "failure",
+            "result": {
+                "external_status": 503,
+                "writer_sessions": 0,
+                "reconnect_denial": "database_acl",
+            },
+        },
+        "held_fence_failure_mismatch",
+    )
+    from vendor_cp.deployment import transition_fence
+    from vendor_cp.deployment.cp_transition_host import HeldFenceContinuation
+
+    proof_document = read_json(prior_store.read(pins["proof_digest"]))
+    require(
+        proof_document.get("fence_id") == pins["fence_id"], "held_fence_proof_mismatch"
+    )
+    proof = transition_fence.FenceProof.from_document(
+        proof_document,
+        expected_digest=pins["proof_digest"],
+    )
+    require(
+        proof.fence_id == pins["fence_id"] and proof.database == prior["database"],
+        "held_fence_proof_mismatch",
+    )
+    result = HeldFenceContinuation(prior, proof)
+    result.bind(request)
+    return result
 
 
 def _load_recovery(
@@ -389,6 +552,7 @@ def run_transition(
         if bundle_file is not None:
             cp._read_protected(bundle_file)
         recovery = _load_recovery(installation)
+        held_fence = _load_held_fence(installation, request)
         previous = request["previous_receipt_digest"]
         if previous is not None:
             prior_raw = installation.store.read(previous, kind="receipt")
@@ -410,7 +574,10 @@ def run_transition(
         from vendor_cp.deployment.cp_transition_host import ExistingCpTransitionHost
 
         host = ExistingCpTransitionHost(
-            installation.host, store=installation.store, recovery=recovery
+            installation.host,
+            store=installation.store,
+            recovery=recovery,
+            **({"held_fence": held_fence} if held_fence is not None else {}),
         )
         return cp.execute_transition(
             raw,

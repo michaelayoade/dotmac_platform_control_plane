@@ -384,7 +384,7 @@ def test_real_candidate_quiescence_observes_mutations_after_backend_exit(
         with setup.begin() as connection:
             connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
             connection.exec_driver_sql(
-                f'CREATE TABLE "{schema}".proof ' "(id integer PRIMARY KEY,value text)"
+                f'CREATE TABLE "{schema}".proof (id integer PRIMARY KEY,value text)'
             )
             connection.exec_driver_sql(
                 f"INSERT INTO \"{schema}\".proof VALUES (1,'baseline')"  # noqa: S608
@@ -584,3 +584,138 @@ def test_real_pg_rejects_unsupported_retained_source_bootstrap(
             assert measure_catalogue(connection) == original
     finally:
         engine.dispose()
+
+
+def test_held_fence_new_host_preserves_original_acl_through_failure_and_restore(
+    postgres_url, scratch_db, url_for, tmp_path, monkeypatch
+):
+    """Dedicated-host PostgreSQL proof; never touches shared writer-role ACLs."""
+    from contextlib import contextmanager
+    from copy import deepcopy
+
+    from vendor_cp.deployment import cp_transition_host as host_module
+    from vendor_cp.deployment import transition_fence as fence
+
+    database = scratch_db.rpartition("/")[2]
+    role = f"cp_held_writer_{uuid.uuid4().hex[:10]}"
+    admin = create_engine(url_for(postgres_url, database), isolation_level="AUTOCOMMIT")
+    grants_query = text(
+        "SELECT COALESCE(g.rolname,''), a.privilege_type, a.is_grantable, "
+        "grantor.rolname FROM pg_database d, "
+        "aclexplode(COALESCE(d.datacl,acldefault('d',d.datdba))) a "
+        "LEFT JOIN pg_roles g ON g.oid=a.grantee "
+        "JOIN pg_roles grantor ON grantor.oid=a.grantor "
+        "WHERE d.datname=current_database()"
+    )
+
+    @contextmanager
+    def connect(database, role="postgres", **kwargs):
+        engine = create_engine(
+            url_for(postgres_url, database, user=role), isolation_level="AUTOCOMMIT"
+        )
+        try:
+            with engine.connect() as connection:
+                yield connection
+        finally:
+            engine.dispose()
+
+    public_fencer = fence.fence_writers
+
+    def bounded_fencer(connection, **kwargs):
+        return public_fencer(connection, writer_roles=(role,), **kwargs)
+
+    # Use a disposable role through the public owner argument. Production
+    # continues to use the public owner's normal complete writer-role set.
+    monkeypatch.setattr(fence, "fence_writers", bounded_fencer)
+    try:
+        with admin.connect() as connection:
+            connection.exec_driver_sql(f'CREATE ROLE "{role}" LOGIN')
+            connection.exec_driver_sql(
+                f'ALTER DATABASE "{database}" OWNER TO app_admin'
+            )
+            # Non-default direct CONNECT with grant option is the baseline.
+            connection.exec_driver_sql(
+                f'GRANT CONNECT ON DATABASE "{database}" TO "{role}" WITH GRANT OPTION'
+            )
+            baseline = frozenset(tuple(row) for row in connection.execute(grants_query))
+            oid, cluster = connection.execute(
+                text(
+                    "SELECT oid,(SELECT system_identifier::text "
+                    "FROM pg_control_system()) "
+                    "FROM pg_database WHERE datname=current_database()"
+                )
+            ).one()
+            proof = bounded_fencer(
+                connection, database=database, fence_id="a" * 64, session_wait_seconds=3
+            )
+        source = {
+            "image_digest": "sha256:" + "1" * 64,
+            "revision": "a" * 40,
+            "raw_descriptor_digest": "sha256:" + "3" * 64,
+            "heads": ["source"],
+        }
+        prior = cast(
+            CpTransitionRequestV1,
+            {
+                "product": "dotmac_vendor_control_plane",
+                "environment": "production",
+                "host": "dedicated-test",
+                "database": database,
+                "database_oid": oid,
+                "cluster_system_identifier": cluster,
+                "source": source,
+                "previous_receipt_digest": None,
+                "authorization_run_id": 1,
+                "authorization_run_attempt": 1,
+            },
+        )
+        # This test exercises real fence/restore and connection denial, while
+        # maintenance and protected artifact storage remain separate owners.
+        store = type("MemoryEvidence", (), {"put": lambda self, raw: raw_digest(raw)})()
+        failed = ExistingCpTransitionHost(_config(tmp_path), store=store, recovery={})
+        failed.proof = proof
+        failed._request, failed._nonce = prior, proof.fence_id
+        monkeypatch.setattr(failed, "_connect", connect)
+        monkeypatch.setattr(failed, "_maintenance", lambda: None)
+        failed.fail_closed(prior, proof.fence_id, acl_may_be_restored=False)
+        retained = failed.proof.canonical_bytes()
+        assert failed.proof.prior_grants == baseline
+
+        # A new process/owner receives only the public document plus host pins.
+        reloaded = fence.FenceProof.from_document(
+            read_json(retained),
+            expected_digest=raw_digest(retained),
+            allowed_writer_roles=(role,),
+        )
+        current = deepcopy(prior)
+        current["authorization_run_id"] = 2
+        new_nonce = "b" * 64
+        replacement = ExistingCpTransitionHost(
+            _config(tmp_path),
+            store=store,
+            recovery={},
+            held_fence=host_module.HeldFenceContinuation(prior, reloaded),
+        )
+        replacement._request, replacement._nonce = current, new_nonce
+        monkeypatch.setattr(replacement, "_connect", connect)
+        replacement.fence_and_negative_reconnect(current, new_nonce)
+        assert replacement.proof.fence_id == new_nonce
+        assert replacement.proof.prior_grants == baseline
+        with admin.connect() as connection:
+            assert fence.fence_is_holding(connection, replacement.proof)
+            fence.restore_writers(
+                connection,
+                replacement.proof,
+                database=database,
+                expected_fence_id=new_nonce,
+                session_wait_seconds=3,
+            )
+            assert (
+                frozenset(tuple(row) for row in connection.execute(grants_query))
+                == baseline
+            )
+    finally:
+        with admin.connect() as connection:
+            connection.exec_driver_sql(f'DROP OWNED BY "{role}"')
+            connection.exec_driver_sql(f'DROP ROLE IF EXISTS "{role}"')
+        admin.dispose()
