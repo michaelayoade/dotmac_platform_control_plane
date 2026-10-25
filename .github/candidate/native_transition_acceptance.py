@@ -93,7 +93,7 @@ def synthetic_authorization(request, root, now):
     signer = repository + "/.github/workflows/authorize.yml@refs/heads/main"
     certificate = {
         "issuer": "https://token.actions.githubusercontent.com",
-        "subjectAlternativeName": {"type": "URI", "value": signer},
+        "subjectAlternativeName": signer,
         "buildSignerURI": signer,
         "buildSignerDigest": "c" * 40,
         "runnerEnvironment": "github-hosted",
