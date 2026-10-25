@@ -946,6 +946,9 @@ class ExistingCpTransitionHost:
         with self._connect(request["database"]) as connection:
             self._identity(connection, request)
             self._check_fence_baseline(connection, request)
+            candidate_roles.require_planned_target_only_connect(
+                connection, database=request["database"]
+            )
         self._docker("image", "inspect", config.postgres_image)
         self._target_descriptor = _read_protected(config.target_descriptor)
         self._image(config.target_image, request["target"], self._target_descriptor)

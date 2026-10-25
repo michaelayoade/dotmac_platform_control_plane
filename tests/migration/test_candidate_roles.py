@@ -22,6 +22,7 @@ from vendor_cp.deployment.candidate_roles import (
     cleanup_before_restore,
     create_roles,
     deactivate,
+    require_planned_target_only_connect,
     restore_after_candidate,
     verify_staged_database,
 )
@@ -423,6 +424,80 @@ def test_other_database_public_connect_refuses_activation(
             _restore(owner, roles, proof)
         finally:
             owner.execute(text(f'DROP DATABASE "{other}"'))
+
+
+def test_planned_candidates_refuse_default_public_connect_without_mutation(
+    scratch_db: str,
+    postgres_url: str,
+    url_for: Callable[..., str],
+    target_only_connect: tuple[str, ...],
+) -> None:
+    db = scratch_db.rpartition("/")[2]
+    other = f"d16_forecast_{uuid.uuid4().hex[:12]}"
+    with _connect(url_for(postgres_url, db)) as owner:
+        require_planned_target_only_connect(owner, database=db)
+        prior = fence_module._current_grants(owner, db)
+        owner.execute(text(f'CREATE DATABASE "{other}"'))
+        try:
+            with pytest.raises(CandidateRoleRefused, match="another database"):
+                require_planned_target_only_connect(owner, database=db)
+            assert fence_module._current_grants(owner, db) == prior
+        finally:
+            owner.execute(text(f'DROP DATABASE "{other}"'))
+
+
+@pytest.mark.parametrize("other", ["postgres", "template1"])
+@pytest.mark.parametrize("parent", ["app_user", "platform_api"])
+@pytest.mark.parametrize("inherited", [False, True])
+def test_planned_candidates_refuse_effective_parent_connect_without_mutation(
+    scratch_db: str,
+    postgres_url: str,
+    url_for: Callable[..., str],
+    target_only_connect: tuple[str, ...],
+    other: str,
+    parent: str,
+    inherited: bool,
+) -> None:
+    db = scratch_db.rpartition("/")[2]
+    ancestor = f"d16_ancestor_{uuid.uuid4().hex[:12]}"
+    recipient = ancestor if inherited else parent
+    assert other in target_only_connect
+    with _connect(url_for(postgres_url, db)) as owner:
+        require_planned_target_only_connect(owner, database=db)
+        prior = fence_module._current_grants(owner, db)
+        if inherited:
+            owner.execute(text(f'CREATE ROLE "{ancestor}" NOLOGIN'))
+        try:
+            if inherited:
+                owner.execute(text(f'GRANT "{ancestor}" TO {parent} WITH INHERIT TRUE'))
+            owner.execute(text(f'GRANT CONNECT ON DATABASE {other} TO "{recipient}"'))
+            with pytest.raises(CandidateRoleRefused, match="another database"):
+                require_planned_target_only_connect(owner, database=db)
+            assert fence_module._current_grants(owner, db) == prior
+        finally:
+            owner.execute(
+                text(f'REVOKE CONNECT ON DATABASE {other} FROM "{recipient}"')
+            )
+            if inherited:
+                owner.execute(text(f'REVOKE "{ancestor}" FROM {parent}'))
+                owner.execute(text(f'DROP ROLE "{ancestor}"'))
+        require_planned_target_only_connect(owner, database=db)
+
+
+def test_planned_target_only_candidates_need_no_candidate_roles_or_acl_changes(
+    scratch_db: str,
+    postgres_url: str,
+    url_for: Callable[..., str],
+    target_only_connect: tuple[str, ...],
+) -> None:
+    db = scratch_db.rpartition("/")[2]
+    with _connect(url_for(postgres_url, db)) as owner:
+        prior = fence_module._current_grants(owner, db)
+        query = text("SELECT oid FROM pg_roles ORDER BY oid")
+        roles_before = owner.execute(query).all()
+        require_planned_target_only_connect(owner, database=db)
+        assert fence_module._current_grants(owner, db) == prior
+        assert owner.execute(query).all() == roles_before
 
 
 def test_live_candidate_session_refuses_cleanup_and_restore(
