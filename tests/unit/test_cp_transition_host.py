@@ -362,6 +362,7 @@ def test_maintenance_failure_still_attempts_refence(
     request = cast(CpTransitionRequestV1, {"database": "source"})
     monkeypatch.setattr(host, "_bound", lambda *a: None)
     monkeypatch.setattr(host, "_identity", lambda *a: None)
+    monkeypatch.setattr(host, "_check_fence_baseline", lambda *a: None)
     monkeypatch.setattr(host, "_connect", lambda *a, **k: nullcontext(object()))
 
     def maintenance():

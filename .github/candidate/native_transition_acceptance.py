@@ -871,6 +871,25 @@ def main():
             == [("restored_ok", "app_admin"), ("restored_wrong_owner", "postgres")],
             "restore_database_owner_intervention_mismatch",
         )
+        # Reproduce pg_dump's explicit-owner-default -> NULL ACL representation.
+        # Only the dump source fixtures receive this grant; fresh restores stay raw.
+        for database in ("restored_ok", "restored_wrong_owner"):
+            with host._connect(database) as source_fixture:
+                source_fixture.exec_driver_sql(
+                    "GRANT ALL ON TABLE public.alembic_version TO app_admin"
+                )
+                require(
+                    source_fixture.execute(
+                        text(
+                            "SELECT c.relacl::text="
+                            "pg_catalog.acldefault('r',c.relowner)::text "
+                            "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n "
+                            "ON n.oid=c.relnamespace WHERE n.nspname='public' "
+                            "AND c.relname='alembic_version'"
+                        )
+                    ).scalar_one(),
+                    "source_explicit_default_acl_fixture_missing",
+                )
         host.proof = fence_writers(
             observer, database="restored_ok", fence_id=nonce, session_wait_seconds=3
         )
@@ -960,6 +979,34 @@ def main():
                 host_nonce=nonce,
                 expected_source_cluster=request["cluster_system_identifier"],
                 expected_source_database=request["database"],
+            )
+            acl_proof = json.loads(store.read(host._catalogue_comparison_digest))
+            require(
+                any(
+                    entry["identity"] == ["public", "alembic_version"]
+                    for entry in acl_proof["relation_acls"]
+                ),
+                "actual_default_acl_restore_case_missing",
+            )
+            source_relations = json.loads(store.read(host.genesis["catalogue_digest"]))[
+                "relations"
+            ]
+            restored_relations = json.loads(store.read(restored["catalogue_digest"]))[
+                "relations"
+            ]
+            source_acl = next(
+                row[6]
+                for row in source_relations
+                if row[:2] == ["public", "alembic_version"]
+            )
+            restored_acl = next(
+                row[6]
+                for row in restored_relations
+                if row[:2] == ["public", "alembic_version"]
+            )
+            require(
+                isinstance(source_acl, str) and restored_acl is None,
+                "actual_default_acl_restore_representation_missing",
             )
             results = {
                 "inspection": {

@@ -465,7 +465,7 @@ class Host:
         catalogue_proof = retain(
             canonical_json(
                 {
-                    "schema": "dotmac.cp_catalogue_restore_comparison/1",
+                    "schema": "dotmac.cp_catalogue_restore_comparison/2",
                     "request_digest": cp.request_digest(request()),
                     "host_nonce": self.nonce,
                     "source_cluster_system_identifier": request()[
@@ -474,7 +474,7 @@ class Host:
                     "source_database": request()["database"],
                     "source_catalogue_digest": genesis["catalogue_digest"],
                     "restored_catalogue_digest": genesis["catalogue_digest"],
-                    "method": "postgres16-temp-view-parse/1",
+                    "method": "postgres16-check-parse-table-acldefault/2",
                     "parser": {
                         "server_version_num": 160004,
                         "cluster_system_identifier": str(
@@ -485,6 +485,7 @@ class Host:
                         "standard_conforming_strings": "on",
                     },
                     "checks": [],
+                    "relation_acls": [],
                     "restored_catalogue_after_digest": genesis["catalogue_digest"],
                 }
             )

@@ -519,6 +519,46 @@ def measure_candidate_quiescence(connection: Connection) -> dict[str, object]:
     }
 
 
+@dataclass(frozen=True, slots=True)
+class HeldFenceContinuation:
+    """Root-loaded prior state, never an authorization for the next attempt."""
+
+    request: CpTransitionRequestV1
+    proof: transition_fence.FenceProof
+
+    def bind(self, request: CpTransitionRequestV1, nonce: str | None = None) -> None:
+        require(
+            all(
+                cast(dict[str, object], request)[key]
+                == cast(dict[str, object], self.request)[key]
+                for key in (
+                    "product",
+                    "environment",
+                    "host",
+                    "database",
+                    "cluster_system_identifier",
+                    "database_oid",
+                    "source",
+                    "previous_receipt_digest",
+                )
+            ),
+            "held_fence_source_mismatch",
+        )
+        require(
+            request_digest(request) != request_digest(self.request),
+            "held_fence_request_reused",
+        )
+        require(
+            (request["authorization_run_id"], request["authorization_run_attempt"])
+            != (
+                self.request["authorization_run_id"],
+                self.request["authorization_run_attempt"],
+            ),
+            "held_fence_authorization_reused",
+        )
+        require(nonce != self.proof.fence_id, "held_fence_nonce_reused")
+
+
 class ExistingCpTransitionHost:
     """Concrete measured host used by ``execute_transition``.
 
@@ -534,12 +574,14 @@ class ExistingCpTransitionHost:
         store: ArtifactStore,
         recovery: RecoveryContexts,
         process: ProcessExecutor | None = None,
+        held_fence: HeldFenceContinuation | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.recovery = recovery
         self.process = process or SubprocessExecutor()
-        self.proof: transition_fence.FenceProof | None = None
+        self._held_fence = held_fence
+        self.proof = held_fence.proof if held_fence else None
         self.genesis: SourceObservation | None = None
         self.roles: candidate_roles.CandidateRoles | None = None
         self.launch: CandidateComposeLaunch | None = None
@@ -687,6 +729,8 @@ class ExistingCpTransitionHost:
         )
 
     def _bound(self, request: CpTransitionRequestV1, nonce: str) -> None:
+        if self._held_fence is not None:
+            self._held_fence.bind(request, nonce)
         require(self._request == request, "host_request_mismatch")
         if self._nonce is None:
             reservation = read_json(
@@ -856,6 +900,8 @@ class ExistingCpTransitionHost:
             require(info.get("Image") == source_id, "incumbent_image_mismatch")
 
     def inspect(self, request: CpTransitionRequestV1) -> bytes:
+        if self._held_fence is not None:
+            self._held_fence.bind(request)
         require(
             sys.platform == "linux" and os.geteuid() == 0,
             "root_linux_operator_required",
@@ -895,6 +941,11 @@ class ExistingCpTransitionHost:
             re.fullmatch(r"\S+@sha256:[0-9a-f]{64}", config.postgres_image) is not None,
             "postgres_image_not_pinned",
         )
+        # Admission precedes even disposable image-inspection containers and
+        # the executor's new reservation, as well as all transition mutations.
+        with self._connect(request["database"]) as connection:
+            self._identity(connection, request)
+            self._check_fence_baseline(connection, request)
         self._docker("image", "inspect", config.postgres_image)
         self._target_descriptor = _read_protected(config.target_descriptor)
         self._image(config.target_image, request["target"], self._target_descriptor)
@@ -969,6 +1020,9 @@ class ExistingCpTransitionHost:
 
     def maintenance(self, request: CpTransitionRequestV1, nonce: str) -> bytes:
         self._bound(request, nonce)
+        with self._connect(request["database"]) as connection:
+            self._identity(connection, request)
+            self._check_fence_baseline(connection, request)
         self._maintenance()
         return self._evidence(
             request,
@@ -1009,11 +1063,14 @@ class ExistingCpTransitionHost:
         self._bound(request, nonce)
         with self._connect(request["database"]) as connection:
             self._identity(connection, request)
+            self._check_fence_baseline(connection, request)
             self.proof = transition_fence.fence_writers(
                 connection,
                 database=request["database"],
                 fence_id=nonce,
                 session_wait_seconds=self.config.session_wait_seconds,
+                prior=self.proof,
+                expected_prior_fence_id=self.proof.fence_id if self.proof else None,
             )
         self.store.put(canonical_json(self.proof.to_document()))
         self._strict(request)
@@ -1027,6 +1084,53 @@ class ExistingCpTransitionHost:
                 "reconnect_denial": "database_acl",
             },
         )
+
+    def _check_fence_baseline(
+        self, connection: Connection, request: CpTransitionRequestV1
+    ) -> None:
+        """Read-only admission; never capture a held ACL as a fresh baseline."""
+        if self.proof is None:
+            blocked = connection.execute(
+                text(
+                    "SELECT rolname FROM pg_roles WHERE rolname = ANY(:writers) "
+                    "AND NOT has_database_privilege(rolname, :database, 'CONNECT')"
+                ),
+                {
+                    "writers": list(transition_fence.WRITER_ROLES),
+                    "database": request["database"],
+                },
+            ).all()
+            require(not blocked, "held_fence_context_required")
+            return
+        proof = self.proof
+        require(proof.database == request["database"], "held_fence_database_mismatch")
+        require(
+            transition_fence.fence_is_holding(connection, proof),
+            "held_fence_not_holding",
+        )
+        # Compare the server-decomposed ACL, including grantors/options. The
+        # public fence owner alone performs revocation, rebind and restoration.
+        live = frozenset(
+            tuple(row)
+            for row in connection.execute(
+                text(
+                    "SELECT COALESCE(g.rolname, ''), a.privilege_type, "
+                    "a.is_grantable, grantor.rolname FROM pg_database d, "
+                    "aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a "
+                    "LEFT JOIN pg_roles g ON g.oid=a.grantee "
+                    "JOIN pg_roles grantor ON grantor.oid=a.grantor "
+                    "WHERE d.datname=:database"
+                ),
+                {"database": request["database"]},
+            )
+        )
+        revoked = {"", *proof.fenced_roles, *proof.member_roles}
+        expected = frozenset(
+            grant
+            for grant in proof.prior_grants
+            if not (grant[0] in revoked and grant[1] == "CONNECT")
+        )
+        require(live == expected, "held_fence_acl_drift")
 
     def stop_and_drain_writers(
         self, request: CpTransitionRequestV1, nonce: str
@@ -2313,6 +2417,12 @@ class ExistingCpTransitionHost:
         self, request: CpTransitionRequestV1, nonce: str, *, acl_may_be_restored: bool
     ) -> bytes:
         self._bound(request, nonce)
+        if self.proof is None:
+            # A failure before the initial fence is not permission to overwrite
+            # an existing held ACL baseline through the containment path.
+            with self._connect(request["database"]) as connection:
+                self._identity(connection, request)
+                self._check_fence_baseline(connection, request)
         errors: list[BaseException] = []
         # Each independent containment action is attempted even if another
         # fails. In particular maintenance failure must not skip DB re-fencing.
@@ -2328,6 +2438,8 @@ class ExistingCpTransitionHost:
         try:
             with self._connect(request["database"]) as connection:
                 self._identity(connection, request)
+                if self.proof is None:
+                    self._check_fence_baseline(connection, request)
                 self.proof = transition_fence.fence_writers(
                     connection,
                     database=request["database"],

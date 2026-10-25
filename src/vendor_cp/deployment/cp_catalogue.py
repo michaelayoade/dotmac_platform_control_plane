@@ -1,8 +1,9 @@
-"""Complete raw catalogues and bounded PostgreSQL CHECK parse equivalence.
+"""Complete raw catalogues and bounded PostgreSQL restore equivalence.
 
-Raw observations remain distinct. Only changed ordinary local CHECK expression
-representations may compare through PostgreSQL's own parser on the restored
-relation. Temporary views are never executed and always rolled back.
+Raw observations remain distinct. Ordinary local CHECK representations compare
+through PostgreSQL's parser; ordinary table explicit/NULL ACLs compare only to
+the server default for the unchanged owner. Temporary views are never executed
+and always rolled back.
 """
 
 from __future__ import annotations
@@ -111,17 +112,25 @@ class CheckComparison(TypedDict):
     restored_view_definition: str
 
 
+class RelationAclComparison(TypedDict):
+    identity: list[str]
+    source_row_digest: Digest
+    restored_row_digest: Digest
+    server_default_acl: str
+
+
 class RestoreComparison(TypedDict):
-    schema: Literal["dotmac.cp_catalogue_restore_comparison/1"]
+    schema: Literal["dotmac.cp_catalogue_restore_comparison/2"]
     request_digest: Digest
     host_nonce: str
     source_cluster_system_identifier: str
     source_database: Identifier
     source_catalogue_digest: Digest
     restored_catalogue_digest: Digest
-    method: Literal["postgres16-temp-view-parse/1"]
+    method: Literal["postgres16-check-parse-table-acldefault/2"]
     parser: ParserObservation
     checks: list[CheckComparison]
+    relation_acls: list[RelationAclComparison]
     restored_catalogue_after_digest: Digest
 
 
@@ -188,11 +197,56 @@ def _constraints(catalogue: Catalogue) -> ConstraintRows:
     return result
 
 
+def _relations(catalogue: Catalogue) -> dict[tuple[str, str], list[object]]:
+    result: dict[tuple[str, str], list[object]] = {}
+    for row in catalogue["relations"]:
+        require(len(row) == 8, "catalogue_relation_shape")
+        require(
+            all(type(row[index]) is str and bool(row[index]) for index in range(4)),
+            "catalogue_relation_shape",
+        )
+        require(
+            type(row[4]) is bool and type(row[5]) is bool, "catalogue_relation_shape"
+        )
+        require(row[6] is None or type(row[6]) is str, "catalogue_relation_shape")
+        key = cast(str, row[0]), cast(str, row[1])
+        require(key not in result, "catalogue_relation_identity_duplicate")
+        result[key] = row
+    return result
+
+
+def _changed_relation_acls(
+    source: Catalogue, restored: Catalogue
+) -> list[tuple[tuple[str, str], list[object], list[object]]]:
+    original, fresh = _relations(source), _relations(restored)
+    require(set(original) == set(fresh), "catalogue_relation_inventory_mismatch")
+    result = []
+    for identity in sorted(original):
+        one, two = original[identity], fresh[identity]
+        if one == two:
+            continue
+        require(
+            one[2] == two[2] == "r"
+            and all(one[index] == two[index] for index in range(8) if index != 6),
+            "catalogue_relation_nonacl_mismatch",
+        )
+        require(
+            (one[6] is None) != (two[6] is None), "catalogue_relation_acl_unsupported"
+        )
+        explicit = two[6] if one[6] is None else one[6]
+        require(
+            type(explicit) is str and bool(explicit),
+            "catalogue_relation_acl_unsupported",
+        )
+        result.append((identity, one, two))
+    return result
+
+
 def _changed_checks(
     source: Catalogue, restored: Catalogue
 ) -> list[tuple[ConstraintIdentity, list[object], list[object]]]:
     for name in CATALOGUE_QUERIES:
-        if name != "constraints":
+        if name not in {"constraints", "relations"}:
             require(source[name] == restored[name], "catalogue_noncheck_mismatch")
     original, fresh = _constraints(source), _constraints(restored)
     require(set(original) == set(fresh), "catalogue_constraint_inventory_mismatch")
@@ -293,9 +347,9 @@ def verify_restore_comparison(
         != (expected_source_cluster, expected_source_database),
         "catalogue_parser_is_source_database",
     )
-    changed = _changed_checks(
-        _catalogue(source_catalogue), _catalogue(restored_catalogue)
-    )
+    source, restored = _catalogue(source_catalogue), _catalogue(restored_catalogue)
+    changed_acls = _changed_relation_acls(source, restored)
+    changed = _changed_checks(source, restored)
     entries: dict[ConstraintIdentity, CheckComparison] = {}
     for entry in value["checks"]:
         names = entry["identity"]
@@ -318,6 +372,31 @@ def verify_restore_comparison(
             bool(entry["source_view_definition"].strip())
             and entry["source_view_definition"] == entry["restored_view_definition"],
             "catalogue_check_parse_mismatch",
+        )
+
+    acl_entries: dict[tuple[str, str], RelationAclComparison] = {}
+    for acl_entry in value["relation_acls"]:
+        names = acl_entry["identity"]
+        require(len(names) == 2 and all(bool(name) for name in names))
+        acl_key = names[0], names[1]
+        require(acl_key not in acl_entries, "catalogue_relation_acl_proof_duplicate")
+        acl_entries[acl_key] = acl_entry
+    require(
+        set(acl_entries) == {identity for identity, _, _ in changed_acls},
+        "catalogue_relation_acl_proof_coverage",
+    )
+    for acl_identity, original, fresh in changed_acls:
+        acl_entry = acl_entries[acl_identity]
+        require(
+            acl_entry["source_row_digest"] == _digest(canonical_json(original))
+            and acl_entry["restored_row_digest"] == _digest(canonical_json(fresh)),
+            "catalogue_relation_acl_row_binding_mismatch",
+        )
+        explicit = fresh[6] if original[6] is None else original[6]
+        require(
+            bool(acl_entry["server_default_acl"])
+            and explicit == acl_entry["server_default_acl"],
+            "catalogue_relation_acl_default_mismatch",
         )
 
 
@@ -362,13 +441,13 @@ def capture_restore_comparison(
     expected_source_cluster: str,
     expected_source_database: str,
 ) -> bytes:
-    """Parse changed CHECKs on the independently measured restored database."""
+    """Prove bounded CHECK and table ACL equivalence on the live restored database."""
     _validate_context(
         request_digest, host_nonce, expected_source_cluster, expected_source_database
     )
-    changed = _changed_checks(
-        _catalogue(source_catalogue), _catalogue(restored_catalogue)
-    )
+    source, restored = _catalogue(source_catalogue), _catalogue(restored_catalogue)
+    changed_acls = _changed_relation_acls(source, restored)
+    changed = _changed_checks(source, restored)
     require(
         not _driver(connection).autocommit and connection.in_transaction(),
         "catalogue_parser_transaction_required",
@@ -378,6 +457,7 @@ def capture_restore_comparison(
         "catalogue_live_restore_mismatch",
     )
     checks: list[CheckComparison] = []
+    relation_acls: list[RelationAclComparison] = []
     nested = connection.begin_nested()
     try:
         with _fixed_deparse(connection):
@@ -408,6 +488,30 @@ def capture_restore_comparison(
                 != (expected_source_cluster, expected_source_database),
                 "catalogue_parser_is_source_database",
             )
+            for acl_identity, original, fresh in changed_acls:
+                default_acl = connection.execute(
+                    text(
+                        "SELECT pg_catalog.acldefault('r',r.oid)::text "
+                        "FROM pg_catalog.pg_roles r WHERE r.rolname=:owner"
+                    ),
+                    {"owner": fresh[3]},
+                ).scalar_one()
+                require(
+                    isinstance(default_acl, str) and bool(default_acl),
+                    "catalogue_relation_acl_default_absent",
+                )
+                explicit = fresh[6] if original[6] is None else original[6]
+                require(
+                    explicit == default_acl, "catalogue_relation_acl_default_mismatch"
+                )
+                relation_acls.append(
+                    RelationAclComparison(
+                        identity=list(acl_identity),
+                        source_row_digest=_digest(canonical_json(original)),
+                        restored_row_digest=_digest(canonical_json(fresh)),
+                        server_default_acl=default_acl,
+                    )
+                )
             for identity, original, fresh in changed:
                 schema, table, name = identity
                 require(isinstance(table, str))
@@ -434,16 +538,17 @@ def capture_restore_comparison(
         after = measure_catalogue(connection)
         require(after == restored_catalogue, "catalogue_changed_during_parse")
     value = RestoreComparison(
-        schema="dotmac.cp_catalogue_restore_comparison/1",
+        schema="dotmac.cp_catalogue_restore_comparison/2",
         request_digest=request_digest,
         host_nonce=host_nonce,
         source_cluster_system_identifier=expected_source_cluster,
         source_database=expected_source_database,
         source_catalogue_digest=_digest(source_catalogue),
         restored_catalogue_digest=_digest(restored_catalogue),
-        method="postgres16-temp-view-parse/1",
+        method="postgres16-check-parse-table-acldefault/2",
         parser=parser,
         checks=checks,
+        relation_acls=relation_acls,
         restored_catalogue_after_digest=_digest(after),
     )
     proof = canonical_json(value)
