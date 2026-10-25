@@ -371,7 +371,7 @@ def _load_held_fence(
     identity = installation.policy.identity
     require(
         all(
-            prior[key] == getattr(identity, key)
+            cast(dict[str, object], prior)[key] == getattr(identity, key)
             for key in (
                 "host",
                 "database",
@@ -573,12 +573,17 @@ def run_transition(
             )
         from vendor_cp.deployment.cp_transition_host import ExistingCpTransitionHost
 
-        host = ExistingCpTransitionHost(
-            installation.host,
-            store=installation.store,
-            recovery=recovery,
-            **({"held_fence": held_fence} if held_fence is not None else {}),
-        )
+        if held_fence is None:
+            host = ExistingCpTransitionHost(
+                installation.host, store=installation.store, recovery=recovery
+            )
+        else:
+            host = ExistingCpTransitionHost(
+                installation.host,
+                store=installation.store,
+                recovery=recovery,
+                held_fence=held_fence,
+            )
         return cp.execute_transition(
             raw,
             request_path=request_file,

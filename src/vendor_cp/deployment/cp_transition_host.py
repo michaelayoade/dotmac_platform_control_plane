@@ -529,7 +529,8 @@ class HeldFenceContinuation:
     def bind(self, request: CpTransitionRequestV1, nonce: str | None = None) -> None:
         require(
             all(
-                request[key] == self.request[key]
+                cast(dict[str, object], request)[key]
+                == cast(dict[str, object], self.request)[key]
                 for key in (
                     "product",
                     "environment",
