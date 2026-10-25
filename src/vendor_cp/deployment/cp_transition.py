@@ -542,7 +542,7 @@ class GhAttestationVerifier:
         signer_uri = f"{repository_uri}/{policy.workflow_path}@refs/heads/main"
         expected: dict[str, object] = {
             "issuer": "https://token.actions.githubusercontent.com",
-            "subjectAlternativeName": {"type": "URI", "value": signer_uri},
+            "subjectAlternativeName": signer_uri,
             "buildSignerURI": signer_uri,
             "buildSignerDigest": policy.workflow_revision,
             "runnerEnvironment": "github-hosted",

@@ -184,7 +184,7 @@ def test_protected_directory_policy_rejects_writable_parents(tmp_path: Path) -> 
 
 @pytest.fixture
 def trust(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Synthetic values using the published sigstore-go verification JSON shape.
+    """Synthetic values using the pinned gh 2.87.3 verification JSON shape.
 
     Primary schema: github.com/sigstore/sigstore-go/blob/main/docs/verification.md
     No attestation is minted: only subprocess.run is replaced for unit tests.
@@ -228,7 +228,7 @@ def trust(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     signer = repository + "/.github/workflows/authorize.yml@refs/heads/main"
     cert = {
         "issuer": "https://token.actions.githubusercontent.com",
-        "subjectAlternativeName": {"type": "URI", "value": signer},
+        "subjectAlternativeName": signer,
         "buildSignerURI": signer,
         "buildSignerDigest": "c" * 40,
         "runnerEnvironment": "github-hosted",
@@ -304,6 +304,53 @@ def test_real_verifier_boundary_checks_certificate(trust) -> None:
     verified = verifier.verify(request(), request_path=path, bundle_path=None, now=NOW)
     assert verified.authorization_run_id == 123
     assert verified.authorization_run_attempt == 2
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("not a URI", id="malformed"),
+        pytest.param(
+            "https://github.com/example/cp/.github/workflows/authorize.yml"
+            "@refs/heads/evil",
+            id="wrong-ref",
+        ),
+        pytest.param(
+            "https://github.com/attacker/cp/.github/workflows/authorize.yml"
+            "@refs/heads/main",
+            id="wrong-repository",
+        ),
+        pytest.param(
+            "https://github.com/example/cp/.github/workflows/other.yml@refs/heads/main",
+            id="wrong-workflow",
+        ),
+        pytest.param(None, id="null"),
+        pytest.param([], id="list"),
+    ],
+)
+def test_auth_refuses_invalid_san(trust, bad) -> None:
+    verifier, path, _result, cert, _files = trust
+    cert["subjectAlternativeName"] = bad
+    with pytest.raises(ContractError, match="authorization_identity_mismatch"):
+        verifier.verify(request(), request_path=path, bundle_path=None, now=NOW)
+
+
+def test_auth_refuses_object_san_even_with_exact_signer_uri(trust) -> None:
+    verifier, path, _result, cert, _files = trust
+    cert["subjectAlternativeName"] = {
+        "type": "URI",
+        "value": cert["buildSignerURI"],
+    }
+    with pytest.raises(ContractError, match="authorization_identity_mismatch"):
+        verifier.verify(request(), request_path=path, bundle_path=None, now=NOW)
+
+
+def test_auth_refuses_missing_san(trust) -> None:
+    verifier, path, _result, cert, _files = trust
+    del cert["subjectAlternativeName"]
+    with pytest.raises(ContractError, match="authorization_identity_mismatch"):
+        verifier.verify(request(), request_path=path, bundle_path=None, now=NOW)
 
 
 @pytest.mark.parametrize(
