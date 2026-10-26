@@ -16,7 +16,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Literal, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, TypedDict, cast
 
 from vendor_cp.deploy_agent.contracts import (
     Digest,
@@ -39,6 +39,9 @@ from vendor_cp.deployment.effects import (
     PlatformBackupResult,
     PlatformCpRecoveryBundle,
 )
+
+if TYPE_CHECKING:
+    from vendor_cp.deployment.transition_fence import FenceProof
 
 RecoveryContexts = Mapping[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]]
 
@@ -66,6 +69,44 @@ class CpTransitionRequestV1(TypedDict):
     trusted_actor: Identifier
     expires_at: str
     previous_receipt_digest: Digest | None
+
+
+Nonce = Annotated[str, r"[0-9a-f]{64}"]
+
+
+class CommittedMigrationBasisV1(TypedDict):
+    context_digest: Digest
+    prior_request_digest: Digest
+    prior_host_nonce: Nonce
+    prior_reservation_digest: Digest
+    prior_authorization_digest: Digest
+    original_fence_digest: Digest
+    current_fence_digest: Digest
+    current_fence_id: Nonce
+    frontier_measurement_digest: Digest
+
+
+class CpCommittedMigrationRequestV1(TypedDict):
+    schema: Literal["dotmac.cp_committed_migration_request/1"]
+    product: Literal["dotmac_vendor_control_plane"]
+    environment: Literal["production"]
+    host: Identifier
+    database: Identifier
+    cluster_system_identifier: str
+    database_oid: int
+    source: TransitionSideV1
+    target: TransitionSideV1
+    previous_receipt_digest: Digest | None
+    operator_revision: Revision
+    basis: CommittedMigrationBasisV1
+    plan_digest: Digest
+    authorization_run_id: int
+    authorization_run_attempt: int
+    trusted_actor: Identifier
+    expires_at: str
+
+
+TransitionRequest = CpTransitionRequestV1 | CpCommittedMigrationRequestV1
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,11 +178,19 @@ PLAN_FIELDS = (
 )
 
 
-def transition_plan_digest(request: CpTransitionRequestV1) -> str:
-    return digest({key: cast(dict[str, object], request)[key] for key in PLAN_FIELDS})
+COMMITTED_PLAN_FIELDS = (*PLAN_FIELDS, "operator_revision", "basis")
 
 
-def request_digest(request: CpTransitionRequestV1) -> str:
+def transition_plan_digest(request: TransitionRequest) -> str:
+    committed = request.get("schema") == "dotmac.cp_committed_migration_request/1"
+    fields = COMMITTED_PLAN_FIELDS if committed else PLAN_FIELDS
+    payload = {key: cast(dict[str, object], request)[key] for key in fields}
+    if committed:
+        payload["schema"] = "dotmac.cp_committed_migration_plan/1"
+    return digest(payload)
+
+
+def request_digest(request: TransitionRequest) -> str:
     """Digest of the exact closed CP JSON representation (not a signature)."""
     return digest(request)
 
@@ -248,7 +297,7 @@ class ArtifactStore:
         return checksum
 
     def reserve(
-        self, request: CpTransitionRequestV1, authorization: VerifiedAuthorization
+        self, request: TransitionRequest, authorization: VerifiedAuthorization
     ) -> str:
         """Durably consume request digest and generate a distinct host nonce."""
         verify_authorization(request, authorization)
@@ -267,6 +316,28 @@ class ArtifactStore:
         self._create(self._name(checksum, "reservation"), raw)
         require(self.read(checksum, kind="reservation") == raw)
         return nonce
+
+    def reserve_committed_frontier(
+        self,
+        context: CommittedMigrationContext,
+        request: CpCommittedMigrationRequestV1,
+        *,
+        host_nonce: str,
+        fresh_reservation_digest: str,
+    ) -> bytes:
+        """Consume the independently pinned prior attempt, under the CP lock.
+
+        This key excludes the fresh store and context, so sibling proposals
+        contend. Failed and partial writes are permanently consumed.
+        """
+        require(self.root == context.prior_store.root, "committed_prior_store_mismatch")
+        raw = canonical_json(
+            _frontier_claim(context, request, host_nonce, fresh_reservation_digest)
+        )
+        key = committed_frontier_key(context)
+        self._create(self._name(key, "reservation"), raw)
+        require(self.read(key, kind="reservation") == raw, "artifact_readback_mismatch")
+        return raw
 
 
 def raw_digest(raw: bytes) -> str:
@@ -410,7 +481,7 @@ class VerifiedAuthorization:
 
 
 def verify_authorization(
-    request: CpTransitionRequestV1, authorization: VerifiedAuthorization
+    request: TransitionRequest, authorization: VerifiedAuthorization
 ) -> None:
     """Require the exact in-process authorization issued by the gh owner."""
     require(
@@ -446,17 +517,16 @@ class GhAttestationVerifier:
 
     def verify(
         self,
-        request: CpTransitionRequestV1,
+        request: TransitionRequest,
         *,
         request_path: Path,
         bundle_path: Path | None,
         now: datetime,
     ) -> VerifiedAuthorization:
-        import re
         import subprocess  # noqa: S404 - pinned absolute binary, fixed argv/env
 
         policy = self.policy
-        validate_request(request, identity=policy.identity, now=now)
+        validate_any_request(request, identity=policy.identity, now=now)
         raw = _read_protected(request_path)
         require(raw == canonical_json(request), "request_bytes_mismatch")
         require(
@@ -521,95 +591,12 @@ class GhAttestationVerifier:
         require(
             len(completed.stdout) <= 16 * 1024 * 1024, "verification_output_too_large"
         )
-        wrapped = read_json(b'{"results":' + completed.stdout + b"}")
-        results = wrapped["results"]
-        require(
-            isinstance(results, list) and len(results) == 1, "ambiguous_attestation"
-        )
-        result = cast(dict[str, object], cast(list[object], results)[0])
-        require(
-            isinstance(result, dict)
-            and isinstance(result.get("verificationResult"), dict)
-        )
-        verified = cast(dict[str, object], result["verificationResult"])
-        signature = cast(dict[str, object], verified.get("signature"))
-        require(
-            isinstance(signature, dict)
-            and isinstance(signature.get("certificate"), dict)
-        )
-        cert = cast(dict[str, object], signature["certificate"])
-        repository_uri = f"https://github.com/{policy.repository}"
-        signer_uri = f"{repository_uri}/{policy.workflow_path}@refs/heads/main"
-        expected: dict[str, object] = {
-            "issuer": "https://token.actions.githubusercontent.com",
-            "subjectAlternativeName": signer_uri,
-            "buildSignerURI": signer_uri,
-            "buildSignerDigest": policy.workflow_revision,
-            "runnerEnvironment": "github-hosted",
-            "sourceRepositoryURI": repository_uri,
-            "sourceRepositoryDigest": policy.workflow_revision,
-            "sourceRepositoryRef": "refs/heads/main",
-            "sourceRepositoryIdentifier": policy.repository_id,
-            "sourceRepositoryOwnerIdentifier": policy.repository_owner_id,
-            "buildConfigURI": signer_uri,
-            "buildConfigDigest": policy.workflow_revision,
-        }
-        require(
-            all(cert.get(key) == value for key, value in expected.items()),
-            "authorization_identity_mismatch",
-        )
-        match = re.fullmatch(
-            re.escape(repository_uri)
-            + r"/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
-            str(cert.get("runInvocationURI")),
-        )
-        require(match is not None, "authorization_run_mismatch")
-        assert match is not None  # noqa: S101 - narrowed by require
-        run, attempt = map(int, match.groups())
-        require(
-            (run, attempt)
-            == (request["authorization_run_id"], request["authorization_run_attempt"]),
-            "authorization_run_mismatch",
-        )
-        observed_times = verified.get("verifiedTimestamps")
-        require(
-            isinstance(observed_times, list) and bool(observed_times),
-            "missing_verified_timestamp",
-        )
-        for item in cast(list[dict[str, object]], observed_times):
-            require(
-                isinstance(item, dict)
-                and item.get("type") in {"Tlog", "TimestampAuthority"}
-            )
-            observed = datetime.fromisoformat(
-                str(item.get("timestamp")).replace("Z", "+00:00")
-            )
-            require(
-                observed.tzinfo is not None
-                and observed <= now
-                and timestamp(request["expires_at"]) - timedelta(hours=24) <= observed
-                and observed < timestamp(request["expires_at"]),
-                "invalid_verified_timestamp",
-            )
-        statement = verified.get("statement")
-        require(isinstance(statement, dict))
-        statement = cast(dict[str, object], statement)
-        require(statement.get("predicateType") == policy.predicate_type)
-        require(
-            statement.get("subject")
-            == [{"name": request_path.name, "digest": {"sha256": raw_digest(raw)[7:]}}],
-            "authorization_subject_mismatch",
-        )
-        # Actor is populated from github.actor by this exact reviewed producer,
-        # never from dispatch inputs. Run identity above is independently certified.
-        require(
-            statement.get("predicate")
-            == {
-                "request_digest": request_digest(request),
-                "trusted_actor": request["trusted_actor"],
-                "environment": "production",
-            },
-            "authorization_predicate_mismatch",
+        run, attempt = _verify_authorization_report(
+            request,
+            policy=policy,
+            verification_bytes=completed.stdout,
+            request_name=request_path.name,
+            now=now,
         )
         return VerifiedAuthorization(
             request_digest(request),
@@ -626,6 +613,111 @@ class GhAttestationVerifier:
                 raw_digest(completed.stdout),
             ),
         )
+
+
+def _verify_authorization_report(
+    request: TransitionRequest,
+    *,
+    policy: CpTransitionTrustPolicy,
+    verification_bytes: bytes,
+    request_name: str,
+    now: datetime,
+) -> tuple[int, int]:
+    """Restrict a successful verifier report; never mint execution authority."""
+    import re
+
+    wrapped = read_json(b'{"results":' + verification_bytes + b"}")
+    results = wrapped["results"]
+    require(isinstance(results, list) and len(results) == 1, "ambiguous_attestation")
+    result = cast(dict[str, object], cast(list[object], results)[0])
+    require(
+        isinstance(result, dict) and isinstance(result.get("verificationResult"), dict)
+    )
+    verified = cast(dict[str, object], result["verificationResult"])
+    signature = cast(dict[str, object], verified.get("signature"))
+    require(
+        isinstance(signature, dict) and isinstance(signature.get("certificate"), dict)
+    )
+    cert = cast(dict[str, object], signature["certificate"])
+    repository_uri = f"https://github.com/{policy.repository}"
+    signer_uri = f"{repository_uri}/{policy.workflow_path}@refs/heads/main"
+    expected: dict[str, object] = {
+        "issuer": "https://token.actions.githubusercontent.com",
+        "subjectAlternativeName": signer_uri,
+        "buildSignerURI": signer_uri,
+        "buildSignerDigest": policy.workflow_revision,
+        "runnerEnvironment": "github-hosted",
+        "sourceRepositoryURI": repository_uri,
+        "sourceRepositoryDigest": policy.workflow_revision,
+        "sourceRepositoryRef": "refs/heads/main",
+        "sourceRepositoryIdentifier": policy.repository_id,
+        "sourceRepositoryOwnerIdentifier": policy.repository_owner_id,
+        "buildConfigURI": signer_uri,
+        "buildConfigDigest": policy.workflow_revision,
+    }
+    require(
+        all(cert.get(key) == value for key, value in expected.items()),
+        "authorization_identity_mismatch",
+    )
+    match = re.fullmatch(
+        re.escape(repository_uri)
+        + r"/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
+        str(cert.get("runInvocationURI")),
+    )
+    require(match is not None, "authorization_run_mismatch")
+    assert match is not None  # noqa: S101 - narrowed by require
+    run, attempt = map(int, match.groups())
+    require(
+        (run, attempt)
+        == (request["authorization_run_id"], request["authorization_run_attempt"]),
+        "authorization_run_mismatch",
+    )
+    observed_times = verified.get("verifiedTimestamps")
+    require(
+        isinstance(observed_times, list) and bool(observed_times),
+        "missing_verified_timestamp",
+    )
+    for item in cast(list[dict[str, object]], observed_times):
+        require(
+            isinstance(item, dict)
+            and item.get("type") in {"Tlog", "TimestampAuthority"}
+        )
+        observed = datetime.fromisoformat(
+            str(item.get("timestamp")).replace("Z", "+00:00")
+        )
+        require(
+            observed.tzinfo is not None
+            and observed <= now
+            and timestamp(request["expires_at"]) - timedelta(hours=24) <= observed
+            and observed < timestamp(request["expires_at"]),
+            "invalid_verified_timestamp",
+        )
+    statement = verified.get("statement")
+    require(isinstance(statement, dict))
+    statement = cast(dict[str, object], statement)
+    require(statement.get("predicateType") == policy.predicate_type)
+    require(
+        statement.get("subject")
+        == [
+            {
+                "name": request_name,
+                "digest": {"sha256": raw_digest(canonical_json(request))[7:]},
+            }
+        ],
+        "authorization_subject_mismatch",
+    )
+    # Actor is populated from github.actor by this exact reviewed producer,
+    # never from dispatch inputs. Run identity above is independently certified.
+    require(
+        statement.get("predicate")
+        == {
+            "request_digest": request_digest(request),
+            "trusted_actor": request["trusted_actor"],
+            "environment": "production",
+        },
+        "authorization_predicate_mismatch",
+    )
+    return run, attempt
 
 
 class SourceObservation(TypedDict):
@@ -706,7 +798,7 @@ class CandidateClosureV1(TypedDict):
 def _validate_evidence(
     value: dict[str, object],
     *,
-    request: CpTransitionRequestV1,
+    request: TransitionRequest,
     nonce: str,
     kind: str,
     store: ArtifactStore,
@@ -911,39 +1003,10 @@ def _validate_evidence(
             ),
             "candidate_cleanup_unproved",
         )
-        proof = read_json(store.read(closed["quiescence_digest"]))
-        _shape(proof, CandidateQuiescenceProofV1)
-        require(
-            proof["request_digest"] == request_digest(request)
-            and proof["host_nonce"] == nonce
-            and proof["before_digest"] == proof["after_digest"],
-            "candidate_mutation_observed",
+        _verify_candidate_quiescence(
+            closed["quiescence_digest"], request=request, nonce=nonce, store=store
         )
-        before = store.read(cast(str, proof["before_digest"]))
-        require(before == store.read(cast(str, proof["after_digest"])))
-        document = read_json(before)
-        _shape(document, CandidateSnapshotV1)
-        snapshot = cast(CandidateSnapshotV1, document)
-        require(
-            snapshot["request_digest"] == request_digest(request)
-            and snapshot["host_nonce"] == nonce,
-            "candidate_snapshot_mismatch",
-        )
-        measured = snapshot["measurement"]
-        require(measured["track_counts"] is True and bool(measured["relations"]))
-        for row in measured["relations"]:
-            require(
-                len(row) == 7
-                and all(isinstance(item, str) and bool(item) for item in row[:2])
-                and all(type(item) is int and item >= 0 for item in row[2:])
-            )
-        for sequence in measured["sequences"]:
-            require(
-                len(sequence) == 3
-                and all(isinstance(item, str) and bool(item) for item in sequence[:2])
-                and (sequence[2] is None or type(sequence[2]) is int)
-            )
-        store.read(measured["catalogue_digest"])
+
     else:
         require(
             kind in expected
@@ -952,6 +1015,44 @@ def _validate_evidence(
         )
         if kind == "authorization":
             store.read(cast(dict[str, str], result)["verification_digest"])
+
+
+def _verify_candidate_quiescence(
+    proof_digest: str, *, request: TransitionRequest, nonce: str, store: ArtifactStore
+) -> None:
+    proof = read_json(store.read(proof_digest))
+    _shape(proof, CandidateQuiescenceProofV1)
+    require(
+        proof["request_digest"] == request_digest(request)
+        and proof["host_nonce"] == nonce
+        and proof["before_digest"] == proof["after_digest"],
+        "candidate_mutation_observed",
+    )
+    before = store.read(cast(str, proof["before_digest"]))
+    require(before == store.read(cast(str, proof["after_digest"])))
+    document = read_json(before)
+    _shape(document, CandidateSnapshotV1)
+    snapshot = cast(CandidateSnapshotV1, document)
+    require(
+        snapshot["request_digest"] == request_digest(request)
+        and snapshot["host_nonce"] == nonce,
+        "candidate_snapshot_mismatch",
+    )
+    measured = snapshot["measurement"]
+    require(measured["track_counts"] is True and bool(measured["relations"]))
+    for row in measured["relations"]:
+        require(
+            len(row) == 7
+            and all(isinstance(item, str) and bool(item) for item in row[:2])
+            and all(type(item) is int and item >= 0 for item in row[2:])
+        )
+    for sequence in measured["sequences"]:
+        require(
+            len(sequence) == 3
+            and all(isinstance(item, str) and bool(item) for item in sequence[:2])
+            and (sequence[2] is None or type(sequence[2]) is int)
+        )
+    store.read(measured["catalogue_digest"])
 
 
 class CpMigrationTransitionReceiptV1(TypedDict):
@@ -993,6 +1094,7 @@ def verify_transition_prefix(
     host_nonce: str,
     evidence: Mapping[str, str],
     recovery: RecoveryContexts,
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
 ) -> None:
     """Join retained pre-DDL facts to the single authenticated host attempt.
 
@@ -1000,7 +1102,9 @@ def verify_transition_prefix(
     live observations. Retained bytes cannot replace those independent reads.
     """
     verify_authorization(request, authorization)
-    verify_predecessor(request, store=store, recovery=recovery)
+    verify_predecessor(
+        request, store=store, recovery=recovery, committed_contexts=committed_contexts
+    )
     reservation = read_json(store.read(request_digest(request), kind="reservation"))
     require(
         reservation
@@ -1039,6 +1143,7 @@ def verify_predecessor(
     store: ArtifactStore,
     recovery: RecoveryContexts,
     depth: int = 0,
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
 ) -> None:
     """Verify the complete independent chain anchor before host mutation or DDL."""
     require(depth < 32, "receipt_chain_too_deep")
@@ -1047,8 +1152,13 @@ def verify_predecessor(
         return
     raw = store.read(checksum, kind="receipt")
     prior = read_json(raw)
-    _shape(prior, CpMigrationTransitionReceiptV1)
-    previous = cast(CpMigrationTransitionReceiptV1, prior)
+    if prior.get("schema") == "dotmac.cp_committed_migration_receipt/1":
+        _shape(prior, CpCommittedMigrationReceiptV1)
+    else:
+        _shape(prior, CpMigrationTransitionReceiptV1)
+    previous = cast(
+        CpMigrationTransitionReceiptV1 | CpCommittedMigrationReceiptV1, prior
+    )
     require(
         previous["phase"] == "complete"
         and previous["request"]["target"] == request["source"],
@@ -1069,7 +1179,7 @@ def verify_predecessor(
         ),
         "predecessor_identity_mismatch",
     )
-    verify_receipt(
+    verify_any_receipt(
         raw,
         store=store,
         request=previous["request"],
@@ -1077,6 +1187,7 @@ def verify_predecessor(
         routing_gate=True,
         _depth=depth + 1,
         recovery=recovery,
+        committed_contexts=committed_contexts,
     )
 
 
@@ -1089,6 +1200,7 @@ def verify_receipt(
     recovery: RecoveryContexts,
     routing_gate: bool = False,
     _depth: int = 0,
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
 ) -> CpMigrationTransitionReceiptV1:
     require(_depth < 32, "receipt_chain_too_deep")
     reservation = read_json(store.read(request_digest(request), kind="reservation"))
@@ -1151,7 +1263,13 @@ def verify_receipt(
             evidence=validation_evidence,
             recovery=recovery,
         )
-    verify_predecessor(request, store=store, recovery=recovery, depth=_depth)
+    verify_predecessor(
+        request,
+        store=store,
+        recovery=recovery,
+        depth=_depth,
+        committed_contexts=committed_contexts,
+    )
     return value
 
 
@@ -1184,17 +1302,17 @@ class CpTransitionHost(Protocol):
         fence_digest: str,
         evidence: Mapping[str, str],
     ) -> bytes: ...
-    def target_heads(self, request: CpTransitionRequestV1, nonce: str) -> bytes: ...
-    def candidate_ready(self, request: CpTransitionRequestV1, nonce: str) -> bytes: ...
+    def target_heads(self, request: TransitionRequest, nonce: str) -> bytes: ...
+    def candidate_ready(self, request: TransitionRequest, nonce: str) -> bytes: ...
     def close_candidate_and_refence(
-        self, request: CpTransitionRequestV1, nonce: str
+        self, request: TransitionRequest, nonce: str
     ) -> bytes: ...
-    def restore_acl(self, request: CpTransitionRequestV1, nonce: str) -> bytes: ...
-    def full_ready(self, request: CpTransitionRequestV1, nonce: str) -> bytes: ...
+    def restore_acl(self, request: TransitionRequest, nonce: str) -> bytes: ...
+    def full_ready(self, request: TransitionRequest, nonce: str) -> bytes: ...
     def verify_pre_routing(self, receipt_bytes: bytes) -> bytes: ...
-    def restore_routing(self, request: CpTransitionRequestV1, nonce: str) -> bytes: ...
+    def restore_routing(self, request: TransitionRequest, nonce: str) -> bytes: ...
     def fail_closed(
-        self, request: CpTransitionRequestV1, nonce: str, *, acl_may_be_restored: bool
+        self, request: TransitionRequest, nonce: str, *, acl_may_be_restored: bool
     ) -> bytes: ...
 
 
@@ -1208,6 +1326,7 @@ def execute_transition(
     store: ArtifactStore,
     recovery: RecoveryContexts,
     clock: Callable[[], datetime],
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
 ) -> str:
     """Single-use CP owner. Failure never retries or restores public routing."""
     with host.lock():
@@ -1216,7 +1335,12 @@ def execute_transition(
         authorization = verifier.verify(
             request, request_path=request_path, bundle_path=bundle_path, now=now
         )
-        verify_predecessor(request, store=store, recovery=recovery)
+        verify_predecessor(
+            request,
+            store=store,
+            recovery=recovery,
+            committed_contexts=committed_contexts,
+        )
         inspection = host.inspect(request)
         validate_request(request, identity=verifier.policy.identity, now=clock())
         nonce = store.reserve(request, authorization)
@@ -1272,6 +1396,7 @@ def execute_transition(
                 host_nonce=nonce,
                 routing_gate=routing_gate,
                 recovery=recovery,
+                committed_contexts=committed_contexts,
             )
             checksum = store.put(raw, kind="receipt")
             return store.read(checksum, kind="receipt")
@@ -1311,6 +1436,7 @@ def execute_transition(
                 host_nonce=nonce,
                 evidence=evidence,
                 recovery=recovery,
+                committed_contexts=committed_contexts,
             )
             retain(
                 "migrate",
@@ -1325,31 +1451,742 @@ def execute_transition(
                     evidence=dict(evidence),
                 ),
             )
-            for kind, action in (
-                ("migrated-target-heads", host.target_heads),
-                ("candidate-ready", host.candidate_ready),
-                ("candidate-removed-fenced", host.close_candidate_and_refence),
-            ):
-                retain(kind, action(request, nonce))
-            receipt("pre-routing", routing_gate=False)
-            # Set before the call: partial ACL restoration also requires compensation.
-            acl_may_be_restored = True
-            retain("acl-restored", host.restore_acl(request, nonce))
-            retain("full-ready", host.full_ready(request, nonce))
-            pre_routing = receipt("pre-routing", routing_gate=True)
-            evidence["pre-routing-receipt"] = raw_digest(pre_routing)
-            retain("pre-routing-verified", host.verify_pre_routing(pre_routing))
-            del evidence["pre-routing-receipt"]
-            # Persist the independently checked AND gate before returning routing.
-            store.read(evidence["pre-routing-verified"])
-            retain("routing-restored", host.restore_routing(request, nonce))
-            return raw_digest(receipt("complete", routing_gate=True))
+            retain("migrated-target-heads", host.target_heads(request, nonce))
+
+            def mark_acl() -> None:
+                nonlocal acl_may_be_restored
+                acl_may_be_restored = True
+
+            return _execute_common_suffix(
+                request,
+                nonce=nonce,
+                host=host,
+                store=store,
+                evidence=evidence,
+                retain=retain,
+                receipt=receipt,
+                mark_acl=mark_acl,
+            )
+
         except BaseException as original:
             try:
                 failure = host.fail_closed(
                     request, nonce, acl_may_be_restored=acl_may_be_restored
                 )
                 retain("failure", failure)
+            except BaseException as compensation:
+                original.add_note(
+                    f"Fail-closed compensation failed: {type(compensation).__name__}"
+                )
+            raise
+
+
+def validate_committed_request(
+    value: object, *, identity: CpTransitionIdentity, now: datetime
+) -> CpCommittedMigrationRequestV1:
+    _shape(value, CpCommittedMigrationRequestV1)
+    request = cast(CpCommittedMigrationRequestV1, value)
+    require(now.tzinfo is not None)
+    require(
+        all(
+            cast(dict[str, object], request)[key] == getattr(identity, key)
+            for key in ("host", "database", "cluster_system_identifier", "database_oid")
+        ),
+        "host_mismatch",
+    )
+    require(
+        request["authorization_run_id"] > 0 and request["authorization_run_attempt"] > 0
+    )
+    require(
+        now < timestamp(request["expires_at"]) <= now + timedelta(hours=24), "expired"
+    )
+    require(
+        request["plan_digest"] == transition_plan_digest(request),
+        "plan_digest_mismatch",
+    )
+    for side in (request["source"], request["target"]):
+        require(bool(side["heads"]) and side["heads"] == sorted(set(side["heads"])))
+    require(request["source"]["image_digest"] != request["target"]["image_digest"])
+    return request
+
+
+def load_committed_request(
+    raw: bytes, *, identity: CpTransitionIdentity, now: datetime
+) -> CpCommittedMigrationRequestV1:
+    return validate_committed_request(read_json(raw), identity=identity, now=now)
+
+
+def validate_any_request(
+    value: TransitionRequest, *, identity: CpTransitionIdentity, now: datetime
+) -> TransitionRequest:
+    if value["schema"] == "dotmac.cp_committed_migration_request/1":
+        return validate_committed_request(value, identity=identity, now=now)
+    return validate_request(value, identity=identity, now=now)
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalAuthorization:
+    """Protected original verifier output and independently bounded execution time.
+
+    This evidence never carries the fresh gh execution witness.
+    """
+
+    policy: CpTransitionTrustPolicy
+    verification_bytes: bytes
+    execution_window_start: datetime
+    execution_window_end: datetime
+    request_name: str
+    protection_bytes: bytes
+    context_digest: str
+
+    def verify(self, request: CpTransitionRequestV1) -> None:
+        require(
+            self.execution_window_start.tzinfo is not None
+            and self.execution_window_end.tzinfo is not None
+        )
+        require(
+            self.execution_window_start <= self.execution_window_end,
+            "historical_execution_window_invalid",
+        )
+        sha(self.context_digest)
+        require(
+            raw_digest(self.protection_bytes)
+            == self.policy.environment_protection_digest,
+            "environment_protection_mismatch",
+        )
+        proof_document = read_json(self.protection_bytes)
+        _shape(proof_document, SingleUserManualV2)
+        proof = cast(SingleUserManualV2, proof_document)
+        require(
+            proof["repository_id"] == self.policy.repository_id
+            and proof["repository_owner_id"] == self.policy.repository_owner_id
+            and proof["workflow_revision"] == self.policy.workflow_revision
+            and proof["required_reviewer_ids"] == [int(self.policy.repository_owner_id)]
+            and request["trusted_actor"] == self.policy.repository.split("/", 1)[0]
+            and timestamp(proof["expires_at"]) > self.execution_window_end,
+            "environment_protection_mismatch",
+        )
+        for bound in (self.execution_window_start, self.execution_window_end):
+            validate_request(request, identity=self.policy.identity, now=bound)
+        _verify_authorization_report(
+            request,
+            policy=self.policy,
+            verification_bytes=self.verification_bytes,
+            request_name=self.request_name,
+            now=self.execution_window_start,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedMigrationContext:
+    prior_store: ArtifactStore
+    request: CpTransitionRequestV1
+    host_nonce: str
+    evidence: Mapping[str, str]
+    historical_authorization: HistoricalAuthorization
+    recovery: RecoveryContexts
+    original_proof: FenceProof
+    proof: FenceProof
+    context_digest: str
+    migration_claim_digest: str
+    migration_tree_digest: str
+    quiescence_digest: str
+
+    @property
+    def measurement(self) -> CandidateMeasurementV1:
+        proof_document = read_json(self.prior_store.read(self.quiescence_digest))
+        _shape(proof_document, CandidateQuiescenceProofV1)
+        proof = cast(CandidateQuiescenceProofV1, proof_document)
+        snapshot = read_json(self.prior_store.read(proof["after_digest"]))
+        _shape(snapshot, CandidateSnapshotV1)
+        return cast(CandidateSnapshotV1, snapshot)["measurement"]
+
+    def recovery_context(self) -> RecoveryContexts:
+        return self.recovery
+
+
+def committed_frontier_key(context: CommittedMigrationContext) -> str:
+    return digest(
+        {
+            "schema": "dotmac.cp_committed_frontier_key/1",
+            "prior_request_digest": request_digest(context.request),
+            "prior_host_nonce": context.host_nonce,
+        }
+    )
+
+
+def _frontier_claim(
+    context: CommittedMigrationContext,
+    request: CpCommittedMigrationRequestV1,
+    nonce: str,
+    fresh_reservation_digest: str,
+) -> dict[str, object]:
+    return {
+        "schema": "dotmac.cp_committed_frontier_reservation/1",
+        "frontier_key": committed_frontier_key(context),
+        "prior_request_digest": request_digest(context.request),
+        "prior_host_nonce": context.host_nonce,
+        "current_fence_digest": request["basis"]["current_fence_digest"],
+        "current_fence_id": request["basis"]["current_fence_id"],
+        "context_digest": context.context_digest,
+        "request_digest": request_digest(request),
+        "host_nonce": nonce,
+        "fresh_reservation_digest": fresh_reservation_digest,
+    }
+
+
+def verify_committed_frontier(
+    context: CommittedMigrationContext,
+    request: CpCommittedMigrationRequestV1,
+    *,
+    owned_frontier_claim: bytes | None = None,
+) -> None:
+    """Verify the exact original committed failure, never a relabelled prefix."""
+    import re
+
+    from vendor_cp.deployment.transition_fence import FenceProof
+
+    prior, store = context.request, context.prior_store
+    _shape(request, CpCommittedMigrationRequestV1)
+    context.historical_authorization.verify(prior)
+    reservation_raw = store.read(request_digest(prior), kind="reservation")
+    authorization_raw = context.historical_authorization.verification_bytes
+    require(
+        store.read(raw_digest(authorization_raw)) == authorization_raw,
+        "authorization_bytes_mismatch",
+    )
+    reservation = read_json(reservation_raw)
+    require(
+        reservation
+        == {
+            "schema": "dotmac.cp_transition_attempt/2",
+            "request_digest": request_digest(prior),
+            "host_nonce": context.host_nonce,
+            "authorization_run_id": prior["authorization_run_id"],
+            "authorization_run_attempt": prior["authorization_run_attempt"],
+            "verification_digest": raw_digest(authorization_raw),
+        },
+        "reservation_mismatch",
+    )
+    for name in (
+        "product",
+        "environment",
+        "host",
+        "database",
+        "cluster_system_identifier",
+        "database_oid",
+        "source",
+        "target",
+        "previous_receipt_digest",
+    ):
+        require(
+            cast(dict[str, object], request)[name]
+            == cast(dict[str, object], prior)[name],
+            "committed_target_or_identity_mismatch",
+        )
+    require(
+        (request["authorization_run_id"], request["authorization_run_attempt"])
+        != (prior["authorization_run_id"], prior["authorization_run_attempt"]),
+        "committed_authorization_reused",
+    )
+    for proof in (context.original_proof, context.proof):
+        FenceProof.from_document(
+            read_json(store.read(proof.digest())), expected_digest=proof.digest()
+        )
+        require(proof.database == prior["database"], "committed_fence_mismatch")
+    require(
+        context.original_proof.fence_id == context.host_nonce
+        and context.original_proof.prior_acl == context.proof.prior_acl
+        and context.original_proof.prior_grants == context.proof.prior_grants
+        and context.original_proof.member_roles == context.proof.member_roles
+        and context.original_proof.fenced_roles == context.proof.fenced_roles
+        and context.original_proof.absent_roles == context.proof.absent_roles,
+        "committed_fence_lineage_mismatch",
+    )
+    expected_basis = {
+        "context_digest": context.context_digest,
+        "prior_request_digest": request_digest(prior),
+        "prior_host_nonce": context.host_nonce,
+        "prior_reservation_digest": raw_digest(reservation_raw),
+        "prior_authorization_digest": raw_digest(authorization_raw),
+        "original_fence_digest": context.original_proof.digest(),
+        "current_fence_digest": context.proof.digest(),
+        "current_fence_id": context.proof.fence_id,
+        "frontier_measurement_digest": digest(context.measurement),
+    }
+    require(request["basis"] == expected_basis, "committed_basis_mismatch")
+    required = PRE_MIGRATION_EVIDENCE | {
+        "migrate",
+        "migrated-target-heads",
+        "failure",
+    }
+    require(set(context.evidence) == required, "committed_frontier_evidence_mismatch")
+    retained = dict(context.evidence)
+    for kind, checksum in retained.items():
+        _validate_evidence(
+            read_json(store.read(checksum)),
+            request=prior,
+            nonce=context.host_nonce,
+            kind=kind,
+            store=store,
+            evidence=retained,
+            recovery=context.recovery,
+        )
+    _verify_candidate_quiescence(
+        context.quiescence_digest, request=prior, nonce=context.host_nonce, store=store
+    )
+    claim = read_json(store.read(context.migration_claim_digest))
+    require(
+        claim
+        == {
+            "schema": "dotmac.cp_transition_migration_claim/1",
+            "request_digest": request_digest(prior),
+            "host_nonce": context.host_nonce,
+            "migration_tree_digest": context.migration_tree_digest,
+        },
+        "committed_migration_claim_mismatch",
+    )
+    tree = read_json(store.read(context.migration_tree_digest))
+    require(
+        set(tree) == {"schema", "revision", "files"}
+        and tree["schema"] == "dotmac.cp_transition_migration_tree/1"
+        and tree["revision"] == prior["target"]["revision"]
+        and isinstance(tree["files"], dict)
+        and bool(tree["files"]),
+        "committed_migration_tree_mismatch",
+    )
+    for path, checksum in cast(dict[str, str], tree["files"]).items():
+        require(
+            isinstance(path, str)
+            and not path.startswith("/")
+            and ".." not in Path(path).parts
+        )
+        sha(checksum)
+    verify_predecessor(prior, store=store, recovery=context.recovery)
+    # Scan all retained attempts, not merely the caller-selected evidence map.
+    directory = _open_directory(store.root)
+    try:
+        for name in os.listdir(directory):
+            match = re.fullmatch(
+                r"([0-9a-f]{64})\.(evidence|receipt|reservation)\.json", name
+            )
+            if match is None:
+                continue
+            raw = store.read("sha256:" + match[1], kind=match[2])
+            if match[2] == "reservation":
+                # This root-pinned directory belongs to one original attempt.
+                # History uses separate stores; unknown/partial reservations deny.
+                if "sha256:" + match[1] == request_digest(prior):
+                    require(
+                        raw == reservation_raw, "committed_reservation_contradiction"
+                    )
+                else:
+                    require(
+                        "sha256:" + match[1] == committed_frontier_key(context)
+                        and owned_frontier_claim is not None
+                        and raw == owned_frontier_claim,
+                        "committed_frontier_consumed",
+                    )
+                continue
+            try:
+                item = read_json(raw)
+            except ValueError:
+                continue
+            if item.get("request_digest") == request_digest(prior):
+                require(
+                    item.get("host_nonce") == context.host_nonce,
+                    "committed_later_attempt",
+                )
+                require(match[2] != "receipt", "committed_frontier_already_ready")
+                retained_kind = item.get("kind")
+                if retained_kind is not None:
+                    require(
+                        isinstance(retained_kind, str)
+                        and retained_kind in required
+                        and retained.get(retained_kind) == raw_digest(raw),
+                        "committed_frontier_contradiction",
+                    )
+            embedded = item.get("request")
+            if (
+                isinstance(embedded, dict)
+                and embedded != prior
+                and embedded.get("host") == prior["host"]
+                and embedded.get("database") == prior["database"]
+            ):
+                require(False, "committed_later_attempt")
+    finally:
+        os.close(directory)
+    if owned_frontier_claim is not None:
+        owned = read_json(owned_frontier_claim)
+        _shape(owned.get("host_nonce"), Nonce)
+        _shape(owned.get("fresh_reservation_digest"), Digest)
+        require(owned["host_nonce"] != context.host_nonce, "committed_nonce_reused")
+        require(
+            owned
+            == _frontier_claim(
+                context,
+                request,
+                cast(str, owned["host_nonce"]),
+                cast(str, owned["fresh_reservation_digest"]),
+            ),
+            "committed_frontier_owner_mismatch",
+        )
+    key = committed_frontier_key(context)
+    try:
+        existing = store.read(key, kind="reservation")
+    except FileNotFoundError:
+        require(owned_frontier_claim is None, "committed_frontier_claim_missing")
+    else:
+        require(
+            owned_frontier_claim is not None and existing == owned_frontier_claim,
+            "committed_frontier_consumed",
+        )
+
+
+class CpCommittedMigrationReceiptV1(TypedDict):
+    schema: Literal["dotmac.cp_committed_migration_receipt/1"]
+    request: CpCommittedMigrationRequestV1
+    request_digest: Digest
+    host_nonce: str
+    phase: Literal["pre-routing", "complete"]
+    historical_context_digest: Digest
+    frontier_reservation_digest: Digest
+    evidence: dict[Identifier, Digest]
+
+
+def _execute_common_suffix(
+    request: TransitionRequest,
+    *,
+    nonce: str,
+    host: CpTransitionHost,
+    store: ArtifactStore,
+    evidence: dict[str, str],
+    retain: Callable[[str, bytes], str],
+    receipt: Callable[..., bytes],
+    mark_acl: Callable[[], None],
+) -> str:
+    """One candidate/ACL/readiness/routing owner for both request variants."""
+    retain("candidate-ready", host.candidate_ready(request, nonce))
+    retain("candidate-removed-fenced", host.close_candidate_and_refence(request, nonce))
+    receipt("pre-routing", routing_gate=False)
+    mark_acl()
+    retain("acl-restored", host.restore_acl(request, nonce))
+    retain("full-ready", host.full_ready(request, nonce))
+    pre_routing = receipt("pre-routing", routing_gate=True)
+    evidence["pre-routing-receipt"] = raw_digest(pre_routing)
+    retain("pre-routing-verified", host.verify_pre_routing(pre_routing))
+    del evidence["pre-routing-receipt"]
+    store.read(evidence["pre-routing-verified"])
+    retain("routing-restored", host.restore_routing(request, nonce))
+    return raw_digest(receipt("complete", routing_gate=True))
+
+
+COMMITTED_PRE_ACL_EVIDENCE = {
+    "inspection",
+    "authorization",
+    "committed-rebound",
+    "migrated-target-heads",
+    "candidate-ready",
+    "candidate-removed-fenced",
+}
+
+
+def _validate_committed_evidence(
+    value: dict[str, object],
+    *,
+    request: CpCommittedMigrationRequestV1,
+    nonce: str,
+    kind: str,
+    store: ArtifactStore,
+    evidence: dict[str, str],
+    recovery: RecoveryContexts,
+) -> None:
+    if kind != "committed-rebound":
+        _validate_evidence(
+            value,
+            request=request,
+            nonce=nonce,
+            kind=kind,
+            store=store,
+            evidence=evidence,
+            recovery=recovery,
+        )
+        return
+    require(
+        value
+        == {
+            "schema": "dotmac.cp_transition_evidence/2",
+            "request_digest": request_digest(request),
+            "host_nonce": nonce,
+            "kind": kind,
+            "result": {
+                "prior_fence_id": request["basis"]["current_fence_id"],
+                "fence_id": nonce,
+                "original_fence_digest": request["basis"]["original_fence_digest"],
+                "current_fence_digest": request["basis"]["current_fence_digest"],
+            },
+        },
+        "committed_rebind_mismatch",
+    )
+
+
+def verify_committed_receipt(
+    raw: bytes,
+    *,
+    store: ArtifactStore,
+    request: CpCommittedMigrationRequestV1,
+    host_nonce: str,
+    recovery: RecoveryContexts,
+    context: CommittedMigrationContext,
+    routing_gate: bool = False,
+    _depth: int = 0,
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+) -> CpCommittedMigrationReceiptV1:
+    require(_depth < 32, "receipt_chain_too_deep")
+    reservation_raw = store.read(request_digest(request), kind="reservation")
+    reservation = read_json(reservation_raw)
+    require(
+        reservation
+        == {
+            "schema": "dotmac.cp_transition_attempt/2",
+            "request_digest": request_digest(request),
+            "host_nonce": host_nonce,
+            "authorization_run_id": request["authorization_run_id"],
+            "authorization_run_attempt": request["authorization_run_attempt"],
+            "verification_digest": reservation.get("verification_digest"),
+        },
+        "reservation_mismatch",
+    )
+    sha(reservation["verification_digest"])
+    claim = canonical_json(
+        _frontier_claim(context, request, host_nonce, raw_digest(reservation_raw))
+    )
+    verify_committed_frontier(context, request, owned_frontier_claim=claim)
+    document = read_json(raw)
+    _shape(document, CpCommittedMigrationReceiptV1)
+    value = cast(CpCommittedMigrationReceiptV1, document)
+    require(
+        value["request"] == request
+        and value["request_digest"] == request_digest(request)
+        and value["host_nonce"] == host_nonce
+        and value["historical_context_digest"] == context.context_digest
+        and value["frontier_reservation_digest"] == raw_digest(claim),
+        "committed_receipt_mismatch",
+    )
+    required = COMMITTED_PRE_ACL_EVIDENCE | (
+        RUNTIME_EVIDENCE if routing_gate else set()
+    )
+    allowed = COMMITTED_PRE_ACL_EVIDENCE | RUNTIME_EVIDENCE
+    if value["phase"] == "complete":
+        required |= RUNTIME_EVIDENCE | ROUTING_EVIDENCE
+        allowed |= ROUTING_EVIDENCE
+    require(required <= set(value["evidence"]) <= allowed, "receipt_phase_mismatch")
+    retained = dict(value["evidence"])
+    if "pre-routing-verified" in retained:
+        pre_routing = dict(value)
+        pre_routing["phase"] = "pre-routing"
+        pre_routing["evidence"] = {
+            key: checksum
+            for key, checksum in retained.items()
+            if key not in ROUTING_EVIDENCE
+        }
+        retained["pre-routing-receipt"] = raw_digest(canonical_json(pre_routing))
+        store.read(retained["pre-routing-receipt"], kind="receipt")
+    for kind, checksum in value["evidence"].items():
+        _validate_committed_evidence(
+            read_json(store.read(checksum)),
+            request=request,
+            nonce=host_nonce,
+            kind=kind,
+            store=store,
+            evidence=retained,
+            recovery=recovery,
+        )
+    return value
+
+
+def verify_any_receipt(
+    raw: bytes,
+    *,
+    store: ArtifactStore,
+    request: TransitionRequest,
+    host_nonce: str,
+    recovery: RecoveryContexts,
+    routing_gate: bool = False,
+    _depth: int = 0,
+    context: CommittedMigrationContext | None = None,
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+) -> CpMigrationTransitionReceiptV1 | CpCommittedMigrationReceiptV1:
+    if request["schema"] == "dotmac.cp_committed_migration_request/1":
+        context = context or (committed_contexts or {}).get(
+            request["basis"]["context_digest"]
+        )
+        require(context is not None, "committed_context_missing")
+        assert context is not None  # noqa: S101 - narrowed by require
+        return verify_committed_receipt(
+            raw,
+            store=store,
+            request=request,
+            host_nonce=host_nonce,
+            recovery=recovery,
+            routing_gate=routing_gate,
+            _depth=_depth,
+            context=context,
+            committed_contexts=committed_contexts,
+        )
+    return verify_receipt(
+        raw,
+        store=store,
+        request=request,
+        host_nonce=host_nonce,
+        recovery=recovery,
+        routing_gate=routing_gate,
+        _depth=_depth,
+        committed_contexts=committed_contexts,
+    )
+
+
+class CpCommittedTransitionHost(CpTransitionHost, Protocol):
+    def inspect_committed(
+        self, request: CpCommittedMigrationRequestV1, context: CommittedMigrationContext
+    ) -> bytes: ...
+    def rebind_committed(
+        self,
+        request: CpCommittedMigrationRequestV1,
+        nonce: str,
+        context: CommittedMigrationContext,
+    ) -> bytes: ...
+
+
+def execute_committed_continuation(
+    raw_request: bytes,
+    *,
+    request_path: Path,
+    bundle_path: Path | None,
+    verifier: GhAttestationVerifier,
+    host: CpCommittedTransitionHost,
+    store: ArtifactStore,
+    recovery: RecoveryContexts,
+    context: CommittedMigrationContext,
+    clock: Callable[[], datetime],
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+) -> str:
+    with host.lock():
+        now = clock()
+        request = load_committed_request(
+            raw_request, identity=verifier.policy.identity, now=now
+        )
+        authorization = verifier.verify(
+            request, request_path=request_path, bundle_path=bundle_path, now=now
+        )
+        verify_committed_frontier(context, request)
+        inspection = host.inspect_committed(request, context)
+        validate_committed_request(
+            request, identity=verifier.policy.identity, now=clock()
+        )
+        nonce = store.reserve(request, authorization)
+        reservation_raw = store.read(request_digest(request), kind="reservation")
+        claim = context.prior_store.reserve_committed_frontier(
+            context,
+            request,
+            host_nonce=nonce,
+            fresh_reservation_digest=raw_digest(reservation_raw),
+        )
+        verify_committed_frontier(context, request, owned_frontier_claim=claim)
+        evidence: dict[str, str] = {}
+        acl_may_be_restored = False
+
+        def retain(kind: str, raw: bytes) -> str:
+            _validate_committed_evidence(
+                read_json(raw),
+                request=request,
+                nonce=nonce,
+                kind=kind,
+                store=store,
+                evidence=evidence,
+                recovery=recovery,
+            )
+            checksum = store.put(raw)
+            evidence[kind] = checksum
+            return checksum
+
+        def local(kind: str, facts: object) -> bytes:
+            return canonical_json(
+                {
+                    "schema": "dotmac.cp_transition_evidence/2",
+                    "request_digest": request_digest(request),
+                    "host_nonce": nonce,
+                    "kind": kind,
+                    "result": facts,
+                }
+            )
+
+        def receipt(
+            phase: Literal["pre-routing", "complete"], *, routing_gate: bool
+        ) -> bytes:
+            value: CpCommittedMigrationReceiptV1 = {
+                "schema": "dotmac.cp_committed_migration_receipt/1",
+                "request": request,
+                "request_digest": request_digest(request),
+                "host_nonce": nonce,
+                "phase": phase,
+                "historical_context_digest": context.context_digest,
+                "frontier_reservation_digest": raw_digest(claim),
+                "evidence": dict(evidence),
+            }
+            raw = canonical_json(value)
+            verify_committed_receipt(
+                raw,
+                store=store,
+                request=request,
+                host_nonce=nonce,
+                recovery=recovery,
+                routing_gate=routing_gate,
+                context=context,
+                committed_contexts=committed_contexts,
+            )
+            return store.read(store.put(raw, kind="receipt"), kind="receipt")
+
+        try:
+            retain("inspection", local("inspection", read_json(inspection)))
+            auth_digest = store.put(authorization.verification_bytes)
+            retain(
+                "authorization",
+                local(
+                    "authorization",
+                    {
+                        "verification_digest": auth_digest,
+                        "run_id": authorization.authorization_run_id,
+                        "run_attempt": authorization.authorization_run_attempt,
+                        "trusted_actor": authorization.trusted_actor,
+                    },
+                ),
+            )
+            retain("committed-rebound", host.rebind_committed(request, nonce, context))
+            retain("migrated-target-heads", host.target_heads(request, nonce))
+
+            def mark_acl() -> None:
+                nonlocal acl_may_be_restored
+                acl_may_be_restored = True
+
+            return _execute_common_suffix(
+                request,
+                nonce=nonce,
+                host=host,
+                store=store,
+                evidence=evidence,
+                retain=retain,
+                receipt=receipt,
+                mark_acl=mark_acl,
+            )
+        except BaseException as original:
+            try:
+                retain(
+                    "failure",
+                    host.fail_closed(
+                        request, nonce, acl_may_be_restored=acl_may_be_restored
+                    ),
+                )
             except BaseException as compensation:
                 original.add_note(
                     f"Fail-closed compensation failed: {type(compensation).__name__}"

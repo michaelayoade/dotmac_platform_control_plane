@@ -110,6 +110,66 @@ The read-only GitHub repository connector on 2026-10-24 returned repository
 identity values are checked by both producer and workflow. That metadata query
 did not inspect or verify branch/environment protection.
 
+## Committed-migration continuation
+
+The 2026-10-26 source amendment permits one separate request variant through
+the existing operator and protected workflow. `CommittedMigrationPlanV1`
+retains the historical source, exact prior application target and predecessor,
+and adds an independently installed `operator_revision` plus a closed `basis`.
+The new plan digest includes a fixed continuation discriminator. The workflow
+still derives actor, run, attempt and expiry from its own protected context;
+the signed request digest commits to all continuation pins. The existing V1
+request and pre-restore held-fence loader do not accept this failure frontier.
+
+An independently protected `dotmac.cp_committed_migration_context/1` file
+binds the original request, reservation, authorization transcript, migration
+claim and tree, post-commit migration and target-head evidence, failure,
+quiescence snapshots, recovery bundle and original/current fence proofs.
+The failed prefix has no candidate-ready or later successful checkpoint.
+Candidate cleanup on failure retains its quiescence proof and snapshots but
+does not retain a successful closure stage; the continuation validates those
+actual bytes directly and independently measures current candidate absence.
+It must not manufacture a missing historical stage.
+
+Historical authorization is evidence only. Its separately pinned context
+contains the original trust policy/protection snapshot and protected raw
+`invocation.json` and `result.json` paths and digests. Their closed records bind
+the original request/run, work directory and failed owner result. The original
+`started_unix` and `completed_unix` bound execution; validate expiry and
+protection at both bounds, and verified issuance before that window. An
+attestation timestamp alone is insufficient, and this checker never creates
+a fresh execution witness from retained JSON.
+
+Under the canonical lock, admission verifies the retained prefix and original
+backup checksums, then measures current target heads, immutable application
+identity, maintenance, stopped incumbents, absent candidates, zero writers,
+strict ACL and original grant lineage. The complete canonical quiescence
+measurement must match across contexts, including catalogue, relation storage,
+counters, sequences and restart/reset facts. Snapshot request/nonce envelopes
+remain distinct. The existing target-only CONNECT check also runs before
+reservation and rebind, with no exception for system databases or PUBLIC grants.
+
+Fresh request reservation precedes an exclusive frontier reservation in the
+**original attempt store**, keyed only by original request digest and nonce.
+This prevents sibling contexts and distinct fresh artifact directories from
+consuming the same frontier. The fence proof's ID is not a database-side
+durable replay marker. Partial reservations remain consumed; neither is
+deleted or retried. Rebind uses the existing public fence owner and retains
+the original ACL baseline.
+
+Both request variants use one candidate/readiness/ACL/routing suffix. The
+continuation performs no capture, scratch restore or migration. Its distinct
+`dotmac.cp_committed_migration_receipt/1` verifies the original prefix and fresh
+suffix in their own contexts. Routing verification and subsequent V1 history
+explicitly dispatch this receipt type; historical recovery bindings remain
+under the original request key. Failed suffixes remain fenced and do not form
+a new resumable frontier. Returning to the old schema requires separately
+authorized recovery.
+
+This contract authorizes source implementation and isolated tests. Release,
+installation, any maintenance-database ACL repair, fresh protected job approval
+and live execution require their own concrete gates and authority.
+
 ## Immutable action sources and validation
 
 Pins were resolved through the official GitHub REST tag references and checked

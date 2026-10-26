@@ -318,3 +318,64 @@ def test_authorization_workflow_keeps_manual_gate_and_repeats_owner_guards():
     ):
         assert guard in workflow
     assert "names = {'cryptography', 'cffi', 'pycparser'}" in workflow
+
+
+def test_committed_plan_is_closed_and_operator_revision_is_independent(tmp_path):
+    value = plan()
+    value["operator_revision"] = "e" * 40
+    value["basis"] = {
+        "context_digest": "sha256:" + "1" * 64,
+        "prior_request_digest": "sha256:" + "2" * 64,
+        "prior_host_nonce": "3" * 64,
+        "prior_reservation_digest": "sha256:" + "4" * 64,
+        "prior_authorization_digest": "sha256:" + "5" * 64,
+        "original_fence_digest": "sha256:" + "6" * 64,
+        "current_fence_digest": "sha256:" + "7" * 64,
+        "current_fence_id": "8" * 64,
+        "frontier_measurement_digest": "sha256:" + "9" * 64,
+    }
+    # Canonical plan fields, including both new fields, are signed.
+    value["plan_digest"] = cp.digest(
+        {
+            "schema": "dotmac.cp_committed_migration_plan/1",
+            **{key: value[key] for key in cp.COMMITTED_PLAN_FIELDS},
+        }
+    )
+    authored = author(value)
+    assert authored["schema"] == "dotmac.cp_committed_migration_request/1"
+    assert authored["operator_revision"] != REVISION
+    identity = cp.CpTransitionIdentity("cp-production", "platform", "123456", 16384)
+    cp.load_committed_request(canonical_json(authored), identity=identity, now=NOW)
+    with pytest.raises(ContractError):
+        cp.load_request(canonical_json(authored), identity=identity, now=NOW)
+    producer.write_authorization(authored, tmp_path / "committed")
+    value["basis"]["unknown"] = "unsafe"
+    with pytest.raises(ContractError):
+        author(value)
+
+
+def test_old_plan_digest_accepts_closed_plan_without_schema_unchanged():
+    value = plan()
+    expected = cp.digest({key: value[key] for key in cp.PLAN_FIELDS})
+    assert cp.transition_plan_digest(value) == expected
+    assert (
+        cp.transition_plan_digest({**value, "schema": "dotmac.cp_transition_request/1"})
+        == expected
+    )
+
+
+def test_committed_plan_digest_binds_fixed_variant_discriminator():
+    value = {
+        **plan(),
+        "schema": "dotmac.cp_committed_migration_request/1",
+        "operator_revision": "e" * 40,
+        "basis": {"frontier": "pinned"},
+    }
+    payload = {key: value[key] for key in cp.COMMITTED_PLAN_FIELDS}
+    actual = cp.transition_plan_digest(value)
+    assert actual == cp.digest(
+        {"schema": "dotmac.cp_committed_migration_plan/1", **payload}
+    )
+    assert actual != cp.digest(payload)
+    assert actual != cp.digest({"schema": "dotmac.cp_transition_plan/1", **payload})
+    assert actual != cp.digest({key: value[key] for key in cp.PLAN_FIELDS})

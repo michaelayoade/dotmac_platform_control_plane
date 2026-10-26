@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       plan:
-        description: Closed TransitionPlanV1 JSON with reviewed plan_digest
+        description: Closed TransitionPlanV1 or CommittedMigrationPlanV1 JSON with reviewed plan_digest
         required: true
         type: string
 

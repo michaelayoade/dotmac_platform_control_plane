@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 import uuid
 from collections.abc import Callable, Iterator
@@ -11,7 +10,6 @@ from contextlib import contextmanager
 import pytest
 from psycopg import sql
 from sqlalchemy import Connection, create_engine, text
-from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
 from vendor_cp.deployment import transition_fence as fence_module
@@ -71,85 +69,6 @@ def _assert_connect_denied(url: str) -> None:
 
 def _roles(db: str) -> CandidateRoles:
     return CandidateRoles.for_run(database=db, run_id=uuid.uuid4().hex)
-
-
-@pytest.fixture
-def target_only_connect(
-    scratch_db: str,
-    postgres_url: str,
-    url_for: Callable[..., str],
-) -> Iterator[tuple[str, ...]]:
-    """Temporarily close other DBs only on the disposable PG16 test service.
-
-    The CI coordinate is the checked-in docker-compose.test.yml service.
-    A different isolated loopback test container needs an explicit opt-in.
-    Never run this fixture against a shared or remote database cluster.
-    """
-    parsed = make_url(postgres_url)
-    ci_disposable = (
-        parsed.host in {"localhost", "127.0.0.1"}
-        and parsed.port == 5439
-        and parsed.database == "vendor_cp_test"
-        and parsed.username == "postgres"
-    )
-    explicit_disposable = (
-        os.getenv("D16_DISPOSABLE_PG16") == "1"
-        and parsed.host in {"localhost", "127.0.0.1"}
-        and parsed.username == "postgres"
-    )
-    if not (ci_disposable or explicit_disposable):
-        pytest.fail("candidate ACL fixture requires a disposable loopback PG16")
-    target = scratch_db.rpartition("/")[2]
-    with _connect(url_for(postgres_url, target)) as owner:
-        databases = owner.execute(
-            text(
-                "SELECT datname, pg_get_userbyid(datdba) FROM pg_database "
-                "WHERE datallowconn AND datname <> :target ORDER BY datname"
-            ),
-            {"target": target},
-        ).all()
-        snapshots: dict[str, frozenset[tuple[str, str, bool, str]]] = {}
-        removed: dict[str, set[tuple[str, str, bool, str]]] = {}
-        for name, database_owner in databases:
-            grants = fence_module._current_grants(owner, str(name))
-            selected = {
-                grant
-                for grant in grants
-                if grant[1] == "CONNECT"
-                and grant[0] in {"", "app_user", "platform_api"}
-            }
-            if any(
-                grantor != database_owner or grantable
-                for _, _, grantable, grantor in selected
-            ):
-                pytest.fail("disposable cluster has an unsupported other-DB ACL")
-            snapshots[str(name)] = grants
-            removed[str(name)] = selected
-        try:
-            for name in snapshots:
-                quoted = owner.dialect.identifier_preparer.quote(name)
-                owner.execute(
-                    text(
-                        f"REVOKE CONNECT ON DATABASE {quoted} "
-                        "FROM PUBLIC, app_user, platform_api"
-                    )
-                )
-                expected = snapshots[name] - removed[name]
-                assert fence_module._current_grants(owner, name) == expected
-            yield tuple(snapshots)
-        finally:
-            for name, selected in removed.items():
-                quoted = owner.dialect.identifier_preparer.quote(name)
-                for grantee, _priv, _grantable, _grantor in sorted(selected):
-                    recipient = (
-                        "PUBLIC"
-                        if grantee == ""
-                        else owner.dialect.identifier_preparer.quote(grantee)
-                    )
-                    owner.execute(
-                        text(f"GRANT CONNECT ON DATABASE {quoted} TO {recipient}")
-                    )
-                assert fence_module._current_grants(owner, name) == snapshots[name]
 
 
 def _fence(conn: Connection, db: str, roles: CandidateRoles):  # type: ignore[no-untyped-def]

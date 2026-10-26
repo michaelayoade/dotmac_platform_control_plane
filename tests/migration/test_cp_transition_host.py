@@ -719,3 +719,286 @@ def test_held_fence_new_host_preserves_original_acl_through_failure_and_restore(
             connection.exec_driver_sql(f'DROP OWNED BY "{role}"')
             connection.exec_driver_sql(f'DROP ROLE IF EXISTS "{role}"')
         admin.dispose()
+
+
+@pytest.fixture
+def committed_pg_host(postgres_url, url_for, tmp_path, monkeypatch, request):
+    """Real PG admission with only installation/container boundaries replaced.
+
+    Dynamic fixture acquisition makes the explicit disposable guard precede
+    scratch creation and all maintenance-database ACL work.
+    """
+    from contextlib import contextmanager
+    from copy import deepcopy
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.pool import NullPool
+
+    from vendor_cp.deploy_agent.contracts import canonical_json
+    from vendor_cp.deployment import cp_transition_host as host_module
+    from vendor_cp.deployment import transition_fence as fence
+
+    parsed = make_url(postgres_url)
+    if not (
+        os.getenv("D16_DISPOSABLE_PG16") == "1"
+        and parsed.host in {"localhost", "127.0.0.1"}
+        and parsed.username == "postgres"
+    ):
+        pytest.fail("committed host tests require explicit disposable loopback PG16")
+    scratch = request.getfixturevalue("scratch_db")
+    database = scratch.rpartition("/")[2]
+    if getattr(request, "param", True):
+        request.getfixturevalue("target_only_connect")
+
+    @contextmanager
+    def connect(database, role="postgres", **kwargs):
+        engine = create_engine(
+            url_for(postgres_url, database, user=role),
+            isolation_level="AUTOCOMMIT",
+            poolclass=NullPool,
+        )
+        try:
+            with engine.connect() as connection:
+                yield connection
+        finally:
+            engine.dispose()
+
+    class Evidence:
+        def __init__(self):
+            self.values = {}
+            self.writes = []
+
+        def put(self, raw):
+            checksum = raw_digest(raw)
+            self.values[checksum] = raw
+            self.writes.append(checksum)
+            return checksum
+
+        def read(self, checksum, **kwargs):
+            if checksum not in self.values:
+                raise FileNotFoundError
+            return self.values[checksum]
+
+    heads = [f"committed_target_{i}" for i in range(7)]
+    with connect(database) as connection:
+        assert (
+            int(connection.exec_driver_sql("SHOW server_version_num").scalar_one())
+            // 10000
+            == 16
+        )
+        connection.exec_driver_sql(f'ALTER DATABASE "{database}" OWNER TO app_admin')
+        connection.exec_driver_sql(
+            "CREATE TABLE public.alembic_version (version_num varchar(64) PRIMARY KEY)"
+        )
+        connection.execute(
+            text("INSERT INTO public.alembic_version VALUES (:head)"),
+            [{"head": head} for head in heads],
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE public.committed_probe (value integer)"
+        )
+        connection.exec_driver_sql("CREATE SEQUENCE public.committed_sequence")
+        oid, cluster = connection.execute(
+            text(
+                "SELECT oid,(SELECT system_identifier::text FROM pg_control_system()) "
+                "FROM pg_database WHERE datname=current_database()"
+            )
+        ).one()
+        baseline = fence._current_grants(connection, database)
+        proof = fence.fence_writers(
+            connection, database=database, fence_id="a" * 64, session_wait_seconds=3
+        )
+    # NullPool closes the setup backend so pending tuple statistics are flushed
+    # before the historical quiescence measurement is established.
+    raw_descriptor = b"already independently verified target descriptor"
+    prior = {
+        "schema": "dotmac.cp_transition_request/1",
+        "host": "dedicated-test",
+        "database": database,
+        "database_oid": oid,
+        "cluster_system_identifier": cluster,
+        "source": {"heads": [f"historical_source_{i}" for i in range(6)]},
+        "target": {"heads": heads, "raw_descriptor_digest": raw_digest(raw_descriptor)},
+    }
+    with connect(database) as connection:
+        measurement = measure_candidate_quiescence(connection)
+    catalogue = measurement.pop("catalogue_bytes")
+    measurement["catalogue_digest"] = raw_digest(catalogue)
+    context = SimpleNamespace(
+        request=prior,
+        proof=proof,
+        original_proof=proof,
+        context_digest="test-verified-historical-context",
+        measurement=measurement,
+    )
+    fresh = {
+        **deepcopy(prior),
+        "schema": "dotmac.cp_committed_migration_request/1",
+        "operator_revision": "f" * 40,
+        "basis": {
+            "context_digest": context.context_digest,
+            "current_fence_digest": proof.digest(),
+            "current_fence_id": proof.fence_id,
+            "original_fence_digest": proof.digest(),
+            "frontier_measurement_digest": raw_digest(canonical_json(measurement)),
+        },
+    }
+    evidence = Evidence()
+    host = ExistingCpTransitionHost(
+        replace(_config(tmp_path), operator_revision="f" * 40),
+        store=evidence,
+        recovery={},
+        committed_context=context,
+    )
+    monkeypatch.setattr(host, "_connect", connect)
+    monkeypatch.setattr(host, "_inspect_installation", lambda *a: None)
+    monkeypatch.setattr(host, "_source_image_identity", lambda *a: "stopped-incumbent")
+    monkeypatch.setattr(
+        host,
+        "_writers",
+        lambda: [
+            {
+                "Image": "stopped-incumbent",
+                "State": {"Running": False},
+                "HostConfig": {"RestartPolicy": {"Name": "no"}},
+            }
+        ],
+    )
+    monkeypatch.setattr(host, "_docker", lambda *a: "")
+    monkeypatch.setattr(host, "_http", lambda *a, **k: None)
+    monkeypatch.setattr(host, "_maintenance", lambda: None)
+    monkeypatch.setattr(host, "_run", lambda *a, **k: pytest.fail("container mutation"))
+    monkeypatch.setattr(
+        host, "_source_matches", lambda *a: pytest.fail("source observed")
+    )
+    monkeypatch.setattr(host_module, "_read_protected", lambda *a: raw_descriptor)
+    try:
+        yield SimpleNamespace(
+            host=host,
+            request=fresh,
+            context=context,
+            connect=connect,
+            database=database,
+            baseline=baseline,
+            evidence=evidence,
+        )
+    finally:
+        with connect(database) as connection:
+            if host.roles is not None:
+                for role, _ in host.roles.bindings():
+                    if (
+                        connection.execute(
+                            text("SELECT 1 FROM pg_roles WHERE rolname=:role"),
+                            {"role": role},
+                        ).scalar_one_or_none()
+                        is not None
+                    ):
+                        connection.exec_driver_sql(f'DROP OWNED BY "{role}"')
+                        connection.exec_driver_sql(f'DROP ROLE "{role}"')
+            fence.restore_writers(
+                connection,
+                host.proof,
+                database=database,
+                expected_fence_id=host.proof.fence_id,
+                session_wait_seconds=3,
+            )
+            assert fence._current_grants(connection, database) == baseline
+
+
+def test_committed_pg_admission_rebind_and_candidate_failure_preserve_lineage(
+    committed_pg_host,
+):
+    """Actual queries/ACLs/roles; no candidate container or application startup."""
+    from types import SimpleNamespace
+
+    from vendor_cp.deployment import candidate_roles
+    from vendor_cp.deployment import transition_fence as fence
+    from vendor_cp.deployment.transition_evidence import read_current_migration_heads
+
+    state = committed_pg_host
+    host, request, context = state.host, state.request, state.context
+    host.inspect_committed(request, context)
+    assert state.evidence.writes == []  # Admission does not reserve or rebind.
+    nonce = "b" * 64
+    host._nonce = nonce  # Fresh executor reservation boundary is core-tested.
+    rebound = read_json(host.rebind_committed(request, nonce, context))
+    assert rebound["kind"] == "committed-rebound"
+    assert host.proof.fence_id == nonce
+    assert host.proof.prior_grants == state.baseline == context.proof.prior_grants
+    host._candidate_quiescence_before = host._quiescence_snapshot(request, nonce)
+    host.roles = candidate_roles.CandidateRoles.for_run(
+        database=state.database, run_id=nonce[:32]
+    )
+    host.launch = SimpleNamespace(run_id=nonce[:32])
+    host._candidate_created = True
+    with state.connect(state.database) as connection:
+        candidate_roles.create_roles(
+            connection, host.roles, host.proof, **host._candidate_arguments()
+        )
+    # The candidate fails after role creation and before container startup.
+    failure = read_json(host.fail_closed(request, nonce, acl_may_be_restored=False))
+    assert failure["kind"] == "failure"
+    assert not host._candidate_created and not host._candidate_started
+    assert host.proof.prior_grants == state.baseline
+    with state.connect(state.database) as connection:
+        assert (
+            list(read_current_migration_heads(connection)) == request["target"]["heads"]
+        )
+        assert fence.fence_is_holding(connection, host.proof)
+        assert not connection.execute(
+            text("SELECT rolname FROM pg_roles WHERE left(rolname,8)='vcp_d16_'")
+        ).all()
+
+
+@pytest.mark.parametrize(
+    "drift", ["catalogue", "data", "sequence", "reset", "storage", "heads"]
+)
+def test_committed_pg_live_drift_refuses_before_rebind(committed_pg_host, drift):
+    state = committed_pg_host
+    statements = {
+        "catalogue": (
+            "CREATE INDEX committed_probe_index ON public.committed_probe(value)"
+        ),
+        "data": "INSERT INTO public.committed_probe VALUES (1)",
+        "sequence": "SELECT nextval('public.committed_sequence')",
+        "reset": "SELECT pg_stat_reset()",
+        "storage": "TRUNCATE public.committed_probe",
+        "heads": "UPDATE public.alembic_version SET version_num='wrong' "
+        "WHERE version_num='committed_target_0'",
+    }
+    with state.connect(state.database) as connection:
+        connection.exec_driver_sql(statements[drift])
+        connection.exec_driver_sql("SELECT pg_stat_force_next_flush()")
+    expected = (
+        "committed_target_heads_mismatch"
+        if drift == "heads"
+        else "committed_measurement_drift"
+    )
+    with pytest.raises(ContractError, match=expected):
+        state.host.inspect_committed(state.request, state.context)
+    assert state.evidence.writes == []
+    assert state.host.proof is state.context.proof
+    assert state.host._request is None and state.host._nonce is None
+
+
+@pytest.mark.parametrize("committed_pg_host", [False], indirect=True)
+def test_committed_pg_public_other_database_connect_refuses_before_reservation(
+    committed_pg_host,
+):
+    from vendor_cp.deployment.candidate_roles import CandidateRoleRefused
+
+    state = committed_pg_host
+    with state.connect(state.database) as connection:
+        assert (
+            connection.execute(
+                text("SELECT has_database_privilege('app_user','postgres','CONNECT')")
+            ).scalar_one()
+            is True
+        )
+    with pytest.raises(CandidateRoleRefused, match="another database"):
+        state.host.inspect_committed(state.request, state.context)
+    assert state.evidence.writes == []
+    assert state.host.proof is state.context.proof
+    assert state.host._request is None and state.host._nonce is None

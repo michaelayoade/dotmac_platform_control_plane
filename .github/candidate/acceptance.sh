@@ -470,6 +470,7 @@ python3 - "$IMAGE" "$NATIVE_SOURCE_IMAGE" "$WORKDIR" <<'NATIVE_COORDINATES'
 import importlib.util
 import json
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -477,12 +478,17 @@ spec = importlib.util.spec_from_file_location("identity", ".github/candidate/rec
 identity = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(identity)
 coordinates = {}
+docker_image_ids = {}
 for side, image in zip(("target", "source"), sys.argv[1:3]):
     inspected, = json.loads(identity.docker("image", "inspect", image))
+    docker_image_id = inspected["Id"]
+    if not isinstance(docker_image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", docker_image_id):
+        raise ValueError("invalid inspected Docker image ID")
+    docker_image_ids[side] = docker_image_id
     revision = inspected["Config"]["Labels"]["org.opencontainers.image.revision"]
     platform = identity.platform({key.lower(): value for key, value in inspected.items()})
     path = pathlib.Path(sys.argv[3]) / (side + ".tar")
-    identity.docker("image", "save", "--platform", platform, "-o", str(path), image)
+    identity.docker("image", "save", "--platform", platform, "-o", str(path), docker_image_id)
     manifest, config, layers = identity.archive_oci_coordinate(path, platform, revision)
     if layers != inspected["RootFS"]["Layers"]:
         raise ValueError("exported layers differ from actual image")
@@ -490,6 +496,7 @@ for side, image in zip(("target", "source"), sys.argv[1:3]):
         layers=layers, source_revision=revision, platform=platform,
         coordinate_scope="acceptance-local OCI export; not future registry index")
     path.unlink()
+coordinates["docker_image_ids"] = docker_image_ids
 (pathlib.Path(sys.argv[3]) / "native-coordinate.json").write_text(json.dumps(coordinates))
 NATIVE_COORDINATES
 # Git bundles carry actual objects only: never runner .git/config, credential
@@ -516,6 +523,28 @@ pass "lane A: a correctly-owned restored copy upgrades through native_upgrade"
 pass "lane B: a wrongly-owned restored copy is refused before DDL by host source preflight"
 pass "database sensitivity: rollback-only CREATE SCHEMA succeeds for owner; SQLSTATE 42501 permission denied for database for wrong owner"
 pass "native authorization, target revision, tree bytes and durable replay sensitivities passed"
+
+# Synthetic contracts run by the native snapshot's actual Docker image ID, without
+# application checkout, database, Docker socket, host credentials or network.
+step "4a installed committed-migration continuation core/host/operator contracts"
+contract_image_id="$(python3 -I -B "$PWD/.github/candidate/committed_continuation_acceptance.py" \
+    prepare "$PWD" "$WORKDIR/continuation-checks" \
+    candidate-native-acceptance.json "$WORKDIR/native-coordinate.json" candidate-identity.json)" \
+    || fail "could not prepare lock-hashed continuation test tools"
+docker run --rm --pull never --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+    --volume "$WORKDIR/continuation-checks:/checks:ro" \
+    --entrypoint python "$contract_image_id" -I -B /checks/committed_continuation_acceptance.py run \
+    > candidate-committed-continuation-acceptance.json \
+    || fail "installed continuation contracts refused; see report/log"
+# Join full raw evidence and its digest to the already-retained native report;
+# the explicit scope keeps these synthetic vectors separate from native facts.
+python3 -I -B "$PWD/.github/candidate/committed_continuation_acceptance.py" \
+    bind candidate-native-acceptance.json candidate-committed-continuation-acceptance.json \
+    "$WORKDIR/native-coordinate.json" \
+    || fail "installed continuation report could not bind to the native candidate"
+pass "installed continuation contracts: every core/host/operator case executed; zero skips/errors/failures"
 
 step "5  database ownership, roles, grants and isolation"
 # `::text` on every flag, and it is load-bearing rather than tidy. PostgreSQL

@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, NotRequired, TypedDict, cast
@@ -104,6 +104,11 @@ class HeldFenceContextV1(TypedDict):
     failed_stage: Literal["source-restore-comparison"]
 
 
+class CommittedMigrationPinsV1(TypedDict):
+    path: str
+    digest: Digest
+
+
 class InstallationV1(TypedDict):
     schema: Literal["dotmac.cp_transition_installation/1"]
     identity: IdentityV1
@@ -112,6 +117,8 @@ class InstallationV1(TypedDict):
     artifact_directory: str
     historical_context_files: list[str]
     held_fence_context: NotRequired[HeldFencePinsV1]
+    committed_migration_context: NotRequired[CommittedMigrationPinsV1]
+    operator_revision: NotRequired[Revision]
 
 
 class BackupMetadataV1(TypedDict):
@@ -140,6 +147,58 @@ class HistoricalContextV1(TypedDict):
     backup: BackupMetadataV1
 
 
+class CommittedMigrationContextV1(TypedDict):
+    schema: Literal["dotmac.cp_committed_migration_context/1"]
+    prior_artifact_directory: str
+    request: cp.CpTransitionRequestV1
+    host_nonce: Annotated[str, r"[0-9a-f]{64}"]
+    reservation_digest: Digest
+    authorization_verification_digest: Digest
+    authorization_context_digest: Digest
+    original_fence_digest: Digest
+    current_fence_digest: Digest
+    current_fence_id: Annotated[str, r"[0-9a-f]{64}"]
+    evidence: dict[Identifier, Digest]
+    migration_claim_digest: Digest
+    migration_tree_digest: Digest
+    quiescence_digest: Digest
+    incumbent_roles: list[IncumbentV1]
+    backup: BackupMetadataV1
+
+
+class HistoricalAuthorizationContextV1(TypedDict):
+    schema: Literal["dotmac.cp_historical_authorization_context/1"]
+    trust: TrustV1
+    request_name: str
+    invocation_file: str
+    invocation_digest: Digest
+    result_file: str
+    result_digest: Digest
+
+
+class OriginalInvocationV1(TypedDict):
+    status: Literal["ONE_ATTEMPT_STARTED"]
+    run_id: int
+    started_unix: int
+    request_sha256: Annotated[str, r"[0-9a-f]{64}"]
+    bundle_sha256: Annotated[str, r"[0-9a-f]{64}"]
+
+
+class OriginalResultV1(TypedDict):
+    status: Literal["OWNER_RETURNED"]
+    exit: Literal[3]
+    stdout_bytes: int
+    stderr_bytes: int
+    work: str
+    completed_unix: int
+
+
+class HistoricalCommittedContextV1(TypedDict):
+    schema: Literal["dotmac.cp_committed_recovery_context/1"]
+    receipt_digest: Digest
+    committed_context: CommittedMigrationPinsV1
+
+
 @dataclass(frozen=True, slots=True)
 class Installation:
     policy: cp.CpTransitionTrustPolicy
@@ -147,6 +206,18 @@ class Installation:
     store: cp.ArtifactStore
     historical_context_files: tuple[Path, ...]
     held_fence_context: HeldFencePinsV1 | None = None
+    committed_migration_context: CommittedMigrationPinsV1 | None = None
+    operator_revision: str | None = None
+
+
+class _HostContinuationArguments(TypedDict, total=False):
+    held_fence: HeldFenceContinuation
+    committed_context: cp.CommittedMigrationContext
+    committed_contexts: dict[str, cp.CommittedMigrationContext]
+
+
+class _ExecutionContexts(TypedDict, total=False):
+    committed_contexts: dict[str, cp.CommittedMigrationContext]
 
 
 class TransitionOperatorRefused(Exception):
@@ -265,16 +336,9 @@ def _host_config(value: HostV1) -> CpTransitionHostConfig:
     )
 
 
-def load_installation(path: Path) -> Installation:
-    """Read an exact public policy through the core's protected-path owner."""
-    require(
-        sys.platform == "linux" and os.geteuid() == 0, "root_linux_operator_required"
-    )
-    document = read_json(cp._read_protected(path))
-    _shape(document, InstallationV1)
-    value = cast(InstallationV1, document)
-    identity = cp.CpTransitionIdentity(**value["identity"])
-    trust = value["trust"]
+def _trust_policy(
+    identity: cp.CpTransitionIdentity, trust: TrustV1
+) -> cp.CpTransitionTrustPolicy:
     require(
         trust["repository"] == producer.REPOSITORY
         and trust["repository_id"] == producer.REPOSITORY_ID
@@ -283,7 +347,7 @@ def load_installation(path: Path) -> Installation:
         and trust["predicate_type"] == producer.PREDICATE_TYPE,
         "installation_trust_mismatch",
     )
-    policy = cp.CpTransitionTrustPolicy(
+    return cp.CpTransitionTrustPolicy(
         identity=identity,
         repository=trust["repository"],
         repository_id=trust["repository_id"],
@@ -297,16 +361,42 @@ def load_installation(path: Path) -> Installation:
         environment_protection_proof=_path(trust["environment_protection_proof"]),
         environment_protection_digest=trust["environment_protection_digest"],
     )
+
+
+def load_installation(path: Path) -> Installation:
+    """Read an exact public policy through the core's protected-path owner."""
+    require(
+        sys.platform == "linux" and os.geteuid() == 0, "root_linux_operator_required"
+    )
+    document = read_json(cp._read_protected(path))
+    _shape(document, InstallationV1)
+    value = cast(InstallationV1, document)
+    identity = cp.CpTransitionIdentity(**value["identity"])
+    policy = _trust_policy(identity, value["trust"])
+    committed = value.get("committed_migration_context")
+    require(
+        committed is None or value.get("held_fence_context") is None,
+        "continuation_contexts_conflict",
+    )
+    require(
+        committed is None or value.get("operator_revision") is not None,
+        "committed_operator_revision_required",
+    )
     store = cp.ArtifactStore(_path(value["artifact_directory"]))
     _directory(store.root)
     paths = tuple(_path(item) for item in value["historical_context_files"])
     require(len(paths) == len(set(paths)) and len(paths) <= 32)
     return Installation(
         policy,
-        _host_config(value["host"]),
+        replace(
+            _host_config(value["host"]),
+            operator_revision=value.get("operator_revision"),
+        ),
         store,
         paths,
         value.get("held_fence_context"),
+        committed,
+        value.get("operator_revision"),
     )
 
 
@@ -445,14 +535,220 @@ def _load_held_fence(
     return result
 
 
+def _recovery_binding(
+    installation: Installation,
+    store: cp.ArtifactStore,
+    request: cp.CpTransitionRequestV1,
+    metadata: BackupMetadataV1,
+    incumbent_roles: list[IncumbentV1],
+) -> tuple[PlatformCpRecoveryBundle, PlatformBackupResult]:
+    """Reconstruct the existing recovery owner; never recapture or restore."""
+    identity = installation.policy.identity
+    source = store.read(request["source"]["raw_descriptor_digest"])
+    target = store.read(request["target"]["raw_descriptor_digest"])
+    require(
+        all(
+            cast(dict[str, int], metadata)[name] > 0
+            for name in (
+                "size_bytes",
+                "manifest_size_bytes",
+                "database_dump_size_bytes",
+                "globals_size_bytes",
+            )
+        )
+    )
+    root = _path(metadata["path"])
+    require(root.parent == installation.host.backup_directory)
+    directory = cp._open_directory(root)
+    try:
+        for name in BUNDLE_COMPONENTS:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                cp._protected(os.fstat(descriptor), directory=False)
+            finally:
+                os.close(descriptor)
+    finally:
+        os.close(directory)
+    owner = PlatformCpRecoveryBundle.for_transition(
+        installation.host.deploy_directory,
+        source_descriptor=source,
+        target_descriptor=target,
+        source_image=f"ghcr.io/michaelayoade/dotmac_vendor_control_plane@{request['source']['image_digest']}",
+        source_revision=request["source"]["revision"],
+        target_image=f"ghcr.io/michaelayoade/dotmac_vendor_control_plane@{request['target']['image_digest']}",
+        target_source_revision=request["target"]["revision"],
+        expected_source_heads=tuple(request["source"]["heads"]),
+        target=identity.host,
+        incumbent_roles=[
+            (role["role"], role["image_digest"]) for role in incumbent_roles
+        ],
+        host_id_file=installation.host.host_id_file,
+        compose_file=installation.host.compose_file,
+        env_file=installation.host.compose_env_file,
+        backup_dir=installation.host.backup_directory,
+        docker_bin=str(installation.host.docker_binary),
+    )
+    backup = PlatformBackupResult(**metadata)
+    require(owner.verify(backup), "historical_recovery_refused")
+    return owner, backup
+
+
+def _load_historical_authorization(
+    installation: Installation,
+    store: cp.ArtifactStore,
+    context: CommittedMigrationContextV1,
+) -> cp.HistoricalAuthorization:
+    document = read_json(store.read(context["authorization_context_digest"]))
+    _shape(document, HistoricalAuthorizationContextV1)
+    value = cast(HistoricalAuthorizationContextV1, document)
+    require(value["request_name"] == "request.json", "historical_subject_mismatch")
+    invocation_path = _path(value["invocation_file"])
+    result_path = _path(value["result_file"])
+    require(
+        invocation_path.name == "invocation.json"
+        and result_path.name == "result.json"
+        and invocation_path.parent == result_path.parent,
+        "historical_execution_records_mismatch",
+    )
+    invocation_raw = cp._read_protected(invocation_path)
+    result_raw = cp._read_protected(result_path)
+    require(
+        cp.raw_digest(invocation_raw) == value["invocation_digest"]
+        and cp.raw_digest(result_raw) == value["result_digest"],
+        "historical_execution_records_mismatch",
+    )
+    invocation_document = read_json(invocation_raw)
+    result_document = read_json(result_raw)
+    _shape(invocation_document, OriginalInvocationV1)
+    _shape(result_document, OriginalResultV1)
+    invocation = cast(OriginalInvocationV1, invocation_document)
+    result = cast(OriginalResultV1, result_document)
+    prior = context["request"]
+    require(
+        invocation["run_id"] == prior["authorization_run_id"]
+        and invocation["request_sha256"] == cp.request_digest(prior)[7:]
+        and result["work"] == str(invocation_path.parent)
+        and 0 < invocation["started_unix"] <= result["completed_unix"]
+        and result["stdout_bytes"] >= 0
+        and result["stderr_bytes"] >= 0,
+        "historical_execution_records_mismatch",
+    )
+    policy = _trust_policy(installation.policy.identity, value["trust"])
+    historical = cp.HistoricalAuthorization(
+        policy=policy,
+        verification_bytes=store.read(context["authorization_verification_digest"]),
+        execution_window_start=datetime.fromtimestamp(invocation["started_unix"], UTC),
+        execution_window_end=datetime.fromtimestamp(result["completed_unix"], UTC),
+        request_name=value["request_name"],
+        protection_bytes=cp._read_protected(policy.environment_protection_proof),
+        context_digest=context["authorization_context_digest"],
+    )
+    historical.verify(prior)
+    return historical
+
+
+def _load_committed_context(
+    installation: Installation,
+    pins: CommittedMigrationPinsV1 | None = None,
+) -> cp.CommittedMigrationContext | None:
+    """Load protected historical facts; fresh admission remains core-owned."""
+    pins = pins if pins is not None else installation.committed_migration_context
+    if pins is None:
+        return None
+    raw = cp._read_protected(_path(pins["path"]))
+    require(cp.raw_digest(raw) == pins["digest"], "committed_context_digest_mismatch")
+    document = read_json(raw)
+    _shape(document, CommittedMigrationContextV1)
+    value = cast(CommittedMigrationContextV1, document)
+    prior = value["request"]
+    require(
+        all(
+            cast(dict[str, object], prior)[key]
+            == getattr(installation.policy.identity, key)
+            for key in ("host", "database", "cluster_system_identifier", "database_oid")
+        ),
+        "historical_identity_mismatch",
+    )
+    store = cp.ArtifactStore(_path(value["prior_artifact_directory"]))
+    _directory(store.root)
+    require(
+        cp.raw_digest(store.read(cp.request_digest(prior), kind="reservation"))
+        == value["reservation_digest"],
+        "committed_reservation_digest_mismatch",
+    )
+    historical = _load_historical_authorization(installation, store, value)
+    owner, backup = _recovery_binding(
+        installation, store, prior, value["backup"], value["incumbent_roles"]
+    )
+    from vendor_cp.deployment.transition_fence import FenceProof
+
+    proofs = [
+        FenceProof.from_document(
+            read_json(store.read(checksum)), expected_digest=checksum
+        )
+        for checksum in (value["original_fence_digest"], value["current_fence_digest"])
+    ]
+    require(
+        proofs[1].fence_id == value["current_fence_id"],
+        "committed_fence_id_mismatch",
+    )
+    return cp.CommittedMigrationContext(
+        prior_store=store,
+        request=prior,
+        host_nonce=value["host_nonce"],
+        evidence=value["evidence"],
+        historical_authorization=historical,
+        recovery={cp.request_digest(prior): (owner, backup)},
+        original_proof=proofs[0],
+        proof=proofs[1],
+        context_digest=pins["digest"],
+        migration_claim_digest=value["migration_claim_digest"],
+        migration_tree_digest=value["migration_tree_digest"],
+        quiescence_digest=value["quiescence_digest"],
+    )
+
+
 def _load_recovery(
     installation: Installation,
+    *,
+    committed_contexts: dict[str, cp.CommittedMigrationContext] | None = None,
 ) -> dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]]:
     """Rebuild only independently root-installed historical recovery bindings."""
     recovery: dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]] = {}
+    contexts = committed_contexts if committed_contexts is not None else {}
     historical = []
+    committed_receipts = []
     for path in installation.historical_context_files:
         document = read_json(cp._read_protected(path))
+        if document.get("schema") == "dotmac.cp_committed_recovery_context/1":
+            _shape(document, HistoricalCommittedContextV1)
+            committed_entry = cast(HistoricalCommittedContextV1, document)
+            context = _load_committed_context(
+                installation, committed_entry["committed_context"]
+            )
+            require(context is not None, "historical_committed_context_missing")
+            assert context is not None  # noqa: S101 - narrowed by require
+            require(
+                context.context_digest not in contexts,
+                "duplicate_historical_committed_context",
+            )
+            contexts[context.context_digest] = context
+            for key, binding in context.recovery.items():
+                require(key not in recovery, "duplicate_historical_recovery")
+                recovery[key] = binding
+            raw = installation.store.read(
+                committed_entry["receipt_digest"], kind="receipt"
+            )
+            value = read_json(raw)
+            _shape(value, cp.CpCommittedMigrationReceiptV1)
+            receipt = cast(cp.CpCommittedMigrationReceiptV1, value)
+            require(
+                receipt["phase"] == "complete"
+                and receipt["historical_context_digest"] == context.context_digest,
+                "historical_committed_receipt_mismatch",
+            )
+            committed_receipts.append((raw, receipt, context))
+            continue
         _shape(document, HistoricalContextV1)
         entry = cast(HistoricalContextV1, document)
         request = entry["request"]
@@ -471,63 +767,25 @@ def _load_recovery(
         )
         key = cp.request_digest(request)
         require(key not in recovery)
-        source = installation.store.read(request["source"]["raw_descriptor_digest"])
-        target = installation.store.read(request["target"]["raw_descriptor_digest"])
         raw = installation.store.read(entry["receipt_digest"], kind="receipt")
         receipt_value = read_json(raw)
         _shape(receipt_value, cp.CpMigrationTransitionReceiptV1)
-        receipt = cast(cp.CpMigrationTransitionReceiptV1, receipt_value)
-        require(receipt["request"] == request and receipt["phase"] == "complete")
-        metadata = entry["backup"]
+        old_receipt = cast(cp.CpMigrationTransitionReceiptV1, receipt_value)
         require(
-            all(
-                cast(dict[str, int], metadata)[name] > 0
-                for name in (
-                    "size_bytes",
-                    "manifest_size_bytes",
-                    "database_dump_size_bytes",
-                    "globals_size_bytes",
-                )
-            )
+            old_receipt["request"] == request and old_receipt["phase"] == "complete"
         )
-        root = _path(metadata["path"])
-        require(root.parent == installation.host.backup_directory)
-        directory = cp._open_directory(root)
-        try:
-            for name in BUNDLE_COMPONENTS:
-                descriptor = os.open(
-                    name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory
-                )
-                try:
-                    cp._protected(os.fstat(descriptor), directory=False)
-                finally:
-                    os.close(descriptor)
-        finally:
-            os.close(directory)
-        owner = PlatformCpRecoveryBundle.for_transition(
-            installation.host.deploy_directory,
-            source_descriptor=source,
-            target_descriptor=target,
-            source_image=f"ghcr.io/michaelayoade/dotmac_vendor_control_plane@{request['source']['image_digest']}",
-            source_revision=request["source"]["revision"],
-            target_image=f"ghcr.io/michaelayoade/dotmac_vendor_control_plane@{request['target']['image_digest']}",
-            target_source_revision=request["target"]["revision"],
-            expected_source_heads=tuple(request["source"]["heads"]),
-            target=identity.host,
-            incumbent_roles=[
-                (role["role"], role["image_digest"])
-                for role in entry["incumbent_roles"]
-            ],
-            host_id_file=installation.host.host_id_file,
-            compose_file=installation.host.compose_file,
-            env_file=installation.host.compose_env_file,
-            backup_dir=installation.host.backup_directory,
-            docker_bin=str(installation.host.docker_binary),
+        owner, backup = _recovery_binding(
+            installation,
+            installation.store,
+            request,
+            entry["backup"],
+            entry["incumbent_roles"],
         )
-        backup = PlatformBackupResult(**metadata)
-        require(owner.verify(backup), "historical_recovery_refused")
         recovery[key] = (owner, backup)
-        historical.append((raw, request, receipt["host_nonce"]))
+        historical.append((raw, request, old_receipt["host_nonce"]))
+    verification_contexts: _ExecutionContexts = {}
+    if contexts:
+        verification_contexts["committed_contexts"] = contexts
     for raw, request, nonce in historical:
         cp.verify_receipt(
             raw,
@@ -535,6 +793,18 @@ def _load_recovery(
             request=request,
             host_nonce=nonce,
             recovery=recovery,
+            **verification_contexts,
+        )
+    for raw, receipt, context in committed_receipts:
+        cp.verify_committed_receipt(
+            raw,
+            store=installation.store,
+            request=receipt["request"],
+            host_nonce=receipt["host_nonce"],
+            recovery=recovery,
+            context=context,
+            committed_contexts=contexts,
+            routing_gate=True,
         )
     return recovery
 
@@ -546,43 +816,96 @@ def run_transition(
     try:
         installation = load_installation(config_file)
         raw = cp._read_protected(request_file)
-        request = cp.load_request(
-            raw, identity=installation.policy.identity, now=datetime.now(UTC)
-        )
+        schema = read_json(raw).get("schema")
+        request: cp.TransitionRequest
+        if schema == "dotmac.cp_transition_request/1":
+            request = cp.load_request(
+                raw, identity=installation.policy.identity, now=datetime.now(UTC)
+            )
+        else:
+            require(
+                schema == "dotmac.cp_committed_migration_request/1",
+                "unknown_transition_request",
+            )
+            request = cp.load_committed_request(
+                raw, identity=installation.policy.identity, now=datetime.now(UTC)
+            )
         if bundle_file is not None:
             cp._read_protected(bundle_file)
-        recovery = _load_recovery(installation)
-        held_fence = _load_held_fence(installation, request)
+        contexts: dict[str, cp.CommittedMigrationContext] = {}
+        recovery = _load_recovery(installation, committed_contexts=contexts)
+        context = None
+        held_fence = None
+        if request["schema"] == "dotmac.cp_committed_migration_request/1":
+            require(
+                request["operator_revision"] == installation.operator_revision,
+                "committed_operator_revision_mismatch",
+            )
+            context = _load_committed_context(installation)
+            require(context is not None, "committed_context_missing")
+            assert context is not None  # noqa: S101 - narrowed by require
+            contexts[context.context_digest] = context
+            for key, binding in context.recovery.items():
+                require(key not in recovery, "duplicate_historical_recovery")
+                recovery[key] = binding
+        else:
+            held_fence = _load_held_fence(installation, request)
         previous = request["previous_receipt_digest"]
         if previous is not None:
             prior_raw = installation.store.read(previous, kind="receipt")
             prior_value = read_json(prior_raw)
-            _shape(prior_value, cp.CpMigrationTransitionReceiptV1)
-            prior = cast(cp.CpMigrationTransitionReceiptV1, prior_value)
-            require(
-                cp.request_digest(prior["request"]) in recovery,
-                "historical_recovery_missing",
-            )
+            prior: cp.CpMigrationTransitionReceiptV1 | cp.CpCommittedMigrationReceiptV1
+            if prior_value.get("schema") == "dotmac.cp_committed_migration_receipt/1":
+                _shape(prior_value, cp.CpCommittedMigrationReceiptV1)
+                prior = cast(cp.CpCommittedMigrationReceiptV1, prior_value)
+                require(
+                    prior["historical_context_digest"] in contexts,
+                    "historical_recovery_missing",
+                )
+            else:
+                _shape(prior_value, cp.CpMigrationTransitionReceiptV1)
+                prior = cast(cp.CpMigrationTransitionReceiptV1, prior_value)
+                require(
+                    cp.request_digest(prior["request"]) in recovery,
+                    "historical_recovery_missing",
+                )
             require(prior["phase"] == "complete", "incomplete_previous_receipt")
-            cp.verify_receipt(
+            cp.verify_any_receipt(
                 prior_raw,
                 store=installation.store,
                 request=prior["request"],
                 host_nonce=prior["host_nonce"],
                 recovery=recovery,
+                committed_contexts=contexts,
+                routing_gate=True,
             )
         from vendor_cp.deployment.cp_transition_host import ExistingCpTransitionHost
 
-        if held_fence is None:
-            host = ExistingCpTransitionHost(
-                installation.host, store=installation.store, recovery=recovery
-            )
-        else:
-            host = ExistingCpTransitionHost(
-                installation.host,
+        options: _HostContinuationArguments = {}
+        if held_fence is not None:
+            options["held_fence"] = held_fence
+        if context is not None:
+            options["committed_context"] = context
+        if contexts:
+            options["committed_contexts"] = contexts
+        host = ExistingCpTransitionHost(
+            installation.host, store=installation.store, recovery=recovery, **options
+        )
+        execution_contexts: _ExecutionContexts = {}
+        if contexts:
+            execution_contexts["committed_contexts"] = contexts
+        if context is not None:
+            return cp.execute_committed_continuation(
+                raw,
+                request_path=request_file,
+                bundle_path=bundle_file,
+                verifier=cp.GhAttestationVerifier(installation.policy),
+                host=host,
                 store=installation.store,
                 recovery=recovery,
-                held_fence=held_fence,
+                context=context,
+                clock=lambda: datetime.now(UTC),
+                **execution_contexts,
             )
         return cp.execute_transition(
             raw,
@@ -593,6 +916,7 @@ def run_transition(
             store=installation.store,
             recovery=recovery,
             clock=lambda: datetime.now(UTC),
+            **execution_contexts,
         )
     except Exception:
         # Executor owns post-reservation compensation; never leak child output,

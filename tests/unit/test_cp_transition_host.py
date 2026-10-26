@@ -673,11 +673,14 @@ def test_keyless_full_runtime_refuses_disabled_agent(host, monkeypatch, tmp_path
         host._runtime_specification()
 
 
+@pytest.mark.parametrize("with_registry", [False, True])
 def test_migrate_passes_same_active_transaction_and_independent_observer(
-    host, monkeypatch
+    host, monkeypatch, with_registry
 ):
     from vendor_cp import migrations
 
+    registry = {"historical-context": object()} if with_registry else {}
+    host._committed_contexts = registry
     events = []
     observer = object()
 
@@ -699,6 +702,10 @@ def test_migrate_passes_same_active_transaction_and_independent_observer(
         assert kwargs["fence_connection"] is observer
         assert kwargs["evidence"] == {"source-genesis": "retained"}
         assert kwargs["host_nonce"] == "nonce"
+        if with_registry:
+            assert kwargs["committed_contexts"] is registry
+        else:
+            assert "committed_contexts" not in kwargs
         assert kwargs["repository_root"] == host.config.repository_root
         assert kwargs["git_binary"] == host.config.git_binary
         assert kwargs["git_binary_digest"] == host.config.git_binary_digest

@@ -65,9 +65,12 @@ from vendor_cp.deployment.cp_catalogue import (
 )
 from vendor_cp.deployment.cp_transition import (
     ArtifactStore,
+    CommittedMigrationContext,
+    CpCommittedMigrationRequestV1,
     CpTransitionRequestV1,
     RecoveryContexts,
     SourceObservation,
+    TransitionRequest,
     TransitionSideV1,
     VerifiedAuthorization,
     _open_directory,
@@ -76,7 +79,7 @@ from vendor_cp.deployment.cp_transition import (
     _read_protected,
     raw_digest,
     request_digest,
-    verify_receipt,
+    verify_any_receipt,
 )
 from vendor_cp.deployment.descriptor_binding import source_descriptor_declarations
 from vendor_cp.deployment.effects import (
@@ -296,6 +299,10 @@ def local_postgres_connection(
 ConnectionFactory = Callable[..., AbstractContextManager[Connection]]
 
 
+class _CommittedContextArguments(TypedDict, total=False):
+    committed_contexts: Mapping[str, CommittedMigrationContext]
+
+
 class _CandidateArguments(TypedDict):
     expected_digest: str
     expected_fence_id: str
@@ -337,6 +344,7 @@ class CpTransitionHostConfig:
     timeout_seconds: int = 180
     session_wait_seconds: float = 30
     connection: ConnectionFactory = local_postgres_connection
+    operator_revision: str | None = None
 
     def __post_init__(self) -> None:
         require(
@@ -575,19 +583,41 @@ class ExistingCpTransitionHost:
         recovery: RecoveryContexts,
         process: ProcessExecutor | None = None,
         held_fence: HeldFenceContinuation | None = None,
+        committed_context: CommittedMigrationContext | None = None,
+        committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.recovery = recovery
         self.process = process or SubprocessExecutor()
+        require(
+            held_fence is None or committed_context is None,
+            "continuation_contexts_mutually_exclusive",
+        )
         self._held_fence = held_fence
-        self.proof = held_fence.proof if held_fence else None
+        self._committed_context = committed_context
+        self._committed_contexts = dict(committed_contexts or {})
+        if committed_context is not None:
+            key = committed_context.context_digest
+            require(
+                key not in self._committed_contexts
+                or self._committed_contexts[key] is committed_context,
+                "committed_context_registry_conflict",
+            )
+            self._committed_contexts[key] = committed_context
+        self.proof = (
+            committed_context.proof
+            if committed_context is not None
+            else held_fence.proof
+            if held_fence
+            else None
+        )
         self.genesis: SourceObservation | None = None
         self.roles: candidate_roles.CandidateRoles | None = None
         self.launch: CandidateComposeLaunch | None = None
         self._source_descriptor = b""
         self._target_descriptor = b""
-        self._request: CpTransitionRequestV1 | None = None
+        self._request: TransitionRequest | None = None
         self._nonce: str | None = None
         self._routing_receipt: str | None = None
         self._candidate_created = False
@@ -712,7 +742,7 @@ class ExistingCpTransitionHost:
         )
 
     @staticmethod
-    def _identity(connection: Connection, request: CpTransitionRequestV1) -> None:
+    def _identity(connection: Connection, request: TransitionRequest) -> None:
         row = connection.execute(
             text("""SELECT current_database(),d.oid,
             (SELECT system_identifier::text FROM pg_control_system())
@@ -728,9 +758,16 @@ class ExistingCpTransitionHost:
             "database_identity_mismatch",
         )
 
-    def _bound(self, request: CpTransitionRequestV1, nonce: str) -> None:
+    def _bound(self, request: TransitionRequest, nonce: str) -> None:
         if self._held_fence is not None:
-            self._held_fence.bind(request, nonce)
+            require(request["schema"] == "dotmac.cp_transition_request/1")
+            self._held_fence.bind(cast(CpTransitionRequestV1, request), nonce)
+        if request.get("schema") == "dotmac.cp_committed_migration_request/1":
+            require(self._committed_context is not None, "committed_context_required")
+            assert self._committed_context is not None  # noqa: S101
+            self._committed_binding(
+                cast(CpCommittedMigrationRequestV1, request), self._committed_context
+            )
         require(self._request == request, "host_request_mismatch")
         if self._nonce is None:
             reservation = read_json(
@@ -741,7 +778,7 @@ class ExistingCpTransitionHost:
         require(self._nonce == nonce, "host_nonce_mismatch")
 
     def _evidence(
-        self, request: CpTransitionRequestV1, nonce: str, kind: str, result: object
+        self, request: TransitionRequest, nonce: str, kind: str, result: object
     ) -> bytes:
         self._bound(request, nonce)
         return canonical_json(
@@ -899,9 +936,7 @@ class ExistingCpTransitionHost:
             # exact immutable image still has to be the admitted source.
             require(info.get("Image") == source_id, "incumbent_image_mismatch")
 
-    def inspect(self, request: CpTransitionRequestV1) -> bytes:
-        if self._held_fence is not None:
-            self._held_fence.bind(request)
+    def _inspect_installation(self, request: TransitionRequest) -> None:
         require(
             sys.platform == "linux" and os.geteuid() == 0,
             "root_linux_operator_required",
@@ -941,6 +976,12 @@ class ExistingCpTransitionHost:
             re.fullmatch(r"\S+@sha256:[0-9a-f]{64}", config.postgres_image) is not None,
             "postgres_image_not_pinned",
         )
+
+    def inspect(self, request: CpTransitionRequestV1) -> bytes:
+        if self._held_fence is not None:
+            self._held_fence.bind(request)
+        self._inspect_installation(request)
+        config = self.config
         # Admission precedes even disposable image-inspection containers and
         # the executor's new reservation, as well as all transition mutations.
         with self._connect(request["database"]) as connection:
@@ -956,6 +997,202 @@ class ExistingCpTransitionHost:
         self._request = request
         return canonical_json(
             {"source": request["source"], "target": request["target"]}
+        )
+
+    def _committed_binding(
+        self,
+        request: CpCommittedMigrationRequestV1,
+        context: CommittedMigrationContext,
+    ) -> None:
+        require(
+            self._held_fence is None and self._committed_context is context,
+            "committed_context_mismatch",
+        )
+        require(
+            self.config.operator_revision is not None
+            and self.config.operator_revision == request["operator_revision"],
+            "operator_revision_mismatch",
+        )
+        require(
+            request["basis"]["context_digest"] == context.context_digest
+            and request["basis"]["current_fence_digest"] == context.proof.digest()
+            and request["basis"]["current_fence_id"] == context.proof.fence_id
+            and request["basis"]["original_fence_digest"]
+            == context.original_proof.digest(),
+            "committed_fence_basis_mismatch",
+        )
+        require(
+            request["source"] == context.request["source"]
+            and request["target"] == context.request["target"]
+            and all(
+                cast(Mapping[str, object], request)[key]
+                == cast(Mapping[str, object], context.request)[key]
+                for key in (
+                    "host",
+                    "database",
+                    "database_oid",
+                    "cluster_system_identifier",
+                )
+            ),
+            "committed_identity_mismatch",
+        )
+        require(
+            context.proof.prior_grants == context.original_proof.prior_grants,
+            "committed_original_grants_mismatch",
+        )
+
+    @staticmethod
+    def _check_committed_measurement(
+        request: CpCommittedMigrationRequestV1,
+        context: CommittedMigrationContext,
+        measurement: dict[str, object],
+    ) -> None:
+        measurement = dict(measurement)
+        catalogue = cast(bytes, measurement.pop("catalogue_bytes"))
+        measurement["catalogue_digest"] = raw_digest(catalogue)
+        require(
+            canonical_json(measurement) == canonical_json(context.measurement)
+            and raw_digest(canonical_json(measurement))
+            == request["basis"]["frontier_measurement_digest"],
+            "committed_measurement_drift",
+        )
+
+    def _committed_admission(
+        self,
+        request: CpCommittedMigrationRequestV1,
+        context: CommittedMigrationContext,
+    ) -> None:
+        """Only current-state reads; historical source six is never reobserved."""
+        self._committed_binding(request, context)
+        require(self.proof == context.proof, "committed_current_fence_mismatch")
+        self._http(self.config.external_ready_url, expected=503)
+        # The early forecast must precede every image/candidate/fence mutation.
+        with self._connect(request["database"]) as connection:
+            self._identity(connection, request)
+            self._check_fence_baseline(connection, request)
+            candidate_roles.require_planned_target_only_connect(
+                connection, database=request["database"]
+            )
+            require(
+                list(read_current_migration_heads(connection))
+                == context.request["target"]["heads"],
+                "committed_target_heads_mismatch",
+            )
+            require(
+                not connection.execute(
+                    text(
+                        "SELECT rolname FROM pg_roles WHERE "
+                        "left(rolname,8)='vcp_d16_'"
+                    )
+                ).all(),
+                "committed_candidate_roles_present",
+            )
+            require(
+                not connection.execute(
+                    text(
+                        "SELECT pid FROM pg_stat_activity WHERE "
+                        "left(usename,8)='vcp_d16_'"
+                    )
+                ).all(),
+                "committed_candidate_sessions_present",
+            )
+            measurement = measure_candidate_quiescence(connection)
+        self._check_committed_measurement(request, context, measurement)
+        descriptor = _read_protected(self.config.target_descriptor)
+        require(
+            raw_digest(descriptor) == request["target"]["raw_descriptor_digest"],
+            "committed_target_descriptor_mismatch",
+        )
+        self._target_descriptor = descriptor
+        self._source_image_identity(self.config.target_image, request["target"])
+        incumbent = self._source_image_identity(
+            self.config.source_image, context.request["source"]
+        )
+        writers = self._writers()
+        require(bool(writers), "incumbent_missing")
+        for info in writers:
+            require(info.get("Image") == incumbent, "incumbent_image_mismatch")
+            require(
+                cast(dict[str, object], info["State"])["Running"] is False
+                and cast(
+                    dict[str, object],
+                    cast(dict[str, object], info["HostConfig"])["RestartPolicy"],
+                )["Name"]
+                == "no",
+                "writer_stop_unproved",
+            )
+        # Include stopped resources: no prior candidate may be reused silently.
+        require(
+            not self._docker("ps", "-aq", "--filter", "name=vcp-d16-"),
+            "committed_candidate_containers_present",
+        )
+        # Compose labels survive a privileged container rename.
+        for identifier in self._docker(
+            "ps", "-aq", "--filter", "label=com.docker.compose.project"
+        ).splitlines():
+            info = self._container(identifier)
+            labels = cast(
+                dict[str, str],
+                cast(dict[str, object], info["Config"]).get("Labels", {}),
+            )
+            require(
+                not labels.get("com.docker.compose.project", "").startswith("vcp-d16-"),
+                "committed_candidate_containers_present",
+            )
+        self._strict(request)
+
+    def inspect_committed(
+        self,
+        request: CpCommittedMigrationRequestV1,
+        context: CommittedMigrationContext,
+    ) -> bytes:
+        self._inspect_installation(request)
+        self._committed_admission(request, context)
+        self._request = request
+        return canonical_json(
+            {"source": request["source"], "target": request["target"]}
+        )
+
+    def rebind_committed(
+        self,
+        request: CpCommittedMigrationRequestV1,
+        nonce: str,
+        context: CommittedMigrationContext,
+    ) -> bytes:
+        self._bound(request, nonce)
+        require(nonce != context.proof.fence_id, "committed_nonce_reused")
+        # Core owns the durable single-use prior-frontier claim under lock.
+        # A FenceProof ID is not a server-stored compare-and-swap token.
+        self._committed_admission(request, context)
+        with self._connect(request["database"]) as connection:
+            self._identity(connection, request)
+            self._check_fence_baseline(connection, request)
+            candidate_roles.require_planned_target_only_connect(
+                connection, database=request["database"]
+            )
+            self._check_committed_measurement(
+                request, context, measure_candidate_quiescence(connection)
+            )
+            self.proof = transition_fence.fence_writers(
+                connection,
+                database=request["database"],
+                fence_id=nonce,
+                session_wait_seconds=self.config.session_wait_seconds,
+                prior=context.proof,
+                expected_prior_fence_id=context.proof.fence_id,
+            )
+        self.store.put(canonical_json(self.proof.to_document()))
+        self._strict(request)
+        return self._evidence(
+            request,
+            nonce,
+            "committed-rebound",
+            {
+                "prior_fence_id": context.proof.fence_id,
+                "fence_id": nonce,
+                "original_fence_digest": request["basis"]["original_fence_digest"],
+                "current_fence_digest": request["basis"]["current_fence_digest"],
+            },
         )
 
     def _maintenance(self) -> None:
@@ -1034,7 +1271,7 @@ class ExistingCpTransitionHost:
             {"external_status": 503, "active_http": 0, "active_websockets": 0},
         )
 
-    def _strict(self, request: CpTransitionRequestV1) -> transition_fence.FenceProof:
+    def _strict(self, request: TransitionRequest) -> transition_fence.FenceProof:
         require(self.proof is not None, "fence_missing")
         assert self.proof is not None  # noqa: S101 - require above is runtime guard
         with self._connect(request["database"]) as connection:
@@ -1046,7 +1283,7 @@ class ExistingCpTransitionHost:
         self._negative_reconnect(request)
         return self.proof
 
-    def _negative_reconnect(self, request: CpTransitionRequestV1) -> None:
+    def _negative_reconnect(self, request: TransitionRequest) -> None:
         require(self.proof is not None, "fence_missing")
         assert self.proof is not None  # noqa: S101 - require above is runtime guard
         for role in (*self.proof.fenced_roles, *self.proof.member_roles):
@@ -1089,7 +1326,7 @@ class ExistingCpTransitionHost:
         )
 
     def _check_fence_baseline(
-        self, connection: Connection, request: CpTransitionRequestV1
+        self, connection: Connection, request: TransitionRequest
     ) -> None:
         """Read-only admission; never capture a held ACL as a fresh baseline."""
         if self.proof is None:
@@ -1666,6 +1903,9 @@ class ExistingCpTransitionHost:
     ) -> bytes:
         from vendor_cp.migrations import native_upgrade
 
+        historical_contexts: _CommittedContextArguments = {}
+        if self._committed_contexts:
+            historical_contexts["committed_contexts"] = self._committed_contexts
         self._bound(request, nonce)
         proof = self._strict(request)
         self._source_matches(request)
@@ -1692,6 +1932,7 @@ class ExistingCpTransitionHost:
                         repository_root=self.config.repository_root,
                         git_binary=self.config.git_binary,
                         git_binary_digest=self.config.git_binary_digest,
+                        **historical_contexts,
                     )
         self._strict(request)
         return self._evidence(
@@ -1705,7 +1946,7 @@ class ExistingCpTransitionHost:
             },
         )
 
-    def target_heads(self, request: CpTransitionRequestV1, nonce: str) -> bytes:
+    def target_heads(self, request: TransitionRequest, nonce: str) -> bytes:
         self._bound(request, nonce)
         self._strict(request)
         with self._connect(request["database"]) as connection:
@@ -1730,10 +1971,19 @@ class ExistingCpTransitionHost:
             "expected_fence_id": self.proof.fence_id,
         }
 
-    def candidate_ready(self, request: CpTransitionRequestV1, nonce: str) -> bytes:
+    def candidate_ready(self, request: TransitionRequest, nonce: str) -> bytes:
         self._bound(request, nonce)
         proof = self._strict(request)
-        require(request_digest(request) in self.recovery, "recovery_missing")
+        if request["schema"] == "dotmac.cp_committed_migration_request/1":
+            require(self._committed_context is not None, "committed_context_required")
+            assert self._committed_context is not None  # noqa: S101
+            historical = self._committed_context.recovery_context()
+            require(
+                request_digest(self._committed_context.request) in historical,
+                "recovery_missing",
+            )
+        else:
+            require(request_digest(request) in self.recovery, "recovery_missing")
         self.target_heads(request, nonce)
         self._candidate_backends_exited = False
         self._candidate_quiescence_before = self._quiescence_snapshot(request, nonce)
@@ -1777,7 +2027,7 @@ class ExistingCpTransitionHost:
         )
 
     def _materialize_candidate_environment(
-        self, request: CpTransitionRequestV1, run_id: str
+        self, request: TransitionRequest, run_id: str
     ) -> None:
         source = self.config.candidate_runtime_environment
         if source is None:
@@ -1932,7 +2182,7 @@ class ExistingCpTransitionHost:
         except DBAPIError:
             raise RuntimeError("candidate credential installation failed") from None
 
-    def _verify_candidate(self, request: CpTransitionRequestV1) -> None:
+    def _verify_candidate(self, request: TransitionRequest) -> None:
         require(
             self.roles is not None
             and self.proof is not None
@@ -1960,7 +2210,7 @@ class ExistingCpTransitionHost:
         )
 
     def close_candidate_and_refence(
-        self, request: CpTransitionRequestV1, nonce: str
+        self, request: TransitionRequest, nonce: str
     ) -> bytes:
         self._bound(request, nonce)
         require(
@@ -2030,7 +2280,7 @@ class ExistingCpTransitionHost:
             },
         )
 
-    def _quiescence_snapshot(self, request: CpTransitionRequestV1, nonce: str) -> bytes:
+    def _quiescence_snapshot(self, request: TransitionRequest, nonce: str) -> bytes:
         with self._connect(request["database"]) as connection:
             self._identity(connection, request)
             measurement = measure_candidate_quiescence(connection)
@@ -2046,7 +2296,7 @@ class ExistingCpTransitionHost:
         )
 
     def _finish_candidate_quiescence(
-        self, request: CpTransitionRequestV1, nonce: str
+        self, request: TransitionRequest, nonce: str
     ) -> str:
         require(
             self._candidate_quiescence_before is not None, "candidate_baseline_missing"
@@ -2079,7 +2329,7 @@ class ExistingCpTransitionHost:
         return self._candidate_quiescence_digest
 
     def _drain_candidates(
-        self, connection: Connection, request: CpTransitionRequestV1
+        self, connection: Connection, request: TransitionRequest
     ) -> None:
         require(self.roles is not None)
         assert self.roles is not None  # noqa: S101
@@ -2105,7 +2355,7 @@ class ExistingCpTransitionHost:
             require(time.monotonic() < deadline, "candidate_drain_failed")
             time.sleep(0.05)
 
-    def restore_acl(self, request: CpTransitionRequestV1, nonce: str) -> bytes:
+    def restore_acl(self, request: TransitionRequest, nonce: str) -> bytes:
         self._bound(request, nonce)
         proof = self._strict(request)
         require(
@@ -2135,7 +2385,7 @@ class ExistingCpTransitionHost:
             {"database": request["database"], "acl_difference": []},
         )
 
-    def _full_runtime(self, request: CpTransitionRequestV1) -> None:
+    def _full_runtime(self, request: TransitionRequest) -> None:
         require(self._acl_restored, "acl_not_restored")
         specification = self._runtime_specification()
         target_id = json.loads(
@@ -2236,7 +2486,7 @@ class ExistingCpTransitionHost:
             f"/platform/deploy/desired-state/{path}"
         )
 
-    def full_ready(self, request: CpTransitionRequestV1, nonce: str) -> bytes:
+    def full_ready(self, request: TransitionRequest, nonce: str) -> bytes:
         self._bound(request, nonce)
         # Compose reads the root-materialised runtime inputs. The selected image
         # is a fixed explicit env binding, never an environment inheritance.
@@ -2380,13 +2630,15 @@ class ExistingCpTransitionHost:
     def verify_pre_routing(self, receipt_bytes: bytes) -> bytes:
         require(self._request is not None and self._nonce is not None)
         assert self._request is not None and self._nonce is not None  # noqa: S101
-        verify_receipt(
+        verify_any_receipt(
             receipt_bytes,
             store=self.store,
             request=self._request,
             host_nonce=self._nonce,
             recovery=self.recovery,
             routing_gate=True,
+            context=self._committed_context,
+            committed_contexts=self._committed_contexts,
         )
         checksum = raw_digest(receipt_bytes)
         require(
@@ -2402,7 +2654,7 @@ class ExistingCpTransitionHost:
             {"receipt_digest": checksum},
         )
 
-    def restore_routing(self, request: CpTransitionRequestV1, nonce: str) -> bytes:
+    def restore_routing(self, request: TransitionRequest, nonce: str) -> bytes:
         self._bound(request, nonce)
         require(self._routing_receipt is not None, "routing_gate_missing")
         assert self._routing_receipt is not None  # noqa: S101
@@ -2417,7 +2669,7 @@ class ExistingCpTransitionHost:
         )
 
     def fail_closed(
-        self, request: CpTransitionRequestV1, nonce: str, *, acl_may_be_restored: bool
+        self, request: TransitionRequest, nonce: str, *, acl_may_be_restored: bool
     ) -> bytes:
         self._bound(request, nonce)
         if self.proof is None:
