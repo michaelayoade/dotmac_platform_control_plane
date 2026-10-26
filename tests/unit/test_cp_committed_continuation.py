@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import timedelta
 
 import pytest
@@ -33,6 +33,18 @@ def committed(store, trust, monkeypatch):
     old_host = Host(fail="candidate-ready")
     with pytest.raises(RuntimeError, match="candidate-ready"):
         execute(store, trust, monkeypatch, old_host)
+    # The real host retains this capture before restoring. It deliberately has
+    # no host_nonce: the recovery-restored evidence binds the verified backup.
+    _, backup = store.recovery[cp.request_digest(request())]
+    store.put(
+        canonical_json(
+            {
+                "schema": "dotmac.cp_transition_recovery_capture/1",
+                "request_digest": cp.request_digest(request()),
+                "backup": asdict(backup),
+            }
+        )
+    )
     evidence = {}
     quiescence = None
     for item in store.root.glob("*.evidence.json"):
@@ -304,6 +316,89 @@ def run(committed, name="fresh", fail=None):
         clock=lambda: now,
     )
     return store, host, checksum
+
+
+def test_exact_retained_producer_capture_is_admitted_after_backup_verification(
+    committed,
+):
+    context, value, *_ = committed
+    _, backup = context.recovery[cp.request_digest(context.request)]
+    capture = canonical_json(
+        {
+            "schema": "dotmac.cp_transition_recovery_capture/1",
+            "request_digest": cp.request_digest(context.request),
+            "backup": asdict(backup),
+        }
+    )
+    assert "host_nonce" not in cp.read_json(capture)
+    assert isinstance(
+        json.loads(context.historical_authorization.verification_bytes), list
+    )
+    assert context.prior_store.read(cp.raw_digest(capture)) == capture
+    cp.verify_committed_frontier(context, value)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "path",
+        "checksum",
+        "size_bytes",
+        "database_dump_sha256",
+        "database_dump_size_bytes",
+        "globals_sha256",
+        "extra_key",
+        "backup_extra_key",
+        "sibling_nonce",
+        "unknown_nonce_free",
+        "noncanonical_bytes",
+        "receipt_kind",
+    ],
+)
+def test_only_exact_evidence_capture_bytes_are_recognized(committed, mutation):
+    context, value, *_ = committed
+    _, backup = context.recovery[cp.request_digest(context.request)]
+    capture = {
+        "schema": "dotmac.cp_transition_recovery_capture/1",
+        "request_digest": cp.request_digest(context.request),
+        "backup": asdict(backup),
+    }
+    if mutation == "path":
+        capture["backup"][mutation] += "/other"
+    elif mutation in {"checksum", "database_dump_sha256", "globals_sha256"}:
+        capture["backup"][mutation] = (
+            "f" * 64 if mutation == "checksum" else "sha256:" + "f" * 64
+        )
+    elif mutation in {"size_bytes", "database_dump_size_bytes"}:
+        capture["backup"][mutation] += 1
+    elif mutation == "extra_key":
+        capture["unexpected"] = True
+    elif mutation == "backup_extra_key":
+        capture["backup"]["unexpected"] = True
+    elif mutation == "sibling_nonce":
+        capture["host_nonce"] = "f" * 64
+    elif mutation == "unknown_nonce_free":
+        capture["schema"] = "dotmac.unknown_nonce_free/1"
+    raw = (
+        json.dumps(capture, indent=2).encode()
+        if mutation == "noncanonical_bytes"
+        else canonical_json(capture)
+    )
+    context.prior_store.put(
+        raw, kind="receipt" if mutation == "receipt_kind" else "evidence"
+    )
+    with pytest.raises(ContractError, match="committed_later_attempt"):
+        cp.verify_committed_frontier(context, value)
+
+
+def test_exact_capture_cannot_bypass_bound_backup_owner_verification(
+    committed, monkeypatch
+):
+    context, value, *_ = committed
+    owner, _ = context.recovery[cp.request_digest(context.request)]
+    monkeypatch.setattr(owner, "verify", lambda backup: False)
+    with pytest.raises(ContractError, match="recovery_owner_refused"):
+        cp.verify_committed_frontier(context, value)
 
 
 def test_historical_expiry_is_not_renewed_and_fresh_expiry_is_required(committed):
