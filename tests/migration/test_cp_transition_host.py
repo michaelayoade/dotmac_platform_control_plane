@@ -657,6 +657,7 @@ def test_held_fence_new_host_preserves_original_acl_through_failure_and_restore(
         prior = cast(
             CpTransitionRequestV1,
             {
+                "schema": "dotmac.cp_transition_request/1",
                 "product": "dotmac_vendor_control_plane",
                 "environment": "production",
                 "host": "dedicated-test",
