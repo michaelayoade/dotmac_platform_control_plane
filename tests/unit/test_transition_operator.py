@@ -130,6 +130,136 @@ def test_explicit_configuration_constructs_existing_owners(load) -> None:
     assert installed.historical_context_files == ()
 
 
+def test_committed_installation_pins_operator_and_excludes_held_context(load):
+    value = document()
+    value["committed_migration_context"] = {"path": "/opt/cp/context", "digest": SHA}
+    with pytest.raises(ContractError, match="operator_revision_required"):
+        load(value)
+    value["operator_revision"] = "c" * 40
+    installed = load(value)
+    assert installed.operator_revision == installed.host.operator_revision == "c" * 40
+    value["held_fence_context"] = {
+        "path": "/opt/cp/held",
+        "digest": SHA,
+        "proof_digest": SHA,
+        "fence_id": "d" * 64,
+    }
+    with pytest.raises(ContractError, match="contexts_conflict"):
+        load(value)
+
+
+@pytest.fixture
+def historical_execution(load, monkeypatch):
+    installed = load(document())
+    prior = request()
+    start = int(datetime.now(UTC).timestamp())
+    invocation = {
+        "status": "ONE_ATTEMPT_STARTED",
+        "run_id": prior["authorization_run_id"],
+        "started_unix": start,
+        "request_sha256": cp.request_digest(prior)[7:],
+        "bundle_sha256": "b" * 64,
+    }
+    result = {
+        "status": "OWNER_RETURNED",
+        "exit": 3,
+        "stdout_bytes": 201,
+        "stderr_bytes": 8482,
+        "work": "/opt/cp/original",
+        "completed_unix": start + 60,
+    }
+    context = {
+        "schema": "dotmac.cp_historical_authorization_context/1",
+        "trust": document()["trust"],
+        "request_name": "request.json",
+        "invocation_file": "/opt/cp/original/invocation.json",
+        "invocation_digest": cp.raw_digest(canonical_json(invocation)),
+        "result_file": "/opt/cp/original/result.json",
+        "result_digest": cp.raw_digest(canonical_json(result)),
+    }
+    reads = {}
+    seen = {}
+
+    def historical(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(verify=lambda value: seen.update(prior=value))
+
+    monkeypatch.setattr(cp, "HistoricalAuthorization", historical)
+    monkeypatch.setattr(cp, "_read_protected", lambda path: reads[path])
+
+    def run():
+        raw = canonical_json(context)
+        key = cp.raw_digest(raw)
+        blobs = {key: raw, SHA: b"retained-verification"}
+        reads[Path("/opt/cp/original/invocation.json")] = canonical_json(invocation)
+        reads[Path("/opt/cp/original/result.json")] = canonical_json(result)
+        reads[Path("/opt/cp/protection.json")] = b"protected-policy-snapshot"
+        return op._load_historical_authorization(
+            installed,
+            SimpleNamespace(read=lambda checksum: blobs[checksum]),
+            {
+                "request": prior,
+                "authorization_context_digest": key,
+                "authorization_verification_digest": SHA,
+            },
+        )
+
+    return run, invocation, result, context, seen
+
+
+def test_historical_execution_window_comes_from_both_protected_records(
+    historical_execution,
+):
+    run, invocation, result, _context, seen = historical_execution
+    run()
+    assert seen["execution_window_start"] == datetime.fromtimestamp(
+        invocation["started_unix"], UTC
+    )
+    assert seen["execution_window_end"] == datetime.fromtimestamp(
+        result["completed_unix"], UTC
+    )
+    assert seen["verification_bytes"] == b"retained-verification"
+    assert seen["prior"]["authorization_run_id"] == invocation["run_id"]
+
+
+@pytest.mark.parametrize("field", ["run_id", "request_sha256", "started_unix", "extra"])
+def test_changed_original_invocation_cannot_supply_historical_time(
+    historical_execution, field
+):
+    run, invocation, _result, context, _seen = historical_execution
+    invocation[field] = 0 if field in {"run_id", "started_unix"} else "changed"
+    context["invocation_digest"] = cp.raw_digest(canonical_json(invocation))
+    with pytest.raises(ContractError):
+        run()
+
+
+@pytest.mark.parametrize("field", ["work", "completed_unix", "exit", "extra"])
+def test_changed_original_completion_cannot_supply_historical_time(
+    historical_execution, field
+):
+    run, _invocation, result, context, _seen = historical_execution
+    result[field] = 0 if field in {"completed_unix", "exit"} else "changed"
+    context["result_digest"] = cp.raw_digest(canonical_json(result))
+    with pytest.raises(ContractError):
+        run()
+
+
+def test_original_execution_record_raw_digest_is_required(historical_execution):
+    run, invocation, _result, _context, _seen = historical_execution
+    invocation["started_unix"] += 1
+    with pytest.raises(ContractError, match="records_mismatch"):
+        run()
+
+
+def test_committed_context_raw_pin_is_independent_of_request(load, monkeypatch):
+    installed = load(document())
+    monkeypatch.setattr(cp, "_read_protected", lambda path: b"{}")
+    with pytest.raises(ContractError, match="context_digest_mismatch"):
+        op._load_committed_context(
+            installed, {"path": "/opt/cp/context", "digest": SHA}
+        )
+
+
 @pytest.mark.parametrize("section", [None, "identity", "trust", "host"])
 def test_unknown_or_secret_configuration_fields_refused(load, section) -> None:
     value = document()
@@ -492,3 +622,120 @@ def test_historical_reconstruction_uses_backup_and_receipt_owners(
     assert seen["backup"].checksum == "a" * 64
     assert seen["receipt"]["recovery"] is result
     assert seen["receipt"]["request"] == entry["request"]
+
+
+def committed_request():
+    value = {
+        **request(),
+        "schema": "dotmac.cp_committed_migration_request/1",
+        "authorization_run_id": 124,
+        "operator_revision": "c" * 40,
+        "basis": {
+            "context_digest": SHA,
+            "prior_request_digest": SHA,
+            "prior_host_nonce": "d" * 64,
+            "prior_reservation_digest": SHA,
+            "prior_authorization_digest": SHA,
+            "original_fence_digest": SHA,
+            "current_fence_digest": SHA,
+            "current_fence_id": "d" * 64,
+            "frontier_measurement_digest": SHA,
+        },
+    }
+    value["plan_digest"] = cp.transition_plan_digest(value)
+    return value
+
+
+def test_operator_dispatches_committed_request_without_v1_execution(load, monkeypatch):
+    from vendor_cp.deployment import cp_transition_host
+
+    value = document()
+    value["operator_revision"] = "c" * 40
+    value["committed_migration_context"] = {"path": "/opt/cp/context", "digest": SHA}
+    installed = load(value)
+    raw = canonical_json(committed_request())
+    binding = object()
+    context = SimpleNamespace(context_digest=SHA, recovery={"original-key": binding})
+    seen = {}
+    monkeypatch.setattr(op, "load_installation", lambda path: installed)
+    monkeypatch.setattr(cp, "_read_protected", lambda path: raw)
+    monkeypatch.setattr(op, "_load_committed_context", lambda installation: context)
+
+    def host(config, **kwargs):
+        seen.update(host=kwargs)
+        return SimpleNamespace()
+
+    def execute(raw_request, **kwargs):
+        assert raw_request == raw
+        assert kwargs["context"] is context
+        assert kwargs["recovery"] == {"original-key": binding}
+        assert kwargs["committed_contexts"] == {SHA: context}
+        return TARGET
+
+    monkeypatch.setattr(cp_transition_host, "ExistingCpTransitionHost", host)
+    monkeypatch.setattr(cp, "execute_committed_continuation", execute)
+    monkeypatch.setattr(
+        cp, "execute_transition", lambda *a, **kw: pytest.fail("V1 used")
+    )
+    assert (
+        op.run_transition(config_file=Path("/config"), request_file=Path("/request"))
+        == TARGET
+    )
+    assert seen["host"]["committed_context"] is context
+    assert seen["host"]["committed_contexts"] == {SHA: context}
+
+
+def test_operator_refuses_different_operator_revision_before_context_loading(
+    load, monkeypatch
+):
+    value = document()
+    value["operator_revision"] = "e" * 40
+    installed = load(value)
+    raw = canonical_json(committed_request())
+    monkeypatch.setattr(op, "load_installation", lambda path: installed)
+    monkeypatch.setattr(cp, "_read_protected", lambda path: raw)
+    monkeypatch.setattr(
+        op, "_load_committed_context", lambda *a: pytest.fail("context loaded")
+    )
+    with pytest.raises(op.TransitionOperatorRefused, match="CP_TRANSITION_REFUSED"):
+        op.run_transition(config_file=Path("/config"), request_file=Path("/request"))
+
+
+def test_history_loads_explicit_committed_receipt_and_both_contexts(load, monkeypatch):
+    value = document()
+    value["historical_context_files"] = ["/opt/cp/history"]
+    installed = load(value)
+    entry = {
+        "schema": "dotmac.cp_committed_recovery_context/1",
+        "receipt_digest": TARGET,
+        "committed_context": {"path": "/opt/cp/context", "digest": SHA},
+    }
+    current = committed_request()
+    receipt = {
+        "schema": "dotmac.cp_committed_migration_receipt/1",
+        "request": current,
+        "request_digest": cp.request_digest(current),
+        "host_nonce": "e" * 64,
+        "phase": "complete",
+        "historical_context_digest": SHA,
+        "frontier_reservation_digest": TARGET,
+        "evidence": {},
+    }
+    binding = object()
+    context = SimpleNamespace(context_digest=SHA, recovery={"original-key": binding})
+    monkeypatch.setattr(cp, "_read_protected", lambda path: canonical_json(entry))
+    monkeypatch.setattr(op, "_load_committed_context", lambda *a: context)
+    monkeypatch.setattr(
+        installed.store, "read", lambda *a, **kw: canonical_json(receipt)
+    )
+    seen = {}
+    monkeypatch.setattr(
+        cp, "verify_committed_receipt", lambda raw, **kw: seen.update(kw)
+    )
+    contexts = {}
+    assert op._load_recovery(installed, committed_contexts=contexts) == {
+        "original-key": binding
+    }
+    assert contexts == {SHA: context}
+    assert seen["context"] is context and seen["routing_gate"] is True
+    assert seen["committed_contexts"] is contexts

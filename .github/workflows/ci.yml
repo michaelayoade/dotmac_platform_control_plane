@@ -94,6 +94,8 @@ jobs:
       # prints skips; under required CI a suite that can pass by skipping is
       # not a gate, which is exactly how this suite stayed silently unrun.
       REQUIRE_POSTGRES_TESTS: "1"
+      # Mutation probes are confined to this job's disposable loopback PG16.
+      D16_DISPOSABLE_PG16: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

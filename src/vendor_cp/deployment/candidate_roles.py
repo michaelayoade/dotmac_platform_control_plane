@@ -368,7 +368,9 @@ def _require_candidate_acl_delta(
     _require_originals_denied(conn, roles, proof)
 
 
-def _require_target_only_connect(conn: Connection, roles: CandidateRoles) -> None:
+def _require_target_only_connect_for(
+    conn: Connection, *, database: str, app: str, platform: str
+) -> None:
     """A PostgreSQL LOGIN is cluster-wide, so inspect every connectable DB."""
     other_database = conn.execute(
         text(
@@ -378,12 +380,33 @@ def _require_target_only_connect(conn: Connection, roles: CandidateRoles) -> Non
             "OR has_database_privilege(:platform, d.datname, 'CONNECT')) "
             "LIMIT 1"
         ),
-        {"target": roles.database, "app": roles.app, "platform": roles.platform},
+        {"target": database, "app": app, "platform": platform},
     ).scalar_one_or_none()
     if other_database is not None:
         raise CandidateRoleRefused(
             "a candidate identity can CONNECT to another database"
         )
+
+
+def require_planned_target_only_connect(conn: Connection, *, database: str) -> None:
+    """Read-only forecast for candidates inheriting their sole planned parents.
+
+    Effective parent CONNECT includes PUBLIC and inherited privileges, even on
+    postgres/template1. The target fence changes only the target database ACL.
+    This prerequisite creates no roles and replaces neither activation's check
+    of the actual identities nor its membership and role-shape proofs.
+    """
+    if _existing(conn, _PARENTS) != set(_PARENTS):
+        raise CandidateRoleRefused("a required writer parent role is absent")
+    _require_target_only_connect_for(
+        conn, database=database, app=_PARENTS[0], platform=_PARENTS[1]
+    )
+
+
+def _require_target_only_connect(conn: Connection, roles: CandidateRoles) -> None:
+    _require_target_only_connect_for(
+        conn, database=roles.database, app=roles.app, platform=roles.platform
+    )
 
 
 def deactivate(

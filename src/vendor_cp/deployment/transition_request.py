@@ -16,6 +16,7 @@ from typing import Literal, TypedDict, cast
 from vendor_cp.deploy_agent.contracts import (
     Digest,
     Identifier,
+    Revision,
     _shape,
     canonical_json,
     read_json,
@@ -23,13 +24,15 @@ from vendor_cp.deploy_agent.contracts import (
     sha,
 )
 from vendor_cp.deployment.cp_transition import (
+    COMMITTED_PLAN_FIELDS,
     PLAN_FIELDS,
+    CommittedMigrationBasisV1,
     CpTransitionIdentity,
-    CpTransitionRequestV1,
+    TransitionRequest,
     TransitionSideV1,
     raw_digest,
     request_digest,
-    validate_request,
+    validate_any_request,
 )
 
 REPOSITORY = "michaelayoade/dotmac_platform_control_plane"
@@ -55,13 +58,30 @@ class TransitionPlanV1(TypedDict):
     plan_digest: Digest
 
 
+class CommittedMigrationPlanV1(TypedDict):
+    """Closed signed historical frontier plus independently pinned operator."""
+
+    product: Literal["dotmac_vendor_control_plane"]
+    environment: Literal["production"]
+    host: Identifier
+    database: Identifier
+    cluster_system_identifier: str
+    database_oid: int
+    source: TransitionSideV1
+    target: TransitionSideV1
+    previous_receipt_digest: Digest | None
+    operator_revision: Revision
+    basis: CommittedMigrationBasisV1
+    plan_digest: Digest
+
+
 def author_request(
     plan_raw: bytes,
     *,
     context: Mapping[str, str],
     expected_revision: str,
     now: datetime,
-) -> CpTransitionRequestV1:
+) -> TransitionRequest:
     """Validate exact plan and reviewed workflow context before authoring bytes.
 
     The revision identifies the authorization workflow, independently of both
@@ -94,8 +114,9 @@ def author_request(
     actor = context.get("GITHUB_ACTOR", "")
     _shape(actor, Identifier)
     document = read_json(plan_raw)
-    _shape(document, TransitionPlanV1)
-    plan = cast(TransitionPlanV1, document)
+    committed = "basis" in document or "operator_revision" in document
+    _shape(document, CommittedMigrationPlanV1 if committed else TransitionPlanV1)
+    plan = cast(TransitionPlanV1 | CommittedMigrationPlanV1, document)
     identity = CpTransitionIdentity(
         plan["host"],
         plan["database"],
@@ -103,13 +124,18 @@ def author_request(
         plan["database_oid"],
     )
     request = cast(
-        CpTransitionRequestV1,
+        TransitionRequest,
         {
             **{
                 key: cast(dict[str, object], plan)[key]
-                for key in (*PLAN_FIELDS, "plan_digest")
+                for key in (
+                    *(COMMITTED_PLAN_FIELDS if committed else PLAN_FIELDS),
+                    "plan_digest",
+                )
             },
-            "schema": "dotmac.cp_transition_request/1",
+            "schema": "dotmac.cp_committed_migration_request/1"
+            if committed
+            else "dotmac.cp_transition_request/1",
             "authorization_run_id": numbers[0],
             "authorization_run_attempt": numbers[1],
             "trusted_actor": actor,
@@ -119,10 +145,10 @@ def author_request(
             .replace("+00:00", "Z"),
         },
     )
-    return validate_request(request, identity=identity, now=now)
+    return validate_any_request(request, identity=identity, now=now)
 
 
-def write_authorization(request: CpTransitionRequestV1, output: Path) -> dict[str, str]:
+def write_authorization(request: TransitionRequest, output: Path) -> dict[str, str]:
     """Write canonical request and the verifier's exact three-field predicate."""
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     raw = canonical_json(request)

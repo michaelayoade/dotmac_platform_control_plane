@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from vendor_cp.deployment.cp_transition import (
         ArtifactStore,
+        CommittedMigrationContext,
         CpTransitionRequestV1,
         RecoveryContexts,
         VerifiedAuthorization,
@@ -539,6 +540,7 @@ def native_upgrade(
     repository_root: Path,
     git_binary: Path,
     git_binary_digest: str,
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
 ) -> None:
     """Apply the composed CP graph once on the caller's exact transaction.
 
@@ -593,6 +595,7 @@ def native_upgrade(
         host_nonce=host_nonce,
         evidence=evidence,
         recovery=recovery,
+        **({"committed_contexts": committed_contexts} if committed_contexts else {}),
     )
     previous_bytecode = sys.dont_write_bytecode
     sys.dont_write_bytecode = True

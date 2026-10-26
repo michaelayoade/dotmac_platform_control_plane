@@ -400,6 +400,15 @@ disagree, fix the drift.
     remain binding. Size alone requires no additional approval and never
     substitutes for those checks or explicit live-cutover authorization.
 
+    **Committed-migration continuation amendment (2026-10-26):** the existing
+    CP owners may implement a separately typed continuation from a verified
+    committed migration and failed candidate prerequisite. Historical evidence
+    retains its original request and nonce; fresh protected authorization and
+    an exclusive claim in the original attempt store control the suffix.
+    The application target cannot change, DDL and capture cannot replay, and
+    the original V1 and pre-restore held-context contracts remain closed.
+    This source-and-test amendment grants no live activation or publication.
+
     **`3` and `4` are different numbers and stay different**, including through
     `docker compose run`, which propagates the container's status unchanged. An
     owner refused and there is no evidence look identical from outside and mean

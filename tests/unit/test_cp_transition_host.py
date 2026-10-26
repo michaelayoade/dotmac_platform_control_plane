@@ -152,6 +152,70 @@ def test_target_descriptor_drift_refuses_before_docker(host):
     assert process.commands == []
 
 
+@pytest.mark.parametrize("other_database", [None, "postgres", "template1"])
+def test_candidate_connect_forecast_precedes_processes_and_transition_mutations(
+    host, monkeypatch, tmp_path, other_database
+):
+    actions = []
+    queries = []
+    docker = tmp_path / "docker"
+    docker.write_text("unit boundary")
+    docker.chmod(0o700)
+    host.config = replace(host.config, docker_binary=docker)
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        module, "_open_directory", lambda path: os.open(tmp_path, os.O_RDONLY)
+    )
+    monkeypatch.setattr(
+        module,
+        "_read_protected",
+        lambda path: b"host" if path == host.config.host_id_file else b"maintenance",
+    )
+    host.config = replace(
+        host.config, maintenance_helper_digest=raw_digest(b"maintenance")
+    )
+
+    def execute(sql, parameters):
+        queries.append((str(sql), parameters))
+        if "FROM pg_roles" in str(sql):
+            return SimpleNamespace(scalars=lambda: ["app_user", "platform_api"])
+        actions.append("candidate-connect-forecast")
+        return SimpleNamespace(scalar_one_or_none=lambda: other_database)
+
+    connection = SimpleNamespace(execute=execute)
+    monkeypatch.setattr(host, "_connect", lambda *a: nullcontext(connection))
+    monkeypatch.setattr(host, "_identity", lambda *a: actions.append("identity"))
+    monkeypatch.setattr(
+        host, "_check_fence_baseline", lambda *a: actions.append("baseline")
+    )
+    monkeypatch.setattr(host, "_docker", lambda *a: actions.append("docker"))
+    monkeypatch.setattr(host, "_image", lambda *a: actions.append("image"))
+    monkeypatch.setattr(host, "_source_matches", lambda *a: actions.append("source"))
+    monkeypatch.setattr(host, "_run", lambda *a, **k: pytest.fail("process ran"))
+    monkeypatch.setattr(host, "_maintenance", lambda: pytest.fail("maintenance ran"))
+    request = cast(
+        CpTransitionRequestV1,
+        {"host": "host", "database": "cp", "source": {}, "target": {}},
+    )
+    if other_database is not None:
+        with pytest.raises(
+            module.candidate_roles.CandidateRoleRefused, match="another database"
+        ):
+            host.inspect(request)
+        assert host._request is None
+    else:
+        host.inspect(request)
+    assert actions[:3] == ["identity", "baseline", "candidate-connect-forecast"]
+    assert actions[3:] == ([] if other_database else ["docker", "image", "source"])
+    assert all(sql.startswith("SELECT ") for sql, _ in queries)
+    assert queries[-1][1] == {
+        "target": "cp",
+        "app": "app_user",
+        "platform": "platform_api",
+    }
+
+
 @pytest.fixture
 def historic_source_descriptor():
     raw = (
@@ -609,11 +673,14 @@ def test_keyless_full_runtime_refuses_disabled_agent(host, monkeypatch, tmp_path
         host._runtime_specification()
 
 
+@pytest.mark.parametrize("with_registry", [False, True])
 def test_migrate_passes_same_active_transaction_and_independent_observer(
-    host, monkeypatch
+    host, monkeypatch, with_registry
 ):
     from vendor_cp import migrations
 
+    registry = {"historical-context": object()} if with_registry else {}
+    host._committed_contexts = registry
     events = []
     observer = object()
 
@@ -635,6 +702,10 @@ def test_migrate_passes_same_active_transaction_and_independent_observer(
         assert kwargs["fence_connection"] is observer
         assert kwargs["evidence"] == {"source-genesis": "retained"}
         assert kwargs["host_nonce"] == "nonce"
+        if with_registry:
+            assert kwargs["committed_contexts"] is registry
+        else:
+            assert "committed_contexts" not in kwargs
         assert kwargs["repository_root"] == host.config.repository_root
         assert kwargs["git_binary"] == host.config.git_binary
         assert kwargs["git_binary_digest"] == host.config.git_binary_digest
