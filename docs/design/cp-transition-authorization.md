@@ -166,6 +166,24 @@ under the original request key. Failed suffixes remain fenced and do not form
 a new resumable frontier. Returning to the old schema requires separately
 authorized recovery.
 
+The distinct 2026-10-26 `FAILED-CANDIDATE` source-only amendment permits one
+generation from exactly a failed committed-migration V1 predecessor. Admission
+requires affirmative failure and equal quiescence, the unchanged full `7ef`
+measurement and a separately pinned new operator revision, no later stage,
+receipt or candidate residue, and the complete
+original and failed authorization, reservation, claim and fence chain. Its
+exclusive deterministic claim is in the failed store derived from the pinned
+`installation.json`: its sibling `artifact-store`, with the retained
+`native-attempt-<run>-<attempt>` execution records under that same operator root.
+Renamed installations, copied stores and changed execution bindings refuse.
+The original `7f` store, claim, backup
+and fixed application target remain unchanged. There is no recursive successor,
+migration replay, capture or restore. The continuation uses the same candidate,
+ACL, readiness and routing owner, with fresh protected authority, a new nonce,
+a typed receipt and future history. This is a source-only amendment with
+isolated PostgreSQL tests; it authorizes no CI publication, installation,
+authorization dispatch or native grant.
+
 This contract authorizes source implementation and isolated tests. Release,
 installation, any maintenance-database ACL repair, fresh protected job approval
 and live execution require their own concrete gates and authority.

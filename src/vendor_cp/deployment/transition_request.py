@@ -25,9 +25,11 @@ from vendor_cp.deploy_agent.contracts import (
 )
 from vendor_cp.deployment.cp_transition import (
     COMMITTED_PLAN_FIELDS,
+    FAILED_CANDIDATE_PLAN_FIELDS,
     PLAN_FIELDS,
     CommittedMigrationBasisV1,
     CpTransitionIdentity,
+    FailedCandidateBasisV1,
     TransitionRequest,
     TransitionSideV1,
     raw_digest,
@@ -75,6 +77,24 @@ class CommittedMigrationPlanV1(TypedDict):
     plan_digest: Digest
 
 
+class FailedCandidatePlanV1(TypedDict):
+    """Closed failed-candidate continuation intent and its bound evidence."""
+
+    schema: Literal["dotmac.cp_failed_candidate_plan/1"]
+    product: Literal["dotmac_vendor_control_plane"]
+    environment: Literal["production"]
+    host: Identifier
+    database: Identifier
+    cluster_system_identifier: str
+    database_oid: int
+    source: TransitionSideV1
+    target: TransitionSideV1
+    previous_receipt_digest: Digest | None
+    operator_revision: Revision
+    basis: FailedCandidateBasisV1
+    plan_digest: Digest
+
+
 def author_request(
     plan_raw: bytes,
     *,
@@ -114,9 +134,21 @@ def author_request(
     actor = context.get("GITHUB_ACTOR", "")
     _shape(actor, Identifier)
     document = read_json(plan_raw)
-    committed = "basis" in document or "operator_revision" in document
-    _shape(document, CommittedMigrationPlanV1 if committed else TransitionPlanV1)
-    plan = cast(TransitionPlanV1 | CommittedMigrationPlanV1, document)
+    failed_candidate = document.get("schema") == "dotmac.cp_failed_candidate_plan/1"
+    committed = not failed_candidate and (
+        "basis" in document or "operator_revision" in document
+    )
+    plan_type = (
+        FailedCandidatePlanV1
+        if failed_candidate
+        else CommittedMigrationPlanV1
+        if committed
+        else TransitionPlanV1
+    )
+    _shape(document, plan_type)
+    plan = cast(
+        TransitionPlanV1 | CommittedMigrationPlanV1 | FailedCandidatePlanV1, document
+    )
     identity = CpTransitionIdentity(
         plan["host"],
         plan["database"],
@@ -129,12 +161,20 @@ def author_request(
             **{
                 key: cast(dict[str, object], plan)[key]
                 for key in (
-                    *(COMMITTED_PLAN_FIELDS if committed else PLAN_FIELDS),
+                    *(
+                        FAILED_CANDIDATE_PLAN_FIELDS
+                        if failed_candidate
+                        else COMMITTED_PLAN_FIELDS
+                        if committed
+                        else PLAN_FIELDS
+                    ),
                     "plan_digest",
                 )
             },
             "schema": "dotmac.cp_committed_migration_request/1"
             if committed
+            else "dotmac.cp_failed_candidate_request/1"
+            if failed_candidate
             else "dotmac.cp_transition_request/1",
             "authorization_run_id": numbers[0],
             "authorization_run_attempt": numbers[1],

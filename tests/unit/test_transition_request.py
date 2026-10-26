@@ -63,6 +63,37 @@ def plan() -> dict[str, object]:
     return {**value, "plan_digest": cp.digest(value)}
 
 
+def failed_candidate_plan() -> dict[str, object]:
+    value = plan()
+    value.update(
+        {
+            "schema": "dotmac.cp_failed_candidate_plan/1",
+            "operator_revision": "e" * 40,
+            "basis": {
+                "context_digest": "sha256:" + "1" * 64,
+                "original_context_digest": "sha256:" + "2" * 64,
+                "original_frontier_key": "sha256:" + "3" * 64,
+                "original_frontier_claim_digest": "sha256:" + "4" * 64,
+                "failed_request_digest": "sha256:" + "5" * 64,
+                "failed_host_nonce": "6" * 64,
+                "failed_reservation_digest": "sha256:" + "7" * 64,
+                "failed_authorization_digest": "sha256:" + "8" * 64,
+                "failure_digest": "sha256:" + "9" * 64,
+                "quiescence_digest": "sha256:" + "a" * 64,
+                "original_fence_digest": "sha256:" + "b" * 64,
+                "current_fence_digest": "sha256:" + "c" * 64,
+                "current_fence_id": "d" * 64,
+                "frontier_measurement_digest": "sha256:" + "e" * 64,
+            },
+        }
+    )
+    fields = {key: value[key] for key in cp.FAILED_CANDIDATE_PLAN_FIELDS}
+    value["plan_digest"] = cp.digest(
+        {"schema": "dotmac.cp_failed_candidate_plan/1", **fields}
+    )
+    return value
+
+
 def author(value=None, trusted=None):
     return producer.author_request(
         canonical_json(plan() if value is None else value),
@@ -362,6 +393,46 @@ def test_old_plan_digest_accepts_closed_plan_without_schema_unchanged():
         cp.transition_plan_digest({**value, "schema": "dotmac.cp_transition_request/1"})
         == expected
     )
+
+
+def test_failed_candidate_plan_authors_exact_new_request_and_closed_basis():
+    value = failed_candidate_plan()
+    authored = author(value)
+    assert authored["schema"] == "dotmac.cp_failed_candidate_request/1"
+    assert authored["basis"] == value["basis"]
+    assert authored["operator_revision"] == value["operator_revision"]
+    assert authored["authorization_run_id"] == 123
+    assert authored["authorization_run_attempt"] == 2
+    assert authored["trusted_actor"] == producer.REPOSITORY_OWNER
+    assert cp.timestamp(authored["expires_at"]) == NOW + timedelta(hours=23)
+    identity = cp.CpTransitionIdentity("cp-production", "platform", "123456", 16384)
+    cp.validate_any_request(authored, identity=identity, now=NOW)
+
+
+def test_failed_candidate_plan_rejects_bad_schema_basis_and_extra_fields():
+    value = failed_candidate_plan()
+    for bad in (
+        {**value, "schema": "dotmac.cp_unknown_plan/1"},
+        {**value, "basis": {**value["basis"], "unknown": "injected"}},
+        {**value, "unsigned": "injected"},
+    ):
+        with pytest.raises(ContractError):
+            author(bad)
+    committed_basis = {
+        key: "sha256:" + f"{index + 1:x}" * 64
+        for index, key in enumerate(cp.CommittedMigrationBasisV1.__annotations__)
+    }
+    cross_kind = failed_candidate_plan()
+    cross_kind["basis"] = committed_basis
+    with pytest.raises(ContractError):
+        author(cross_kind)
+
+
+def test_failed_candidate_plan_digest_tamper_is_refused():
+    value = failed_candidate_plan()
+    value["basis"]["failure_digest"] = "sha256:" + "f" * 64
+    with pytest.raises(ContractError):
+        author(value)
 
 
 def test_committed_plan_digest_binds_fixed_variant_discriminator():

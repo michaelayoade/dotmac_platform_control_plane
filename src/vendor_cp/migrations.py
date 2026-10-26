@@ -29,6 +29,7 @@ if TYPE_CHECKING:
         ArtifactStore,
         CommittedMigrationContext,
         CpTransitionRequestV1,
+        FailedCandidateContext,
         RecoveryContexts,
         VerifiedAuthorization,
     )
@@ -541,6 +542,7 @@ def native_upgrade(
     git_binary: Path,
     git_binary_digest: str,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
 ) -> None:
     """Apply the composed CP graph once on the caller's exact transaction.
 
@@ -595,7 +597,8 @@ def native_upgrade(
         host_nonce=host_nonce,
         evidence=evidence,
         recovery=recovery,
-        **({"committed_contexts": committed_contexts} if committed_contexts else {}),
+        committed_contexts=committed_contexts,
+        failed_candidate_contexts=failed_candidate_contexts,
     )
     previous_bytecode = sys.dont_write_bytecode
     sys.dont_write_bytecode = True

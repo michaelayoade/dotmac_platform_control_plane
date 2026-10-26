@@ -1,6 +1,6 @@
 """CI-only continuation core contract checks against an installed candidate.
 
-The runner prepares only five fixed test files and public, lock-hashed pure
+The runner prepares only fixed test inputs and public, lock-hashed pure
 pytest wheels. The offline candidate receives no application source overlay.
 This is synthetic core coverage, not protected issuance or native host proof.
 """
@@ -27,8 +27,16 @@ COLLECT = (
     "test_cp_committed_continuation.py",
     "test_cp_committed_host.py",
     "test_transition_operator.py",
+    "test_cp_failed_candidate_recovery.py",
+    "test_failed_candidate_operator.py",
+    "test_cp_transition_host.py",
 )
-TESTS = (*COLLECT, "test_cp_transition.py", "test_cp_transition_host.py")
+TESTS = (*COLLECT, "test_cp_transition.py")
+FIXTURES = {
+    "fixtures/cp-transition/source-3ef3cef4.toml": (
+        "sha256:42d1b0b6bbb8b1b0cc9990cd5630a4be66ea778aaa206ef69a22c3cc72f1c5aa"
+    )
+}
 OWNERS = (
     "vendor_cp.deployment.cp_transition",
     "vendor_cp.deployment.cp_transition_host",
@@ -49,6 +57,24 @@ TOOL_ROOTS = {
 
 def sha256(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def stage_public_fixtures(root: Path, destination: Path) -> None:
+    for name, checksum in FIXTURES.items():
+        raw = (root / "tests" / name).read_bytes()
+        if sha256(raw) != checksum:
+            raise ValueError("immutable public descriptor fixture changed")
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+
+
+def verify_public_fixtures(root: Path, fixtures: dict) -> None:
+    if fixtures != FIXTURES:
+        raise ValueError("unexpected public descriptor fixture inputs")
+    for name, checksum in FIXTURES.items():
+        if sha256((root / name).read_bytes()) != checksum:
+            raise ValueError("public descriptor fixture changed after preparation")
 
 
 def select_wheels(lock: dict) -> dict:
@@ -130,6 +156,7 @@ def prepare(
         raw = (root / "tests/unit" / name).read_bytes()
         (destination / name).write_bytes(raw)
         sources[name] = sha256(raw)
+    stage_public_fixtures(root, destination)
     shutil.copyfile(__file__, destination / Path(__file__).name)
     requirements = destination / "pytest-requirements.txt"
     requirements.write_text(
@@ -171,6 +198,7 @@ def prepare(
         json.dumps(
             {
                 "tests": sources,
+                "fixtures": FIXTURES,
                 "tools": wheels,
                 "candidate": candidate,
                 "docker_image_id": docker_image_id,
@@ -180,8 +208,8 @@ def prepare(
         + "\n"
     )
     # The candidate runs as the image's service UID, not runner/root.
-    for path in destination.iterdir():
-        path.chmod(0o644)
+    for path in destination.rglob("*"):
+        path.chmod(0o755 if path.is_dir() else 0o644)
     return docker_image_id
 
 
@@ -203,6 +231,7 @@ def verify_vectors(native: dict) -> None:
         or report["collected"] != len(report["cases"])
         or report["passed"] != report["collected"]
         or report["rejected"] != 0
+        or report["inputs"].get("fixtures") != FIXTURES
         or report["modules"]
         != {
             name: sum(n.startswith(name + "::") for n in report["cases"])
@@ -328,6 +357,7 @@ def run(root: Path) -> None:
     for name, checksum in manifest["tests"].items():
         if sha256((root / name).read_bytes()) != checksum:
             raise ValueError("selected test file changed after preparation")
+    verify_public_fixtures(root, manifest.get("fixtures"))
     paths = []
     for name, pin in manifest["tools"].items():
         path = root / pin["filename"]

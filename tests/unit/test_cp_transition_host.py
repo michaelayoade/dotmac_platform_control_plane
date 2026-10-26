@@ -158,9 +158,9 @@ def test_candidate_connect_forecast_precedes_processes_and_transition_mutations(
 ):
     actions = []
     queries = []
-    docker = tmp_path / "docker"
-    docker.write_text("unit boundary")
-    docker.chmod(0o700)
+    # The artifact's temporary filesystem is noexec. Use the running
+    # interpreter for this filesystem check; every process boundary is mocked.
+    docker = Path(module.sys.executable)
     host.config = replace(host.config, docker_binary=docker)
     monkeypatch.setattr(module.sys, "platform", "linux")
     monkeypatch.setattr(module.os, "geteuid", lambda: 0)
@@ -218,12 +218,14 @@ def test_candidate_connect_forecast_precedes_processes_and_transition_mutations(
 
 @pytest.fixture
 def historic_source_descriptor():
-    raw = (
-        Path(__file__).parents[1]
-        / "fixtures"
-        / "cp-transition"
-        / "source-3ef3cef4.toml"
-    ).read_bytes()
+    relative = Path("fixtures/cp-transition/source-3ef3cef4.toml")
+    candidates = (
+        Path(__file__).parent / relative,
+        Path(__file__).parents[1] / relative,
+    )
+    present = [path for path in candidates if path.is_file()]
+    assert len(present) == 1, "exactly one public descriptor fixture is required"
+    raw = present[0].read_bytes()
     assert raw_digest(raw) == (
         "sha256:42d1b0b6bbb8b1b0cc9990cd5630a4be66ea778aaa206ef69a22c3cc72f1c5aa"
     )
@@ -674,13 +676,16 @@ def test_keyless_full_runtime_refuses_disabled_agent(host, monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("with_registry", [False, True])
+@pytest.mark.parametrize("with_failed_registry", [False, True])
 def test_migrate_passes_same_active_transaction_and_independent_observer(
-    host, monkeypatch, with_registry
+    host, monkeypatch, with_registry, with_failed_registry
 ):
     from vendor_cp import migrations
 
     registry = {"historical-context": object()} if with_registry else {}
     host._committed_contexts = registry
+    failed_registry = {"failed-context": object()} if with_failed_registry else {}
+    host._failed_candidate_contexts = failed_registry
     events = []
     observer = object()
 
@@ -706,6 +711,10 @@ def test_migrate_passes_same_active_transaction_and_independent_observer(
             assert kwargs["committed_contexts"] is registry
         else:
             assert "committed_contexts" not in kwargs
+        if with_failed_registry:
+            assert kwargs["failed_candidate_contexts"] is failed_registry
+        else:
+            assert "failed_candidate_contexts" not in kwargs
         assert kwargs["repository_root"] == host.config.repository_root
         assert kwargs["git_binary"] == host.config.git_binary
         assert kwargs["git_binary_digest"] == host.config.git_binary_digest
@@ -1496,3 +1505,458 @@ def test_restore_retains_raw_catalogues_and_requires_bound_comparison(
         }[case]
         with pytest.raises(ContractError, match=code):
             host.capture_and_restore(request, nonce)
+
+
+class _PasswordTransportConnection:
+    """Real SQLAlchemy/psycopg statement transport, synthetic cursor, no DB."""
+
+    def __init__(self, *, fail_do: bool = False):
+        from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
+
+        self.dialect = PGDialect_psycopg()
+        self.statements: list[str] = []
+        self.passwords: list[str] = []
+        self.fail_do = fail_do
+
+    def execute(self, statement, parameters):
+        assert str(statement) == (
+            "SELECT set_config('dotmac.candidate_password', :password, false)"
+        )
+        assert set(parameters) == {"password"}
+        self.passwords.append(parameters["password"])
+
+    def exec_driver_sql(self, statement, *, execution_options=None):
+        from psycopg._queries import _query2pg_nocache
+        from sqlalchemy.engine.default import DefaultExecutionContext
+        from sqlalchemy.util import immutabledict
+
+        parent = self
+
+        class Cursor:
+            def execute(self, query, parameters=None):
+                parent.statements.append(query)
+                if parameters is not None:
+                    _query2pg_nocache(query.encode(), "utf-8")
+                if parent.fail_do and query.startswith("DO "):
+                    raise OperationalError(
+                        "PRIVATE_DRIVER_SQL",
+                        {"PRIVATE": "synthetic-material"},
+                        Exception("PRIVATE_DRIVER_DIAGNOSTIC"),
+                    )
+
+        class Context(DefaultExecutionContext):
+            def create_cursor(self):
+                return Cursor()
+
+        context = Context._init_statement(
+            self.dialect,
+            self,
+            None,
+            immutabledict(execution_options or {}),
+            statement,
+            [],
+        )
+        parameters = context.parameters[0]
+        if not parameters and context.no_parameters:
+            self.dialect.do_execute_no_params(context.cursor, statement, context)
+        else:
+            self.dialect.do_execute(context.cursor, statement, parameters, context)
+
+
+def _synthetic_password_installer(host, monkeypatch):
+    from sqlalchemy.engine import URL
+
+    roles = module.candidate_roles.CandidateRoles.for_run(
+        database="synthetic_db", run_id="a" * 32
+    )
+    passwords = ("synthetic-app-'\\%L", "synthetic-platform-'\\%s")
+    values = {"VENDOR_DEPLOYMENT_PROFILE": "cp_transition"}
+    for (role, _parent), key, password in zip(
+        roles.bindings(),
+        ("DATABASE_URL", "PLATFORM_DATABASE_URL"),
+        passwords,
+        strict=True,
+    ):
+        values[key] = URL.create(
+            "postgresql+psycopg",
+            username=role,
+            password=password,
+            database="synthetic_db",
+        ).render_as_string(hide_password=False)
+    monkeypatch.setattr(
+        module,
+        "_read_protected",
+        lambda path: "".join(
+            f"{key}={value}\n" for key, value in values.items()
+        ).encode(),
+    )
+    host.roles = roles
+    host.launch = cast(
+        module.CandidateComposeLaunch, SimpleNamespace(env_file=Path("synthetic.env"))
+    )
+    return roles, passwords
+
+
+def test_candidate_password_installer_preserves_server_format_through_real_transport(
+    host, monkeypatch
+):
+    roles, passwords = _synthetic_password_installer(host, monkeypatch)
+    connection = _PasswordTransportConnection()
+    host._install_candidate_passwords(cast(module.Connection, connection))
+    assert connection.passwords == list(passwords)
+    assert len(connection.statements) == 4
+    for index, (role, _parent) in enumerate(roles.bindings()):
+        sql = connection.statements[index * 2]
+        assert f"ALTER ROLE {role} PASSWORD %L" in sql
+        assert "%%L" not in sql
+        assert not any(password in sql for password in passwords)
+        assert connection.statements[index * 2 + 1] == "RESET dotmac.candidate_password"
+
+
+def test_candidate_password_default_transport_reproduces_percent_L_refusal():
+    from psycopg import ProgrammingError
+
+    connection = _PasswordTransportConnection()
+    with pytest.raises(ProgrammingError):
+        connection.exec_driver_sql(
+            "DO $password$ BEGIN EXECUTE format('ALTER ROLE synthetic PASSWORD %L', "
+            "current_setting('dotmac.candidate_password')); END $password$"
+        )
+
+
+def test_candidate_password_driver_failure_still_resets_and_redacts(host, monkeypatch):
+    _synthetic_password_installer(host, monkeypatch)
+    connection = _PasswordTransportConnection(fail_do=True)
+    with pytest.raises(RuntimeError) as refusal:
+        host._install_candidate_passwords(cast(module.Connection, connection))
+    assert str(refusal.value) == "candidate credential installation failed"
+    assert refusal.value.__suppress_context__ is True
+    assert connection.statements[-1] == "RESET dotmac.candidate_password"
+    assert len(connection.passwords) == 1
+
+
+@pytest.fixture
+def failed_candidate(host, monkeypatch):
+    from copy import deepcopy
+
+    catalogue = b"complete retained catalogue"
+    measurement = {
+        "track_counts": True,
+        "stats_reset": "reset",
+        "server_start": "started",
+        "relations": [["public", "records", 1, 2, 3, 4, 5]],
+        "sequences": [["public", "sequence", 6]],
+        "catalogue_digest": raw_digest(catalogue),
+    }
+    grants = (("owner", "CREATE", False, "owner"),)
+    original_proof = SimpleNamespace(
+        prior_grants=grants, prior_acl="original ACL", digest=lambda: "original-proof"
+    )
+    proof = SimpleNamespace(
+        fence_id="failed-current-nonce",
+        prior_grants=grants,
+        prior_acl="original ACL",
+        digest=lambda: "failed-current-proof",
+    )
+    descriptor_raw = b"same old signed target"
+    prior = {
+        "schema": "dotmac.cp_transition_request/1",
+        "host": "host",
+        "database": "cp",
+        "database_oid": 42,
+        "cluster_system_identifier": "123",
+        "source": {"heads": ["source-six"]},
+        "target": {
+            "heads": [f"target-{i}" for i in range(7)],
+            "raw_descriptor_digest": raw_digest(descriptor_raw),
+        },
+    }
+    original = SimpleNamespace(request=prior, original_proof=original_proof)
+    recovery = {module.request_digest(prior): object()}
+    context = SimpleNamespace(
+        original=original,
+        original_proof=original_proof,
+        proof=proof,
+        context_digest="failed-context",
+        measurement=measurement,
+        recovery_context=lambda: recovery,
+    )
+    request = {
+        **deepcopy(prior),
+        "schema": "dotmac.cp_failed_candidate_request/1",
+        "operator_revision": "f" * 40,
+        "basis": {
+            "context_digest": context.context_digest,
+            "current_fence_digest": proof.digest(),
+            "current_fence_id": proof.fence_id,
+            "original_fence_digest": original_proof.digest(),
+            "frontier_measurement_digest": raw_digest(canonical_json(measurement)),
+        },
+    }
+    host.config = replace(host.config, operator_revision="f" * 40)
+    host._failed_candidate_context = context
+    host._failed_candidate_contexts = {context.context_digest: context}
+    host.proof = proof
+    actions = []
+    connection = SimpleNamespace(
+        execute=lambda *a, **k: SimpleNamespace(all=lambda: [])
+    )
+    monkeypatch.setattr(host, "_connect", lambda *a, **k: nullcontext(connection))
+    monkeypatch.setattr(host, "_identity", lambda *a: actions.append("identity"))
+    monkeypatch.setattr(host, "_check_fence_baseline", lambda *a: actions.append("acl"))
+    monkeypatch.setattr(host, "_http", lambda *a, **k: actions.append("503"))
+    monkeypatch.setattr(host, "_inspect_installation", lambda *a: None)
+    monkeypatch.setattr(
+        host, "_strict", lambda *a: actions.append("strict") or host.proof
+    )
+    monkeypatch.setattr(module, "_read_protected", lambda *a: descriptor_raw)
+    monkeypatch.setattr(
+        module, "read_current_migration_heads", lambda *a: prior["target"]["heads"]
+    )
+    monkeypatch.setattr(
+        module.candidate_roles,
+        "require_planned_target_only_connect",
+        lambda *a, **k: actions.append("forecast"),
+    )
+
+    def measure(*a):
+        value = deepcopy(measurement)
+        value.pop("catalogue_digest")
+        value["catalogue_bytes"] = catalogue
+        return value
+
+    monkeypatch.setattr(module, "measure_candidate_quiescence", measure)
+    monkeypatch.setattr(host, "_source_image_identity", lambda *a: "incumbent")
+    monkeypatch.setattr(
+        host,
+        "_writers",
+        lambda: [
+            {
+                "Image": "incumbent",
+                "State": {"Running": False},
+                "HostConfig": {"RestartPolicy": {"Name": "no"}},
+            }
+        ],
+    )
+    monkeypatch.setattr(host, "_docker", lambda *a, **k: "")
+    monkeypatch.setattr(
+        host, "_source_matches", lambda *a: pytest.fail("historical source reobserved")
+    )
+    monkeypatch.setattr(host, "_run", lambda *a, **k: pytest.fail("process mutation"))
+    return host, request, context, actions, recovery
+
+
+def test_failed_candidate_admission_uses_current_proof_and_old_target(failed_candidate):
+    host, request, context, actions, _ = failed_candidate
+    assert module.read_json(host.inspect_failed_candidate(request, context)) == {
+        "source": request["source"],
+        "target": request["target"],
+    }
+    assert host._request is request and host.proof is context.proof
+    assert actions == ["503", "identity", "acl", "forecast", "strict"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "track_counts",
+        "stats_reset",
+        "server_start",
+        "relations",
+        "sequences",
+        "catalogue_digest",
+    ],
+)
+def test_failed_candidate_binds_every_retained_measurement_field(
+    failed_candidate, field
+):
+    host, request, context, _, _ = failed_candidate
+    context.measurement = {**context.measurement, field: "drift"}
+    with pytest.raises(ContractError, match="committed_measurement_drift"):
+        host.inspect_failed_candidate(request, context)
+    assert host._request is None
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "operator",
+        "target",
+        "basis",
+        "lineage",
+        "heads",
+        "running",
+        "restart",
+        "candidate",
+    ],
+)
+def test_failed_candidate_current_state_drift_refused(
+    failed_candidate, monkeypatch, fault
+):
+    host, request, context, _, _ = failed_candidate
+    if fault == "operator":
+        request["operator_revision"] = "a" * 40
+    elif fault == "target":
+        request["target"] = {**request["target"], "heads": ["drift"]}
+    elif fault == "basis":
+        request["basis"]["current_fence_digest"] = "drift"
+    elif fault == "lineage":
+        context.proof.prior_acl = "drift"
+    elif fault == "heads":
+        monkeypatch.setattr(
+            module, "read_current_migration_heads", lambda *a: ["source-six"]
+        )
+    elif fault in {"running", "restart"}:
+        writer = host._writers()[0]
+        if fault == "running":
+            writer["State"]["Running"] = True
+        else:
+            writer["HostConfig"]["RestartPolicy"]["Name"] = "always"
+        monkeypatch.setattr(host, "_writers", lambda: [writer])
+    else:
+        monkeypatch.setattr(host, "_docker", lambda *a, **k: "candidate")
+    with pytest.raises(ContractError):
+        host.inspect_failed_candidate(request, context)
+    assert host._request is None
+
+
+def test_failed_candidate_forecast_refuses_before_rebind(failed_candidate, monkeypatch):
+    host, request, context, actions, _ = failed_candidate
+
+    def denied(*a, **k):
+        raise module.candidate_roles.CandidateRoleRefused("another database")
+
+    monkeypatch.setattr(
+        module.candidate_roles, "require_planned_target_only_connect", denied
+    )
+    monkeypatch.setattr(
+        module.transition_fence, "fence_writers", lambda *a, **k: pytest.fail("rebound")
+    )
+    with pytest.raises(module.candidate_roles.CandidateRoleRefused):
+        host.inspect_failed_candidate(request, context)
+    assert actions == ["503", "identity", "acl"]
+
+
+def test_failed_candidate_rebind_revalidates_and_preserves_original_lineage(
+    failed_candidate, monkeypatch
+):
+    host, request, context, actions, _ = failed_candidate
+    host._request = request
+    monkeypatch.setattr(host, "_bound", lambda *a: None)
+    replacement = SimpleNamespace(**vars(context.proof))
+    replacement.fence_id = "successor-nonce"
+    replacement.to_document = lambda: {"retained": "new public proof"}
+    retained = []
+    monkeypatch.setattr(
+        host.store, "put", lambda raw: retained.append(raw) or raw_digest(raw)
+    )
+
+    def rebind(connection, **kwargs):
+        assert kwargs["prior"] is context.proof
+        assert kwargs["expected_prior_fence_id"] == "failed-current-nonce"
+        assert kwargs["fence_id"] == "successor-nonce"
+        actions.append("rebind")
+        return replacement
+
+    monkeypatch.setattr(module.transition_fence, "fence_writers", rebind)
+    value = module.read_json(
+        host.rebind_failed_candidate(request, "successor-nonce", context)
+    )
+    assert value["kind"] == "failed-candidate-rebound"
+    assert value["result"]["prior_fence_id"] == "failed-current-nonce"
+    assert actions.index("forecast") < actions.index("rebind")
+    assert actions.count("forecast") == 2
+    assert host.proof.prior_grants == context.original_proof.prior_grants
+    assert host.proof.prior_acl == context.original_proof.prior_acl
+    assert retained == [canonical_json(replacement.to_document())]
+
+
+def test_failed_candidate_candidate_uses_original_recovery_without_rekey(
+    failed_candidate, monkeypatch
+):
+    host, request, context, _, recovery = failed_candidate
+    monkeypatch.setattr(host, "_bound", lambda *a: None)
+    monkeypatch.setattr(host, "target_heads", lambda *a: b"heads")
+    monkeypatch.setattr(host, "_quiescence_snapshot", lambda *a: b"snapshot")
+    monkeypatch.setattr(host, "_retain", lambda *a: "retained")
+
+    def stop(*a):
+        raise RuntimeError("original recovery admitted")
+
+    monkeypatch.setattr(host, "_materialize_candidate_environment", stop)
+    with pytest.raises(RuntimeError, match="original recovery admitted"):
+        host.candidate_ready(request, "successor-nonce")
+    assert list(recovery) == [module.request_digest(context.original.request)]
+    assert module.request_digest(request) not in recovery and host.recovery == {}
+
+
+def test_failed_candidate_context_is_exclusive_and_registry_conflicts_refuse(
+    failed_candidate,
+):
+    host, _, context, _, _ = failed_candidate
+    with pytest.raises(ContractError, match="continuation_contexts_mutually_exclusive"):
+        module.ExistingCpTransitionHost(
+            host.config,
+            store=host.store,
+            recovery={},
+            committed_context=context,
+            failed_candidate_context=context,
+        )
+    with pytest.raises(
+        ContractError, match="failed_candidate_context_registry_conflict"
+    ):
+        module.ExistingCpTransitionHost(
+            host.config,
+            store=host.store,
+            recovery={},
+            failed_candidate_context=context,
+            failed_candidate_contexts={context.context_digest: object()},
+        )
+
+
+def test_failed_candidate_measurement_is_rechecked_before_rebind(
+    failed_candidate, monkeypatch
+):
+    host, request, context, _, _ = failed_candidate
+    monkeypatch.setattr(host, "_bound", lambda *a: None)
+    monkeypatch.setattr(host, "_failed_candidate_admission", lambda *a: None)
+    monkeypatch.setattr(
+        module, "measure_candidate_quiescence", lambda *a: {"catalogue_bytes": b"drift"}
+    )
+    monkeypatch.setattr(
+        module.transition_fence,
+        "fence_writers",
+        lambda *a, **k: pytest.fail("fence mutated"),
+    )
+    with pytest.raises(ContractError, match="committed_measurement_drift"):
+        host.rebind_failed_candidate(request, "fresh-nonce", context)
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_routing_propagates_failed_context_registry_for_current_and_future_v1(
+    failed_candidate, monkeypatch, active
+):
+    host, request, context, _, _ = failed_candidate
+    if not active:
+        host._failed_candidate_context = None
+        request = {**request, "schema": "dotmac.cp_transition_request/1"}
+    host._request = request
+    host._nonce = "successor-nonce"
+    receipt = b"retained typed receipt"
+    forwarded = []
+    monkeypatch.setattr(
+        module, "verify_any_receipt", lambda raw, **kwargs: forwarded.append(kwargs)
+    )
+    monkeypatch.setattr(host.store, "read", lambda *a, **k: receipt)
+    runtimes = []
+    monkeypatch.setattr(host, "_full_runtime", lambda value: runtimes.append(value))
+    monkeypatch.setattr(host, "_evidence", lambda *a: b"verified")
+    assert host.verify_pre_routing(receipt) == b"verified"
+    assert forwarded[0]["failed_candidate_contexts"] == {
+        context.context_digest: context
+    }
+    if active:
+        assert forwarded[0]["failed_candidate_context"] is context
+    else:
+        assert "failed_candidate_context" not in forwarded[0]
+    assert forwarded[0]["routing_gate"] is True and runtimes == [request]

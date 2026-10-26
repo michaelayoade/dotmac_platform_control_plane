@@ -409,6 +409,21 @@ disagree, fix the drift.
     the original V1 and pre-restore held-context contracts remain closed.
     This source-and-test amendment grants no live activation or publication.
 
+    **Failed-candidate recovery amendment (2026-10-26):** Michael approved
+    source implementation and isolated tests for one separately typed successor
+    of a contained failed committed V1 candidate attempt. The old transition
+    contracts remain non-resumable. The successor verifies the original migration
+    prefix, spent claim, failed authorization/execution and equal quiescence
+    evidence; it requires the unchanged full frontier and no later-stage evidence.
+    A deterministic exclusive claim in the failed canonical store, derived from
+    its protected Installation and invocation, permits one generation only. The
+    original store, claim, backup and application target stay immutable. Existing
+    fence and candidate/readiness/ACL/routing owners perform the suffix; capture,
+    restore and migration cannot replay. The actual SQLAlchemy/psycopg password
+    installer requires isolated PostgreSQL authentication and cleanup tests.
+    This amendment grants no CI build, publication, host installation, fresh
+    authorization dispatch or live execution.
+
     **`3` and `4` are different numbers and stay different**, including through
     `docker compose run`, which propagates the container's status unchanged. An
     owner refused and there is no evidence look identical from outside and mean

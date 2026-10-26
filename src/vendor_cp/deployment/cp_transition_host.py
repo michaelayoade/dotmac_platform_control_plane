@@ -67,7 +67,9 @@ from vendor_cp.deployment.cp_transition import (
     ArtifactStore,
     CommittedMigrationContext,
     CpCommittedMigrationRequestV1,
+    CpFailedCandidateRequestV1,
     CpTransitionRequestV1,
+    FailedCandidateContext,
     RecoveryContexts,
     SourceObservation,
     TransitionRequest,
@@ -301,6 +303,12 @@ ConnectionFactory = Callable[..., AbstractContextManager[Connection]]
 
 class _CommittedContextArguments(TypedDict, total=False):
     committed_contexts: Mapping[str, CommittedMigrationContext]
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext]
+
+
+class _FailedReceiptArguments(TypedDict, total=False):
+    failed_candidate_context: FailedCandidateContext
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext]
 
 
 class _CandidateArguments(TypedDict):
@@ -585,17 +593,33 @@ class ExistingCpTransitionHost:
         held_fence: HeldFenceContinuation | None = None,
         committed_context: CommittedMigrationContext | None = None,
         committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+        failed_candidate_context: FailedCandidateContext | None = None,
+        failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.recovery = recovery
         self.process = process or SubprocessExecutor()
         require(
-            held_fence is None or committed_context is None,
+            sum(
+                context is not None
+                for context in (held_fence, committed_context, failed_candidate_context)
+            )
+            <= 1,
             "continuation_contexts_mutually_exclusive",
         )
         self._held_fence = held_fence
         self._committed_context = committed_context
+        self._failed_candidate_context = failed_candidate_context
+        self._failed_candidate_contexts = dict(failed_candidate_contexts or {})
+        if failed_candidate_context is not None:
+            key = failed_candidate_context.context_digest
+            require(
+                key not in self._failed_candidate_contexts
+                or self._failed_candidate_contexts[key] is failed_candidate_context,
+                "failed_candidate_context_registry_conflict",
+            )
+            self._failed_candidate_contexts[key] = failed_candidate_context
         self._committed_contexts = dict(committed_contexts or {})
         if committed_context is not None:
             key = committed_context.context_digest
@@ -606,7 +630,9 @@ class ExistingCpTransitionHost:
             )
             self._committed_contexts[key] = committed_context
         self.proof = (
-            committed_context.proof
+            failed_candidate_context.proof
+            if failed_candidate_context is not None
+            else committed_context.proof
             if committed_context is not None
             else held_fence.proof
             if held_fence
@@ -767,6 +793,16 @@ class ExistingCpTransitionHost:
             assert self._committed_context is not None  # noqa: S101
             self._committed_binding(
                 cast(CpCommittedMigrationRequestV1, request), self._committed_context
+            )
+        elif request.get("schema") == "dotmac.cp_failed_candidate_request/1":
+            require(
+                self._failed_candidate_context is not None,
+                "failed_candidate_context_required",
+            )
+            assert self._failed_candidate_context is not None  # noqa: S101
+            self._failed_candidate_binding(
+                cast(CpFailedCandidateRequestV1, request),
+                self._failed_candidate_context,
             )
         require(self._request == request, "host_request_mismatch")
         if self._nonce is None:
@@ -1041,10 +1077,66 @@ class ExistingCpTransitionHost:
             "committed_original_grants_mismatch",
         )
 
+    def _failed_candidate_binding(
+        self,
+        request: CpFailedCandidateRequestV1,
+        context: FailedCandidateContext,
+    ) -> None:
+        require(
+            self._held_fence is None
+            and self._committed_context is None
+            and self._failed_candidate_context is context,
+            "failed_candidate_context_mismatch",
+        )
+        require(
+            self.config.operator_revision is not None
+            and self.config.operator_revision == request["operator_revision"],
+            "operator_revision_mismatch",
+        )
+        require(
+            request["basis"]["context_digest"] == context.context_digest
+            and request["basis"]["current_fence_digest"] == context.proof.digest()
+            and request["basis"]["current_fence_id"] == context.proof.fence_id
+            and request["basis"]["original_fence_digest"]
+            == context.original_proof.digest(),
+            "failed_candidate_fence_basis_mismatch",
+        )
+        historical = context.original.request
+        require(
+            request["source"] == historical["source"]
+            and request["target"] == historical["target"]
+            and all(
+                cast(Mapping[str, object], request)[key]
+                == cast(Mapping[str, object], historical)[key]
+                for key in (
+                    "host",
+                    "database",
+                    "database_oid",
+                    "cluster_system_identifier",
+                )
+            ),
+            "failed_candidate_identity_mismatch",
+        )
+        require(
+            context.proof.prior_grants == context.original_proof.prior_grants
+            and context.proof.prior_acl == context.original_proof.prior_acl,
+            "failed_candidate_original_grants_mismatch",
+        )
+
+    def _failed_candidate_admission(
+        self,
+        request: CpFailedCandidateRequestV1,
+        context: FailedCandidateContext,
+    ) -> None:
+        self._failed_candidate_binding(request, context)
+        self._continuation_admission(
+            request, context, historical=context.original.request
+        )
+
     @staticmethod
     def _check_committed_measurement(
-        request: CpCommittedMigrationRequestV1,
-        context: CommittedMigrationContext,
+        request: CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1,
+        context: CommittedMigrationContext | FailedCandidateContext,
         measurement: dict[str, object],
     ) -> None:
         measurement = dict(measurement)
@@ -1064,6 +1156,15 @@ class ExistingCpTransitionHost:
     ) -> None:
         """Only current-state reads; historical source six is never reobserved."""
         self._committed_binding(request, context)
+        self._continuation_admission(request, context, historical=context.request)
+
+    def _continuation_admission(
+        self,
+        request: CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1,
+        context: CommittedMigrationContext | FailedCandidateContext,
+        *,
+        historical: CpTransitionRequestV1,
+    ) -> None:
         require(self.proof == context.proof, "committed_current_fence_mismatch")
         self._http(self.config.external_ready_url, expected=503)
         # The early forecast must precede every image/candidate/fence mutation.
@@ -1075,7 +1176,7 @@ class ExistingCpTransitionHost:
             )
             require(
                 list(read_current_migration_heads(connection))
-                == context.request["target"]["heads"],
+                == historical["target"]["heads"],
                 "committed_target_heads_mismatch",
             )
             require(
@@ -1106,7 +1207,7 @@ class ExistingCpTransitionHost:
         self._target_descriptor = descriptor
         self._source_image_identity(self.config.target_image, request["target"])
         incumbent = self._source_image_identity(
-            self.config.source_image, context.request["source"]
+            self.config.source_image, historical["source"]
         )
         writers = self._writers()
         require(bool(writers), "incumbent_missing")
@@ -1164,11 +1265,53 @@ class ExistingCpTransitionHost:
         # Core owns the durable single-use prior-frontier claim under lock.
         # A FenceProof ID is not a server-stored compare-and-swap token.
         self._committed_admission(request, context)
+        return self._rebind_continuation(
+            request, nonce, context, kind="committed-rebound"
+        )
+
+    def inspect_failed_candidate(
+        self,
+        request: CpFailedCandidateRequestV1,
+        context: FailedCandidateContext,
+    ) -> bytes:
+        self._inspect_installation(request)
+        self._failed_candidate_admission(request, context)
+        self._request = request
+        return canonical_json(
+            {"source": request["source"], "target": request["target"]}
+        )
+
+    def rebind_failed_candidate(
+        self,
+        request: CpFailedCandidateRequestV1,
+        nonce: str,
+        context: FailedCandidateContext,
+    ) -> bytes:
+        self._bound(request, nonce)
+        require(nonce != context.proof.fence_id, "failed_candidate_nonce_reused")
+        self._failed_candidate_admission(request, context)
+        return self._rebind_continuation(
+            request, nonce, context, kind="failed-candidate-rebound"
+        )
+
+    def _rebind_continuation(
+        self,
+        request: CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1,
+        nonce: str,
+        context: CommittedMigrationContext | FailedCandidateContext,
+        *,
+        kind: str,
+    ) -> bytes:
         with self._connect(request["database"]) as connection:
             self._identity(connection, request)
             self._check_fence_baseline(connection, request)
             candidate_roles.require_planned_target_only_connect(
                 connection, database=request["database"]
+            )
+            require(
+                list(read_current_migration_heads(connection))
+                == request["target"]["heads"],
+                "committed_target_heads_mismatch",
             )
             self._check_committed_measurement(
                 request, context, measure_candidate_quiescence(connection)
@@ -1186,7 +1329,7 @@ class ExistingCpTransitionHost:
         return self._evidence(
             request,
             nonce,
-            "committed-rebound",
+            kind,
             {
                 "prior_fence_id": context.proof.fence_id,
                 "fence_id": nonce,
@@ -1906,6 +2049,10 @@ class ExistingCpTransitionHost:
         historical_contexts: _CommittedContextArguments = {}
         if self._committed_contexts:
             historical_contexts["committed_contexts"] = self._committed_contexts
+        if self._failed_candidate_contexts:
+            historical_contexts["failed_candidate_contexts"] = (
+                self._failed_candidate_contexts
+            )
         self._bound(request, nonce)
         proof = self._strict(request)
         self._source_matches(request)
@@ -1974,7 +2121,19 @@ class ExistingCpTransitionHost:
     def candidate_ready(self, request: TransitionRequest, nonce: str) -> bytes:
         self._bound(request, nonce)
         proof = self._strict(request)
-        if request["schema"] == "dotmac.cp_committed_migration_request/1":
+        if request["schema"] == "dotmac.cp_failed_candidate_request/1":
+            require(
+                self._failed_candidate_context is not None,
+                "failed_candidate_context_required",
+            )
+            assert self._failed_candidate_context is not None  # noqa: S101
+            historical = self._failed_candidate_context.recovery_context()
+            require(
+                request_digest(self._failed_candidate_context.original.request)
+                in historical,
+                "recovery_missing",
+            )
+        elif request["schema"] == "dotmac.cp_committed_migration_request/1":
             require(self._committed_context is not None, "committed_context_required")
             assert self._committed_context is not None  # noqa: S101
             historical = self._committed_context.recovery_context()
@@ -1983,6 +2142,10 @@ class ExistingCpTransitionHost:
                 "recovery_missing",
             )
         else:
+            require(
+                request["schema"] == "dotmac.cp_transition_request/1",
+                "unsupported_candidate_request",
+            )
             require(request_digest(request) in self.recovery, "recovery_missing")
         self.target_heads(request, nonce)
         self._candidate_backends_exited = False
@@ -2175,7 +2338,10 @@ class ExistingCpTransitionHost:
                         "DO $password$ BEGIN EXECUTE "
                         f"format('ALTER ROLE {quoted} PASSWORD %L', "
                         "current_setting('dotmac.candidate_password')); "
-                        "END $password$"
+                        "END $password$",
+                        # %L belongs to PostgreSQL format(), not psycopg's
+                        # parameter parser. Keep the DO body byte-for-byte.
+                        execution_options={"no_parameters": True},
                     )
                 finally:
                     connection.exec_driver_sql("RESET dotmac.candidate_password")
@@ -2630,6 +2796,13 @@ class ExistingCpTransitionHost:
     def verify_pre_routing(self, receipt_bytes: bytes) -> bytes:
         require(self._request is not None and self._nonce is not None)
         assert self._request is not None and self._nonce is not None  # noqa: S101
+        failed_contexts: _FailedReceiptArguments = {}
+        if self._failed_candidate_context is not None:
+            failed_contexts["failed_candidate_context"] = self._failed_candidate_context
+        if self._failed_candidate_contexts:
+            failed_contexts["failed_candidate_contexts"] = (
+                self._failed_candidate_contexts
+            )
         verify_any_receipt(
             receipt_bytes,
             store=self.store,
@@ -2639,6 +2812,7 @@ class ExistingCpTransitionHost:
             routing_gate=True,
             context=self._committed_context,
             committed_contexts=self._committed_contexts,
+            **failed_contexts,
         )
         checksum = raw_digest(receipt_bytes)
         require(

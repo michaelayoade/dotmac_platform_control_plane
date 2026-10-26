@@ -19,6 +19,26 @@ SPEC.loader.exec_module(harness)
 
 
 class HarnessTests(unittest.TestCase):
+    def test_public_fixture_is_staged_and_bound_without_checkout_access(self):
+        source = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            harness.stage_public_fixtures(source, root)
+            harness.verify_public_fixtures(root, dict(harness.FIXTURES))
+            for selected in ({}, {**harness.FIXTURES, "../outside.toml": "bad"}):
+                with self.subTest(selected=selected), self.assertRaises(ValueError):
+                    harness.verify_public_fixtures(root, selected)
+            relative = next(iter(harness.FIXTURES))
+            fixture = root / relative
+            fixture.write_bytes(fixture.read_bytes() + b"\n")
+            with self.assertRaises(ValueError):
+                harness.verify_public_fixtures(root, dict(harness.FIXTURES))
+            changed_source = root / "tests" / relative
+            changed_source.parent.mkdir(parents=True)
+            changed_source.write_bytes(fixture.read_bytes())
+            with self.assertRaises(ValueError):
+                harness.stage_public_fixtures(root, root / "output")
+
     def test_retained_report_binds_raw_bytes_candidate_and_preserves_native_facts(self):
         candidate = {
             "config_digest": "sha256:" + "a" * 64,
@@ -50,7 +70,11 @@ class HarnessTests(unittest.TestCase):
             "rejected": 0,
             "cases": cases,
             "modules": {name: 1 for name in harness.COLLECT},
-            "inputs": {"candidate": candidate, "docker_image_id": docker_image_id},
+            "inputs": {
+                "candidate": candidate,
+                "docker_image_id": docker_image_id,
+                "fixtures": copy.deepcopy(harness.FIXTURES),
+            },
         }
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory) / "candidate-native-acceptance.json"
@@ -90,6 +114,7 @@ class HarnessTests(unittest.TestCase):
                 "candidate",
                 "missing-module",
                 "engine-id",
+                "fixtures",
             ):
                 tampered = copy.deepcopy(bound)
                 vector = tampered["installed_contract_vectors"]
@@ -103,12 +128,14 @@ class HarnessTests(unittest.TestCase):
                     vector["report"]["inputs"]["candidate"]["config_digest"] = "other"
                 elif kind == "engine-id":
                     vector["docker_image_id"] = "sha256:" + "f" * 64
+                elif kind == "fixtures":
+                    vector["report"]["inputs"]["fixtures"] = {}
                 else:
                     vector["report"]["cases"].pop()
                     vector["report"]["collected"] -= 1
                     vector["report"]["passed"] -= 1
                     vector["report"]["modules"][harness.COLLECT[-1]] = 0
-                if kind in ("candidate", "missing-module"):
+                if kind in ("candidate", "missing-module", "fixtures"):
                     encoded = harness.json.dumps(vector["report"]).encode()
                     vector["report_raw_utf8"] = encoded.decode()
                     vector["report_raw_sha256"] = harness.sha256(encoded)
