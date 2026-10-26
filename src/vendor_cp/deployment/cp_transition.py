@@ -13,7 +13,7 @@ import secrets
 import stat
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, TypedDict, cast
@@ -1763,6 +1763,16 @@ def verify_committed_frontier(
         )
         sha(checksum)
     verify_predecessor(prior, store=store, recovery=context.recovery)
+    # recovery-restored above has already verified this exact bound backup.
+    # The host's capture is nonce-free; recognize only its canonical bytes.
+    _, backup = context.recovery[request_digest(prior)]
+    recovery_capture = canonical_json(
+        {
+            "schema": "dotmac.cp_transition_recovery_capture/1",
+            "request_digest": request_digest(prior),
+            "backup": asdict(backup),
+        }
+    )
     # Scan all retained attempts, not merely the caller-selected evidence map.
     directory = _open_directory(store.root)
     try:
@@ -1787,6 +1797,8 @@ def verify_committed_frontier(
                         and raw == owned_frontier_claim,
                         "committed_frontier_consumed",
                     )
+                continue
+            if match[2] == "evidence" and raw == recovery_capture:
                 continue
             try:
                 item = read_json(raw)
