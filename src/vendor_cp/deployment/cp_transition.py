@@ -106,7 +106,46 @@ class CpCommittedMigrationRequestV1(TypedDict):
     expires_at: str
 
 
-TransitionRequest = CpTransitionRequestV1 | CpCommittedMigrationRequestV1
+class FailedCandidateBasisV1(TypedDict):
+    context_digest: Digest
+    original_context_digest: Digest
+    original_frontier_key: Digest
+    original_frontier_claim_digest: Digest
+    failed_request_digest: Digest
+    failed_host_nonce: Nonce
+    failed_reservation_digest: Digest
+    failed_authorization_digest: Digest
+    failure_digest: Digest
+    quiescence_digest: Digest
+    original_fence_digest: Digest
+    current_fence_digest: Digest
+    current_fence_id: Nonce
+    frontier_measurement_digest: Digest
+
+
+class CpFailedCandidateRequestV1(TypedDict):
+    schema: Literal["dotmac.cp_failed_candidate_request/1"]
+    product: Literal["dotmac_vendor_control_plane"]
+    environment: Literal["production"]
+    host: Identifier
+    database: Identifier
+    cluster_system_identifier: str
+    database_oid: int
+    source: TransitionSideV1
+    target: TransitionSideV1
+    previous_receipt_digest: Digest | None
+    operator_revision: Revision
+    basis: FailedCandidateBasisV1
+    plan_digest: Digest
+    authorization_run_id: int
+    authorization_run_attempt: int
+    trusted_actor: Identifier
+    expires_at: str
+
+
+TransitionRequest = (
+    CpTransitionRequestV1 | CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,14 +218,18 @@ PLAN_FIELDS = (
 
 
 COMMITTED_PLAN_FIELDS = (*PLAN_FIELDS, "operator_revision", "basis")
+FAILED_CANDIDATE_PLAN_FIELDS = COMMITTED_PLAN_FIELDS
 
 
 def transition_plan_digest(request: TransitionRequest) -> str:
     committed = request.get("schema") == "dotmac.cp_committed_migration_request/1"
-    fields = COMMITTED_PLAN_FIELDS if committed else PLAN_FIELDS
+    failed = request.get("schema") == "dotmac.cp_failed_candidate_request/1"
+    fields = COMMITTED_PLAN_FIELDS if committed or failed else PLAN_FIELDS
     payload = {key: cast(dict[str, object], request)[key] for key in fields}
     if committed:
         payload["schema"] = "dotmac.cp_committed_migration_plan/1"
+    elif failed:
+        payload["schema"] = "dotmac.cp_failed_candidate_plan/1"
     return digest(payload)
 
 
@@ -335,6 +378,29 @@ class ArtifactStore:
             _frontier_claim(context, request, host_nonce, fresh_reservation_digest)
         )
         key = committed_frontier_key(context)
+        self._create(self._name(key, "reservation"), raw)
+        require(self.read(key, kind="reservation") == raw, "artifact_readback_mismatch")
+        return raw
+
+    def reserve_failed_candidate_frontier(
+        self,
+        context: FailedCandidateContext,
+        request: CpFailedCandidateRequestV1,
+        *,
+        host_nonce: str,
+        fresh_reservation_digest: str,
+    ) -> bytes:
+        """Consume the canonical failed attempt, independent of fresh inputs."""
+        require(
+            self.root == context.prior_store.root,
+            "failed_candidate_prior_store_mismatch",
+        )
+        raw = canonical_json(
+            _failed_candidate_claim(
+                context, request, host_nonce, fresh_reservation_digest
+            )
+        )
+        key = failed_candidate_frontier_key(context)
         self._create(self._name(key, "reservation"), raw)
         require(self.read(key, kind="reservation") == raw, "artifact_readback_mismatch")
         return raw
@@ -1095,6 +1161,7 @@ def verify_transition_prefix(
     evidence: Mapping[str, str],
     recovery: RecoveryContexts,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
 ) -> None:
     """Join retained pre-DDL facts to the single authenticated host attempt.
 
@@ -1103,7 +1170,11 @@ def verify_transition_prefix(
     """
     verify_authorization(request, authorization)
     verify_predecessor(
-        request, store=store, recovery=recovery, committed_contexts=committed_contexts
+        request,
+        store=store,
+        recovery=recovery,
+        committed_contexts=committed_contexts,
+        failed_candidate_contexts=failed_candidate_contexts,
     )
     reservation = read_json(store.read(request_digest(request), kind="reservation"))
     require(
@@ -1144,6 +1215,7 @@ def verify_predecessor(
     recovery: RecoveryContexts,
     depth: int = 0,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
 ) -> None:
     """Verify the complete independent chain anchor before host mutation or DDL."""
     require(depth < 32, "receipt_chain_too_deep")
@@ -1152,12 +1224,17 @@ def verify_predecessor(
         return
     raw = store.read(checksum, kind="receipt")
     prior = read_json(raw)
-    if prior.get("schema") == "dotmac.cp_committed_migration_receipt/1":
+    if prior.get("schema") == "dotmac.cp_failed_candidate_receipt/1":
+        _shape(prior, CpFailedCandidateReceiptV1)
+    elif prior.get("schema") == "dotmac.cp_committed_migration_receipt/1":
         _shape(prior, CpCommittedMigrationReceiptV1)
     else:
         _shape(prior, CpMigrationTransitionReceiptV1)
     previous = cast(
-        CpMigrationTransitionReceiptV1 | CpCommittedMigrationReceiptV1, prior
+        CpMigrationTransitionReceiptV1
+        | CpCommittedMigrationReceiptV1
+        | CpFailedCandidateReceiptV1,
+        prior,
     )
     require(
         previous["phase"] == "complete"
@@ -1188,6 +1265,7 @@ def verify_predecessor(
         _depth=depth + 1,
         recovery=recovery,
         committed_contexts=committed_contexts,
+        failed_candidate_contexts=failed_candidate_contexts,
     )
 
 
@@ -1201,6 +1279,7 @@ def verify_receipt(
     routing_gate: bool = False,
     _depth: int = 0,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
 ) -> CpMigrationTransitionReceiptV1:
     require(_depth < 32, "receipt_chain_too_deep")
     reservation = read_json(store.read(request_digest(request), kind="reservation"))
@@ -1269,6 +1348,7 @@ def verify_receipt(
         recovery=recovery,
         depth=_depth,
         committed_contexts=committed_contexts,
+        failed_candidate_contexts=failed_candidate_contexts,
     )
     return value
 
@@ -1327,6 +1407,7 @@ def execute_transition(
     recovery: RecoveryContexts,
     clock: Callable[[], datetime],
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
 ) -> str:
     """Single-use CP owner. Failure never retries or restores public routing."""
     with host.lock():
@@ -1340,6 +1421,7 @@ def execute_transition(
             store=store,
             recovery=recovery,
             committed_contexts=committed_contexts,
+            failed_candidate_contexts=failed_candidate_contexts,
         )
         inspection = host.inspect(request)
         validate_request(request, identity=verifier.policy.identity, now=clock())
@@ -1397,6 +1479,7 @@ def execute_transition(
                 routing_gate=routing_gate,
                 recovery=recovery,
                 committed_contexts=committed_contexts,
+                failed_candidate_contexts=failed_candidate_contexts,
             )
             checksum = store.put(raw, kind="receipt")
             return store.read(checksum, kind="receipt")
@@ -1437,6 +1520,7 @@ def execute_transition(
                 evidence=evidence,
                 recovery=recovery,
                 committed_contexts=committed_contexts,
+                failed_candidate_contexts=failed_candidate_contexts,
             )
             retain(
                 "migrate",
@@ -1516,9 +1600,46 @@ def load_committed_request(
     return validate_committed_request(read_json(raw), identity=identity, now=now)
 
 
+def validate_failed_candidate_request(
+    value: object, *, identity: CpTransitionIdentity, now: datetime
+) -> CpFailedCandidateRequestV1:
+    _shape(value, CpFailedCandidateRequestV1)
+    request = cast(CpFailedCandidateRequestV1, value)
+    require(now.tzinfo is not None)
+    require(
+        all(
+            cast(dict[str, object], request)[key] == getattr(identity, key)
+            for key in ("host", "database", "cluster_system_identifier", "database_oid")
+        ),
+        "host_mismatch",
+    )
+    require(
+        request["authorization_run_id"] > 0 and request["authorization_run_attempt"] > 0
+    )
+    require(
+        now < timestamp(request["expires_at"]) <= now + timedelta(hours=24), "expired"
+    )
+    require(
+        request["plan_digest"] == transition_plan_digest(request),
+        "plan_digest_mismatch",
+    )
+    for side in (request["source"], request["target"]):
+        require(bool(side["heads"]) and side["heads"] == sorted(set(side["heads"])))
+    require(request["source"]["image_digest"] != request["target"]["image_digest"])
+    return request
+
+
+def load_failed_candidate_request(
+    raw: bytes, *, identity: CpTransitionIdentity, now: datetime
+) -> CpFailedCandidateRequestV1:
+    return validate_failed_candidate_request(read_json(raw), identity=identity, now=now)
+
+
 def validate_any_request(
     value: TransitionRequest, *, identity: CpTransitionIdentity, now: datetime
 ) -> TransitionRequest:
+    if value["schema"] == "dotmac.cp_failed_candidate_request/1":
+        return validate_failed_candidate_request(value, identity=identity, now=now)
     if value["schema"] == "dotmac.cp_committed_migration_request/1":
         return validate_committed_request(value, identity=identity, now=now)
     return validate_request(value, identity=identity, now=now)
@@ -1568,6 +1689,65 @@ class HistoricalAuthorization:
         )
         for bound in (self.execution_window_start, self.execution_window_end):
             validate_request(request, identity=self.policy.identity, now=bound)
+        _verify_authorization_report(
+            request,
+            policy=self.policy,
+            verification_bytes=self.verification_bytes,
+            request_name=self.request_name,
+            now=self.execution_window_start,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalCommittedAuthorization:
+    """Protected original verifier output and independently bounded execution time.
+
+    This evidence never carries the fresh gh execution witness.
+    """
+
+    policy: CpTransitionTrustPolicy
+    verification_bytes: bytes
+    execution_window_start: datetime
+    execution_window_end: datetime
+    request_name: str
+    protection_bytes: bytes
+    context_digest: str
+
+    def verify(self, request: CpCommittedMigrationRequestV1) -> None:
+        require(
+            request["operator_revision"] == self.policy.workflow_revision,
+            "historical_operator_revision_mismatch",
+        )
+        require(
+            self.execution_window_start.tzinfo is not None
+            and self.execution_window_end.tzinfo is not None
+        )
+        require(
+            self.execution_window_start <= self.execution_window_end,
+            "historical_execution_window_invalid",
+        )
+        sha(self.context_digest)
+        require(
+            raw_digest(self.protection_bytes)
+            == self.policy.environment_protection_digest,
+            "environment_protection_mismatch",
+        )
+        proof_document = read_json(self.protection_bytes)
+        _shape(proof_document, SingleUserManualV2)
+        proof = cast(SingleUserManualV2, proof_document)
+        require(
+            proof["repository_id"] == self.policy.repository_id
+            and proof["repository_owner_id"] == self.policy.repository_owner_id
+            and proof["workflow_revision"] == self.policy.workflow_revision
+            and proof["required_reviewer_ids"] == [int(self.policy.repository_owner_id)]
+            and request["trusted_actor"] == self.policy.repository.split("/", 1)[0]
+            and timestamp(proof["expires_at"]) > self.execution_window_end,
+            "environment_protection_mismatch",
+        )
+        for bound in (self.execution_window_start, self.execution_window_end):
+            validate_committed_request(
+                request, identity=self.policy.identity, now=bound
+            )
         _verify_authorization_report(
             request,
             policy=self.policy,
@@ -1953,6 +2133,7 @@ def verify_committed_receipt(
     routing_gate: bool = False,
     _depth: int = 0,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
 ) -> CpCommittedMigrationReceiptV1:
     require(_depth < 32, "receipt_chain_too_deep")
     reservation_raw = store.read(request_digest(request), kind="reservation")
@@ -2027,8 +2208,34 @@ def verify_any_receipt(
     routing_gate: bool = False,
     _depth: int = 0,
     context: CommittedMigrationContext | None = None,
+    failed_candidate_context: FailedCandidateContext | None = None,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-) -> CpMigrationTransitionReceiptV1 | CpCommittedMigrationReceiptV1:
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+) -> (
+    CpMigrationTransitionReceiptV1
+    | CpCommittedMigrationReceiptV1
+    | CpFailedCandidateReceiptV1
+):
+    if request["schema"] == "dotmac.cp_failed_candidate_request/1":
+        failed_candidate_context = failed_candidate_context or (
+            failed_candidate_contexts or {}
+        ).get(request["basis"]["context_digest"])
+        require(
+            failed_candidate_context is not None, "failed_candidate_context_missing"
+        )
+        assert failed_candidate_context is not None  # noqa: S101 - narrowed by require
+        return verify_failed_candidate_receipt(
+            raw,
+            store=store,
+            request=request,
+            host_nonce=host_nonce,
+            recovery=recovery,
+            routing_gate=routing_gate,
+            _depth=_depth,
+            context=failed_candidate_context,
+            committed_contexts=committed_contexts,
+            failed_candidate_contexts=failed_candidate_contexts,
+        )
     if request["schema"] == "dotmac.cp_committed_migration_request/1":
         context = context or (committed_contexts or {}).get(
             request["basis"]["context_digest"]
@@ -2045,6 +2252,7 @@ def verify_any_receipt(
             _depth=_depth,
             context=context,
             committed_contexts=committed_contexts,
+            failed_candidate_contexts=failed_candidate_contexts,
         )
     return verify_receipt(
         raw,
@@ -2055,6 +2263,7 @@ def verify_any_receipt(
         routing_gate=routing_gate,
         _depth=_depth,
         committed_contexts=committed_contexts,
+        failed_candidate_contexts=failed_candidate_contexts,
     )
 
 
@@ -2082,6 +2291,7 @@ def execute_committed_continuation(
     context: CommittedMigrationContext,
     clock: Callable[[], datetime],
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
 ) -> str:
     with host.lock():
         now = clock()
@@ -2156,6 +2366,7 @@ def execute_committed_continuation(
                 routing_gate=routing_gate,
                 context=context,
                 committed_contexts=committed_contexts,
+                failed_candidate_contexts=failed_candidate_contexts,
             )
             return store.read(store.put(raw, kind="receipt"), kind="receipt")
 
@@ -2175,6 +2386,553 @@ def execute_committed_continuation(
                 ),
             )
             retain("committed-rebound", host.rebind_committed(request, nonce, context))
+            retain("migrated-target-heads", host.target_heads(request, nonce))
+
+            def mark_acl() -> None:
+                nonlocal acl_may_be_restored
+                acl_may_be_restored = True
+
+            return _execute_common_suffix(
+                request,
+                nonce=nonce,
+                host=host,
+                store=store,
+                evidence=evidence,
+                retain=retain,
+                receipt=receipt,
+                mark_acl=mark_acl,
+            )
+        except BaseException as original:
+            try:
+                retain(
+                    "failure",
+                    host.fail_closed(
+                        request, nonce, acl_may_be_restored=acl_may_be_restored
+                    ),
+                )
+            except BaseException as compensation:
+                original.add_note(
+                    f"Fail-closed compensation failed: {type(compensation).__name__}"
+                )
+            raise
+
+
+@dataclass(frozen=True, slots=True)
+class FailedCandidateContext:
+    original: CommittedMigrationContext
+    prior_store: ArtifactStore
+    request: CpCommittedMigrationRequestV1
+    host_nonce: str
+    evidence: Mapping[str, str]
+    historical_authorization: HistoricalCommittedAuthorization
+    proof: FenceProof
+    context_digest: str
+    original_frontier_claim_digest: str
+    quiescence_digest: str
+    inventory: Mapping[str, str]
+
+    @property
+    def original_proof(self) -> FenceProof:
+        return self.original.original_proof
+
+    @property
+    def measurement(self) -> CandidateMeasurementV1:
+        document = read_json(self.prior_store.read(self.quiescence_digest))
+        _shape(document, CandidateQuiescenceProofV1)
+        snapshot = read_json(self.prior_store.read(cast(str, document["after_digest"])))
+        _shape(snapshot, CandidateSnapshotV1)
+        return cast(CandidateSnapshotV1, snapshot)["measurement"]
+
+    def recovery_context(self) -> RecoveryContexts:
+        return self.original.recovery
+
+
+def failed_candidate_frontier_key(context: FailedCandidateContext) -> str:
+    return digest(
+        {
+            "schema": "dotmac.cp_failed_candidate_frontier_key/1",
+            "original_frontier_key": committed_frontier_key(context.original),
+            "failed_request_digest": request_digest(context.request),
+            "failed_host_nonce": context.host_nonce,
+        }
+    )
+
+
+def _failed_candidate_claim(
+    context: FailedCandidateContext,
+    request: CpFailedCandidateRequestV1,
+    nonce: str,
+    fresh_reservation_digest: str,
+) -> dict[str, object]:
+    return {
+        "schema": "dotmac.cp_failed_candidate_frontier_reservation/1",
+        "frontier_key": failed_candidate_frontier_key(context),
+        "original_frontier_key": committed_frontier_key(context.original),
+        "original_frontier_claim_digest": context.original_frontier_claim_digest,
+        "failed_request_digest": request_digest(context.request),
+        "failed_host_nonce": context.host_nonce,
+        "context_digest": context.context_digest,
+        "current_fence_digest": request["basis"]["current_fence_digest"],
+        "current_fence_id": request["basis"]["current_fence_id"],
+        "request_digest": request_digest(request),
+        "host_nonce": nonce,
+        "fresh_reservation_digest": fresh_reservation_digest,
+    }
+
+
+FAILED_CANDIDATE_PREFIX_EVIDENCE = {
+    "inspection",
+    "authorization",
+    "committed-rebound",
+    "migrated-target-heads",
+    "failure",
+}
+FAILED_CANDIDATE_PRE_ACL_EVIDENCE = (
+    COMMITTED_PRE_ACL_EVIDENCE - {"committed-rebound"}
+) | {"failed-candidate-rebound"}
+
+
+def verify_failed_candidate_frontier(
+    context: FailedCandidateContext,
+    request: CpFailedCandidateRequestV1,
+    *,
+    owned_successor_claim: bytes | None = None,
+) -> None:
+    """Admit one contained failed committed V1 suffix, from its full history."""
+    from vendor_cp.deployment.transition_fence import FenceProof
+
+    _shape(request, CpFailedCandidateRequestV1)
+    prior, store = context.request, context.prior_store
+    # This check is independent of annotations: a successor is never eligible.
+    _shape(prior, CpCommittedMigrationRequestV1)
+    _shape(context.host_nonce, Nonce)
+    sha(context.context_digest)
+    context.historical_authorization.verify(prior)
+    reservation_raw = store.read(request_digest(prior), kind="reservation")
+    authorization_raw = context.historical_authorization.verification_bytes
+    reservation = read_json(reservation_raw)
+    require(
+        reservation
+        == {
+            "schema": "dotmac.cp_transition_attempt/2",
+            "request_digest": request_digest(prior),
+            "host_nonce": context.host_nonce,
+            "authorization_run_id": prior["authorization_run_id"],
+            "authorization_run_attempt": prior["authorization_run_attempt"],
+            "verification_digest": raw_digest(authorization_raw),
+        },
+        "failed_candidate_reservation_mismatch",
+    )
+    require(
+        store.read(raw_digest(authorization_raw)) == authorization_raw,
+        "authorization_bytes_mismatch",
+    )
+    original_claim = context.original.prior_store.read(
+        committed_frontier_key(context.original), kind="reservation"
+    )
+    require(
+        raw_digest(original_claim) == context.original_frontier_claim_digest,
+        "failed_candidate_original_claim_mismatch",
+    )
+    verify_committed_frontier(
+        context.original, prior, owned_frontier_claim=original_claim
+    )
+    claim = read_json(original_claim)
+    require(
+        claim["host_nonce"] == context.host_nonce
+        and claim["fresh_reservation_digest"] == raw_digest(reservation_raw),
+        "failed_candidate_original_claim_mismatch",
+    )
+    require(
+        context.host_nonce != context.original.host_nonce,
+        "failed_candidate_nonce_reused",
+    )
+    for name in PLAN_FIELDS:
+        require(
+            cast(dict[str, object], request)[name]
+            == cast(dict[str, object], prior)[name],
+            "failed_candidate_target_or_identity_mismatch",
+        )
+    require(
+        (request["authorization_run_id"], request["authorization_run_attempt"])
+        not in {
+            (prior["authorization_run_id"], prior["authorization_run_attempt"]),
+            (
+                context.original.request["authorization_run_id"],
+                context.original.request["authorization_run_attempt"],
+            ),
+        },
+        "failed_candidate_authorization_reused",
+    )
+    proof = context.proof
+    FenceProof.from_document(
+        read_json(store.read(proof.digest())), expected_digest=proof.digest()
+    )
+    original = context.original_proof
+    require(
+        proof.database == prior["database"] and proof.fence_id == context.host_nonce,
+        "failed_candidate_fence_mismatch",
+    )
+    require(
+        original.prior_acl == proof.prior_acl
+        and original.prior_grants == proof.prior_grants
+        and original.member_roles == proof.member_roles
+        and original.fenced_roles == proof.fenced_roles
+        and original.absent_roles == proof.absent_roles,
+        "failed_candidate_fence_lineage_mismatch",
+    )
+    require(
+        set(context.evidence) == FAILED_CANDIDATE_PREFIX_EVIDENCE,
+        "failed_candidate_prefix_mismatch",
+    )
+    retained = dict(context.evidence)
+    for kind, checksum in retained.items():
+        _validate_committed_evidence(
+            read_json(store.read(checksum)),
+            request=prior,
+            nonce=context.host_nonce,
+            kind=kind,
+            store=store,
+            evidence=retained,
+            recovery=context.original.recovery,
+        )
+    _verify_candidate_quiescence(
+        context.quiescence_digest, request=prior, nonce=context.host_nonce, store=store
+    )
+    require(
+        context.measurement == context.original.measurement,
+        "failed_candidate_measurement_mismatch",
+    )
+    expected_basis = {
+        "context_digest": context.context_digest,
+        "original_context_digest": context.original.context_digest,
+        "original_frontier_key": committed_frontier_key(context.original),
+        "original_frontier_claim_digest": context.original_frontier_claim_digest,
+        "failed_request_digest": request_digest(prior),
+        "failed_host_nonce": context.host_nonce,
+        "failed_reservation_digest": raw_digest(reservation_raw),
+        "failed_authorization_digest": raw_digest(authorization_raw),
+        "failure_digest": retained["failure"],
+        "quiescence_digest": context.quiescence_digest,
+        "original_fence_digest": original.digest(),
+        "current_fence_digest": proof.digest(),
+        "current_fence_id": proof.fence_id,
+        "frontier_measurement_digest": digest(context.measurement),
+    }
+    require(request["basis"] == expected_basis, "failed_candidate_basis_mismatch")
+    # Build the entire permitted closure from verified owners, never a caller's
+    # inventory alone. Unknown names, partial files and later stages all deny.
+    closure: dict[str, str] = {}
+
+    def include(checksum: str, *, kind: str = "evidence") -> None:
+        closure[store._name(checksum, kind)] = raw_digest(
+            store.read(checksum, kind=kind)
+        )
+
+    include(request_digest(prior), kind="reservation")
+    for checksum in (
+        *retained.values(),
+        raw_digest(authorization_raw),
+        proof.digest(),
+        context.quiescence_digest,
+        context.measurement["catalogue_digest"],
+    ):
+        include(checksum)
+    quiescence = read_json(store.read(context.quiescence_digest))
+    include(cast(str, quiescence["after_digest"]))
+    require(dict(context.inventory) == closure, "failed_candidate_inventory_mismatch")
+    expected_inventory = dict(closure)
+    key = failed_candidate_frontier_key(context)
+    if owned_successor_claim is not None:
+        owned = read_json(owned_successor_claim)
+        _shape(owned.get("host_nonce"), Nonce)
+        _shape(owned.get("fresh_reservation_digest"), Digest)
+        require(
+            owned["host_nonce"]
+            not in {context.host_nonce, context.original.host_nonce},
+            "failed_candidate_nonce_reused",
+        )
+        require(
+            owned
+            == _failed_candidate_claim(
+                context,
+                request,
+                cast(str, owned["host_nonce"]),
+                cast(str, owned["fresh_reservation_digest"]),
+            ),
+            "failed_candidate_frontier_owner_mismatch",
+        )
+        require(
+            store.read(key, kind="reservation") == owned_successor_claim,
+            "failed_candidate_frontier_consumed",
+        )
+        expected_inventory[store._name(key, "reservation")] = raw_digest(
+            owned_successor_claim
+        )
+    directory = _open_directory(store.root)
+    try:
+        names = set(os.listdir(directory))
+        require(names == set(expected_inventory), "failed_candidate_inventory_mismatch")
+        for name, checksum in expected_inventory.items():
+            stem, kind, _ = name.split(".")
+            require(
+                raw_digest(store.read("sha256:" + stem, kind=kind)) == checksum,
+                "failed_candidate_inventory_mismatch",
+            )
+    finally:
+        os.close(directory)
+
+
+class CpFailedCandidateReceiptV1(TypedDict):
+    schema: Literal["dotmac.cp_failed_candidate_receipt/1"]
+    request: CpFailedCandidateRequestV1
+    request_digest: Digest
+    host_nonce: str
+    phase: Literal["pre-routing", "complete"]
+    historical_context_digest: Digest
+    successor_reservation_digest: Digest
+    evidence: dict[Identifier, Digest]
+
+
+def _validate_failed_candidate_evidence(
+    value: dict[str, object],
+    *,
+    request: CpFailedCandidateRequestV1,
+    nonce: str,
+    kind: str,
+    store: ArtifactStore,
+    evidence: dict[str, str],
+    recovery: RecoveryContexts,
+) -> None:
+    if kind != "failed-candidate-rebound":
+        _validate_evidence(
+            value,
+            request=request,
+            nonce=nonce,
+            kind=kind,
+            store=store,
+            evidence=evidence,
+            recovery=recovery,
+        )
+        return
+    require(
+        value
+        == {
+            "schema": "dotmac.cp_transition_evidence/2",
+            "request_digest": request_digest(request),
+            "host_nonce": nonce,
+            "kind": kind,
+            "result": {
+                "prior_fence_id": request["basis"]["current_fence_id"],
+                "fence_id": nonce,
+                "original_fence_digest": request["basis"]["original_fence_digest"],
+                "current_fence_digest": request["basis"]["current_fence_digest"],
+            },
+        },
+        "failed_candidate_rebind_mismatch",
+    )
+
+
+def verify_failed_candidate_receipt(
+    raw: bytes,
+    *,
+    store: ArtifactStore,
+    request: CpFailedCandidateRequestV1,
+    host_nonce: str,
+    recovery: RecoveryContexts,
+    context: FailedCandidateContext,
+    routing_gate: bool = False,
+    _depth: int = 0,
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+) -> CpFailedCandidateReceiptV1:
+    require(_depth < 32, "receipt_chain_too_deep")
+    reservation_raw = store.read(request_digest(request), kind="reservation")
+    reservation = read_json(reservation_raw)
+    require(
+        reservation
+        == {
+            "schema": "dotmac.cp_transition_attempt/2",
+            "request_digest": request_digest(request),
+            "host_nonce": host_nonce,
+            "authorization_run_id": request["authorization_run_id"],
+            "authorization_run_attempt": request["authorization_run_attempt"],
+            "verification_digest": reservation.get("verification_digest"),
+        },
+        "reservation_mismatch",
+    )
+    sha(reservation["verification_digest"])
+    claim = canonical_json(
+        _failed_candidate_claim(
+            context, request, host_nonce, raw_digest(reservation_raw)
+        )
+    )
+    verify_failed_candidate_frontier(context, request, owned_successor_claim=claim)
+    document = read_json(raw)
+    _shape(document, CpFailedCandidateReceiptV1)
+    value = cast(CpFailedCandidateReceiptV1, document)
+    require(
+        value["request"] == request
+        and value["request_digest"] == request_digest(request)
+        and value["host_nonce"] == host_nonce
+        and value["historical_context_digest"] == context.context_digest
+        and value["successor_reservation_digest"] == raw_digest(claim),
+        "failed_candidate_receipt_mismatch",
+    )
+    required = FAILED_CANDIDATE_PRE_ACL_EVIDENCE | (
+        RUNTIME_EVIDENCE if routing_gate else set()
+    )
+    allowed = FAILED_CANDIDATE_PRE_ACL_EVIDENCE | RUNTIME_EVIDENCE
+    if value["phase"] == "complete":
+        required |= RUNTIME_EVIDENCE | ROUTING_EVIDENCE
+        allowed |= ROUTING_EVIDENCE
+    require(required <= set(value["evidence"]) <= allowed, "receipt_phase_mismatch")
+    retained = dict(value["evidence"])
+    if "pre-routing-verified" in retained:
+        pre_routing = dict(value)
+        pre_routing["phase"] = "pre-routing"
+        pre_routing["evidence"] = {
+            key: checksum
+            for key, checksum in retained.items()
+            if key not in ROUTING_EVIDENCE
+        }
+        retained["pre-routing-receipt"] = raw_digest(canonical_json(pre_routing))
+        store.read(retained["pre-routing-receipt"], kind="receipt")
+    for kind, checksum in value["evidence"].items():
+        _validate_failed_candidate_evidence(
+            read_json(store.read(checksum)),
+            request=request,
+            nonce=host_nonce,
+            kind=kind,
+            store=store,
+            evidence=retained,
+            recovery=recovery,
+        )
+    return value
+
+
+class CpFailedCandidateTransitionHost(CpTransitionHost, Protocol):
+    def inspect_failed_candidate(
+        self, request: CpFailedCandidateRequestV1, context: FailedCandidateContext
+    ) -> bytes: ...
+    def rebind_failed_candidate(
+        self,
+        request: CpFailedCandidateRequestV1,
+        nonce: str,
+        context: FailedCandidateContext,
+    ) -> bytes: ...
+
+
+def execute_failed_candidate_recovery(
+    raw_request: bytes,
+    *,
+    request_path: Path,
+    bundle_path: Path | None,
+    verifier: GhAttestationVerifier,
+    host: CpFailedCandidateTransitionHost,
+    store: ArtifactStore,
+    recovery: RecoveryContexts,
+    context: FailedCandidateContext,
+    clock: Callable[[], datetime],
+    committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+) -> str:
+    with host.lock():
+        now = clock()
+        request = load_failed_candidate_request(
+            raw_request, identity=verifier.policy.identity, now=now
+        )
+        authorization = verifier.verify(
+            request, request_path=request_path, bundle_path=bundle_path, now=now
+        )
+        verify_failed_candidate_frontier(context, request)
+        inspection = host.inspect_failed_candidate(request, context)
+        validate_failed_candidate_request(
+            request, identity=verifier.policy.identity, now=clock()
+        )
+        nonce = store.reserve(request, authorization)
+        reservation_raw = store.read(request_digest(request), kind="reservation")
+        claim = context.prior_store.reserve_failed_candidate_frontier(
+            context,
+            request,
+            host_nonce=nonce,
+            fresh_reservation_digest=raw_digest(reservation_raw),
+        )
+        verify_failed_candidate_frontier(context, request, owned_successor_claim=claim)
+        evidence: dict[str, str] = {}
+        acl_may_be_restored = False
+
+        def retain(kind: str, raw: bytes) -> str:
+            _validate_failed_candidate_evidence(
+                read_json(raw),
+                request=request,
+                nonce=nonce,
+                kind=kind,
+                store=store,
+                evidence=evidence,
+                recovery=recovery,
+            )
+            checksum = store.put(raw)
+            evidence[kind] = checksum
+            return checksum
+
+        def local(kind: str, facts: object) -> bytes:
+            return canonical_json(
+                {
+                    "schema": "dotmac.cp_transition_evidence/2",
+                    "request_digest": request_digest(request),
+                    "host_nonce": nonce,
+                    "kind": kind,
+                    "result": facts,
+                }
+            )
+
+        def receipt(
+            phase: Literal["pre-routing", "complete"], *, routing_gate: bool
+        ) -> bytes:
+            value: CpFailedCandidateReceiptV1 = {
+                "schema": "dotmac.cp_failed_candidate_receipt/1",
+                "request": request,
+                "request_digest": request_digest(request),
+                "host_nonce": nonce,
+                "phase": phase,
+                "historical_context_digest": context.context_digest,
+                "successor_reservation_digest": raw_digest(claim),
+                "evidence": dict(evidence),
+            }
+            raw = canonical_json(value)
+            verify_failed_candidate_receipt(
+                raw,
+                store=store,
+                request=request,
+                host_nonce=nonce,
+                recovery=recovery,
+                routing_gate=routing_gate,
+                context=context,
+                committed_contexts=committed_contexts,
+                failed_candidate_contexts=failed_candidate_contexts,
+            )
+            return store.read(store.put(raw, kind="receipt"), kind="receipt")
+
+        try:
+            retain("inspection", local("inspection", read_json(inspection)))
+            auth_digest = store.put(authorization.verification_bytes)
+            retain(
+                "authorization",
+                local(
+                    "authorization",
+                    {
+                        "verification_digest": auth_digest,
+                        "run_id": authorization.authorization_run_id,
+                        "run_attempt": authorization.authorization_run_attempt,
+                        "trusted_actor": authorization.trusted_actor,
+                    },
+                ),
+            )
+            retain(
+                "failed-candidate-rebound",
+                host.rebind_failed_candidate(request, nonce, context),
+            )
             retain("migrated-target-heads", host.target_heads(request, nonce))
 
             def mark_acl() -> None:

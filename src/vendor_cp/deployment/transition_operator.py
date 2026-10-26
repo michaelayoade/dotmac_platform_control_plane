@@ -20,6 +20,7 @@ from vendor_cp.deploy_agent.contracts import (
     Identifier,
     Revision,
     _shape,
+    canonical_json,
     read_json,
     require,
 )
@@ -109,6 +110,11 @@ class CommittedMigrationPinsV1(TypedDict):
     digest: Digest
 
 
+class FailedCandidatePinsV1(TypedDict):
+    path: str
+    digest: Digest
+
+
 class InstallationV1(TypedDict):
     schema: Literal["dotmac.cp_transition_installation/1"]
     identity: IdentityV1
@@ -119,6 +125,7 @@ class InstallationV1(TypedDict):
     held_fence_context: NotRequired[HeldFencePinsV1]
     committed_migration_context: NotRequired[CommittedMigrationPinsV1]
     operator_revision: NotRequired[Revision]
+    failed_candidate_context: NotRequired[FailedCandidatePinsV1]
 
 
 class BackupMetadataV1(TypedDict):
@@ -199,6 +206,29 @@ class HistoricalCommittedContextV1(TypedDict):
     committed_context: CommittedMigrationPinsV1
 
 
+class FailedCandidateContextV1(TypedDict):
+    schema: Literal["dotmac.cp_failed_candidate_context/1"]
+    failed_installation: FailedCandidatePinsV1
+    request: cp.CpCommittedMigrationRequestV1
+    host_nonce: Annotated[str, r"[0-9a-f]{64}"]
+    reservation_digest: Digest
+    authorization_verification_digest: Digest
+    authorization_context: FailedCandidatePinsV1
+    original_context_digest: Digest
+    original_frontier_claim_digest: Digest
+    current_fence_digest: Digest
+    current_fence_id: Annotated[str, r"[0-9a-f]{64}"]
+    evidence: dict[Identifier, Digest]
+    quiescence_digest: Digest
+    inventory: dict[str, Digest]
+
+
+class HistoricalFailedCandidateContextV1(TypedDict):
+    schema: Literal["dotmac.cp_failed_candidate_recovery_context/1"]
+    receipt_digest: Digest
+    failed_candidate_context: FailedCandidatePinsV1
+
+
 @dataclass(frozen=True, slots=True)
 class Installation:
     policy: cp.CpTransitionTrustPolicy
@@ -208,16 +238,20 @@ class Installation:
     held_fence_context: HeldFencePinsV1 | None = None
     committed_migration_context: CommittedMigrationPinsV1 | None = None
     operator_revision: str | None = None
+    failed_candidate_context: FailedCandidatePinsV1 | None = None
 
 
 class _HostContinuationArguments(TypedDict, total=False):
     held_fence: HeldFenceContinuation
     committed_context: cp.CommittedMigrationContext
     committed_contexts: dict[str, cp.CommittedMigrationContext]
+    failed_candidate_context: cp.FailedCandidateContext
+    failed_candidate_contexts: dict[str, cp.FailedCandidateContext]
 
 
 class _ExecutionContexts(TypedDict, total=False):
     committed_contexts: dict[str, cp.CommittedMigrationContext]
+    failed_candidate_contexts: dict[str, cp.FailedCandidateContext]
 
 
 class TransitionOperatorRefused(Exception):
@@ -374,12 +408,18 @@ def load_installation(path: Path) -> Installation:
     identity = cp.CpTransitionIdentity(**value["identity"])
     policy = _trust_policy(identity, value["trust"])
     committed = value.get("committed_migration_context")
+    failed = value.get("failed_candidate_context")
     require(
-        committed is None or value.get("held_fence_context") is None,
+        sum(
+            item is not None
+            for item in (committed, failed, value.get("held_fence_context"))
+        )
+        <= 1,
         "continuation_contexts_conflict",
     )
     require(
-        committed is None or value.get("operator_revision") is not None,
+        (committed is None and failed is None)
+        or value.get("operator_revision") is not None,
         "committed_operator_revision_required",
     )
     store = cp.ArtifactStore(_path(value["artifact_directory"]))
@@ -397,6 +437,7 @@ def load_installation(path: Path) -> Installation:
         value.get("held_fence_context"),
         committed,
         value.get("operator_revision"),
+        failed,
     )
 
 
@@ -708,18 +749,257 @@ def _load_committed_context(
     )
 
 
+def _load_failed_authorization(
+    installation: Installation,
+    failed: Installation,
+    failed_path: Path,
+    failed_trust: TrustV1,
+    context: FailedCandidateContextV1,
+) -> cp.HistoricalCommittedAuthorization:
+    pins = context["authorization_context"]
+    raw = cp._read_protected(_path(pins["path"]))
+    require(cp.raw_digest(raw) == pins["digest"], "historical_context_digest_mismatch")
+    document = read_json(raw)
+    _shape(document, HistoricalAuthorizationContextV1)
+    value = cast(HistoricalAuthorizationContextV1, document)
+    require(value["trust"] == failed_trust, "historical_installation_trust_mismatch")
+    require(value["request_name"] == "request.json", "historical_subject_mismatch")
+    prior = context["request"]
+    work = failed_path.parent / (
+        f"native-attempt-{prior['authorization_run_id']}-{prior['authorization_run_attempt']}"
+    )
+    invocation_path, result_path = (
+        _path(value["invocation_file"]),
+        _path(value["result_file"]),
+    )
+    require(
+        invocation_path == work / "invocation.json"
+        and result_path == work / "result.json",
+        "historical_execution_records_mismatch",
+    )
+    invocation_raw, result_raw = (
+        cp._read_protected(invocation_path),
+        cp._read_protected(result_path),
+    )
+    require(
+        cp.raw_digest(invocation_raw) == value["invocation_digest"]
+        and cp.raw_digest(result_raw) == value["result_digest"],
+        "historical_execution_records_mismatch",
+    )
+    invocation_value, result_value = read_json(invocation_raw), read_json(result_raw)
+    _shape(invocation_value, OriginalInvocationV1)
+    _shape(result_value, OriginalResultV1)
+    invocation, result = (
+        cast(OriginalInvocationV1, invocation_value),
+        cast(OriginalResultV1, result_value),
+    )
+    request_raw = cp._read_protected(work / "request.json")
+    bundle_raw = cp._read_protected(work / "bundle.json")
+    require(
+        request_raw == canonical_json(prior)
+        and cp.raw_digest(request_raw)[7:] == invocation["request_sha256"]
+        and cp.raw_digest(bundle_raw)[7:] == invocation["bundle_sha256"]
+        and invocation["run_id"] == prior["authorization_run_id"]
+        and result["work"] == str(work)
+        and 0 < invocation["started_unix"] <= result["completed_unix"]
+        and result["stdout_bytes"] >= 0
+        and result["stderr_bytes"] >= 0,
+        "historical_execution_records_mismatch",
+    )
+    historical = cp.HistoricalCommittedAuthorization(
+        policy=failed.policy,
+        verification_bytes=failed.store.read(
+            context["authorization_verification_digest"]
+        ),
+        execution_window_start=datetime.fromtimestamp(invocation["started_unix"], UTC),
+        execution_window_end=datetime.fromtimestamp(result["completed_unix"], UTC),
+        request_name=value["request_name"],
+        protection_bytes=cp._read_protected(failed.policy.environment_protection_proof),
+        context_digest=pins["digest"],
+    )
+    require(
+        failed.policy.identity == installation.policy.identity,
+        "historical_identity_mismatch",
+    )
+    historical.verify(prior)
+    return historical
+
+
+def _load_failed_candidate_context(
+    installation: Installation,
+    pins: FailedCandidatePinsV1 | None = None,
+) -> cp.FailedCandidateContext | None:
+    """Derive the spent store from its immutable Installation, never caller paths."""
+    pins = pins if pins is not None else installation.failed_candidate_context
+    if pins is None:
+        return None
+    raw = cp._read_protected(_path(pins["path"]))
+    require(
+        cp.raw_digest(raw) == pins["digest"], "failed_candidate_context_digest_mismatch"
+    )
+    document = read_json(raw)
+    _shape(document, FailedCandidateContextV1)
+    value = cast(FailedCandidateContextV1, document)
+    failed_pins = value["failed_installation"]
+    failed_path = _path(failed_pins["path"])
+    require(
+        failed_path.name == "installation.json", "failed_installation_path_mismatch"
+    )
+    failed_raw = cp._read_protected(failed_path)
+    require(
+        cp.raw_digest(failed_raw) == failed_pins["digest"],
+        "failed_installation_digest_mismatch",
+    )
+    failed_document = read_json(failed_raw)
+    _shape(failed_document, InstallationV1)
+    failed_value = cast(InstallationV1, failed_document)
+    require(
+        "committed_migration_context" in failed_value
+        and "held_fence_context" not in failed_value
+        and "failed_candidate_context" not in failed_value,
+        "failed_candidate_predecessor_kind",
+    )
+    failed = load_installation(failed_path)
+    require(
+        failed.store.root == failed_path.parent / "artifact-store",
+        "failed_candidate_canonical_store_mismatch",
+    )
+    require(
+        cp._read_protected(failed_path) == failed_raw, "failed_installation_changed"
+    )
+    prior = value["request"]
+    require(
+        failed.policy.identity == installation.policy.identity
+        and failed.operator_revision
+        == failed.policy.workflow_revision
+        == prior["operator_revision"],
+        "historical_identity_mismatch",
+    )
+    require(failed.store.root != installation.store.root, "recovery_store_reused")
+    original = _load_committed_context(failed)
+    require(original is not None, "committed_context_missing")
+    assert original is not None  # noqa: S101 - narrowed by require
+    require(
+        original.context_digest == value["original_context_digest"],
+        "committed_context_digest_mismatch",
+    )
+    require(
+        original.prior_store.root not in {failed.store.root, installation.store.root},
+        "recovery_store_reused",
+    )
+    require(
+        cp.raw_digest(failed.store.read(cp.request_digest(prior), kind="reservation"))
+        == value["reservation_digest"],
+        "failed_candidate_reservation_mismatch",
+    )
+    require(
+        all(
+            re.fullmatch(r"[0-9a-f]{64}\.(?:evidence|reservation)\.json", name)
+            for name in value["inventory"]
+        ),
+        "failed_candidate_inventory_mismatch",
+    )
+    historical = _load_failed_authorization(
+        installation, failed, failed_path, failed_value["trust"], value
+    )
+    from vendor_cp.deployment.transition_fence import FenceProof
+
+    proof = FenceProof.from_document(
+        read_json(failed.store.read(value["current_fence_digest"])),
+        expected_digest=value["current_fence_digest"],
+    )
+    require(
+        proof.fence_id == value["current_fence_id"] == value["host_nonce"],
+        "failed_candidate_fence_mismatch",
+    )
+    return cp.FailedCandidateContext(
+        original=original,
+        prior_store=failed.store,
+        request=prior,
+        host_nonce=value["host_nonce"],
+        evidence=value["evidence"],
+        historical_authorization=historical,
+        proof=proof,
+        context_digest=pins["digest"],
+        original_frontier_claim_digest=value["original_frontier_claim_digest"],
+        quiescence_digest=value["quiescence_digest"],
+        inventory=value["inventory"],
+    )
+
+
+def _register_original_context(
+    contexts: dict[str, cp.CommittedMigrationContext],
+    recovery: dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]],
+    context: cp.CommittedMigrationContext,
+) -> cp.CommittedMigrationContext:
+    known = contexts.get(context.context_digest)
+    if known is not None:
+        require(
+            known.request == context.request
+            and known.prior_store.root == context.prior_store.root
+            and known.historical_authorization.context_digest
+            == context.historical_authorization.context_digest
+            and {key: binding[1] for key, binding in known.recovery.items()}
+            == {key: binding[1] for key, binding in context.recovery.items()},
+            "conflicting_historical_recovery",
+        )
+        return known
+    contexts[context.context_digest] = context
+    for key, binding in context.recovery.items():
+        require(key not in recovery, "duplicate_historical_recovery")
+        recovery[key] = binding
+    return context
+
+
 def _load_recovery(
     installation: Installation,
     *,
     committed_contexts: dict[str, cp.CommittedMigrationContext] | None = None,
+    failed_candidate_contexts: dict[str, cp.FailedCandidateContext] | None = None,
 ) -> dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]]:
     """Rebuild only independently root-installed historical recovery bindings."""
     recovery: dict[str, tuple[PlatformCpRecoveryBundle, PlatformBackupResult]] = {}
     contexts = committed_contexts if committed_contexts is not None else {}
+    failed_contexts = (
+        failed_candidate_contexts if failed_candidate_contexts is not None else {}
+    )
     historical = []
     committed_receipts = []
+    failed_receipts = []
+    committed_entries: set[str] = set()
     for path in installation.historical_context_files:
         document = read_json(cp._read_protected(path))
+        if document.get("schema") == "dotmac.cp_failed_candidate_recovery_context/1":
+            _shape(document, HistoricalFailedCandidateContextV1)
+            failed_entry = cast(HistoricalFailedCandidateContextV1, document)
+            failed_context = _load_failed_candidate_context(
+                installation, failed_entry["failed_candidate_context"]
+            )
+            require(failed_context is not None, "failed_candidate_context_missing")
+            assert failed_context is not None  # noqa: S101 - narrowed by require
+            require(
+                failed_context.context_digest not in failed_contexts,
+                "duplicate_failed_candidate_context",
+            )
+            original = _register_original_context(
+                contexts, recovery, failed_context.original
+            )
+            failed_context = replace(failed_context, original=original)
+            failed_contexts[failed_context.context_digest] = failed_context
+            raw = installation.store.read(
+                failed_entry["receipt_digest"], kind="receipt"
+            )
+            value = read_json(raw)
+            _shape(value, cp.CpFailedCandidateReceiptV1)
+            failed_receipt = cast(cp.CpFailedCandidateReceiptV1, value)
+            require(
+                failed_receipt["phase"] == "complete"
+                and failed_receipt["historical_context_digest"]
+                == failed_context.context_digest,
+                "historical_failed_candidate_receipt_mismatch",
+            )
+            failed_receipts.append((raw, failed_receipt, failed_context))
+            continue
         if document.get("schema") == "dotmac.cp_committed_recovery_context/1":
             _shape(document, HistoricalCommittedContextV1)
             committed_entry = cast(HistoricalCommittedContextV1, document)
@@ -729,13 +1009,11 @@ def _load_recovery(
             require(context is not None, "historical_committed_context_missing")
             assert context is not None  # noqa: S101 - narrowed by require
             require(
-                context.context_digest not in contexts,
+                context.context_digest not in committed_entries,
                 "duplicate_historical_committed_context",
             )
-            contexts[context.context_digest] = context
-            for key, binding in context.recovery.items():
-                require(key not in recovery, "duplicate_historical_recovery")
-                recovery[key] = binding
+            committed_entries.add(context.context_digest)
+            context = _register_original_context(contexts, recovery, context)
             raw = installation.store.read(
                 committed_entry["receipt_digest"], kind="receipt"
             )
@@ -786,6 +1064,8 @@ def _load_recovery(
     verification_contexts: _ExecutionContexts = {}
     if contexts:
         verification_contexts["committed_contexts"] = contexts
+    if failed_contexts:
+        verification_contexts["failed_candidate_contexts"] = failed_contexts
     for raw, request, nonce in historical:
         cp.verify_receipt(
             raw,
@@ -803,8 +1083,19 @@ def _load_recovery(
             host_nonce=receipt["host_nonce"],
             recovery=recovery,
             context=context,
-            committed_contexts=contexts,
+            **verification_contexts,
             routing_gate=True,
+        )
+    for raw, failed_receipt, failed_context in failed_receipts:
+        cp.verify_failed_candidate_receipt(
+            raw,
+            store=installation.store,
+            request=failed_receipt["request"],
+            host_nonce=failed_receipt["host_nonce"],
+            recovery=recovery,
+            context=failed_context,
+            routing_gate=True,
+            **verification_contexts,
         )
     return recovery
 
@@ -822,19 +1113,29 @@ def run_transition(
             request = cp.load_request(
                 raw, identity=installation.policy.identity, now=datetime.now(UTC)
             )
+        elif schema == "dotmac.cp_committed_migration_request/1":
+            request = cp.load_committed_request(
+                raw, identity=installation.policy.identity, now=datetime.now(UTC)
+            )
         else:
             require(
-                schema == "dotmac.cp_committed_migration_request/1",
+                schema == "dotmac.cp_failed_candidate_request/1",
                 "unknown_transition_request",
             )
-            request = cp.load_committed_request(
+            request = cp.load_failed_candidate_request(
                 raw, identity=installation.policy.identity, now=datetime.now(UTC)
             )
         if bundle_file is not None:
             cp._read_protected(bundle_file)
         contexts: dict[str, cp.CommittedMigrationContext] = {}
-        recovery = _load_recovery(installation, committed_contexts=contexts)
+        failed_contexts: dict[str, cp.FailedCandidateContext] = {}
+        recovery = _load_recovery(
+            installation,
+            committed_contexts=contexts,
+            failed_candidate_contexts=failed_contexts,
+        )
         context = None
+        failed_context = None
         held_fence = None
         if request["schema"] == "dotmac.cp_committed_migration_request/1":
             require(
@@ -848,14 +1149,42 @@ def run_transition(
             for key, binding in context.recovery.items():
                 require(key not in recovery, "duplicate_historical_recovery")
                 recovery[key] = binding
+        elif request["schema"] == "dotmac.cp_failed_candidate_request/1":
+            require(
+                request["operator_revision"] == installation.operator_revision,
+                "failed_candidate_operator_revision_mismatch",
+            )
+            failed_context = _load_failed_candidate_context(installation)
+            require(failed_context is not None, "failed_candidate_context_missing")
+            assert failed_context is not None  # noqa: S101 - narrowed by require
+            require(
+                failed_context.context_digest not in failed_contexts,
+                "duplicate_failed_candidate_context",
+            )
+            original = _register_original_context(
+                contexts, recovery, failed_context.original
+            )
+            failed_context = replace(failed_context, original=original)
+            failed_contexts[failed_context.context_digest] = failed_context
         else:
             held_fence = _load_held_fence(installation, request)
         previous = request["previous_receipt_digest"]
         if previous is not None:
             prior_raw = installation.store.read(previous, kind="receipt")
             prior_value = read_json(prior_raw)
-            prior: cp.CpMigrationTransitionReceiptV1 | cp.CpCommittedMigrationReceiptV1
-            if prior_value.get("schema") == "dotmac.cp_committed_migration_receipt/1":
+            prior: (
+                cp.CpMigrationTransitionReceiptV1
+                | cp.CpCommittedMigrationReceiptV1
+                | cp.CpFailedCandidateReceiptV1
+            )
+            if prior_value.get("schema") == "dotmac.cp_failed_candidate_receipt/1":
+                _shape(prior_value, cp.CpFailedCandidateReceiptV1)
+                prior = cast(cp.CpFailedCandidateReceiptV1, prior_value)
+                require(
+                    prior["historical_context_digest"] in failed_contexts,
+                    "historical_recovery_missing",
+                )
+            elif prior_value.get("schema") == "dotmac.cp_committed_migration_receipt/1":
                 _shape(prior_value, cp.CpCommittedMigrationReceiptV1)
                 prior = cast(cp.CpCommittedMigrationReceiptV1, prior_value)
                 require(
@@ -870,14 +1199,19 @@ def run_transition(
                     "historical_recovery_missing",
                 )
             require(prior["phase"] == "complete", "incomplete_previous_receipt")
+            previous_contexts: _ExecutionContexts = {}
+            if contexts:
+                previous_contexts["committed_contexts"] = contexts
+            if failed_contexts:
+                previous_contexts["failed_candidate_contexts"] = failed_contexts
             cp.verify_any_receipt(
                 prior_raw,
                 store=installation.store,
                 request=prior["request"],
                 host_nonce=prior["host_nonce"],
                 recovery=recovery,
-                committed_contexts=contexts,
                 routing_gate=True,
+                **previous_contexts,
             )
         from vendor_cp.deployment.cp_transition_host import ExistingCpTransitionHost
 
@@ -888,12 +1222,31 @@ def run_transition(
             options["committed_context"] = context
         if contexts:
             options["committed_contexts"] = contexts
+        if failed_context is not None:
+            options["failed_candidate_context"] = failed_context
+        if failed_contexts:
+            options["failed_candidate_contexts"] = failed_contexts
         host = ExistingCpTransitionHost(
             installation.host, store=installation.store, recovery=recovery, **options
         )
         execution_contexts: _ExecutionContexts = {}
         if contexts:
             execution_contexts["committed_contexts"] = contexts
+        if failed_contexts:
+            execution_contexts["failed_candidate_contexts"] = failed_contexts
+        if failed_context is not None:
+            return cp.execute_failed_candidate_recovery(
+                raw,
+                request_path=request_file,
+                bundle_path=bundle_file,
+                verifier=cp.GhAttestationVerifier(installation.policy),
+                host=host,
+                store=installation.store,
+                recovery=recovery,
+                context=failed_context,
+                clock=lambda: datetime.now(UTC),
+                **execution_contexts,
+            )
         if context is not None:
             return cp.execute_committed_continuation(
                 raw,
