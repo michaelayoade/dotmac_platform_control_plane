@@ -158,9 +158,9 @@ def test_candidate_connect_forecast_precedes_processes_and_transition_mutations(
 ):
     actions = []
     queries = []
-    docker = tmp_path / "docker"
-    docker.write_text("unit boundary")
-    docker.chmod(0o700)
+    # The artifact's temporary filesystem is noexec. Use the running
+    # interpreter for this filesystem check; every process boundary is mocked.
+    docker = Path(module.sys.executable)
     host.config = replace(host.config, docker_binary=docker)
     monkeypatch.setattr(module.sys, "platform", "linux")
     monkeypatch.setattr(module.os, "geteuid", lambda: 0)
