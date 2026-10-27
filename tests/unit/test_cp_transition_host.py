@@ -1635,8 +1635,9 @@ def test_candidate_password_driver_failure_still_resets_and_redacts(host, monkey
     assert len(connection.passwords) == 1
 
 
-@pytest.fixture
-def failed_candidate(host, monkeypatch):
+@pytest.fixture(params=[1, 2], ids=["failed-v1", "bounded-v2"])
+def failed_candidate(host, monkeypatch, request):
+    generation = request.param
     from copy import deepcopy
 
     catalogue = b"complete retained catalogue"
@@ -1683,7 +1684,7 @@ def failed_candidate(host, monkeypatch):
     )
     request = {
         **deepcopy(prior),
-        "schema": "dotmac.cp_failed_candidate_request/1",
+        "schema": f"dotmac.cp_failed_candidate_request/{generation}",
         "operator_revision": "f" * 40,
         "basis": {
             "context_digest": context.context_digest,

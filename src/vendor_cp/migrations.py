@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         CommittedMigrationContext,
         CpTransitionRequestV1,
         FailedCandidateContext,
+        FailedCandidateContextV2,
         RecoveryContexts,
         VerifiedAuthorization,
     )
@@ -542,7 +543,10 @@ def native_upgrade(
     git_binary: Path,
     git_binary_digest: str,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
 ) -> None:
     """Apply the composed CP graph once on the caller's exact transaction.
 

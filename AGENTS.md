@@ -424,6 +424,22 @@ disagree, fix the drift.
     This amendment grants no CI build, publication, host installation, fresh
     authorization dispatch or live execution.
 
+    **Bounded V2 source amendment (2026-10-27):** Michael approved a
+    separately versioned plan, request, context and receipt for exactly one
+    failed `CpFailedCandidateRequestV1` predecessor. V1 remains limited to a
+    failed committed V1 predecessor, including its second-generation refusal.
+    V2 revalidates that complete V1 ancestry with its existing spent claim,
+    validates the latest failed V1 authorization and execution window under its
+    actual schema, and derives the exact latest store closure from validated
+    records. The new create-only claim uses the original frontier key plus
+    the latest failed request digest and nonce, independent of fresh context,
+    store, authorization or protocol choices. Ancestor bytes, original backup,
+    ACL/grants, target and measurement remain fixed; V2 predecessors refuse.
+    The existing admission, fence rebinding and common suffix owners remain
+    the sole execution owners. This approval covers source, tests and review
+    only; it grants no CI/build/publication, installation, authorization
+    dispatch, native attempt, claim deletion, capture, restore or DDL replay.
+
     **`3` and `4` are different numbers and stay different**, including through
     `docker compose run`, which propagates the container's status unchanged. An
     owner refused and there is no evidence look identical from outside and mean

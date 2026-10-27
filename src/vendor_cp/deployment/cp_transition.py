@@ -143,8 +143,36 @@ class CpFailedCandidateRequestV1(TypedDict):
     expires_at: str
 
 
+class FailedCandidateBasisV2(FailedCandidateBasisV1):
+    predecessor_context_digest: Digest
+    predecessor_frontier_claim_digest: Digest
+
+
+class CpFailedCandidateRequestV2(TypedDict):
+    schema: Literal["dotmac.cp_failed_candidate_request/2"]
+    product: Literal["dotmac_vendor_control_plane"]
+    environment: Literal["production"]
+    host: Identifier
+    database: Identifier
+    cluster_system_identifier: str
+    database_oid: int
+    source: TransitionSideV1
+    target: TransitionSideV1
+    previous_receipt_digest: Digest | None
+    operator_revision: Revision
+    basis: FailedCandidateBasisV2
+    plan_digest: Digest
+    authorization_run_id: int
+    authorization_run_attempt: int
+    trusted_actor: Identifier
+    expires_at: str
+
+
 TransitionRequest = (
-    CpTransitionRequestV1 | CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1
+    CpTransitionRequestV1
+    | CpCommittedMigrationRequestV1
+    | CpFailedCandidateRequestV1
+    | CpFailedCandidateRequestV2
 )
 
 
@@ -223,13 +251,20 @@ FAILED_CANDIDATE_PLAN_FIELDS = COMMITTED_PLAN_FIELDS
 
 def transition_plan_digest(request: TransitionRequest) -> str:
     committed = request.get("schema") == "dotmac.cp_committed_migration_request/1"
-    failed = request.get("schema") == "dotmac.cp_failed_candidate_request/1"
+    failed = request.get("schema") in {
+        "dotmac.cp_failed_candidate_request/1",
+        "dotmac.cp_failed_candidate_request/2",
+    }
     fields = COMMITTED_PLAN_FIELDS if committed or failed else PLAN_FIELDS
     payload = {key: cast(dict[str, object], request)[key] for key in fields}
     if committed:
         payload["schema"] = "dotmac.cp_committed_migration_plan/1"
     elif failed:
-        payload["schema"] = "dotmac.cp_failed_candidate_plan/1"
+        payload["schema"] = (
+            "dotmac.cp_failed_candidate_plan/2"
+            if request["schema"] == "dotmac.cp_failed_candidate_request/2"
+            else "dotmac.cp_failed_candidate_plan/1"
+        )
     return digest(payload)
 
 
@@ -384,8 +419,8 @@ class ArtifactStore:
 
     def reserve_failed_candidate_frontier(
         self,
-        context: FailedCandidateContext,
-        request: CpFailedCandidateRequestV1,
+        context: FailedCandidateContext | FailedCandidateContextV2,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
         *,
         host_nonce: str,
         fresh_reservation_digest: str,
@@ -1161,7 +1196,10 @@ def verify_transition_prefix(
     evidence: Mapping[str, str],
     recovery: RecoveryContexts,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
 ) -> None:
     """Join retained pre-DDL facts to the single authenticated host attempt.
 
@@ -1215,7 +1253,10 @@ def verify_predecessor(
     recovery: RecoveryContexts,
     depth: int = 0,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
 ) -> None:
     """Verify the complete independent chain anchor before host mutation or DDL."""
     require(depth < 32, "receipt_chain_too_deep")
@@ -1224,7 +1265,9 @@ def verify_predecessor(
         return
     raw = store.read(checksum, kind="receipt")
     prior = read_json(raw)
-    if prior.get("schema") == "dotmac.cp_failed_candidate_receipt/1":
+    if prior.get("schema") == "dotmac.cp_failed_candidate_receipt/2":
+        _shape(prior, CpFailedCandidateReceiptV2)
+    elif prior.get("schema") == "dotmac.cp_failed_candidate_receipt/1":
         _shape(prior, CpFailedCandidateReceiptV1)
     elif prior.get("schema") == "dotmac.cp_committed_migration_receipt/1":
         _shape(prior, CpCommittedMigrationReceiptV1)
@@ -1233,7 +1276,8 @@ def verify_predecessor(
     previous = cast(
         CpMigrationTransitionReceiptV1
         | CpCommittedMigrationReceiptV1
-        | CpFailedCandidateReceiptV1,
+        | CpFailedCandidateReceiptV1
+        | CpFailedCandidateReceiptV2,
         prior,
     )
     require(
@@ -1279,7 +1323,10 @@ def verify_receipt(
     routing_gate: bool = False,
     _depth: int = 0,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
 ) -> CpMigrationTransitionReceiptV1:
     require(_depth < 32, "receipt_chain_too_deep")
     reservation = read_json(store.read(request_digest(request), kind="reservation"))
@@ -1407,7 +1454,10 @@ def execute_transition(
     recovery: RecoveryContexts,
     clock: Callable[[], datetime],
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
 ) -> str:
     """Single-use CP owner. Failure never retries or restores public routing."""
     with host.lock():
@@ -1629,15 +1679,49 @@ def validate_failed_candidate_request(
     return request
 
 
+def validate_failed_candidate_request_v2(
+    value: object, *, identity: CpTransitionIdentity, now: datetime
+) -> CpFailedCandidateRequestV2:
+    _shape(value, CpFailedCandidateRequestV2)
+    request = cast(CpFailedCandidateRequestV2, value)
+    require(now.tzinfo is not None)
+    require(
+        all(
+            cast(dict[str, object], request)[key] == getattr(identity, key)
+            for key in ("host", "database", "cluster_system_identifier", "database_oid")
+        ),
+        "host_mismatch",
+    )
+    require(
+        request["authorization_run_id"] > 0 and request["authorization_run_attempt"] > 0
+    )
+    require(
+        now < timestamp(request["expires_at"]) <= now + timedelta(hours=24), "expired"
+    )
+    require(
+        request["plan_digest"] == transition_plan_digest(request),
+        "plan_digest_mismatch",
+    )
+    for side in (request["source"], request["target"]):
+        require(bool(side["heads"]) and side["heads"] == sorted(set(side["heads"])))
+    require(request["source"]["image_digest"] != request["target"]["image_digest"])
+    return request
+
+
 def load_failed_candidate_request(
     raw: bytes, *, identity: CpTransitionIdentity, now: datetime
-) -> CpFailedCandidateRequestV1:
-    return validate_failed_candidate_request(read_json(raw), identity=identity, now=now)
+) -> CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2:
+    value = read_json(raw)
+    if value.get("schema") == "dotmac.cp_failed_candidate_request/2":
+        return validate_failed_candidate_request_v2(value, identity=identity, now=now)
+    return validate_failed_candidate_request(value, identity=identity, now=now)
 
 
 def validate_any_request(
     value: TransitionRequest, *, identity: CpTransitionIdentity, now: datetime
 ) -> TransitionRequest:
+    if value["schema"] == "dotmac.cp_failed_candidate_request/2":
+        return validate_failed_candidate_request_v2(value, identity=identity, now=now)
     if value["schema"] == "dotmac.cp_failed_candidate_request/1":
         return validate_failed_candidate_request(value, identity=identity, now=now)
     if value["schema"] == "dotmac.cp_committed_migration_request/1":
@@ -1713,7 +1797,9 @@ class HistoricalCommittedAuthorization:
     protection_bytes: bytes
     context_digest: str
 
-    def verify(self, request: CpCommittedMigrationRequestV1) -> None:
+    def verify(
+        self, request: CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1
+    ) -> None:
         require(
             request["operator_revision"] == self.policy.workflow_revision,
             "historical_operator_revision_mismatch",
@@ -1745,9 +1831,7 @@ class HistoricalCommittedAuthorization:
             "environment_protection_mismatch",
         )
         for bound in (self.execution_window_start, self.execution_window_end):
-            validate_committed_request(
-                request, identity=self.policy.identity, now=bound
-            )
+            validate_any_request(request, identity=self.policy.identity, now=bound)
         _verify_authorization_report(
             request,
             policy=self.policy,
@@ -2133,7 +2217,10 @@ def verify_committed_receipt(
     routing_gate: bool = False,
     _depth: int = 0,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
 ) -> CpCommittedMigrationReceiptV1:
     require(_depth < 32, "receipt_chain_too_deep")
     reservation_raw = store.read(request_digest(request), kind="reservation")
@@ -2208,15 +2295,24 @@ def verify_any_receipt(
     routing_gate: bool = False,
     _depth: int = 0,
     context: CommittedMigrationContext | None = None,
-    failed_candidate_context: FailedCandidateContext | None = None,
+    failed_candidate_context: FailedCandidateContext
+    | FailedCandidateContextV2
+    | None = None,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
 ) -> (
     CpMigrationTransitionReceiptV1
     | CpCommittedMigrationReceiptV1
     | CpFailedCandidateReceiptV1
+    | CpFailedCandidateReceiptV2
 ):
-    if request["schema"] == "dotmac.cp_failed_candidate_request/1":
+    if (
+        request["schema"] == "dotmac.cp_failed_candidate_request/1"
+        or request["schema"] == "dotmac.cp_failed_candidate_request/2"
+    ):
         failed_candidate_context = failed_candidate_context or (
             failed_candidate_contexts or {}
         ).get(request["basis"]["context_digest"])
@@ -2291,7 +2387,10 @@ def execute_committed_continuation(
     context: CommittedMigrationContext,
     clock: Callable[[], datetime],
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
 ) -> str:
     with host.lock():
         now = clock()
@@ -2447,7 +2546,41 @@ class FailedCandidateContext:
         return self.original.recovery
 
 
-def failed_candidate_frontier_key(context: FailedCandidateContext) -> str:
+@dataclass(frozen=True, slots=True)
+class FailedCandidateContextV2:
+    predecessor: FailedCandidateContext
+    predecessor_frontier_claim_digest: str
+    original: CommittedMigrationContext
+    prior_store: ArtifactStore
+    request: CpFailedCandidateRequestV1
+    host_nonce: str
+    evidence: Mapping[str, str]
+    historical_authorization: HistoricalCommittedAuthorization
+    proof: FenceProof
+    context_digest: str
+    original_frontier_claim_digest: str
+    quiescence_digest: str
+    inventory: Mapping[str, str]
+
+    @property
+    def original_proof(self) -> FenceProof:
+        return self.original.original_proof
+
+    @property
+    def measurement(self) -> CandidateMeasurementV1:
+        document = read_json(self.prior_store.read(self.quiescence_digest))
+        _shape(document, CandidateQuiescenceProofV1)
+        snapshot = read_json(self.prior_store.read(cast(str, document["after_digest"])))
+        _shape(snapshot, CandidateSnapshotV1)
+        return cast(CandidateSnapshotV1, snapshot)["measurement"]
+
+    def recovery_context(self) -> RecoveryContexts:
+        return self.original.recovery
+
+
+def failed_candidate_frontier_key(
+    context: FailedCandidateContext | FailedCandidateContextV2,
+) -> str:
     return digest(
         {
             "schema": "dotmac.cp_failed_candidate_frontier_key/1",
@@ -2459,8 +2592,8 @@ def failed_candidate_frontier_key(context: FailedCandidateContext) -> str:
 
 
 def _failed_candidate_claim(
-    context: FailedCandidateContext,
-    request: CpFailedCandidateRequestV1,
+    context: FailedCandidateContext | FailedCandidateContextV2,
+    request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
     nonce: str,
     fresh_reservation_digest: str,
 ) -> dict[str, object]:
@@ -2493,18 +2626,109 @@ FAILED_CANDIDATE_PRE_ACL_EVIDENCE = (
 
 
 def verify_failed_candidate_frontier(
-    context: FailedCandidateContext,
-    request: CpFailedCandidateRequestV1,
+    context: FailedCandidateContext | FailedCandidateContextV2,
+    request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
     *,
     owned_successor_claim: bytes | None = None,
 ) -> None:
     """Admit one contained failed committed V1 suffix, from its full history."""
     from vendor_cp.deployment.transition_fence import FenceProof
 
-    _shape(request, CpFailedCandidateRequestV1)
+    v2 = isinstance(context, FailedCandidateContextV2)
+    _shape(request, CpFailedCandidateRequestV2 if v2 else CpFailedCandidateRequestV1)
     prior, store = context.request, context.prior_store
-    # This check is independent of annotations: a successor is never eligible.
-    _shape(prior, CpCommittedMigrationRequestV1)
+    _shape(prior, CpFailedCandidateRequestV1 if v2 else CpCommittedMigrationRequestV1)
+    if isinstance(context, FailedCandidateContextV2):
+        predecessor = context.predecessor
+        require(
+            type(predecessor) is FailedCandidateContext,
+            "unsupported_recovery_generation",
+        )
+        require(
+            context.original is predecessor.original,
+            "failed_candidate_ancestry_mismatch",
+        )
+        predecessor_reservation = store.read(request_digest(prior), kind="reservation")
+        spent = predecessor.prior_store.read(
+            failed_candidate_frontier_key(predecessor), kind="reservation"
+        )
+        require(
+            raw_digest(spent) == context.predecessor_frontier_claim_digest,
+            "failed_candidate_spent_claim_mismatch",
+        )
+        require(
+            read_json(spent)
+            == _failed_candidate_claim(
+                predecessor,
+                cast(CpFailedCandidateRequestV1, prior),
+                context.host_nonce,
+                raw_digest(predecessor_reservation),
+            ),
+            "failed_candidate_spent_claim_mismatch",
+        )
+        verify_failed_candidate_frontier(
+            predecessor,
+            cast(CpFailedCandidateRequestV1, prior),
+            owned_successor_claim=spent,
+        )
+        require(
+            len(
+                {
+                    context.context_digest,
+                    predecessor.context_digest,
+                    context.original.context_digest,
+                }
+            )
+            == 3,
+            "duplicate_recovery_context",
+        )
+        require(
+            len(
+                {
+                    request_digest(prior),
+                    request_digest(predecessor.request),
+                    request_digest(context.original.request),
+                    request_digest(request),
+                }
+            )
+            == 4,
+            "duplicate_recovery_request",
+        )
+        stores = [
+            context.prior_store.root.resolve(),
+            predecessor.prior_store.root.resolve(),
+            context.original.prior_store.root.resolve(),
+        ]
+        require(len(set(stores)) == 3, "recovery_store_reused")
+        identities = [(path.stat().st_dev, path.stat().st_ino) for path in stores]
+        require(len(set(identities)) == 3, "recovery_store_reused")
+        require(
+            len(
+                {
+                    context.historical_authorization.context_digest,
+                    predecessor.historical_authorization.context_digest,
+                    context.original.historical_authorization.context_digest,
+                }
+            )
+            == 3,
+            "duplicate_authorization_context",
+        )
+        roles = [
+            (p["authorization_run_id"], p["authorization_run_attempt"])
+            for p in (prior, predecessor.request, context.original.request, request)
+        ]
+        require(len(set(roles)) == 4, "failed_candidate_authorization_reused")
+        require(
+            len(
+                {
+                    context.host_nonce,
+                    predecessor.host_nonce,
+                    context.original.host_nonce,
+                }
+            )
+            == 3,
+            "failed_candidate_nonce_reused",
+        )
     _shape(context.host_nonce, Nonce)
     sha(context.context_digest)
     context.historical_authorization.verify(prior)
@@ -2535,12 +2759,28 @@ def verify_failed_candidate_frontier(
         "failed_candidate_original_claim_mismatch",
     )
     verify_committed_frontier(
-        context.original, prior, owned_frontier_claim=original_claim
+        context.original,
+        context.predecessor.request
+        if isinstance(context, FailedCandidateContextV2)
+        else cast(CpCommittedMigrationRequestV1, prior),
+        owned_frontier_claim=original_claim,
     )
     claim = read_json(original_claim)
     require(
-        claim["host_nonce"] == context.host_nonce
-        and claim["fresh_reservation_digest"] == raw_digest(reservation_raw),
+        claim["host_nonce"]
+        == (
+            context.predecessor.host_nonce
+            if isinstance(context, FailedCandidateContextV2)
+            else context.host_nonce
+        )
+        and claim["fresh_reservation_digest"]
+        == raw_digest(
+            context.predecessor.prior_store.read(
+                request_digest(context.predecessor.request), kind="reservation"
+            )
+            if isinstance(context, FailedCandidateContextV2)
+            else reservation_raw
+        ),
         "failed_candidate_original_claim_mismatch",
     )
     require(
@@ -2582,20 +2822,38 @@ def verify_failed_candidate_frontier(
         "failed_candidate_fence_lineage_mismatch",
     )
     require(
-        set(context.evidence) == FAILED_CANDIDATE_PREFIX_EVIDENCE,
+        set(context.evidence)
+        == (
+            (FAILED_CANDIDATE_PREFIX_EVIDENCE - {"committed-rebound"})
+            | {"failed-candidate-rebound"}
+            if v2
+            else FAILED_CANDIDATE_PREFIX_EVIDENCE
+        ),
         "failed_candidate_prefix_mismatch",
     )
     retained = dict(context.evidence)
     for kind, checksum in retained.items():
-        _validate_committed_evidence(
-            read_json(store.read(checksum)),
-            request=prior,
-            nonce=context.host_nonce,
-            kind=kind,
-            store=store,
-            evidence=retained,
-            recovery=context.original.recovery,
-        )
+        document = read_json(store.read(checksum))
+        if isinstance(context, FailedCandidateContextV2):
+            _validate_failed_candidate_evidence(
+                document,
+                request=context.request,
+                nonce=context.host_nonce,
+                kind=kind,
+                store=store,
+                evidence=retained,
+                recovery=context.original.recovery,
+            )
+        else:
+            _validate_committed_evidence(
+                document,
+                request=context.request,
+                nonce=context.host_nonce,
+                kind=kind,
+                store=store,
+                evidence=retained,
+                recovery=context.original.recovery,
+            )
     _verify_candidate_quiescence(
         context.quiescence_digest, request=prior, nonce=context.host_nonce, store=store
     )
@@ -2619,6 +2877,11 @@ def verify_failed_candidate_frontier(
         "current_fence_id": proof.fence_id,
         "frontier_measurement_digest": digest(context.measurement),
     }
+    if isinstance(context, FailedCandidateContextV2):
+        expected_basis.update(
+            predecessor_context_digest=context.predecessor.context_digest,
+            predecessor_frontier_claim_digest=context.predecessor_frontier_claim_digest,
+        )
     require(request["basis"] == expected_basis, "failed_candidate_basis_mismatch")
     # Build the entire permitted closure from verified owners, never a caller's
     # inventory alone. Unknown names, partial files and later stages all deny.
@@ -2649,7 +2912,15 @@ def verify_failed_candidate_frontier(
         _shape(owned.get("fresh_reservation_digest"), Digest)
         require(
             owned["host_nonce"]
-            not in {context.host_nonce, context.original.host_nonce},
+            not in (
+                {
+                    context.host_nonce,
+                    context.original.host_nonce,
+                    context.predecessor.host_nonce,
+                }
+                if isinstance(context, FailedCandidateContextV2)
+                else {context.host_nonce, context.original.host_nonce}
+            ),
             "failed_candidate_nonce_reused",
         )
         require(
@@ -2694,10 +2965,21 @@ class CpFailedCandidateReceiptV1(TypedDict):
     evidence: dict[Identifier, Digest]
 
 
+class CpFailedCandidateReceiptV2(TypedDict):
+    schema: Literal["dotmac.cp_failed_candidate_receipt/2"]
+    request: CpFailedCandidateRequestV2
+    request_digest: Digest
+    host_nonce: str
+    phase: Literal["pre-routing", "complete"]
+    historical_context_digest: Digest
+    successor_reservation_digest: Digest
+    evidence: dict[Identifier, Digest]
+
+
 def _validate_failed_candidate_evidence(
     value: dict[str, object],
     *,
-    request: CpFailedCandidateRequestV1,
+    request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
     nonce: str,
     kind: str,
     store: ArtifactStore,
@@ -2737,15 +3019,18 @@ def verify_failed_candidate_receipt(
     raw: bytes,
     *,
     store: ArtifactStore,
-    request: CpFailedCandidateRequestV1,
+    request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
     host_nonce: str,
     recovery: RecoveryContexts,
-    context: FailedCandidateContext,
+    context: FailedCandidateContext | FailedCandidateContextV2,
     routing_gate: bool = False,
     _depth: int = 0,
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
-) -> CpFailedCandidateReceiptV1:
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
+) -> CpFailedCandidateReceiptV1 | CpFailedCandidateReceiptV2:
     require(_depth < 32, "receipt_chain_too_deep")
     reservation_raw = store.read(request_digest(request), kind="reservation")
     reservation = read_json(reservation_raw)
@@ -2769,8 +3054,13 @@ def verify_failed_candidate_receipt(
     )
     verify_failed_candidate_frontier(context, request, owned_successor_claim=claim)
     document = read_json(raw)
-    _shape(document, CpFailedCandidateReceiptV1)
-    value = cast(CpFailedCandidateReceiptV1, document)
+    _shape(
+        document,
+        CpFailedCandidateReceiptV2
+        if request["schema"] == "dotmac.cp_failed_candidate_request/2"
+        else CpFailedCandidateReceiptV1,
+    )
+    value = cast(CpFailedCandidateReceiptV1 | CpFailedCandidateReceiptV2, document)
     require(
         value["request"] == request
         and value["request_digest"] == request_digest(request)
@@ -2813,13 +3103,15 @@ def verify_failed_candidate_receipt(
 
 class CpFailedCandidateTransitionHost(CpTransitionHost, Protocol):
     def inspect_failed_candidate(
-        self, request: CpFailedCandidateRequestV1, context: FailedCandidateContext
+        self,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
+        context: FailedCandidateContext | FailedCandidateContextV2,
     ) -> bytes: ...
     def rebind_failed_candidate(
         self,
-        request: CpFailedCandidateRequestV1,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
         nonce: str,
-        context: FailedCandidateContext,
+        context: FailedCandidateContext | FailedCandidateContextV2,
     ) -> bytes: ...
 
 
@@ -2832,10 +3124,13 @@ def execute_failed_candidate_recovery(
     host: CpFailedCandidateTransitionHost,
     store: ArtifactStore,
     recovery: RecoveryContexts,
-    context: FailedCandidateContext,
+    context: FailedCandidateContext | FailedCandidateContextV2,
     clock: Callable[[], datetime],
     committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
+    | None = None,
 ) -> str:
     with host.lock():
         now = clock()
@@ -2846,10 +3141,24 @@ def execute_failed_candidate_recovery(
             request, request_path=request_path, bundle_path=bundle_path, now=now
         )
         verify_failed_candidate_frontier(context, request)
+        if isinstance(context, FailedCandidateContextV2):
+            ancestors = (
+                context.prior_store,
+                context.predecessor.prior_store,
+                context.original.prior_store,
+            )
+            fresh_identity = (store.root.stat().st_dev, store.root.stat().st_ino)
+            require(
+                all(
+                    store.root.resolve() != ancestor.root.resolve()
+                    and fresh_identity
+                    != (ancestor.root.stat().st_dev, ancestor.root.stat().st_ino)
+                    for ancestor in ancestors
+                ),
+                "recovery_store_reused",
+            )
         inspection = host.inspect_failed_candidate(request, context)
-        validate_failed_candidate_request(
-            request, identity=verifier.policy.identity, now=clock()
-        )
+        validate_any_request(request, identity=verifier.policy.identity, now=clock())
         nonce = store.reserve(request, authorization)
         reservation_raw = store.read(request_digest(request), kind="reservation")
         claim = context.prior_store.reserve_failed_candidate_frontier(
@@ -2890,8 +3199,10 @@ def execute_failed_candidate_recovery(
         def receipt(
             phase: Literal["pre-routing", "complete"], *, routing_gate: bool
         ) -> bytes:
-            value: CpFailedCandidateReceiptV1 = {
-                "schema": "dotmac.cp_failed_candidate_receipt/1",
+            value = {
+                "schema": "dotmac.cp_failed_candidate_receipt/2"
+                if request["schema"] == "dotmac.cp_failed_candidate_request/2"
+                else "dotmac.cp_failed_candidate_receipt/1",
                 "request": request,
                 "request_digest": request_digest(request),
                 "host_nonce": nonce,

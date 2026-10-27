@@ -68,8 +68,10 @@ from vendor_cp.deployment.cp_transition import (
     CommittedMigrationContext,
     CpCommittedMigrationRequestV1,
     CpFailedCandidateRequestV1,
+    CpFailedCandidateRequestV2,
     CpTransitionRequestV1,
     FailedCandidateContext,
+    FailedCandidateContextV2,
     RecoveryContexts,
     SourceObservation,
     TransitionRequest,
@@ -304,12 +306,16 @@ ConnectionFactory = Callable[..., AbstractContextManager[Connection]]
 
 class _CommittedContextArguments(TypedDict, total=False):
     committed_contexts: Mapping[str, CommittedMigrationContext]
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext]
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
 
 
 class _FailedReceiptArguments(TypedDict, total=False):
-    failed_candidate_context: FailedCandidateContext
-    failed_candidate_contexts: Mapping[str, FailedCandidateContext]
+    failed_candidate_context: FailedCandidateContext | FailedCandidateContextV2
+    failed_candidate_contexts: Mapping[
+        str, FailedCandidateContext | FailedCandidateContextV2
+    ]
 
 
 class _CandidateArguments(TypedDict):
@@ -594,8 +600,13 @@ class ExistingCpTransitionHost:
         held_fence: HeldFenceContinuation | None = None,
         committed_context: CommittedMigrationContext | None = None,
         committed_contexts: Mapping[str, CommittedMigrationContext] | None = None,
-        failed_candidate_context: FailedCandidateContext | None = None,
-        failed_candidate_contexts: Mapping[str, FailedCandidateContext] | None = None,
+        failed_candidate_context: FailedCandidateContext
+        | FailedCandidateContextV2
+        | None = None,
+        failed_candidate_contexts: Mapping[
+            str, FailedCandidateContext | FailedCandidateContextV2
+        ]
+        | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -796,14 +807,17 @@ class ExistingCpTransitionHost:
             self._committed_binding(
                 cast(CpCommittedMigrationRequestV1, request), self._committed_context
             )
-        elif request.get("schema") == "dotmac.cp_failed_candidate_request/1":
+        elif request.get("schema") in {
+            "dotmac.cp_failed_candidate_request/1",
+            "dotmac.cp_failed_candidate_request/2",
+        }:
             require(
                 self._failed_candidate_context is not None,
                 "failed_candidate_context_required",
             )
             assert self._failed_candidate_context is not None  # noqa: S101
             self._failed_candidate_binding(
-                cast(CpFailedCandidateRequestV1, request),
+                cast(CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2, request),
                 self._failed_candidate_context,
             )
         require(self._request == request, "host_request_mismatch")
@@ -1081,8 +1095,8 @@ class ExistingCpTransitionHost:
 
     def _failed_candidate_binding(
         self,
-        request: CpFailedCandidateRequestV1,
-        context: FailedCandidateContext,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
+        context: FailedCandidateContext | FailedCandidateContextV2,
     ) -> None:
         require(
             self._held_fence is None
@@ -1127,8 +1141,8 @@ class ExistingCpTransitionHost:
 
     def _failed_candidate_admission(
         self,
-        request: CpFailedCandidateRequestV1,
-        context: FailedCandidateContext,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
+        context: FailedCandidateContext | FailedCandidateContextV2,
     ) -> None:
         self._failed_candidate_binding(request, context)
         self._continuation_admission(
@@ -1137,8 +1151,12 @@ class ExistingCpTransitionHost:
 
     @staticmethod
     def _check_committed_measurement(
-        request: CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1,
-        context: CommittedMigrationContext | FailedCandidateContext,
+        request: CpCommittedMigrationRequestV1
+        | CpFailedCandidateRequestV1
+        | CpFailedCandidateRequestV2,
+        context: CommittedMigrationContext
+        | FailedCandidateContext
+        | FailedCandidateContextV2,
         measurement: dict[str, object],
     ) -> None:
         measurement = dict(measurement)
@@ -1162,8 +1180,12 @@ class ExistingCpTransitionHost:
 
     def _continuation_admission(
         self,
-        request: CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1,
-        context: CommittedMigrationContext | FailedCandidateContext,
+        request: CpCommittedMigrationRequestV1
+        | CpFailedCandidateRequestV1
+        | CpFailedCandidateRequestV2,
+        context: CommittedMigrationContext
+        | FailedCandidateContext
+        | FailedCandidateContextV2,
         *,
         historical: CpTransitionRequestV1,
     ) -> None:
@@ -1273,8 +1295,8 @@ class ExistingCpTransitionHost:
 
     def inspect_failed_candidate(
         self,
-        request: CpFailedCandidateRequestV1,
-        context: FailedCandidateContext,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
+        context: FailedCandidateContext | FailedCandidateContextV2,
     ) -> bytes:
         self._inspect_installation(request)
         self._failed_candidate_admission(request, context)
@@ -1285,9 +1307,9 @@ class ExistingCpTransitionHost:
 
     def rebind_failed_candidate(
         self,
-        request: CpFailedCandidateRequestV1,
+        request: CpFailedCandidateRequestV1 | CpFailedCandidateRequestV2,
         nonce: str,
-        context: FailedCandidateContext,
+        context: FailedCandidateContext | FailedCandidateContextV2,
     ) -> bytes:
         self._bound(request, nonce)
         require(nonce != context.proof.fence_id, "failed_candidate_nonce_reused")
@@ -1298,9 +1320,13 @@ class ExistingCpTransitionHost:
 
     def _rebind_continuation(
         self,
-        request: CpCommittedMigrationRequestV1 | CpFailedCandidateRequestV1,
+        request: CpCommittedMigrationRequestV1
+        | CpFailedCandidateRequestV1
+        | CpFailedCandidateRequestV2,
         nonce: str,
-        context: CommittedMigrationContext | FailedCandidateContext,
+        context: CommittedMigrationContext
+        | FailedCandidateContext
+        | FailedCandidateContextV2,
         *,
         kind: str,
     ) -> bytes:
@@ -2124,7 +2150,10 @@ class ExistingCpTransitionHost:
         self.candidate_phase = None
         self._bound(request, nonce)
         proof = self._strict(request)
-        if request["schema"] == "dotmac.cp_failed_candidate_request/1":
+        if request["schema"] in {
+            "dotmac.cp_failed_candidate_request/1",
+            "dotmac.cp_failed_candidate_request/2",
+        }:
             require(
                 self._failed_candidate_context is not None,
                 "failed_candidate_context_required",
