@@ -156,7 +156,8 @@ def test_compose_render_exposes_only_candidate_app_with_relay_disabled(
     assert app["restart"] == "no"
     assert app["networks"] == {"vendor_backend": None, "candidate_probe": None}
     probe = rendered["networks"]["candidate_probe"]
-    assert probe["driver"] == "bridge" and probe["internal"] is False
+    # Compose omits default-false fields from normalized config JSON.
+    assert probe["driver"] == "bridge" and probe.get("internal", False) is False
     assert not probe.get("external")
     assert rendered["networks"]["vendor_backend"]["external"] is True
     assert rendered["volumes"]["vendor_product_manifests"]["external"] is True
